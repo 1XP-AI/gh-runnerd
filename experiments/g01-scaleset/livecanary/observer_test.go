@@ -89,6 +89,7 @@ func TestObserveSDKRunnerIdentityAndProvenance(t *testing.T) {
 				if r.Method != "GET" || r.URL.Path != "/tenant/_apis/distributedtask/pools/0/agents/8" || r.URL.Query().Get("api-version") != "6.0-preview" {
 					t.Error("wrong SDK target or name fallback")
 				}
+				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(tc.status)
 				_, _ = w.Write([]byte(tc.body))
 			})
