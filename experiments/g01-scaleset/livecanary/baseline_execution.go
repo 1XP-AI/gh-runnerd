@@ -27,9 +27,14 @@ func (s *pairedBaselineScope) afterAcquire(ctx context.Context, acquisition base
 	wire, status, observed := capture.takeJIT()
 	r.HTTPStatus = status
 	known := callErr == nil && observed && status == 200 && wire != nil && wire.Runner != nil && got != nil && got.Runner != nil && *wire.Runner == *got.Runner && wire.EncodedJITConfig == got.EncodedJITConfig && wire.Runner.ID > 0 && wire.Runner.Name == s.approval.workerName() && wire.Runner.RunnerScaleSetID == s.setID
+	// The transport already observed this bounded response. Cancellation may
+	// stop SDK decoding; preserve its expected runner tuple as unknown evidence.
+	// Only full SDK agreement below supplies a transient handoff secret.
+	if observed && status == 200 && wire != nil && wire.Runner != nil && wire.Runner.ID > 0 && wire.Runner.Name == s.approval.workerName() && wire.Runner.RunnerScaleSetID == s.setID {
+		r.JIT.Runner = &liveworker.SDKRunnerIdentity{ID: liveworker.SDKRunnerID(wire.Runner.ID), Name: wire.Runner.Name, ScaleSetID: wire.Runner.RunnerScaleSetID}
+	}
 	secret := ""
 	if known {
-		r.JIT.Runner = &liveworker.SDKRunnerIdentity{ID: liveworker.SDKRunnerID(got.Runner.ID), Name: got.Runner.Name, ScaleSetID: got.Runner.RunnerScaleSetID}
 		secret = got.EncodedJITConfig
 	}
 	if got != nil {

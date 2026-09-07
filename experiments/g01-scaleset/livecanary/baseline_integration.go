@@ -125,8 +125,12 @@ func runPairedBaselineWithCadence(ctx context.Context, d *Driver, w *liveworker.
 		s.worker = worker
 		s.binding = worker.Binding()
 		operationErr := s.execute()
-		out = s.summarize(operationErr)
-		return operationErr
+		var storageErr error
+		out, storageErr = s.summarize(operationErr)
+		if operationErr != nil {
+			return operationErr
+		}
+		return storageErr
 	})
 	if err != nil {
 		return out, ErrQuarantine
@@ -362,11 +366,11 @@ func newPairedBaselineListenerHeld(s *pairedBaselineScope) (*baselineListener, e
 	b.pairGuard = s.boundary
 	return b, nil
 }
-func (s *pairedBaselineScope) summarize(callErr error) pairedBaselineCollection {
+func (s *pairedBaselineScope) summarize(callErr error) (pairedBaselineCollection, error) {
 	state, err := s.state()
 	out := pairedBaselineCollection{Outcome: collectionUnresolved, OutstandingSession: state.outstanding(), Rounds: state.rounds, SessionIntent: state.sessionIntent, SessionResult: state.sessionResult}
 	if err != nil {
-		return out
+		return out, ErrJournal
 	}
 	if callErr == nil {
 		out.Outcome = collectionIncomplete
@@ -376,7 +380,11 @@ func (s *pairedBaselineScope) summarize(callErr error) pairedBaselineCollection 
 	}
 	r := baselineRecord{Stage: "collection", Outcome: "observed", SessionID: state.sessionID, Collection: &baselineCollectionFacts{Outcome: out.Outcome, Pair: state.pairRef, Start: state.startRef, Completed: state.completedRef, LastSample: state.lastSample, Rounds: state.rounds, OutstandingSession: state.outstanding(), SessionIntent: state.sessionIntent, SessionResult: state.sessionResult}}
 	if state.seen && state.pending == nil && state.child == nil {
-		out.Result, _ = s.store(r)
+		out.Result, err = s.store(r)
+		if err != nil {
+			out.Outcome = collectionUnresolved
+			return out, ErrJournal
+		}
 	}
-	return out
+	return out, nil
 }
