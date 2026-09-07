@@ -151,17 +151,7 @@ func openJournalWithSync(directory string, a Approval, syncDirectory func(*os.Fi
 		if err = j.write(Event{Kind: "approval", Digest: want}); err != nil {
 			return nil, err
 		}
-		// Sync both the new file and its directory entry before permitting any
-		// external effect. A zero-length/torn journal can never authorize reuse.
-		dir, err := root.Open(".")
-		if err != nil {
-			return nil, ErrState
-		}
-		err = syncDirectory(dir)
-		dir.Close()
-		if err != nil {
-			return nil, ErrState
-		}
+
 	} else {
 		reader := bufio.NewReader(io.LimitReader(f, 1<<20+1))
 		line, err := reader.ReadBytes('\n')
@@ -186,6 +176,17 @@ func openJournalWithSync(directory string, a Approval, syncDirectory func(*os.Fi
 			}
 			j.events = append(j.events, e)
 		}
+	}
+	// Retry directory-entry durability even when a prior failed sync left a
+	// valid header. File contents alone never prove its entry survived a crash.
+	dir, err := root.Open(".")
+	if err != nil {
+		return nil, ErrState
+	}
+	err = syncDirectory(dir)
+	dir.Close()
+	if err != nil {
+		return nil, ErrState
 	}
 	ok = true
 	return j, nil

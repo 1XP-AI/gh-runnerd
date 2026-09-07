@@ -30,5 +30,15 @@ one start for both missing-network cases.
 
 After the initial corrections, fresh package race tests passed: livecanary1.616s
 and liveworker2.014s. These are synthetic results and do not close the live gates.
-Admission across directories, explicit renewal and directory-sync recovery are
-still required corrections on this branch before final review.
+Admission across directories and explicit renewal are still required corrections
+on this branch before final review.
+
+## Directory-sync recovery
+
+Red commit `b0c8059` reproduces the failed-directory-sync restart defect in both
+worker and controller journals. An injected initial sync failure stops the first
+open, but the former reopen path accepted its valid header without retrying the
+failed directory sync. Both implementations now sync on every successful open,
+including existing journals, before returning authority to perform effects.
+Targeted fresh journal race tests passed for both packages. This is deterministic
+failure-injection evidence, not a physical crash or power-loss experiment.
