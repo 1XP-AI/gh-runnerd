@@ -82,6 +82,7 @@ type report struct {
 	LaunchdLocked        outcome `json:"launchd_locked"`
 	PreferencesUnchanged bool    `json:"keychain_preferences_unchanged"`
 	Cleanup              bool    `json:"cleanup_complete"`
+	RecoveryID           string  `json:"recovery_id,omitempty"`
 }
 
 func cstring(s string) (*C.char, func()) {
@@ -153,7 +154,7 @@ func escape(s string) string {
 	_ = xml.EscapeText(&b, []byte(s))
 	return b.String()
 }
-func launch(parent context.Context, root, phase, expected string) (result outcome, resultErr error) {
+func launch(parent context.Context, root, phase, expected string, servicesGone *bool) (result outcome, resultErr error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return outcome{}, errors.New("executable resolution failed")
@@ -183,6 +184,7 @@ func launch(parent context.Context, root, phase, expected string) (result outcom
 	}
 	defer func() {
 		if !cleanup() {
+			*servicesGone = false
 			resultErr = errors.New("probe service cleanup failed")
 		}
 	}()
@@ -227,26 +229,36 @@ func run(ctx context.Context) (result report, err error) {
 		return result, errors.New("probe ownership capture failed")
 	}
 	var keychain C.SecKeychainRef
+	servicesGone := true
 	defer func() {
-		cleanup := true
+		result.Cleanup = finishOwned(servicesGone,
+			func() {
+				if keychain != 0 {
+					_ = C.SecKeychainLock(keychain)
+				}
+			},
+			func() bool { return keychain == 0 || C.SecKeychainDelete(keychain) == 0 },
+			func() bool {
+				current, e := os.Lstat(root)
+				return e == nil && os.SameFile(rootInfo, current) && current.IsDir() && current.Mode().Perm() == 0700 && os.RemoveAll(root) == nil
+			})
 		if keychain != 0 {
-			if status := C.SecKeychainDelete(keychain); status != 0 {
-				cleanup = false
-			}
 			C.CFRelease(C.CFTypeRef(keychain))
 		}
-		current, e := os.Lstat(root)
-		if e != nil || !os.SameFile(rootInfo, current) || !current.IsDir() || current.Mode().Perm() != 0700 {
-			cleanup = false
-		} else if os.RemoveAll(root) != nil {
-			cleanup = false
-		}
 		result.PreferencesUnchanged = C.unchanged(list, def) != 0
-		result.Cleanup = cleanup
-		if !cleanup || !result.PreferencesUnchanged {
-			err = errors.New("probe cleanup or preference invariant failed")
+		if !result.Cleanup {
+			// Only a non-secret basename is reported; exact labels/plists remain in
+			// this private owned directory for operator recovery. Never erase them
+			// while service absence or Keychain deletion is uncertain.
+			result.RecoveryID = filepath.Base(root)
+			err = errors.New("probe cleanup incomplete; private recovery inventory retained")
+		}
+		if !result.PreferencesUnchanged {
+			result.Cleanup = false
+			err = errors.New("probe preference invariant failed")
 		}
 	}()
+
 	passwordBytes := make([]byte, 32)
 	if _, err = rand.Read(passwordBytes); err != nil {
 		return result, errors.New("probe randomness failed")
@@ -284,14 +296,14 @@ func run(ctx context.Context) (result report, err error) {
 		return result, errors.New("private keychain changed preferences")
 	}
 	result.Direct = read(root, expected)
-	result.LaunchdUnlocked, err = launch(ctx, root, "unlocked", expected)
+	result.LaunchdUnlocked, err = launch(ctx, root, "unlocked", expected, &servicesGone)
 	if err != nil {
 		return result, err
 	}
 	if status := C.SecKeychainLock(keychain); status != 0 {
 		return result, statusError("synthetic keychain lock", status)
 	}
-	result.LaunchdLocked, err = launch(ctx, root, "locked", expected)
+	result.LaunchdLocked, err = launch(ctx, root, "locked", expected, &servicesGone)
 	if err != nil {
 		return result, err
 	}

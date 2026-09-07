@@ -25,6 +25,8 @@ Actual red results, recorded before replacing the stubs:
 
 The implementation replaced these stubs, and the tests passed. Additional meaningful regression tests caught two issues before their fixes: credential JSON serialization was not redacted, and extra repository Administration permission was accepted. Both red results were recorded as explicit failures, then fixed.
 
+Independent Astra review caught a runtime-probe cleanup bug before execution: unknown launchd service absence could still allow deletion of its recovery inventory. After extracting the actual cleanup ordering into a testable helper, `go test -tags=g02runtime -run TestUnknownServiceCleanupPreservesRecoveryInventory ./cmd/g02-keychain-probe` failed with `complete=true keychain_deleted=true inventory_removed=true locked=false`. The fix aggregates service cleanup status, attempts to lock only the owned Keychain, preserves the exact private label/plist inventory on unknown service absence, and returns `cleanup_complete=false`. The failure case and verified-absence cleanup order now pass without creating a Keychain or launchd job.
+
 The HTTP adapter tests were also authored before its implementation. They verify RS256 signatures using the generated key, issuer and timestamps, pinned API version, exact App/organization paths, zero redirect following, bounded/malformed response handling, code path validation, conversion response validation, and normalized errors.
 
 Final commands from `experiments/g02-auth`:

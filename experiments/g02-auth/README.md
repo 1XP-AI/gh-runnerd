@@ -22,7 +22,7 @@ A public struct containing a PEM must not become an application logging boundary
 
 ## Optional synthetic macOS probe
 
-The source at `cmd/g02-keychain-probe/main.go` is excluded from ordinary builds unless `-tags=g02runtime` is supplied. It creates a fresh private **file-based** Keychain, a generated 32-byte canary with an ACL for the same executable, and unique transient `gui/<uid>` launchd jobs. It disables interaction only for probe processes. It locks only the newly created Keychain, checks explicit access denial, deletes the Keychain, removes the exact owned jobs and temporary directory, and compares default/search-list metadata before and after. It does not use a system daemon or a release signing identity.
+The source at `cmd/g02-keychain-probe/main.go` is excluded from ordinary builds unless `-tags=g02runtime` is supplied. It creates a fresh private **file-based** Keychain, a generated 32-byte canary with an ACL for the same executable, and unique transient `gui/<uid>` launchd jobs. It disables interaction only for probe processes. It locks only the newly created Keychain, checks explicit access denial, deletes the Keychain, removes the exact owned jobs and temporary directory, and compares default/search-list metadata before and after. If service absence remains uncertain, it reports incomplete cleanup, attempts to lock only its synthetic Keychain, and retains the private recovery inventory instead of deleting it. It does not use a system daemon or a release signing identity.
 
 Run only the reviewed immutable build in the authorized current-login experiment:
 
