@@ -18,11 +18,10 @@ adjacent evidence and a future observation procedure. The selected source pins:
 | Runner application | v2.337.0, commit `397b032cbf865e9c3ddfab89d533ec19325e1273` |
 | ARC reference | gha-runner-scale-set-0.14.2, commit `9bb16ae49d0ce585d8e682aa7e2668a6e832d5d8` |
 
-The accompanying source capture contains the exact retrieved-file SHA-256
-manifest. Links use the pins above for source. REST pages were inspected on
+Source links below use the exact pins above. REST pages were inspected on
 2026-09-07 and render current documented examples even with
-`apiVersion=2022-11-28`; that is documented capability, not proof that the
-harness used that header. A live probe must verify its selected API version.
+`apiVersion=2022-11-28`; that is documented capability, not execution evidence
+for the harness's selected header. A live probe must verify its API version.
 
 ## Identity facts and the constrained tuple
 
@@ -101,9 +100,11 @@ Strict ownership remains unchanged:
   explicit operator resolution exists.
 - Zero statistics, a nil poll, elapsed time, an absent callback or a fresh
   approval cannot erase an earlier work-bearing observation.
-- Never persist, print or recover a JIT secret, raw response, worker OAuth
-  credential or broad job-context dump. Base64 JIT data is encoding, not
-  protection.
+- Controller journals, logs, evidence and observer receipts must not retain or
+  print JIT secrets, raw responses, worker OAuth credentials or broad job-context
+  dumps. The [worker harness](g01-worker-harness.md) separately records the JIT
+  material retained in Docker metadata and worker credential files. Base64
+  encoding does not protect that material.
 
 ## Terminal evidence
 
@@ -130,8 +131,8 @@ worker-absence proof.
 | Loss case | Supported later evidence | Still unavailable / required boundary |
 |---|---|---|
 | Clean baseline | Original set/session/message/request and JIT/runner/container receipts; matching Started/Completed; exact terminal REST job; exact local exit; exact runner absence with complete inventory and fresh owned-set statistics. | Cross-service ordering, absence propagation and safe busy/assignment behavior still require live validation. |
-| Acquire response lost before JIT | Durable acquire intent, known request/run identity and a fence proving no JIT or worker handoff followed. Later observations can retire the experiment without claiming acquisition never succeeded. | No read-back of the accepted request-ID set, per-request release/cancel API or idempotency guarantee. Zero counters alone cannot recover acceptance or ownership. |
-| JIT response lost before worker handoff | Name lookup may find a candidate and exact set ID. Under the strict contract, require an immutable creation receipt or explicit external operator resolution plus exact-ID absence/ownership evidence before any owned cleanup. | The old JIT secret cannot be recovered. Name/set equality is not a creation receipt. Never regenerate to discover what happened. |
+| Acquire response lost before JIT | Durable acquire intent and known request/run identity; an exact REST attempt/job eventually terminal; proof no JIT/worker handoff followed; and reconciliation of the same owned set/session/resources. These are candidates for a separately reviewed retirement without claiming acquisition never succeeded. | No read-back of the accepted request-ID set, per-request release/cancel API or idempotency guarantee. Zero counters alone cannot recover acceptance or ownership. |
+| JIT response lost before worker handoff | Name lookup may find a candidate and exact set ID. Under the strict contract, require an immutable creation receipt or explicit external operator resolution plus exact-ID absence/ownership evidence before any owned cleanup. | No supported API retrieves the old JIT secret. Name/set equality is not a creation receipt. Never regenerate to discover what happened. |
 | Known runner/container, callback missing | Exact terminal REST job bound to that runner, verified worker exit and exact runner absence can support a separately classified completion path after review. | Do not fabricate callback success; SDK completion history may not be replayable. Cleanup still needs its own exact ownership and busy-safe evidence. |
 | Unknown create/start/delete result | If an exact ID was retained, inspect it with unchanged ownership/profile and pair state/local evidence. A controlled fault witness may identify a deliberately suppressed return without entering the driver's retry path. | Names, empty statistics and elapsed time do not establish ownership. A true network loss with no witness remains unresolved. |
 
@@ -143,8 +144,10 @@ trigger retry, or be presented as automatic recovery.
 
 ## Broker and live-gate boundary
 
-The current broker is a **global finite ledger with one slot per named phase,
-including `inspect` and `cleanup`**. A fresh attempt directory does not grant
+The broker correction under review in [PR #29](https://github.com/1XP-AI/gh-runnerd/pull/29)
+uses a **global finite ledger with one slot per named phase, including `inspect`
+and `cleanup`**. At this document's review, that correction is not merged into
+`main`; this describes its reviewed design, not available released behavior. A fresh attempt directory does not grant
 another inspection, reset a claim or authorize another JIT/acquisition. A
 successor experiment needs an explicit pair/epoch, finite budget and separate
 review. A proposed future sample/poll budget inside an approved phase is not
@@ -165,7 +168,7 @@ baseline contract:
    optional `job.check_run_id` step may strengthen the binding. Keep the pinned
    runner/image, `DisableUpdate`, exact container receipt and one-worker limit.
 4. Define the finite sample/poll budget and manual reconciliation path before
-   execution. Current one-use phases cannot be rerun by choosing a new
+   execution. The reviewed one-use phase design cannot be rerun by choosing a new
    directory. No baseline without a reviewed completion/cleanup or explicit
    external-resolution path should be requested.
 
