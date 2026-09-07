@@ -136,3 +136,19 @@ func (a *GitHubAPI) jwt(c Credential) (string, error) {
 	}
 	return unsigned + "." + base64.RawURLEncoding.EncodeToString(signature), nil
 }
+
+func (a *GitHubAPI) DescribeApp(ctx context.Context, c Credential) (AppIdentity, error) {
+	var result struct {
+		ID    int64  `json:"id"`
+		Slug  string `json:"slug"`
+		Owner struct {
+			Login string `json:"login"`
+			ID    int64  `json:"id"`
+			Type  string `json:"type"`
+		} `json:"owner"`
+	}
+	if a.call(ctx, http.MethodGet, "/app", &c, http.StatusOK, &result) != nil || result.ID < 1 || result.Owner.ID < 1 || result.Slug == "" || result.Owner.Login == "" {
+		return AppIdentity{}, errors.New("App identity lookup failed")
+	}
+	return AppIdentity{ID: result.ID, Slug: result.Slug, OwnerID: result.Owner.ID, OwnerLogin: result.Owner.Login, OwnerType: result.Owner.Type}, nil
+}

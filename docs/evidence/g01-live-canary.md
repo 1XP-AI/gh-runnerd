@@ -6,6 +6,11 @@ running workflows require explicit authorization for the named environment and
 reviewed immutable harness/workflow commit. Do not mark these checkboxes passed
 because the offline fixture supplied the desired behavior.
 
+A separate [tagged controller phase driver](g01-live-driver.md) now provides a
+reviewable executable for bounded controller operations. It has not run live and
+does not launch workers or complete the phases below. The original fixture
+remains loopback-only.
+
 ## Required environment and authorization record
 
 - [ ] Maintainer identifies one disposable **private** repository and one
@@ -30,8 +35,9 @@ because the offline fixture supplied the desired behavior.
   against [published digests](g01-contract.md#runner-and-jit-transport) and record
   exact runtime/image digest. Recheck support/security status before execution.
 - [ ] Independent Astra `xhigh` reviews the immutable live harness, authority
-  checks, cleanup, fault barriers and sanitized telemetry. This offline module
-  is not a live harness and must not be pointed at GitHub by replacing its URL.
+  checks, cleanup, fault barriers and sanitized telemetry. The offline fixture
+  must not be pointed at GitHub by replacing its URL. The separate tagged driver
+  and remaining worker steps require their own exact-commit review/approval.
 - [ ] Maintainer authorizes the named scale-set/session creation, bounded JIT
   issuance, workflow dispatch, manager interruption, response suppression and
   owned cleanup operations below. Record authorization without secret values.

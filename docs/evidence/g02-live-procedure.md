@@ -1,13 +1,13 @@
 # G02 remaining live procedure
 
-This is a concrete experiment proposal, not a report that these checks passed. Use reviewed immutable code, a dedicated trusted environment, explicit authorization for these exact resources and an organization owner available for both installations. This G02 harness intentionally has **no live enrollment CLI or persistent real-key importer**. A reviewed local driver must wire the already-tested `Attempt`, `GitHubAPI.Convert`, and `ManualImport` before the browser experiment. That driver and the persistent credential boundary are remaining work, not imaginary existing commands.
+This is a concrete experiment proposal, not a report that these checks passed. Use reviewed immutable code, a dedicated trusted environment, explicit authorization for these exact resources and an organization owner available for both installations. The `g02-enroll` verify-only driver now connects `Attempt`, `GitHubAPI.Convert`, and `ManualImport`, with an in-memory atomic sink and a private non-secret journal. Its executable command and offline evidence are in [the driver record](g02-live-driver.md). It has not been run against GitHub. Independent review and explicit approval of the exact live resources remain required; a persistent real-key importer is still unimplemented.
 
 ## A. Disposable GitHub enrollment proposal
 
 | Field | Proposed value / required access |
 |---|---|
-| App owner | Operator-nominated disposable test personal account or test organization; owner name must be recorded privately before creation |
-| App name | `gh-runnerd-g02-20260907-<fresh-six-hex-suffix>`; inventory this exact name before/after |
+| App owner | `1XP-AI` (organization ID `258160258`), proposed and not yet created |
+| App name | `gh-runnerd-gate-deab34`; inventory this exact name before/after |
 | Homepage | `https://github.com/1XP-AI/gh-runnerd` |
 | Visibility | Any account (`public: true`) so the same App can be installed in both nominated test organizations |
 | Permissions | Organization self-hosted runners read/write, baseline metadata read; no repository Administration, Actions, contents or user permissions |
@@ -16,7 +16,7 @@ This is a concrete experiment proposal, not a report that these checks passed. U
 | Redirect | Actual address of one already-bound `tcp4`, `127.0.0.1:0` listener, with `/manifest/callback`; no proxy, localhost alias or OAuth callback |
 | Authorization extras | No `callback_urls`, `setup_url`, user OAuth-on-install, client secret flow or public receiver |
 | Network operations | Browser creation POST once, one code conversion POST, App-auth GETs for App and each org installation; do not request runner registration/JIT credentials |
-| Installations | Two operator-nominated test orgs; owner authorizes the same App in each; chosen private test repositories where applicable |
+| Installations | `1XP-AI` (`258160258`) and `1XP-Inc` (`149097057`); owners authorize the same App in each and independently record both installation IDs |
 | Cleanup | Owner uninstalls the two exact installation IDs, deletes the one exact disposable App, verifies absence, removes only its probe credentials/state |
 
 A disabled webhook URL using `.invalid` is a deliberate safe test input, **not** a claim that GitHub accepts it. If GitHub refuses that shape before registration, record the refusal and inspect the nominated owner's App inventory. Do not silently resubmit a changed Manifest. A follow-up no-URL shape (`hook_attributes: {"active": false}`) is a separate explicit experiment after confirming no App was created. If neither shape works, manual registration with the Webhook Active box cleared is the fallback; do not add a publicly reachable webhook server to make the test pass.
@@ -25,7 +25,7 @@ Exact initial Manifest, substituting only the recorded name and actual listener 
 
 ```json
 {
-  "name": "gh-runnerd-g02-20260907-<fresh-six-hex-suffix>",
+  "name": "gh-runnerd-gate-deab34",
   "url": "https://github.com/1XP-AI/gh-runnerd",
   "redirect_url": "http://127.0.0.1:<actual-port>/manifest/callback",
   "public": true,
@@ -52,7 +52,7 @@ Exact initial Manifest, substituting only the recorded name and actual listener 
 
 ## B. Current-session synthetic Keychain/launchd probe
 
-The build-tagged command is the only executable platform experiment supplied by this PR. It uses no GitHub credentials and no installed persistent agent:
+The build-tagged command is the existing executable macOS platform experiment; the new enrollment driver performs no Keychain or launchd operations. It uses no GitHub credentials and no installed persistent agent:
 
 ```sh
 cd experiments/g02-auth
