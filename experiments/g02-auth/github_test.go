@@ -135,3 +135,18 @@ func TestManifestConversionDoesNotExposeSecretsOrRetry(t *testing.T) {
 		t.Fatal("invalid code reached network")
 	}
 }
+
+func TestDescribeAppAuthenticatesOwnerAndSlug(t *testing.T) {
+	c := syntheticCandidate(t)
+	cred, _ := parseCredential(c)
+	api := NewGitHubAPI(time.Now, transportFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != "/app" || r.Method != "GET" || !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+			t.Fatal("identity not authenticated")
+		}
+		return response(200, `{"id":71,"slug":"synthetic-app","owner":{"login":"org-a","id":101,"type":"Organization"}}`), nil
+	}))
+	got, err := api.DescribeApp(context.Background(), cred)
+	if err != nil || got.ID != 71 || got.Slug != "synthetic-app" || got.OwnerLogin != "org-a" || got.OwnerID != 101 || got.OwnerType != "Organization" {
+		t.Fatal("lost App owner identity")
+	}
+}

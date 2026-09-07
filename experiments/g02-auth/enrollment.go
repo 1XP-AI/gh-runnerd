@@ -25,6 +25,7 @@ type Attempt struct {
 	expires     time.Time
 	now         func() time.Time
 	convert     func(context.Context, string) error
+	onSuccess   http.HandlerFunc // optional driver continuation; set before serving
 	mu          sync.Mutex
 	consumed    bool
 }
@@ -92,6 +93,10 @@ func (a *Attempt) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	if err := a.convert(ctx, q.Get("code")); err != nil {
 		reject(http.StatusBadGateway, "conversion failed; inspect existing App and use manual import")
+		return
+	}
+	if a.onSuccess != nil {
+		a.onSuccess(w, r)
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
