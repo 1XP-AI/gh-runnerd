@@ -1,0 +1,564 @@
+{
+  "schema_version": 1,
+  "issues": [
+    {
+      "key": "G01",
+      "title": "Prove Scale Set delivery, acquisition and drain contracts",
+      "stage": "M0 - Evidence gates",
+      "agent": "Astra xhigh",
+      "dependencies": [],
+      "goal": "Select and pin a supported Scale Set integration path with demonstrated recovery at message acknowledgement, acquisition and JIT boundaries.",
+      "scope": "Isolated protocol spike and ADR; compare release v0.4.0 with audited commit cb0405b2d874500e75ae34eff8d582ab75956b45. Do not implement production providers or copy the demo shutdown policy.",
+      "tdd": [
+        "Red: fake session server reproduces ACK-before-callback crash and missing lifecycle callback.",
+        "Cover pre/post ACK, acquisition, >50 events, repeated/stale statistics, 202, 401/403/429, callback failure and session replacement with deterministic barriers.",
+        "Test idle-assignment races while drain withdraws capacity; mocks alone cannot prove server deregistration/acquisition behavior. Run an explicitly authorized disposable private live canary before closing the gate."
+      ],
+      "acceptance": [
+        "Record exact module/runner versions and supported JIT bootstrap transports, including any secret exposure.",
+        "Choose high-level listener plus independent reconciliation OR a lower-level supported message loop; do not simply reverse ordering without evidence.",
+        "Document recoverable state versus quarantine for lost callback/request IDs; no exactly-once claim.",
+        "Publish sanitized live contract evidence or keep the gate unresolved; obtain independent Astra protocol review."
+      ],
+      "risk": "High",
+      "kind": "gate",
+      "priority": "P0"
+    },
+    {
+      "key": "G02",
+      "title": "Prove local App enrollment and launchd credential access",
+      "stage": "M0 - Evidence gates",
+      "agent": "Astra xhigh",
+      "dependencies": [],
+      "goal": "Resolve GitHub App Manifest loopback enrollment and the macOS credential/service identity contract with real platform evidence and a safe manual-import fallback.",
+      "scope": "Gate experiments and ADR only. Use disposable authorized Apps/org installations; do not alter production App settings, existing runners or disable FileVault.",
+      "tdd": [
+        "Red: reject wrong/expired/replayed state, duplicate callback parameters, wrong Host and forged installation IDs in a small harness.",
+        "Live-check disabled-webhook Manifest shape, HTTP loopback random-port redirect and two org installations; distinguish OAuth from Manifest.",
+        "Test Keychain read under actual signed/source-build launchd identity, screen lock, login/logout and reboot; identify file-based Keychain requirement for a system daemon."
+      ],
+      "acceptance": [
+        "Confirm minimal org runner permissions, organization-owner installation requirement and per-org identity checks.",
+        "Decide login-scoped startup and dedicated controller/job identities; document cold-boot limitations and any narrow helper.",
+        "Manual App import works if Manifest is rejected; partial setup never silently creates extra Apps.",
+        "Publish sanitized results and explicit support matrix; no secret values or raw callback URLs/codes."
+      ],
+      "risk": "High",
+      "kind": "gate",
+      "priority": "P0"
+    },
+    {
+      "key": "G03",
+      "title": "Bootstrap Go module and independent public CI",
+      "stage": "M0 - Evidence gates",
+      "agent": "Luna max",
+      "dependencies": [],
+      "goal": "Establish a reproducible Go development and TDD baseline whose public PR checks run without gh-runnerd, live GitHub credentials or local runner access.",
+      "scope": "Supported Go toolchain pin, module/package skeleton, formatting/vet/unit/race/fuzz-smoke/vulnerability checks and contribution commands; no runtime behavior.",
+      "tdd": [
+        "Introduce a tiny meaningful behavioral test for the first shared value contract, prove it fails before implementation and passes afterward.",
+        "Verify ordinary checks succeed with no App credentials and no Docker daemon.",
+        "Review workflow permissions and trusted/untrusted triggers; pin external actions to reviewed commits."
+      ],
+      "acceptance": [
+        "Record toolchain and dependency policy, licence inventory and local commands.",
+        "CI uses hosted standard environments and cannot bootstrap-deadlock on this manager.",
+        "Skipped hardware/live suites are explicit and never represented as passed.",
+        "No product daemon is installed by tests."
+      ],
+      "risk": "Medium",
+      "kind": "implementation",
+      "priority": "P1"
+    },
+    {
+      "key": "G04",
+      "title": "Freeze CLI configuration, provider and scaling contracts",
+      "stage": "M0 - Evidence gates",
+      "agent": "Astra xhigh",
+      "dependencies": [
+        "G01",
+        "G02",
+        "G03"
+      ],
+      "goal": "Publish unambiguous versioned contracts for CLI configuration, provider capabilities, resource ownership and fixed/autoscale policies before parallel implementation.",
+      "scope": "Design/schema fixtures and interface contracts. Define fixed count and autoscale minTotal/maxTotal; defer idleBuffer. Include explicit existing Docker endpoint and trust domain.",
+      "tdd": [
+        "Red: invalid/negative limits, min greater than max, incompatible provider capabilities and duplicate pool IDs are rejected by contract fixtures.",
+        "Specify desired=min(maxTotal,max(minTotal,TotalAssignedJobs)); reducing below busy count affects admission only.",
+        "Table-test serialized request/response versions, unknown state and resource identity including process birth evidence."
+      ],
+      "acceptance": [
+        "CLI --min maps to minTotal, not minimum idle workers; all docs/examples agree.",
+        "Define provider create/discover/inspect/retire/logs capabilities and owned-resource identity.",
+        "Document native controller/job identity and Docker DinD privilege profiles; an adapter cannot silently broaden trust.",
+        "Assign shared file ownership; independent provider implementation can proceed without redefining contracts.",
+        "Define runner freshness/security update ownership, staged refresh and rollback; a prohibited stale version must not receive new jobs."
+      ],
+      "risk": "High",
+      "kind": "implementation",
+      "priority": "P0"
+    },
+    {
+      "key": "G05",
+      "title": "Implement durable state and operation journal",
+      "stage": "M1 - Control plane",
+      "agent": "Astra xhigh",
+      "dependencies": [
+        "G03",
+        "G04"
+      ],
+      "goal": "Persist desired/observed worker state and side-effect intents so interrupted operations reconcile without uncontrolled duplicate workers or foreign-resource deletion.",
+      "scope": "SQLite schema/migrations, typed reducer and ownership ledger; no live provider side effects.",
+      "tdd": [
+        "Red: reopen a real temporary DB after kill points at intent commit, reservation, lost provider response and cleanup-before-commit.",
+        "Property/fuzz tests reject invalid transitions and keep unknown workers reserved.",
+        "Inject DB busy, disk-full, interrupted migration and PID/resource reuse; inspect old/new state after reopen."
+      ],
+      "acceptance": [
+        "Stable identities include controller/org/pool/generation/immutable provider ID.",
+        "Intent is durable before side effect; retries are idempotent and ambiguous outcomes quarantine.",
+        "No credentials/JIT payload in DB; migrations have tested rollback/recovery policy.",
+        "Crash tests do not claim to simulate physical power loss unless actually tested."
+      ],
+      "risk": "High",
+      "kind": "implementation",
+      "priority": "P0"
+    },
+    {
+      "key": "G06",
+      "title": "Implement the supervised daemon and authorized local IPC",
+      "stage": "M1 - Control plane",
+      "agent": "Astra xhigh",
+      "dependencies": [
+        "G05"
+      ],
+      "goal": "Run one foreground daemon under supervision and authorize CLI commands through a private versioned Unix socket with durable operation identities.",
+      "scope": "Lock ownership, private socket, peer UID, server identity, bounded message parsing and durable mutations; no remote network control API.",
+      "tdd": [
+        "Red: duplicate daemon, wrong peer UID, job UID invoking the real CLI, wrong socket owner and symlink substitution cannot mutate state.",
+        "Test concurrent/replayed commands, stale epochs, invalid methods and oversized frames.",
+        "Kill daemon while clients are connected; reconnection returns accurate committed/uncommitted outcomes."
+      ],
+      "acceptance": [
+        "Terminal/CLI exit does not stop managed workers.",
+        "No arbitrary shell/path/mint-token endpoint exists; every mutation is authorized.",
+        "A daemon restart cannot create a second owner or adopt manual runners.",
+        "No job-user access to control socket in the supported profile."
+      ],
+      "risk": "High",
+      "kind": "implementation",
+      "priority": "P0"
+    },
+    {
+      "key": "G07",
+      "title": "Implement GitHub App credential and installation binding",
+      "stage": "M1 - Control plane",
+      "agent": "Astra xhigh",
+      "dependencies": [
+        "G02",
+        "G05"
+      ],
+      "goal": "Authenticate each configured organization with a verified user-owned App installation while keeping management secrets local and out of all worker/control outputs.",
+      "scope": "Credential-store adapter, App import, canonical org/App binding, SDK refresh facade and safe rotation; no auto browser creation.",
+      "tdd": [
+        "Red: wrong org/App/personal/suspended/underprivileged installation is refused; only configured installations are used.",
+        "Fake full SDK auth chain, concurrent expiry, clock skew, 401 refresh, 403 revoke and per-org isolation.",
+        "Seed secret canaries into raw SDK response bodies/URLs/errors; verify absence from logs/status/DB/backend spawn.",
+        "Locked/denied Keychain fails closed; crash during key/profile swap preserves a recoverable old/new selection."
+      ],
+      "acceptance": [
+        "Baseline org permission is organization_self_hosted_runners:write; no repo-admin escalation.",
+        "One org auth failure stops its new acquisition but does not disable the other healthy org.",
+        "Shared App compromise blast radius and key-memory limitations are documented.",
+        "Actual G02 credential identity contract is implemented; no plaintext fallback."
+      ],
+      "risk": "High",
+      "kind": "implementation",
+      "priority": "P0"
+    },
+    {
+      "key": "G08",
+      "title": "Implement guided init and optional Manifest enrollment",
+      "stage": "M1 - Control plane",
+      "agent": "Luna max",
+      "dependencies": [
+        "G06",
+        "G07"
+      ],
+      "goal": "Provide a resumable init flow that imports or creates an operator-owned App and binds authorized organizations without copying per-runner registration tokens.",
+      "scope": "CLI onboarding over the G02-reviewed auth contract. Manual import is first-class; Manifest available only if its live gate passed.",
+      "tdd": [
+        "Red: denial, cancelled browser, port conflict, timed-out conversion, replay and a crash between remote creation/key commit leave honest partial status.",
+        "Never convert a callback more than once or trust browser installation_id without API verification.",
+        "Golden CLI tests use synthetic data; no PEM/code/key material in output or failure diagnostics."
+      ],
+      "acceptance": [
+        "Init does not require an external callback server or gh OAuth session.",
+        "Pending second-org installation can be resumed without duplicating the first.",
+        "App permissions/trust/startup expectations are shown before user browser approval.",
+        "Astra reviews all auth-facing code and evidence before merge."
+      ],
+      "risk": "Medium",
+      "kind": "implementation",
+      "priority": "P1"
+    },
+    {
+      "key": "G09",
+      "title": "Implement the recoverable Scale Set adapter",
+      "stage": "M1 - Control plane",
+      "agent": "Astra xhigh",
+      "dependencies": [
+        "G01",
+        "G05",
+        "G07"
+      ],
+      "goal": "Translate verified Scale Set demand and lifecycle observations into durable local intents with bounded retry and explicit advertised capacity.",
+      "scope": "One client/session per pool/org, JIT attempt binding, safe errors, reconnect and reviewed ACK strategy; no provider-specific lifecycle policy.",
+      "tdd": [
+        "Red: crash after ACK/before callback and lost JIT response cannot permanently lose recoverable capacity or reuse abandoned JIT.",
+        "Replay >50 jobs, stale messages, expired sessions, 429 backoff and prolonged outage with a fake clock.",
+        "Confirm aggregate stats drive demand while unknown job identity remains conservative."
+      ],
+      "acceptance": [
+        "Uses G01 pinned integration and real evidence, not the instructional Docker example lifecycle.",
+        "No raw SDK error logs, cross-org mutable client state or unbounded retries.",
+        "Stops new acquisition on authorization loss and reconciles before resuming.",
+        "Owned scale-set/runner deletion requires durable identity, not a name prefix."
+      ],
+      "risk": "High",
+      "kind": "implementation",
+      "priority": "P0"
+    },
+    {
+      "key": "G10",
+      "title": "Implement disposable Linux workers with isolated Docker services",
+      "stage": "M2 - Execution and scaling",
+      "agent": "Astra xhigh",
+      "dependencies": [
+        "G04",
+        "G05",
+        "G07"
+      ],
+      "goal": "Provision ARM64 one-job Linux workers against an explicit existing Docker engine with worker-owned Docker services, resources and cleanup.",
+      "scope": "Docker adapter, pinned images, per-worker daemon/network/storage and logs. No automatic Docker Desktop/Lima installation or global context mutation.",
+      "tdd": [
+        "Red: common provider contract for create/lost response/retry/inspect/drain/cleanup preserves unrelated containers and volumes.",
+        "Run ordinary shell, checkout-like mounts, job container and simultaneous PostgreSQL/Redis service fixtures on real ARM64 Docker.",
+        "Probe job mounts/env/engine inspection for manager secrets and management socket exposure; enforce the reviewed trusted DinD profile.",
+        "Runtime outage and partial cleanup retain reservations/quarantine instead of broad prune."
+      ],
+      "acceptance": [
+        "DB ports/mount paths and resource ceilings include service daemon overhead.",
+        "Images pinned by digest and ARM64 manifest, required runtime tool dependencies documented.",
+        "Dedicated job Docker daemon only; privileged DinD if needed is an explicit trusted-runtime exception, not hostile-code isolation.",
+        "Existing manual runners/runtime objects remain untouched.",
+        "Refresh only future workers to a verified supported runner/image version; preserve busy workers and block stale admission."
+      ],
+      "risk": "High",
+      "kind": "implementation",
+      "priority": "P0"
+    },
+    {
+      "key": "G11",
+      "title": "Implement trusted native macOS worker identity and lifecycle",
+      "stage": "M2 - Execution and scaling",
+      "agent": "Astra xhigh",
+      "dependencies": [
+        "G02",
+        "G04",
+        "G05",
+        "G07"
+      ],
+      "goal": "Run one-job macOS ARM64 workers under the reviewed job identity with correct process ownership, recoverable supervision and scoped cleanup.",
+      "scope": "Dedicated controller/job identity integration and minimal allowlisted helper if required by G02, process-group lifecycle, unique workdir and logs. No VM isolation claim.",
+      "tdd": [
+        "Red: job identity cannot read controller key/state/socket; same-UID mode is unsupported by the protected default.",
+        "A long-running worker survives manager restart; PID reuse cannot authorize killing another process.",
+        "Inject cancellation during bootstrap, surviving child processes, workdir symlink, cleanup failure and conflicting host-tool mutation.",
+        "JIT transport follows verified runner support, with residual in-job exposure documented and no management key inheritance."
+      ],
+      "acceptance": [
+        "Native provider is enabled only for explicit trusted repositories/trust domain.",
+        "Different organizations do not share a native job identity or writable credential/cache areas by default.",
+        "Helper accepts only bounded approved operations, not arbitrary executable paths, UIDs or shell text.",
+        "Unsupported identity/Keychain/service conditions fail preflight; fresh workdir is not advertised as fresh OS.",
+        "Controller owns pinned runner download/update policy; verify checksum and refresh new workers without replacing the binary beneath busy workers."
+      ],
+      "risk": "High",
+      "kind": "implementation",
+      "priority": "P0"
+    },
+    {
+      "key": "G12",
+      "title": "Implement deterministic shared capacity and fair scheduling",
+      "stage": "M2 - Execution and scaling",
+      "agent": "Luna max",
+      "dependencies": [
+        "G04",
+        "G05"
+      ],
+      "goal": "Compute fixed/autoscale targets and admit workers without exceeding per-pool, per-runtime or host-wide budgets, while making fair progress across eligible pools.",
+      "scope": "Pure policy module with fake clock and typed snapshots; no changes to protocol acquisition or provider contracts.",
+      "tdd": [
+        "Red: simultaneous requests by both orgs cannot reserve the same last CPU/memory slot.",
+        "Property tests cover zero/max/minTotal, infeasible floors, busy-over-reduced-cap, creation/cleanup/unknown reservations and pressure cutoff.",
+        "Finite scenario tests prove no starvation as slots free, deterministic tie-breaking and no oscillation under chosen backoff."
+      ],
+      "acceptance": [
+        "Uses fixed count or minTotal/maxTotal semantics consistently; explicit idleBuffer deferred.",
+        "Native memory budget is admission-only; no hard OS cap promise.",
+        "Existing engine allocation and daemon/OS headroom are represented without double-counting.",
+        "Astra reviews invariants/property counterexamples before connecting live effects."
+      ],
+      "risk": "High",
+      "kind": "implementation",
+      "priority": "P0"
+    },
+    {
+      "key": "G13",
+      "title": "Integrate reconciliation, drain and safe restart",
+      "stage": "M2 - Execution and scaling",
+      "agent": "Astra xhigh",
+      "dependencies": [
+        "G06",
+        "G09",
+        "G10",
+        "G11",
+        "G12"
+      ],
+      "goal": "Reconcile GitHub and provider observations into safe worker lifecycle changes across crashes, scale-down and network/runtime failures.",
+      "scope": "Connect durable intents to providers and scheduler, stop/resume/restart/drain and quarantine; no automatic job rerun or force-delete default.",
+      "tdd": [
+        "Red: assignment immediately after idle observation cannot be killed during scale-down.",
+        "Inject every intent/side-effect/result-commit crash window, message loss, one-org failure and Docker disconnect.",
+        "Test drain timeout reports busy/unknown workers without force kill; repeated commands survive restart.",
+        "Host reboot reports interrupted jobs accurately; manual/foreign resources never adopted."
+      ],
+      "acceptance": [
+        "Reservations released only after known terminal/cleanup state.",
+        "Manager restart preserves surviving workers and quarantines ambiguous state.",
+        "Future capacity withdrawn during drain without claiming atomic remote cancellation.",
+        "Astra independently reviews end-to-end failure matrix."
+      ],
+      "risk": "High",
+      "kind": "implementation",
+      "priority": "P0"
+    },
+    {
+      "key": "G14",
+      "title": "Implement status, logs and sanitized diagnostics",
+      "stage": "M3 - Reliability qualification",
+      "agent": "Luna max",
+      "dependencies": [
+        "G06",
+        "G13"
+      ],
+      "goal": "Give operators one accurate view of organizations, pools, capacity, jobs and failures with bounded redacted local logs and machine-readable output.",
+      "scope": "status/list/describe/logs/doctor/export and telemetry adapters; no new auth scopes unless justified by an approved feature.",
+      "tdd": [
+        "Red: desired/reserved/creating/busy/draining/unknown counts reflect durable and stale observations separately.",
+        "Test concurrent tail/rotation, slow clients, missing provider and bounded diagnostic export.",
+        "Secret canaries in SDK errors, config and job data never appear in CLI/JSON/logs/metrics."
+      ],
+      "acceptance": [
+        "Logs survive worker cleanup with retention/disk limits.",
+        "Metrics distinguish manager overhead, engine limits and job costs.",
+        "Stale/offline state is visible rather than falsely healthy.",
+        "Exit codes/JSON version and cancellation behavior are documented."
+      ],
+      "risk": "Medium",
+      "kind": "implementation",
+      "priority": "P1"
+    },
+    {
+      "key": "G15",
+      "title": "Implement startup, shutdown and safe configuration updates",
+      "stage": "M3 - Reliability qualification",
+      "agent": "Luna max",
+      "dependencies": [
+        "G02",
+        "G06",
+        "G13"
+      ],
+      "goal": "Install and manage the daemon through launchd with honest login/boot behavior, safe config generations and reversible lifecycle commands.",
+      "scope": "startup/unstartup/restart/doctor installation and config persistence. Do not promise cold-boot access unless G02 established it.",
+      "tdd": [
+        "Red: CLI without an interactive shell/ambient env uses correct endpoint/keychain paths.",
+        "Test stale lock, duplicate launch registration, malformed config, generation update mid-job, rollback and daemon crash restart.",
+        "Run actual supported login/lock/reboot mode; uninstall does not automatically delete Apps or legacy workers."
+      ],
+      "acceptance": [
+        "launchd supervises foreground daemon; terminal closure irrelevant.",
+        "Busy jobs survive ordinary manager upgrades; unsupported service version rejected safely.",
+        "Explicit boundaries among daemon uninstall, owned-resource cleanup, local key deletion and remote App uninstall.",
+        "Astra reviews credential/service identity and cleanup transitions."
+      ],
+      "risk": "Medium",
+      "kind": "implementation",
+      "priority": "P1"
+    },
+    {
+      "key": "G16",
+      "title": "Build repeatable two-organization runtime qualification",
+      "stage": "M3 - Reliability qualification",
+      "agent": "Luna max",
+      "dependencies": [
+        "G08",
+        "G13",
+        "G14",
+        "G15"
+      ],
+      "goal": "Provide a repeatable, opt-in hardware/live test suite proving real GitHub workflow routing, Linux DB services and macOS jobs across two organizational installations.",
+      "scope": "Fixtures, scripts and sanitized evidence format from reviewed contracts; no unauthenticated public PR access to local hardware.",
+      "tdd": [
+        "Red: tests detect wrong org/label routing, leftover DB/container/workdir and busy-job termination.",
+        "Execute Linux shell/job-container/services workflows and native macOS workflows, queue bursts and cap changes.",
+        "Use immutable reviewed commit and disposable controlled resources; record every skipped profile."
+      ],
+      "acceptance": [
+        "Both orgs and both platforms appear in evidence, with actual job URLs sanitized if private.",
+        "Parallel service tests catch port/network/workspace conflicts.",
+        "Cleanup uses owned inventory and preserves existing manual infrastructure.",
+        "Astra signs off contract coverage; credentials stay outside fixtures/artifacts."
+      ],
+      "risk": "Medium",
+      "kind": "implementation",
+      "priority": "P1"
+    },
+    {
+      "key": "G17",
+      "title": "Qualify crash recovery, soak and resource budgets",
+      "stage": "M3 - Reliability qualification",
+      "agent": "Astra xhigh",
+      "dependencies": [
+        "G16",
+        "G19"
+      ],
+      "goal": "Establish release-candidate reliability and measured resource limits through deterministic faults and a real mixed-workload soak.",
+      "scope": "24-hour/100-job proposed release gate, fault matrix, performance baseline and decision report. Do not promote if required evidence is missing.",
+      "tdd": [
+        "Kill daemon at all identified barriers, interrupt network/runtime, rotate tokens and simulate disk pressure.",
+        "Run queue bursts and repeated drain/scale transitions with both orgs and OS pools.",
+        "Measure manager CPU/RSS, API traffic, admission/ready latency, queue time and disk growth on fixed hardware.",
+        "Control host reboot and classify expected interrupted jobs separately from manager recovery faults.",
+        "Simulate stale runner/image and urgent required update during busy work; prove paused new admission, safe refresh/drain and no rollback to forbidden stale version."
+      ],
+      "acceptance": [
+        "No unexplained duplicates/orphans/cap violations/busy kills/secret exposure.",
+        "Set recommended counts from measured headroom, not host marketing specs.",
+        "Document SDK preview limits and residual trust/platform limitations.",
+        "Independent Astra reliability verdict; incomplete soak remains incomplete."
+      ],
+      "risk": "High",
+      "kind": "gate",
+      "priority": "P0"
+    },
+    {
+      "key": "G18",
+      "title": "Package signed releases and reproducible distribution",
+      "stage": "M4 - Pilot and release",
+      "agent": "Luna max",
+      "dependencies": [
+        "G03",
+        "G15",
+        "G17"
+      ],
+      "goal": "Produce verifiable macOS ARM64 release artifacts with install/upgrade/rollback instructions and accurate preview/stability labeling.",
+      "scope": "Build packaging/checksums/provenance/SBOM/license notices/Homebrew formula plan; signing/notarization only with user-owned credentials when available.",
+      "tdd": [
+        "Red: corrupted artifact/signature and incompatible state version fail before replacement.",
+        "Test clean install and upgrade rollback without deleting user state/keys or interrupting busy jobs.",
+        "Verify PR builds require no signing secrets; release evidence records unsigned/notarized status truthfully."
+      ],
+      "acceptance": [
+        "No downloaded macOS image, restricted virtualization binary or embedded App private key.",
+        "No auto-publish/signing purchase implied; repository owner controls release channel.",
+        "Bootstrap build remains independent of gh-runnerd.",
+        "Astra reviews supply-chain, update and rollback effects."
+      ],
+      "risk": "Medium",
+      "kind": "implementation",
+      "priority": "P1"
+    },
+    {
+      "key": "G19",
+      "title": "Audit trust admission and cross-worker secret boundaries",
+      "stage": "M3 - Reliability qualification",
+      "agent": "Astra xhigh",
+      "dependencies": [
+        "G08",
+        "G10",
+        "G11",
+        "G13"
+      ],
+      "goal": "Verify and enforce the advertised trust profiles so untrusted work cannot enter trusted-only pools and jobs cannot reach manager credentials/control in the supported configuration.",
+      "scope": "Threat-model closure, policy preflight, native UID and Docker DinD profiles, adversarial non-destructive probes. No unsupported claim of hostile-container isolation.",
+      "tdd": [
+        "Red: mismatched runner-group access, ambiguous fork provenance and job invoking official CLI cannot bypass policy.",
+        "Try reading controller home/state/keychain/socket, sibling files/env and manager Docker socket from controlled test jobs.",
+        "Exercise SDK secret-in-error, proxy inheritance, wrong-org endpoint, unsafe mount/device/host-network requests.",
+        "Test shared-App blast radius/rotation docs and reject unsupported arbitrary backend flags."
+      ],
+      "acceptance": [
+        "Runner-group restrictions verified before new admission; no automatic broadening to all repos.",
+        "Outer runner launches unprivileged; only reviewed worker-specific DinD has manager-runtime privilege. Trusted jobs control inner daemon; no claim that inner privileged containers are prohibited.",
+        "Same-user native insecure mode is not protected default; unresolved boundaries block release.",
+        "Public-fork support deferred until isolated VM/network provenance design is proven."
+      ],
+      "risk": "High",
+      "kind": "gate",
+      "priority": "P0"
+    },
+    {
+      "key": "G20",
+      "title": "Pilot migration with reversible legacy runner handoff",
+      "stage": "M4 - Pilot and release",
+      "agent": "Astra xhigh",
+      "dependencies": [
+        "G17",
+        "G18"
+      ],
+      "goal": "Demonstrate a reversible rollout from existing manual runners to gh-runnerd-managed pools across both organizations without accidental interruption or resource adoption.",
+      "scope": "Runbook and operator-authorized canary rollout. Existing manual services remain until canary success; no unattended production rewrite.",
+      "tdd": [
+        "Red: migration checks detect workflow labels still targeting the wrong pool or a missing access grant.",
+        "Move one reviewed test workflow first, then expand; verify rollback can route back to old runners.",
+        "Drain old owned-by-operator services only in the explicit handoff procedure after busy work completes."
+      ],
+      "acceptance": [
+        "Linux and macOS canary evidence and pool resource settings are recorded.",
+        "Legacy identities are never imported solely by name prefix.",
+        "Workflow routing labels remain stable when scaling worker count.",
+        "Record rollout verdict and rollback path; current planning task does not perform migration."
+      ],
+      "risk": "High",
+      "kind": "gate",
+      "priority": "P1"
+    },
+    {
+      "key": "G21",
+      "title": "Evaluate optional macOS VM and multi-host providers",
+      "stage": "M5 - Future",
+      "agent": "Astra xhigh",
+      "dependencies": [
+        "G17"
+      ],
+      "goal": "Decide whether optional isolated macOS VM and multi-host adapters can meet safety, licensing and operating-cost requirements without coupling the core to one runtime.",
+      "scope": "Research/prototype ADR only after core qualification. Evaluate Apple Virtualization helper and optional external tools; no default Tart bundling.",
+      "tdd": [
+        "Reproduce image clone/boot/one-job/teardown and controller-restart behavior in an isolated experiment.",
+        "Measure startup/capacity and validate exact macOS VM licence/runtime limits separately from runner-process counts.",
+        "Probe persistence, credential access and host/LAN networking before claiming untrusted-job support."
+      ],
+      "acceptance": [
+        "Document go/no-go, license boundaries and optional provider interface changes.",
+        "No unlimited scaling claim on one Mac or inference that all Linux VMs share macOS guest cap.",
+        "Remote-host design includes trust/auth/recovery and central budget semantics before implementation.",
+        "Scope stays outside v0.1; create bounded follow-up implementation issues only after evidence."
+      ],
+      "risk": "High",
+      "kind": "research",
+      "priority": "P2"
+    }
+  ]
+}
