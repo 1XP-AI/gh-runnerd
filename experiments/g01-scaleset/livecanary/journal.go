@@ -106,6 +106,10 @@ func ReadApproval(path string) (Approval, error) {
 }
 
 func OpenJournal(directory string, a Approval) (*FileJournal, error) {
+	return openJournalWithSync(directory, a, func(f *os.File) error { return f.Sync() })
+}
+
+func openJournalWithSync(directory string, a Approval, syncDirectory func(*os.File) error) (*FileJournal, error) {
 	info, err := os.Lstat(directory)
 	if err != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
 		return nil, ErrJournal
@@ -153,7 +157,7 @@ func OpenJournal(directory string, a Approval) (*FileJournal, error) {
 		if err != nil {
 			return nil, ErrJournal
 		}
-		err = dir.Sync()
+		err = syncDirectory(dir)
 		dir.Close()
 		if err != nil {
 			return nil, ErrJournal
