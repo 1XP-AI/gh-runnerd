@@ -16,6 +16,7 @@ Every row is an unimplemented goal. G01/G02 are evidence gates; G03 is independe
 | G10 | Implement disposable Linux workers with isolated Docker services | M2 - Execution and scaling | Astra xhigh | G04, G05, G07 |
 | G11 | Implement trusted native macOS worker identity and lifecycle | M2 - Execution and scaling | Astra xhigh | G02, G04, G05, G07 |
 | G12 | Implement deterministic shared capacity and fair scheduling | M2 - Execution and scaling | Luna max | G04, G05 |
+| G12a | Pure scaling targets and capacity arithmetic (child of G12) | M2 - Execution and scaling | Luna max | G03 + reviewed numeric contract; independently ready |
 | G13 | Integrate reconciliation, drain and safe restart | M2 - Execution and scaling | Astra xhigh | G06, G09, G10, G11, G12 |
 | G14 | Implement status, logs and sanitized diagnostics | M3 - Reliability qualification | Luna max | G06, G13 |
 | G15 | Implement startup, shutdown and safe configuration updates | M3 - Reliability qualification | Astra xhigh | G02, G06, G13 |
@@ -35,3 +36,13 @@ The machine-readable source is [backlog.json](backlog.json). Published issue num
 - After G05, IPC, auth, and pure scheduling can proceed with separate file ownership.
 - Linux and native macOS providers can proceed independently once shared contracts/credentials exist.
 - Integration, security verdict, soak and rollout are sequential evidence gates.
+
+## Independent G12 arithmetic slice
+
+[G12a #40](https://github.com/1XP-AI/gh-runnerd/issues/40) extracts only the
+already specified numeric rules from G12 after independent Astra contract
+review. It depends on completed G03 and its issue's numeric contract. It can
+proceed alongside G01/G02 because it has no GitHub, credential, provider,
+configuration, persistence or worker-operation dependency. G04's shared
+contracts, G05's durable reservations and the remaining G12/G13 work retain
+their original gates. The parent remains open after this child is complete.
