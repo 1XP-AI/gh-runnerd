@@ -213,13 +213,20 @@ func TestPairedTerminalFixtureFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	log := string(data)
+	lines := strings.Split(strings.TrimSpace(log), "\n")
 	for _, invocation := range []string{
 		"go1.26.8\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -skip ^TestPairedTerminal ./livecanary",
 		"go1.26.8\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run ^TestPairedTerminal ./livecanary",
 		"go1.26.8\tvet -tags=g01_pair_fixture ./livecanary",
 	} {
-		if !strings.Contains(log, invocation) {
-			t.Fatalf("offline gate omitted %q; wrapper log:\n%s", invocation, log)
+		count := 0
+		for _, line := range lines {
+			if line == invocation {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Fatalf("offline gate logged %q %d times; wrapper log:\n%s", invocation, count, log)
 		}
 	}
 }
