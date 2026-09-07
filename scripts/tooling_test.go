@@ -33,6 +33,22 @@ func toolingRun(t *testing.T, root string, extra []string, args ...string) (stri
 	return string(data), err
 }
 
+func toolingGoWrapper(t *testing.T, root string) (string, string, string) {
+	t.Helper()
+	realGo, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(root, "go-wrapper.log")
+	wrapperPath := filepath.Join(root, "logging-go")
+	toolingFile(t, root, "logging-go", `#!/bin/sh
+set -eu
+printf '%s\t%s\n' "${GOTOOLCHAIN:-}" "$*" >> "$TOOLING_GO_LOG"
+exec "$TOOLING_REAL_GO" "$@"
+`, 0700)
+	return wrapperPath, logPath, realGo
+}
+
 func toolingFixture(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
@@ -49,6 +65,17 @@ func toolingFixture(t *testing.T) string {
 		toolingFile(t, root, base+"/go.mod", "module example.test/"+module+"\n\ngo 1.26.8\n", 0600)
 		toolingFile(t, root, base+"/fixture.go", "package fixture\n", 0600)
 	}
+	toolingFile(t, root, "experiments/g01-scaleset/livecanary/fixture.go", "package livecanary\n\nfunc fixtureValue() string { return \"livecanary-fixture\" }\n", 0600)
+	toolingFile(t, root, "experiments/g01-scaleset/livecanary/fixture_test.go", `package livecanary
+
+import "testing"
+
+func TestLivecanaryFixturePositiveControl(t *testing.T) {
+	if got := fixtureValue(); got != "livecanary-fixture" {
+		t.Fatalf("fixture value = %q", got)
+	}
+}
+`, 0600)
 	for _, command := range []string{"g01-live", "g01-worker"} {
 		toolingFile(t, root, "experiments/g01-scaleset/cmd/"+command+"/main.go", "package main\n\nfunc main() {}\n", 0600)
 	}
@@ -130,6 +157,48 @@ func TestToolingTaggedCLIRegressionRuns(t *testing.T) {
 		}
 		if err := os.Remove(filepath.Join(root, name)); err != nil {
 			t.Fatal(err)
+		}
+	}
+}
+
+func TestToolingTaggedPairFixtureRegressionRuns(t *testing.T) {
+	root := toolingFixture(t)
+	const sentinel = "tagged-pair-fixture-regression"
+	fixturePath := "experiments/g01-scaleset/livecanary/pair_fixture_regression_test.go"
+	toolingFile(t, root, fixturePath, `//go:build g01_pair_fixture && !g01_live && !g01_worker
+
+package livecanary
+
+import "testing"
+
+func TestTaggedPairFixtureFailure(t *testing.T) { t.Fatal("tagged-pair-fixture-regression") }
+`, 0600)
+	wrapper, logPath, realGo := toolingGoWrapper(t, root)
+	env := []string{"GO=" + wrapper, "TOOLING_REAL_GO=" + realGo, "TOOLING_GO_LOG=" + logPath}
+	if out, err := toolingRun(t, root, env, "make", "check"); err == nil || !strings.Contains(out, sentinel) {
+		t.Fatalf("tagged livecanary failure was skipped: %s", out)
+	}
+	if err := os.Remove(filepath.Join(root, fixturePath)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logPath, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	env = append(env, "GOTOOLCHAIN=auto")
+	if out, err := toolingRun(t, root, env, "bash", "scripts/check-offline-experiments.sh"); err != nil {
+		t.Fatalf("pair fixture positive control: %s", out)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(data)
+	for _, invocation := range []string{
+		"go1.26.8\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture ./livecanary",
+		"go1.26.8\tvet -tags=g01_pair_fixture ./livecanary",
+	} {
+		if !strings.Contains(log, invocation) {
+			t.Fatalf("offline gate omitted %q; wrapper log:\n%s", invocation, log)
 		}
 	}
 }

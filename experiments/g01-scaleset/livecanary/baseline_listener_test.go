@@ -40,6 +40,7 @@ type baselineFixture struct {
 	sessions, sources, sets, requests               atomic.Int32
 	change                                          func(string, any) any
 	afterResponse                                   func(*http.Request, *http.Response)
+	extra                                           func(http.ResponseWriter, *http.Request) bool
 }
 
 func baselineFixtureItem(a Approval, kind string) map[string]any {
@@ -58,6 +59,10 @@ func baselineFixtureItem(a Approval, kind string) map[string]any {
 	return j
 }
 func newBaselineFixture(t *testing.T, change func(string, any) any) *baselineFixture {
+	return newBaselineFixtureWithInventory(t, change, "")
+}
+
+func newBaselineFixtureWithInventory(t *testing.T, change func(string, any) any, inventory string) *baselineFixture {
 	t.Helper()
 	f := &baselineFixture{a: approval(), change: change}
 	c := credentials(f.a)
@@ -122,6 +127,9 @@ func newBaselineFixture(t *testing.T, change func(string, any) any) *baselineFix
 			f.sources.Add(1)
 			body = observationRun(f.a)
 		default:
+			if f.extra != nil && f.extra(w, r) {
+				return
+			}
 			f.forbidden.Add(1)
 			w.WriteHeader(403)
 			return
@@ -191,6 +199,9 @@ func newBaselineFixture(t *testing.T, change func(string, any) any) *baselineFix
 		}
 		_ = f.j.Close()
 	})
+	if inventory != "" && f.j.Append(Event{Kind: "inventory", Digest: inventory}) != nil {
+		t.Fatal("initial inventory fixture")
+	}
 	if f.j.Append(Event{Kind: "intent", Operation: "create"}) != nil || f.j.Append(Event{Kind: "result", Operation: "create", ID: 7}) != nil {
 		t.Fatal("owned set receipt fixture failed")
 	}

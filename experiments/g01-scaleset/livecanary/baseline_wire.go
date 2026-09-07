@@ -3,6 +3,8 @@ package livecanary
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"github.com/actions/scaleset"
 	"io"
 	"net/http"
 	"net/url"
@@ -24,6 +26,7 @@ type baselineWireCapture struct {
 	batch         *baselineBatch
 	accepted      *baselineAccepted
 	set           *baselineSetFacts
+	jit           *scaleset.RunnerScaleSetJitRunnerConfig
 }
 
 func (c *baselineWireCapture) context(ctx context.Context) context.Context {
@@ -58,6 +61,8 @@ func (c *baselineWireCapture) target(r *http.Request) bool {
 		suffix += "sessions"
 	} else if c.stage == "acquire" {
 		suffix += "acquirejobs"
+	} else if c.stage == "jit" {
+		suffix += "generatejitconfig"
 	} else {
 		return false
 	}
@@ -99,6 +104,14 @@ func guardBaselineResponse(req *http.Request, response *http.Response) (*http.Re
 		c.session, err = decodeBaselineSession(data)
 	case "poll":
 		c.batch, err = decodeBaselineBatch(data)
+	case "jit":
+		var w scaleset.RunnerScaleSetJitRunnerConfig
+		err = DecodeStrict(data, &w)
+		if err == nil && validJITSecret(w.EncodedJITConfig) {
+			c.jit = &w
+		} else {
+			err = ErrRemote
+		}
 	case "acquire":
 		var w struct {
 			Count *int    `json:"count"`
@@ -138,4 +151,20 @@ func (c *baselineWireCapture) facts() (*baselineSessionFacts, *baselineBatch, *b
 	// Called only after the synchronous SDK request returns. Later transport
 	// use is forbidden; journal append performs a separate deep copy.
 	return c.session, c.batch, c.accepted, c.status
+}
+
+func validJITSecret(secret string) bool {
+	if len(secret) < 16 || len(secret) > 1<<20 {
+		return false
+	}
+	data, err := base64.StdEncoding.Strict().DecodeString(secret)
+	clear(data)
+	return err == nil
+}
+func (c *baselineWireCapture) takeJIT() (*scaleset.RunnerScaleSetJitRunnerConfig, int, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	jit := c.jit
+	c.jit = nil
+	return jit, c.status, c.count == 1 && !c.invalid
 }

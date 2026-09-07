@@ -34,6 +34,8 @@ for module_dir in "${offline_modules[@]}"; do
 			# paths only. Do not discover arbitrary opt-in tags or platform probes.
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -tags=g01_live,g01_worker ./cmd/g01-live ./cmd/g01-worker
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" vet -tags=g01_live,g01_worker ./cmd/g01-live ./cmd/g01-worker
+			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture ./livecanary
+			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" vet -tags=g01_pair_fixture ./livecanary
 		fi
 	)
 done
