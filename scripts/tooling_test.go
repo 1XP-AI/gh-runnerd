@@ -161,24 +161,44 @@ func TestToolingTaggedCLIRegressionRuns(t *testing.T) {
 	}
 }
 
-func TestToolingTaggedPairFixtureRegressionRuns(t *testing.T) {
+func TestToolingTaggedPairFixturePartitionsRun(t *testing.T) {
 	root := toolingFixture(t)
-	const sentinel = "tagged-pair-fixture-regression"
-	fixturePath := "experiments/g01-scaleset/livecanary/pair_fixture_regression_test.go"
-	toolingFile(t, root, fixturePath, `//go:build g01_pair_fixture && !g01_live && !g01_worker
+	const collectionSentinel = "tagged-pair-fixture-collection-regression"
+	const terminalSentinel = "tagged-pair-fixture-terminal-regression"
+	collectionPath := "experiments/g01-scaleset/livecanary/pair_fixture_collection_regression_test.go"
+	terminalPath := "experiments/g01-scaleset/livecanary/pair_fixture_terminal_regression_test.go"
+	toolingFile(t, root, collectionPath, `//go:build g01_pair_fixture && !g01_live && !g01_worker
 
 package livecanary
 
 import "testing"
 
-func TestTaggedPairFixtureFailure(t *testing.T) { t.Fatal("tagged-pair-fixture-regression") }
+func TestTaggedPairFixtureCollectionFailure(t *testing.T) {
+	t.Fatal("tagged-pair-fixture-collection-regression")
+}
+`, 0600)
+	toolingFile(t, root, terminalPath, `//go:build g01_pair_fixture && !g01_live && !g01_worker
+
+package livecanary
+
+import "testing"
+
+func TestPairedTerminalFixtureFailure(t *testing.T) {
+	t.Fatal("tagged-pair-fixture-terminal-regression")
+}
 `, 0600)
 	wrapper, logPath, realGo := toolingGoWrapper(t, root)
 	env := []string{"GO=" + wrapper, "TOOLING_REAL_GO=" + realGo, "TOOLING_GO_LOG=" + logPath}
-	if out, err := toolingRun(t, root, env, "make", "check"); err == nil || !strings.Contains(out, sentinel) {
-		t.Fatalf("tagged livecanary failure was skipped: %s", out)
+	if out, err := toolingRun(t, root, env, "make", "check"); err == nil || !strings.Contains(out, collectionSentinel) {
+		t.Fatalf("tagged collection failure was skipped: %s", out)
 	}
-	if err := os.Remove(filepath.Join(root, fixturePath)); err != nil {
+	if err := os.Remove(filepath.Join(root, collectionPath)); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := toolingRun(t, root, env, "make", "check"); err == nil || !strings.Contains(out, terminalSentinel) {
+		t.Fatalf("tagged terminal failure was skipped: %s", out)
+	}
+	if err := os.Remove(filepath.Join(root, terminalPath)); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(logPath, nil, 0600); err != nil {
@@ -194,7 +214,8 @@ func TestTaggedPairFixtureFailure(t *testing.T) { t.Fatal("tagged-pair-fixture-r
 	}
 	log := string(data)
 	for _, invocation := range []string{
-		"go1.26.8\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture ./livecanary",
+		"go1.26.8\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -skip ^TestPairedTerminal ./livecanary",
+		"go1.26.8\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run ^TestPairedTerminal ./livecanary",
 		"go1.26.8\tvet -tags=g01_pair_fixture ./livecanary",
 	} {
 		if !strings.Contains(log, invocation) {
