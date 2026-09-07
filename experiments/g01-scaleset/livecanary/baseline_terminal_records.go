@@ -2,7 +2,6 @@ package livecanary
 
 import (
 	"reflect"
-	"strings"
 
 	"github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/liveworker"
 )
@@ -336,7 +335,4 @@ func (s *baselineHistory) pendingTerminalRoster(lookup func(controllerRecordRef)
 func (s *baselineHistory) rosterMatches(o *rosterObservation, lookup func(controllerRecordRef) *Event) bool {
 	anchor := lookup(s.rosterRef)
 	return o != nil && o.Completeness == rosterComplete && anchor != nil && anchor.Baseline != nil && anchor.Baseline.Roster != nil && reflect.DeepEqual(o, anchor.Baseline.Roster.Observation)
-}
-func isTerminalRead(stage string) bool {
-	return strings.Contains(stage, "roster") || stage == "terminal-set" || stage == "terminal-set-recheck" || stage == "terminal-set-absence"
 }

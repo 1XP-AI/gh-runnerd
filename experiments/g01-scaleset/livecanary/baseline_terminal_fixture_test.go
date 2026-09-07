@@ -18,6 +18,13 @@ type terminalFixture struct {
 }
 
 func newTerminalFixture(t *testing.T, cleanup bool) *terminalFixture {
+	phases := []string{"create", "start", "inspect"}
+	if cleanup {
+		phases = append(phases, "cleanup")
+	}
+	return newTerminalFixtureWithPhases(t, phases)
+}
+func newTerminalFixtureWithPhases(t *testing.T, phases []string) *terminalFixture {
 	t.Helper()
 	f := &terminalFixture{}
 	config := &pairedFixtureConfiguration{controllerResponse: func(stage string, value any) any {
@@ -33,9 +40,7 @@ func newTerminalFixture(t *testing.T, cleanup bool) *terminalFixture {
 		}
 		return value
 	}}
-	if cleanup {
-		config.workerPhases = []string{"create", "start", "inspect", "cleanup"}
-	}
+	config.workerPhases = phases
 	f.pairedIntegrationFixture = newPairedIntegrationFixtureConfigured(t, config)
 	f.githubBefore = func(w http.ResponseWriter, r *http.Request) bool {
 		switch {

@@ -80,7 +80,7 @@ func TestPairedTerminalEligibilityUsesFreshExactFacts(t *testing.T) {
 				return v
 			}
 			f.dockerResponse = func(r *http.Request, v any) any {
-				if f.c.polls.Load() >= 2 && strings.Contains(r.URL.Path,"/containers/") && strings.HasSuffix(r.URL.Path, "/json") {
+				if f.c.polls.Load() >= 2 && strings.Contains(r.URL.Path, "/containers/") && strings.HasSuffix(r.URL.Path, "/json") {
 					st := v.(map[string]any)["State"].(map[string]any)
 					switch fault {
 					case "exit-nonzero":
@@ -277,4 +277,52 @@ func TestPairedTerminalCompletionCadenceAndReceiptSeparation(t *testing.T) {
 		t.Fatal("rounds/worker cached Bind writes changed")
 	}
 	terminalNoReplay(t, f)
+}
+
+func TestPairedTerminalEveryOriginalWorkerPhaseRequired(t *testing.T) {
+	for _, missing := range []string{"create", "start", "inspect", "cleanup"} {
+		t.Run(missing, func(t *testing.T) {
+			var phases []string
+			for _, p := range []string{"create", "start", "inspect", "cleanup"} {
+				if p != missing {
+					phases = append(phases, p)
+				}
+			}
+			f := newTerminalFixtureWithPhases(t, phases)
+			if _, err := f.run(); err == nil || f.c.requests.Load() != 0 || f.dockerReads.Load() != 0 || len(f.c.j.Events()) != 3 || len(f.wf.Journal.Events()) != 0 {
+				t.Fatal("missing original phase reached prefix")
+			}
+		})
+	}
+}
+
+func TestPairedTerminalOriginalDeadlineAtClose(t *testing.T) {
+	f := newTerminalFixture(t, true)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	reached := false
+	f.c.j.syncFile = func(file *os.File) error {
+		e := terminalLastDiskEvent(file)
+		if e.Baseline != nil && e.Baseline.Stage == "terminal-session-close" && e.Baseline.Outcome == "intent" && !reached {
+			reached = true
+			<-ctx.Done()
+		}
+		return file.Sync()
+	}
+	out, err := terminalRunContext(f, ctx)
+	if !reached || ctx.Err() != context.DeadlineExceeded || err == nil || out.Terminal != terminalUnresolved || f.sessionDeletes.Load() != 0 || out.Collection.Terminal == nil || out.Collection.Terminal.Measurement != collectionCollected {
+		t.Fatal("original deadline did not bound terminal effect")
+	}
+}
+func TestPairedTerminalCollectionOnlyRemainsEffectFree(t *testing.T) {
+	f := newTerminalFixture(t, true)
+	out, err := runFastPair(f.pairedIntegrationFixture)
+	if err != nil || out.Outcome != collectionCollected || out.Terminal != nil || out.OutstandingSession != sessionKnownOpen || f.sessionDeletes.Load() != 0 || f.workerDeletes.Load() != 0 || f.setDeletes.Load() != 0 || f.rosters.Load() != 1 {
+		t.Fatal("collection-only path enabled terminal cleanup")
+	}
+	for _, e := range f.c.j.Events() {
+		if e.Baseline != nil && e.Baseline.Terminal != nil {
+			t.Fatal("collection-only terminal record")
+		}
+	}
 }
