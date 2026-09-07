@@ -39,8 +39,9 @@ func realBaselineCadence() pairedBaselineCadence {
 }
 
 type pairedBaselineScope struct {
-	terminalEnabled bool
-	cadence         pairedBaselineCadence
+	observedWorkerDeletion *liveworker.DeletionReceipt
+	terminalEnabled        bool
+	cadence                pairedBaselineCadence
 
 	ctx                 context.Context
 	driver              *Driver
@@ -411,6 +412,18 @@ func (s *pairedBaselineScope) summarize(callErr error) (pairedBaselineCollection
 	}
 	r := baselineRecord{Stage: "collection", Outcome: "observed", SessionID: state.sessionID, Collection: &baselineCollectionFacts{Outcome: out.Outcome, Pair: state.pairRef, Start: state.startRef, Completed: state.completedRef, LastSample: state.lastSample, Rounds: state.rounds, OutstandingSession: state.outstanding(), SessionIntent: state.sessionIntent, SessionResult: state.sessionResult}}
 	r.Collection.Terminal = out.Terminal
+	// The W receipt is independently durable, even if C's bridge append failed.
+	// Keep this returned-only evidence separate from the replay-derived C record.
+	if s.terminalEnabled && out.Terminal.WorkerDeletion == nil && s.observedWorkerDeletion != nil {
+		facts := *out.Terminal
+		receipt := *s.observedWorkerDeletion
+		if receipt.AbsenceResult != nil {
+			ref := *receipt.AbsenceResult
+			receipt.AbsenceResult = &ref
+		}
+		facts.WorkerDeletion = &receipt
+		out.Terminal = &facts
+	}
 	if state.seen && state.pending == nil && state.child == nil {
 		out.Result, err = s.store(r)
 		if err != nil {

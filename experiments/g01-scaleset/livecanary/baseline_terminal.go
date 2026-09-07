@@ -148,6 +148,7 @@ func (s *pairedBaselineScope) terminalStepCall(stage string) error {
 		callErr = e
 		if receipt != (liveworker.DeletionReceipt{}) {
 			r.Terminal.Deletion = &receipt
+			s.observedWorkerDeletion = &receipt
 		}
 		known = e == nil && r.Terminal.Deletion != nil && receipt.AbsenceResult != nil
 	case stage == "terminal-set-delete":
