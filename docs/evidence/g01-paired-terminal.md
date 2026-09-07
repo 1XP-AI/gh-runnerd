@@ -75,7 +75,10 @@ Terminal children use the existing private baseline event branch and the existin
 single parent/serial child slots. Each effect is preceded by a durable intent and
 fresh authority/capacity checks. The controller reserves the maximum bounded
 intent/result, parent-unknown and summary space; the limits remain 16 KiB per
-record and 1 MiB per journal. No effect follows uncertainty, lost authority,
+record and 1 MiB per journal. After the actual final roster result is durable,
+only the parent closure and collection summary remain, so the final boundary
+reserves two maximum records while retaining the same current C/W authority
+check. All pre-effect reservations remain unchanged. No effect follows uncertainty, lost authority,
 insufficient capacity or persistence failure. A child unknown can close its
 actual parent unknown; it cannot resume collection or legacy cleanup.
 
@@ -128,6 +131,14 @@ Recorded checkpoints:
   replay-derived measurement fix `857c23d`, complete C sync matrix 11.238 seconds.
 - Actual W-receipt/C-bridge failure red `4c86fe4`, race 2.542 seconds; returned-only
   receipt fix `0d75256`, focused receipt and original-phase controls 3.732 seconds.
+- Final capacity red `a999883`, race 4.540 seconds: the real last roster result
+  consumed part of a valid four-record reserve, leaving 64,562 bytes, but the
+  obsolete four-record check rejected completion. Exact 32,768 bytes also
+  wrongly failed. Legal whitespace within existing bounded JSONL lines preserves
+  decoded events and the pinned inode; every fixture explicitly reopens and
+  replays successfully without new requests. The correction's four capacity/
+  cancellation cases and five existing final-child/parent/summary sync cases
+  passed with race in 9.202 seconds. Less than two maximum records still refuses.
 
 The bounded matrix exercises all four missing original worker phases; fresh
 job/runner/local eligibility; assigned/running nonzero and missing statistics,
@@ -160,7 +171,7 @@ GOTOOLCHAIN=go1.26.8 go vet -C experiments/g01-scaleset -tags=g01_pair_fixture .
 The fixture tag remains excluded with either live command tag. Tooling red
 `78a8b3e` and fixes `5f419c9`/`ff70853` were independently verified by the
 integrator, including actual partition invocation and failing-test witnesses.
-The final combined terminal source/test tree passed the entire tagged terminal
+The earlier frozen `cfea2048` source/test tree passed the entire tagged terminal
 partition with race in 58.043 seconds. The unchanged distinct-ID/cadence and pinned
 SDK listener admission controls passed with race in 3.366 seconds; tagged vet and
 diff checks passed. These author checks did not repeat the repository-wide check.

@@ -168,5 +168,13 @@ func (s *pairedBaselineScope) terminalStepCall(stage string) error {
 	if callErr != nil {
 		return ErrQuarantine
 	}
+	if stage == "terminal-roster-final" {
+		// This actual final child result is durable. Only its parent closure and
+		// collection summary remain; keep both journals' current-authority check.
+		if err := s.checkPair(); err != nil {
+			return err
+		}
+		return s.journal.baselineCapacity()
+	}
 	return s.boundary()
 }
