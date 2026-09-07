@@ -135,6 +135,10 @@ func (s *pairedBaselineScope) sample(ctx context.Context, f *baselineSample, sta
 	}
 	sdk, err := s.captured.observeSDKRunner(ctx, sdkRunnerID(state.jit.Runner.ID), state.jit.Runner.Name, s.setID)
 	f.SDK = &sdk
+	trial := state
+	if err == nil && !trial.acceptSampleThrough(f, s.approval, 1) {
+		err = ErrQuarantine
+	}
 	if err != nil {
 		return err
 	}
@@ -147,6 +151,10 @@ func (s *pairedBaselineScope) sample(ctx context.Context, f *baselineSample, sta
 	}
 	job, err := s.captured.observeRESTJob(ctx, 1, previous)
 	f.Job = &job
+	trial = state
+	if err == nil && !trial.acceptSampleThrough(f, s.approval, 2) {
+		err = ErrQuarantine
+	}
 	if err != nil {
 		return err
 	}
@@ -174,6 +182,10 @@ func (s *pairedBaselineScope) sample(ctx context.Context, f *baselineSample, sta
 		if err != nil {
 			return err
 		}
+	}
+	trial = state
+	if !trial.acceptSampleThrough(f, s.approval, 3) {
+		return ErrQuarantine
 	}
 	if err = boundary(); err != nil {
 		return err

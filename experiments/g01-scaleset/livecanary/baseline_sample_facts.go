@@ -17,7 +17,13 @@ func validResponse(r observationResponse, endpoint string) bool {
 	return false
 }
 func (s *baselineHistory) acceptSample(f *baselineSample, a Approval) bool {
-	if f.SDK == nil || f.Job == nil || f.Local == nil {
+	return s.acceptSampleThrough(f, a, 4)
+}
+
+// One consistency policy is used after each reader and again during replay.
+// The trial history is local; durable positives change only with a result.
+func (s *baselineHistory) acceptSampleThrough(f *baselineSample, a Approval, through int) bool {
+	if f.SDK == nil {
 		return false
 	}
 	if !validResponse(f.SDK.Response, "sdk_runner") {
@@ -29,6 +35,12 @@ func (s *baselineHistory) acceptSample(f *baselineSample, a Approval) bool {
 		}
 		s.lastSDK = f.SDK
 	} else if f.SDK.Response.Outcome != observationNotFound {
+		return false
+	}
+	if through == 1 {
+		return true
+	}
+	if f.Job == nil {
 		return false
 	}
 	job := f.Job
@@ -71,6 +83,9 @@ func (s *baselineHistory) acceptSample(f *baselineSample, a Approval) bool {
 		}
 		s.lastJob = &merged
 	}
+	if through == 2 {
+		return true
+	}
 	addressable := s.lastJob != nil && s.lastJob.RunnerID != nil && *s.lastJob.RunnerID > 0 && s.lastJob.RunnerName != nil && *s.lastJob.RunnerName == s.jit.Runner.Name && s.lastJob.RunnerGroupID != nil && *s.lastJob.RunnerGroupID == int64(a.RunnerGroupID)
 	if f.RESTAddressable != addressable || addressable != (f.REST != nil) {
 		return false
@@ -88,6 +103,12 @@ func (s *baselineHistory) acceptSample(f *baselineSample, a Approval) bool {
 		} else if r.Response.Outcome != observationNotFound {
 			return false
 		}
+	}
+	if through == 3 {
+		return true
+	}
+	if f.Local == nil {
+		return false
 	}
 	l := f.Local
 	if l.PairSHA256 != s.pair.Receipt.PairSHA256 || l.ContainerID != s.handoff.Container.ContainerID || !refPresent(controllerRef(l.Intent)) || !refPresent(controllerRef(l.Result)) || l.Result.Sequence <= l.Intent.Sequence || l.Method != "GET" || l.Path != "/v1.45/containers/"+l.ContainerID+"/json" {
