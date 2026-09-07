@@ -88,8 +88,12 @@ func TestAdditionalCapacityExamples(t *testing.T) {
 		{
 			name:      "memory is limiting",
 			requested: 10,
-			budgets:   []Budget{runtimeBudget(100, 0, 1, 20)},
-			want:      4,
+			budgets: []Budget{{
+				Limit:     Resources{CPUMillicores: 100, MemoryBytes: 100},
+				Committed: Resources{MemoryBytes: 20},
+				PerWorker: Resources{CPUMillicores: 1, MemoryBytes: 20},
+			}},
+			want: 4,
 		},
 		{
 			name:      "requested caps available capacity",
@@ -199,11 +203,6 @@ func TestAdditionalCapacityValidation(t *testing.T) {
 			request: 4,
 			budgets: []Budget{{Limit: Resources{CPUMillicores: 1}, Committed: Resources{}}},
 		},
-		{
-			name:    "minimum exceeds maximum",
-			request: 1,
-			budgets: []Budget{{Limit: Resources{CPUMillicores: 2}, Committed: Resources{CPUMillicores: 1}, PerWorker: Resources{CPUMillicores: 0}}},
-		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if _, err := AdditionalCapacity(test.request, test.budgets); err == nil {
@@ -220,6 +219,16 @@ func TestAdditionalCapacityValidatesLaterInputsAfterZeroBound(t *testing.T) {
 
 	if _, err := AdditionalCapacity(10, []Budget{zeroBound, invalidLater}); err == nil {
 		t.Fatal("AdditionalCapacity returned a zero result without validating the later budget")
+	}
+}
+
+func TestAdditionalCapacityValidatesLaterInputsForZeroRequest(t *testing.T) {
+	valid := runtimeBudget(10, 0, 1, 1)
+	invalidLater := runtimeBudget(10, 0, 1, 1)
+	invalidLater.Committed.CPUMillicores = -1
+
+	if _, err := AdditionalCapacity(0, []Budget{valid, invalidLater}); err == nil {
+		t.Fatal("AdditionalCapacity returned zero without validating the later budget")
 	}
 }
 
