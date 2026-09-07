@@ -30,6 +30,9 @@ type FileJournal struct {
 	file          *os.File
 	events        []Event
 	mu            sync.Mutex
+	approval      Approval
+	writeFailed   bool
+	syncFile      func(*os.File) error // nil in production; tests gate a real file fsync
 }
 
 func privateFile(info os.FileInfo, mode os.FileMode) bool {
@@ -175,7 +178,7 @@ func openJournalAtAdmission(directory string, a Approval, admissionDirectory str
 	if a.Validate(time.Now()) != nil {
 		return nil, ErrJournal
 	}
-	j := &FileJournal{file: f, root: root, directory: directory, directoryInfo: directoryInfo, fileInfo: info, ownership: ownershipDigest(a)}
+	j := &FileJournal{file: f, root: root, directory: directory, directoryInfo: directoryInfo, fileInfo: info, ownership: ownershipDigest(a), approval: a}
 	incoming := authorityFor(a)
 	if info.Size() == 0 {
 		j.authority = incoming
@@ -241,12 +244,24 @@ func openJournalAtAdmission(directory string, a Approval, admissionDirectory str
 		return nil, err
 	}
 	j.claim = claim
+	identity, identityErr := j.controllerIdentity()
+	if identityErr != nil {
+		_ = claim.close()
+		return nil, ErrJournal
+	}
+	if _, err = replayBaseline(j.events, identity, a); err != nil {
+		_ = claim.close()
+		return nil, err
+	}
 	rootKept = true
 	ok = true
 	return j, nil
 }
 
 func validEvent(e Event) bool {
+	if e.Baseline != nil || e.Kind == "baseline" {
+		return validBaselineShape(e)
+	}
 	if e.Work != "" {
 		if e.Kind != "result" || (e.Work != workDemand && e.Work != workUnresolved) {
 			return false
@@ -285,8 +300,16 @@ func (j *FileJournal) write(e any) error {
 		return ErrJournal
 	}
 	data = append(data, '\n')
+	info, statErr := j.file.Stat()
+	if statErr != nil || info.Size()+int64(len(data)) > baselineJournalLimit {
+		return ErrJournal
+	}
 	n, err := j.file.Write(data)
-	if err != nil || n != len(data) || j.file.Sync() != nil {
+	syncFile := j.syncFile
+	if syncFile == nil {
+		syncFile = func(f *os.File) error { return f.Sync() }
+	}
+	if err != nil || n != len(data) || syncFile(j.file) != nil {
 		return ErrJournal
 	}
 	return nil
@@ -294,20 +317,17 @@ func (j *FileJournal) write(e any) error {
 func (j *FileJournal) Append(e Event) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	if !validEvent(e) {
-		return ErrJournal
-	}
-	e.Sequence = len(j.events) + 1
-	if err := j.write(e); err != nil {
-		return err
-	}
-	j.events = append(j.events, e)
-	return nil
+	_, err := j.appendStored(e)
+	return err
 }
 func (j *FileJournal) Events() []Event {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	return append([]Event(nil), j.events...)
+	events := make([]Event, len(j.events))
+	for i, e := range j.events {
+		events[i] = cloneEvent(e)
+	}
+	return events
 }
 func (j *FileJournal) Close() error {
 	j.life.Lock()
