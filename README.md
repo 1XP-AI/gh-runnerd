@@ -36,6 +36,8 @@ Linux still needs a Linux kernel/runtime on macOS. The first release connects to
 - [Authentication and trust boundaries](docs/SECURITY-DESIGN.md)
 - [TDD and release evidence](docs/TEST-STRATEGY.md)
 - [Issue goals and agent execution](docs/EXECUTION.md)
+- [Public CI and local checks](docs/CI.md)
+- [Dependency and license inventory](docs/DEPENDENCIES.md)
 - [Published issue goals](docs/ISSUES.md)
 - [Ordered backlog](docs/BACKLOG.md)
 - [Sources and unresolved experiments](docs/SOURCES.md)
