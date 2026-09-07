@@ -1,7 +1,7 @@
 # ADR 0002: Released Scale Set listener with independent reconciliation
 
 Status: **provisional integration selection; G01 remains unresolved** pending
-independent Astra protocol review and authorized live contract evidence.
+independent Luna max protocol review and authorized live contract evidence.
 
 Issue: [G01](https://github.com/1XP-AI/gh-runnerd/issues/1).
 Checked: 2026-09-07. See [measured offline evidence](../evidence/g01-contract.md)
