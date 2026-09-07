@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -190,23 +191,48 @@ func TestPairedCloseDrainsBothActualJournals(t *testing.T) {
 	}
 }
 
-func TestPairedOriginalDeadlineStopsHostRead(t *testing.T) {
-	f := newPairedIntegrationFixture(t)
-	entered := false
-	f.dockerBefore = func(_ http.ResponseWriter, r *http.Request) bool {
-		if r.URL.Path == "/version" {
-			entered = true
-			<-r.Context().Done()
-			return true
-		}
-		return false
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-	start := time.Now()
-	out, err := runPairedBaselineWithCadence(ctx, &Driver{Approval: f.c.a, Journal: f.c.j, API: f.c.api}, f.w, fastPairCadence())
-	if !entered || err == nil || out.Outcome != collectionUnresolved || time.Since(start) > 2*time.Second || f.c.sessions.Load() != 0 || f.jit.Load() != 0 || f.creates.Load() != 0 {
-		t.Fatal("original deadline failed to bound host work")
+func TestPairedOriginalDeadlineBoundsBootstrap(t *testing.T) {
+	for _, mode := range []string{"ordinary", "slow-prefix-sync"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newPairedIntegrationFixture(t)
+			var entered atomic.Bool
+			release := make(chan struct{})
+			t.Cleanup(func() { close(release) })
+			f.dockerBefore = func(_ http.ResponseWriter, r *http.Request) bool {
+				if r.URL.Path == "/version" {
+					entered.Store(true)
+					select {
+					case <-r.Context().Done():
+					case <-release:
+					}
+					return true
+				}
+				return false
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			defer cancel()
+			prefixSeen := false
+			if mode == "slow-prefix-sync" {
+				f.c.j.syncFile = func(file *os.File) error {
+					if err := file.Sync(); err != nil {
+						return err
+					}
+					e := terminalLastDiskEvent(file)
+					if !prefixSeen && e.Baseline != nil && e.Baseline.Stage == "pair" && e.Baseline.Outcome == "intent" {
+						prefixSeen = true
+						<-ctx.Done()
+					}
+					return nil
+				}
+			}
+			start := time.Now()
+			out, err := runPairedBaselineWithCadence(ctx, &Driver{Approval: f.c.a, Journal: f.c.j, API: f.c.api}, f.w, fastPairCadence())
+			elapsed := time.Since(start)
+			t.Logf("prefix_sync=%t host_entered=%t deadline=%t error=%t outcome=%s elapsed=%s sessions=%d acquire=%d JIT=%d create=%d start=%d", prefixSeen, entered.Load(), ctx.Err() == context.DeadlineExceeded, err != nil, out.Outcome, elapsed, f.c.sessions.Load(), f.c.acquires.Load(), f.jit.Load(), f.creates.Load(), f.starts.Load())
+			if !entered.Load() || ctx.Err() != context.DeadlineExceeded || err == nil || out.Outcome != collectionUnresolved || elapsed > 2*time.Second || f.c.sessions.Load() != 0 || f.c.acquires.Load() != 0 || f.jit.Load() != 0 || f.creates.Load() != 0 || f.starts.Load() != 0 {
+				t.Fatal("original deadline failed to bound host work")
+			}
+		})
 	}
 }
 
