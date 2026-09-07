@@ -65,6 +65,29 @@ GOTOOLCHAIN=go1.26.8 go vet ./liveworker
 The last focused run includes the additional escaped-duplicate and Unicode State
 alias cases added after the full worker run. `git diff --check` also passed.
 The independent Astra xhigh reviewer reproduced the red failure at `1ae7d12`.
+
+## Integration review correction
+
+Merged current main `fa3e1919321f597bf3d792d57be5301fd06f54d3` into this branch;
+the combined review head was `1097854ca926a106dfb50a982cdf23cc4ec6e87d`.
+Integrator review identified that adding a context check in the shared response
+reader could discard a complete successful mutation response if cancellation
+arrived at its body's EOF. A wrapper around the actual Unix transport makes that
+boundary deterministic, without replacing the request/client behavior.
+
+With the new regression tests and the pre-fix implementation, this command
+exited 1: create, start and cleanup each lost a fully received result. The exact
+observation cancellation control passed.
+
+```text
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s ./liveworker -run '^(TestDockerCompletedMutationResponseSurvivesEOFCancellation|TestDockerInspectExactEOFCancellationKeepsUnknownOutcome)$'
+```
+
+Removed the added cancellation check from the shared reader, preserving legacy
+mutation-result handling; InspectExact retains its own final cancellation guard.
+The complete worker race suite (including these regressions and all added alias
+cases), worker vet and `git diff --check` then passed on the combined tree.
+
 Final-head independent review, repository-wide checks, hosted CI and GitHub Codex
-review remain pending at this green commit. No real Docker/GitHub live behavior,
-paired execution, account admission or daemon-verified absence was tested.
+review remain pending. No real Docker/GitHub live behavior, paired execution,
+account admission or daemon-verified absence was tested.

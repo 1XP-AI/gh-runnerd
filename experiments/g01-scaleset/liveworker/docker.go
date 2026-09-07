@@ -95,7 +95,8 @@ func (d *Docker) request(ctx context.Context, method, path string, payload any, 
 }
 
 // response retains the existing client, socket pin and bounded body handling.
-// Status alone never turns a failed or cancelled read into an observation.
+// A fully received mutation result remains available if cancellation arrives
+// at EOF. InspectExact separately checks cancellation before returning facts.
 func (d *Docker) response(ctx context.Context, method, path string, payload any) ([]byte, int, error) {
 	var body []byte
 	var err error
@@ -116,7 +117,7 @@ func (d *Docker) response(ctx context.Context, method, path string, payload any)
 	}
 	defer response.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(response.Body, responseLimit+1))
-	if err != nil || len(data) > responseLimit || ctx.Err() != nil {
+	if err != nil || len(data) > responseLimit {
 		return nil, response.StatusCode, ErrRemote
 	}
 	return data, response.StatusCode, nil

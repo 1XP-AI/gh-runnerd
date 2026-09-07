@@ -513,3 +513,77 @@ func TestDockerInspectExactRejectsReplacedSocket(t *testing.T) {
 		t.Fatal("replacement socket received exact observation")
 	}
 }
+
+type cancelAtEOFBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (b cancelAtEOFBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err == io.EOF {
+		b.cancel()
+	}
+	return n, err
+}
+
+// Only wrap the response after the actual pinned Unix transport returns it.
+// This makes cancellation at a fully received body's EOF deterministic.
+type cancelAtEOFTransport struct {
+	http.RoundTripper
+	path   string
+	cancel context.CancelFunc
+}
+
+func (t cancelAtEOFTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	response, err := t.RoundTripper.RoundTrip(r)
+	if err == nil && r.URL.Path == t.path {
+		response.Body = cancelAtEOFBody{response.Body, t.cancel}
+	}
+	return response, err
+}
+
+func TestDockerCompletedMutationResponseSurvivesEOFCancellation(t *testing.T) {
+	for _, phase := range []string{"create", "start", "cleanup"} {
+		t.Run(phase, func(t *testing.T) {
+			f := unixFixture(t)
+			client := f.driver.Runtime.(*Docker)
+			if phase != "create" && f.driver.Run(context.Background(), "create", syntheticJIT) != nil {
+				t.Fatal("synthetic create failed")
+			}
+			path := "/v1.45/containers/create"
+			jit := syntheticJIT
+			if phase != "create" {
+				path = "/v1.45/containers/" + f.runtime.container.ID
+				jit = ""
+				if phase == "start" {
+					path += "/start"
+				}
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			client.client.Transport = cancelAtEOFTransport{client.client.Transport, path, cancel}
+			err := f.driver.Run(ctx, phase, jit)
+			state := replay(f.driver.Journal.Events())
+			if ctx.Err() == nil {
+				t.Fatal("EOF cancellation boundary was not reached")
+			}
+			if err != nil || state.uncertain || state.id != f.runtime.container.ID || (phase == "cleanup" && !state.deleted) {
+				t.Fatal("fully received mutation result or exact create ID was discarded")
+			}
+		})
+	}
+}
+
+func TestDockerInspectExactEOFCancellationKeepsUnknownOutcome(t *testing.T) {
+	f, client := createdInspectFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	path := "/v1.45/containers/" + f.runtime.container.ID + "/json"
+	client.client.Transport = cancelAtEOFTransport{client.client.Transport, path, cancel}
+	observation, err := client.InspectExact(ctx, f.runtime.container.ID)
+	if ctx.Err() == nil {
+		t.Fatal("EOF cancellation boundary was not reached")
+	}
+	assertInspectUnknown(t, observation, err)
+}
