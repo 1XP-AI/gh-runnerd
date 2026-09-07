@@ -176,8 +176,8 @@ Existing actual eligibility, acknowledgement/cancellation, failed postcheck and
 full terminal controls passed with race in 19.320 seconds after the refactor.
 
 The bounded matrix exercises missing original controller cleanup and all four
-missing original worker phases; fresh
-job/runner/local eligibility; assigned/running nonzero and missing statistics,
+missing original worker phases; fresh job/runner/local eligibility;
+assigned/running nonzero and missing statistics,
 ownership/update/roster drift; captured-204 cancellation, original-context
 expiry, lost and rejected deletes, failed/absent postchecks; actual C and W sync
 failures; capacity after intent; C/W journal and claim replacement at effect
@@ -194,19 +194,28 @@ Sync-error fixtures inject failures at actual file-write/sync boundaries and do
 not claim physical power-loss durability. The trust model remains reviewed Go
 code and private local files, not hostile same-UID code or copying a used mutex.
 
-The independently reviewed Luna tooling fragment runs complementary tagged
-partitions, each with the exact toolchain, race detector, count one and a
-120-second timeout, plus one tagged vet pass:
+The independently reviewed Luna tooling fragment runs three complementary tagged
+partitions: collection, terminal excluding the explicitly named persistence
+tests, and those persistence tests. Each retains the exact toolchain, race
+detector, count one and a 120-second timeout, plus one tagged vet pass:
 
 ```sh
+terminal_storage_tests='^TestPairedTerminal(Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure)$'
 GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -skip '^TestPairedTerminal'
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run '^TestPairedTerminal'
+GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run '^TestPairedTerminal' -skip "$terminal_storage_tests"
+GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run "$terminal_storage_tests"
 GOTOOLCHAIN=go1.26.8 go vet -C experiments/g01-scaleset -tags=g01_pair_fixture ./livecanary
 ```
 
-The fixture tag remains excluded with either live command tag. Tooling red
+The fixture tag remains excluded with either live command tag. The earlier
+two-part tooling red
 `78a8b3e` and fixes `5f419c9`/`ff70853` were independently verified by the
 integrator, including actual partition invocation and failing-test witnesses.
+The three-part update preserves red `0e3c0b5` (actual missing-partition witness,
+16.182 seconds) and fix `31b56f1` (actual three-group positive/negative checks,
+18.851 seconds), independently verified by the integrator with vet, shell syntax
+and diff checks. Those checks prove static test invocation, not full-suite or
+live completion.
 The earlier frozen `cfea2048` source/test tree passed the entire tagged terminal
 partition with race in 58.043 seconds. The unchanged distinct-ID/cadence and pinned
 SDK listener admission controls passed with race in 3.366 seconds; tagged vet and
