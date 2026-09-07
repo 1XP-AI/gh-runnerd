@@ -116,10 +116,11 @@ func assertObservationSecretSafe(t *testing.T, got any, err error) {
 }
 func observationRun(a Approval) map[string]any {
 	repo := map[string]any{"id": a.RepositoryID, "private": true, "fork": false}
-	return map[string]any{"id": a.WorkflowRunID, "head_sha": a.WorkflowSHA, "event": "workflow_dispatch", "path": a.WorkflowPath, "run_attempt": 1, "repository": repo, "head_repository": repo}
+	head := map[string]any{"id": a.RepositoryID, "private": true, "fork": false}
+	return map[string]any{"id": a.WorkflowRunID, "head_sha": a.WorkflowSHA, "event": "workflow_dispatch", "path": a.WorkflowPath, "run_attempt": 1, "repository": repo, "head_repository": head}
 }
 func observationJob(a Approval) map[string]any {
-	return map[string]any{"id": int64(9007199254740995), "run_id": a.WorkflowRunID, "head_sha": a.WorkflowSHA, "status": "completed", "conclusion": "success", "runner_id": int64(9007199254740993), "runner_name": "fixture-runner", "runner_group_id": a.RunnerGroupID}
+	return map[string]any{"id": int64(9007199254740995), "run_id": a.WorkflowRunID, "run_attempt": 1, "head_sha": a.WorkflowSHA, "status": "completed", "conclusion": "success", "runner_id": int64(9007199254740993), "runner_name": "fixture-runner", "runner_group_id": a.RunnerGroupID}
 }
 func TestObserveRESTExactFacts(t *testing.T) {
 	a := approval()
