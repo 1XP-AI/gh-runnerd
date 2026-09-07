@@ -34,7 +34,7 @@ remains loopback-only.
 - [ ] Use SDK `v0.4.0`, Go `1.26.8` and runner `2.337.0`; verify runner bytes
   against [published digests](g01-contract.md#runner-and-jit-transport) and record
   exact runtime/image digest. Recheck support/security status before execution.
-- [ ] Independent Astra `xhigh` reviews the immutable live harness, authority
+- [ ] Independent Luna max reviews the immutable live harness, authority
   checks, cleanup, fault barriers and sanitized telemetry. The offline fixture
   must not be pointed at GitHub by replacing its URL. The separate tagged driver
   and remaining worker steps require their own exact-commit review/approval.
@@ -89,7 +89,7 @@ with its GitHub outcome and left for explicit maintainer handling.
 - [ ] Revoke/delete only temporary credentials belonging to this experiment
   according to the maintainer's authorization; preserve the existing App and
   unrelated installations.
-- [ ] Independent Astra reviews the sanitized results and the final recovery /
+- [ ] Independent Luna max reviews the sanitized results and the final recovery /
   drain decision. If acquisition, JIT ambiguity or safe drain remains unknown,
   keep G01 unresolved and dependent production implementation blocked.
 
