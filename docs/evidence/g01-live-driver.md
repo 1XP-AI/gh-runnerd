@@ -49,6 +49,9 @@ Later zero/absent responses and successful inspection never release these fences
 A nil poll reaches the no-message path only when earlier session/read evidence
 permits the controlled probe; it cannot override unsafe evidence, and prior
 demand remains a permanent cleanup fence.
+An owned read validates the exact set ID/name/group and ownership label before
+completing its durable result. Invalid metadata remains unresolved even if a
+later response matches and reports zero; it never replaces the create receipt.
 
 The preceding credential-input wait accepts only the broker's stdin pipe and is
 separately capped at thirty seconds and approval expiry; terminal and regular

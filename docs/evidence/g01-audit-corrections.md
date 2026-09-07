@@ -207,3 +207,36 @@ results across actual private journal close/reopen followed by a successful
 zero/absent inspection. Genuine all-zero and optional-absence controls retain
 empty cleanup, and demand retains the intended controlled barrier. No live
 resource, host crash or power-loss test is claimed.
+
+## Invalid owned-object proof is also durable
+
+The next exact-head external review found
+[P1: persist invalid owned-set observations](https://github.com/1XP-AI/gh-runnerd/pull/37#discussion_r3950272982)
+at `94e4eff`, `livecanary/driver.go:205`. The read result previously stored zero
+statistics as safe before checking the returned ID, name, group and ownership
+label. The immediate phase refused, but a later matching zero response could
+still authorize cleanup.
+
+Red commit `b29f3ba` reproduces 30 invalid-to-valid transitions: five nonnil
+identity failures across inspection, pre-JIT and pre-probe reads, each using a
+fresh Driver or an actual private journal close/reopen. Every case reached its
+first cleanup with one delete and no uncertainty (race run, 2.289s). Six nil-object
+controls were already fenced. The fixture uses the same inventory before and
+after the observation, so neither inventory mismatch nor an earlier cleanup
+attempt masks the ownership regression.
+
+All existing owned-object predicates now run inside the `observe-owned` result:
+nonnull object, exact scale-set ID/name/group and the required ownership label
+name. Any failure is durably unresolved before returning quarantine; the original
+create receipt is retained. A matching zero inspection cannot clear it. The
+existing intent/result failure ordering also covers this invalid result. The
+separate DisableUpdate phase gate and otherwise verified empty-cleanup control
+remain unchanged.
+
+Focused command:
+`GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s -run 'TestInvalidOwnedProof|TestUpdateSettingDrift|TestCleanupOnlyForNeverIssuedWorker' ./livecanary`.
+Adjacent review checked malformed create/session callbacks, post-poll validation,
+runner binding and discovery; those already retain their applicable uncertainty
+or cannot adopt/retry. This correction changes only owned-object predicate
+placement. It requires fresh exact-head review and CI; earlier clean verdicts
+do not cover it, and no live execution is claimed.

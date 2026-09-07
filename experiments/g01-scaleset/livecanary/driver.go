@@ -199,19 +199,15 @@ func (d *Driver) owned(ctx context.Context, id int) (*scaleset.RunnerScaleSet, e
 		if err != nil {
 			return Event{}, err
 		}
-		if s == nil {
+		// Ownership validation is part of the durable observation result.
+		// A later matching zero must not erase an earlier loss of this proof.
+		if s == nil || s.ID != id || s.Name != d.Approval.setName() || s.RunnerGroupID != d.Approval.RunnerGroupID || !slices.ContainsFunc(s.Labels, func(l scaleset.Label) bool { return l.Name == d.Approval.setName() }) {
 			return Event{Work: workUnresolved}, nil
 		}
 		return Event{Work: statisticsWork(s.Statistics)}, nil
 	})
 	if err != nil {
 		return nil, err
-	}
-	if s == nil || s.ID != id || s.Name != d.Approval.setName() || s.RunnerGroupID != d.Approval.RunnerGroupID {
-		return nil, ErrQuarantine
-	}
-	if !slices.ContainsFunc(s.Labels, func(l scaleset.Label) bool { return l.Name == d.Approval.setName() }) {
-		return nil, ErrQuarantine
 	}
 	return s, nil
 }
