@@ -33,6 +33,9 @@ func brokerTestPlan(t *testing.T, a *BrokerApproval, parent string, launch func(
 	if e != nil {
 		t.Fatal(e)
 	}
+	p.localPrepare = func(context.Context, string) (brokerPreparationReceipt, error) {
+		return brokerSyntheticPreparation(t, p, filepath.Join(parent, "admission"))
+	}
 	return p
 }
 func TestBrokerFinitePhasesAndUnknownRetention(t *testing.T) {
@@ -534,6 +537,12 @@ func TestBrokerInvalidCanonicalJournalRefusesBeforeMint(t *testing.T) {
 			a.Phase = "create"
 			launched := false
 			p := brokerTestPlan(t, &a, filepath.Dir(root), func(context.Context, []byte, string) error { launched = true; return errBroker })
+			// Sequencing fixture: the actual canonical parser/phase matrix is exercised
+			// by G01 tests and the optional cross-module executable test below.
+			p.localPrepare = func(context.Context, string) (brokerPreparationReceipt, error) {
+				return brokerPreparationReceipt{}, errBroker
+			}
+
 			binding, _ := p.binding()
 			header := map[string]any{"version": 1, "ownership": binding.Ownership, "authority": map[string]any{"digest": brokerDigest(p.controller), "expires_at": p.controller.ExpiresAt, "phases": p.controller.Phases}}
 			if kind == "mismatched authority" {

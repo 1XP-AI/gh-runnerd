@@ -114,7 +114,7 @@ func brokerExecute(parent context.Context, a BrokerApproval, input brokerInput, 
 		if claim.check() != nil || j.check() != nil {
 			return errBroker
 		}
-		if plan != nil && (plan.check() != nil || plan.compatibleControllerClaim(claim.root) != nil) {
+		if plan != nil && (plan.check() != nil || plan.compatibleControllerClaim(claim.root) != nil || (plan.prepared != nil && plan.preparedState(claim.root, false) != nil)) {
 			return errBroker
 		}
 		return nil
@@ -122,6 +122,24 @@ func brokerExecute(parent context.Context, a BrokerApproval, input brokerInput, 
 	if guard() != nil {
 		return BrokerResult{}, errBroker
 	}
+
+	if plan != nil {
+		if j.append("controller_preparation_started", nil) != nil {
+			return BrokerResult{}, errBroker
+		}
+		receipt, err := plan.localPrepare(ctx, filepath.Join(path, "controller-approval.json"))
+		if err != nil || !receipt.valid(plan) {
+			return BrokerResult{}, errBroker
+		}
+		plan.preparationReceipt = receipt
+		if guard() != nil || plan.preparedState(claim.root, true) != nil {
+			return BrokerResult{}, errBroker
+		}
+		if j.append("controller_state_prepared", map[string]any{"receipt": receipt}) != nil || guard() != nil {
+			return BrokerResult{}, errBroker
+		}
+	}
+
 	// Every authenticated call revalidates the still-held durable claim.
 	scoped := newBrokerAPI(api.now, brokerGuardTransport{api.client.Transport, guard})
 	api = scoped

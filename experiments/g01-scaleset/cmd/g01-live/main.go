@@ -6,11 +6,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"runtime/debug"
+	"slices"
 	"time"
 
 	"github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/livecanary"
@@ -38,7 +40,10 @@ func buildRevision() (string, bool) {
 	return version, clean && sdk && len(version) == 40
 }
 
-func run(args []string, in io.Reader, out io.Writer) (code int) {
+func run(args []string, in io.Reader, out io.Writer) int {
+	return runWithPreparation(args, in, out, buildRevision, livecanary.PrepareJournal)
+}
+func runWithPreparation(args []string, in io.Reader, out io.Writer, revisionForBuild func() (string, bool), prepareJournal func(string, livecanary.Approval, string) (livecanary.PreparationReceipt, error)) (code int) {
 	// SDK errors and panic values can contain bearer credentials/response bodies.
 	// This last-resort boundary prints no dynamic exception or caller input.
 	defer func() {
@@ -51,6 +56,7 @@ func run(args []string, in io.Reader, out io.Writer) (code int) {
 	flags.SetOutput(io.Discard)
 	plan := flags.Bool("plan", false, "")
 	execute := flags.Bool("execute-approved-canary", false, "")
+	prepare := flags.Bool("prepare-approved-journal", false, "")
 	approvalPath := flags.String("approval", "", "")
 	statePath := flags.String("state-dir", "", "")
 	phase := flags.String("phase", "", "")
@@ -61,20 +67,33 @@ func run(args []string, in io.Reader, out io.Writer) (code int) {
 	if flags.Parse(args) != nil || flags.NArg() != 0 {
 		return reject()
 	}
-	if *plan && !*execute {
+	if *plan && !*execute && !*prepare {
 		fmt.Fprintln(out, "Controller-only phases: create, before-ack, after-ack, before-acquire, acquire-loss, jit-loss, inspect, cleanup. No worker launch or workflow dispatch. Live execution requires an immutable reviewed build, exact private approval and controller-side broker input.")
 		return 0
 	}
-	if !*execute || *plan || *approvalPath == "" || *statePath == "" || *phase == "" {
+	if (*execute == *prepare) || *plan || *approvalPath == "" || *statePath == "" || *phase == "" {
 		return reject()
 	}
 	a, err := livecanary.ReadApproval(*approvalPath)
-	if err != nil || a.Validate(time.Now()) != nil {
+	if err != nil || a.Validate(time.Now()) != nil || !slices.Contains(a.Phases, *phase) {
 		return reject()
 	}
-	revision, ok := buildRevision()
+	revision, ok := revisionForBuild()
 	if !ok || revision != a.HarnessSHA {
 		return reject()
+	}
+	if *prepare {
+		if prepareJournal == nil {
+			return reject()
+		}
+		receipt, e := prepareJournal(*statePath, a, *phase)
+		if e != nil {
+			return reject()
+		}
+		if json.NewEncoder(out).Encode(receipt) != nil {
+			return reject()
+		}
+		return 0
 	}
 	j, err := livecanary.OpenJournal(*statePath, a)
 	if err != nil {

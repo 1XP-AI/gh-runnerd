@@ -216,21 +216,11 @@ func (d *Driver) owned(ctx context.Context, id int) (*scaleset.RunnerScaleSet, e
 // A second process uses the durable journal to retain unknown reservations;
 // session credentials cannot be rehydrated using the supported SDK API.
 func (d *Driver) Run(ctx context.Context, phase string) error {
-	if d.Approval.Validate(time.Now()) != nil || !slices.Contains(d.Approval.Phases, phase) {
-		return ErrApproval
-	}
-	if d.Journal == nil {
-		return ErrJournal
-	}
-	release, err := d.Journal.authorize(d.Approval)
+	s, release, err := authorizePhase(d.Approval, d.Journal, phase)
 	if err != nil {
-		return ErrJournal
+		return err
 	}
 	defer release()
-	s := replay(d.Journal.Events())
-	if phase != "inspect" && (s.uncertain || s.phaseSeen[phase] || s.deleted) {
-		return ErrQuarantine
-	}
 	deadline := time.Now().Add(10 * time.Minute)
 	if d.Approval.ExpiresAt.Before(deadline) {
 		deadline = d.Approval.ExpiresAt

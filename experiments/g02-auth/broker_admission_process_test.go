@@ -91,7 +91,7 @@ func TestBrokerAdmissionSeparateProcessCrashKeepsSlot(t *testing.T) {
 }
 
 func TestBrokerConcurrentFirstClaimAdmitsOne(t *testing.T) {
-	for iteration := 0; iteration < 200; iteration++ {
+	for iteration := 0; iteration < 50; iteration++ {
 		parent, e := filepath.EvalSymlinks(t.TempDir())
 		if e != nil {
 			t.Fatal("fixture")

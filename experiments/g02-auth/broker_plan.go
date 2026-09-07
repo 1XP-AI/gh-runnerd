@@ -12,20 +12,26 @@ import (
 // Private prepared inputs are constructed only after the front door verifies
 // source, binary, authority and private paths. Test launchers are synthetic.
 type brokerControllerPlan struct {
-	approval     BrokerApproval
-	controller   controllerApproval
-	raw          []byte
-	state        *os.Root
-	statePath    string
-	stateInfo    os.FileInfo
-	snapshot     *os.File
-	snapshotInfo os.FileInfo
-	journal      *brokerJournal
-	binaryCheck  func() error
-	launch       func(context.Context, []byte, string) error
+	approval           BrokerApproval
+	controller         controllerApproval
+	raw                []byte
+	state              *os.Root
+	statePath          string
+	stateInfo          os.FileInfo
+	snapshot           *os.File
+	snapshotInfo       os.FileInfo
+	journal            *brokerJournal
+	binaryCheck        func() error
+	localPrepare       func(context.Context, string) (brokerPreparationReceipt, error)
+	preparationReceipt brokerPreparationReceipt
+	prepared           *brokerPreparedState
+	launch             func(context.Context, []byte, string) error
 }
 
 func (p *brokerControllerPlan) close() {
+	if p != nil {
+		p.prepared.close()
+	}
 	if p != nil && p.snapshot != nil {
 		p.snapshot.Close()
 	}
@@ -48,7 +54,7 @@ func (p *brokerControllerPlan) binding() (brokerControllerBinding, error) {
 	return brokerControllerBinding{brokerDigest(c), p.approval.ControllerBinarySHA256, p.approval.ControllerHarnessSHA, brokerFileIdentity(i)}, nil
 }
 func (p *brokerControllerPlan) prepare(a BrokerApproval, j *brokerJournal, now time.Time) error {
-	if p == nil || p.binaryCheck == nil || p.launch == nil || brokerDigest(p.approval) != brokerDigest(a) || p.controller.validate(a, now) != nil || brokerBytesDigest(p.raw) != a.ControllerApprovalSHA256 || p.binaryCheck() != nil {
+	if p == nil || p.binaryCheck == nil || p.launch == nil || p.localPrepare == nil || brokerDigest(p.approval) != brokerDigest(a) || p.controller.validate(a, now) != nil || brokerBytesDigest(p.raw) != a.ControllerApprovalSHA256 || p.binaryCheck() != nil {
 		return errBroker
 	}
 	if _, e := p.binding(); e != nil {
@@ -152,7 +158,8 @@ func (p *brokerControllerPlan) compatibleControllerClaim(root *os.Root) error {
 	if id.Device != record.JournalDevice || id.Inode != record.JournalInode {
 		return errBroker
 	}
-	// Full authority/replay validation remains the reviewed controller's job.
+	// Credential-free canonical preparation validates full authority/replay
+	// before authenticated work; this bridge only checks shared claim identity.
 	return nil
 }
 

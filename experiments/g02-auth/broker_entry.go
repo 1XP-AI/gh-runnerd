@@ -155,6 +155,9 @@ func runBrokerWithAPI(ctx context.Context, files BrokerFiles, input *os.File, ap
 		if err != nil {
 			return BrokerResult{}, errBroker
 		}
+		plan.localPrepare = func(ctx context.Context, snapshotPath string) (brokerPreparationReceipt, error) {
+			return invokeBrokerPreparation(ctx, binary, files.StateDirectory, snapshotPath, files.ControllerStateDirectory, approval.Phase)
+		}
 	}
 	return brokerExecute(ctx, approval, credentialInput, files.StateDirectory, api, plan)
 }

@@ -20,6 +20,33 @@ import (
 // production entry point must separately verify G01 build metadata before it
 // can construct verifiedBrokerBinary; these pipe tests isolate that handoff.
 func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == "--prepare-approved-journal" {
+		if len(os.Args) != 8 || os.Args[2] != "--approval" || os.Args[4] != "--state-dir" || os.Args[6] != "--phase" {
+			os.Exit(3)
+		}
+		for _, entry := range os.Environ() {
+			if entry != "LANG=C" && entry != "LC_ALL=C" {
+				os.Exit(4)
+			}
+		}
+		data, e := io.ReadAll(io.LimitReader(os.Stdin, 1))
+		if e != nil || len(data) != 0 {
+			os.Exit(5)
+		}
+		switch os.Args[7] {
+		case "before-ack":
+			time.Sleep(time.Minute)
+		case "inspect":
+			fmt.Fprint(os.Stdout, strings.Repeat("synthetic-private-preparation-output", 1000))
+		case "cleanup":
+			fmt.Fprint(os.Stdout, `{"version":1,"VERSION":2}`)
+		case "after-ack":
+		default:
+			fmt.Fprint(os.Stdout, `{"version":1,"status":"controller_journal_prepared","phase":"create"}`)
+		}
+		os.Exit(0)
+	}
+
 	if len(os.Args) > 1 && os.Args[1] == "--execute-approved-canary" {
 		if len(os.Args) != 8 || os.Args[2] != "--approval" || os.Args[4] != "--state-dir" || os.Args[6] != "--phase" {
 			os.Exit(3)
