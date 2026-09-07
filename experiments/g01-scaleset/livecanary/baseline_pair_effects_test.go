@@ -229,10 +229,63 @@ func TestPairedOriginalDeadlineBoundsBootstrap(t *testing.T) {
 			out, err := runPairedBaselineWithCadence(ctx, &Driver{Approval: f.c.a, Journal: f.c.j, API: f.c.api}, f.w, fastPairCadence())
 			elapsed := time.Since(start)
 			t.Logf("prefix_sync=%t host_entered=%t deadline=%t error=%t outcome=%s elapsed=%s sessions=%d acquire=%d JIT=%d create=%d start=%d", prefixSeen, entered.Load(), ctx.Err() == context.DeadlineExceeded, err != nil, out.Outcome, elapsed, f.c.sessions.Load(), f.c.acquires.Load(), f.jit.Load(), f.creates.Load(), f.starts.Load())
-			if !entered.Load() || ctx.Err() != context.DeadlineExceeded || err == nil || out.Outcome != collectionUnresolved || elapsed > 2*time.Second || f.c.sessions.Load() != 0 || f.c.acquires.Load() != 0 || f.jit.Load() != 0 || f.creates.Load() != 0 || f.starts.Load() != 0 {
+			// Original authority can expire during valid local preparation, before
+			// a host request starts. Both paths must refuse every later effect.
+			if ctx.Err() != context.DeadlineExceeded || err == nil || out.Outcome != collectionUnresolved || elapsed > 2*time.Second || f.c.requests.Load() != 0 || f.c.sessions.Load() != 0 || f.c.acquires.Load() != 0 || f.jit.Load() != 0 || f.creates.Load() != 0 || f.starts.Load() != 0 {
 				t.Fatal("original deadline failed to bound host work")
 			}
 		})
+	}
+}
+
+func TestPairedOriginalCancellationStopsEnteredHostRead(t *testing.T) {
+	f := newPairedIntegrationFixture(t)
+	entered, exited, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var enterOnce, exitOnce sync.Once
+	var hostCalls atomic.Int32
+	t.Cleanup(func() { close(release) })
+	f.dockerBefore = func(_ http.ResponseWriter, r *http.Request) bool {
+		if r.URL.Path != "/version" {
+			return false
+		}
+		hostCalls.Add(1)
+		enterOnce.Do(func() { close(entered) })
+		defer exitOnce.Do(func() { close(exited) })
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+		return true
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type result struct {
+		out pairedBaselineCollection
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		out, err := runPairedBaselineWithCadence(ctx, &Driver{Approval: f.c.a, Journal: f.c.j, API: f.c.api}, f.w, fastPairCadence())
+		done <- result{out, err}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("host request did not enter before independent test guard")
+	}
+	cancel() // Cancel the original parent only after actual request entry.
+	select {
+	case <-exited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("entered host request did not exit on parent cancellation")
+	}
+	select {
+	case got := <-done:
+		if ctx.Err() != context.Canceled || got.err == nil || got.out.Outcome != collectionUnresolved || hostCalls.Load() != 1 || f.c.requests.Load() != 0 || f.c.sessions.Load() != 0 || f.c.acquires.Load() != 0 || f.jit.Load() != 0 || f.creates.Load() != 0 || f.starts.Load() != 0 {
+			t.Fatal("original cancellation crossed the entered-host boundary")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("paired invocation failed to drain after parent cancellation")
 	}
 }
 

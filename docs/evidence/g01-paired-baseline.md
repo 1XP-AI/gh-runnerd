@@ -114,13 +114,23 @@ Subsequent immutable behavioral reds and corrections cover:
 
 The matrix uses actual controller stage intent/result fsyncs, selected worker
 record fsyncs and same-file reopen; C/W journal and claim inode replacement;
-current dependency/cancellation checks; original 200 ms host deadline; actual file
+current dependency/cancellation checks; original 200 ms bootstrap deadline; actual file
 budget exhaustion; malformed/lost JIT and lost Unix create/start responses;
 known-create cancellation; concurrent Close/drain; source/association regression;
 and retained positives across later empty job listings. A private cadence seam
 advances only test cadence; network and authority deadlines always remain real.
 One full collection positive retains actual five-second waits. No full suite or live result
 is inferred from a focused test; final combined results are recorded below.
+
+The original 200 ms deadline may expire during valid local preparation before
+the host request starts. Both early expiry and an entered blocked request must
+return unresolved and prevent later operations. Fixture red `924f032` reproduced
+the former case at an actual C intent sync (race 1.013 seconds); requiring host
+entry incorrectly rejected that safe outcome. The corrected timer test and a
+separate synchronized original-parent cancellation test passed with race in
+2.158 seconds. The latter waits for actual `/version` entry, then cancels the
+parent and observes request exit and zero later operations; it does not claim
+to prove timed expiry inside an active request. No production timeout changed.
 
 The C fixture seeds inventory/create receipts. It does not execute remote policy
 Preflight or prove a live original scale-set creation. Docker fixtures are private
