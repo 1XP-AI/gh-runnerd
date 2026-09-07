@@ -25,12 +25,15 @@ import (
 const pairFixtureJIT = "c3ludGhldGljLXByaXZhdGUtaml0LWNvbmZpZw=="
 
 type pairedIntegrationFixture struct {
+	containerReads                             atomic.Int32
 	c                                          *baselineFixture
 	w                                          *liveworker.Driver
 	wf                                         *liveworker.PairFileFixture
 	jit, creates, starts, dockerReads, cleanup atomic.Int32
 	mu                                         sync.Mutex
 	container                                  map[string]any
+	sdkReads, restReads, jobLists, jobDetails  atomic.Int32
+	remote                                     func(*http.Request, any) any
 }
 
 func newPairedIntegrationFixture(t *testing.T) *pairedIntegrationFixture {
@@ -61,18 +64,25 @@ func newPairedIntegrationFixture(t *testing.T) *pairedIntegrationFixture {
 			f.jit.Add(1)
 			value = map[string]any{"runner": map[string]any{"id": 81, "name": a.workerName(), "runnerScaleSetId": 7}, "encodedJITConfig": pairFixtureJIT}
 		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/agents/81"):
+			f.sdkReads.Add(1)
 			value = map[string]any{"id": 81, "name": a.workerName(), "runnerScaleSetId": 7}
-		case r.Method == "GET" && r.URL.Path == "/orgs/"+a.Organization+"/actions/runners/81":
-			value = map[string]any{"id": 81, "name": a.workerName(), "status": "online", "busy": true}
+		case r.Method == "GET" && r.URL.Path == "/orgs/"+a.Organization+"/actions/runners/9001":
+			f.restReads.Add(1)
+			value = map[string]any{"id": 9001, "name": a.workerName(), "status": "online", "busy": true}
 		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/attempts/1/jobs"):
+			f.jobLists.Add(1)
 			value = map[string]any{"total_count": 1, "jobs": []any{f.job()}}
 		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/actions/jobs/701"):
+			f.jobDetails.Add(1)
 			value = f.job()
 		default:
 			if r.Method == "DELETE" {
 				f.cleanup.Add(1)
 			}
 			return false
+		}
+		if f.remote != nil {
+			value = f.remote(r, value)
 		}
 		_ = json.NewEncoder(w).Encode(value)
 		return true
@@ -125,6 +135,7 @@ func newPairedIntegrationFixture(t *testing.T) *pairedIntegrationFixture {
 			return
 		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/json"):
 			f.dockerReads.Add(1)
+			f.containerReads.Add(1)
 			value = f.container
 		default:
 			f.cleanup.Add(1)
@@ -151,7 +162,7 @@ func (f *pairedIntegrationFixture) job() map[string]any {
 		status = "completed"
 		conclusion = "success"
 	}
-	return map[string]any{"id": 701, "run_id": f.c.a.WorkflowRunID, "run_attempt": 1, "head_sha": f.c.a.WorkflowSHA, "status": status, "conclusion": conclusion, "runner_id": 81, "runner_name": f.c.a.workerName(), "runner_group_id": f.c.a.RunnerGroupID}
+	return map[string]any{"id": 701, "run_id": f.c.a.WorkflowRunID, "run_attempt": 1, "head_sha": f.c.a.WorkflowSHA, "status": status, "conclusion": conclusion, "runner_id": 9001, "runner_name": f.c.a.workerName(), "runner_group_id": f.c.a.RunnerGroupID}
 }
 
 func TestPairedBaselineActualJournalsExecuteAndCollect(t *testing.T) {
