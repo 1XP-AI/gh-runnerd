@@ -32,6 +32,21 @@ empty poll is **unresolved**, never a passed barrier. The high-level listener
 retains upstream ACK ordering; fault barriers use its public client interface.
 Adapter deadlines remain effective after the listener removes cancellation.
 
+Creation requests `RunnerSetting.DisableUpdate=true` using the pinned SDK's
+[`RunnerSetting` field](https://github.com/actions/scaleset/blob/v0.4.0/types.go).
+The returned create object must confirm it; false or omitted settings quarantine
+the uncertain create without retry. The driver reads the owned scale set again
+before session/JIT phases and refuses those effects if updates are enabled.
+Read-only inspection and otherwise verified empty cleanup remain available.
+This closes an update path that an image digest alone cannot constrain; it does
+not prove the service honored the setting or prevent concurrent administrator
+changes after the read. Actual bootstrap/version evidence is still required.
+
+Offline regression evidence: the tests first failed because creation allowed
+updates, an unconfirmed response succeeded, and setting drift admitted work.
+The corrected tests pass, including the pinned SDK's JSON request at the
+loopback server and all existing phase barriers. No live setting was changed.
+
 Known session closure is automatic only at a safe planned barrier. These probes
 measure close/new-session behavior, **not crash restart of the same session**.
 Rehydration and general session replacement remain unimplemented. A surviving

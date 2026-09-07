@@ -37,7 +37,7 @@ func TestDriverBarriersThroughPinnedSDK(t *testing.T) {
 			j := &memoryJournal{}
 			acks, acquires, jits, closes := 0, 0, 0, 0
 			creates, refreshes, replacementACKs := 0, 0, 0
-			set := &scaleset.RunnerScaleSet{ID: 7, Name: a.setName(), RunnerGroupID: a.RunnerGroupID, Labels: []scaleset.Label{{Name: a.setName()}}, Statistics: &scaleset.RunnerScaleSetStatistic{}}
+			set := &scaleset.RunnerScaleSet{ID: 7, Name: a.setName(), RunnerGroupID: a.RunnerGroupID, Labels: []scaleset.Label{{Name: a.setName()}}, Statistics: &scaleset.RunnerScaleSetStatistic{}, RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true}}
 			var server *httptest.Server
 			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				var body any
@@ -86,6 +86,14 @@ func TestDriverBarriersThroughPinnedSDK(t *testing.T) {
 					body = map[string]any{"count": 0, "value": []any{}}
 				case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/runnerscalesets"):
 					creates++
+					var request struct {
+						RunnerSetting struct {
+							DisableUpdate bool `json:"disableUpdate"`
+						} `json:"RunnerSetting"`
+					}
+					if json.NewDecoder(r.Body).Decode(&request) != nil || !request.RunnerSetting.DisableUpdate {
+						t.Error("SDK create request did not disable runner updates")
+					}
 					body = set
 					if strings.HasPrefix(scenario, "create-") {
 						if scenario == "create-error-oversize" {

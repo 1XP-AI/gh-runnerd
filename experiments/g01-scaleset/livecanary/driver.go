@@ -231,8 +231,8 @@ func (d *Driver) Run(ctx context.Context, phase string) error {
 			return ErrQuarantine
 		}
 		return d.effect(ctx, "create", nil, func(c context.Context) (Event, error) {
-			set, err := d.API.CreateScaleSet(c, &scaleset.RunnerScaleSet{Name: d.Approval.setName(), RunnerGroupID: d.Approval.RunnerGroupID, Labels: []scaleset.Label{{Name: d.Approval.setName(), Type: "System"}}})
-			if err != nil || set == nil || set.ID <= 0 || set.Name != d.Approval.setName() || set.RunnerGroupID != d.Approval.RunnerGroupID {
+			set, err := d.API.CreateScaleSet(c, &scaleset.RunnerScaleSet{Name: d.Approval.setName(), RunnerGroupID: d.Approval.RunnerGroupID, Labels: []scaleset.Label{{Name: d.Approval.setName(), Type: "System"}}, RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true}})
+			if err != nil || set == nil || set.ID <= 0 || set.Name != d.Approval.setName() || set.RunnerGroupID != d.Approval.RunnerGroupID || !set.RunnerSetting.DisableUpdate {
 				return Event{}, ErrRemote
 			}
 			return Event{ID: set.ID}, nil
@@ -270,6 +270,12 @@ func (d *Driver) Run(ctx context.Context, phase string) error {
 			return ErrQuarantine
 		}
 		return d.record(Event{Kind: "observation", Operation: "inventory", Digest: after})
+	}
+	// A pinned container does not pin the listener if GitHub can request an
+	// update. Recheck server state before session/JIT effects; observation and
+	// otherwise verified empty cleanup remain possible after setting drift.
+	if !set.RunnerSetting.DisableUpdate {
+		return ErrQuarantine
 	}
 	if phase == "jit-loss" {
 		ref, err := boundedRead(ctx, func(c context.Context) (*scaleset.RunnerReference, error) {
