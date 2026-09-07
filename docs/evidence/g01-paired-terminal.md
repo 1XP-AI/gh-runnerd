@@ -4,10 +4,13 @@ Issue [54](https://github.com/1XP-AI/gh-runnerd/issues/54) adds a private,
 same-invocation terminal entry over the paired execution library. It is a
 synthetic experiment implementation, not a live command or completion of G01.
 `runPairedBaseline` retains its collection-only behavior and performs no cleanup.
-The fixed `runPairedTerminal` entry additionally requires all four original worker
-phases (`create`, `start`, `inspect`, `cleanup`) before any pair prefix, host
+The fixed `runPairedTerminal` entry additionally requires the original controller
+`cleanup` phase and all four original worker phases (`create`, `start`, `inspect`,
+`cleanup`) before any pair prefix, host
 request, session or acquisition. No public approval phase, worker method, CLI,
 broker operation, recovery entry or admission-root behavior is added.
+These phase checks are necessary constraints, not standalone paired or live
+authority. The collection-only entry does not require controller cleanup.
 
 ## Invocation, evidence and ordering
 
@@ -139,8 +142,14 @@ Recorded checkpoints:
   replays successfully without new requests. The correction's four capacity/
   cancellation cases and five existing final-child/parent/summary sync cases
   passed with race in 9.202 seconds. Less than two maximum records still refuses.
+- Original controller-authority red `d1d297c`, race 4.405 seconds: C approval
+  without cleanup, captured before journal/API setup, still reached all three
+  deletes. The guard now refuses before the prefix. Its missing-C-cleanup,
+  unchanged collection-only, four original W-phase and full terminal positive
+  controls passed with race in 5.697 seconds.
 
-The bounded matrix exercises all four missing original worker phases; fresh
+The bounded matrix exercises missing original controller cleanup and all four
+missing original worker phases; fresh
 job/runner/local eligibility; assigned/running nonzero and missing statistics,
 ownership/update/roster drift; captured-204 cancellation, original-context
 expiry, lost and rejected deletes, failed/absent postchecks; actual C and W sync

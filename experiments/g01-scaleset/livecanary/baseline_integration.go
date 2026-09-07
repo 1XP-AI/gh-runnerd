@@ -79,6 +79,9 @@ func runPairedBaselineMode(ctx context.Context, d *Driver, w *liveworker.Driver,
 		return out, ErrApproval
 	}
 	if terminal {
+		if !slices.Contains(d.Approval.Phases, "cleanup") {
+			return out, ErrApproval
+		}
 		for _, phase := range []string{"create", "start", "inspect", "cleanup"} {
 			if !slices.Contains(w.Approval.Phases, phase) {
 				return out, ErrApproval
