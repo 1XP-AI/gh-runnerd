@@ -1,0 +1,55 @@
+# Inactive template. Render and independently review immutable private-repo
+# .github/workflows/canary.yml before dispatch. Never install in the public repo.
+name: G01 private protocol canary
+run-name: G01 __G01_OWNER_NONCE__ ${{ inputs.phase }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: Reviewed serial canary phase
+        required: true
+        type: choice
+        options:
+          - baseline
+          - before-ack
+          - after-ack
+          - acquisition-ambiguity
+          - jit-ambiguity
+          - idle-drain
+          - busy-deregistration
+          - session-replacement
+
+permissions: {}
+
+jobs:
+  canary:
+    runs-on:
+      group: __G01_RUNNER_GROUP_NAME__
+      labels: __G01_SCALE_SET_NAME__
+    timeout-minutes: 10
+    steps:
+      - name: Check the disposable ARM64 worker
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -s)" = Linux
+          test "$(uname -m)" = aarch64
+          test "$(id -u)" != 0
+          # Presence checks only: never read or print credential values.
+          test -z "${ACTIONS_RUNNER_INPUT_JITCONFIG+x}"
+          test -z "${GH_TOKEN+x}"
+          test -z "${GH_HOST+x}"
+          test -z "${GH_ENTERPRISE_TOKEN+x}"
+          test -z "${GH_APP_PRIVATE_KEY+x}"
+          test -f /home/runner/.credentials
+          printf '%s\n' 'worker_checks_passed=true'
+      - name: Emit bounded heartbeat and finish normally
+        shell: bash
+        run: |
+          set -euo pipefail
+          for tick in {1..60}; do
+            printf 'canary_heartbeat=%s\n' "$tick"
+            sleep 1
+          done
+          printf '%s\n' 'canary_completed=true'
