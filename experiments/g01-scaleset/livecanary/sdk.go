@@ -213,34 +213,35 @@ func (a *SDKAPI) VerifyRun(ctx context.Context, approval Approval, id int64) err
 
 func (a *SDKAPI) Inventory(ctx context.Context) (string, error) {
 	var ids []int64
+	seen := make(map[int64]bool)
+	total := -1
 	for page := 1; page <= 10; page++ {
-		var list struct {
-			TotalCount int `json:"total_count"`
-			Runners    []struct {
-				ID int64 `json:"id"`
-			} `json:"runners"`
-		}
+		var list inventoryPage
 		if a.get(ctx, "/orgs/"+a.approval.Organization+"/actions/runners?per_page=100&page="+strconv.Itoa(page), a.credentials.InstallationToken, &list) != nil {
 			return "", ErrRemote
 		}
-		for _, runner := range list.Runners {
-			if runner.ID <= 0 {
+		if page == 1 {
+			total = list.count
+		}
+		if list.count != total || len(ids)+len(list.ids) > total {
+			return "", ErrRemote
+		}
+		for _, id := range list.ids {
+			if seen[id] {
 				return "", ErrRemote
 			}
-			ids = append(ids, runner.ID)
+			seen[id] = true
+			ids = append(ids, id)
 		}
-		if len(ids) == list.TotalCount {
+		if len(ids) == total {
 			slices.Sort(ids)
-			for i := 1; i < len(ids); i++ {
-				if ids[i-1] == ids[i] {
-					return "", ErrRemote
-				}
-			}
+			// Preserve the existing sorted-ID encoding, including nil -> null
+			// for an explicitly complete empty inventory in stored journals.
 			data, _ := json.Marshal(ids)
 			digest := sha256.Sum256(data)
 			return hex.EncodeToString(digest[:]), nil
 		}
-		if len(list.Runners) == 0 || len(ids) > list.TotalCount {
+		if len(list.ids) == 0 {
 			return "", ErrRemote
 		}
 	}
