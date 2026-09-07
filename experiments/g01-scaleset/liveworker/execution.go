@@ -160,6 +160,9 @@ func (s *pairedScope) preflight(check ControllerCheck, room int64) (ImageProfile
 	if err := s.guard(check); err != nil {
 		return ImageProfile{}, err
 	}
+	if !s.journal.hasRoom(room) {
+		return ImageProfile{}, ErrState
+	}
 	ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
 	defer cancel()
 	a := s.approval

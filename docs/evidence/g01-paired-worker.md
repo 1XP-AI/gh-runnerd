@@ -120,3 +120,22 @@ when completed. No real Docker daemon, GitHub API/App, Keychain, account root or
 live effect was used. These tests do not prove two-file controller pairing,
 controller acquire/JIT ordering or terminal GitHub eligibility. Actual controller
 FileJournal integration with its real lease/checker is required before live wiring.
+
+## Independent-review capacity correction
+
+At initial green `114b55a7ba0ec374a9cf50456ec46479c65de979`, independent review
+found that preflight checked the whole operation budget before invoking the
+controller checker. That checker could consume journal space, allowing preflight
+(and, for Start/DeleteTerminal, later effects) after the original required budget
+was lost. The existing later intent/effect checks did not cover this earlier gap.
+
+Adopted the independent real-FileJournal four-operation matrix in red commit
+`1b0715236371e4817765e4c396a5ab949e26bfce`. The focused race test
+`TestPairedPreflightRechecksCapacityAfterChecker` failed (exit 1, 0.561 seconds):
+Create/Observe each made one preflight request; Start also inspected and started;
+DeleteTerminal inspected twice and deleted. The fix repeats the full requested
+`hasRoom(room)` check immediately after the controller checker and before
+Runtime.Preflight, preserving the larger 64/96 KiB Start/DeleteTerminal budgets.
+The complete liveworker race suite, including this matrix, then passed
+(exit 0, 5.705 seconds). Independent exact-head re-review and the integrator's
+full repository checks remain separate gates.
