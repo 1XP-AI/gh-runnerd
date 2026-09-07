@@ -2,74 +2,441 @@ package livecanary
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"slices"
+	"sync"
+	"time"
 
 	"github.com/actions/scaleset"
 	"github.com/actions/scaleset/listener"
 )
 
-// Compiled red checkpoint: the SDK's typed listener boundary alone does not
-// retain whole-message evidence or validate the raw acquisition count.
-type baselineAcquisition struct{ RequestID int64 }
-type baselineListener struct {
-	ctx      context.Context
-	approval Approval
-	journal  *FileJournal
-	api      *SDKAPI
-	setID    int
-	session  Session
-	after    func(context.Context, baselineAcquisition) error
-}
-
 var errBaselineCollected = errors.New("baseline callback collection complete")
 
+// Private protocol collection under the caller's concrete controller lease.
+// No current phase/CLI calls this. The future pair orchestrator must prove
+// completed pairing and host preflight before invoking this experiment slice.
+type baselineListener struct {
+	mu                     sync.Mutex
+	ctx                    context.Context
+	cancel                 context.CancelFunc
+	approval               Approval
+	journal                *FileJournal
+	api                    SDKAPI
+	identity               controllerJournalIdentity
+	creation               controllerRecordRef
+	setID                  int
+	session                Session
+	initial                scaleset.RunnerScaleSetSession
+	sessionID, queue       string
+	running, used, invalid bool
+	after                  func(context.Context, baselineAcquisition) error
+}
+
 func newBaselineListenerHeld(ctx context.Context, a Approval, j *FileJournal, api *SDKAPI, setID int) (*baselineListener, error) {
-	return &baselineListener{ctx: ctx, approval: a, journal: j, api: api, setID: setID}, nil
+	if ctx == nil || ctx.Err() != nil || j == nil || api == nil || api.client == nil || api.rest == nil || setID <= 0 || a.WorkflowRunID <= 0 || !j.authorityHeld(a) || approvalDigest(a) != approvalDigest(api.approval) {
+		return nil, ErrApproval
+	}
+	_, cancel, err := api.observationContext(ctx, true)
+	if err != nil {
+		return nil, ErrApproval
+	}
+	cancel()
+	id, err := j.controllerIdentity()
+	if err != nil {
+		return nil, err
+	}
+	events := j.Events()
+	s := replay(events)
+	if s.setID != setID || s.uncertain || s.reserved || s.deleted || len(s.observedJobs) != 0 {
+		return nil, ErrQuarantine
+	}
+	var creation controllerRecordRef
+	for _, e := range events {
+		if e.Baseline != nil || (e.Kind == "phase" && e.Operation != "create") || e.Operation == "jit" || e.Operation == "acquire" || e.Operation == "session-open" {
+			return nil, ErrQuarantine
+		}
+		if e.Kind == "result" && e.Operation == "create" && e.ID == setID {
+			if creation.Sequence != 0 {
+				return nil, ErrQuarantine
+			}
+			creation = controllerEventRef(id, e)
+		}
+	}
+	if creation.Sequence == 0 {
+		return nil, ErrQuarantine
+	}
+	a.Phases = slices.Clone(a.Phases)
+	a.ActionsHosts = slices.Clone(a.ActionsHosts)
+	captured := *api
+	captured.approval = a
+	captured.options = slices.Clone(api.options)
+	deadline := time.Now().Add(10 * time.Minute)
+	if a.ExpiresAt.Before(deadline) {
+		deadline = a.ExpiresAt
+	}
+	if api.credentials.ExpiresAt.Before(deadline) {
+		deadline = api.credentials.ExpiresAt
+	}
+	original, stop := context.WithDeadline(ctx, deadline)
+	return &baselineListener{ctx: original, cancel: stop, approval: a, journal: j, api: captured, identity: id, creation: creation, setID: setID}, nil
+}
+func (b *baselineListener) check() error {
+	if b == nil || !b.running || b.invalid || b.ctx.Err() != nil || !b.journal.authorityHeld(b.approval) {
+		return ErrQuarantine
+	}
+	id, err := b.journal.controllerIdentity()
+	if err != nil || id != b.identity {
+		return ErrJournal
+	}
+	if b.session != nil && b.session.Session().SessionID.String() != b.sessionID {
+		return ErrQuarantine
+	}
+	return nil
+}
+func (b *baselineListener) state() (baselineHistory, error) {
+	return replayBaseline(b.journal.Events(), b.identity, b.approval)
+}
+func (b *baselineListener) enter() error {
+	if b == nil || !b.mu.TryLock() {
+		return ErrQuarantine
+	}
+	if err := b.check(); err != nil {
+		b.mu.Unlock()
+		return err
+	}
+	return nil
+}
+func (b *baselineListener) record(r baselineRecord) (controllerRecordRef, error) {
+	r.Version = 1
+	r.SetID = b.setID
+	r.Creation = b.creation
+	ref, err := b.journal.appendRecord(Event{Kind: "baseline", Baseline: &r})
+	if err != nil {
+		b.invalid = true
+	}
+	return ref, err
+}
+func (b *baselineListener) begin(stage string, configure func(*baselineRecord)) (baselineRecord, error) {
+	if err := b.check(); err != nil {
+		return baselineRecord{}, err
+	}
+	if err := b.journal.baselineCapacity(); err != nil {
+		return baselineRecord{}, err
+	}
+	r := baselineRecord{Stage: stage, Outcome: "intent", SessionID: b.sessionID}
+	if configure != nil {
+		configure(&r)
+	}
+	ref, err := b.record(r)
+	r.Intent = ref
+	return r, err
+}
+
+// Known responses survive cancellation; every subsequent operation rechecks
+// the original authority before its request or continuation.
+func (b *baselineListener) finish(r baselineRecord, known bool) (controllerRecordRef, error) {
+	r.Outcome = "result"
+	if !known {
+		r.Outcome = "unknown"
+	}
+	ref, err := b.record(r)
+	if err != nil {
+		return controllerRecordRef{}, ErrJournal
+	}
+	if !known {
+		b.invalid = true
+		return ref, ErrQuarantine
+	}
+	return ref, nil
+}
+func (b *baselineListener) wire(stage string) *baselineWireCapture {
+	return &baselineWireCapture{stage: stage, setID: b.setID, queue: b.queue}
 }
 func (b *baselineListener) run(after func(context.Context, baselineAcquisition) error) error {
+	if b == nil || b.ctx == nil || b.cancel == nil || !b.mu.TryLock() {
+		return ErrQuarantine
+	}
+	if b.used || after == nil {
+		b.mu.Unlock()
+		return ErrApproval
+	}
+	b.used = true
+	b.running = true
 	b.after = after
-	d := Driver{b.approval, b.journal, b.api}
-	if err := d.effect(b.ctx, "session-open", nil, func(ctx context.Context) (Event, error) {
-		var err error
-		b.session, err = b.api.OpenSession(ctx, b.setID, b.approval.setName())
-		if err != nil {
-			return Event{}, err
-		}
-		return Event{SessionID: b.session.Session().SessionID.String()}, nil
-	}); err != nil {
+	b.mu.Unlock()
+	defer func() {
+		b.cancel()
+		b.mu.Lock()
+		b.running = false
+		b.invalid = true
+		b.after = nil
+		b.mu.Unlock()
+	}()
+	if err := b.initialize(); err != nil {
 		return err
 	}
 	l, err := listener.New(b, listener.Config{ScaleSetID: b.setID, MaxRunners: 1})
 	if err != nil {
 		return ErrQuarantine
 	}
-	if err = l.Run(b.ctx, b); errors.Is(err, errBaselineCollected) {
+	err = l.Run(b.ctx, b)
+	if errors.Is(err, errBaselineCollected) {
 		return nil
 	}
 	return ErrQuarantine
 }
-func (b *baselineListener) Session() scaleset.RunnerScaleSetSession { return b.session.Session() }
-func (b *baselineListener) GetMessage(_ context.Context, last, capacity int) (*scaleset.RunnerScaleSetMessage, error) {
-	m, err := b.session.GetMessage(b.ctx, last, capacity)
-	if err == nil && m != nil {
-		err = b.journal.Append(Event{Kind: "observation", Operation: "poll", ID: m.MessageID})
+func (b *baselineListener) initialize() error {
+	if err := b.enter(); err != nil {
+		return err
 	}
-	return m, err
+	defer b.mu.Unlock()
+	r, err := b.begin("set-observe", nil)
+	if err != nil {
+		return err
+	}
+	c := b.wire("set-observe")
+	ctx, cancel := context.WithTimeout(b.ctx, operationTimeout)
+	set, callErr := b.api.GetScaleSet(c.context(ctx), b.setID)
+	cancel()
+	r.Set = c.set
+	r.HTTPStatus = c.status
+	known := callErr == nil && c.observed() && r.Set.eligible(b.approval, b.setID) && set != nil && set.ID == r.Set.ID && set.Name == r.Set.Name && set.RunnerGroupID == r.Set.GroupID && set.RunnerSetting.DisableUpdate && r.Set.Statistics.matches(set.Statistics)
+	if _, err = b.finish(r, known); err != nil {
+		return err
+	}
+	r, err = b.begin("session-open", nil)
+	if err != nil {
+		return err
+	}
+	c = b.wire("session-open")
+	ctx, cancel = context.WithTimeout(b.ctx, operationTimeout)
+	session, callErr := b.api.OpenSession(c.context(ctx), b.setID, b.approval.setName())
+	cancel()
+	sf, _, _, status := c.facts()
+	r.Session = sf
+	r.HTTPStatus = status
+	known = callErr == nil && c.observed() && sf.eligible(b.approval, b.setID) && session != nil
+	var initial scaleset.RunnerScaleSetSession
+	if session != nil {
+		initial = session.Session()
+	}
+	if known {
+		known = initial.SessionID.String() == sf.SessionID && initial.OwnerName == sf.Owner && sf.Statistics.matches(initial.Statistics) && initial.MessageQueueURL != ""
+	}
+	if session != nil && sf != nil && initial.SessionID.String() == sf.SessionID && initial.OwnerName == b.approval.setName() {
+		b.session = session
+		b.sessionID = sf.SessionID
+		b.queue = initial.MessageQueueURL
+	}
+	if _, err = b.finish(r, known); err != nil {
+		return err
+	}
+	b.session = session
+	b.sessionID = sf.SessionID
+	b.queue = initial.MessageQueueURL
+	b.initial = scaleset.RunnerScaleSetSession{SessionID: initial.SessionID, OwnerName: initial.OwnerName, Statistics: initial.Statistics}
+	return nil
+}
+func (b *baselineListener) Session() scaleset.RunnerScaleSetSession {
+	if b == nil {
+		return scaleset.RunnerScaleSetSession{}
+	}
+	if !b.mu.TryLock() {
+		return scaleset.RunnerScaleSetSession{}
+	}
+	defer b.mu.Unlock()
+	if b.check() != nil {
+		return scaleset.RunnerScaleSetSession{}
+	}
+	copy := b.initial
+	if copy.Statistics != nil {
+		x := *copy.Statistics
+		copy.Statistics = &x
+	}
+	return copy
+}
+func (b *baselineListener) GetMessage(_ context.Context, last, capacity int) (*scaleset.RunnerScaleSetMessage, error) {
+	if err := b.enter(); err != nil {
+		return nil, err
+	}
+	defer b.mu.Unlock()
+	s, err := b.state()
+	if err != nil || last != s.cursor || capacity != 1 || s.polls >= 16 {
+		return nil, ErrQuarantine
+	}
+	r, err := b.begin("poll", func(r *baselineRecord) { r.Cursor = last })
+	if err != nil {
+		return nil, err
+	}
+	c := b.wire("poll")
+	c.cursor = last
+	ctx, cancel := context.WithTimeout(b.ctx, operationTimeout)
+	m, callErr := b.session.GetMessage(c.context(ctx), last, 1)
+	cancel()
+	_, batch, _, status := c.facts()
+	r.Batch = batch
+	r.HTTPStatus = status
+	r.NoMessage = status == 202 && m == nil
+	known := callErr == nil && c.observed() && (r.NoMessage || (m != nil && batch != nil && batch.matches(m) && batch.MessageID > 0 && !s.messageIDs[batch.MessageID] && batch.Statistics.eligible(s.acquired)))
+	if known && !r.NoMessage {
+		copyState := s
+		if err := copyState.admitBatch(batch, b.approval); err != nil {
+			known = false
+		}
+	}
+	batchRef, err := b.finish(r, known)
+	if err != nil {
+		return nil, err
+	}
+	if r.NoMessage {
+		return nil, nil
+	}
+	r, err = b.begin("source", func(r *baselineRecord) { r.BatchRef = batchRef })
+	if err != nil {
+		return nil, err
+	}
+	// The strict source reader requires this separate credential/context gate.
+	vctx, vcancel, callErr := b.api.observationContext(b.ctx, true)
+	var response observationResponse
+	if callErr == nil {
+		response, callErr = b.api.observeApprovedRun(vctx)
+		vcancel()
+	}
+	r.HTTPStatus = response.Status
+	if callErr == nil && response.Status == 200 {
+		r.Source = baselineApprovedSource(b.approval)
+	}
+	if _, err = b.finish(r, r.Source != nil); err != nil {
+		return nil, err
+	}
+	if err = b.check(); err != nil {
+		return nil, err
+	}
+	data, _ := json.Marshal(m)
+	var copy scaleset.RunnerScaleSetMessage
+	if json.Unmarshal(data, &copy) != nil {
+		return nil, ErrQuarantine
+	}
+	return &copy, nil
 }
 func (b *baselineListener) DeleteMessage(_ context.Context, id int) error {
-	return b.session.DeleteMessage(b.ctx, id)
+	if err := b.enter(); err != nil {
+		return err
+	}
+	defer b.mu.Unlock()
+	s, err := b.state()
+	if err != nil || s.batch == nil || id != s.batch.MessageID {
+		return ErrQuarantine
+	}
+	r, err := b.begin("ack", func(r *baselineRecord) { r.MessageID = id; r.BatchRef = s.batchRef; r.SourceRef = s.sourceRef })
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(b.ctx, operationTimeout)
+	callErr := b.session.DeleteMessage(ctx, id)
+	cancel()
+	_, err = b.finish(r, callErr == nil && b.session.Session().SessionID.String() == b.sessionID)
+	return err
 }
 func (b *baselineListener) AcquireJobs(_ context.Context, ids []int64) ([]int64, error) {
-	got, err := b.session.AcquireJobs(b.ctx, ids)
-	if err == nil && len(got) == 1 {
-		err = b.after(b.ctx, baselineAcquisition{RequestID: got[0]})
+	if err := b.enter(); err != nil {
+		return nil, err
 	}
-	return got, err
+	defer b.mu.Unlock()
+	s, err := b.state()
+	if err != nil || s.anchor == nil || len(ids) != 1 || ids[0] != s.anchor.RequestID || s.acquired {
+		return nil, ErrQuarantine
+	}
+	r, err := b.begin("acquire", func(r *baselineRecord) { r.BatchRef = s.batchRef; r.SourceRef = s.sourceRef; r.ACKRef = s.ackRef })
+	if err != nil {
+		return nil, err
+	}
+	c := b.wire("acquire")
+	ctx, cancel := context.WithTimeout(b.ctx, operationTimeout)
+	got, callErr := b.session.AcquireJobs(c.context(ctx), slices.Clone(ids))
+	cancel()
+	_, _, accepted, status := c.facts()
+	r.Accepted = accepted
+	r.HTTPStatus = status
+	known := callErr == nil && c.observed() && status == 200 && accepted != nil && accepted.Count != nil && *accepted.Count == 1 && len(accepted.IDs) == 1 && accepted.IDs[0] == ids[0] && slices.Equal(got, ids) && b.session.Session().SessionID.String() == b.sessionID
+	resultRef, err := b.finish(r, known)
+	if err != nil {
+		return nil, err
+	}
+	receipt := baselineAcquisition{b.sessionID, s.batch.MessageID, ids[0], s.anchor.JobID, s.anchor.Index, s.batchRef, s.sourceRef, s.ackRef, r.Intent, resultRef}
+	continuation, err := b.begin("continuation", func(r *baselineRecord) { r.AcquireRef = resultRef })
+	if err != nil {
+		return nil, err
+	}
+	// The SDK has returned and released its session mutex. The continuation
+	// never runs in a transport hook; reentrant adapter calls promptly refuse.
+	callErr = b.after(b.ctx, receipt)
+	if _, err = b.finish(continuation, callErr == nil); err != nil {
+		return nil, err
+	}
+	return slices.Clone(got), nil
 }
-func (b *baselineListener) HandleJobStarted(context.Context, *scaleset.JobStarted) error { return nil }
-func (b *baselineListener) HandleJobCompleted(context.Context, *scaleset.JobCompleted) error {
-	return errBaselineCollected
+func (b *baselineListener) callback(stage string, value any) error {
+	if err := b.enter(); err != nil {
+		return err
+	}
+	defer b.mu.Unlock()
+	s, err := b.state()
+	if err != nil || s.batch == nil {
+		return ErrQuarantine
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return ErrQuarantine
+	}
+	for i, x := range s.batch.Items {
+		kind := "JobStarted"
+		if stage == "completed" {
+			kind = "JobCompleted"
+		}
+		if x.Kind != kind || s.callbacks[i] {
+			continue
+		}
+		got, e := decodeBaselineItem(data, i)
+		if e != nil || got.RequestID != x.RequestID || got.JobID != x.JobID {
+			return ErrQuarantine
+		}
+		for _, p := range [][2]*string{{x.RunnerName, got.RunnerName}, {x.Result, got.Result}} {
+			if p[0] != nil && (p[1] == nil || *p[0] != *p[1]) {
+				return ErrQuarantine
+			}
+		}
+		if x.RunnerID != nil && (got.RunnerID == nil || *x.RunnerID != *got.RunnerID) {
+			return ErrQuarantine
+		}
+		_, err = b.record(baselineRecord{Stage: stage, Outcome: "observed", SessionID: b.sessionID, BatchRef: s.batchRef, ACKRef: s.ackRef, ItemIndex: &i})
+		return err
+	}
+	return ErrQuarantine
+}
+func (b *baselineListener) HandleJobStarted(_ context.Context, x *scaleset.JobStarted) error {
+	return b.callback("started", x)
+}
+func (b *baselineListener) HandleJobCompleted(_ context.Context, x *scaleset.JobCompleted) error {
+	return b.callback("completed", x)
 }
 func (b *baselineListener) HandleDesiredRunnerCount(_ context.Context, n int) (int, error) {
+	if err := b.enter(); err != nil {
+		return 0, err
+	}
+	defer b.mu.Unlock()
+	s, err := b.state()
+	if err != nil || s.latest == nil || s.latest.Assigned == nil || *s.latest.Assigned != n {
+		return 0, ErrQuarantine
+	}
+	_, err = b.record(baselineRecord{Stage: "desired", Outcome: "observed", SessionID: b.sessionID, BatchRef: s.batchRef, Desired: &n})
+	if err != nil {
+		return 0, err
+	}
+	if s.complete {
+		return min(n, 1), errBaselineCollected
+	}
 	return min(n, 1), nil
 }

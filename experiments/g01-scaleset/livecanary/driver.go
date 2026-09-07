@@ -40,6 +40,7 @@ type Approval struct {
 }
 
 type Event struct {
+	Baseline   *baselineRecord `json:"baseline,omitempty"`
 	Authority  *phaseAuthority `json:"authority,omitempty"`
 	Sequence   int             `json:"sequence"`
 	Kind       string          `json:"kind"`
@@ -100,6 +101,9 @@ func replay(events []Event) state {
 	pending := ""
 	for _, e := range events {
 		switch e.Kind {
+		case "baseline":
+			// This library slice never grants a legacy fault/cleanup phase.
+			s.reserved, s.uncertain, s.workObserved = true, true, true
 		case "phase":
 			s.phaseSeen[e.Operation] = true
 		case "inventory":

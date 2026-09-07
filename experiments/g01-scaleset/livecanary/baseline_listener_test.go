@@ -21,16 +21,23 @@ import (
 	"github.com/hashicorp/go-retryablehttp"
 )
 
+type baselineReply struct {
+	status int
+	body   any
+	lost   bool
+}
+
 type baselineFixture struct {
 	a                                               Approval
 	api                                             *SDKAPI
 	j                                               *FileJournal
 	release                                         func()
 	acks, acquires, continuations, polls, forbidden atomic.Int32
+	sessions, sources, sets, requests               atomic.Int32
 	change                                          func(string, any) any
 }
 
-func baselineItem(a Approval, kind string) map[string]any {
+func baselineFixtureItem(a Approval, kind string) map[string]any {
 	j := map[string]any{"messageType": kind, "runnerRequestId": int64(42), "jobId": "opaque-job-not-a-REST-id"}
 	if kind == "JobAvailable" {
 		j["ownerName"], j["repositoryName"], j["workflowRunId"] = a.Organization, a.Repository, a.WorkflowRunID
@@ -51,6 +58,7 @@ func newBaselineFixture(t *testing.T, change func(string, any) any) *baselineFix
 	c := credentials(f.a)
 	var server *httptest.Server
 	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.requests.Add(1)
 		_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, 1<<20))
 		_ = r.Body.Close()
 		w.Header().Set("Content-Type", "application/json")
@@ -64,23 +72,29 @@ func newBaselineFixture(t *testing.T, change func(string, any) any) *baselineFix
 			claims, _ := json.Marshal(map[string]int64{"exp": time.Now().Add(time.Hour).Unix()})
 			body = map[string]string{"url": server.URL + "/tenant/", "token": "eyJhbGciOiJub25lIn0." + base64.RawURLEncoding.EncodeToString(claims) + "."}
 		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/runnerscalesets/7"):
+			stage = "set"
+			f.sets.Add(1)
 			body = scaleset.RunnerScaleSet{ID: 7, Name: f.a.setName(), RunnerGroupID: f.a.RunnerGroupID, Labels: []scaleset.Label{{Name: f.a.setName()}}, RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true}, Statistics: &scaleset.RunnerScaleSetStatistic{}}
 		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/sessions"):
 			stage = "session"
+			f.sessions.Add(1)
 			body = scaleset.RunnerScaleSetSession{SessionID: uuid.MustParse("00000000-0000-4000-8000-000000000001"), OwnerName: f.a.setName(), MessageQueueURL: server.URL + "/queue", MessageQueueAccessToken: "synthetic-secret-queue", Statistics: &scaleset.RunnerScaleSetStatistic{}}
 		case r.URL.Path == "/queue" && r.Method == "GET":
 			n := f.polls.Add(1)
 			stage = "poll" + strconv.Itoa(int(n))
-			if n > 2 {
-				w.WriteHeader(403)
-				return
+
+			wantCursor := ""
+			for _, e := range f.j.Events() {
+				if e.Baseline != nil && e.Baseline.Stage == "ack" && e.Baseline.Outcome == "result" {
+					wantCursor = strconv.Itoa(e.Baseline.MessageID)
+				}
 			}
-			if (n == 1 && r.URL.Query().Get("lastMessageId") != "") || (n == 2 && r.URL.Query().Get("lastMessageId") != "9") {
-				t.Error("wrong cursor")
+			if r.URL.Query().Get("lastMessageId") != wantCursor {
+				t.Error("SDK cursor did not equal the last durable ACK")
 			}
-			items := []any{baselineItem(f.a, "JobAvailable")}
+			items := []any{baselineFixtureItem(f.a, "JobAvailable")}
 			if n == 2 {
-				items = []any{baselineItem(f.a, "JobAssigned"), baselineItem(f.a, "JobCompleted"), baselineItem(f.a, "JobStarted")}
+				items = []any{baselineFixtureItem(f.a, "JobAssigned"), baselineFixtureItem(f.a, "JobCompleted"), baselineFixtureItem(f.a, "JobStarted")}
 			}
 			if change != nil {
 				items = change(stage+"-items", items).([]any)
@@ -89,8 +103,8 @@ func newBaselineFixture(t *testing.T, change func(string, any) any) *baselineFix
 			body = map[string]any{"messageId": 8 + n, "messageType": "RunnerScaleSetJobMessages", "body": string(data), "statistics": scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: 1}}
 		case strings.HasPrefix(r.URL.Path, "/queue/") && r.Method == "DELETE":
 			f.acks.Add(1)
-			w.WriteHeader(204)
-			return
+			stage = "ack"
+			body = baselineReply{status: 204}
 		case strings.HasSuffix(r.URL.Path, "/acquirejobs") && r.Method == "POST":
 			f.acquires.Add(1)
 			stage = "acquire"
@@ -100,6 +114,7 @@ func newBaselineFixture(t *testing.T, change func(string, any) any) *baselineFix
 				t.Error("wrong verification authority")
 			}
 			stage = "source"
+			f.sources.Add(1)
 			body = observationRun(f.a)
 		default:
 			f.forbidden.Add(1)
@@ -108,6 +123,20 @@ func newBaselineFixture(t *testing.T, change func(string, any) any) *baselineFix
 		}
 		if change != nil {
 			body = change(stage, body)
+		}
+		if reply, ok := body.(baselineReply); ok {
+			if reply.lost {
+				conn, _, err := w.(http.Hijacker).Hijack()
+				if err == nil {
+					_ = conn.Close()
+				}
+				return
+			}
+			w.WriteHeader(reply.status)
+			if reply.body == nil {
+				return
+			}
+			body = reply.body
 		}
 		if raw, ok := body.(json.RawMessage); ok {
 			_, _ = w.Write(raw)
@@ -177,7 +206,7 @@ func TestBaselinePinnedSDKAdmission(t *testing.T) {
 					return append(body.([]any), map[string]any{"messageType": "FutureJob", "runnerRequestId": 99})
 				}
 				if stage == "poll1-items" && name == "started-before-acquire" {
-					return append(body.([]any), baselineItem(approval(), "JobStarted"))
+					return append(body.([]any), baselineFixtureItem(approval(), "JobStarted"))
 				}
 				if stage == "acquire" && name == "wrong-acquire-count" {
 					return map[string]any{"count": 2, "value": []int64{42}}
