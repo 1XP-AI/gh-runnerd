@@ -5,13 +5,17 @@ package main
 import (
 	"context"
 	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
 )
 
 func TestBlockedCredentialPipeStopsAtDeadline(t *testing.T) {
-	r, w := io.Pipe()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer r.Close()
 	defer w.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)

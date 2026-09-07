@@ -81,15 +81,25 @@ func run(args []string, in io.Reader, out io.Writer) (code int) {
 		return reject()
 	}
 	defer j.Close()
-	data, err := io.ReadAll(io.LimitReader(in, 16385))
-	if err != nil || len(data) > 16384 {
+	closable, ok := in.(io.ReadCloser)
+	if !ok {
 		return reject()
 	}
+	inputDeadline := time.Now().Add(30 * time.Second)
+	if a.ExpiresAt.Before(inputDeadline) {
+		inputDeadline = a.ExpiresAt
+	}
+	inputContext, cancelInput := context.WithDeadline(context.Background(), inputDeadline)
+	data, err := readCredentialInput(inputContext, closable)
+	cancelInput()
+	if err != nil {
+		return reject()
+	}
+	defer clear(data) // Best effort; Go/SDK strings and memory retain copies.
 	var credentials livecanary.Credentials
 	if livecanary.DecodeStrict(data, &credentials) != nil {
 		return reject()
 	}
-	clear(data) // Best effort only; Go/SDK strings and process memory retain copies.
 	api, err := livecanary.NewSDKAPI(a, credentials)
 	if err != nil {
 		return reject()
