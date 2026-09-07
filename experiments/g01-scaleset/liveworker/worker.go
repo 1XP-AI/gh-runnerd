@@ -33,6 +33,7 @@ type Approval struct {
 }
 
 type Event struct {
+	Paired       *pairedEvent    `json:"paired,omitempty"`
 	Authority    *phaseAuthority `json:"authority,omitempty"`
 	Status       string          `json:"status,omitempty"`
 	Sequence     int             `json:"sequence"`
@@ -86,6 +87,7 @@ type Driver struct {
 type state struct {
 	id, envDigest, labelsDigest               string
 	created, startAttempt, uncertain, deleted bool
+	paired                                    bool
 }
 
 func replay(events []Event) state {
@@ -126,6 +128,22 @@ func replay(events []Event) state {
 		}
 	}
 	s.uncertain = s.uncertain || pending != ""
+	var paired pairedState
+	for _, e := range events {
+		if !paired.step(e) {
+			s.uncertain = true
+			break
+		}
+	}
+	if paired.binding != nil {
+		s.paired = true
+		s.id, s.created = paired.knownID, paired.createInput != nil
+		s.startAttempt, s.deleted = paired.startInput != nil, paired.deleted != nil
+		s.uncertain = s.uncertain || paired.uncertain || paired.pending != ""
+		if paired.createInput != nil {
+			s.envDigest, s.labelsDigest = paired.createInput.EnvDigest, paired.createInput.LabelsDigest
+		}
+	}
 	return s
 }
 func (d *Driver) record(e Event) error {
@@ -182,6 +200,9 @@ func (d *Driver) Run(ctx context.Context, phase, jit string) error {
 	}
 	defer release()
 	s := replay(d.Journal.Events())
+	if s.paired && phase != "inspect" {
+		return ErrUncertain
+	}
 	if phase != "inspect" && (s.uncertain || s.deleted) {
 		return ErrUncertain
 	}

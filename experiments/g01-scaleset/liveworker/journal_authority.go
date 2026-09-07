@@ -60,11 +60,23 @@ func (j *FileJournal) authorize(a Approval) (func(), error) {
 	if !j.life.TryLock() {
 		return nil, ErrState
 	}
-	if j.closed || !j.claim.matches(j) || !j.ownsCurrentJournal() || a.Validate(time.Now()) != nil || j.ownership != ownershipDigest(a) || j.authority.Digest != approvalDigest(a) {
+	if j.current(a) != nil {
 		j.life.Unlock()
 		return nil, ErrState
 	}
 	return j.life.Unlock, nil
+}
+
+// current rechecks a held execution lease without reacquiring life. Result
+// recording after a known effect remains possible even after context expiry.
+func (j *FileJournal) current(a Approval) error {
+	j.mu.Lock()
+	poisoned, authority := j.poisoned, j.authority.Digest
+	j.mu.Unlock()
+	if j.closed || poisoned || !j.claim.matches(j) || !j.ownsCurrentJournal() || a.Validate(time.Now()) != nil || j.ownership != ownershipDigest(a) || authority != approvalDigest(a) {
+		return ErrState
+	}
+	return nil
 }
 
 func (j *FileJournal) ownsCurrentJournal() bool {

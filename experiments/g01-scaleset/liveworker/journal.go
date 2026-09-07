@@ -30,6 +30,11 @@ type FileJournal struct {
 	file          *os.File
 	events        []Event
 	mu            sync.Mutex
+	paired        pairedState
+	bytes         int64
+	poisoned      bool
+	// Private fault injection preserves the real file write/fsync boundary.
+	recordSync func(*os.File) error
 }
 
 func privateFile(info os.FileInfo, mode os.FileMode) bool {
@@ -175,7 +180,7 @@ func openJournalAtAdmission(directory string, a Approval, admissionDirectory str
 	if a.Validate(time.Now()) != nil {
 		return nil, ErrState
 	}
-	j := &FileJournal{file: f, root: root, directory: directory, directoryInfo: directoryInfo, fileInfo: info, ownership: ownershipDigest(a)}
+	j := &FileJournal{file: f, root: root, directory: directory, directoryInfo: directoryInfo, fileInfo: info, ownership: ownershipDigest(a), bytes: info.Size()}
 	incoming := authorityFor(a)
 	if info.Size() == 0 {
 		j.authority = incoming
@@ -203,7 +208,7 @@ func openJournalAtAdmission(directory string, a Approval, admissionDirectory str
 				return nil, ErrState
 			}
 			var e Event
-			if DecodeStrict(line, &e) != nil || e.Sequence != len(j.events)+1 || !validEvent(e) {
+			if DecodeStrict(line, &e) != nil || e.Sequence != len(j.events)+1 || (e.Paired != nil && len(line) > maxPairRecord) || !validEvent(e) || !j.paired.step(e) {
 				return nil, ErrState
 			}
 			if e.Kind == "authority" {
@@ -240,12 +245,19 @@ func openJournalAtAdmission(directory string, a Approval, admissionDirectory str
 	if err != nil {
 		return nil, err
 	}
+	if j.paired.binding != nil && j.paired.binding.Worker != j.pairedIdentity() {
+		_ = j.claim.close()
+		return nil, ErrState
+	}
 	rootKept = true
 	ok = true
 	return j, nil
 }
 
 func validEvent(e Event) bool {
+	if e.Paired != nil || e.Kind == "paired" {
+		return validPairedShape(e)
+	}
 	switch e.Kind {
 	case "authority":
 		return e.Authority != nil
@@ -263,29 +275,91 @@ func (j *FileJournal) write(e any) error {
 		return ErrState
 	}
 	data = append(data, '\n')
-	n, err := j.file.Write(data)
-	if err != nil || n != len(data) || j.file.Sync() != nil {
+	if j.poisoned || j.bytes+int64(len(data)) > maxJournal {
 		return ErrState
 	}
+	info, err := j.file.Stat()
+	if err != nil || info.Size() != j.bytes {
+		j.poisoned = true
+		return ErrState
+	}
+	n, err := j.file.Write(data)
+	if err != nil || n != len(data) {
+		j.poisoned = true
+		return ErrState
+	}
+	syncFile := j.recordSync
+	if syncFile == nil {
+		syncFile = func(f *os.File) error { return f.Sync() }
+	}
+	if syncFile(j.file) != nil {
+		j.poisoned = true
+		return ErrState
+	}
+	j.bytes += int64(len(data))
 	return nil
 }
 func (j *FileJournal) Append(e Event) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	if !validEvent(e) {
-		return ErrState
-	}
+	_, err := j.appendStored(e)
+	return err
+}
+
+// appendStored works during pre-claim renewal too. Only appendRecord needs a
+// fully initialized claim to produce a domain-bound public receipt.
+func (j *FileJournal) appendStored(e Event) (Event, error) {
+	e = cloneEvent(e)
 	e.Sequence = len(j.events) + 1
+	next := j.paired
+	if !validEvent(e) || !next.step(e) {
+		return Event{}, ErrState
+	}
+	if e.Paired != nil && (j.claim == nil || next.binding == nil || next.binding.Worker != j.pairedIdentity()) {
+		return Event{}, ErrState
+	}
 	if err := j.write(e); err != nil {
-		return err
+		return Event{}, err
 	}
 	j.events = append(j.events, e)
-	return nil
+	j.paired = next
+	return cloneEvent(e), nil
+}
+
+func (j *FileJournal) appendRecord(e Event) (RecordRef, error) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.claim == nil {
+		return RecordRef{}, ErrState
+	}
+	assigned, err := j.appendStored(e)
+	if err != nil {
+		return RecordRef{}, err
+	}
+	return workerEventRef(j.pairedIdentity(), assigned), nil
+}
+
+func (j *FileJournal) hasRoom(required int64) bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	info, err := j.file.Stat()
+	return err == nil && !j.poisoned && info.Size() == j.bytes && required >= 0 && j.bytes+required <= maxJournal
+}
+
+func (j *FileJournal) pairState() pairedState {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	// Internal callers only read this snapshot. Exported receipts are cloned.
+	return j.paired
 }
 func (j *FileJournal) Events() []Event {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	return append([]Event(nil), j.events...)
+	events := make([]Event, len(j.events))
+	for i, e := range j.events {
+		events[i] = cloneEvent(e)
+	}
+	return events
 }
 func (j *FileJournal) Close() error {
 	j.life.Lock()
