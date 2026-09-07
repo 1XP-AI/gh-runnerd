@@ -505,3 +505,23 @@ func TestBrokerControllerClaimReadUsesInitializationLease(t *testing.T) {
 		t.Fatal("empty unchanged inventory refused after lease released")
 	}
 }
+
+func TestBrokerLockReplacementRefusesOnReopen(t *testing.T) {
+	a, c, api, f, root := newBrokerFixture(t)
+	if _, e := brokerExecute(context.Background(), a, brokerInput{PEM: string(c.PEM)}, root, api, nil); e != nil {
+		t.Fatal("initial discovery")
+	}
+	lock := filepath.Join(f.admissionRoot, "broker-admission.lock")
+	if os.Rename(lock, lock+"-retained") != nil || os.WriteFile(lock, nil, 0600) != nil {
+		t.Fatal("owned replacement fixture")
+	}
+	// An unused slot must not rebind the replacement serialization identity.
+	a.Mode = "controller"
+	a.Phase = "inspect"
+	f.root = filepath.Join(filepath.Dir(root), "inspect")
+	p := brokerTestPlan(t, &a, filepath.Dir(root), func(context.Context, []byte, string) error { return nil })
+	before := len(f.calls)
+	if _, e := brokerExecute(context.Background(), a, brokerInput{PEM: string(c.PEM)}, f.root, api, p); e == nil || len(f.calls) != before || f.tokenCalls != 1 {
+		t.Fatal("replacement lock rebound ledger on reopen")
+	}
+}

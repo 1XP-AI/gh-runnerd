@@ -92,6 +92,17 @@ func (p *brokerControllerPlan) check() error {
 // Its lock is released before the child starts; the broker has a distinct lock.
 // This detects present conflicts, not hostile same-UID races after release.
 func (p *brokerControllerPlan) compatibleControllerClaim(root *os.Root) error {
+	// Share the controller/worker short initialization lease before even opening
+	// their claim. Never contend for a newly created, not-yet-locked empty claim.
+	directory, e := root.Open(".")
+	if e != nil {
+		return errBroker
+	}
+	defer directory.Close()
+	if syscall.Flock(int(directory.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+		return errBroker
+	}
+
 	binding, e := p.binding()
 	if e != nil {
 		return errBroker
