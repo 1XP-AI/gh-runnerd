@@ -2,7 +2,9 @@ package enrollment
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -96,8 +98,12 @@ func TestManualInheritedInputChild(t *testing.T) {
 	if fixture[0] == "manual" {
 		p := driverProposal()
 		p.Organizations[0].InstallationID, p.Organizations[1].InstallationID = 201, 202
-		result, e := VerifyManual(ctx, p, os.Getenv("G02_INPUT_JOURNAL"), 71, os.Stdin, &driverFake{fakeAPI: validAPI()})
+		api := &manualIdentityAPI{driverFake: &driverFake{fakeAPI: validAPI()}}
+		result, e := VerifyManual(ctx, p, os.Getenv("G02_INPUT_JOURNAL"), 71, os.Stdin, api)
 		err = e
+		if !wantSuccess && api.identityCalls != 0 {
+			t.Fatal("incomplete input reached credential authentication")
+		}
 		if wantSuccess && (!result.CredentialsNotPersisted || result.VerifiedOrganizations != 2) {
 			t.Fatal("successful inherited input did not complete verification")
 		}
@@ -112,4 +118,42 @@ func TestManualInheritedInputChild(t *testing.T) {
 		t.Fatal("input returned without honoring the requested cancellation")
 	}
 	fmt.Println("inherited-input-ok")
+}
+
+type failedPrivateRead struct{}
+
+func (failedPrivateRead) Read(b []byte) (int, error) {
+	return copy(b, "synthetic-private-prefix"), errors.New("synthetic read failure")
+}
+func (failedPrivateRead) Close() error { return nil }
+
+func TestPrivateInputPreservesBudgetAndRegularFile(t *testing.T) {
+	for _, n := range []int{32768, 32769} {
+		data, err := readPrivateInput(context.Background(), io.NopCloser(strings.NewReader(strings.Repeat("x", n))), 32768)
+		if n == 32768 && (err != nil || len(data) != n) {
+			t.Fatal("exact bounded input refused")
+		}
+		if n == 32769 && (err == nil || len(data) != 0) {
+			t.Fatal("oversized input returned bytes")
+		}
+	}
+	data, err := readPrivateInput(context.Background(), failedPrivateRead{}, 32768)
+	if err == nil || len(data) != 0 {
+		t.Fatal("failed input exposed a partial prefix")
+	}
+	f, err := os.CreateTemp(t.TempDir(), "private-input")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := io.WriteString(f, "synthetic-private-input"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Seek(0, 0); err != nil {
+		t.Fatal(err)
+	}
+	data, err = readPrivateInput(context.Background(), f, 32768)
+	if err != nil || string(data) != "synthetic-private-input" {
+		t.Fatal("bounded regular input refused")
+	}
 }
