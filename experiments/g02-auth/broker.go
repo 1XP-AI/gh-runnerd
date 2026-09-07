@@ -97,7 +97,7 @@ func brokerExecute(parent context.Context, a BrokerApproval, input brokerInput, 
 		return BrokerResult{}, errBroker
 	}
 	install, err := api.github.OrganizationInstallation(ctx, cred, a.Organization)
-	if err != nil || install.ID != a.InstallationID || install.AppID != identity.ID || install.AccountID != a.OrganizationID || install.TargetID != a.OrganizationID || !strings.EqualFold(install.Login, a.Organization) || install.AccountType != "Organization" || install.TargetType != "Organization" || !install.SuspensionKnown || install.Suspended || !minimalPermissions(install.Permissions) {
+	if err != nil || install.ID != a.InstallationID || install.AppID != identity.ID || install.AccountID != a.OrganizationID || install.TargetID != a.OrganizationID || install.Login != a.Organization || install.AccountType != "Organization" || install.TargetType != "Organization" || !install.SuspensionKnown || install.Suspended || !minimalPermissions(install.Permissions) {
 		return BrokerResult{}, errBroker
 	}
 	if j.append("token_request_started", nil) != nil {

@@ -3,6 +3,7 @@ package enrollment
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"io"
 	"net"
@@ -56,6 +57,12 @@ func newBrokerAPI(now func() time.Time, fixture http.RoundTripper) *brokerAPI {
 	}
 	if fixture == nil {
 		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.Protocols = new(http.Protocols)
+		transport.Protocols.SetHTTP1(true)
+		if transport.TLSClientConfig == nil {
+			transport.TLSClientConfig = new(tls.Config)
+		}
+		transport.TLSClientConfig.NextProtos = []string{"http/1.1"}
 		transport.Proxy = nil
 		transport.DisableCompression = true
 		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {

@@ -29,16 +29,19 @@ func TestBrokerHTTPDebugDoesNotExposeCredentials(t *testing.T) {
 		server.EnableHTTP2 = true
 		server.StartTLS()
 		defer server.Close()
+		original := http.DefaultTransport
+		inherited := original.(*http.Transport).Clone()
+		inherited.TLSClientConfig = server.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
+		inherited.TLSClientConfig.NextProtos = []string{"h2", "http/1.1"}
+		http.DefaultTransport = inherited
+		defer func() { http.DefaultTransport = original }()
+		defer inherited.CloseIdleConnections()
 		api := newBrokerAPI(time.Now, nil)
 		transport := api.client.Transport.(brokerTransport).inner.(*http.Transport)
 		// Configure only this constructor's private transport for its own TLS
-		// fixture. Preserve its production ALPN/protocol policy.
-		tls := server.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
-		if transport.TLSClientConfig != nil {
-			tls.NextProtos = append([]string(nil), transport.TLSClientConfig.NextProtos...)
-		}
-		tls.ServerName = server.Certificate().DNSNames[0]
-		transport.TLSClientConfig = tls
+		// fixture. Preserve the production policy, including inherited h2 ALPN.
+		transport.TLSClientConfig.RootCAs = server.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs
+		transport.TLSClientConfig.ServerName = server.Certificate().DNSNames[0]
 		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 			if address != "api.github.com:443" {
 				return nil, errBroker

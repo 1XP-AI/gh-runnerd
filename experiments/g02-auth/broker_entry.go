@@ -90,16 +90,7 @@ func readBrokerInput(parent context.Context, input *os.File) (brokerInput, error
 	}
 	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
-	done := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = input.Close()
-		case <-done:
-		}
-	}()
-	data, err := io.ReadAll(io.LimitReader(input, 65537))
-	close(done)
+	data, err := readPrivateInput(ctx, input, 65536)
 	defer clear(data)
 	var result brokerInput
 	if err != nil || len(data) > 65536 || ctx.Err() != nil || decodeBrokerJSON(data, &result, true) != nil || len(result.PEM) > 32768 || len(result.VerificationToken) > 1024 {

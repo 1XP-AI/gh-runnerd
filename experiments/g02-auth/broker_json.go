@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"strings"
+	"unicode"
 )
 
 func decodeBrokerJSON(data []byte, target any, strict bool) error {
@@ -44,7 +46,11 @@ func uniqueBrokerJSON(d *json.Decoder, depth int) bool {
 				return false
 			}
 			key, ok := token.(string)
-			if !ok || seen[key] || !uniqueBrokerJSON(d, depth+1) {
+			if !ok {
+				return false
+			}
+			key = foldedBrokerName(key)
+			if seen[key] || !uniqueBrokerJSON(d, depth+1) {
 				return false
 			}
 			seen[key] = true
@@ -62,4 +68,21 @@ func uniqueBrokerJSON(d *json.Decoder, depth int) bool {
 	default:
 		return false
 	}
+}
+
+// Match encoding/json's Unicode simple-fold field equivalence. These bounded
+// decoders serve fixed authority/API schemas, not arbitrary case-distinct maps.
+func foldedBrokerName(input string) string {
+	var result strings.Builder
+	result.Grow(len(input))
+	for _, r := range input {
+		minimum := r
+		for next := unicode.SimpleFold(r); next != r; next = unicode.SimpleFold(next) {
+			if next < minimum {
+				minimum = next
+			}
+		}
+		result.WriteRune(minimum)
+	}
+	return result.String()
 }
