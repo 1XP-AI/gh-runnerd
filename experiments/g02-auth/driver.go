@@ -384,17 +384,7 @@ func VerifyManual(parent context.Context, p Proposal, path string, appID int64, 
 	defer j.close()
 	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
-	// Closing the supplied private input unblocks a pipe on cancellation.
-	readDone := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = input.Close()
-		case <-readDone:
-		}
-	}()
-	data, err := io.ReadAll(io.LimitReader(input, 32*1024+1))
-	close(readDone)
+	data, err := readPrivateInput(ctx, input, 32*1024)
 	defer clear(data)
 	if err != nil || len(data) > 32*1024 || ctx.Err() != nil {
 		return DriverSummary{}, errDriver

@@ -1,0 +1,11 @@
+# G02 inherited manual input correction
+
+Issue #30's independent audit reproduced a merged-code defect in `VerifyManual`: a private named FIFO inherited as fd0 could remain blocked after its input context expired or was canceled. Closing the original blocking `os.Stdin` did not interrupt that read. An in-process `os.Pipe` test had missed this boundary.
+
+Red commit `d21810f` calls the actual manual verification entry with a mode0600 inherited blocking FIFO, freshly generated synthetic RSA input and an in-memory identity API. Deadline and cancellation cases fail their independent two-second subprocess guard even though the input context ends after150ms. Immediate and delayed EOF are positive controls. No real credentials or GitHub request are involved.
+
+The input helper now prepares a close-on-exec, nonblocking duplicate before attaching it to Go's poller. Cancellation closes the pollable duplicate; short read-deadline probes retry within the original deadline so Darwin's missing delayed-FIFO EOF notification does not stall successful input. Probe timeouts never count as EOF. The helper checks the32KiB budget and discards partial bytes on errors. `VerifyManual` retains ownership and closure of original input, journal locking, authenticated identity checks and its30-second maximum context. The CLI's existing input ownership/permission checks remain in place.
+
+Protected regular-file input remains supported with byte limits and context checks. This does not promise cancellation of arbitrary filesystem stalls, or of arbitrary custom readers that do not cooperate with Close. No change to App creation, installation authority or credential storage is included.
+
+Fresh inherited-FIFO tests passed three race repetitions after the fix, covering success, delayed EOF, deadline and cancellation. Failure cases assert no authentication call occurs. Exact budget, oversize, read-error prefix refusal and bounded regular-file positive controls passed. Full plain `make check` passed with both offline modules and reviewed tagged G01 command suites, formatting, build, vet, root unit/race, dependency/license and configured vulnerability checks. Fuzz was explicitly skipped because no targets exist. Independent review and exact-head external Codex review are required before integration; no live verification was performed.

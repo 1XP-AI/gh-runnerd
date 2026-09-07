@@ -17,11 +17,19 @@ Use Luna only after the contract and dependencies are settled. Escalate discover
 2. In the implementation task, create **one active goal** from the issue's Goal statement. Do not invent a token budget. Record issue URL and goal status in that task.
 3. Create a dedicated branch/worktree. Keep one issue's behavior in one PR; split only if the issue's acceptance contract requires it.
 4. Follow red -> green -> refactor, with meaningful failure evidence before the fix and relevant automated checks afterward.
-5. Ask the assigned independent reviewer to check invariants and failure cases. Record reviewer/model and outcomes in the PR.
-6. Move Project status to In review. Merge only after required checks/review and the issue's existing authorization/policy permits it.
+5. Ask the assigned independent reviewer to check invariants and failure cases. Record reviewer/model and outcomes in the PR. This internal review is separate from the GitHub Codex review.
+6. Move Project status to In review. Wait for GitHub Codex to finish reviewing the exact current PR head. Use the configured `codex-review` skill to read both inline reviews and issue-comment findings, including stale/outdated findings. Reproduce each finding; fix it or provide a specific evidence-based rebuttal. After pushing fixes, request `@codex review` and wait for the new result. Merge only when required CI and both review paths are complete, no actionable finding remains unresolved, and the issue's existing authorization permits it. Check the current head immediately before merge and constrain the merge to that SHA.
 7. Close the issue and mark its goal complete only when all acceptance criteria and evidence are satisfied. If the goal includes merge, a merely opened PR is not completion.
 
 Keep dependent issues blocked until evidence gates pass. A blocked issue needs a concrete blocker and an independently useful next step if one exists. Follow the host's actual goal-tool blocked threshold; do not mark a goal blocked after a single inconvenience. GitHub Project Goal text is a durable work specification, not an active Codex goal or an automatic scheduler.
+
+If review arrives after a PR was merged, audit the finding against current `main`
+and use a fresh issue-linked fix PR. Keep the original review thread open until
+the correction or rebuttal has concrete evidence; link the reviewed fix and its
+validation before resolving it. A moved anchor, stale original commit or an
+untimestamped thumbs-up does not establish that a finding was addressed. Record
+review/merge timing when auditing a missed review instead of implying the review
+was complete at merge time.
 
 ## Reusable dispatch text
 
