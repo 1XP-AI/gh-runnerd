@@ -71,9 +71,10 @@ import (
 )
 
 type outcome struct {
-	Status  int  `json:"status"`
-	Matches bool `json:"canary_matches"`
-	SameUID bool `json:"same_uid"`
+	Attempted bool `json:"attempted"`
+	Status    int  `json:"status"`
+	Matches   bool `json:"canary_matches"`
+	SameUID   bool `json:"same_uid"`
 }
 type report struct {
 	Profile              string  `json:"profile"`
@@ -109,7 +110,7 @@ func read(root, expected string) outcome {
 		stat, ok := info.Sys().(*syscall.Stat_t)
 		sameUID = ok && stat.Uid == uint32(os.Geteuid())
 	}
-	return outcome{Status: int(status), Matches: status == 0 && hex.EncodeToString(digest[:]) == expected, SameUID: sameUID}
+	return outcome{Attempted: true, Status: int(status), Matches: status == 0 && hex.EncodeToString(digest[:]) == expected, SameUID: sameUID}
 }
 
 type ownerRecord struct {
@@ -285,7 +286,8 @@ func run(ctx context.Context) (result report, err error) {
 		return result, statusError("capture created Keychain path", status)
 	}
 	createdPath := C.GoString(&captured[0])
-	if filepath.Dir(createdPath) != root {
+	createdParent, parentError := os.Stat(filepath.Dir(createdPath))
+	if parentError != nil || !os.SameFile(rootInfo, createdParent) {
 		return result, errors.New("created Keychain escaped owned directory")
 	}
 	marker, _ := json.Marshal(ownerRecord{Version: "gh-runnerd-g02-synthetic-v1", Keychain: filepath.Base(createdPath)})
