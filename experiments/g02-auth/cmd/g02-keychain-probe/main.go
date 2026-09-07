@@ -34,6 +34,7 @@ static OSStatus create_canary(const char *path, const char *password, unsigned i
  s=SecItemAdd(query,NULL);
  CFRelease(query);CFRelease(value);CFRelease(access);return s;
 }
+static OSStatus captured_path(SecKeychainRef keychain, char *path) {UInt32 length=4096;return SecKeychainGetPath(keychain,&length,path);}
 static OSStatus read_canary(const char *path, unsigned char *bytes) {
  SecKeychainRef keychain=NULL; OSStatus s=SecKeychainOpen(path,&keychain);if(s)return s;
  const void *one[]={keychain};CFArrayRef list=CFArrayCreate(NULL,one,1,&kCFTypeArrayCallBacks);
@@ -92,7 +93,11 @@ func statusError(phase string, status C.OSStatus) error {
 }
 func read(root, expected string) outcome {
 	var bytes [32]byte
-	path, free := cstring(filepath.Join(root, "synthetic.keychain"))
+	name, valid := ownedKeychain(root)
+	if !valid {
+		return outcome{Status: -1}
+	}
+	path, free := cstring(filepath.Join(root, name))
 	defer free()
 	status := C.read_canary(path, (*C.uchar)(unsafe.Pointer(&bytes[0])))
 	digest := sha256.Sum256(bytes[:])
@@ -106,31 +111,43 @@ func read(root, expected string) outcome {
 	return outcome{Status: int(status), Matches: status == 0 && hex.EncodeToString(digest[:]) == expected, SameUID: sameUID}
 }
 
-func validRoot(root string) bool {
+type ownerRecord struct {
+	Version  string `json:"version"`
+	Keychain string `json:"keychain"`
+}
+
+func ownedKeychain(root string) (string, bool) {
 	if !filepath.IsAbs(root) || !strings.HasPrefix(filepath.Base(root), "gh-runnerd-g02-") {
-		return false
+		return "", false
 	}
 	info, err := os.Lstat(root)
 	if err != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
-		return false
+		return "", false
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || stat.Uid != uint32(os.Geteuid()) {
-		return false
+		return "", false
 	}
-	for _, name := range []string{"owned", "synthetic.keychain"} {
+	ownedFile := func(name string) bool {
 		file, err := os.Lstat(filepath.Join(root, name))
 		if err != nil || !file.Mode().IsRegular() || file.Mode().Perm()&0077 != 0 {
 			return false
 		}
 		owner, ok := file.Sys().(*syscall.Stat_t)
-		if !ok || owner.Uid != uint32(os.Geteuid()) {
-			return false
-		}
+		return ok && owner.Uid == uint32(os.Geteuid())
+	}
+	if !ownedFile("owned") {
+		return "", false
 	}
 	data, err := os.ReadFile(filepath.Join(root, "owned"))
-	return err == nil && string(data) == "gh-runnerd-g02-synthetic-v1"
+	var record ownerRecord
+	if err != nil || json.Unmarshal(data, &record) != nil || record.Version != "gh-runnerd-g02-synthetic-v1" || record.Keychain == "" || record.Keychain == "." || filepath.Base(record.Keychain) != record.Keychain || !ownedFile(record.Keychain) {
+		return "", false
+	}
+	return record.Keychain, true
 }
+func validRoot(root string) bool { _, valid := ownedKeychain(root); return valid }
+
 func escape(s string) string {
 	var b strings.Builder
 	_ = xml.EscapeText(&b, []byte(s))
@@ -230,9 +247,6 @@ func run(ctx context.Context) (result report, err error) {
 			err = errors.New("probe cleanup or preference invariant failed")
 		}
 	}()
-	if os.WriteFile(filepath.Join(root, "owned"), []byte("gh-runnerd-g02-synthetic-v1"), 0600) != nil {
-		return result, errors.New("probe ownership marker failed")
-	}
 	passwordBytes := make([]byte, 32)
 	if _, err = rand.Read(passwordBytes); err != nil {
 		return result, errors.New("probe randomness failed")
@@ -253,6 +267,18 @@ func run(ctx context.Context) (result report, err error) {
 	clear(secret[:])
 	if status != 0 {
 		return result, statusError("synthetic keychain creation", status)
+	}
+	var captured [4096]C.char
+	if status := C.captured_path(keychain, &captured[0]); status != 0 {
+		return result, statusError("capture created Keychain path", status)
+	}
+	createdPath := C.GoString(&captured[0])
+	if filepath.Dir(createdPath) != root {
+		return result, errors.New("created Keychain escaped owned directory")
+	}
+	marker, _ := json.Marshal(ownerRecord{Version: "gh-runnerd-g02-synthetic-v1", Keychain: filepath.Base(createdPath)})
+	if os.WriteFile(filepath.Join(root, "owned"), marker, 0600) != nil || !validRoot(root) {
+		return result, errors.New("probe ownership capture failed")
 	}
 	if C.unchanged(list, def) == 0 {
 		return result, errors.New("private keychain changed preferences")
