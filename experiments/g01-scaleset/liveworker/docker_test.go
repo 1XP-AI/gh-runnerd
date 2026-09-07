@@ -17,12 +17,13 @@ import (
 )
 
 type dockerFixture struct {
-	driver   *Driver
-	runtime  *fakeRuntime
-	fault    string
-	requests atomic.Int64
-	approval Approval
-	socket   string
+	driver          *Driver
+	runtime         *fakeRuntime
+	fault           string
+	requests        atomic.Int64
+	approval        Approval
+	socket          string
+	inspectResponse atomic.Pointer[inspectFixtureResponse]
 }
 
 type hookJournal struct {
@@ -261,6 +262,11 @@ func unixFixture(t *testing.T) *dockerFixture {
 				body = map[string]any{"Id": containerID, "extra": strings.Repeat("synthetic-private-response", responseLimit/8)}
 			}
 		case strings.HasSuffix(r.URL.Path, "/json") && r.Method == http.MethodGet:
+			if response := f.inspectResponse.Load(); response != nil {
+				w.WriteHeader(response.status)
+				_, _ = w.Write(response.body)
+				return
+			}
 			body = f.runtime.container
 			if f.fault == "absent-container" {
 				status = http.StatusNotFound
