@@ -114,7 +114,6 @@ func (s *pairedBaselineScope) sampleRounds(first, last int) error {
 		if err != nil {
 			return err
 		}
-		s.lastRound = s.cadence.now()
 		request, cancel := context.WithTimeout(s.ctx, operationTimeout)
 		callErr := s.sample(request, f, state)
 		cancel()
@@ -124,6 +123,7 @@ func (s *pairedBaselineScope) sampleRounds(first, last int) error {
 		if err != nil {
 			return err
 		}
+		s.lastRound = s.cadence.now()
 	}
 	return nil
 }

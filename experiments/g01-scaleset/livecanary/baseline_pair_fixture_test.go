@@ -25,6 +25,8 @@ import (
 const pairFixtureJIT = "c3ludGhldGljLXByaXZhdGUtaml0LWNvbmZpZw=="
 
 type pairedIntegrationFixture struct {
+	githubBefore, dockerBefore                 func(http.ResponseWriter, *http.Request) bool
+	dockerResponse                             func(*http.Request, any) any
 	containerReads                             atomic.Int32
 	c                                          *baselineFixture
 	w                                          *liveworker.Driver
@@ -56,6 +58,9 @@ func newPairedIntegrationFixture(t *testing.T) *pairedIntegrationFixture {
 	f.c.release()
 	f.c.release = nil
 	f.c.extra = func(w http.ResponseWriter, r *http.Request) bool {
+		if f.githubBefore != nil && f.githubBefore(w, r) {
+			return true
+		}
 		var value any
 		switch {
 		case r.Method == "GET" && r.URL.Path == "/orgs/"+a.Organization+"/actions/runners":
@@ -103,6 +108,9 @@ func newPairedIntegrationFixture(t *testing.T) *pairedIntegrationFixture {
 	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		if f.dockerBefore != nil && f.dockerBefore(w, r) {
+			return
+		}
 		var value any
 		switch {
 		case r.Method == "GET" && r.URL.Path == "/version":
@@ -141,6 +149,9 @@ func newPairedIntegrationFixture(t *testing.T) *pairedIntegrationFixture {
 			f.cleanup.Add(1)
 			w.WriteHeader(403)
 			return
+		}
+		if f.dockerResponse != nil {
+			value = f.dockerResponse(r, value)
 		}
 		_ = json.NewEncoder(w).Encode(value)
 	})}

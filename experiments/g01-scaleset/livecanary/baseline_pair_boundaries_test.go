@@ -249,7 +249,12 @@ func TestPairedRosterAndHostStopBeforeSession(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			f := newPairedIntegrationFixture(t)
 			if mode == "host-image" {
-				f.w.Approval.ImageID = "sha256:" + strings.Repeat("b", 64)
+				f.dockerResponse = func(req *http.Request, value any) any {
+					if strings.HasPrefix(req.URL.Path, "/v1.45/images/") {
+						value.(map[string]any)["Id"] = "sha256:" + strings.Repeat("b", 64)
+					}
+					return value
+				}
 			} else {
 				f.remote = func(req *http.Request, value any) any {
 					if req.URL.Path == "/orgs/"+f.c.a.Organization+"/actions/runners" {
