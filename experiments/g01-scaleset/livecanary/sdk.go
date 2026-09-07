@@ -183,23 +183,29 @@ func (a *SDKAPI) Preflight(ctx context.Context, approval Approval) error {
 	return nil
 }
 
+type workflowRun struct {
+	ID             int64      `json:"id"`
+	HeadSHA        string     `json:"head_sha"`
+	Event          string     `json:"event"`
+	Path           string     `json:"path"`
+	RunAttempt     int        `json:"run_attempt"`
+	Repository     repository `json:"repository"`
+	HeadRepository repository `json:"head_repository"`
+}
+
+func matchesApprovedRun(approval Approval, id int64, run workflowRun) bool {
+	return !(run.ID != id || run.HeadSHA != approval.WorkflowSHA || run.Event != "workflow_dispatch" || run.Path != approval.WorkflowPath || run.RunAttempt != 1 || run.Repository.ID != approval.RepositoryID || run.HeadRepository.ID != approval.RepositoryID || !run.Repository.Private || !run.HeadRepository.Private || run.Repository.Fork || run.HeadRepository.Fork)
+}
+
 func (a *SDKAPI) VerifyRun(ctx context.Context, approval Approval, id int64) error {
 	if id <= 0 || id != approval.WorkflowRunID {
 		return ErrApproval
 	}
-	var run struct {
-		ID             int64      `json:"id"`
-		HeadSHA        string     `json:"head_sha"`
-		Event          string     `json:"event"`
-		Path           string     `json:"path"`
-		RunAttempt     int        `json:"run_attempt"`
-		Repository     repository `json:"repository"`
-		HeadRepository repository `json:"head_repository"`
-	}
+	var run workflowRun
 	if a.get(ctx, "/repos/"+approval.Organization+"/"+approval.Repository+"/actions/runs/"+strconv.FormatInt(id, 10), a.credentials.VerificationToken, &run) != nil {
 		return ErrApproval
 	}
-	if run.ID != id || run.HeadSHA != approval.WorkflowSHA || run.Event != "workflow_dispatch" || run.Path != approval.WorkflowPath || run.RunAttempt != 1 || run.Repository.ID != approval.RepositoryID || run.HeadRepository.ID != approval.RepositoryID || !run.Repository.Private || !run.HeadRepository.Private || run.HeadRepository.Fork {
+	if !matchesApprovedRun(approval, id, run) {
 		return ErrApproval
 	}
 	return nil
