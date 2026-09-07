@@ -3,6 +3,7 @@ package livecanary
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -64,7 +65,32 @@ func NewSDKAPI(a Approval, c Credentials) (*SDKAPI, error) {
 	if a.Validate(time.Now()) != nil || c.validate(a, time.Now()) != nil {
 		return nil, ErrApproval
 	}
+	transport := newSDKTransport(a)
+	retry := retryablehttp.NewClient()
+	retry.RetryMax = 0
+	retry.Logger = nil
+	retry.HTTPClient = &http.Client{Transport: withResponseBudget(transport), Timeout: operationTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	options := []scaleset.HTTPOption{scaleset.WithRetryableHTTPClint(retry), scaleset.WithLogger(slog.New(slog.DiscardHandler))}
+	client, err := scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{GitHubConfigURL: "https://github.com/" + a.Organization, PersonalAccessToken: c.InstallationToken}, options...)
+	if err != nil {
+		return nil, ErrApproval
+	}
+	return &SDKAPI{client: client, rest: retry.HTTPClient, baseURL: "https://api.github.com", approval: a, credentials: c, options: options}, nil
+}
+
+// Keep the production transport construction separate so its TLS protocol and
+// destination gates can be exercised against a private local TLS fixture.
+func newSDKTransport(a Approval) *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	// HTTP/2 GODEBUG traces can print Authorization and response data. Pin the
+	// inner credential transport, not just the response wrapper, to HTTP/1.
+	transport.Protocols = new(http.Protocols)
+	transport.Protocols.SetHTTP1(true)
+	// Clone can inherit an already initialized HTTP/2 ALPN advertisement.
+	if transport.TLSClientConfig == nil {
+		transport.TLSClientConfig = new(tls.Config)
+	}
+	transport.TLSClientConfig.NextProtos = []string{"http/1.1"}
 	transport.Proxy = func(req *http.Request) (*url.URL, error) {
 		host := req.URL.Hostname()
 		if req.URL.Scheme != "https" || req.URL.User != nil || (req.URL.Port() != "" && req.URL.Port() != "443") || (host != "api.github.com" && !slices.Contains(a.ActionsHosts, host)) {
@@ -79,16 +105,7 @@ func NewSDKAPI(a Approval, c Credentials) (*SDKAPI, error) {
 		}
 		return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, network, address)
 	}
-	retry := retryablehttp.NewClient()
-	retry.RetryMax = 0
-	retry.Logger = nil
-	retry.HTTPClient = &http.Client{Transport: withResponseBudget(transport), Timeout: operationTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	options := []scaleset.HTTPOption{scaleset.WithRetryableHTTPClint(retry), scaleset.WithLogger(slog.New(slog.DiscardHandler))}
-	client, err := scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{GitHubConfigURL: "https://github.com/" + a.Organization, PersonalAccessToken: c.InstallationToken}, options...)
-	if err != nil {
-		return nil, ErrApproval
-	}
-	return &SDKAPI{client: client, rest: retry.HTTPClient, baseURL: "https://api.github.com", approval: a, credentials: c, options: options}, nil
+	return transport
 }
 
 func (a *SDKAPI) get(ctx context.Context, path, token string, target any) error {
