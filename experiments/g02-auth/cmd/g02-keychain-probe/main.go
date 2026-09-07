@@ -76,14 +76,22 @@ type outcome struct {
 	Matches   bool `json:"canary_matches"`
 	SameUID   bool `json:"same_uid"`
 }
+type ownedFileMetadata struct {
+	Name    string `json:"name"`
+	Mode    uint32 `json:"mode"`
+	Regular bool   `json:"regular"`
+	SameUID bool   `json:"same_uid"`
+}
 type report struct {
-	Profile              string  `json:"profile"`
-	Direct               outcome `json:"direct"`
-	LaunchdUnlocked      outcome `json:"launchd_unlocked"`
-	LaunchdLocked        outcome `json:"launchd_locked"`
-	PreferencesUnchanged bool    `json:"keychain_preferences_unchanged"`
-	Cleanup              bool    `json:"cleanup_complete"`
-	RecoveryID           string  `json:"recovery_id,omitempty"`
+	Profile              string              `json:"profile"`
+	Direct               outcome             `json:"direct"`
+	LaunchdUnlocked      outcome             `json:"launchd_unlocked"`
+	LaunchdLocked        outcome             `json:"launchd_locked"`
+	PreferencesUnchanged bool                `json:"keychain_preferences_unchanged"`
+	Cleanup              bool                `json:"cleanup_complete"`
+	RecoveryID           string              `json:"recovery_id,omitempty"`
+	LogicalKeychain      string              `json:"logical_keychain,omitempty"`
+	OwnedFiles           []ownedFileMetadata `json:"owned_files,omitempty"`
 }
 
 func cstring(s string) (*C.char, func()) {
@@ -290,6 +298,19 @@ func run(ctx context.Context) (result report, err error) {
 	if parentError != nil || !os.SameFile(rootInfo, createdParent) {
 		return result, errors.New("created Keychain escaped owned directory")
 	}
+	result.LogicalKeychain = filepath.Base(createdPath)
+	entries, readError := os.ReadDir(root)
+	if readError != nil {
+		return result, errors.New("owned directory metadata unavailable")
+	}
+	for _, entry := range entries {
+		info, infoError := os.Lstat(filepath.Join(root, entry.Name()))
+		if infoError != nil {
+			return result, errors.New("owned file metadata unavailable")
+		}
+		owner, ok := info.Sys().(*syscall.Stat_t)
+		result.OwnedFiles = append(result.OwnedFiles, ownedFileMetadata{Name: entry.Name(), Mode: uint32(info.Mode().Perm()), Regular: info.Mode().IsRegular(), SameUID: ok && owner.Uid == uint32(os.Geteuid())})
+	}
 	marker, _ := json.Marshal(ownerRecord{Version: "gh-runnerd-g02-synthetic-v1", Keychain: filepath.Base(createdPath)})
 	if os.WriteFile(filepath.Join(root, "owned"), marker, 0600) != nil || !validRoot(root) {
 		return result, errors.New("probe ownership capture failed")
@@ -297,6 +318,8 @@ func run(ctx context.Context) (result report, err error) {
 	if C.unchanged(list, def) == 0 {
 		return result, errors.New("private keychain changed preferences")
 	}
+	result.LogicalKeychain = ""
+	result.OwnedFiles = nil
 	result.Direct = read(root, expected)
 	result.LaunchdUnlocked, err = launch(ctx, root, "unlocked", expected, &servicesGone)
 	if err != nil {
