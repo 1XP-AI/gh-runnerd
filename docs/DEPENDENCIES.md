@@ -2,14 +2,27 @@
 
 Checked 2026-09-07 for the G03 bootstrap. The runtime module intentionally has no third-party Go dependencies yet, so no `go.sum` is needed. Future implementation issues must add every runtime module to the table and keep `make deps` and `make licenses` passing.
 
-## Runtime and toolchain
+## Runtime modules
 
-| Module or component | Version | License | Use and source |
-| --- | --- | --- | --- |
-| `github.com/1XP-AI/gh-runnerd` | local module | MIT | Project code; [repository license](../LICENSE). |
-| Go standard library | `go1.26.8` | BSD-3-Clause | Language/runtime baseline; [official release history](https://go.dev/doc/devel/release). |
+| Module | Version | Replacement | License | Use and source |
+| --- | --- | --- | --- | --- |
+| `github.com/1XP-AI/gh-runnerd` | `local` | `none` | MIT | Project code; [repository license](../LICENSE). |
 
-`go list -m all` is the source of truth for the runtime module graph. `scripts/check-licenses.sh` verifies that every listed module has a row in this inventory and a top-level `LICENSE`, `COPYING`, `NOTICE` or equivalent file. The current graph contains only the local module.
+`go list -m all` is the source of truth for this exact runtime module table.
+`scripts/check-licenses.sh` compares module path, selected version and replacement
+identity, rejecting missing, stale and duplicate rows. Use `local` for the main
+module, the exact selected version for dependencies, and `none` without a
+replacement. A replacement is its Go-reported path, followed by `@version` when
+versioned (for example `example.org/replacement@v1.2.3` or `./local-replacement`).
+The selected source must also have a top-level `LICENSE`, `COPYING`, `NOTICE` or
+equivalent file. This checks the recorded identity and license-file presence;
+human review must still determine the license and its obligations. The current
+runtime graph contains only the local module; nested experiments remain separate.
+
+## Toolchain
+
+Go standard library: `go1.26.8`, BSD-3-Clause, the language/runtime baseline;
+[official release history](https://go.dev/doc/devel/release).
 
 ## Public CI actions
 
