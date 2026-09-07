@@ -19,12 +19,15 @@ import (
 
 // The only dialable address comes from this private loopback fixture. No flag,
 // environment variable or credential can repoint it to a live service.
-func observationFixture(t *testing.T, handler http.HandlerFunc) *SDKAPI {
+func observationFixture(t *testing.T, handler http.HandlerFunc, intercept ...func(http.ResponseWriter, *http.Request) bool) *SDKAPI {
 	t.Helper()
 	a := approval()
 	c := credentials(a)
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if len(intercept) != 0 && intercept[0](w, r) {
+			return
+		}
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/runners/registration-token"):
 			if r.Method != "POST" || r.Header.Get("Authorization") != "Bearer "+c.InstallationToken {

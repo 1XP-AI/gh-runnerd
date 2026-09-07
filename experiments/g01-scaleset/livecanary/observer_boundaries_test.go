@@ -201,7 +201,7 @@ func TestObserveInvalidAuthorityAndInputsNeverReachNetwork(t *testing.T) {
 	for _, fault := range []string{"sdk-id", "sdk-set", "sdk-name", "rest-id", "rest-name", "attempt", "previous", "run-zero", "missing-verifier", "same-verifier", "verifier-newline", "expired-approval", "expired-token", "wrong-app", "cancelled"} {
 		t.Run(fault, func(t *testing.T) {
 			var calls atomic.Int32
-			api := observationFixture(t, func(http.ResponseWriter, *http.Request) { calls.Add(1) })
+			api := observationFixture(t, func(http.ResponseWriter, *http.Request) {}, func(http.ResponseWriter, *http.Request) bool { calls.Add(1); return false })
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			sdkID, setID, name, restID, attempt, previous := sdkRunnerID(8), 7, "fixture-runner", restRunnerID(8), 1, restJobID(0)
@@ -420,5 +420,126 @@ func TestObservationResponseCaptureIsLocalAndRejectsOtherOperations(t *testing.T
 	captureRunnerResponse(req, 200)
 	if _, one := first.result(); one {
 		t.Fatal("multiple target responses accepted as one")
+	}
+}
+
+func TestObserveSDKBootstrapFailureCannotReportRunnerAbsent(t *testing.T) {
+	for _, status := range []int{404, 403, 429, 500} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			var all, targets atomic.Int32
+			api := observationFixture(t, func(http.ResponseWriter, *http.Request) { targets.Add(1) }, func(w http.ResponseWriter, r *http.Request) bool {
+				all.Add(1)
+				if !strings.HasSuffix(r.URL.Path, "/runners/registration-token") {
+					t.Error("bootstrap failure did not stop request sequence")
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte(`{"typeName":"AgentNotFoundException","message":"synthetic-secret-bootstrap"}`))
+				return true
+			})
+			got, err := api.observeSDKRunner(context.Background(), 8, "fixture-runner", 7)
+			if err == nil || got.Response.Outcome != observationUnresolved || got.Response.Status != 0 || targets.Load() != 0 || all.Load() != 1 {
+				t.Fatal("bootstrap outcome became target absence or was retried")
+			}
+			assertObservationSecretSafe(t, got, err)
+		})
+	}
+}
+
+func TestObserveCancellationReachesSDKBootstrapAndRESTDetail(t *testing.T) {
+	for _, mode := range []string{"sdk-bootstrap", "rest-detail"} {
+		t.Run(mode, func(t *testing.T) {
+			entered := make(chan struct{})
+			var later atomic.Int32
+			api := observationFixture(t, func(w http.ResponseWriter, r *http.Request) {
+				if mode == "sdk-bootstrap" {
+					later.Add(1)
+					return
+				}
+				a := approval()
+				if strings.HasSuffix(r.URL.Path, "/runs/5") {
+					_ = json.NewEncoder(w).Encode(observationRun(a))
+					return
+				}
+				if strings.HasSuffix(r.URL.Path, "/attempts/1/jobs") {
+					_ = json.NewEncoder(w).Encode(map[string]any{"total_count": 1, "jobs": []any{observationJob(a)}})
+					return
+				}
+				close(entered)
+				<-r.Context().Done()
+			}, func(w http.ResponseWriter, r *http.Request) bool {
+				if mode == "sdk-bootstrap" {
+					close(entered)
+					<-r.Context().Done()
+					return true
+				}
+				return false
+			})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() {
+				var err error
+				if mode == "sdk-bootstrap" {
+					_, err = api.observeSDKRunner(ctx, 8, "fixture-runner", 7)
+				} else {
+					_, err = api.observeRESTJob(ctx, 1, 0)
+				}
+				done <- err
+			}()
+			select {
+			case <-entered:
+			case <-time.After(time.Second):
+				t.Fatal("observation did not reach barrier")
+			}
+			cancel()
+			select {
+			case err := <-done:
+				if err == nil {
+					t.Fatal("cancelled observation succeeded")
+				}
+			case <-time.After(time.Second):
+				t.Fatal("original context cancellation lost")
+			}
+			if later.Load() != 0 {
+				t.Fatal("SDK continued after cancelled bootstrap")
+			}
+		})
+	}
+}
+
+func TestObserveJobStatusProgressionWithinOneSample(t *testing.T) {
+	for _, from := range []string{"queued", "in_progress", "completed"} {
+		for _, to := range []string{"queued", "in_progress", "completed"} {
+			t.Run(from+"/"+to, func(t *testing.T) {
+				a := approval()
+				api := observationFixture(t, func(w http.ResponseWriter, r *http.Request) {
+					if strings.HasSuffix(r.URL.Path, "/runs/5") {
+						_ = json.NewEncoder(w).Encode(observationRun(a))
+						return
+					}
+					job := observationJob(a)
+					status := to
+					list := strings.HasSuffix(r.URL.Path, "/attempts/1/jobs")
+					if list {
+						status = from
+					}
+					job["status"] = status
+					if status != "completed" {
+						job["conclusion"] = nil
+					}
+					if list {
+						_ = json.NewEncoder(w).Encode(map[string]any{"total_count": 1, "jobs": []any{job}})
+					} else {
+						_ = json.NewEncoder(w).Encode(job)
+					}
+				})
+				rank := map[string]int{"queued": 0, "in_progress": 1, "completed": 2}
+				_, err := api.observeRESTJob(context.Background(), 1, 0)
+				if (err == nil) != (rank[to] >= rank[from]) {
+					t.Fatal("same-sample status regression accepted or forward progress refused")
+				}
+			})
+		}
 	}
 }

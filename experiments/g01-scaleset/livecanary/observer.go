@@ -144,21 +144,21 @@ func (a *SDKAPI) observeRESTJob(ctx context.Context, attempt int, previous restJ
 	}
 	prefix := "/repos/" + a.approval.Organization + "/" + a.approval.Repository + "/actions/"
 	var list struct {
-		Count *int              `json:"total_count"`
-		Jobs  []observedJobWire `json:"jobs"`
+		Count *int               `json:"total_count"`
+		Jobs  *[]observedJobWire `json:"jobs"`
 	}
 	out.Response, err = a.observationGET(ctx, prefix+"runs/"+strconv.FormatInt(a.approval.WorkflowRunID, 10)+"/attempts/1/jobs?per_page=2&page=1", a.credentials.VerificationToken, "rest_attempt_jobs", &list)
 	if err != nil || out.Response.Outcome == observationNotFound {
 		return out, err
 	}
-	if list.Count == nil || *list.Count != len(list.Jobs) || len(list.Jobs) > 1 {
+	if list.Count == nil || list.Jobs == nil || *list.Count != len(*list.Jobs) || len(*list.Jobs) > 1 {
 		return out, ErrRemote
 	}
-	if len(list.Jobs) == 0 {
+	if len(*list.Jobs) == 0 {
 		out.Response.Outcome = observationPending
 		return out, nil
 	}
-	candidate := list.Jobs[0]
+	candidate := (*list.Jobs)[0]
 	if !candidate.valid(a.approval) || (previous != 0 && candidate.ID != previous) {
 		return out, ErrRemote
 	}
@@ -167,7 +167,7 @@ func (a *SDKAPI) observeRESTJob(ctx context.Context, attempt int, previous restJ
 	if err != nil || out.Response.Outcome == observationNotFound {
 		return out, err
 	}
-	if !detail.valid(a.approval) || detail.ID != candidate.ID || !samePositiveAssociation(candidate, detail) {
+	if !detail.valid(a.approval) || detail.ID != candidate.ID || !samePositiveAssociation(candidate, detail) || !jobProgresses(candidate, detail) {
 		return out, ErrRemote
 	}
 	out.ID, out.RunID, out.Attempt, out.HeadSHA = detail.ID, detail.RunID, attempt, detail.HeadSHA
@@ -221,4 +221,24 @@ func samePositiveAssociation(first, second observedJobWire) bool {
 }
 func observationName(name string) bool {
 	return len(name) > 0 && len(name) <= 256 && utf8.ValidString(name) && !strings.ContainsFunc(name, unicode.IsControl)
+}
+
+// One list/detail sample may progress, but cannot forget a terminal outcome or
+// regress to an earlier state. This does not retain history across samples.
+func jobProgresses(first, second observedJobWire) bool {
+	rank := func(status string) int {
+		switch status {
+		case "queued":
+			return 0
+		case "in_progress":
+			return 1
+		case "completed":
+			return 2
+		}
+		return -1
+	}
+	if rank(second.Status) < rank(first.Status) {
+		return false
+	}
+	return first.Status != "completed" || (first.Conclusion != nil && second.Conclusion != nil && *first.Conclusion == *second.Conclusion)
 }
