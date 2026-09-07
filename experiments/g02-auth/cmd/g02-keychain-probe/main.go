@@ -61,6 +61,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -117,6 +118,16 @@ func validRoot(root string) bool {
 	if !ok || stat.Uid != uint32(os.Geteuid()) {
 		return false
 	}
+	for _, name := range []string{"owned", "synthetic.keychain"} {
+		file, err := os.Lstat(filepath.Join(root, name))
+		if err != nil || !file.Mode().IsRegular() || file.Mode().Perm()&0077 != 0 {
+			return false
+		}
+		owner, ok := file.Sys().(*syscall.Stat_t)
+		if !ok || owner.Uid != uint32(os.Geteuid()) {
+			return false
+		}
+	}
 	data, err := os.ReadFile(filepath.Join(root, "owned"))
 	return err == nil && string(data) == "gh-runnerd-g02-synthetic-v1"
 }
@@ -125,7 +136,7 @@ func escape(s string) string {
 	_ = xml.EscapeText(&b, []byte(s))
 	return b.String()
 }
-func launch(root, phase, expected string) (result outcome, resultErr error) {
+func launch(parent context.Context, root, phase, expected string) (result outcome, resultErr error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return outcome{}, errors.New("executable resolution failed")
@@ -139,14 +150,19 @@ func launch(root, phase, expected string) (result outcome, resultErr error) {
 	if os.WriteFile(plist, []byte(body), 0600) != nil {
 		return outcome{}, errors.New("probe plist write failed")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 	cleanup := func() bool {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = exec.CommandContext(ctx, "/bin/launchctl", "bootout", domain+"/"+label).Run()
-		// An absent exact label is the cleanup postcondition. No service inventory is read.
-		return exec.CommandContext(ctx, "/bin/launchctl", "print", domain+"/"+label).Run() != nil
+		// A timeout/permission failure is unknown, not proof of absence. The exact
+		// missing-service status is 113 on this platform; fail closed otherwise.
+		checkCtx, checkCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer checkCancel()
+		err := exec.CommandContext(checkCtx, "/bin/launchctl", "print", domain+"/"+label).Run()
+		var exited *exec.ExitError
+		return checkCtx.Err() == nil && errors.As(err, &exited) && exited.ExitCode() == 113
 	}
 	defer func() {
 		if !cleanup() {
@@ -157,6 +173,9 @@ func launch(root, phase, expected string) (result outcome, resultErr error) {
 		return outcome{}, errors.New("probe bootstrap failed")
 	}
 	for deadline := time.Now().Add(8 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		if parent.Err() != nil {
+			return outcome{}, errors.New("probe canceled")
+		}
 		data, err := os.ReadFile(output)
 		var result outcome
 		if err == nil && json.Unmarshal(data, &result) == nil {
@@ -166,7 +185,7 @@ func launch(root, phase, expected string) (result outcome, resultErr error) {
 	return outcome{}, errors.New("probe result timed out")
 }
 
-func run() (result report, err error) {
+func run(ctx context.Context) (result report, err error) {
 	result.Profile = "synthetic-file-keychain-current-login"
 	if os.Geteuid() == 0 {
 		return result, errors.New("run this probe as the current non-root login user")
@@ -187,6 +206,7 @@ func run() (result report, err error) {
 	}
 	rootInfo, err := os.Lstat(root)
 	if err != nil {
+		_ = os.Remove(root)
 		return result, errors.New("probe ownership capture failed")
 	}
 	var keychain C.SecKeychainRef
@@ -238,14 +258,14 @@ func run() (result report, err error) {
 		return result, errors.New("private keychain changed preferences")
 	}
 	result.Direct = read(root, expected)
-	result.LaunchdUnlocked, err = launch(root, "unlocked", expected)
+	result.LaunchdUnlocked, err = launch(ctx, root, "unlocked", expected)
 	if err != nil {
 		return result, err
 	}
 	if status := C.SecKeychainLock(keychain); status != 0 {
 		return result, statusError("synthetic keychain lock", status)
 	}
-	result.LaunchdLocked, err = launch(root, "locked", expected)
+	result.LaunchdLocked, err = launch(ctx, root, "locked", expected)
 	if err != nil {
 		return result, err
 	}
@@ -267,7 +287,9 @@ func main() {
 		fmt.Fprintln(os.Stderr, "usage: g02-keychain-probe --synthetic-current-login")
 		os.Exit(2)
 	}
-	result, err := run()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	result, err := run(ctx)
 	_ = json.NewEncoder(os.Stdout).Encode(result)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
