@@ -1,0 +1,33 @@
+# Published issue goals
+
+[Repository](https://github.com/1XP-AI/gh-runnerd) · [Architecture plan](PLAN.md) · [Execution policy](EXECUTION.md)
+
+These are open, unimplemented goals. Status below is the initial planning state; the live GitHub issue/Project is authoritative after work begins. No future goal is automatically dispatched.
+
+| Goal | Issue | Primary agent | Initial state | Test profiles |
+|---|---|---|---|---|
+| G01 | [#1 Prove Scale Set delivery, acquisition and drain contracts](https://github.com/1XP-AI/gh-runnerd/issues/1) | Astra xhigh | Ready | offline, trusted-live-github |
+| G02 | [#2 Prove local App enrollment and launchd credential access](https://github.com/1XP-AI/gh-runnerd/issues/2) | Astra xhigh | Ready | offline, trusted-runtime, trusted-live-github |
+| G03 | [#3 Bootstrap Go module and independent public CI](https://github.com/1XP-AI/gh-runnerd/issues/3) | Luna max | Ready | offline |
+| G04 | [#4 Freeze CLI configuration, provider and scaling contracts](https://github.com/1XP-AI/gh-runnerd/issues/4) | Astra xhigh | Backlog | offline |
+| G05 | [#5 Implement durable state and operation journal](https://github.com/1XP-AI/gh-runnerd/issues/5) | Astra xhigh | Backlog | offline |
+| G06 | [#6 Implement the supervised daemon and authorized local IPC](https://github.com/1XP-AI/gh-runnerd/issues/6) | Astra xhigh | Backlog | offline, trusted-runtime |
+| G07 | [#7 Implement GitHub App credential and installation binding](https://github.com/1XP-AI/gh-runnerd/issues/7) | Astra xhigh | Backlog | offline, trusted-runtime, trusted-live-github |
+| G08 | [#8 Implement guided init and optional Manifest enrollment](https://github.com/1XP-AI/gh-runnerd/issues/8) | Astra xhigh | Backlog | offline, trusted-live-github |
+| G09 | [#9 Implement the recoverable Scale Set adapter](https://github.com/1XP-AI/gh-runnerd/issues/9) | Astra xhigh | Backlog | offline, trusted-live-github |
+| G10 | [#10 Implement disposable Linux workers with isolated Docker services](https://github.com/1XP-AI/gh-runnerd/issues/10) | Astra xhigh | Backlog | offline, trusted-runtime, trusted-live-github |
+| G11 | [#11 Implement trusted native macOS worker identity and lifecycle](https://github.com/1XP-AI/gh-runnerd/issues/11) | Astra xhigh | Backlog | offline, trusted-runtime, trusted-live-github |
+| G12 | [#12 Implement deterministic shared capacity and fair scheduling](https://github.com/1XP-AI/gh-runnerd/issues/12) | Luna max | Backlog | offline |
+| G13 | [#13 Integrate reconciliation, drain and safe restart](https://github.com/1XP-AI/gh-runnerd/issues/13) | Astra xhigh | Backlog | offline, trusted-runtime |
+| G14 | [#14 Implement status, logs and sanitized diagnostics](https://github.com/1XP-AI/gh-runnerd/issues/14) | Luna max | Backlog | offline, trusted-runtime |
+| G15 | [#15 Implement startup, shutdown and safe configuration updates](https://github.com/1XP-AI/gh-runnerd/issues/15) | Astra xhigh | Backlog | offline, trusted-runtime |
+| G16 | [#16 Build repeatable two-organization runtime qualification](https://github.com/1XP-AI/gh-runnerd/issues/16) | Luna max | Backlog | offline, trusted-runtime, trusted-live-github |
+| G17 | [#17 Qualify crash recovery, soak and resource budgets](https://github.com/1XP-AI/gh-runnerd/issues/17) | Astra xhigh | Backlog | offline, trusted-runtime, trusted-live-github |
+| G18 | [#18 Package signed releases and reproducible distribution](https://github.com/1XP-AI/gh-runnerd/issues/18) | Luna max | Backlog | offline, trusted-runtime |
+| G19 | [#19 Audit trust admission and cross-worker secret boundaries](https://github.com/1XP-AI/gh-runnerd/issues/19) | Astra xhigh | Backlog | offline, trusted-runtime, trusted-live-github |
+| G20 | [#20 Pilot migration with reversible legacy runner handoff](https://github.com/1XP-AI/gh-runnerd/issues/20) | Astra xhigh | Backlog | offline, trusted-runtime, trusted-live-github |
+| G21 | [#21 Evaluate optional macOS VM and multi-host providers](https://github.com/1XP-AI/gh-runnerd/issues/21) | Astra xhigh | Future | offline |
+
+All 48 dependency edges are recorded as native GitHub blocking relationships and linked in issue bodies. Start G01/G02/G03; evidence gates control dependent work.
+
+Each issue has one Goal statement, scope, TDD cases, acceptance criteria, model/effort, risk and dependencies. See [backlog.json](backlog.json) for machine-readable specifications.

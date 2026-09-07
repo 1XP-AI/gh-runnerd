@@ -23,3 +23,5 @@ Reviewed 2026-09-07. This summarizes independent research and code/document insp
 The resulting backlog contains 21 bounded goals with primary model, risk, dependencies, TDD evidence and acceptance criteria. Astra reviews security/protocol/lifecycle boundaries, including Luna changes that touch them.
 
 Final read-only review corrections: runner freshness policy now has provider and soak acceptance coverage; quarantined workers retain reservations; Docker daemon privilege is described accurately; browser redirects do not incorrectly require Origin; external IDs are recorded after creation/discovery, following durable intent; bootstrap invariants distinguish management credentials from approved per-worker JIT transport; executable G04 contracts depend on the G03 Go bootstrap.
+
+TDD publication review: G03 validates tooling without ceremonial application tests; first behavior contracts begin in G04. G08 enrollment and G15 launchd lifecycle are Astra-owned; Luna G12 is limited to pure versioned proposals and Astra G05/G13 owns atomic live admission. Every backlog entry carries initial status and test profiles.

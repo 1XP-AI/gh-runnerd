@@ -7,7 +7,7 @@ The GitHub Project is the planning/control surface. Each implementation issue ha
 | Work | Implementer | Review |
 |---|---|---|
 | Auth, protocol, concurrency, resource admission, destructive lifecycle, providers and architecture | Astra / `gpt-6-astra`, `xhigh` | Independent Astra `xhigh` on security/recovery boundaries |
-| Bounded CLI/config/UI-of-CLI, test harness under an approved contract, packaging/docs | Luna / `gpt-5.6-luna`, `max` | Astra `xhigh` for changed security/recovery interfaces; otherwise an independent contract review |
+| Bounded CLI presentation, pure policy proposals under an Astra-approved contract, test harnesses, packaging/docs | Luna / `gpt-5.6-luna`, `max` | Astra `xhigh` for changed security/recovery interfaces; otherwise an independent contract review |
 
 Use Luna only after the contract and dependencies are settled. Escalate discovered architecture, secret handling, process isolation or concurrency changes to Astra; do not stretch a small issue into an unreviewed redesign. Parallelize only independent issues with non-overlapping file ownership; no simultaneous edits to shared protocol/state definitions.
 
@@ -29,4 +29,8 @@ Keep dependent issues blocked until evidence gates pass. A blocked issue needs a
 
 ## Board fields
 
-Status, Stage, Priority, Agent, Risk, Goal and Dependencies. Initial gates/bootstrap work is Ready; dependent work is Backlog. VM/fleet research is explicitly Future. Use one issue per bounded outcome and linked dependencies instead of assigning all future work active goals at once.
+Status, Stage, Priority, Agent, Risk, Goal, Dependencies and Test profile. Initial gates/bootstrap work is Ready; dependent work is Backlog. VM/fleet research is explicitly Future. Machine-readable `status` and `test_profile` values are in `backlog.json`; trusted-runtime and trusted-live-github profiles require maintainer-controlled execution and never run on public PR code.
+
+G08 enrollment and G15 service lifecycle are Astra-owned. Luna G12 computes pure proposals only; Astra G05/G13 owns atomic reservation and live admission.
+
+Use one issue per bounded outcome and linked dependencies instead of assigning all future work active goals at once.

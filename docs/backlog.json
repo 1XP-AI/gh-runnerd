@@ -22,7 +22,16 @@
       ],
       "risk": "High",
       "kind": "gate",
-      "priority": "P0"
+      "priority": "P0",
+      "status": "Ready",
+      "test_profile": [
+        "offline",
+        "trusted-live-github"
+      ],
+      "github_issue": {
+        "number": 1,
+        "url": "https://github.com/1XP-AI/gh-runnerd/issues/1"
+      }
     },
     {
       "key": "G02",
@@ -45,7 +54,17 @@
       ],
       "risk": "High",
       "kind": "gate",
-      "priority": "P0"
+      "priority": "P0",
+      "status": "Ready",
+      "test_profile": [
+        "offline",
+        "trusted-runtime",
+        "trusted-live-github"
+      ],
+      "github_issue": {
+        "number": 2,
+        "url": "https://github.com/1XP-AI/gh-runnerd/issues/2"
+      }
     },
     {
       "key": "G03",
@@ -56,7 +75,7 @@
       "goal": "Establish a reproducible Go development and TDD baseline whose public PR checks run without gh-runnerd, live GitHub credentials or local runner access.",
       "scope": "Supported Go toolchain pin, module/package skeleton, formatting/vet/unit/race/fuzz-smoke/vulnerability checks and contribution commands; no runtime behavior.",
       "tdd": [
-        "Introduce a tiny meaningful behavioral test for the first shared value contract, prove it fails before implementation and passes afterward.",
+        "Verify a negative CI smoke in a temporary fixture (for example malformed Go fails formatting/compilation); do not invent application behavior for scaffolding. Meaningful application red/green evidence begins with G04 contracts.",
         "Verify ordinary checks succeed with no App credentials and no Docker daemon.",
         "Review workflow permissions and trusted/untrusted triggers; pin external actions to reviewed commits."
       ],
@@ -68,7 +87,15 @@
       ],
       "risk": "Medium",
       "kind": "implementation",
-      "priority": "P1"
+      "priority": "P1",
+      "status": "Ready",
+      "test_profile": [
+        "offline"
+      ],
+      "github_issue": {
+        "number": 3,
+        "url": "https://github.com/1XP-AI/gh-runnerd/issues/3"
+      }
     },
     {
       "key": "G04",
@@ -96,7 +123,15 @@
       ],
       "risk": "High",
       "kind": "implementation",
-      "priority": "P0"
+      "priority": "P0",
+      "status": "Backlog",
+      "test_profile": [
+        "offline"
+      ],
+      "github_issue": {
+        "number": 4,
+        "url": "https://github.com/1XP-AI/gh-runnerd/issues/4"
+      }
     },
     {
       "key": "G05",
@@ -122,7 +157,15 @@
       ],
       "risk": "High",
       "kind": "implementation",
-      "priority": "P0"
+      "priority": "P0",
+      "status": "Backlog",
+      "test_profile": [
+        "offline"
+      ],
+      "github_issue": {
+        "number": 5,
+        "url": "https://github.com/1XP-AI/gh-runnerd/issues/5"
+      }
     },
     {
       "key": "G06",
@@ -147,7 +190,16 @@
       ],
       "risk": "High",
       "kind": "implementation",
-      "priority": "P0"
+      "priority": "P0",
+      "status": "Backlog",
+      "test_profile": [
+        "offline",
+        "trusted-runtime"
+      ],
+      "github_issue": {
+        "number": 6,
+        "url": "https://github.com/1XP-AI/gh-runnerd/issues/6"
+      }
     },
     {
       "key": "G07",
@@ -174,13 +226,23 @@
       ],
       "risk": "High",
       "kind": "implementation",
-      "priority": "P0"
+      "priority": "P0",
+      "status": "Backlog",
+      "test_profile": [
+        "offline",
+        "trusted-runtime",
+        "trusted-live-github"
+      ],
+      "github_issue": {
+        "number": 7,
+        "url": "https://github.com/1XP-AI/gh-runnerd/issues/7"
+      }
     },
     {
       "key": "G08",
       "title": "Implement guided init and optional Manifest enrollment",
       "stage": "M1 - Control plane",
-      "agent": "Luna max",
+      "agent": "Astra xhigh",
       "dependencies": [
         "G06",
         "G07"
@@ -198,9 +260,18 @@
         "App permissions/trust/startup expectations are shown before user browser approval.",
         "Astra reviews all auth-facing code and evidence before merge."
       ],
-      "risk": "Medium",
+      "risk": "High",
       "kind": "implementation",
-      "priority": "P1"
+      "priority": "P1",
+      "status": "Backlog",
+      "test_profile": [
+        "offline",
+        "trusted-live-github"
+      ],
+      "github_issue": {
+        "number": 8,
+        "url": "https://github.com/1XP-AI/gh-runnerd/issues/8"
+      }
     },
     {
       "key": "G09",
@@ -227,7 +298,16 @@
       ],
       "risk": "High",
       "kind": "implementation",
-      "priority": "P0"
+      "priority": "P0",
+      "status": "Backlog",
+      "test_profile": [
+        "offline",
+        "trusted-live-github"
+      ],
+      "github_issue": {
+        "number": 9,
+        "url": "https://github.com/1XP-AI/gh-runnerd/issues/9"
+      }
     },
     {
       "key": "G10",
@@ -256,7 +336,17 @@
       ],
       "risk": "High",
       "kind": "implementation",
-      "priority": "P0"
+      "priority": "P0",
+      "status": "Backlog",
+      "test_profile": [
+        "offline",
+        "trusted-runtime",
+        "trusted-live-github"
+      ],
+      "github_issue": {
+        "number": 10,
+        "url": "https://github.com/1XP-AI/gh-runnerd/issues/10"
+      }
     },
     {
       "key": "G11",
@@ -286,7 +376,17 @@
       ],
       "risk": "High",
       "kind": "implementation",
-      "priority": "P0"
+      "priority": "P0",
+      "status": "Backlog",
+      "test_profile": [
+        "offline",
+        "trusted-runtime",
+        "trusted-live-github"
+      ],
+      "github_issue": {
+        "number": 11,
+        "url": "https://github.com/1XP-AI/gh-runnerd/issues/11"
+      }
     },
     {
       "key": "G12",
@@ -297,10 +397,10 @@
         "G04",
         "G05"
       ],
-      "goal": "Compute fixed/autoscale targets and admit workers without exceeding per-pool, per-runtime or host-wide budgets, while making fair progress across eligible pools.",
-      "scope": "Pure policy module with fake clock and typed snapshots; no changes to protocol acquisition or provider contracts.",
+      "goal": "Compute deterministic fixed/autoscale targets and serial admission proposals that respect per-pool, per-runtime and host-wide budgets, with fair progress across eligible pools.",
+      "scope": "Pure policy module with fake clock and immutable typed snapshots. Astra-owned G04 defines policy; G05 owns atomic reservation persistence and G13 owns live serialized application. No concurrent side effects, protocol acquisition or provider mutations in this issue.",
       "tdd": [
-        "Red: simultaneous requests by both orgs cannot reserve the same last CPU/memory slot.",
+        "Red: a pure reduction of simultaneous two-org demands proposes at most one allocation for the last CPU/memory slot; stale or duplicate proposal application is exercised by G05/G13 integration, not claimed solved here.",
         "Property tests cover zero/max/minTotal, infeasible floors, busy-over-reduced-cap, creation/cleanup/unknown reservations and pressure cutoff.",
         "Finite scenario tests prove no starvation as slots free, deterministic tie-breaking and no oscillation under chosen backoff."
       ],
@@ -308,11 +408,20 @@
         "Uses fixed count or minTotal/maxTotal semantics consistently; explicit idleBuffer deferred.",
         "Native memory budget is admission-only; no hard OS cap promise.",
         "Existing engine allocation and daemon/OS headroom are represented without double-counting.",
-        "Astra reviews invariants/property counterexamples before connecting live effects."
+        "Astra reviews invariants/property counterexamples before connecting live effects.",
+        "Return versioned proposals, never mutate reservations or spawn workers; G13 Astra integration rejects stale proposals and commits capacity atomically."
       ],
       "risk": "High",
       "kind": "implementation",
-      "priority": "P0"
+      "priority": "P0",
+      "status": "Backlog",
+      "test_profile": [
+        "offline"
+      ],
+      "github_issue": {
+        "number": 12,
+        "url": "https://github.com/1XP-AI/gh-runnerd/issues/12"
+      }
     },
     {
       "key": "G13",
@@ -342,7 +451,16 @@
       ],
       "risk": "High",
       "kind": "implementation",
-      "priority": "P0"
+      "priority": "P0",
+      "status": "Backlog",
+      "test_profile": [
+        "offline",
+        "trusted-runtime"
+      ],
+      "github_issue": {
+        "number": 13,
+        "url": "https://github.com/1XP-AI/gh-runnerd/issues/13"
+      }
     },
     {
       "key": "G14",
@@ -368,13 +486,22 @@
       ],
       "risk": "Medium",
       "kind": "implementation",
-      "priority": "P1"
+      "priority": "P1",
+      "status": "Backlog",
+      "test_profile": [
+        "offline",
+        "trusted-runtime"
+      ],
+      "github_issue": {
+        "number": 14,
+        "url": "https://github.com/1XP-AI/gh-runnerd/issues/14"
+      }
     },
     {
       "key": "G15",
       "title": "Implement startup, shutdown and safe configuration updates",
       "stage": "M3 - Reliability qualification",
-      "agent": "Luna max",
+      "agent": "Astra xhigh",
       "dependencies": [
         "G02",
         "G06",
@@ -393,9 +520,18 @@
         "Explicit boundaries among daemon uninstall, owned-resource cleanup, local key deletion and remote App uninstall.",
         "Astra reviews credential/service identity and cleanup transitions."
       ],
-      "risk": "Medium",
+      "risk": "High",
       "kind": "implementation",
-      "priority": "P1"
+      "priority": "P1",
+      "status": "Backlog",
+      "test_profile": [
+        "offline",
+        "trusted-runtime"
+      ],
+      "github_issue": {
+        "number": 15,
+        "url": "https://github.com/1XP-AI/gh-runnerd/issues/15"
+      }
     },
     {
       "key": "G16",
@@ -423,7 +559,17 @@
       ],
       "risk": "Medium",
       "kind": "implementation",
-      "priority": "P1"
+      "priority": "P1",
+      "status": "Backlog",
+      "test_profile": [
+        "offline",
+        "trusted-runtime",
+        "trusted-live-github"
+      ],
+      "github_issue": {
+        "number": 16,
+        "url": "https://github.com/1XP-AI/gh-runnerd/issues/16"
+      }
     },
     {
       "key": "G17",
@@ -451,7 +597,17 @@
       ],
       "risk": "High",
       "kind": "gate",
-      "priority": "P0"
+      "priority": "P0",
+      "status": "Backlog",
+      "test_profile": [
+        "offline",
+        "trusted-runtime",
+        "trusted-live-github"
+      ],
+      "github_issue": {
+        "number": 17,
+        "url": "https://github.com/1XP-AI/gh-runnerd/issues/17"
+      }
     },
     {
       "key": "G18",
@@ -478,7 +634,16 @@
       ],
       "risk": "Medium",
       "kind": "implementation",
-      "priority": "P1"
+      "priority": "P1",
+      "status": "Backlog",
+      "test_profile": [
+        "offline",
+        "trusted-runtime"
+      ],
+      "github_issue": {
+        "number": 18,
+        "url": "https://github.com/1XP-AI/gh-runnerd/issues/18"
+      }
     },
     {
       "key": "G19",
@@ -507,7 +672,17 @@
       ],
       "risk": "High",
       "kind": "gate",
-      "priority": "P0"
+      "priority": "P0",
+      "status": "Backlog",
+      "test_profile": [
+        "offline",
+        "trusted-runtime",
+        "trusted-live-github"
+      ],
+      "github_issue": {
+        "number": 19,
+        "url": "https://github.com/1XP-AI/gh-runnerd/issues/19"
+      }
     },
     {
       "key": "G20",
@@ -533,7 +708,17 @@
       ],
       "risk": "High",
       "kind": "gate",
-      "priority": "P1"
+      "priority": "P1",
+      "status": "Backlog",
+      "test_profile": [
+        "offline",
+        "trusted-runtime",
+        "trusted-live-github"
+      ],
+      "github_issue": {
+        "number": 20,
+        "url": "https://github.com/1XP-AI/gh-runnerd/issues/20"
+      }
     },
     {
       "key": "G21",
@@ -558,7 +743,15 @@
       ],
       "risk": "High",
       "kind": "research",
-      "priority": "P2"
+      "priority": "P2",
+      "status": "Future",
+      "test_profile": [
+        "offline"
+      ],
+      "github_issue": {
+        "number": 21,
+        "url": "https://github.com/1XP-AI/gh-runnerd/issues/21"
+      }
     }
   ]
 }
