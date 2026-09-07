@@ -310,11 +310,11 @@ func replayBaseline(events []Event, identity controllerJournalIdentity, a Approv
 			}
 			switch r.Stage {
 			case "set-observe":
-				if s.setObserved || s.sessionID != "" {
+				if s.setObserved || s.sessionID != "" || r.SessionID != "" {
 					return s, ErrJournal
 				}
 			case "session-open":
-				if !s.setObserved || s.sessionID != "" {
+				if !s.setObserved || s.sessionID != "" || r.SessionID != "" {
 					return s, ErrJournal
 				}
 			case "poll":
@@ -331,7 +331,9 @@ func replayBaseline(events []Event, identity controllerJournalIdentity, a Approv
 					return s, ErrJournal
 				}
 			case "acquire":
-				if s.acquired || s.anchor == nil || s.ackRef == (controllerRecordRef{}) || r.BatchRef != s.batchRef || r.SourceRef != s.sourceRef || r.ACKRef != s.ackRef {
+				if s.acquired || s.anchor == nil || s.batch == nil || !slices.ContainsFunc(s.batch.Items, func(x baselineItem) bool {
+					return x.Kind == "JobAvailable" && x.Index == s.anchor.Index && x.RequestID == s.anchor.RequestID
+				}) || s.ackRef == (controllerRecordRef{}) || r.BatchRef != s.batchRef || r.SourceRef != s.sourceRef || r.ACKRef != s.ackRef {
 					return s, ErrJournal
 				}
 			case "continuation":
@@ -355,6 +357,16 @@ func replayBaseline(events []Event, identity controllerJournalIdentity, a Approv
 			if r.Stage == "desired" {
 				if r.Desired == nil || s.latest == nil || s.latest.Assigned == nil || *r.Desired != *s.latest.Assigned {
 					return s, ErrJournal
+				}
+				if s.batch != nil {
+					if s.ackRef == (controllerRecordRef{}) {
+						return s, ErrJournal
+					}
+					for i, x := range s.batch.Items {
+						if x.Kind == "JobAvailable" && !s.continued || (x.Kind == "JobStarted" || x.Kind == "JobCompleted") && !s.callbacks[i] {
+							return s, ErrJournal
+						}
+					}
 				}
 				s.messageDone = true
 			} else {

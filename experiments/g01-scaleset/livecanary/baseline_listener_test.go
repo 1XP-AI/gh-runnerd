@@ -21,6 +21,10 @@ import (
 	"github.com/hashicorp/go-retryablehttp"
 )
 
+type baselineRoundTrip func(*http.Request) (*http.Response, error)
+
+func (f baselineRoundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
 type baselineReply struct {
 	status int
 	body   any
@@ -35,6 +39,7 @@ type baselineFixture struct {
 	acks, acquires, continuations, polls, forbidden atomic.Int32
 	sessions, sources, sets, requests               atomic.Int32
 	change                                          func(string, any) any
+	afterResponse                                   func(*http.Request, *http.Response)
 }
 
 func baselineFixtureItem(a Approval, kind string) map[string]any {
@@ -156,7 +161,15 @@ func newBaselineFixture(t *testing.T, change func(string, any) any) *baselineFix
 		return (&net.Dialer{}).DialContext(ctx, network, address)
 	}
 	t.Cleanup(transport.CloseIdleConnections)
-	httpClient := &http.Client{Transport: withResponseBudget(transport), Timeout: 3 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	outer := transport.Clone()
+	outer.RegisterProtocol("https", baselineRoundTrip(func(r *http.Request) (*http.Response, error) {
+		response, err := (responseBudgetTransport{inner: transport}).RoundTrip(r)
+		if err == nil && f.afterResponse != nil {
+			f.afterResponse(r, response)
+		}
+		return response, err
+	}))
+	httpClient := &http.Client{Transport: outer, Timeout: 3 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	retry := retryablehttp.NewClient()
 	retry.RetryMax = 0
 	retry.Logger = nil

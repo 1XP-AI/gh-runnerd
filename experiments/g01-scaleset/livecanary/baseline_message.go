@@ -2,7 +2,7 @@ package livecanary
 
 import (
 	"encoding/json"
-	"reflect"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -322,20 +322,39 @@ func (b *baselineBatch) matches(m *scaleset.RunnerScaleSetMessage) bool {
 		if err != nil {
 			return false
 		}
-		if x.RequestID != got.RequestID || x.JobID != got.JobID || x.Kind != got.Kind {
+		if !baselineSDKItemMatches(x, got) {
 			return false
 		}
-		for _, p := range [][2]*string{{x.Owner, got.Owner}, {x.Repository, got.Repository}, {x.Event, got.Event}, {x.WorkflowRef, got.WorkflowRef}, {x.RunnerName, got.RunnerName}, {x.Result, got.Result}} {
-			if p[0] != nil && (p[1] == nil || *p[0] != *p[1]) {
-				return false
-			}
-		}
-		if x.RunID != nil && (got.RunID == nil || *x.RunID != *got.RunID) || x.RunnerID != nil && (got.RunnerID == nil || *x.RunnerID != *got.RunnerID) || !reflect.DeepEqual(x.Labels, got.Labels) {
-			return false
-		}
+
 	}
 	for _, v := range byKind {
 		if len(v) != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// SDK struct fields lose wire presence. Its zero-filled value must nevertheless
+// agree with every captured fact; a newly populated callback field is a change.
+func baselineValue[T comparable](p *T) T {
+	if p != nil {
+		return *p
+	}
+	var zero T
+	return zero
+}
+func baselineSDKItemMatches(x, got baselineItem) bool {
+	if x.Index != got.Index || x.Kind != got.Kind || x.RequestID != got.RequestID || x.JobID != got.JobID || baselineValue(x.RunID) != baselineValue(got.RunID) || baselineValue(x.RunnerID) != baselineValue(got.RunnerID) || !slices.Equal(x.Labels, got.Labels) {
+		return false
+	}
+	for _, p := range [][2]*string{{x.Owner, got.Owner}, {x.Repository, got.Repository}, {x.Event, got.Event}, {x.WorkflowRef, got.WorkflowRef}, {x.RunnerName, got.RunnerName}, {x.Result, got.Result}} {
+		if baselineValue(p[0]) != baselineValue(p[1]) {
+			return false
+		}
+	}
+	for _, p := range [][2]*time.Time{{x.QueueTime, got.QueueTime}, {x.AssignTime, got.AssignTime}, {x.RunnerTime, got.RunnerTime}, {x.FinishTime, got.FinishTime}} {
+		if !baselineValue(p[0]).Equal(baselineValue(p[1])) {
 			return false
 		}
 	}

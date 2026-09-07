@@ -131,6 +131,9 @@ func (b *baselineListener) begin(stage string, configure func(*baselineRecord)) 
 	}
 	ref, err := b.record(r)
 	r.Intent = ref
+	if err == nil {
+		err = b.check()
+	} // Intent fsync may outlive authority or file identity.
 	return r, err
 }
 
@@ -159,6 +162,7 @@ func (b *baselineListener) run(after func(context.Context, baselineAcquisition) 
 		return ErrQuarantine
 	}
 	if b.used || after == nil {
+		b.cancel()
 		b.mu.Unlock()
 		return ErrApproval
 	}
@@ -219,13 +223,13 @@ func (b *baselineListener) initialize() error {
 	r.HTTPStatus = status
 	known = callErr == nil && c.observed() && sf.eligible(b.approval, b.setID) && session != nil
 	var initial scaleset.RunnerScaleSetSession
-	if session != nil {
+	if callErr == nil && session != nil {
 		initial = session.Session()
 	}
 	if known {
 		known = initial.SessionID.String() == sf.SessionID && initial.OwnerName == sf.Owner && sf.Statistics.matches(initial.Statistics) && initial.MessageQueueURL != ""
 	}
-	if session != nil && sf != nil && initial.SessionID.String() == sf.SessionID && initial.OwnerName == b.approval.setName() {
+	if callErr == nil && session != nil && sf != nil && initial.SessionID.String() == sf.SessionID && initial.OwnerName == b.approval.setName() {
 		b.session = session
 		b.sessionID = sf.SessionID
 		b.queue = initial.MessageQueueURL
@@ -400,17 +404,10 @@ func (b *baselineListener) callback(stage string, value any) error {
 			continue
 		}
 		got, e := decodeBaselineItem(data, i)
-		if e != nil || got.RequestID != x.RequestID || got.JobID != x.JobID {
+		if e != nil || !baselineSDKItemMatches(x, got) {
 			return ErrQuarantine
 		}
-		for _, p := range [][2]*string{{x.RunnerName, got.RunnerName}, {x.Result, got.Result}} {
-			if p[0] != nil && (p[1] == nil || *p[0] != *p[1]) {
-				return ErrQuarantine
-			}
-		}
-		if x.RunnerID != nil && (got.RunnerID == nil || *x.RunnerID != *got.RunnerID) {
-			return ErrQuarantine
-		}
+
 		_, err = b.record(baselineRecord{Stage: stage, Outcome: "observed", SessionID: b.sessionID, BatchRef: s.batchRef, ACKRef: s.ackRef, ItemIndex: &i})
 		return err
 	}
