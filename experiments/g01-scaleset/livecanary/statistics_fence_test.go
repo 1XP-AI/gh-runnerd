@@ -242,3 +242,41 @@ func TestOlderPendingIntentSurvivesSuccessfulZeroInspection(t *testing.T) {
 		t.Fatal("a later successful observation released an older pending intent")
 	}
 }
+
+func TestObservedRunnerSurvivesLaterAbsenceAndFirstCleanup(t *testing.T) {
+	for _, phase := range []string{"inspect", "jit-loss"} {
+		for _, reference := range []string{"owned", "wrong name", "wrong set", "invalid id"} {
+			t.Run(phase+"/"+reference, func(t *testing.T) {
+				d, f, j := created(t)
+				f.findRunner = &scaleset.RunnerReference{ID: 8, Name: d.Approval.workerName(), RunnerScaleSetID: 7}
+				switch reference {
+				case "wrong name":
+					f.findRunner.Name = "unexpected"
+				case "wrong set":
+					f.findRunner.RunnerScaleSetID = 99
+				case "invalid id":
+					f.findRunner.ID = 0
+				}
+				_ = d.Run(context.Background(), phase)
+				if f.jitCalls != 0 {
+					t.Fatal("known runner presence allowed another JIT")
+				}
+				if reference == "owned" {
+					found := false
+					for _, e := range j.Events() {
+						found = found || e.ID == 8
+					}
+					if !found {
+						t.Error("validated runner identity was not retained")
+					}
+				}
+				f.findRunner = nil
+				restarted := Driver{d.Approval, j, f}
+				_ = restarted.Run(context.Background(), "inspect")
+				if err := restarted.Run(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) || f.deleteCalls != 0 {
+					t.Fatalf("runner evidence lost before first cleanup: %v deletes=%d", err, f.deleteCalls)
+				}
+			})
+		}
+	}
+}
