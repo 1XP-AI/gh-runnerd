@@ -23,8 +23,8 @@ and one unknown reservation exhaust the budget.
 | `before-acquire` | ACK, then stop before acquisition POST; close the known owned session. |
 | `acquire-loss` | Journal exactly one request ID/intent, call `AcquireJobs` once, record only a response success boolean, suppress its application result, retain session/reservation and quarantine. |
 | `jit-loss` | Verify the stable worker name absent, journal one JIT intent, call once, record a response success boolean, discard JIT/result identity and quarantine the reservation. No worker starts. |
-| `inspect` | Read owned statistics and the stable runner reference; record only assigned count/reference ID. No observation releases reservations or uncertainty. |
-| `cleanup` | Delete only with an exact create receipt, nonce name/label and group, no observed job IDs, no JIT/acquisition attempt, no unresolved session/intent, all-zero statistics and an unchanged complete runner-ID inventory. Verify inventory again afterward. |
+| `inspect` | Durably classify owned statistics and runner lookup evidence; retain a reference ID only after exact ownership checks. Unsafe observations return quarantine. No observation releases reservations or uncertainty. |
+| `cleanup` | Delete only with an exact create receipt, nonce name/label and group, no work/statistics/runner fence or observed job IDs, no JIT/acquisition attempt, no unresolved session/intent, all-zero statistics and an unchanged complete runner-ID inventory. Verify inventory again afterward. |
 
 Each SDK/REST operation has a 30-second deadline; each phase is bounded by ten
 minutes and approval expiry, whichever comes first. Each phase is one-shot. An
@@ -36,6 +36,19 @@ job IDs remain reserved across later inspection and stale-zero counts; this
 harness has no terminal-job reconciliation. Unexpected work kinds or an empty
 message with any nonzero statistics quarantine rather than authorize safe close.
 Counts alone never prove ownership or absence of an individual job.
+
+Every statistics-bearing create, owned read, session response, poll and nonnil
+discovery result uses the same durable work fence. Nonnegative available/assigned
+demand blocks later cleanup while allowing the controlled probe. Acquired/running
+work, any runner count, negative counts or missing required statistics quarantine
+new effects. Required statistics include a present poll/discovery object and an
+optional embedded session set when that set is present; a nil poll/discovery
+object or absent embedded set is not itself observed work. A present runner
+lookup also fences capacity, recording its ID only after exact ownership checks.
+Later zero/absent responses and successful inspection never release these fences.
+A nil poll reaches the no-message path only when earlier session/read evidence
+permits the controlled probe; it cannot override unsafe evidence, and prior
+demand remains a permanent cleanup fence.
 
 The preceding credential-input wait accepts only the broker's stdin pipe and is
 separately capped at thirty seconds and approval expiry; terminal and regular
@@ -238,6 +251,12 @@ checks current ownership and takes an exclusive lease before preflight. Torn
 tails, symlinks, hardlinks, permissive modes and changed stable ownership fail
 closed without repair/truncation. Crash after intent or failed result write
 retains uncertainty. Only publish manually reviewed aliases/sanitized timelines.
+
+Work-bearing reads also persist intent before contacting the service and write
+their category in the result. A failed observation write must retain uncertainty
+across restart. Valid create/session identities and their categories share one
+result before the driver returns quarantine. Inspection makes no remote mutation
+but records its observations durably, including when previous work is uncertain.
 
 The version1 header separates stable ownership from explicit phase/expiry
 authority. With the same ownership, a new approved expiry must be later and the

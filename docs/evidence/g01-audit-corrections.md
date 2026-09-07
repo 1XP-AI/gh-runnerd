@@ -9,16 +9,18 @@ credentials, GitHub mutation, Docker operation or worker execution was used.
 An adjacent cleanup regression is preserved at red commit `68eb032`: started-,
 assigned- and completed-only messages previously took the empty-poll safe-close
 path, leaving cleanup possible under stale zero. Unexpected work kinds are now
-quarantined before testing for an empty available-job list. Genuine nil/empty
-poll controls retain the intended no-message behavior; no terminal reconciliation
-is inferred from these unexpected messages.
+quarantined before testing for an empty available-job list. Nil/empty polls can
+take the no-message path only after earlier evidence permits the controlled
+probe; they never clear prior work fences. No terminal reconciliation is inferred
+from these unexpected messages.
 
 Independent review also reproduced a nonzero-statistics poll with no job entries
 taking that safe-close path. Red commit `c575fc0` preserves the case. Empty polls
 now require the complete statistics structure to be zero; positive demand,
 acquired/running work or runner counts conservatively retain uncertainty. Those
 counts are not treated as identities or ownership proof. The true empty control
-intentionally uses all-zero statistics, and nil-message behavior is unchanged.
+intentionally uses all-zero statistics. A nil poll after unsafe session/read
+evidence cannot authorize safe close or cleanup; prior demand still blocks cleanup.
 
 ## Initial corrections
 
@@ -151,3 +153,57 @@ The focused red command is
 Default controller/worker package race checks passed after the admission change
 (2.690s/1.826s). Sync failures are injected; no physical crash, real scale set,
 account-root mutation or live resource cleanup is claimed.
+
+## Retaining every work-bearing observation
+
+Final independent review of `cad9bd2` reproduced another path to stale-zero
+deletion: initial session running statistics followed by a nil poll closed the
+session and allowed cleanup. The source audit also reproduced forgotten create
+response statistics, owned scale-set reads, inspection and optional embedded
+session-set statistics. Nonempty poll messages with running counts still reached
+ACK/acquisition, and a pre-JIT owned read with running counts still issued JIT.
+An exact runner reference observed during inspection or pre-JIT lookup was also
+forgotten when later lookups returned nil.
+
+Red commits `5c853eb` and `f1c94ec` preserve the statistics regressions and controls;
+`5dbfa75` preserves runner-presence regressions. The first source matrix and actual
+file-journal reopen tests failed with one delete after later zero inspection
+(0.891s). The unsafe-running effect tests observed ACK, acquisition or JIT calls
+(0.484s). Runner-presence tests observed a later delete in all eight owned/invalid
+reference cases (0.482s). These are synthetic results; `cad9bd2` approval did not
+authorize merging or executing this later correction.
+
+The shared work classifier and durable observation contract cover these sources:
+
+| Source | Required evidence and behavior |
+| --- | --- |
+| Valid create response | Statistics required. Validated set ID and work category share one durable result before any quarantine return. |
+| Owned GetScaleSet, including inspect, cleanup and pre-JIT/probe reads | Object and statistics required. Persist read intent and classified result; cleanup replays the newly written evidence before deletion. |
+| OpenSession | Top-level statistics required. Optional embedded set may be absent; when present, its statistics are required and its category is combined conservatively. Known session ID and category share one result. The listener receives that checked initial snapshot. |
+| Poll | Nil message means no observation. A present message requires statistics; read intent and category are durable before validation/ACK/acquisition. |
+| Unowned FindScaleSet discovery | Nil object means no observation. A present object requires statistics and is classified without adopting its ID. Discovery never authorizes ownership or a later creation retry. |
+| FindRunner | Nil reference means no observation. Any present reference fences unknown capacity; retain its ID only after exact positive-ID/name/scale-set checks. Unexpected references also fail closed. |
+
+Nonnegative available/assigned-only demand permanently blocks cleanup while
+allowing the separately approved controlled probe. Acquired/running jobs, any
+registered/busy/idle runner count, negative counts and missing required statistics
+permanently quarantine new effects. Counts never prove individual ownership.
+Actual runner presence separately records identity only when its binding is valid.
+No later zero, nil, session close or successful inspection clears either fence.
+
+Work-bearing reads use fixed `observe-owned`, `observe-poll`, `observe-discovery`
+and `observe-runner` intent/result operations. The intent is synced before the
+read because a failed result write could otherwise lose observed work. Create
+and session effects store identity and category atomically in their existing
+result. A failed result leaves its durable intent unresolved across reopen.
+Inspection remains remotely read-only and cannot erase an older pending intent.
+The update-setting regression now distinguishes these journaled observations
+from remote mutation intents, retaining its zero-session/JIT/ACK checks.
+
+The focused synthetic command is
+`GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s -run 'TestObservation|TestStatistics|TestDemandStatistics|TestUnsafeStatistics|TestZeroStatistics|TestOlderPendingIntent|TestObservedRunner|TestUnownedDiscovery' ./livecanary`.
+Additional failure tests cover refusal before a read and failed owned/runner
+results across actual private journal close/reopen followed by a successful
+zero/absent inspection. Genuine all-zero and optional-absence controls retain
+empty cleanup, and demand retains the intended controlled barrier. No live
+resource, host crash or power-loss test is claimed.

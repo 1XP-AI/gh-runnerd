@@ -12,6 +12,7 @@ type statisticsAPI struct {
 	API
 	create, owned bool
 	statistics    *scaleset.RunnerScaleSetStatistic
+	reads         int
 }
 
 func (a *statisticsAPI) CreateScaleSet(ctx context.Context, set *scaleset.RunnerScaleSet) (*scaleset.RunnerScaleSet, error) {
@@ -23,6 +24,7 @@ func (a *statisticsAPI) CreateScaleSet(ctx context.Context, set *scaleset.Runner
 }
 
 func (a *statisticsAPI) GetScaleSet(ctx context.Context, id int) (*scaleset.RunnerScaleSet, error) {
+	a.reads++
 	result, err := a.API.GetScaleSet(ctx, id)
 	if err == nil && result != nil && a.owned {
 		copy := *result
@@ -277,6 +279,104 @@ func TestObservedRunnerSurvivesLaterAbsenceAndFirstCleanup(t *testing.T) {
 					t.Fatalf("runner evidence lost before first cleanup: %v deletes=%d", err, f.deleteCalls)
 				}
 			})
+		}
+	}
+}
+
+type observationWriteFailure struct {
+	Journal
+	kind, operation string
+}
+
+func (j observationWriteFailure) Append(e Event) error {
+	if e.Kind == j.kind && e.Operation == j.operation {
+		return ErrJournal
+	}
+	return j.Journal.Append(e)
+}
+
+func TestObservationIntentFailureStopsBeforeRead(t *testing.T) {
+	d, f, j := created(t)
+	api := &statisticsAPI{API: f, owned: true, statistics: &scaleset.RunnerScaleSetStatistic{TotalRunningJobs: 1}}
+	d.API = api
+	d.Journal = observationWriteFailure{j, "intent", "observe-owned"}
+	if err := d.Run(context.Background(), "inspect"); !errors.Is(err, ErrJournal) || api.reads != 0 {
+		t.Fatalf("work-bearing read occurred without durable intent: error=%v reads=%d", err, api.reads)
+	}
+}
+
+func TestObservationResultFailureSurvivesFileReopenAndInspection(t *testing.T) {
+	for _, source := range []string{"observe-owned", "observe-runner"} {
+		t.Run(source, func(t *testing.T) {
+			d, f, memory := created(t)
+			dir := privateDir(t)
+			j, err := openTestJournal(t, dir, d.Approval)
+			if err != nil {
+				t.Fatal("private journal fixture")
+			}
+			for _, e := range memory.Events() {
+				if e.Kind == "inventory" {
+					e.Digest = fixtureInventory
+				}
+				if j.Append(e) != nil {
+					t.Fatal("private receipt fixture")
+				}
+			}
+			d.Journal = observationWriteFailure{j, "result", source}
+			if source == "observe-owned" {
+				d.API = &statisticsAPI{API: f, owned: true, statistics: &scaleset.RunnerScaleSetStatistic{TotalRunningJobs: 1}}
+			} else {
+				f.findRunner = &scaleset.RunnerReference{ID: 8, Name: d.Approval.workerName(), RunnerScaleSetID: 7}
+			}
+			if err := d.Run(context.Background(), "inspect"); !errors.Is(err, ErrJournal) {
+				t.Fatalf("result refusal not surfaced: %v", err)
+			}
+			if j.Close() != nil {
+				t.Fatal("close failed-result fixture")
+			}
+			j, err = openTestJournal(t, dir, d.Approval)
+			if err != nil {
+				t.Fatal("reopen failed-result fixture")
+			}
+			defer j.Close()
+			f.findRunner = nil
+			restarted := Driver{d.Approval, j, statisticsInventoryAPI{f}}
+			if err := restarted.Run(context.Background(), "inspect"); err != nil {
+				t.Fatalf("zero/absent inspection refused: %v", err)
+			}
+			if !replay(j.Events()).uncertain || restarted.Run(context.Background(), "cleanup") == nil || f.deleteCalls != 0 {
+				t.Fatal("successful inspection cleared the persisted unfinished observation")
+			}
+		})
+	}
+}
+
+type discoveryStatisticsAPI struct {
+	API
+	found *scaleset.RunnerScaleSet
+}
+
+func (a *discoveryStatisticsAPI) FindScaleSet(context.Context, string, int) (*scaleset.RunnerScaleSet, error) {
+	return a.found, nil
+}
+
+func TestUnownedDiscoveryEvidenceCannotAuthorizeCreationAfterAbsence(t *testing.T) {
+	for _, statistics := range []*scaleset.RunnerScaleSetStatistic{{TotalAssignedJobs: 1}, {TotalRunningJobs: 1}, nil} {
+		d, f, j := created(t)
+		j.events = nil // No local create receipt; discovery is not ownership.
+		f.createCalls = 0
+		f.set.Statistics = statistics
+		api := &discoveryStatisticsAPI{API: f, found: f.set}
+		d.API = api
+		_ = d.Run(context.Background(), "inspect")
+		if replay(j.Events()).setID != 0 {
+			t.Fatal("unowned discovery adopted a scale-set ID")
+		}
+		api.found = nil
+		_ = d.Run(context.Background(), "inspect")
+		restarted := Driver{d.Approval, j, api}
+		if restarted.Run(context.Background(), "create") == nil || f.createCalls != 0 {
+			t.Fatal("later absent discovery authorized creation after observed work")
 		}
 	}
 }

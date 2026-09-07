@@ -247,6 +247,16 @@ func openJournalAtAdmission(directory string, a Approval, admissionDirectory str
 }
 
 func validEvent(e Event) bool {
+	if e.Work != "" {
+		if e.Kind != "result" || (e.Work != workDemand && e.Work != workUnresolved) {
+			return false
+		}
+		switch e.Operation {
+		case "create", "session-open", "observe-owned", "observe-poll", "observe-discovery", "observe-runner":
+		default:
+			return false
+		}
+	}
 	switch e.Kind {
 	case "authority":
 		return e.Authority != nil
@@ -262,7 +272,7 @@ func validEvent(e Event) bool {
 		return e.Operation == "before-ack" || e.Operation == "after-ack" || e.Operation == "before-acquire"
 	case "intent", "result", "unknown":
 		switch e.Operation {
-		case "create", "session-open", "session-close", "ack", "acquire", "jit", "delete", "probe":
+		case "create", "session-open", "session-close", "ack", "acquire", "jit", "delete", "probe", "observe-owned", "observe-poll", "observe-discovery", "observe-runner":
 			return true
 		}
 	}

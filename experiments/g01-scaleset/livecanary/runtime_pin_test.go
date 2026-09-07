@@ -49,7 +49,7 @@ func TestUpdateSettingDriftStopsBeforeSessionOrJIT(t *testing.T) {
 				t.Fatal("server setting drift admitted session or JIT work")
 			}
 			for _, event := range j.Events() {
-				if event.Kind == "intent" && event.Operation != "create" {
+				if event.Kind == "intent" && event.Operation != "create" && event.Operation != "observe-discovery" && event.Operation != "observe-owned" {
 					t.Fatal("setting drift reached a side-effect intent")
 				}
 			}
