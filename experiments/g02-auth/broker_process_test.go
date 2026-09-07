@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"strings"
 	"testing"
@@ -92,7 +93,7 @@ func TestBrokerChildBoundsAndReplacedBinaryRefuse(t *testing.T) {
 }
 func TestBrokerBuildMustMatchReviewedController(t *testing.T) {
 	sha := strings.Repeat("a", 40)
-	good := debug.BuildInfo{GoVersion: "go1.26.8", Path: "github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/cmd/g01-live", Deps: []*debug.Module{{Path: "github.com/actions/scaleset", Version: "v0.4.0"}}, Settings: []debug.BuildSetting{{Key: "vcs.revision", Value: sha}, {Key: "vcs.modified", Value: "false"}}}
+	good := debug.BuildInfo{GoVersion: "go1.26.8", Path: "github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/cmd/g01-live", Deps: []*debug.Module{{Path: "github.com/actions/scaleset", Version: "v0.4.0"}}, Settings: []debug.BuildSetting{{Key: "vcs.revision", Value: sha}, {Key: "vcs.modified", Value: "false"}, {Key: "GOOS", Value: runtime.GOOS}, {Key: "GOARCH", Value: runtime.GOARCH}, {Key: "CGO_ENABLED", Value: "1"}, {Key: "-tags", Value: "g01_live"}}}
 	if !validBrokerBuild(&good, sha) {
 		t.Fatal("reviewed controller metadata rejected")
 	}
@@ -111,6 +112,33 @@ func TestBrokerBuildMustMatchReviewedController(t *testing.T) {
 		}
 		if validBrokerBuild(&bad, sha) {
 			t.Errorf("accepted %s", kind)
+		}
+	}
+}
+
+func TestBrokerBuildUnsupportedNativeAdmissionRefuses(t *testing.T) {
+	sha := strings.Repeat("a", 40)
+	base := debug.BuildInfo{GoVersion: "go1.26.8", Path: "github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/cmd/g01-live", Deps: []*debug.Module{{Path: "github.com/actions/scaleset", Version: "v0.4.0"}}, Settings: []debug.BuildSetting{{Key: "vcs.revision", Value: sha}, {Key: "vcs.modified", Value: "false"}, {Key: "GOOS", Value: runtime.GOOS}, {Key: "GOARCH", Value: runtime.GOARCH}, {Key: "CGO_ENABLED", Value: "1"}, {Key: "-tags", Value: "g01_live"}}}
+	for _, tc := range []struct{ key, value string }{{"CGO_ENABLED", "0"}, {"CGO_ENABLED", ""}, {"-tags", "g01_live,osusergo"}, {"-tags", "g01_live osusergo"}, {"GOOS", "other"}, {"GOARCH", "other"}} {
+		t.Run(tc.key+tc.value, func(t *testing.T) {
+			bad := base
+			bad.Settings = append([]debug.BuildSetting(nil), base.Settings...)
+			for i := range bad.Settings {
+				if bad.Settings[i].Key == tc.key {
+					bad.Settings[i].Value = tc.value
+				}
+			}
+			if validBrokerBuild(&bad, sha) {
+				t.Fatal("unsupported executable accepted before token mint")
+			}
+		})
+	}
+	for _, tags := range []string{"g01_live", "g01_live,notosusergo", "g01_live osusergo_extra"} {
+		good := base
+		good.Settings = append([]debug.BuildSetting(nil), base.Settings...)
+		good.Settings[len(good.Settings)-1].Value = tags
+		if !validBrokerBuild(&good, sha) {
+			t.Fatal("exact supported tags refused")
 		}
 	}
 }

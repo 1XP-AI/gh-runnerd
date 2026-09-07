@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -52,5 +53,26 @@ func TestBrokerRepositoryDotComponentsRefuseWithoutAPI(t *testing.T) {
 		if err == nil || len(f.calls) != 0 || f.tokenCalls != 0 {
 			t.Fatal("dot component reached API")
 		}
+	}
+}
+
+func TestBrokerDifferentAttemptCannotRepeatMint(t *testing.T) {
+	a, c, api, f, root := newBrokerFixture(t)
+	for i := 0; i < 2; i++ {
+		if i == 1 {
+			root = filepath.Join(filepath.Dir(root), "other-attempt")
+			f.root = root
+			a.ExpiresAt = a.ExpiresAt.Add(time.Minute)
+		}
+		_, err := brokerExecute(context.Background(), a, brokerInput{PEM: string(c.PEM)}, root, api, nil)
+		if i == 0 && err != nil {
+			t.Fatal("first discovery refused")
+		}
+		if i == 1 && err == nil {
+			t.Error("same discovery repeated in another directory")
+		}
+	}
+	if f.tokenCalls != 1 {
+		t.Fatalf("mint requests=%d; want one across directories/expiry", f.tokenCalls)
 	}
 }
