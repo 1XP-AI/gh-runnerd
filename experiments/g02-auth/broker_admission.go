@@ -96,11 +96,15 @@ type brokerClaimEvent struct {
 	SnapshotDigest string                     `json:"snapshot_digest,omitempty"`
 }
 type brokerLedgerHeader struct {
-	Version  int    `json:"version"`
-	Resource string `json:"resource"`
+	Version  int         `json:"version"`
+	Resource string      `json:"resource"`
+	Root     brokerInode `json:"root"`
+	Lock     brokerInode `json:"lock"`
 }
 type brokerAdmission struct {
 	file                           *os.File
+	lock                           *os.File
+	lockInfo                       os.FileInfo
 	root, parent                   *os.Root
 	path                           string
 	rootInfo, parentInfo, fileInfo os.FileInfo
@@ -116,6 +120,9 @@ func (c *brokerAdmission) close() {
 	if c.file != nil {
 		c.file.Close()
 	}
+	if c.lock != nil {
+		c.lock.Close()
+	}
 	if c.root != nil {
 		c.root.Close()
 	}
@@ -124,6 +131,14 @@ func (c *brokerAdmission) close() {
 	}
 }
 func (c *brokerAdmission) check() error {
+	if c.lock == nil || !privateFile(c.lock) {
+		return errBroker
+	}
+	lock, le := c.root.Lstat("broker-admission.lock")
+	openedLock, loe := c.lock.Stat()
+	if le != nil || loe != nil || !os.SameFile(lock, c.lockInfo) || !os.SameFile(openedLock, c.lockInfo) || openedLock.Size() != 0 || c.lock.Sync() != nil {
+		return errBroker
+	}
 	real, e := filepath.EvalSymlinks(c.path)
 	info, ie := os.Lstat(c.path)
 	pi, pe := os.Lstat(filepath.Dir(c.path))
@@ -193,13 +208,26 @@ func openBrokerAdmission(directory string, a BrokerApproval, j *brokerJournal, p
 	if e != nil || !os.SameFile(info, captured) {
 		return nil, errBroker
 	}
+
+	// The empty lock is only serialization, never recovery authority. Acquire it
+	// before creating/reading content so a contender cannot win an empty ledger.
+	c.lock, e = c.root.OpenFile("broker-admission.lock", os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0600)
+	if e != nil || !privateFile(c.lock) || syscall.Flock(int(c.lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+		return nil, errBroker
+	}
+	c.lockInfo, e = c.lock.Stat()
+	namedLock, ne := c.root.Lstat("broker-admission.lock")
+	if e != nil || ne != nil || c.lockInfo.Size() != 0 || !os.SameFile(c.lockInfo, namedLock) || c.lock.Sync() != nil || syncRoot(c.root) != nil {
+		return nil, errBroker
+	}
+	wantHeader := brokerLedgerHeader{1, brokerResource(a), brokerFileIdentity(info), brokerFileIdentity(c.lockInfo)}
 	created := true
 	c.file, e = c.root.OpenFile("broker-admission.jsonl", os.O_RDWR|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0600)
 	if os.IsExist(e) {
 		created = false
 		c.file, e = c.root.OpenFile("broker-admission.jsonl", os.O_RDWR|syscall.O_NOFOLLOW, 0)
 	}
-	if e != nil || !privateFile(c.file) || syscall.Flock(int(c.file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+	if e != nil || !privateFile(c.file) {
 		return nil, errBroker
 	}
 	c.fileInfo, e = c.file.Stat()
@@ -207,7 +235,7 @@ func openBrokerAdmission(directory string, a BrokerApproval, j *brokerJournal, p
 		return nil, errBroker
 	}
 	if created {
-		if c.append(brokerLedgerHeader{1, brokerResource(a)}) != nil {
+		if c.append(wantHeader) != nil {
 			return nil, errBroker
 		}
 	} else {
@@ -224,7 +252,7 @@ func openBrokerAdmission(directory string, a BrokerApproval, j *brokerJournal, p
 		return nil, errBroker
 	}
 	var header brokerLedgerHeader
-	if decodeBrokerJSON(lines[0], &header, true) != nil || header != (brokerLedgerHeader{1, brokerResource(a)}) {
+	if decodeBrokerJSON(lines[0], &header, true) != nil || header != wantHeader {
 		return nil, errBroker
 	}
 	slots := map[string]brokerClaimEvent{}

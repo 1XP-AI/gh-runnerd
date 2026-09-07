@@ -349,7 +349,7 @@ func TestBrokerPreexistingControllerClaimRefusesBeforeMint(t *testing.T) {
 }
 
 func TestBrokerAdmissionResyncFailureAndRootReplacement(t *testing.T) {
-	for _, kind := range []string{"existing root sync", "claim root sync", "root replacement", "parent replacement"} {
+	for _, kind := range []string{"existing root sync", "claim root sync", "root replacement", "parent replacement", "lock replacement", "nonempty lock"} {
 		t.Run(kind, func(t *testing.T) {
 			a, _, api, f, root := newBrokerFixture(t)
 			j, e := openBrokerJournal(root, a)
@@ -360,7 +360,7 @@ func TestBrokerAdmissionResyncFailureAndRootReplacement(t *testing.T) {
 			calls := 0
 			syncFn := func(r *os.Root) error {
 				calls++
-				if kind == "claim root sync" && calls >= 5 {
+				if kind == "claim root sync" && calls >= 6 {
 					return errBroker
 				}
 				return syncDirectory(r)
@@ -388,6 +388,12 @@ func TestBrokerAdmissionResyncFailureAndRootReplacement(t *testing.T) {
 			}
 			defer claim.close()
 			switch kind {
+			case "lock replacement":
+				name := filepath.Join(f.admissionRoot, "broker-admission.lock")
+				os.Rename(name, name+"-retained")
+				os.WriteFile(name, nil, 0600)
+			case "nonempty lock":
+				os.WriteFile(filepath.Join(f.admissionRoot, "broker-admission.lock"), []byte("unknown"), 0600)
 			case "existing root sync":
 				claim.sync = func(*os.Root) error { return errBroker }
 			case "root replacement":
