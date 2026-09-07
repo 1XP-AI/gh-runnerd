@@ -1,5 +1,6 @@
 // Package livecanary is an isolated, explicitly authorized controller experiment.
-// It does not launch workers or dispatch workflows.
+// Driver.Run remains a controller-only fault harness. The private paired
+// experiment connects reviewed worker execution; neither path dispatches workflows.
 package livecanary
 
 import (
