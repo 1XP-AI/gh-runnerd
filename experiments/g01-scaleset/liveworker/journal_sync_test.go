@@ -14,14 +14,14 @@ func TestFailedDirectorySyncMustBeRetried(t *testing.T) {
 	if os.Chmod(dir, 0700) != nil {
 		t.Fatal("fixture private directory")
 	}
-	j, err := openJournalWithSync(dir, a, syncDirectory)
+	j, err := openJournalAtAdmission(dir, a, testAdmissionDirectory(t, dir), syncDirectory)
 	if err == nil || j != nil || calls != 1 {
 		if j != nil {
 			_ = j.Close()
 		}
 		t.Fatal("injected initial directory sync failure did not stop")
 	}
-	j, err = openJournalWithSync(dir, a, syncDirectory)
+	j, err = openJournalAtAdmission(dir, a, testAdmissionDirectory(t, dir), syncDirectory)
 	if j != nil {
 		_ = j.Close()
 	}

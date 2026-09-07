@@ -26,9 +26,26 @@ workflow commit and one outstanding JIT reservation.
 No phase pulls/builds an image, discovers containers by label, stops/kills a
 worker, restarts it, captures its logs, prunes resources or changes Docker
 contexts. The helper never creates a second worker under the same journal, even
-after successful cleanup. This is a per-journal limit; the controller's permanent
-scale-set admission pin does not cap containers across independent worker
-journals. Integrated one-worker/global worker admission remains an open gate.
+after successful cleanup. The public journal opener additionally holds a
+permanent controller-UID admission claim across state directories, nonces and
+runtime choices. The operator explicitly prepares the owned nonsymlink `0700`
+directory `<OS-account-home>/.gh-runnerd-g01-worker-experiment`. Its location
+comes from native effective-UID account lookup, never HOME/XDG, approval or a
+flag. Unsupported `!cgo`, `osusergo` or Android builds refuse before preparing
+a journal. This work did not prepare the real directory or contact a daemon.
+
+The `0600`, single-link claim pins stable approval ownership plus the exact
+state-directory and journal device/inode pairs. It is locked for the journal
+lifetime, synced with its root and parent, and rechecked before each Driver.Run.
+Closing or crashing the process, an unknown result and successful cleanup never
+release/reassign the claim. Only the same owned journal can reopen, retaining
+all existing uncertainty and restricted inspect/cleanup renewal rules. A copied
+journal, replaced claim or different state/ownership cannot create a new worker.
+The cap applies to this controller UID; other administrator-controlled accounts
+are not coordinated by it. This is the finite G01 experiment limit, not production
+fleet admission or resource scheduling. Controller/worker approval binding and
+an integrated one-worker baseline remain open gates.
+
 A lost create/start/delete response or a failed result
 write retains the intent and forbids subsequent mutations. A returned create
 warning also quarantines the worker, retaining its known ID for inspection.
@@ -237,3 +254,11 @@ Primary contracts:
 - [Docker Engine API 1.45](https://docs.docker.com/reference/api/engine/version/v1.45/) and [pinned Moby schema](https://github.com/moby/moby/blob/v26.1.5/api/swagger.yaml).
 - [Moby non-force removal](https://github.com/moby/moby/blob/v26.1.5/daemon/delete.go) and [start/removal exclusion](https://github.com/moby/moby/blob/v26.1.5/daemon/start.go).
 - [Apple Unix-domain connection access checks](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/connect.2.html).
+
+## Admission correction evidence
+
+[Worker admission evidence](g01-worker-admission.md) records the cross-directory
+red regression and private synthetic verification. Prepare the fixed account
+root only as part of a separately authorized concrete runtime invocation; a
+missing root is a refusal, not permission to pick another location or clear a
+claim. No automatic reconciliation/reset command is provided.
