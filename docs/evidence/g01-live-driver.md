@@ -111,16 +111,24 @@ enforcement. The controller account must be trusted. A same-UID attacker can
 alter state; permissions/locks do not isolate hostile jobs. Keep approval,
 journal and credentials outside repository/shared directories and worker mounts.
 
-Build from a clean reviewed checkout, writing the binary outside the checkout:
+Build from a clean **standalone clone with a real `.git` directory**, detached
+at the reviewed SHA, writing the binary outside the checkout. On the measured
+Go 1.26.8 toolchain, a linked worktree's `.git` file is not recognized for VCS
+stamping, even with `-buildvcs=true`; that binary correctly fails the live gate.
+A local clone of the reviewed repository is sufficient and needs no live API.
 
 ```sh
 cd experiments/g01-scaleset
-GOTOOLCHAIN=go1.26.8 go build -trimpath -tags=g01_live -o "$G01_PRIVATE_BINARY" ./cmd/g01-live
+GOTOOLCHAIN=go1.26.8 go build -buildvcs=true -trimpath -tags=g01_live -o "$G01_PRIVATE_BINARY" ./cmd/g01-live
 "$G01_PRIVATE_BINARY" --plan
+go version -m "$G01_PRIVATE_BINARY"
 ```
 
 Live execution rejects a mismatched Go version, SDK pin, dirty build or embedded
 VCS revision. Building, merging or running `--plan` is not authorization. The
+build metadata must show the reviewed `vcs.revision` and `vcs.modified=false`.
+This was verified offline in a clean local clone at `17a63ffc4604fbec4cc043abd5602a230d35fa8b`;
+the linked-worktree build was correctly missing a usable revision stamp. The
 reviewed controller broker (not implemented here) must provide this private JSON
 on stdin without shell tracing, terminal echo, argv credentials or env dumps:
 
