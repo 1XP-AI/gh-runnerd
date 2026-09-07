@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 )
 
@@ -196,5 +197,80 @@ func TestAuditPR25DistinctStateDirectoriesMustShareCap(t *testing.T) {
 	}
 	if len(f.sets) > 1 {
 		t.Fatalf("different simultaneously owned journals admitted %d scale sets under a cap of one", len(f.sets))
+	}
+}
+
+// Holding the shared directory lock models a competing initializer before the
+// permanent claim has been created. The loser must not create an empty claim.
+func TestAdmissionInitializationLockPrecedesClaimCreation(t *testing.T) {
+	parent := privateDir(t)
+	state := filepath.Join(parent, "state")
+	if os.Mkdir(state, 0700) != nil {
+		t.Fatal("state fixture")
+	}
+	capRoot := testAdmissionDirectory(t, state)
+	lock, err := os.Open(capRoot)
+	if err != nil {
+		t.Fatal("directory fixture")
+	}
+	defer lock.Close()
+	if syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+		t.Fatal("fixture directory lock")
+	}
+	a := approval()
+	j, err := openJournalAtAdmission(state, a, capRoot, func(f *os.File) error { return f.Sync() })
+	if j != nil {
+		j.Close()
+	}
+	if err == nil {
+		t.Error("competing initializer ignored the shared initialization lock")
+	}
+	if _, err := os.Lstat(filepath.Join(capRoot, "admission.json")); !os.IsNotExist(err) {
+		t.Error("losing initializer created a permanent claim")
+	}
+	if syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) != nil {
+		t.Fatal("fixture unlock")
+	}
+	j, err = openJournalAtAdmission(state, a, capRoot, func(f *os.File) error { return f.Sync() })
+	if err != nil {
+		t.Fatal("admission did not recover after competing initializer left")
+	}
+	if j.Close() != nil {
+		t.Fatal("fixture close")
+	}
+}
+
+func TestAdmissionConcurrentFirstStartsHaveOneWinner(t *testing.T) {
+	parent := privateDir(t)
+	capRoot := testAdmissionDirectory(t, filepath.Join(parent, "unused-state"))
+	states := []string{admissionState(t, parent, "first"), admissionState(t, parent, "second")}
+	api := &auditSharedAPI{sets: map[string]*scaleset.RunnerScaleSet{}}
+	a := approval()
+	var wg sync.WaitGroup
+	gate := make(chan struct{})
+	for i := range states {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-gate
+			candidate := a
+			if i == 1 {
+				candidate.OwnerNonce = strings.Repeat("5", 32)
+			}
+			j, err := openJournalAtAdmission(states[i], candidate, capRoot, func(f *os.File) error { return f.Sync() })
+			if err != nil {
+				return
+			}
+			defer j.Close()
+			d := Driver{candidate, j, api}
+			if err := d.Run(context.Background(), "create"); err != nil {
+				t.Errorf("admitted positive control: %v", err)
+			}
+		}(i)
+	}
+	close(gate)
+	wg.Wait()
+	if count := len(api.sets); count != 1 {
+		t.Fatalf("concurrent first starts admitted %d creates, want one", count)
 	}
 }
