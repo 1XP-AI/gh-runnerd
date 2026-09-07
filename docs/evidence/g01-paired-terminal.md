@@ -92,6 +92,14 @@ failure. Cleanup has its own outcome and references. Overall failure remains a
 fixed error and unresolved result; a failed final summary has no summary reference.
 Eight prior rounds alone never imply terminal success.
 
+A persisted collection record may contain terminal facts only after an actual
+terminal-parent intent. If terminal mode fails before that intent, its historical
+measurement supplement remains in returned failure output only; the saved
+collection record has a nil terminal branch. A nonzero collection reference then
+names that exact saved record and does not claim the supplement was persisted.
+Collection-only replay rejects injected terminal facts, even if they equal a
+synthesized unresolved summary. No durable mode flag is added.
+
 The session acknowledgement, worker DELETE receipt, worker absence receipt,
 set DELETE acknowledgement and set absence are separate facts. Captured session
 or set 204 followed by cancellation remains recorded, but the next operation is
@@ -154,6 +162,12 @@ Recorded checkpoints:
   four/three/two accounting passed focused valid-file capacity, cancellation and
   storage controls with race in 20.246 seconds. Insufficient-three cases still
   refuse; successful set DELETE cannot start another child without four records.
+- Summary-branch red `da6cce2`, race 4.276 seconds: same-inode collection-only
+  history accepted injected terminal facts, and cancellation at durable round
+  eight before the parent persisted a terminal supplement. The replay/persistence
+  correction passed both actual-file witnesses and actual controller sync-failure
+  controls with race in 17.224 seconds. Returned measurement and exact nil-branch
+  summary references remain intact in the pre-parent failure control.
 
 The terminal exact-set GET and DELETE calls use the existing captured `SDKAPI`
 methods with the same marked context and target. Those methods forward to the

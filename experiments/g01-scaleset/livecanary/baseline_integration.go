@@ -414,7 +414,11 @@ func (s *pairedBaselineScope) summarize(callErr error) (pairedBaselineCollection
 		}
 	}
 	r := baselineRecord{Stage: "collection", Outcome: "observed", SessionID: state.sessionID, Collection: &baselineCollectionFacts{Outcome: out.Outcome, Pair: state.pairRef, Start: state.startRef, Completed: state.completedRef, LastSample: state.lastSample, Rounds: state.rounds, OutstandingSession: state.outstanding(), SessionIntent: state.sessionIntent, SessionResult: state.sessionResult}}
-	r.Collection.Terminal = out.Terminal
+	// Before an actual terminal intent, supplemental failure measurement is
+	// returned only. This collection reference covers the persisted nil branch.
+	if refPresent(state.terminalIntent) {
+		r.Collection.Terminal = out.Terminal
+	}
 	// The W receipt is independently durable, even if C's bridge append failed.
 	// Keep this returned-only evidence separate from the replay-derived C record.
 	if s.terminalEnabled && out.Terminal.WorkerDeletion == nil && s.observedWorkerDeletion != nil {

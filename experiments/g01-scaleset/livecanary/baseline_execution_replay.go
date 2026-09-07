@@ -25,7 +25,7 @@ func (s *baselineHistory) executionRecord(r baselineRecord, ref controllerRecord
 			if !reflect.DeepEqual(f.Terminal, s.terminalSummary()) {
 				return ErrJournal
 			}
-		} else if f.Terminal != nil && !reflect.DeepEqual(f.Terminal, s.terminalSummary()) {
+		} else if f.Terminal != nil {
 			return ErrJournal
 		}
 		if s.pending != nil || s.child != nil || f.Pair != s.pairRef || f.Start != s.startRef || f.Completed != s.completedRef || f.LastSample != s.lastSample || f.Rounds != s.rounds || f.OutstandingSession != s.outstanding() || f.SessionIntent != s.sessionIntent || f.SessionResult != s.sessionResult {
