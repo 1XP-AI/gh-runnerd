@@ -60,7 +60,7 @@ func (j *FileJournal) authorize(a Approval) (func(), error) {
 	if !j.life.TryLock() {
 		return nil, ErrJournal
 	}
-	if j.closed || !j.ownsCurrentJournal() || a.Validate(time.Now()) != nil || j.ownership != ownershipDigest(a) || j.authority.Digest != approvalDigest(a) {
+	if j.closed || !j.claim.matches(j) || !j.ownsCurrentJournal() || a.Validate(time.Now()) != nil || j.ownership != ownershipDigest(a) || j.authority.Digest != approvalDigest(a) {
 		j.life.Unlock()
 		return nil, ErrJournal
 	}

@@ -24,13 +24,18 @@ and one unknown reservation exhaust the budget.
 | `acquire-loss` | Journal exactly one request ID/intent, call `AcquireJobs` once, record only a response success boolean, suppress its application result, retain session/reservation and quarantine. |
 | `jit-loss` | Verify the stable worker name absent, journal one JIT intent, call once, record a response success boolean, discard JIT/result identity and quarantine the reservation. No worker starts. |
 | `inspect` | Read owned statistics and the stable runner reference; record only assigned count/reference ID. No observation releases reservations or uncertainty. |
-| `cleanup` | Delete only with an exact create receipt, nonce name/label and group, no JIT/acquisition attempt, no unresolved session/intent, all-zero statistics and an unchanged complete runner-ID inventory. Verify inventory again afterward. |
+| `cleanup` | Delete only with an exact create receipt, nonce name/label and group, no observed job IDs, no JIT/acquisition attempt, no unresolved session/intent, all-zero statistics and an unchanged complete runner-ID inventory. Verify inventory again afterward. |
 
 Each SDK/REST operation has a 30-second deadline; each phase is bounded by ten
 minutes and approval expiry, whichever comes first. Each phase is one-shot. An
 empty poll is **unresolved**, never a passed barrier. The high-level listener
 retains upstream ACK ordering; fault barriers use its public client interface.
 Adapter deadlines remain effective after the listener removes cancellation.
+Acquisition probes require exactly one request before the SDK can ACK. Observed
+job IDs remain reserved across later inspection and stale-zero counts; this
+harness has no terminal-job reconciliation. Unexpected work kinds or an empty
+message with any nonzero statistics quarantine rather than authorize safe close.
+Counts alone never prove ownership or absence of an individual job.
 
 Creation requests `RunnerSetting.DisableUpdate=true` using the pinned SDK's
 [`RunnerSetting` field](https://github.com/actions/scaleset/blob/v0.4.0/types.go).
@@ -109,8 +114,27 @@ output uses fixed categories, never input/error values.
 Use a new controller-owned directory with mode `0700`. The approval is a regular,
 non-symlink, single-link file with mode `0600`. The placeholder below is invalid
 and grants no authorization. Fill actual independently reviewed values and only
-the approved phases; expiry must be within 24 hours. Changed approvals cannot
-adopt an existing journal.
+the approved phases; expiry must be within 24 hours. Stable ownership cannot
+change. Explicit recovery renewal may only extend expiry and restrict phases to
+`inspect`/`cleanup`; see the journal contract below.
+
+Before a separately approved invocation, the operator must explicitly prepare
+`<OS-account-home>/.gh-runnerd-g01-experiment` as a controller-owned, nonsymlink
+`0700` directory. The effective UID's OS account home must be owned and not
+writable by group/others. This root is fixed; `HOME`, `XDG_STATE_HOME`, approval
+fields and `--state-dir` cannot select another one. Missing/unsafe roots refuse
+before remote effects. The binary requires `CGO_ENABLED=1` and must not use the
+`osusergo` tag; unsupported account-lookup builds refuse before journal creation.
+No real root was prepared for the synthetic tests.
+
+The first experiment permanently pins stable approval ownership plus the exact
+state-directory and journal inodes in that root. It stays pinned after process
+close, successful deletion or uncertain outcomes. A later distinct experiment
+cannot proceed until a separately implemented and reviewed reconciliation exists;
+never delete the pin or journal to retry. This bounds the controller's scale-set
+experiment across state directories for this UID. Independent worker journals
+still enforce only one container each; integrated/global worker admission remains
+an open gate.
 
 ```json
 {
@@ -145,7 +169,7 @@ A local clone of the reviewed repository is sufficient and needs no live API.
 
 ```sh
 cd experiments/g01-scaleset
-GOTOOLCHAIN=go1.26.8 go build -buildvcs=true -trimpath -tags=g01_live -o "$G01_PRIVATE_BINARY" ./cmd/g01-live
+CGO_ENABLED=1 GOTOOLCHAIN=go1.26.8 go build -buildvcs=true -trimpath -tags=g01_live -o "$G01_PRIVATE_BINARY" ./cmd/g01-live
 "$G01_PRIVATE_BINARY" --plan
 go version -m "$G01_PRIVATE_BINARY"
 ```
@@ -188,11 +212,22 @@ in ADR 0002 for later worker implementation.
 
 `journal.jsonl` is private controller state, not a public report. It contains raw
 numeric request/resource IDs, counts, session UUIDs, operation ordering and
-approval/inventory digests. An exclusive inode lock serializes processes. The
-new file and directory entry are synced before effects; every intent/result is
-synced. Torn tails, symlinks, hardlinks, permissive modes and changed approvals
-fail closed without repair/truncation. Crash after intent or failed result write
+approval/inventory digests. Exclusive journal and permanent-admission inode locks
+serialize processes. The claim, containing directories and every intent/result
+are synced; directory sync is retried on each reopen. The Driver.Run authorizer
+checks current ownership and takes an exclusive lease before preflight. Torn
+tails, symlinks, hardlinks, permissive modes and changed stable ownership fail
+closed without repair/truncation. Crash after intent or failed result write
 retains uncertainty. Only publish manually reviewed aliases/sanitized timelines.
+
+The version1 header separates stable ownership from explicit phase/expiry
+authority. With the same ownership, a new approved expiry must be later and the
+new phases may contain only `inspect` and `cleanup`. The renewal is durable before
+observation, cannot restore older authority or add new-work phases, and never
+clears attempts, observed jobs or uncertainty. A changed harness SHA, nonce or
+any field except expiry/phases is rejected. Legacy headers are retained/refused
+without migration; no live legacy journals exist. This is trusted-code execution
+discipline, not isolation from hostile Go callers or same-UID code.
 
 TDD red commit `889d5f3` compiled and failed creation without durable intent,
 retry after ambiguous creation across restart, and failed authority bypass.

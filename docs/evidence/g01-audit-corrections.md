@@ -44,7 +44,6 @@ one start for both missing-network cases.
 
 After the initial corrections, fresh package race tests passed: livecanary1.616s
 and liveworker2.014s. These are synthetic results and do not close the live gates.
-Admission across directories is still required on this branch before final review.
 
 ## Directory-sync recovery
 
@@ -101,3 +100,54 @@ pairwise comparisons. Single aliases and separate object scopes remain valid.
 These helpers serve fixed approval/credential/journal schemas; arbitrary maps
 with case-distinct keys are intentionally outside this strict decoder contract.
 This is an adjacent verified defect, not an additional original audit finding.
+
+## Permanent controller experiment admission
+
+Red commit `a41030e` preserves the
+[P1 cross-directory cap regression](https://github.com/1XP-AI/gh-runnerd/pull/25#discussion_r3949077105):
+two private state directories with different nonces admitted two synthetic scale
+sets. It also preserves refusal regressions for copied state, a closed/deleted
+first experiment, failed admission sync and unsafe or unknown claim files.
+
+The public controller journal opener now obtains one fixed directory from the
+effective UID's OS account home: `<OS-account-home>/.gh-runnerd-g01-experiment`.
+The operator must explicitly prepare that directory as an owned, nonsymlink
+`0700` directory before a separately approved live invocation. The account home
+must be owned and not writable by group/others. No environment variable, CLI
+flag, approval field or supplied state directory chooses the admission root.
+Missing or unsafe state refuses before remote effects. This work did not prepare
+the real account directory; all admission tests use private injected roots.
+
+The `0600`, single-link `admission.json` holds a permanent versioned record of
+stable approval ownership and the exact state-directory and journal device/inode
+identities. A nonblocking global flock is held for the FileJournal lifetime.
+The claim file, root directory and containing directory are synced, including on
+reopen. The sealed Driver.Run authorizer checks the current claim, journal and
+ownership while holding its exclusive operation lease. Copied state, another
+nonce/directory, replaced inventory or concurrent use cannot obtain this lease.
+Closing the process, successful scale-set deletion and uncertain outcomes never
+remove or reassign the pin. A later distinct experiment requires separately
+implemented and reviewed reconciliation; deleting the claim is not a retry path.
+
+An additional observed working-tree red reproduced Go 1.26.8's `osusergo`
+current-account fallback selecting a synthetic `HOME` (0.501s). The production
+opener now requires `cgo && !osusergo && !android` before even preparing a journal;
+unsupported builds return a fixed refusal. The ordinary Darwin OS-backed lookup
+is the intended runtime contract. The same synthetic regression passes with
+`-tags=osusergo` (race, 1.504s) and `CGO_ENABLED=0` (0.837s). Source inspection of
+the pinned standard library's `os/user/lookup.go`, `lookup_stubs.go` and
+`cgo_lookup_unix.go` established the lookup distinction. These guard tests and
+the fix are committed together, not claimed as a separate immutable red commit.
+
+This is a permanent **controller-UID cap for the bounded scale-set experiment**,
+including its session/JIT/acquisition budget. It does not add admission across
+independent worker journals: the worker helper still limits one container per
+owned journal. Integrated one-worker baseline execution, global worker admission
+and production fleet admission remain blocked. Trusted same-UID/admin code can
+alter files and is outside this filesystem discipline's threat boundary.
+
+The focused red command is
+`GOTOOLCHAIN=go1.26.8 go test -race -count=1 -run 'TestAdmission|TestAuditPR25Distinct' ./livecanary`.
+Default controller/worker package race checks passed after the admission change
+(2.690s/1.826s). Sync failures are injected; no physical crash, real scale set,
+account-root mutation or live resource cleanup is claimed.

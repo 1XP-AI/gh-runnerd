@@ -26,7 +26,10 @@ workflow commit and one outstanding JIT reservation.
 No phase pulls/builds an image, discovers containers by label, stops/kills a
 worker, restarts it, captures its logs, prunes resources or changes Docker
 contexts. The helper never creates a second worker under the same journal, even
-after successful cleanup. A lost create/start/delete response or a failed result
+after successful cleanup. This is a per-journal limit; the controller's permanent
+scale-set admission pin does not cap containers across independent worker
+journals. Integrated one-worker/global worker admission remains an open gate.
+A lost create/start/delete response or a failed result
 write retains the intent and forbids subsequent mutations. A returned create
 warning also quarantines the worker, retaining its known ID for inspection.
 Unknown create with no durable ID requires private operator reconciliation; this
@@ -63,7 +66,8 @@ image volumes, shared PID/IPC namespaces, extra groups, devices, published ports
 or Docker socket. Healthchecks are disabled, restart policy is `no`,
 `AutoRemove=false`, and the log driver is `none`. Standard masked/read-only
 kernel paths are explicit. Before start or cleanup, the complete returned
-configuration must match; unexpected nonzero configuration fields fail closed.
+configuration must match, including exactly one bridge attachment; missing/empty
+network maps and unexpected nonzero configuration fields fail closed.
 Real daemon normalization of this conservative profile is still unverified.
 
 The image contains sudo and Docker client programs. Dropped capabilities,
@@ -130,11 +134,23 @@ The journal records fixed phase/outcome names, IDs, approval digest and private
 environment/label fingerprints. The environment fingerprint is secret-derived
 correlation metadata, so the journal is not a public evidence artifact. Use a
 controller-owned `0700` directory and a `0600` single-link regular journal.
-The file is exclusively locked; intents/results are synced, and a new journal's
-directory entry is synced before mutation. Changed approval, torn tails,
-symlinks, hardlinks and permissive modes are rejected. Local Docker
+The file is exclusively locked; intents/results and the directory entry are
+synced before mutation, retrying directory sync on every reopen. The Driver.Run
+authorizer holds an exclusive operation lease and rechecks current approval and
+exact journal/directory ownership before preflight. Changed stable ownership,
+torn tails, symlinks, hardlinks and permissive modes are rejected. Local Docker
 administrators and processes sharing the controller UID remain trusted; labels
 and filesystem modes are not an adversarial boundary against them.
+
+The version1 header separates stable ownership from phase/expiry authority.
+An explicit renewal must extend expiry and allow only `inspect` and `cleanup`;
+it cannot authorize another create/start, reset attempts or clear uncertainty.
+Renewal is appended durably before observation; superseded authority is refused.
+All other approval fields, including harness, daemon, endpoint, image and nonce,
+must remain unchanged. Legacy journals are retained/refused without migration;
+no live legacy journals exist. This same restricted renewal contract also applies
+to the separate controller journal. It never makes unresolved resources safe to
+delete or confers authority merely because an earlier approval expired.
 
 ## Preparing a reviewable invocation
 
