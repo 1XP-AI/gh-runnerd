@@ -37,8 +37,7 @@ one start for both missing-network cases.
 
 After the initial corrections, fresh package race tests passed: livecanary1.616s
 and liveworker2.014s. These are synthetic results and do not close the live gates.
-Admission across directories and explicit renewal are still required corrections
-on this branch before final review.
+Admission across directories is still required on this branch before final review.
 
 ## Directory-sync recovery
 
@@ -49,3 +48,38 @@ failed directory sync. Both implementations now sync on every successful open,
 including existing journals, before returning authority to perform effects.
 Targeted fresh journal race tests passed for both packages. This is deterministic
 failure-injection evidence, not a physical crash or power-loss experiment.
+
+## Explicit recovery authority
+
+Red commit `c2ae474` reproduces both blocked recovery renewal and a raw Driver
+caller changing approval fields after journal open. The controller has the same
+former whole-approval-digest trap as the worker; both are corrected here.
+
+The new version1 journal header hashes stable ownership with only `expires_at`
+and `phases` excluded. The initial authority and each later authority record
+include the complete approval digest, expiry and phase list. A changed authority
+must extend expiry and may contain only `inspect` and `cleanup`. The caller must
+provide the new explicit, currently valid approval. Each renewal is synced before
+the journal can authorize an operation. It never resets phase attempts, known
+observations, ownership receipts or uncertainty; older authority cannot be reused
+after renewal. Source/harness, endpoint/daemon, image, nonce and all other stable
+fields remain fixed. Expired authority alone never authorizes recovery.
+
+Both Journal interfaces now require an unexported authorizer at Driver.Run before
+preflight. Its exclusive lease refuses concurrent calls on that FileJournal;
+Close waits for the active operation. The authorizer checks the current approval,
+still-owned journal inode and original directory identity. Mutating Driver fields,
+closing the journal, or replacing the file/directory cannot bypass this check.
+This is approved-code discipline in a trusted controller account, not isolation
+from hostile Go callers or same-UID code.
+
+Old journals without the versioned ownership header are refused and retained.
+There is no migration or automatic adoption. No live controller/worker journals
+have been created in this experiment. Explicit renewal does not make an unknown
+resource safe to delete; the existing cleanup fences remain required.
+
+Additional observed working-tree red cases caught a shared read lease admitting
+concurrent phases and replaced journal/directory identities still authorizing
+operations. The final exclusive lease and identity checks cover those cases.
+Their tests and implementation are committed together, so these are not claims
+of separate immutable red commits.

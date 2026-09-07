@@ -117,3 +117,5 @@ func TestChangedDaemonCannotCreate(t *testing.T) {
 		t.Fatal("wrong runtime identity accepted")
 	}
 }
+
+func (*memoryJournal) authorize(Approval) (func(), error) { return func() {}, nil }

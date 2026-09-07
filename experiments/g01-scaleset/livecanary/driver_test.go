@@ -83,3 +83,5 @@ func TestAuthorityMismatchStopsBeforeCreate(t *testing.T) {
 		t.Fatal("creation bypassed remote authority/policy verification")
 	}
 }
+
+func (*memoryJournal) authorize(Approval) (func(), error) { return func() {}, nil }

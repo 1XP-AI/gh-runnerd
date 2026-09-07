@@ -2,6 +2,8 @@ package liveworker
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -77,5 +79,78 @@ func TestRenewedRecoveryApprovalRetainsOwnedState(t *testing.T) {
 			unsafe.Close()
 			t.Errorf("%s authority accepted", kind)
 		}
+	}
+}
+
+func TestAuthorityLeaseRefusesConcurrentRunsAndFencesClose(t *testing.T) {
+	a := approval()
+	j, err := OpenJournal(privateDir(t), a)
+	if err != nil {
+		t.Fatal("private fixture journal")
+	}
+	first, err := j.authorize(a)
+	if err != nil {
+		t.Fatal("first lease")
+	}
+	type result struct {
+		release func()
+		err     error
+	}
+	second := make(chan result, 1)
+	go func() { release, err := j.authorize(a); second <- result{release, err} }()
+	select {
+	case acquired := <-second:
+		if acquired.err == nil {
+			acquired.release()
+			t.Error("same journal authorized concurrent phase execution")
+		}
+	case <-time.After(time.Second):
+		first()
+		t.Fatal("busy admission did not fail promptly")
+	}
+	closed := make(chan struct{})
+	go func() { _ = j.Close(); close(closed) }()
+	select {
+	case <-closed:
+		t.Error("close released ownership during a phase")
+	case <-time.After(50 * time.Millisecond):
+	}
+	first()
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("close did not resume")
+	}
+	if release, err := j.authorize(a); err == nil {
+		release()
+		t.Fatal("closed journal authorized a phase")
+	}
+}
+
+func TestAuthorityRejectsReplacedJournalOrDirectory(t *testing.T) {
+	for _, kind := range []string{"journal", "directory"} {
+		t.Run(kind, func(t *testing.T) {
+			a := approval()
+			dir := privateDir(t)
+			j, err := OpenJournal(dir, a)
+			if err != nil {
+				t.Fatal("fixture journal")
+			}
+			defer j.Close()
+			if kind == "journal" {
+				path := filepath.Join(dir, "journal.jsonl")
+				if os.Rename(path, path+".original") != nil || os.WriteFile(path, []byte("replacement"), 0600) != nil {
+					t.Fatal("fixture replacement")
+				}
+			} else {
+				if os.Rename(dir, dir+".original") != nil || os.Mkdir(dir, 0700) != nil {
+					t.Fatal("fixture directory replacement")
+				}
+			}
+			if release, err := j.authorize(a); err == nil {
+				release()
+				t.Fatal("replaced ownership inventory authorized a phase")
+			}
+		})
 	}
 }

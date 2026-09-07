@@ -3,22 +3,29 @@ package liveworker
 import (
 	"bufio"
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"io"
 	"os"
 	"sync"
 	"syscall"
+	"time"
 )
 
 // Journal is private controller state, not a publishable evidence report. The
 // single locked inode is retained even after crashes. A damaged tail is rejected,
 // never truncated, repaired or interpreted as permission to retry.
 type FileJournal struct {
-	file   *os.File
-	events []Event
-	mu     sync.Mutex
+	root          *os.Root
+	directory     string
+	directoryInfo os.FileInfo
+	fileInfo      os.FileInfo
+	life          sync.Mutex
+	closed        bool
+	ownership     string
+	authority     phaseAuthority
+	file          *os.File
+	events        []Event
+	mu            sync.Mutex
 }
 
 func privateFile(info os.FileInfo, mode os.FileMode) bool {
@@ -122,7 +129,17 @@ func openJournalWithSync(directory string, a Approval, syncDirectory func(*os.Fi
 	if err != nil {
 		return nil, ErrState
 	}
-	defer root.Close()
+	rootKept := false
+	defer func() {
+		if !rootKept {
+			_ = root.Close()
+		}
+	}()
+	directoryInfo := info
+	captured, err := root.Stat(".")
+	if err != nil || !os.SameFile(directoryInfo, captured) {
+		return nil, ErrState
+	}
 	f, err := root.OpenFile("journal.jsonl", os.O_RDWR|os.O_CREATE|os.O_APPEND|syscall.O_NOFOLLOW, 0600)
 	if err != nil {
 		return nil, ErrState
@@ -140,15 +157,14 @@ func openJournalWithSync(directory string, a Approval, syncDirectory func(*os.Fi
 	if syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
 		return nil, ErrState
 	}
-	encoded, err := json.Marshal(a)
-	if err != nil {
+	if a.Validate(time.Now()) != nil {
 		return nil, ErrState
 	}
-	digest := sha256.Sum256(encoded)
-	want := hex.EncodeToString(digest[:])
-	j := &FileJournal{file: f}
+	j := &FileJournal{file: f, root: root, directory: directory, directoryInfo: directoryInfo, fileInfo: info, ownership: ownershipDigest(a)}
+	incoming := authorityFor(a)
 	if info.Size() == 0 {
-		if err = j.write(Event{Kind: "approval", Digest: want}); err != nil {
+		j.authority = incoming
+		if err = j.write(journalHeader{1, j.ownership, incoming}); err != nil {
 			return nil, err
 		}
 
@@ -158,10 +174,11 @@ func openJournalWithSync(directory string, a Approval, syncDirectory func(*os.Fi
 		if err != nil {
 			return nil, ErrState
 		}
-		var header Event
-		if DecodeStrict(line, &header) != nil || header.Kind != "approval" || header.Sequence != 0 || header.Digest != want {
+		var header journalHeader
+		if DecodeStrict(line, &header) != nil || header.Version != 1 || header.Ownership != j.ownership || !header.Authority.matchesOwnership(a) {
 			return nil, ErrState
 		}
+		j.authority = header.Authority
 		for {
 			line, err = reader.ReadBytes('\n')
 			if err == io.EOF && len(line) == 0 {
@@ -174,9 +191,25 @@ func openJournalWithSync(directory string, a Approval, syncDirectory func(*os.Fi
 			if DecodeStrict(line, &e) != nil || e.Sequence != len(j.events)+1 || !validEvent(e) {
 				return nil, ErrState
 			}
+			if e.Kind == "authority" {
+				if !e.Authority.matchesOwnership(a) || !e.Authority.renews(j.authority) {
+					return nil, ErrState
+				}
+				j.authority = *e.Authority
+			}
 			j.events = append(j.events, e)
 		}
 	}
+	if incoming.Digest != j.authority.Digest {
+		if !incoming.renews(j.authority) {
+			return nil, ErrState
+		}
+		if err = j.Append(Event{Kind: "authority", Authority: &incoming}); err != nil {
+			return nil, err
+		}
+		j.authority = incoming
+	}
+
 	// Retry directory-entry durability even when a prior failed sync left a
 	// valid header. File contents alone never prove its entry survived a crash.
 	dir, err := root.Open(".")
@@ -188,12 +221,15 @@ func openJournalWithSync(directory string, a Approval, syncDirectory func(*os.Fi
 	if err != nil {
 		return nil, ErrState
 	}
+	rootKept = true
 	ok = true
 	return j, nil
 }
 
 func validEvent(e Event) bool {
 	switch e.Kind {
+	case "authority":
+		return e.Authority != nil
 	case "observation":
 		return e.Operation == "inspect"
 	case "intent", "result", "unknown":
@@ -202,7 +238,7 @@ func validEvent(e Event) bool {
 	return false
 }
 
-func (j *FileJournal) write(e Event) error {
+func (j *FileJournal) write(e any) error {
 	data, err := json.Marshal(e)
 	if err != nil {
 		return ErrState
@@ -232,4 +268,17 @@ func (j *FileJournal) Events() []Event {
 	defer j.mu.Unlock()
 	return append([]Event(nil), j.events...)
 }
-func (j *FileJournal) Close() error { return j.file.Close() }
+func (j *FileJournal) Close() error {
+	j.life.Lock()
+	defer j.life.Unlock()
+	if j.closed {
+		return nil
+	}
+	j.closed = true
+	fileErr := j.file.Close()
+	rootErr := j.root.Close()
+	if fileErr != nil || rootErr != nil {
+		return ErrState
+	}
+	return nil
+}

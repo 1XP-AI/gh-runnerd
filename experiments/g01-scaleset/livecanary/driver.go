@@ -40,18 +40,20 @@ type Approval struct {
 }
 
 type Event struct {
-	Sequence   int     `json:"sequence"`
-	Kind       string  `json:"kind"`
-	Operation  string  `json:"operation,omitempty"`
-	ID         int     `json:"id,omitempty"`
-	SessionID  string  `json:"session_id,omitempty"`
-	RequestIDs []int64 `json:"request_ids,omitempty"`
-	Count      int     `json:"count,omitempty"`
-	Digest     string  `json:"digest,omitempty"`
-	Succeeded  bool    `json:"succeeded,omitempty"`
+	Authority  *phaseAuthority `json:"authority,omitempty"`
+	Sequence   int             `json:"sequence"`
+	Kind       string          `json:"kind"`
+	Operation  string          `json:"operation,omitempty"`
+	ID         int             `json:"id,omitempty"`
+	SessionID  string          `json:"session_id,omitempty"`
+	RequestIDs []int64         `json:"request_ids,omitempty"`
+	Count      int             `json:"count,omitempty"`
+	Digest     string          `json:"digest,omitempty"`
+	Succeeded  bool            `json:"succeeded,omitempty"`
 }
 
 type Journal interface {
+	authorize(Approval) (func(), error)
 	Events() []Event
 	Append(Event) error
 }
@@ -197,6 +199,14 @@ func (d *Driver) Run(ctx context.Context, phase string) error {
 	if d.Approval.Validate(time.Now()) != nil || !slices.Contains(d.Approval.Phases, phase) {
 		return ErrApproval
 	}
+	if d.Journal == nil {
+		return ErrJournal
+	}
+	release, err := d.Journal.authorize(d.Approval)
+	if err != nil {
+		return ErrJournal
+	}
+	defer release()
 	s := replay(d.Journal.Events())
 	if phase != "inspect" && (s.uncertain || s.phaseSeen[phase] || s.deleted) {
 		return ErrQuarantine
@@ -207,7 +217,7 @@ func (d *Driver) Run(ctx context.Context, phase string) error {
 	}
 	ctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	_, err := boundedRead(ctx, func(c context.Context) (bool, error) { return true, d.API.Preflight(c, d.Approval) })
+	_, err = boundedRead(ctx, func(c context.Context) (bool, error) { return true, d.API.Preflight(c, d.Approval) })
 	if err != nil {
 		return ErrApproval
 	}
