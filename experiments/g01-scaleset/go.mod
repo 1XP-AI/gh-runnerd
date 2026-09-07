@@ -1,6 +1,8 @@
 module github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset
 
-go 1.25.3
+go 1.26.3
+
+toolchain go1.26.8
 
 require (
 	github.com/actions/scaleset v0.4.0

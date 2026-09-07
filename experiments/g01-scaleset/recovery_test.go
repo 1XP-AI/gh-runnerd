@@ -18,6 +18,56 @@ type callbacks struct {
 	desired   func(context.Context, int) (int, error)
 }
 
+func TestRecoveryErrorsHoldReservationsAndRedact(t *testing.T) {
+	for _, fault := range []string{"statistics-error", "nil-statistics", "negative-statistics", "inventory-error", "foreign-owner", "absent-runner"} {
+		t.Run(fault, func(t *testing.T) {
+			_, client := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/runnerscalesets/7") {
+					if fault == "statistics-error" {
+						w.WriteHeader(http.StatusForbidden)
+						writeJSON(w, map[string]string{"message": "synthetic-sensitive-body"})
+						return
+					}
+					stats := &scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: 2}
+					if fault == "nil-statistics" {
+						stats = nil
+					}
+					if fault == "negative-statistics" {
+						stats.TotalAssignedJobs = -1
+					}
+					writeJSON(w, scaleset.RunnerScaleSet{ID: 7, Statistics: stats})
+					return
+				}
+				if fault == "inventory-error" {
+					w.WriteHeader(http.StatusForbidden)
+					writeJSON(w, map[string]string{"message": "synthetic-sensitive-body"})
+					return
+				}
+				refs := scaleset.RunnerReferenceList{}
+				if fault == "foreign-owner" {
+					refs.Count = 1
+					refs.RunnerReferences = []scaleset.RunnerReference{{ID: 11, Name: "owned-1", RunnerScaleSetID: 99}}
+				}
+				writeJSON(w, refs)
+			})
+			initial := recoveryState{Desired: 4, Workers: map[string]string{"owned-1": "ready"}}
+			got, err := recoverState(context.Background(), client, initial)
+			if (err == nil) != (fault == "absent-runner") {
+				t.Fatal("unexpected recovery outcome")
+			}
+			if err != nil && strings.Contains(err.Error(), "synthetic-sensitive-body") {
+				t.Fatal("secret-bearing error escaped")
+			}
+			if !got.AdmissionPaused || got.Workers["owned-1"] != "quarantined" || len(got.Workers) != 1 {
+				t.Fatal("unresolved worker lost reservation")
+			}
+			if initial.Workers["owned-1"] != "ready" {
+				t.Fatal("recovery mutated its input snapshot")
+			}
+		})
+	}
+}
+
 func (c callbacks) HandleJobStarted(ctx context.Context, j *scaleset.JobStarted) error {
 	if c.started != nil {
 		return c.started(ctx, j)
@@ -92,7 +142,7 @@ func TestRecoveryMissingLifecycleCallback(t *testing.T) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/runnerscalesets/7"):
 			writeJSON(w, scaleset.RunnerScaleSet{ID: 7, Statistics: &scaleset.RunnerScaleSetStatistic{}})
-		case strings.HasSuffix(r.URL.Path, "/runners"):
+		case strings.HasSuffix(r.URL.Path, "/agents"):
 			writeJSON(w, scaleset.RunnerReferenceList{Count: 1, RunnerReferences: []scaleset.RunnerReference{{ID: 11, Name: "owned-1", RunnerScaleSetID: 7}}})
 		default:
 			w.WriteHeader(http.StatusNotFound)
