@@ -298,6 +298,28 @@ func run(ctx context.Context) (result report, err error) {
 	if parentError != nil || !os.SameFile(rootInfo, createdParent) {
 		return result, errors.New("created Keychain escaped owned directory")
 	}
+	// SecKeychainCreate may use 0644 even inside a private 0700 directory.
+	// Tighten only the captured newly created regular file, without following
+	// a symlink or changing any existing/default Keychain permissions.
+	createdFile, openError := os.OpenFile(createdPath, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if openError != nil {
+		return result, errors.New("created Keychain descriptor unavailable")
+	}
+	createdInfo, statError := createdFile.Stat()
+	if statError != nil {
+		createdFile.Close()
+		return result, errors.New("created Keychain identity unavailable")
+	}
+	createdOwner, ownerOK := createdInfo.Sys().(*syscall.Stat_t)
+	if !createdInfo.Mode().IsRegular() || !ownerOK || createdOwner.Uid != uint32(os.Geteuid()) {
+		createdFile.Close()
+		return result, errors.New("created Keychain owner mismatch")
+	}
+	modeError := createdFile.Chmod(0600)
+	closeError := createdFile.Close()
+	if modeError != nil || closeError != nil {
+		return result, errors.New("created Keychain permission restriction failed")
+	}
 	result.LogicalKeychain = filepath.Base(createdPath)
 	entries, readError := os.ReadDir(root)
 	if readError != nil {
