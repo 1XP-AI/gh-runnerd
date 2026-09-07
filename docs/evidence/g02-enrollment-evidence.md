@@ -61,6 +61,8 @@ Offline tests and race tests passed. A real TCP listener on `127.0.0.1:0` was ex
 | Screen lock, controller logout/login, host reboot/cold boot | Not run | Login-free boot unsupported; target behavior unverified |
 | Dedicated controller/job identities and narrow helper | Decision only; no accounts/helper created | Protected native profile remains gated |
 
+After integrating the latest merged main, `make check` passed from the repository root. This included pinned Go 1.26.8, formatting/vet/unit/race checks, module integrity and license checks, both G01 and G02 offline modules, and `govulncheck` with no vulnerabilities found for its configured scope. Fuzz smoke explicitly reported **SKIPPED: no Go fuzz targets**; no fuzz coverage is claimed. Tagged probe cleanup/classification tests and tagged vet passed separately without running the platform experiment.
+
 The local ten-minute state lifetime is intentionally shorter than GitHub's documented one-hour Manifest exchange limit. Normal top-level redirect GETs may omit Origin; state and exact Host/path are mandatory regardless. Accepting an absent Origin is not authorization. IPv6, localhost aliases, GHES/GHE.com, proxies, persistent setup listeners and cross-process resumable Manifest attempts are not covered.
 
 ## Actual limited macOS runtime experiment
