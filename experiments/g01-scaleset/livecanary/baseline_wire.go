@@ -33,10 +33,14 @@ func (c *baselineWireCapture) target(r *http.Request) bool {
 	if r.URL.Fragment != "" || r.URL.User != nil || r.URL.EscapedPath() != r.URL.Path {
 		return false
 	}
-	if c.stage == "poll" {
+	if c.stage == "poll" || c.stage == "ack" {
 		u, e := url.Parse(c.queue)
 		if e != nil {
 			return false
+		}
+		if c.stage == "ack" {
+			u.Path += "/" + strconv.Itoa(c.cursor)
+			return r.Method == "DELETE" && r.URL.String() == u.String()
 		}
 		if c.cursor > 0 {
 			q := u.Query()

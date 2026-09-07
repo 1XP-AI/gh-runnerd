@@ -124,14 +124,14 @@ func TestBaselineDurableReceiptAndScope(t *testing.T) {
 }
 
 func TestBaselineKnownResponseSurvivesOriginalCancellation(t *testing.T) {
-	for _, stage := range []string{"poll1", "source", "ack", "acquire"} {
+	for _, stage := range []string{"set", "session", "poll1", "source", "ack", "acquire"} {
 		t.Run(stage, func(t *testing.T) {
 			f := newBaselineFixture(t, nil)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			triggered := false
 			f.afterResponse = func(r *http.Request, response *http.Response) {
-				match := stage == "poll1" && r.URL.Path == "/queue" || stage == "source" && strings.Contains(r.URL.Path, "/actions/runs/") || stage == "ack" && r.Method == "DELETE" || stage == "acquire" && strings.HasSuffix(r.URL.Path, "/acquirejobs")
+				match := stage == "set" && strings.HasSuffix(r.URL.Path, "/runnerscalesets/7") || stage == "session" && strings.HasSuffix(r.URL.Path, "/sessions") || stage == "poll1" && r.URL.Path == "/queue" || stage == "source" && strings.Contains(r.URL.Path, "/actions/runs/") || stage == "ack" && r.Method == "DELETE" || stage == "acquire" && strings.HasSuffix(r.URL.Path, "/acquirejobs")
 				if match && !triggered {
 					triggered = true
 					cancel()
@@ -146,6 +146,12 @@ func TestBaselineKnownResponseSurvivesOriginalCancellation(t *testing.T) {
 				t.Fatal("cancelled authority continued")
 			}
 			want := stage
+			if stage == "set" {
+				want = "set-observe"
+			}
+			if stage == "session" {
+				want = "session-open"
+			}
 			if stage == "poll1" {
 				want = "poll"
 			}
@@ -173,7 +179,7 @@ func TestBaselineKnownResponseSurvivesOriginalCancellation(t *testing.T) {
 }
 func TestBaselineResponseLossAndNoReplay(t *testing.T) {
 	for _, stage := range []string{"session", "ack", "acquire"} {
-		for _, failure := range []string{"lost", "401", "write"} {
+		for _, failure := range []string{"lost", "401", "write", "closed-file"} {
 			t.Run(stage+"/"+failure, func(t *testing.T) {
 				var f *baselineFixture
 				f = newBaselineFixture(t, func(at string, v any) any {
@@ -185,6 +191,8 @@ func TestBaselineResponseLossAndNoReplay(t *testing.T) {
 						return baselineReply{lost: true}
 					case "401":
 						return baselineReply{status: 401}
+					case "closed-file":
+						_ = f.j.file.Close()
 					case "write":
 						f.j.syncFile = func(file *os.File) error {
 							if err := file.Sync(); err != nil {
@@ -317,5 +325,67 @@ func TestBaselineCloseWaitsForHeldScope(t *testing.T) {
 	before := f.requests.Load()
 	if _, err := b.GetMessage(context.Background(), 9, 1); err == nil || f.requests.Load() != before {
 		t.Fatal("closed receiver performed work")
+	}
+}
+
+func TestBaselineLoneAliasesAgreeWithSDK(t *testing.T) {
+	f := newBaselineFixture(t, func(stage string, v any) any {
+		if stage == "poll1-items" {
+			m := v.([]any)[0].(map[string]any)
+			m["RUNNERREQUESTID"] = m["runnerRequestId"]
+			delete(m, "runnerRequestId")
+		}
+		if stage == "acquire" {
+			m := v.(map[string]any)
+			m["COUNT"] = m["count"]
+			delete(m, "count")
+		}
+		return v
+	})
+	if err := f.run(t); err != nil || f.acquires.Load() != 1 || f.acks.Load() != 2 {
+		t.Fatal("single alias disagreed with pinned SDK", err)
+	}
+}
+
+func TestBaselineOriginalContextCancelsInflightSDK(t *testing.T) {
+	for _, stage := range []string{"poll1", "source", "ack", "acquire"} {
+		t.Run(stage, func(t *testing.T) {
+			entered := make(chan struct{})
+			unblock := make(chan struct{})
+			f := newBaselineFixture(t, func(at string, v any) any {
+				if at == stage {
+					close(entered)
+					<-unblock
+				}
+				return v
+			})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			b, err := newBaselineListenerHeld(ctx, f.a, f.j, f.api, 7)
+			if err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan error, 1)
+			go func() {
+				done <- b.run(func(context.Context, baselineAcquisition) error { f.continuations.Add(1); return nil })
+			}()
+			select {
+			case <-entered:
+			case <-time.After(2 * time.Second):
+				close(unblock)
+				t.Fatal("request boundary not reached")
+			}
+			cancel()
+			select {
+			case err := <-done:
+				close(unblock)
+				if err == nil || f.continuations.Load() != 0 {
+					t.Fatal("cancelled in-flight operation continued")
+				}
+			case <-time.After(time.Second):
+				close(unblock)
+				t.Fatal("SDK WithoutCancel escaped original scope")
+			}
+		})
 	}
 }

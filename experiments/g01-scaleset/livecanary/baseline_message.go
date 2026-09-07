@@ -179,11 +179,11 @@ func decodeBaselineItem(data []byte, index int) (baselineItem, error) {
 		Display     json.RawMessage `json:"jobDisplayName"`
 	}
 	if string(data) == "null" || DecodeStrict(data, &w) != nil {
-		return baselineItem{}, ErrRemote
+		return baselineItem{Index: index, Kind: "invalid"}, ErrRemote
 	}
 	x := baselineItem{index, w.Kind, w.RequestID, w.JobID, w.Owner, w.Repository, w.RunID, w.Event, w.WorkflowRef, w.RunnerID, w.RunnerName, w.Result, w.Labels, w.QueueTime, w.AssignTime, w.RunnerTime, w.FinishTime}
 	if !x.bounded() {
-		return baselineItem{}, ErrRemote
+		return baselineItem{Index: index, Kind: "invalid"}, ErrRemote
 	}
 	if w.Kind != "JobAvailable" && w.Kind != "JobAssigned" && w.Kind != "JobStarted" && w.Kind != "JobCompleted" {
 		x.Kind = "unknown"

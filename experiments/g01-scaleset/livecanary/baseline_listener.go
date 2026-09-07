@@ -206,7 +206,7 @@ func (b *baselineListener) initialize() error {
 	cancel()
 	r.Set = c.set
 	r.HTTPStatus = c.status
-	known := callErr == nil && c.observed() && r.Set.eligible(b.approval, b.setID) && set != nil && set.ID == r.Set.ID && set.Name == r.Set.Name && set.RunnerGroupID == r.Set.GroupID && set.RunnerSetting.DisableUpdate && r.Set.Statistics.matches(set.Statistics)
+	known := c.observed() && r.Set.eligible(b.approval, b.setID) && ((callErr != nil && b.ctx.Err() != nil) || (callErr == nil && set != nil && set.ID == r.Set.ID && set.Name == r.Set.Name && set.RunnerGroupID == r.Set.GroupID && set.RunnerSetting.DisableUpdate && r.Set.Statistics.matches(set.Statistics)))
 	if _, err = b.finish(r, known); err != nil {
 		return err
 	}
@@ -221,12 +221,12 @@ func (b *baselineListener) initialize() error {
 	sf, _, _, status := c.facts()
 	r.Session = sf
 	r.HTTPStatus = status
-	known = callErr == nil && c.observed() && sf.eligible(b.approval, b.setID) && session != nil
+	known = c.observed() && sf.eligible(b.approval, b.setID) && ((callErr != nil && b.ctx.Err() != nil) || (callErr == nil && session != nil))
 	var initial scaleset.RunnerScaleSetSession
 	if callErr == nil && session != nil {
 		initial = session.Session()
 	}
-	if known {
+	if known && callErr == nil {
 		known = initial.SessionID.String() == sf.SessionID && initial.OwnerName == sf.Owner && sf.Statistics.matches(initial.Statistics) && initial.MessageQueueURL != ""
 	}
 	if callErr == nil && session != nil && sf != nil && initial.SessionID.String() == sf.SessionID && initial.OwnerName == b.approval.setName() {
@@ -236,6 +236,9 @@ func (b *baselineListener) initialize() error {
 	}
 	if _, err = b.finish(r, known); err != nil {
 		return err
+	}
+	if callErr != nil || b.check() != nil {
+		return ErrQuarantine
 	}
 	b.session = session
 	b.sessionID = sf.SessionID
@@ -283,7 +286,7 @@ func (b *baselineListener) GetMessage(_ context.Context, last, capacity int) (*s
 	r.Batch = batch
 	r.HTTPStatus = status
 	r.NoMessage = status == 202 && m == nil
-	known := callErr == nil && c.observed() && (r.NoMessage || (m != nil && batch != nil && batch.matches(m) && batch.MessageID > 0 && !s.messageIDs[batch.MessageID] && batch.Statistics.eligible(s.acquired)))
+	known := c.observed() && (callErr == nil || b.ctx.Err() != nil) && (r.NoMessage || (batch != nil && (batch.matches(m) || callErr != nil && b.ctx.Err() != nil) && batch.MessageID > 0 && !s.messageIDs[batch.MessageID] && batch.Statistics.eligible(s.acquired)))
 	if known && !r.NoMessage {
 		copyState := s
 		if err := copyState.admitBatch(batch, b.approval); err != nil {
@@ -293,6 +296,9 @@ func (b *baselineListener) GetMessage(_ context.Context, last, capacity int) (*s
 	batchRef, err := b.finish(r, known)
 	if err != nil {
 		return nil, err
+	}
+	if callErr != nil || b.check() != nil {
+		return nil, ErrQuarantine
 	}
 	if r.NoMessage {
 		return nil, nil
@@ -338,10 +344,13 @@ func (b *baselineListener) DeleteMessage(_ context.Context, id int) error {
 	if err != nil {
 		return err
 	}
+	c := b.wire("ack")
+	c.cursor = id
 	ctx, cancel := context.WithTimeout(b.ctx, operationTimeout)
-	callErr := b.session.DeleteMessage(ctx, id)
+	callErr := b.session.DeleteMessage(c.context(ctx), id)
 	cancel()
-	_, err = b.finish(r, callErr == nil && b.session.Session().SessionID.String() == b.sessionID)
+	_, _, _, status := c.facts()
+	_, err = b.finish(r, c.observed() && status == 204 && (callErr == nil || b.ctx.Err() != nil) && b.session.Session().SessionID.String() == b.sessionID)
 	return err
 }
 func (b *baselineListener) AcquireJobs(_ context.Context, ids []int64) ([]int64, error) {
@@ -364,7 +373,7 @@ func (b *baselineListener) AcquireJobs(_ context.Context, ids []int64) ([]int64,
 	_, _, accepted, status := c.facts()
 	r.Accepted = accepted
 	r.HTTPStatus = status
-	known := callErr == nil && c.observed() && status == 200 && accepted != nil && accepted.Count != nil && *accepted.Count == 1 && len(accepted.IDs) == 1 && accepted.IDs[0] == ids[0] && slices.Equal(got, ids) && b.session.Session().SessionID.String() == b.sessionID
+	known := c.observed() && status == 200 && accepted != nil && accepted.Count != nil && *accepted.Count == 1 && len(accepted.IDs) == 1 && accepted.IDs[0] == ids[0] && ((callErr == nil && slices.Equal(got, ids)) || (callErr != nil && b.ctx.Err() != nil)) && b.session.Session().SessionID.String() == b.sessionID
 	resultRef, err := b.finish(r, known)
 	if err != nil {
 		return nil, err
