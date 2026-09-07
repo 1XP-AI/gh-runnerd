@@ -1,8 +1,10 @@
 # G01 Scale Set contract evidence
 
 Date: 2026-09-07. **Offline evidence only; live gate unresolved.**
-Implementation/model: Astra (`gpt-6-astra`, `xhigh`). Independent protocol review
-is still required; this document is not review approval.
+Implementation/model: Astra (`gpt-6-astra`, `xhigh`). Independent Astra `xhigh`
+review approved the offline artifact at `4e58c55`; the reviewer reproduced race
+tests, vet and both pinned SDK comparisons. This is not approval of a live
+canary or the unresolved production integration gate.
 
 ## Exact inputs and primary sources
 
@@ -130,7 +132,7 @@ reference IDs are recoverable candidates. Lost job identity/JIT contents and
 ambiguous acquisition are quarantined, not automatically replayed. Unknown or
 busy resources keep reservations; no exactly-once claim is made.
 
-Outstanding: independent Astra protocol review; reviewed private canary harness;
+Outstanding: reviewed private canary harness;
 explicit authorization for the [concrete live plan](g01-live-canary.md); sanitized
 live evidence; safe drain contract decision. G01 and dependent production work
 remain gated. The spike has no live effects; reverting its files is sufficient
