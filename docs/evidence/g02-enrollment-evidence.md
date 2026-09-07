@@ -56,7 +56,7 @@ Offline tests and race tests passed. A real TCP listener on `127.0.0.1:0` was ex
 | App JWT, wrong App/org/installation IDs, suspension, missing/excess permissions | Passing adapter/binding tests | Local validation contract verified |
 | Disabled-webhook Manifest with HTTP random port redirect | Documentation only; not run against GitHub | Unresolved G02 gate |
 | Two actual org installations and minimal granted permissions | Documentation only; not run | Unresolved G02 gate |
-| Private file-Keychain/current source executable/current GUI login | Actual synthetic reads, verified Keychain lock, explicit denial and full cleanup passed | Limited current-session evidence only; ad-hoc source build |
+| Private file-Keychain/current source executable/current GUI login | Actual synthetic reads, verified Keychain lock, explicit denial and full cleanup passed | Limited current-session source build; final signing metadata not inspected |
 | Intended controller UID/domain, signed release and binary update | Not run | Unresolved G02 gate |
 | Screen lock, controller logout/login, host reboot/cold boot | Not run | Login-free boot unsupported; target behavior unverified |
 | Dedicated controller/job identities and narrow helper | Decision only; no accounts/helper created | Protected native profile remains gated |
@@ -67,7 +67,7 @@ The local ten-minute state lifetime is intentionally shorter than GitHub's docum
 
 ## Actual limited macOS runtime experiment
 
-Independent Astra xhigh review approved the narrow synthetic-only cgo/unsafe exception and each behavior-changing probe revision before execution. Final reviewed source: `50696dbb3cf435e5155a48fdf9673403efe9c682`. The executable was an ARM64 Go 1.26.8 source build with linker-generated **ad-hoc** signing, no Team Identifier and no bound application Info.plist. It was not a Developer ID release, system daemon, intended controller account or protected native worker.
+Independent Astra xhigh review approved the narrow synthetic-only cgo/unsafe exception and each behavior-changing probe revision before execution. Final reviewed source: `50696dbb3cf435e5155a48fdf9673403efe9c682`. The executed artifact was an ARM64 Go 1.26.8 source build. An earlier probe build at `c316e0e` was inspected with `codesign -d -v`, which reported linker-generated **ad-hoc** signing, no Team Identifier and no bound application Info.plist. The same private binary path was rebuilt for later reviewed revisions, but the final `50696db` artifact's signing metadata was not separately inspected before cleanup. That earlier observation is not claimed as verification of the final binary's signing identity. This is source-build evidence only; Developer ID release, system-daemon, intended-controller and protected-native-worker identities remain unverified.
 
 The exact invocation was:
 
