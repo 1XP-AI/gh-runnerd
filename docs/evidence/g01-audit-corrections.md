@@ -83,3 +83,14 @@ concurrent phases and replaced journal/directory identities still authorizing
 operations. The final exclusive lease and identity checks cover those cases.
 Their tests and implementation are committed together, so these are not claims
 of separate immutable red commits.
+
+## Decoder-equivalent field names
+
+The adjacent JSON regression at red commit `b77f0b7` showed both strict decoders
+accepting duplicate fields through ASCII casing and Unicode long-s aliases.
+Duplicate detection now canonicalizes each name by Unicode simple-fold class,
+matching the standard decoder's struct-field equivalence without quadratic
+pairwise comparisons. Single aliases and separate object scopes remain valid.
+These helpers serve fixed approval/credential/journal schemas; arbitrary maps
+with case-distinct keys are intentionally outside this strict decoder contract.
+This is an adjacent verified defect, not an additional original audit finding.

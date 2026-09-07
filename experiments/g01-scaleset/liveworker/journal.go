@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 )
 
 // Journal is private controller state, not a publishable evidence report. The
@@ -69,7 +71,11 @@ func uniqueKeys(d *json.Decoder) bool {
 				return false
 			}
 			s, ok := key.(string)
-			if !ok || seen[s] {
+			if !ok {
+				return false
+			}
+			s = foldedJSONName(s)
+			if seen[s] {
 				return false
 			}
 			seen[s] = true
@@ -281,4 +287,22 @@ func (j *FileJournal) Close() error {
 		return ErrState
 	}
 	return nil
+}
+
+// encoding/json matches struct fields with Unicode simple-fold equivalence.
+// Canonicalize once per key, avoiding quadratic pairwise key comparisons.
+// DecodeStrict serves fixed authority/journal schemas, not case-sensitive maps.
+func foldedJSONName(input string) string {
+	var result strings.Builder
+	result.Grow(len(input))
+	for _, r := range input {
+		minimum := r
+		for next := unicode.SimpleFold(r); next != r; next = unicode.SimpleFold(next) {
+			if next < minimum {
+				minimum = next
+			}
+		}
+		result.WriteRune(minimum)
+	}
+	return result.String()
 }
