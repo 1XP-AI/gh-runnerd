@@ -525,3 +525,53 @@ func TestBrokerLockReplacementRefusesOnReopen(t *testing.T) {
 		t.Fatal("replacement lock rebound ledger on reopen")
 	}
 }
+
+func TestBrokerInvalidCanonicalJournalRefusesBeforeMint(t *testing.T) {
+	for _, kind := range []string{"locked", "malformed", "oversized", "mismatched authority", "phase ineligible"} {
+		t.Run(kind, func(t *testing.T) {
+			a, c, api, f, root := newBrokerFixture(t)
+			a.Mode = "controller"
+			a.Phase = "create"
+			launched := false
+			p := brokerTestPlan(t, &a, filepath.Dir(root), func(context.Context, []byte, string) error { launched = true; return errBroker })
+			binding, _ := p.binding()
+			header := map[string]any{"version": 1, "ownership": binding.Ownership, "authority": map[string]any{"digest": brokerDigest(p.controller), "expires_at": p.controller.ExpiresAt, "phases": p.controller.Phases}}
+			if kind == "mismatched authority" {
+				header["authority"].(map[string]any)["digest"] = strings.Repeat("f", 64)
+			}
+			raw, _ := json.Marshal(header)
+			raw = append(raw, '\n')
+			switch kind {
+			case "malformed":
+				raw = append(raw, []byte("{invalid-event}\n")...)
+			case "oversized":
+				raw = []byte(strings.Repeat("x", (1<<20)+1))
+			case "phase ineligible":
+				raw = append(raw, []byte(`{"sequence":1,"kind":"phase","operation":"create"}`+"\n")...)
+			}
+			path := filepath.Join(p.statePath, "journal.jsonl")
+			if os.WriteFile(path, raw, 0600) != nil {
+				t.Fatal("fixture journal")
+			}
+			journal, e := os.OpenFile(path, os.O_RDWR, 0)
+			if e != nil {
+				t.Fatal("fixture open")
+			}
+			defer journal.Close()
+			if kind == "locked" && syscall.Flock(int(journal.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+				t.Fatal("fixture lease")
+			}
+			ji, _ := journal.Stat()
+			id := brokerFileIdentity(ji)
+			claim := map[string]any{"version": 1, "ownership": binding.Ownership, "state_device": binding.State.Device, "state_inode": binding.State.Inode, "journal_device": id.Device, "journal_inode": id.Inode}
+			encoded, _ := json.Marshal(claim)
+			if os.WriteFile(filepath.Join(f.admissionRoot, "admission.json"), encoded, 0600) != nil {
+				t.Fatal("fixture claim")
+			}
+			_, e = brokerExecute(context.Background(), a, brokerInput{PEM: string(c.PEM)}, root, api, p)
+			if e == nil || f.tokenCalls != 0 || launched {
+				t.Fatalf("known-invalid controller journal reached issuance/handoff: mints=%d launched=%t", f.tokenCalls, launched)
+			}
+		})
+	}
+}
