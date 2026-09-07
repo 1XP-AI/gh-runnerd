@@ -1,6 +1,6 @@
 # G02 enrollment and credential evidence
 
-Status on 2026-09-07: **offline harness complete; required live GitHub and target service-identity gates remain open**. This record does not mark issue G02 Done.
+Status on 2026-09-07: **offline harness and limited current-login synthetic runtime probe complete; required live GitHub and target service-identity gates remain open**. This record does not mark issue G02 Done.
 
 ## Environment and scope
 
@@ -38,7 +38,7 @@ go run ./cmd/g02-synthetic
 go build -tags=g02runtime -o "$G02_PROBE_BINARY" ./cmd/g02-keychain-probe
 ```
 
-The last command is build-only; it is not runtime evidence. Actual synthetic command output:
+The optional build command does not itself count as runtime evidence. The independently reviewed binary was then explicitly invoked as documented below. Actual offline synthetic command output:
 
 ```json
 {"profile":"synthetic","verified_organizations":2,"in_memory_commit":true,"live_github":false}
@@ -56,12 +56,46 @@ Offline tests and race tests passed. A real TCP listener on `127.0.0.1:0` was ex
 | App JWT, wrong App/org/installation IDs, suspension, missing/excess permissions | Passing adapter/binding tests | Local validation contract verified |
 | Disabled-webhook Manifest with HTTP random port redirect | Documentation only; not run against GitHub | Unresolved G02 gate |
 | Two actual org installations and minimal granted permissions | Documentation only; not run | Unresolved G02 gate |
-| Private file-Keychain/current source executable/current GUI login | Probe built, not yet executed in this revision | No runtime pass claimed |
+| Private file-Keychain/current source executable/current GUI login | Actual synthetic reads, verified Keychain lock, explicit denial and full cleanup passed | Limited current-session evidence only; ad-hoc source build |
 | Intended controller UID/domain, signed release and binary update | Not run | Unresolved G02 gate |
 | Screen lock, controller logout/login, host reboot/cold boot | Not run | Login-free boot unsupported; target behavior unverified |
 | Dedicated controller/job identities and narrow helper | Decision only; no accounts/helper created | Protected native profile remains gated |
 
 The local ten-minute state lifetime is intentionally shorter than GitHub's documented one-hour Manifest exchange limit. Normal top-level redirect GETs may omit Origin; state and exact Host/path are mandatory regardless. Accepting an absent Origin is not authorization. IPv6, localhost aliases, GHES/GHE.com, proxies, persistent setup listeners and cross-process resumable Manifest attempts are not covered.
+
+## Actual limited macOS runtime experiment
+
+Independent Astra xhigh review approved the narrow synthetic-only cgo/unsafe exception and each behavior-changing probe revision before execution. Final reviewed source: `50696dbb3cf435e5155a48fdf9673403efe9c682`. The executable was an ARM64 Go 1.26.8 source build with linker-generated **ad-hoc** signing, no Team Identifier and no bound application Info.plist. It was not a Developer ID release, system daemon, intended controller account or protected native worker.
+
+The exact invocation was:
+
+```sh
+"$G02_PROBE_BINARY" --synthetic-current-login
+```
+
+`G02_PROBE_BINARY` was a newly built executable in an owned private temporary build directory. No persistent service was installed. Each run created one fresh private file-based Keychain, a generated 32-byte canary with a calling-executable ACL, and only the needed unique transient GUI launchd jobs. The probe compares default/search-list metadata but neither reads their secret items nor calls setters. It restricts queries to the captured new Keychain and disables interaction per process. It does not lock the screen or any existing Keychain.
+
+All attempted revisions and actual results are retained here:
+
+| Reviewed revision | Actual result | Reads/jobs reached | Cleanup / preferences |
+|---|---|---|---|
+| `f271f94` | Ownership guard refused macOS's canonicalized path spelling | None | Complete / unchanged |
+| `cdd51c3` | Parent filesystem identity passed; strict file-mode guard refused | None | Complete / unchanged |
+| `9023ac8` | Metadata-only diagnostic found created Keychain mode 0644 inside the owned 0700 directory, plus a generated read-only sidecar | None | Complete / unchanged |
+| `6ddb465` | After tightening only the owned regular Keychain descriptor to 0600, direct and launchd reads succeeded; after Keychain lock the fresh launchd read returned -25293 with no canary. Command exited 1 because its initial assertion allowed only -25308 | Both read phases | Complete / unchanged |
+| `50696db` | Explicitly verified the Keychain lock bit, accepted only the two documented denial statuses, and passed with exit 0 | Both read phases | Complete / unchanged |
+
+The initial mode did not expose a real credential: all contents were newly generated synthetic values and the enclosing directory remained 0700. The final fix uses `O_NOFOLLOW`, verifies the created file's regular type/current UID, and tightens that descriptor only. No existing file permissions were changed. The assertion adjustment is supported by Apple's `errSecAuthFailed` and `errSecInteractionNotAllowed` definitions and a regression test that rejects success, missing-item, decode and unknown statuses. **A -25293 status alone is not a universal diagnosis of a locked Keychain**; this experiment observed successful reads first and explicitly verified the same synthetic Keychain's locked state before the denied read.
+
+Final sanitized output, exit 0:
+
+```json
+{"profile":"synthetic-file-keychain-current-login","direct":{"attempted":true,"status":0,"canary_matches":true,"same_uid":true},"launchd_unlocked":{"attempted":true,"status":0,"canary_matches":true,"same_uid":true},"launchd_locked":{"attempted":true,"status":-25293,"canary_matches":false,"same_uid":true},"keychain_preferences_unchanged":true,"synthetic_keychain_locked":true,"cleanup_complete":true}
+```
+
+The fresh GUI launchd child ran as the same UID that owned the private probe directory. Its exact generated label was removed and missing-service exit 113 verified with a fresh timeout. The aggregate cleanup result includes service absence, Keychain deletion and captured-directory removal; unknown service cleanup preserves a private recovery inventory and is never reported complete. No recovery inventory remained from these runs. Test build artifacts were also removed after recording results.
+
+This measures **read denied after verified synthetic Keychain lock** in one current login. Screen lock, actual controller/job UID separation, release-signing persistence across upgrades, logout/login, cold boot and reboot remain unperformed. The support matrix keeps those gates open.
 
 ## Official-source findings
 
@@ -70,6 +104,8 @@ The local ten-minute state lifetime is intentionally shorter than GitHub's docum
 [Installation requirements](https://docs.github.com/en/apps/using-github-apps/installing-a-github-app-from-a-third-party) require owner approval for this organization-permission App. [Runner registration credentials](https://docs.github.com/en/rest/actions/self-hosted-runners#create-a-registration-token-for-an-organization) use organization self-hosted-runners write. [Organization installation lookup](https://docs.github.com/en/rest/apps/apps#get-an-organization-installation-for-the-authenticated-app) requires an App JWT; the harness validates its identity fields rather than trusting a callback installation ID. [JWT guidance](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-json-web-token-jwt-for-a-github-app) permits App ID as issuer, recommends a one-minute `iat` backdate and limits expiry to ten minutes into the future. The harness uses nine minutes. [API version policy](https://docs.github.com/en/rest/about-the-rest-api/api-versions) lists `2022-11-28` as supported through 2028-03-10; its use here is an explicit contract pin.
 
 [Apple TN3137](https://developer.apple.com/documentation/Technotes/tn3137-on-mac-keychains) confines data-protection Keychain to user context and identifies file-based Keychain as the daemon option. The [launchd guide](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html) describes per-user agent termination at logout. Neither source proves this project's packaging or actual machine behavior.
+
+The local Apple SDK and [authentication-failure definition](https://developer.apple.com/documentation/security/errsecauthfailed) identify -25293 as authorization/authentication failure; [interaction-not-allowed](https://developer.apple.com/documentation/security/errsecinteractionnotallowed) identifies -25308 as interaction refusal. These meanings support the narrow negative-read assertion, not a broader Keychain diagnosis.
 
 The synthetic probe uses [private temporary Keychain creation](https://developer.apple.com/documentation/security/seckeychaincreate(_:_:_:_:_:_:)) and [an ACL limited to the calling executable](https://developer.apple.com/documentation/security/secaccesscreate(_:_:_:)). Apple's published [StorageManager source](https://github.com/apple-oss-distributions/Security/blob/main/OSX/libsecurity_keychain/lib/StorageManager.cpp) explicitly avoids adding private keychains to the search list. The probe still checks default/search-list metadata before, during and after; it calls no setters for either.
 
