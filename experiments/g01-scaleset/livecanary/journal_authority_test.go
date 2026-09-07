@@ -11,7 +11,7 @@ import (
 func TestFileJournalRejectsUnrecordedAuthorityBeforeRawDriverEffect(t *testing.T) {
 	a := approval()
 	a.Phases = []string{"create"}
-	j, err := OpenJournal(privateDir(t), a)
+	j, err := openTestJournal(t, privateDir(t), a)
 	if err != nil {
 		t.Fatal("private fixture journal")
 	}
@@ -32,7 +32,7 @@ func TestRenewedRecoveryApprovalRetainsOwnedState(t *testing.T) {
 	a := approval()
 	a.ExpiresAt = time.Now().Add(time.Minute)
 	dir := privateDir(t)
-	j, err := OpenJournal(dir, a)
+	j, err := openTestJournal(t, dir, a)
 	if err != nil {
 		t.Fatal("initial private journal")
 	}
@@ -46,7 +46,7 @@ func TestRenewedRecoveryApprovalRetainsOwnedState(t *testing.T) {
 	if a.Validate(a.ExpiresAt.Add(time.Nanosecond)) == nil || renewed.Validate(a.ExpiresAt.Add(time.Nanosecond)) != nil {
 		t.Fatal("fixture expired/renewed authority mismatch")
 	}
-	j, err = OpenJournal(dir, renewed)
+	j, err = openTestJournal(t, dir, renewed)
 	if err != nil {
 		t.Fatalf("explicit recovery renewal cannot reopen owned state: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestRenewedRecoveryApprovalRetainsOwnedState(t *testing.T) {
 		case "changed owner":
 			bad.OwnerNonce = "99999999999999999999999999999999"
 		}
-		if unsafe, err := OpenJournal(dir, bad); err == nil {
+		if unsafe, err := openTestJournal(t, dir, bad); err == nil {
 			unsafe.Close()
 			t.Errorf("%s authority accepted", kind)
 		}
@@ -83,7 +83,7 @@ func TestRenewedRecoveryApprovalRetainsOwnedState(t *testing.T) {
 
 func TestAuthorityLeaseRefusesConcurrentRunsAndFencesClose(t *testing.T) {
 	a := approval()
-	j, err := OpenJournal(privateDir(t), a)
+	j, err := openTestJournal(t, privateDir(t), a)
 	if err != nil {
 		t.Fatal("private fixture journal")
 	}
@@ -131,7 +131,7 @@ func TestAuthorityRejectsReplacedJournalOrDirectory(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			a := approval()
 			dir := privateDir(t)
-			j, err := OpenJournal(dir, a)
+			j, err := openTestJournal(t, dir, a)
 			if err != nil {
 				t.Fatal("fixture journal")
 			}

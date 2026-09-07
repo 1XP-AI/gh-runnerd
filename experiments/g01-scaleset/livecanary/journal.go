@@ -317,3 +317,8 @@ func foldedJSONName(input string) string {
 	}
 	return result.String()
 }
+
+// Initial test seam retains the former behavior until permanent admission exists.
+func openJournalAtAdmission(directory string, a Approval, admissionDirectory string, syncDirectory func(*os.File) error) (*FileJournal, error) {
+	return openJournalWithSync(directory, a, syncDirectory)
+}
