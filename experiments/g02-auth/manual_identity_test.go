@@ -84,7 +84,13 @@ func TestManualIdentityCorrectionBeforeAuthentication(t *testing.T) {
 					t.Fatal("incorrect App ID unexpectedly verified")
 				}
 			}
-			before, _ := readAttempt(t, path)
+			before, beforeBytes := readAttempt(t, path)
+			api.beforeIdentity = func() {
+				_, current := readAttempt(t, path)
+				if !bytes.Equal(beforeBytes, current) {
+					t.Error("correction rewrote the existing record before authentication")
+				}
+			}
 			calls := api.identityCalls
 			result, err := VerifyManual(context.Background(), p, path, 71, io.NopCloser(bytes.NewReader(candidate.PEM)), api)
 			if err != nil || result.VerifiedOrganizations != 2 || api.identityCalls-calls != 1 {
