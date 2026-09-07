@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -84,7 +85,7 @@ func TestPairedDistinctIDsAndOriginalCadence(t *testing.T) {
 func TestPairedActualJournalSyncFailureMatrix(t *testing.T) {
 	// Every integration stage's intent/result, plus listener parent, session and
 	// final summary. A written-but-unsynced record never authorizes a fresh run.
-	for _, stage := range []string{"pair", "host-preflight", "roster-anchor", "set-observe", "session-open", "acquire", "continuation", "jit", "handoff", "worker-start", "identity-sample", "collection"} {
+	for _, stage := range []string{"pair", "host-preflight", "roster-anchor", "set-observe", "session-open", "poll", "source", "ack", "acquire", "continuation", "jit", "handoff", "worker-start", "identity-sample", "collection"} {
 		outcomes := []string{"intent", "result"}
 		if stage == "collection" {
 			outcomes = []string{"observed"}
@@ -176,5 +177,156 @@ func TestPairedJITCanceledAfterObservedResponseRetainsTuple(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("bounded observed JIT runner tuple lost after cancellation")
+	}
+}
+
+func TestPairedCurrentIdentityAfterIntent(t *testing.T) {
+	for _, point := range []string{"pair", "session-open", "acquire", "jit"} {
+		for _, change := range []string{"controller-file", "worker-file", "controller-claim", "worker-claim", "dependency", "cancel"} {
+			t.Run(point+"/"+change, func(t *testing.T) {
+				f := newPairedIntegrationFixture(t)
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				fired := false
+				f.c.j.syncFile = func(file *os.File) error {
+					if err := file.Sync(); err != nil {
+						return err
+					}
+					raw, _ := os.ReadFile(file.Name())
+					lines := bytes.Split(bytes.TrimSpace(raw), []byte{'\n'})
+					var e Event
+					if json.Unmarshal(lines[len(lines)-1], &e) != nil || e.Baseline == nil || e.Baseline.Stage != point || e.Baseline.Outcome != "intent" || fired {
+						return nil
+					}
+					fired = true
+					path := ""
+					switch change {
+					case "controller-file":
+						path = file.Name()
+					case "worker-file":
+						path = filepath.Join(f.wf.StateDirectory(), "journal.jsonl")
+					case "controller-claim":
+						path = filepath.Join(f.c.j.claim.directory, "admission.json")
+					case "worker-claim":
+						path = filepath.Join(f.wf.AdmissionDirectory(), "admission.json")
+					case "dependency":
+						f.c.api.baseURL += "/substituted"
+					case "cancel":
+						cancel()
+					}
+					if path != "" {
+						old, err := os.ReadFile(path)
+						if err != nil {
+							return err
+						}
+						if err = os.Rename(path, path+".retained"); err != nil {
+							return err
+						}
+						return os.WriteFile(path, old, 0600)
+					}
+					return nil
+				}
+				out, err := runPairedBaselineWithCadence(ctx, &Driver{Approval: f.c.a, Journal: f.c.j, API: f.c.api}, f.w, fastPairCadence())
+				if !fired || err == nil || out.Outcome != collectionUnresolved || f.creates.Load() != 0 || f.starts.Load() != 0 || f.cleanup.Load() != 0 {
+					t.Fatal("current identity gate failed")
+				}
+				if point == "pair" || point == "session-open" {
+					if f.c.sessions.Load() != 0 || f.c.acquires.Load() != 0 || f.jit.Load() != 0 {
+						t.Fatal("effect after lost prefix authority")
+					}
+				}
+				if point == "acquire" && f.c.acquires.Load() != 0 || point == "jit" && f.jit.Load() != 0 {
+					t.Fatal("effect after current authority loss")
+				}
+			})
+		}
+	}
+}
+
+func TestPairedRosterAndHostStopBeforeSession(t *testing.T) {
+	for _, mode := range []string{"roster-null", "roster-drift", "host-image"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newPairedIntegrationFixture(t)
+			if mode == "host-image" {
+				f.w.Approval.ImageID = "sha256:" + strings.Repeat("b", 64)
+			} else {
+				f.remote = func(req *http.Request, value any) any {
+					if req.URL.Path == "/orgs/"+f.c.a.Organization+"/actions/runners" {
+						if mode == "roster-null" {
+							return map[string]any{"total_count": 0, "runners": nil}
+						}
+						return map[string]any{"total_count": 1, "runners": []any{map[string]any{"id": 999}}}
+					}
+					return value
+				}
+			}
+			out, err := runFastPair(f)
+			if err == nil || out.Outcome != collectionUnresolved || f.c.sessions.Load() != 0 || f.c.acquires.Load() != 0 || f.jit.Load() != 0 || f.creates.Load() != 0 {
+				t.Fatal("unverified prefix admitted listener")
+			}
+		})
+	}
+}
+
+func TestPairedCrossRoundEvidenceAndEarlyContradictions(t *testing.T) {
+	for _, mode := range []string{"rest-id", "rest-name", "status-regression", "terminal-flip", "missing-later"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newPairedIntegrationFixture(t)
+			f.remote = func(req *http.Request, value any) any {
+				second := f.jobLists.Load() >= 2
+				var job map[string]any
+				if strings.HasSuffix(req.URL.Path, "/attempts/1/jobs") {
+					if mode == "missing-later" && second {
+						return map[string]any{"total_count": 0, "jobs": []any{}}
+					}
+					job = value.(map[string]any)["jobs"].([]any)[0].(map[string]any)
+				} else if strings.HasSuffix(req.URL.Path, "/actions/jobs/701") {
+					job = value.(map[string]any)
+				}
+				if job != nil {
+					if mode == "terminal-flip" {
+						job["status"] = "completed"
+						job["conclusion"] = "failure"
+						if second {
+							job["conclusion"] = "success"
+						}
+					}
+					if second {
+						switch mode {
+						case "rest-id":
+							job["runner_id"] = 9002
+						case "rest-name":
+							job["runner_name"] = "other"
+						case "status-regression":
+							job["status"] = "queued"
+							job["conclusion"] = nil
+						}
+					}
+				}
+				return value
+			}
+			out, err := runFastPair(f)
+			if mode == "missing-later" {
+				if err != nil || out.Outcome != collectionCollected || out.Rounds != 8 || f.restReads.Load() != 8 || f.jobDetails.Load() != 1 {
+					t.Fatal("later pending discarded previous positive identity")
+				}
+				return
+			}
+			if err == nil || out.Outcome != collectionUnresolved || out.Rounds != 1 || f.restReads.Load() != 1 || f.containerReads.Load() != 2 {
+				t.Fatalf("contradiction did not fence exact next reader: rounds=%d rest=%d local=%d", out.Rounds, f.restReads.Load(), f.containerReads.Load())
+			}
+		})
+	}
+}
+
+func TestPairedCrossStagePayloadsRefused(t *testing.T) {
+	for _, inject := range []func(*baselineRecord){func(r *baselineRecord) { r.Pair = &baselinePair{} }, func(r *baselineRecord) { r.Host = &baselineHost{} }, func(r *baselineRecord) { r.Roster = &baselineRoster{} }, func(r *baselineRecord) { r.JIT = &baselineJIT{} }, func(r *baselineRecord) { r.Handoff = &baselineHandoff{} }, func(r *baselineRecord) { r.Start = &baselineStart{} }, func(r *baselineRecord) { r.Sample = &baselineSample{} }, func(r *baselineRecord) { r.Collection = &baselineCollectionFacts{} }} {
+		for _, stage := range []string{"set-observe", "session-open", "poll", "source", "ack", "acquire", "continuation", "started", "completed", "desired"} {
+			r := baselineRecord{Version: 1, Stage: stage, SetID: 7, Outcome: "intent"}
+			inject(&r)
+			if validBaselineShape(Event{Kind: "baseline", Baseline: &r}) {
+				t.Fatal("new payload accepted on legacy baseline stage")
+			}
+		}
 	}
 }
