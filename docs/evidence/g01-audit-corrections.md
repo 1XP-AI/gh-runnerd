@@ -13,6 +13,13 @@ quarantined before testing for an empty available-job list. Genuine nil/empty
 poll controls retain the intended no-message behavior; no terminal reconciliation
 is inferred from these unexpected messages.
 
+Independent review also reproduced a nonzero-statistics poll with no job entries
+taking that safe-close path. Red commit `c575fc0` preserves the case. Empty polls
+now require the complete statistics structure to be zero; positive demand,
+acquired/running work or runner counts conservatively retain uncertainty. Those
+counts are not treated as identities or ownership proof. The true empty control
+intentionally uses all-zero statistics, and nil-message behavior is unchanged.
+
 ## Initial corrections
 
 The immutable red commit `f6fc90b` preserves regressions for these findings:

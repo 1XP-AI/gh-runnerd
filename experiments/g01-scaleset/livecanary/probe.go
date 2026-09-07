@@ -44,6 +44,11 @@ func (p *probeClient) GetMessage(_ context.Context, last, capacity int) (*scales
 		return nil, ErrQuarantine
 	}
 	if len(m.JobAvailableMessages) == 0 {
+		// Positive counts are unresolved-work evidence, not owned runner IDs.
+		// This harness cannot reconcile them against a later stale zero.
+		if *m.Statistics != (scaleset.RunnerScaleSetStatistic{}) {
+			return nil, ErrQuarantine
+		}
 		return nil, ErrNoMessage
 	}
 	ids := make([]int64, 0, len(m.JobAvailableMessages))
