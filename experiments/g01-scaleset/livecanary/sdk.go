@@ -212,40 +212,55 @@ func (a *SDKAPI) VerifyRun(ctx context.Context, approval Approval, id int64) err
 }
 
 func (a *SDKAPI) Inventory(ctx context.Context) (string, error) {
+	digest, _, _, err := a.enumerateRoster(ctx, nil)
+	return digest, err
+}
+
+// A nil guard preserves the legacy Inventory contract, including its error and
+// cancellation semantics. Only observeRoster installs current-authority checks.
+func (a *SDKAPI) enumerateRoster(ctx context.Context, guard func() error) (string, int, int, error) {
 	var ids []int64
 	seen := make(map[int64]bool)
-	total := -1
+	total, accepted := -1, 0
+	check := func() bool { return guard == nil || guard() == nil }
 	for page := 1; page <= 10; page++ {
+		if !check() {
+			return "", 0, accepted, ErrRemote
+		}
 		var list inventoryPage
 		if a.get(ctx, "/orgs/"+a.approval.Organization+"/actions/runners?per_page=100&page="+strconv.Itoa(page), a.credentials.InstallationToken, &list) != nil {
-			return "", ErrRemote
+			return "", 0, accepted, ErrRemote
 		}
 		if page == 1 {
 			total = list.count
 		}
 		if list.count != total || len(ids)+len(list.ids) > total {
-			return "", ErrRemote
+			return "", 0, accepted, ErrRemote
 		}
 		for _, id := range list.ids {
 			if seen[id] {
-				return "", ErrRemote
+				return "", 0, accepted, ErrRemote
 			}
 			seen[id] = true
 			ids = append(ids, id)
 		}
+		if len(ids) != total && len(list.ids) == 0 || !check() {
+			return "", 0, accepted, ErrRemote
+		}
+		accepted++
 		if len(ids) == total {
 			slices.Sort(ids)
-			// Preserve the existing sorted-ID encoding, including nil -> null
-			// for an explicitly complete empty inventory in stored journals.
+			// Preserve sorted-ID encoding, including nil -> null for empty.
 			data, _ := json.Marshal(ids)
 			digest := sha256.Sum256(data)
-			return hex.EncodeToString(digest[:]), nil
-		}
-		if len(list.ids) == 0 {
-			return "", ErrRemote
+			encoded := hex.EncodeToString(digest[:])
+			if !check() {
+				return "", 0, accepted, ErrRemote
+			}
+			return encoded, total, accepted, nil
 		}
 	}
-	return "", ErrRemote
+	return "", 0, accepted, ErrRemote
 }
 
 func (a *SDKAPI) FindScaleSet(c context.Context, name string, group int) (*scaleset.RunnerScaleSet, error) {
