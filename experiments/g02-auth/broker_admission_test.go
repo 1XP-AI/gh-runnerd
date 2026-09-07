@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -470,5 +471,37 @@ func TestBrokerAllFiniteSlotsUseSameControllerAuthority(t *testing.T) {
 	}
 	if f.tokenCalls != 9 {
 		t.Fatalf("finite issuance count=%d", f.tokenCalls)
+	}
+}
+
+func TestBrokerControllerClaimReadUsesInitializationLease(t *testing.T) {
+	a, _, _, f, root := newBrokerFixture(t)
+	a.Mode = "controller"
+	a.Phase = "create"
+	p := brokerTestPlan(t, &a, filepath.Dir(root), func(context.Context, []byte, string) error { return nil })
+	admission, e := openBrokerPrivateDirectory(f.admissionRoot)
+	if e != nil {
+		t.Fatal("fixture")
+	}
+	defer admission.Close()
+	directory, e := admission.Open(".")
+	if e != nil {
+		t.Fatal("fixture directory")
+	}
+	defer directory.Close()
+	if syscall.Flock(int(directory.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+		t.Fatal("fixture initialization lease")
+	}
+	if p.compatibleControllerClaim(admission) == nil {
+		t.Error("controller claim checked while another initializer held directory")
+	}
+	if _, e := admission.Lstat("admission.json"); !os.IsNotExist(e) {
+		t.Fatal("compatibility created/adopted a claim")
+	}
+	if syscall.Flock(int(directory.Fd()), syscall.LOCK_UN) != nil {
+		t.Fatal("fixture unlock")
+	}
+	if p.compatibleControllerClaim(admission) != nil {
+		t.Fatal("empty unchanged inventory refused after lease released")
 	}
 }
