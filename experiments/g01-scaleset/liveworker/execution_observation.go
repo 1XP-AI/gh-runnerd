@@ -124,7 +124,11 @@ func (w *PairedWorker) DeleteTerminal(decision TerminalDecisionRef) (DeletionRec
 		if !s.original || state.deleteInput == nil || *state.deleteInput.Decision != decision {
 			return DeletionReceipt{}, ErrUncertain
 		}
-		return cloneDeletion(*state.deleted), nil
+		receipt := cloneDeletion(*state.deleted)
+		if receipt.AbsenceResult == nil {
+			return receipt, ErrUncertain
+		}
+		return receipt, nil
 	}
 	if state.pending != "" || state.uncertain || state.deleteInput != nil {
 		return DeletionReceipt{}, ErrUncertain

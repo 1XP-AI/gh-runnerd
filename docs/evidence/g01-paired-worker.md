@@ -139,3 +139,29 @@ Runtime.Preflight, preserving the larger 64/96 KiB Start/DeleteTerminal budgets.
 The complete liveworker race suite, including this matrix, then passed
 (exit 0, 5.705 seconds). Independent exact-head re-review and the integrator's
 full repository checks remain separate gates.
+
+## External-review cached deletion correction
+
+[GitHub Codex finding on PR #48](https://github.com/1XP-AI/gh-runnerd/pull/48#discussion_r3951878335)
+identified that an identical cached DeleteTerminal call returned nil after a
+successful DELETE whose separate absence read failed or still reported present.
+The first call retained the known deletion receipt and returned uncertainty, but
+the cache discarded that distinction when `AbsenceResult` was nil.
+
+Red commit `8dc12928462165380d14a9bbe018a97ddd01ece3` reproduces the finding against
+`30e4378a1f60980debce35b8234b8b07452531bc` with actual private FileJournal and Unix
+fixtures. `TestPairedActualUnixCachedDeletionPreservesMissingAbsenceUncertainty`
+fails for post-delete present-200, HTTP-500, malformed body and lost response
+(exit 1, 0.937 seconds); the separate confirmed-404 control passes. Each case also
+checks that the repeated call makes no request or append and keeps the exact
+known DELETE intent/result references.
+
+The minimal correction retains that copied historical deletion receipt and returns
+`ErrUncertain` whenever its absence reference is missing. It neither repeats DELETE
+nor automatically retries observation. A completed separate absence result still
+permits the historical success response. This does not release either permanent
+reservation, turn a 404 report into independent daemon proof, or decide controller
+cleanup eligibility. Existing original-context cancellation gates remain in place.
+The complete liveworker race suite including the new matrix passed
+(exit 0, 6.339 seconds). Corrected-head independent review, full repository checks
+and fresh external review remain separate merge gates.
