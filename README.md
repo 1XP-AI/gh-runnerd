@@ -25,6 +25,10 @@ gh-runnerd stop tests --drain
 
 Linux still needs a Linux kernel/runtime on macOS. The first release connects to an existing engine; it does not make Linux containers native macOS processes or provision a Kubernetes cluster.
 
+## Track implementation
+
+[GitHub Project](https://github.com/orgs/1XP-AI/projects/2) provides [Goals](https://github.com/orgs/1XP-AI/projects/2/views/1), [Ready](https://github.com/orgs/1XP-AI/projects/2/views/2) and [Board](https://github.com/orgs/1XP-AI/projects/2/views/3) views. All 21 issues carry a goal, model/effort, TDD cases, acceptance criteria and dependencies. Start with G01/G02/G03; the board does not dispatch agents automatically.
+
 ## Read the plan
 
 - [Product and architecture plan](docs/PLAN.md)

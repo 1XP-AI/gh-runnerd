@@ -1,6 +1,6 @@
 # Published issue goals
 
-[Repository](https://github.com/1XP-AI/gh-runnerd) · [Architecture plan](PLAN.md) · [Execution policy](EXECUTION.md)
+[Project](https://github.com/orgs/1XP-AI/projects/2) · [Ready work](https://github.com/orgs/1XP-AI/projects/2/views/2) · [Repository](https://github.com/1XP-AI/gh-runnerd) · [Architecture plan](PLAN.md) · [Execution policy](EXECUTION.md)
 
 These are open, unimplemented goals. Status below is the initial planning state; the live GitHub issue/Project is authoritative after work begins. No future goal is automatically dispatched.
 
@@ -31,3 +31,11 @@ These are open, unimplemented goals. Status below is the initial planning state;
 All 48 dependency edges are recorded as native GitHub blocking relationships and linked in issue bodies. Start G01/G02/G03; evidence gates control dependent work.
 
 Each issue has one Goal statement, scope, TDD cases, acceptance criteria, model/effort, risk and dependencies. See [backlog.json](backlog.json) for machine-readable specifications.
+
+## Project views
+
+- [Goals](https://github.com/orgs/1XP-AI/projects/2/views/1): every issue with status, stage, model, Goal, risk, dependencies and test profiles.
+- [Ready](https://github.com/orgs/1XP-AI/projects/2/views/2): only work whose initial dependencies are clear; begin with G01/G02/G03.
+- [Board](https://github.com/orgs/1XP-AI/projects/2/views/3): status columns with stage, priority and model on cards.
+
+The initial board contains 3 Ready, 17 Backlog and 1 Future issue. Move later issues to Ready only when their dependencies are Done. Model metadata is a dispatch instruction, not an automatic agent scheduler.

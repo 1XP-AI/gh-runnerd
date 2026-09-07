@@ -1,6 +1,6 @@
 # Goal-driven issue execution
 
-The GitHub Project is the planning/control surface. Each implementation issue has one concrete goal, dependencies, acceptance criteria, TDD evidence and a primary agent setting. Models are labels/Project fields, not GitHub user assignees. No issue starts automatically merely because it appears on the board.
+The [GitHub Project](https://github.com/orgs/1XP-AI/projects/2) is the planning/control surface. Each implementation issue has one concrete goal, dependencies, acceptance criteria, TDD evidence and a primary agent setting. Models are labels/Project fields, not GitHub user assignees. No issue starts automatically merely because it appears on the board.
 
 ## Model allocation
 
