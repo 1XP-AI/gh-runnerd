@@ -88,6 +88,7 @@ type report struct {
 	LaunchdUnlocked      outcome             `json:"launchd_unlocked"`
 	LaunchdLocked        outcome             `json:"launchd_locked"`
 	PreferencesUnchanged bool                `json:"keychain_preferences_unchanged"`
+	KeychainLocked       bool                `json:"synthetic_keychain_locked"`
 	Cleanup              bool                `json:"cleanup_complete"`
 	RecoveryID           string              `json:"recovery_id,omitempty"`
 	LogicalKeychain      string              `json:"logical_keychain,omitempty"`
@@ -350,11 +351,19 @@ func run(ctx context.Context) (result report, err error) {
 	if status := C.SecKeychainLock(keychain); status != 0 {
 		return result, statusError("synthetic keychain lock", status)
 	}
+	var keychainState C.SecKeychainStatus
+	if status := C.SecKeychainGetStatus(keychain, &keychainState); status != 0 {
+		return result, statusError("verify synthetic Keychain lock", status)
+	}
+	result.KeychainLocked = keychainState&C.SecKeychainStatus(C.kSecUnlockStateStatus) == 0
+	if !result.KeychainLocked {
+		return result, errors.New("synthetic Keychain did not lock")
+	}
 	result.LaunchdLocked, err = launch(ctx, root, "locked", expected, &servicesGone)
 	if err != nil {
 		return result, err
 	}
-	if !result.Direct.Matches || !result.LaunchdUnlocked.Matches || !result.LaunchdUnlocked.SameUID || result.LaunchdLocked.Status != int(C.errSecInteractionNotAllowed) || result.LaunchdLocked.Matches || !result.LaunchdLocked.SameUID {
+	if !result.Direct.Matches || !result.LaunchdUnlocked.Matches || !result.LaunchdUnlocked.SameUID || !knownCredentialDenial(result.LaunchdLocked.Status) || result.LaunchdLocked.Matches || !result.LaunchdLocked.SameUID {
 		return result, errors.New("probe access expectation failed")
 	}
 	return result, nil
@@ -380,4 +389,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func knownCredentialDenial(status int) bool {
+	return status == int(C.errSecInteractionNotAllowed) || status == int(C.errSecAuthFailed)
 }

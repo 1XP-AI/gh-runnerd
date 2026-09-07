@@ -25,3 +25,16 @@ func TestProvenServiceAbsencePermitsOwnedCleanupInOrder(t *testing.T) {
 		t.Fatal("incorrect owned cleanup order")
 	}
 }
+
+func TestLockedCredentialDenialExcludesUnknownFailures(t *testing.T) {
+	for _, status := range []int{-25293, -25308} {
+		if !knownCredentialDenial(status) {
+			t.Errorf("documented credential denial %d rejected", status)
+		}
+	}
+	for _, status := range []int{0, -1, -25300, -26275} {
+		if knownCredentialDenial(status) {
+			t.Errorf("unrelated status %d misclassified as locked denial", status)
+		}
+	}
+}
