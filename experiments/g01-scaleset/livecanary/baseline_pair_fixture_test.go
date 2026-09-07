@@ -40,6 +40,7 @@ type pairedIntegrationFixture struct {
 
 type pairedFixtureConfiguration struct {
 	workerPhases       []string
+	controllerPhases   []string
 	controllerResponse func(string, any) any
 }
 
@@ -50,8 +51,11 @@ func newPairedIntegrationFixtureConfigured(t *testing.T, config *pairedFixtureCo
 	t.Helper()
 	f := &pairedIntegrationFixture{}
 	a := approval()
+	if config != nil && config.controllerPhases != nil {
+		a.Phases = append([]string(nil), config.controllerPhases...)
+	}
 	empty := sha256.Sum256([]byte("null"))
-	f.c = newBaselineFixtureWithInventory(t, func(stage string, value any) any {
+	f.c = newBaselineFixtureWithApproval(t, func(stage string, value any) any {
 		if strings.HasSuffix(stage, "-items") {
 			for _, item := range value.([]any) {
 				m := item.(map[string]any)
@@ -64,7 +68,7 @@ func newPairedIntegrationFixtureConfigured(t *testing.T, config *pairedFixtureCo
 			return config.controllerResponse(stage, value)
 		}
 		return value
-	}, hex.EncodeToString(empty[:]))
+	}, hex.EncodeToString(empty[:]), a)
 	// The listener fixture normally owns C life; integration owns both leases.
 	f.c.release()
 	f.c.release = nil

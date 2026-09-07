@@ -25,6 +25,9 @@ func newTerminalFixture(t *testing.T, cleanup bool) *terminalFixture {
 	return newTerminalFixtureWithPhases(t, phases)
 }
 func newTerminalFixtureWithPhases(t *testing.T, phases []string) *terminalFixture {
+	return newTerminalFixtureWithControllerPhases(t, phases, nil)
+}
+func newTerminalFixtureWithControllerPhases(t *testing.T, phases, controllerPhases []string) *terminalFixture {
 	t.Helper()
 	f := &terminalFixture{}
 	config := &pairedFixtureConfiguration{controllerResponse: func(stage string, value any) any {
@@ -41,6 +44,7 @@ func newTerminalFixtureWithPhases(t *testing.T, phases []string) *terminalFixtur
 		return value
 	}}
 	config.workerPhases = phases
+	config.controllerPhases = controllerPhases
 	f.pairedIntegrationFixture = newPairedIntegrationFixtureConfigured(t, config)
 	f.githubBefore = func(w http.ResponseWriter, r *http.Request) bool {
 		switch {

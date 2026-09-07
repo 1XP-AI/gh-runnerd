@@ -296,6 +296,25 @@ func TestPairedTerminalEveryOriginalWorkerPhaseRequired(t *testing.T) {
 	}
 }
 
+func TestPairedTerminalOriginalControllerCleanupRequired(t *testing.T) {
+	f := newTerminalFixtureWithControllerPhases(t, []string{"create", "start", "inspect", "cleanup"}, []string{"create", "before-ack"})
+	if f.c.j.authority.Digest != approvalDigest(f.c.a) || len(f.c.j.Events()) != 3 {
+		t.Fatal("original controller authority fixture mismatch")
+	}
+	out, err := f.run()
+	if err == nil || out.Terminal != terminalUnresolved || f.c.requests.Load() != 0 || f.dockerReads.Load() != 0 || len(f.c.j.Events()) != 3 || len(f.wf.Journal.Events()) != 0 {
+		t.Fatalf("missing C cleanup reached prefix: error=%v session_delete=%d worker_delete=%d set_delete=%d", err, f.sessionDeletes.Load(), f.workerDeletes.Load(), f.setDeletes.Load())
+	}
+}
+
+func TestPairedTerminalCollectionWithoutControllerCleanup(t *testing.T) {
+	f := newTerminalFixtureWithControllerPhases(t, []string{"create", "start", "inspect", "cleanup"}, []string{"create", "before-ack"})
+	out, err := runFastPair(f.pairedIntegrationFixture)
+	if err != nil || out.Outcome != collectionCollected || out.Terminal != nil || out.OutstandingSession != sessionKnownOpen || f.sessionDeletes.Load() != 0 || f.workerDeletes.Load() != 0 || f.setDeletes.Load() != 0 {
+		t.Fatal("collection-only path required or exercised controller cleanup")
+	}
+}
+
 func TestPairedTerminalOriginalDeadlineAtClose(t *testing.T) {
 	f := newTerminalFixture(t, true)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
