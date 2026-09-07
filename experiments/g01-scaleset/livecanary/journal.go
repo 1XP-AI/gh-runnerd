@@ -3,22 +3,33 @@ package livecanary
 import (
 	"bufio"
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"io"
 	"os"
+	"os/user"
+	"strings"
 	"sync"
 	"syscall"
+	"time"
+	"unicode"
 )
 
 // Journal is private controller state, not a publishable evidence report. The
 // single locked inode is retained even after crashes. A damaged tail is rejected,
 // never truncated, repaired or interpreted as permission to retry.
 type FileJournal struct {
-	file   *os.File
-	events []Event
-	mu     sync.Mutex
+	claim         *admissionClaim
+	root          *os.Root
+	directory     string
+	directoryInfo os.FileInfo
+	fileInfo      os.FileInfo
+	life          sync.Mutex
+	closed        bool
+	ownership     string
+	authority     phaseAuthority
+	file          *os.File
+	events        []Event
+	mu            sync.Mutex
 }
 
 func privateFile(info os.FileInfo, mode os.FileMode) bool {
@@ -62,7 +73,11 @@ func uniqueKeys(d *json.Decoder) bool {
 				return false
 			}
 			s, ok := key.(string)
-			if !ok || seen[s] {
+			if !ok {
+				return false
+			}
+			s = foldedJSONName(s)
+			if seen[s] {
 				return false
 			}
 			seen[s] = true
@@ -106,6 +121,17 @@ func ReadApproval(path string) (Approval, error) {
 }
 
 func OpenJournal(directory string, a Approval) (*FileJournal, error) {
+	if !nativeAccountLookup {
+		return nil, ErrJournal
+	}
+	directoryForAdmission, err := admissionDirectoryForAccount(user.LookupId)
+	if err != nil {
+		return nil, ErrJournal
+	}
+	return openJournalAtAdmission(directory, a, directoryForAdmission, func(f *os.File) error { return f.Sync() })
+}
+
+func openJournalAtAdmission(directory string, a Approval, admissionDirectory string, syncDirectory func(*os.File) error) (*FileJournal, error) {
 	info, err := os.Lstat(directory)
 	if err != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
 		return nil, ErrJournal
@@ -118,7 +144,17 @@ func OpenJournal(directory string, a Approval) (*FileJournal, error) {
 	if err != nil {
 		return nil, ErrJournal
 	}
-	defer root.Close()
+	rootKept := false
+	defer func() {
+		if !rootKept {
+			_ = root.Close()
+		}
+	}()
+	directoryInfo := info
+	captured, err := root.Stat(".")
+	if err != nil || !os.SameFile(directoryInfo, captured) {
+		return nil, ErrJournal
+	}
 	f, err := root.OpenFile("journal.jsonl", os.O_RDWR|os.O_CREATE|os.O_APPEND|syscall.O_NOFOLLOW, 0600)
 	if err != nil {
 		return nil, ErrJournal
@@ -136,38 +172,28 @@ func OpenJournal(directory string, a Approval) (*FileJournal, error) {
 	if syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
 		return nil, ErrJournal
 	}
-	encoded, err := json.Marshal(a)
-	if err != nil {
+	if a.Validate(time.Now()) != nil {
 		return nil, ErrJournal
 	}
-	digest := sha256.Sum256(encoded)
-	want := hex.EncodeToString(digest[:])
-	j := &FileJournal{file: f}
+	j := &FileJournal{file: f, root: root, directory: directory, directoryInfo: directoryInfo, fileInfo: info, ownership: ownershipDigest(a)}
+	incoming := authorityFor(a)
 	if info.Size() == 0 {
-		if err = j.write(Event{Kind: "approval", Digest: want}); err != nil {
+		j.authority = incoming
+		if err = j.write(journalHeader{1, j.ownership, incoming}); err != nil {
 			return nil, err
 		}
-		// Sync both the new file and its directory entry before permitting any
-		// external effect. A zero-length/torn journal can never authorize reuse.
-		dir, err := root.Open(".")
-		if err != nil {
-			return nil, ErrJournal
-		}
-		err = dir.Sync()
-		dir.Close()
-		if err != nil {
-			return nil, ErrJournal
-		}
+
 	} else {
 		reader := bufio.NewReader(io.LimitReader(f, 1<<20+1))
 		line, err := reader.ReadBytes('\n')
 		if err != nil {
 			return nil, ErrJournal
 		}
-		var header Event
-		if DecodeStrict(line, &header) != nil || header.Kind != "approval" || header.Sequence != 0 || header.Digest != want {
+		var header journalHeader
+		if DecodeStrict(line, &header) != nil || header.Version != 1 || header.Ownership != j.ownership || !header.Authority.matchesOwnership(a) {
 			return nil, ErrJournal
 		}
+		j.authority = header.Authority
 		for {
 			line, err = reader.ReadBytes('\n')
 			if err == io.EOF && len(line) == 0 {
@@ -180,15 +206,60 @@ func OpenJournal(directory string, a Approval) (*FileJournal, error) {
 			if DecodeStrict(line, &e) != nil || e.Sequence != len(j.events)+1 || !validEvent(e) {
 				return nil, ErrJournal
 			}
+			if e.Kind == "authority" {
+				if !e.Authority.matchesOwnership(a) || !e.Authority.renews(j.authority) {
+					return nil, ErrJournal
+				}
+				j.authority = *e.Authority
+			}
 			j.events = append(j.events, e)
 		}
 	}
+	if incoming.Digest != j.authority.Digest {
+		if !incoming.renews(j.authority) {
+			return nil, ErrJournal
+		}
+		if err = j.Append(Event{Kind: "authority", Authority: &incoming}); err != nil {
+			return nil, err
+		}
+		j.authority = incoming
+	}
+
+	// Retry directory-entry durability even when a prior failed sync left a
+	// valid header. File contents alone never prove its entry survived a crash.
+	dir, err := root.Open(".")
+	if err != nil {
+		return nil, ErrJournal
+	}
+	err = syncDirectory(dir)
+	dir.Close()
+	if err != nil {
+		return nil, ErrJournal
+	}
+	claim, err := openAdmission(admissionDirectory, j, syncDirectory)
+	if err != nil {
+		return nil, err
+	}
+	j.claim = claim
+	rootKept = true
 	ok = true
 	return j, nil
 }
 
 func validEvent(e Event) bool {
+	if e.Work != "" {
+		if e.Kind != "result" || (e.Work != workDemand && e.Work != workUnresolved) {
+			return false
+		}
+		switch e.Operation {
+		case "create", "session-open", "observe-owned", "observe-poll", "observe-discovery", "observe-runner":
+		default:
+			return false
+		}
+	}
 	switch e.Kind {
+	case "authority":
+		return e.Authority != nil
 	case "phase":
 		return e.Operation != "" && e.Digest == ""
 	case "inventory":
@@ -201,14 +272,14 @@ func validEvent(e Event) bool {
 		return e.Operation == "before-ack" || e.Operation == "after-ack" || e.Operation == "before-acquire"
 	case "intent", "result", "unknown":
 		switch e.Operation {
-		case "create", "session-open", "session-close", "ack", "acquire", "jit", "delete", "probe":
+		case "create", "session-open", "session-close", "ack", "acquire", "jit", "delete", "probe", "observe-owned", "observe-poll", "observe-discovery", "observe-runner":
 			return true
 		}
 	}
 	return false
 }
 
-func (j *FileJournal) write(e Event) error {
+func (j *FileJournal) write(e any) error {
 	data, err := json.Marshal(e)
 	if err != nil {
 		return ErrJournal
@@ -238,4 +309,36 @@ func (j *FileJournal) Events() []Event {
 	defer j.mu.Unlock()
 	return append([]Event(nil), j.events...)
 }
-func (j *FileJournal) Close() error { return j.file.Close() }
+func (j *FileJournal) Close() error {
+	j.life.Lock()
+	defer j.life.Unlock()
+	if j.closed {
+		return nil
+	}
+	j.closed = true
+	fileErr := j.file.Close()
+	rootErr := j.root.Close()
+	claimErr := j.claim.close()
+	if fileErr != nil || rootErr != nil || claimErr != nil {
+		return ErrJournal
+	}
+	return nil
+}
+
+// encoding/json matches struct fields with Unicode simple-fold equivalence.
+// Canonicalize once per key, avoiding quadratic pairwise key comparisons.
+// DecodeStrict serves fixed authority/journal schemas, not case-sensitive maps.
+func foldedJSONName(input string) string {
+	var result strings.Builder
+	result.Grow(len(input))
+	for _, r := range input {
+		minimum := r
+		for next := unicode.SimpleFold(r); next != r; next = unicode.SimpleFold(next) {
+			if next < minimum {
+				minimum = next
+			}
+		}
+		result.WriteRune(minimum)
+	}
+	return result.String()
+}

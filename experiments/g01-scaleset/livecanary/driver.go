@@ -40,18 +40,21 @@ type Approval struct {
 }
 
 type Event struct {
-	Sequence   int     `json:"sequence"`
-	Kind       string  `json:"kind"`
-	Operation  string  `json:"operation,omitempty"`
-	ID         int     `json:"id,omitempty"`
-	SessionID  string  `json:"session_id,omitempty"`
-	RequestIDs []int64 `json:"request_ids,omitempty"`
-	Count      int     `json:"count,omitempty"`
-	Digest     string  `json:"digest,omitempty"`
-	Succeeded  bool    `json:"succeeded,omitempty"`
+	Authority  *phaseAuthority `json:"authority,omitempty"`
+	Sequence   int             `json:"sequence"`
+	Kind       string          `json:"kind"`
+	Operation  string          `json:"operation,omitempty"`
+	ID         int             `json:"id,omitempty"`
+	SessionID  string          `json:"session_id,omitempty"`
+	RequestIDs []int64         `json:"request_ids,omitempty"`
+	Count      int             `json:"count,omitempty"`
+	Digest     string          `json:"digest,omitempty"`
+	Succeeded  bool            `json:"succeeded,omitempty"`
+	Work       string          `json:"work,omitempty"`
 }
 
 type Journal interface {
+	authorize(Approval) (func(), error)
 	Events() []Event
 	Append(Event) error
 }
@@ -87,11 +90,13 @@ type state struct {
 	sessionID                    string
 	reserved, uncertain, deleted bool
 	phaseSeen                    map[string]bool
+	observedJobs                 map[int64]bool
+	workObserved                 bool
 	inventory                    string
 }
 
 func replay(events []Event) state {
-	s := state{phaseSeen: make(map[string]bool)}
+	s := state{phaseSeen: make(map[string]bool), observedJobs: make(map[int64]bool)}
 	pending := ""
 	for _, e := range events {
 		switch e.Kind {
@@ -99,6 +104,12 @@ func replay(events []Event) state {
 			s.phaseSeen[e.Operation] = true
 		case "inventory":
 			s.inventory = e.Digest
+		case "observation":
+			if e.Operation == "poll" {
+				for _, id := range e.RequestIDs {
+					s.observedJobs[id] = true
+				}
+			}
 		case "intent":
 			if pending != "" {
 				s.uncertain = true
@@ -112,6 +123,10 @@ func replay(events []Event) state {
 				s.uncertain = true
 			}
 			pending = ""
+			if e.Work != "" {
+				s.workObserved = true
+				s.uncertain = s.uncertain || e.Work == workUnresolved
+			}
 			switch e.Operation {
 			case "create":
 				s.setID = e.ID
@@ -138,8 +153,9 @@ func (d *Driver) record(e Event) error {
 	return nil
 }
 
-// effect persists intent before the SDK call and accepts only an allowlisted
-// result. Any error or interrupted write leaves a durable ambiguity fence.
+// effect persists intent before an effect or work-bearing observation. A read
+// result can reveal work that must survive restart, so it has the same ordering.
+// A valid create/session identity and its work category share one result record.
 func (d *Driver) effect(ctx context.Context, op string, ids []int64, call func(context.Context) (Event, error)) error {
 	if err := d.record(Event{Kind: "intent", Operation: op, RequestIDs: ids}); err != nil {
 		return err
@@ -155,7 +171,13 @@ func (d *Driver) effect(ctx context.Context, op string, ids []int64, call func(c
 	}
 	e.Kind = "result"
 	e.Operation = op
-	return d.record(e)
+	if err := d.record(e); err != nil {
+		return err
+	}
+	if e.Work == workUnresolved {
+		return ErrQuarantine
+	}
+	return nil
 }
 
 func boundedRead[T any](ctx context.Context, read func(context.Context) (T, error)) (T, error) {
@@ -170,15 +192,22 @@ func boundedRead[T any](ctx context.Context, read func(context.Context) (T, erro
 }
 
 func (d *Driver) owned(ctx context.Context, id int) (*scaleset.RunnerScaleSet, error) {
-	s, err := boundedRead(ctx, func(c context.Context) (*scaleset.RunnerScaleSet, error) { return d.API.GetScaleSet(c, id) })
+	var s *scaleset.RunnerScaleSet
+	err := d.effect(ctx, "observe-owned", nil, func(c context.Context) (Event, error) {
+		var err error
+		s, err = d.API.GetScaleSet(c, id)
+		if err != nil {
+			return Event{}, err
+		}
+		// Ownership validation is part of the durable observation result.
+		// A later matching zero must not erase an earlier loss of this proof.
+		if s == nil || s.ID != id || s.Name != d.Approval.setName() || s.RunnerGroupID != d.Approval.RunnerGroupID || !slices.ContainsFunc(s.Labels, func(l scaleset.Label) bool { return l.Name == d.Approval.setName() }) {
+			return Event{Work: workUnresolved}, nil
+		}
+		return Event{Work: statisticsWork(s.Statistics)}, nil
+	})
 	if err != nil {
 		return nil, err
-	}
-	if s == nil || s.ID != id || s.Name != d.Approval.setName() || s.RunnerGroupID != d.Approval.RunnerGroupID {
-		return nil, ErrQuarantine
-	}
-	if !slices.ContainsFunc(s.Labels, func(l scaleset.Label) bool { return l.Name == d.Approval.setName() }) {
-		return nil, ErrQuarantine
 	}
 	return s, nil
 }
@@ -190,6 +219,14 @@ func (d *Driver) Run(ctx context.Context, phase string) error {
 	if d.Approval.Validate(time.Now()) != nil || !slices.Contains(d.Approval.Phases, phase) {
 		return ErrApproval
 	}
+	if d.Journal == nil {
+		return ErrJournal
+	}
+	release, err := d.Journal.authorize(d.Approval)
+	if err != nil {
+		return ErrJournal
+	}
+	defer release()
 	s := replay(d.Journal.Events())
 	if phase != "inspect" && (s.uncertain || s.phaseSeen[phase] || s.deleted) {
 		return ErrQuarantine
@@ -200,7 +237,7 @@ func (d *Driver) Run(ctx context.Context, phase string) error {
 	}
 	ctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	_, err := boundedRead(ctx, func(c context.Context) (bool, error) { return true, d.API.Preflight(c, d.Approval) })
+	_, err = boundedRead(ctx, func(c context.Context) (bool, error) { return true, d.API.Preflight(c, d.Approval) })
 	if err != nil {
 		return ErrApproval
 	}
@@ -221,9 +258,7 @@ func (d *Driver) Run(ctx context.Context, phase string) error {
 		if err = d.record(Event{Kind: "inventory", Digest: inventory}); err != nil {
 			return err
 		}
-		existing, err := boundedRead(ctx, func(c context.Context) (*scaleset.RunnerScaleSet, error) {
-			return d.API.FindScaleSet(c, d.Approval.setName(), d.Approval.RunnerGroupID)
-		})
+		existing, err := d.discover(ctx)
 		if err != nil {
 			return err
 		}
@@ -235,7 +270,7 @@ func (d *Driver) Run(ctx context.Context, phase string) error {
 			if err != nil || set == nil || set.ID <= 0 || set.Name != d.Approval.setName() || set.RunnerGroupID != d.Approval.RunnerGroupID || !set.RunnerSetting.DisableUpdate {
 				return Event{}, ErrRemote
 			}
-			return Event{ID: set.ID}, nil
+			return Event{ID: set.ID, Work: statisticsWork(set.Statistics)}, nil
 		})
 	}
 	if s.setID <= 0 || s.reserved {
@@ -246,10 +281,13 @@ func (d *Driver) Run(ctx context.Context, phase string) error {
 		return err
 	}
 	if phase == "cleanup" {
+		s = replay(d.Journal.Events()) // Includes the just-completed owned read.
 		// Aggregate zero alone never authorizes deletion. This scope has never
 		// issued JIT/acquired a job, has no unresolved session, and must match
 		// its original runner inventory as well as its immutable create receipt.
-		if set.Statistics == nil || *set.Statistics != (scaleset.RunnerScaleSetStatistic{}) {
+		// No terminal-job reconciliation exists in this bounded harness.
+		// A closed session or aggregate zero never clears observed requests.
+		if s.uncertain || s.workObserved || len(s.observedJobs) != 0 || set.Statistics == nil || *set.Statistics != (scaleset.RunnerScaleSetStatistic{}) {
 			return ErrQuarantine
 		}
 		inventory, err := boundedRead(ctx, d.API.Inventory)
@@ -278,9 +316,7 @@ func (d *Driver) Run(ctx context.Context, phase string) error {
 		return ErrQuarantine
 	}
 	if phase == "jit-loss" {
-		ref, err := boundedRead(ctx, func(c context.Context) (*scaleset.RunnerReference, error) {
-			return d.API.FindRunner(c, d.Approval.workerName())
-		})
+		ref, err := d.runner(ctx, s.setID)
 		if err != nil {
 			return err
 		}
@@ -305,18 +341,14 @@ func (d *Driver) Run(ctx context.Context, phase string) error {
 
 func (d *Driver) inspect(ctx context.Context, s state) error {
 	if s.setID == 0 { // Discovery is evidence only; never adopt an ambiguous create.
-		_, err := boundedRead(ctx, func(c context.Context) (*scaleset.RunnerScaleSet, error) {
-			return d.API.FindScaleSet(c, d.Approval.setName(), d.Approval.RunnerGroupID)
-		})
+		_, err := d.discover(ctx)
 		return err
 	}
 	set, err := d.owned(ctx, s.setID)
 	if err != nil {
 		return err
 	}
-	ref, err := boundedRead(ctx, func(c context.Context) (*scaleset.RunnerReference, error) {
-		return d.API.FindRunner(c, d.Approval.workerName())
-	})
+	ref, err := d.runner(ctx, s.setID)
 	if err != nil {
 		return err
 	}
