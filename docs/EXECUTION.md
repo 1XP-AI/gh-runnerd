@@ -6,10 +6,9 @@ The [GitHub Project](https://github.com/orgs/1XP-AI/projects/2) is the planning/
 
 | Work | Implementer | Review |
 |---|---|---|
-| Auth, protocol, concurrency, resource admission, destructive lifecycle, providers and architecture | Astra / `gpt-6-astra`, `xhigh` | Independent Astra `xhigh` on security/recovery boundaries |
-| Bounded CLI presentation, pure policy proposals under an Astra-approved contract, test harnesses, packaging/docs | Luna / `gpt-5.6-luna`, `max` | Astra `xhigh` for changed security/recovery interfaces; otherwise an independent contract review |
+| All implementation areas, including auth, protocol, concurrency, resource admission, lifecycle, providers, architecture, tests, packaging and docs | Luna / `gpt-5.6-luna`, `max` | Independent Luna `max`; use a second independent Luna `max` pass for security/recovery boundaries |
 
-Use Luna only after the contract and dependencies are settled. Escalate discovered architecture, secret handling, process isolation or concurrency changes to Astra; do not stretch a small issue into an unreviewed redesign. Parallelize only independent issues with non-overlapping file ownership; no simultaneous edits to shared protocol/state definitions.
+Use Luna max for every issue, including contract-setting evidence gates such as G01, G02 and G04. Verify each issue's contract and dependencies before dependent implementation begins. Escalate discovered architecture, secret handling, process isolation or concurrency changes to an additional independent Luna max review; do not stretch a small issue into an unreviewed redesign. Parallelize only independent issues with non-overlapping file ownership; no simultaneous edits to shared protocol/state definitions. Earlier Astra/Luna allocations in historical review and evidence records are preserved as historical facts.
 
 ## Per-issue goal workflow
 
@@ -39,6 +38,6 @@ was complete at merge time.
 
 Status, Stage, Priority, Agent, Risk, Goal, Dependencies and Test profile. Initial gates/bootstrap work is Ready; dependent work is Backlog. VM/fleet research is explicitly Future. Machine-readable `status` and `test_profile` values are in `backlog.json`; trusted-runtime and trusted-live-github profiles require maintainer-controlled execution and never run on public PR code.
 
-G08 enrollment and G15 service lifecycle are Astra-owned. Luna G12 computes pure proposals only; Astra G05/G13 owns atomic reservation and live admission.
+G08 enrollment and G15 service lifecycle remain gated by their contracts and independent review. Luna max handles both implementation and review; G12 computes pure proposals, while G05/G13 own atomic reservation and live admission under the same Luna max review policy.
 
 Use one issue per bounded outcome and linked dependencies instead of assigning all future work active goals at once.

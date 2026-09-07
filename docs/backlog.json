@@ -5,7 +5,7 @@
       "key": "G01",
       "title": "Prove Scale Set delivery, acquisition and drain contracts",
       "stage": "M0 - Evidence gates",
-      "agent": "Astra xhigh",
+      "agent": "Luna max",
       "dependencies": [],
       "goal": "Select and pin a supported Scale Set integration path with demonstrated recovery at message acknowledgement, acquisition and JIT boundaries.",
       "scope": "Isolated protocol spike and ADR; compare release v0.4.0 with audited commit cb0405b2d874500e75ae34eff8d582ab75956b45. Do not implement production providers or copy the demo shutdown policy.",
@@ -18,7 +18,7 @@
         "Record exact module/runner versions and supported JIT bootstrap transports, including any secret exposure.",
         "Choose high-level listener plus independent reconciliation OR a lower-level supported message loop; do not simply reverse ordering without evidence.",
         "Document recoverable state versus quarantine for lost callback/request IDs; no exactly-once claim.",
-        "Publish sanitized live contract evidence or keep the gate unresolved; obtain independent Astra protocol review."
+        "Publish sanitized live contract evidence or keep the gate unresolved; obtain independent Luna max protocol review."
       ],
       "risk": "High",
       "kind": "gate",
@@ -37,7 +37,7 @@
       "key": "G02",
       "title": "Prove local App enrollment and launchd credential access",
       "stage": "M0 - Evidence gates",
-      "agent": "Astra xhigh",
+      "agent": "Luna max",
       "dependencies": [],
       "goal": "Resolve GitHub App Manifest loopback enrollment and the macOS credential/service identity contract with real platform evidence and a safe manual-import fallback.",
       "scope": "Gate experiments and ADR only. Use disposable authorized Apps/org installations; do not alter production App settings, existing runners or disable FileVault.",
@@ -101,7 +101,7 @@
       "key": "G04",
       "title": "Freeze CLI configuration, provider and scaling contracts",
       "stage": "M0 - Evidence gates",
-      "agent": "Astra xhigh",
+      "agent": "Luna max",
       "dependencies": [
         "G01",
         "G02",
@@ -137,7 +137,7 @@
       "key": "G05",
       "title": "Implement durable state and operation journal",
       "stage": "M1 - Control plane",
-      "agent": "Astra xhigh",
+      "agent": "Luna max",
       "dependencies": [
         "G03",
         "G04"
@@ -171,7 +171,7 @@
       "key": "G06",
       "title": "Implement the supervised daemon and authorized local IPC",
       "stage": "M1 - Control plane",
-      "agent": "Astra xhigh",
+      "agent": "Luna max",
       "dependencies": [
         "G05"
       ],
@@ -205,7 +205,7 @@
       "key": "G07",
       "title": "Implement GitHub App credential and installation binding",
       "stage": "M1 - Control plane",
-      "agent": "Astra xhigh",
+      "agent": "Luna max",
       "dependencies": [
         "G02",
         "G05"
@@ -242,7 +242,7 @@
       "key": "G08",
       "title": "Implement guided init and optional Manifest enrollment",
       "stage": "M1 - Control plane",
-      "agent": "Astra xhigh",
+      "agent": "Luna max",
       "dependencies": [
         "G06",
         "G07"
@@ -258,7 +258,7 @@
         "Init does not require an external callback server or gh OAuth session.",
         "Pending second-org installation can be resumed without duplicating the first.",
         "App permissions/trust/startup expectations are shown before user browser approval.",
-        "Astra reviews all auth-facing code and evidence before merge."
+        "Luna max reviews all auth-facing code and evidence before merge."
       ],
       "risk": "High",
       "kind": "implementation",
@@ -277,7 +277,7 @@
       "key": "G09",
       "title": "Implement the recoverable Scale Set adapter",
       "stage": "M1 - Control plane",
-      "agent": "Astra xhigh",
+      "agent": "Luna max",
       "dependencies": [
         "G01",
         "G05",
@@ -313,7 +313,7 @@
       "key": "G10",
       "title": "Implement disposable Linux workers with isolated Docker services",
       "stage": "M2 - Execution and scaling",
-      "agent": "Astra xhigh",
+      "agent": "Luna max",
       "dependencies": [
         "G04",
         "G05",
@@ -352,7 +352,7 @@
       "key": "G11",
       "title": "Implement trusted native macOS worker identity and lifecycle",
       "stage": "M2 - Execution and scaling",
-      "agent": "Astra xhigh",
+      "agent": "Luna max",
       "dependencies": [
         "G02",
         "G04",
@@ -398,7 +398,7 @@
         "G05"
       ],
       "goal": "Compute deterministic fixed/autoscale targets and serial admission proposals that respect per-pool, per-runtime and host-wide budgets, with fair progress across eligible pools.",
-      "scope": "Pure policy module with fake clock and immutable typed snapshots. Astra-owned G04 defines policy; G05 owns atomic reservation persistence and G13 owns live serialized application. No concurrent side effects, protocol acquisition or provider mutations in this issue.",
+      "scope": "Pure policy module with fake clock and immutable typed snapshots. Luna max-owned G04 defines policy; G05 owns atomic reservation persistence and G13 owns live serialized application. No concurrent side effects, protocol acquisition or provider mutations in this issue.",
       "tdd": [
         "Red: a pure reduction of simultaneous two-org demands proposes at most one allocation for the last CPU/memory slot; stale or duplicate proposal application is exercised by G05/G13 integration, not claimed solved here.",
         "Property tests cover zero/max/minTotal, infeasible floors, busy-over-reduced-cap, creation/cleanup/unknown reservations and pressure cutoff.",
@@ -408,8 +408,8 @@
         "Uses fixed count or minTotal/maxTotal semantics consistently; explicit idleBuffer deferred.",
         "Native memory budget is admission-only; no hard OS cap promise.",
         "Existing engine allocation and daemon/OS headroom are represented without double-counting.",
-        "Astra reviews invariants/property counterexamples before connecting live effects.",
-        "Return versioned proposals, never mutate reservations or spawn workers; G13 Astra integration rejects stale proposals and commits capacity atomically."
+        "Luna max reviews invariants/property counterexamples before connecting live effects.",
+        "Return versioned proposals, never mutate reservations or spawn workers; G13 Luna max integration rejects stale proposals and commits capacity atomically."
       ],
       "risk": "High",
       "kind": "implementation",
@@ -461,7 +461,7 @@
       "key": "G13",
       "title": "Integrate reconciliation, drain and safe restart",
       "stage": "M2 - Execution and scaling",
-      "agent": "Astra xhigh",
+      "agent": "Luna max",
       "dependencies": [
         "G06",
         "G09",
@@ -481,7 +481,7 @@
         "Reservations released only after known terminal/cleanup state.",
         "Manager restart preserves surviving workers and quarantines ambiguous state.",
         "Future capacity withdrawn during drain without claiming atomic remote cancellation.",
-        "Astra independently reviews end-to-end failure matrix."
+        "Luna max independently reviews end-to-end failure matrix."
       ],
       "risk": "High",
       "kind": "implementation",
@@ -535,7 +535,7 @@
       "key": "G15",
       "title": "Implement startup, shutdown and safe configuration updates",
       "stage": "M3 - Reliability qualification",
-      "agent": "Astra xhigh",
+      "agent": "Luna max",
       "dependencies": [
         "G02",
         "G06",
@@ -552,7 +552,7 @@
         "launchd supervises foreground daemon; terminal closure irrelevant.",
         "Busy jobs survive ordinary manager upgrades; unsupported service version rejected safely.",
         "Explicit boundaries among daemon uninstall, owned-resource cleanup, local key deletion and remote App uninstall.",
-        "Astra reviews credential/service identity and cleanup transitions."
+        "Luna max reviews credential/service identity and cleanup transitions."
       ],
       "risk": "High",
       "kind": "implementation",
@@ -589,7 +589,7 @@
         "Both orgs and both platforms appear in evidence, with actual job URLs sanitized if private.",
         "Parallel service tests catch port/network/workspace conflicts.",
         "Cleanup uses owned inventory and preserves existing manual infrastructure.",
-        "Astra signs off contract coverage; credentials stay outside fixtures/artifacts."
+        "Luna max signs off contract coverage; credentials stay outside fixtures/artifacts."
       ],
       "risk": "Medium",
       "kind": "implementation",
@@ -609,7 +609,7 @@
       "key": "G17",
       "title": "Qualify crash recovery, soak and resource budgets",
       "stage": "M3 - Reliability qualification",
-      "agent": "Astra xhigh",
+      "agent": "Luna max",
       "dependencies": [
         "G16",
         "G19"
@@ -627,7 +627,7 @@
         "No unexplained duplicates/orphans/cap violations/busy kills/secret exposure.",
         "Set recommended counts from measured headroom, not host marketing specs.",
         "Document SDK preview limits and residual trust/platform limitations.",
-        "Independent Astra reliability verdict; incomplete soak remains incomplete."
+        "Independent Luna max reliability verdict; incomplete soak remains incomplete."
       ],
       "risk": "High",
       "kind": "gate",
@@ -664,7 +664,7 @@
         "No downloaded macOS image, restricted virtualization binary or embedded App private key.",
         "No auto-publish/signing purchase implied; repository owner controls release channel.",
         "Bootstrap build remains independent of gh-runnerd.",
-        "Astra reviews supply-chain, update and rollback effects."
+        "Luna max reviews supply-chain, update and rollback effects."
       ],
       "risk": "Medium",
       "kind": "implementation",
@@ -683,7 +683,7 @@
       "key": "G19",
       "title": "Audit trust admission and cross-worker secret boundaries",
       "stage": "M3 - Reliability qualification",
-      "agent": "Astra xhigh",
+      "agent": "Luna max",
       "dependencies": [
         "G08",
         "G10",
@@ -722,7 +722,7 @@
       "key": "G20",
       "title": "Pilot migration with reversible legacy runner handoff",
       "stage": "M4 - Pilot and release",
-      "agent": "Astra xhigh",
+      "agent": "Luna max",
       "dependencies": [
         "G17",
         "G18"
@@ -758,7 +758,7 @@
       "key": "G21",
       "title": "Evaluate optional macOS VM and multi-host providers",
       "stage": "M5 - Future",
-      "agent": "Astra xhigh",
+      "agent": "Luna max",
       "dependencies": [
         "G17"
       ],

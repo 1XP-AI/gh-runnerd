@@ -31,6 +31,8 @@ These are issue goals. The table records the initial planning inventory; the liv
 
 The original plan's 48 dependency edges are recorded as native GitHub blocking relationships and linked in issue bodies. Start G01/G02/G03; evidence gates control dependent work.
 
+This table intentionally preserves the initial planning inventory. Current dispatch is recorded in the live Project Agent field and the open issue execution contracts; all future dispatches use Luna max.
+
 Each issue has one Goal statement, scope, TDD cases, acceptance criteria, model/effort, risk and dependencies. See [backlog.json](backlog.json) for machine-readable specifications.
 
 ## Project views
