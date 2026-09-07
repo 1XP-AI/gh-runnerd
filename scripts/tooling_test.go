@@ -165,9 +165,11 @@ func TestToolingTaggedPairFixturePartitionsRun(t *testing.T) {
 	root := toolingFixture(t)
 	const collectionSentinel = "tagged-pair-fixture-collection-regression"
 	const terminalSentinel = "tagged-pair-fixture-terminal-regression"
+	const storageSentinel = "tagged-pair-fixture-storage-regression"
 	collectionPath := "experiments/g01-scaleset/livecanary/pair_fixture_collection_regression_test.go"
 	terminalPath := "experiments/g01-scaleset/livecanary/pair_fixture_terminal_regression_test.go"
-	toolingFile(t, root, collectionPath, `//go:build g01_pair_fixture && !g01_live && !g01_worker
+	storagePath := "experiments/g01-scaleset/livecanary/pair_fixture_storage_regression_test.go"
+	collectionSource := `//go:build g01_pair_fixture && !g01_live && !g01_worker
 
 package livecanary
 
@@ -176,8 +178,8 @@ import "testing"
 func TestTaggedPairFixtureCollectionFailure(t *testing.T) {
 	t.Fatal("tagged-pair-fixture-collection-regression")
 }
-`, 0600)
-	toolingFile(t, root, terminalPath, `//go:build g01_pair_fixture && !g01_live && !g01_worker
+`
+	terminalSource := `//go:build g01_pair_fixture && !g01_live && !g01_worker
 
 package livecanary
 
@@ -186,20 +188,37 @@ import "testing"
 func TestPairedTerminalFixtureFailure(t *testing.T) {
 	t.Fatal("tagged-pair-fixture-terminal-regression")
 }
-`, 0600)
+`
+	storageSource := `//go:build g01_pair_fixture && !g01_live && !g01_worker
+
+package livecanary
+
+import "testing"
+
+func TestPairedTerminalClosedReplayActualFile(t *testing.T) {
+	t.Fatal("tagged-pair-fixture-storage-regression")
+}
+`
 	wrapper, logPath, realGo := toolingGoWrapper(t, root)
 	env := []string{"GO=" + wrapper, "TOOLING_REAL_GO=" + realGo, "TOOLING_GO_LOG=" + logPath}
-	if out, err := toolingRun(t, root, env, "make", "check"); err == nil || !strings.Contains(out, collectionSentinel) {
-		t.Fatalf("tagged collection failure was skipped: %s", out)
-	}
-	if err := os.Remove(filepath.Join(root, collectionPath)); err != nil {
-		t.Fatal(err)
-	}
-	if out, err := toolingRun(t, root, env, "make", "check"); err == nil || !strings.Contains(out, terminalSentinel) {
-		t.Fatalf("tagged terminal failure was skipped: %s", out)
-	}
-	if err := os.Remove(filepath.Join(root, terminalPath)); err != nil {
-		t.Fatal(err)
+	// Each generated witness must fail through its own reviewed partition. The
+	// earlier script already executed all tagged terminal witnesses together;
+	// these controls retain that coverage while the log assertion below proves
+	// the three-way partition contract.
+	for _, tc := range []struct {
+		path, sentinel, name, source string
+	}{
+		{collectionPath, collectionSentinel, "collection", collectionSource},
+		{terminalPath, terminalSentinel, "terminal", terminalSource},
+		{storagePath, storageSentinel, "storage", storageSource},
+	} {
+		toolingFile(t, root, tc.path, tc.source, 0600)
+		if out, err := toolingRun(t, root, env, "make", "check"); err == nil || !strings.Contains(out, tc.sentinel) {
+			t.Fatalf("tagged %s failure was skipped: %s", tc.name, out)
+		}
+		if err := os.Remove(filepath.Join(root, tc.path)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := os.WriteFile(logPath, nil, 0600); err != nil {
 		t.Fatal(err)
@@ -216,7 +235,8 @@ func TestPairedTerminalFixtureFailure(t *testing.T) {
 	lines := strings.Split(strings.TrimSpace(log), "\n")
 	for _, invocation := range []string{
 		"go1.26.8\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -skip ^TestPairedTerminal ./livecanary",
-		"go1.26.8\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run ^TestPairedTerminal ./livecanary",
+		"go1.26.8\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run ^TestPairedTerminal -skip ^TestPairedTerminal(Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure)$ ./livecanary",
+		"go1.26.8\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run ^TestPairedTerminal(Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure)$ ./livecanary",
 		"go1.26.8\tvet -tags=g01_pair_fixture ./livecanary",
 	} {
 		count := 0
