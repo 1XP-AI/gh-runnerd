@@ -18,6 +18,7 @@ These are open, unimplemented goals. Status below is the initial planning state;
 | G10 | [#10 Implement disposable Linux workers with isolated Docker services](https://github.com/1XP-AI/gh-runnerd/issues/10) | Astra xhigh | Backlog | offline, trusted-runtime, trusted-live-github |
 | G11 | [#11 Implement trusted native macOS worker identity and lifecycle](https://github.com/1XP-AI/gh-runnerd/issues/11) | Astra xhigh | Backlog | offline, trusted-runtime, trusted-live-github |
 | G12 | [#12 Implement deterministic shared capacity and fair scheduling](https://github.com/1XP-AI/gh-runnerd/issues/12) | Luna max | Backlog | offline |
+| G12a | [#40 Implement pure scaling targets and capacity arithmetic](https://github.com/1XP-AI/gh-runnerd/issues/40) | Luna max | Ready (independent arithmetic child) | offline |
 | G13 | [#13 Integrate reconciliation, drain and safe restart](https://github.com/1XP-AI/gh-runnerd/issues/13) | Astra xhigh | Backlog | offline, trusted-runtime |
 | G14 | [#14 Implement status, logs and sanitized diagnostics](https://github.com/1XP-AI/gh-runnerd/issues/14) | Luna max | Backlog | offline, trusted-runtime |
 | G15 | [#15 Implement startup, shutdown and safe configuration updates](https://github.com/1XP-AI/gh-runnerd/issues/15) | Astra xhigh | Backlog | offline, trusted-runtime |
@@ -28,7 +29,7 @@ These are open, unimplemented goals. Status below is the initial planning state;
 | G20 | [#20 Pilot migration with reversible legacy runner handoff](https://github.com/1XP-AI/gh-runnerd/issues/20) | Astra xhigh | Backlog | offline, trusted-runtime, trusted-live-github |
 | G21 | [#21 Evaluate optional macOS VM and multi-host providers](https://github.com/1XP-AI/gh-runnerd/issues/21) | Astra xhigh | Future | offline |
 
-All 48 dependency edges are recorded as native GitHub blocking relationships and linked in issue bodies. Start G01/G02/G03; evidence gates control dependent work.
+The original plan's 48 dependency edges are recorded as native GitHub blocking relationships and linked in issue bodies. Start G01/G02/G03; evidence gates control dependent work.
 
 Each issue has one Goal statement, scope, TDD cases, acceptance criteria, model/effort, risk and dependencies. See [backlog.json](backlog.json) for machine-readable specifications.
 
@@ -39,3 +40,12 @@ Each issue has one Goal statement, scope, TDD cases, acceptance criteria, model/
 - [Board](https://github.com/orgs/1XP-AI/projects/2/views/3): status columns with stage, priority and model on cards.
 
 The initial board contains 3 Ready, 17 Backlog and 1 Future issue. Move later issues to Ready only when their dependencies are Done. Model metadata is a dispatch instruction, not an automatic agent scheduler.
+
+## Parallel arithmetic child
+
+Issue [#40](https://github.com/1XP-AI/gh-runnerd/issues/40) is a native sub-issue
+of G12 #12 with a native dependency on completed G03 #3. Its independently
+reviewed numeric contract permits isolated target/resource arithmetic now;
+existing parent dependencies and live evidence gates remain in place. The live
+Project records its current progress. See the child issue for exact scope and
+acceptance; this addition does not mark G12 or its integration complete.

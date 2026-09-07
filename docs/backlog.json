@@ -424,6 +424,40 @@
       }
     },
     {
+      "key": "G12a",
+      "parent": "G12",
+      "title": "Implement pure scaling targets and capacity arithmetic",
+      "stage": "M2 - Execution and scaling",
+      "agent": "Luna max",
+      "dependencies": [
+        "G03"
+      ],
+      "goal": "Implement deterministic, overflow-safe arithmetic for desired runner totals and additional resource capacity as an independent leaf of G12.",
+      "scope": "Three stdlib-only pure calculations under the independently reviewed numeric contract: fixed target, autoscale target and additional capacity. No config/provider schema, durable reservation, proposal application, fairness, I/O or live effects. G04/G12 integration gates remain required.",
+      "tdd": [
+        "Capture a behavioral red for this new feature, not a compilation-only result or a claimed existing product bug.",
+        "Cover zero/negative/min-max limits, exact last slot, reduced limits below committed usage, distinct CPU/memory and host/runtime constraints, and invalid later input after an early zero result.",
+        "Cover permitted individual zero-cost host budget plus positive runtime cost, reject nonempty all-zero cost set even for zero request, and independently check MaxInt64 behavior with math/big feasibility/maximality and bounded fuzz."
+      ],
+      "acceptance": [
+        "Three pure calculations implement the approved numeric contract without overflow or input mutation.",
+        "No new dependency or live integration; future caller accounting, stale calculation and atomic application limits are explicit.",
+        "Independent Astra contract/counterexample review and exact-head GitHub Codex review resolved before merge.",
+        "Completing this child does not complete G12 or waive G01/G02/G04/G05 integration gates."
+      ],
+      "risk": "High",
+      "kind": "implementation",
+      "priority": "P1",
+      "status": "Ready",
+      "test_profile": [
+        "offline"
+      ],
+      "github_issue": {
+        "number": 40,
+        "url": "https://github.com/1XP-AI/gh-runnerd/issues/40"
+      }
+    },
+    {
       "key": "G13",
       "title": "Integrate reconciliation, drain and safe restart",
       "stage": "M2 - Execution and scaling",
