@@ -380,3 +380,77 @@ func TestPairedLateCapacityLossRefusesBeforeEffect(t *testing.T) {
 		})
 	}
 }
+
+// Consume capacity inside the checker called by preflight, after its initial
+// capacity check. This is the immediately adjacent boundary to the committed
+// before/after-intent tests and uses the same actual private FileJournal.
+func TestPairedPreflightRechecksCapacityAfterChecker(t *testing.T) {
+	for _, operation := range []string{"create", "start", "observe", "delete"} {
+		t.Run(operation, func(t *testing.T) {
+			d, j, runtime, in := pairedFixture(t)
+			armed, checked := false, 0
+			room, targetCheck := int64(pairCallRoom), 2
+			if operation == "start" {
+				room *= 2
+			}
+			if operation == "delete" {
+				room = pairDeleteRoom
+			}
+			if operation == "observe" {
+				targetCheck = 1
+			}
+			check := func(ControllerCheck) error {
+				if armed {
+					checked++
+					if checked == targetCheck {
+						padPairedJournal(t, j, room-1)
+					}
+				}
+				return nil
+			}
+			err := d.WithPairedExecution(context.Background(), in, check, func(w *PairedWorker) error {
+				pair, err := w.Bind(fixtureRef(2))
+				if err != nil {
+					return err
+				}
+				h := fixtureHandoff(pair.PairSHA256, d.Approval)
+				var created ContainerReceipt
+				if operation != "create" {
+					created, err = w.Create(h, syntheticJIT)
+					if err != nil {
+						return err
+					}
+				}
+				if operation == "delete" {
+					runtime.container.State.Status = "exited"
+				}
+				before := runtime.preflights.Load()
+				reads, creates := runtime.reads.Load(), runtime.creates.Load()
+				armed = true
+				switch operation {
+				case "create":
+					_, err = w.Create(h, syntheticJIT)
+				case "start":
+					_, err = w.Start(created, fixtureRef(7))
+				case "observe":
+					_, err = w.Observe()
+				case "delete":
+					_, err = w.DeleteTerminal(TerminalDecisionRef{created.PairSHA256, created.ContainerID, created.CreateResult, fixtureRef(8)})
+				}
+				if checked < targetCheck {
+					t.Fatal("capacity boundary not exercised")
+				}
+				if err == nil {
+					t.Error("operation succeeded after required initial capacity was consumed")
+				}
+				if got := runtime.preflights.Load() - before; got != 0 || runtime.reads.Load() != reads || runtime.creates.Load() != creates || runtime.starts.Load() != 0 || runtime.deletes.Load() != 0 {
+					t.Errorf("runtime request after checker consumed required capacity: preflight=%d inspect=%d create=%d start=%d delete=%d", got, runtime.reads.Load()-reads, runtime.creates.Load()-creates, runtime.starts.Load(), runtime.deletes.Load())
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatal("fixture scope failed")
+			}
+		})
+	}
+}
