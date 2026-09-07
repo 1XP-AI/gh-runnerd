@@ -358,6 +358,8 @@ func (b *baselineListener) AcquireJobs(_ context.Context, ids []int64) ([]int64,
 		return nil, err
 	}
 	defer b.mu.Unlock()
+	ids = slices.Clone(ids) // Response checks and the receipt use the same entry snapshot.
+
 	s, err := b.state()
 	if err != nil || s.anchor == nil || len(ids) != 1 || ids[0] != s.anchor.RequestID || s.acquired {
 		return nil, ErrQuarantine

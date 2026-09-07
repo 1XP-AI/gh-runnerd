@@ -105,7 +105,18 @@ GitHub resource, runner, container or Keychain item.
 | `f0a98f4` — `go test -race ./livecanary -run '^TestBaselinePinnedSDKAdmission$' -count=1` | Compiled new-feature red: valid control passed; unknown sibling, pre-acquire Started and wrong envelope count incorrectly returned success with ACK 2/acquire 1/continuation 1 (0.574s). Independent reviewer reproduced the same counts (0.736s). This scaffold is not a claim about the unchanged fault probe. |
 | `ba9322c` — post-intent and callback probes | Real fsync boundary red: replacing the journal or claim after owned-set intent still issued one GET. Cancellation replaced the pending intent; the first session cancellation exposed a typed-nil SDK interface panic. A separate callback probe accepted changed owner/run/ref/time as original wire facts; its changed-runner negative control already refused. |
 | `c3db628` — known-response cancellation probe | After the fixture delivered valid responses, original-context cancellation made SDK poll/ACK/acquire errors overwrite their captured known facts with unknown. The positive response-loss/reopen and scope controls remained green. |
-| Current implementation — `GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -run '^TestBaseline' -count=1` | Passed in 28.095s. Includes the boundary corrections and the matrix below. |
+| `d8744d3` — `GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -run '^TestBaseline' -count=1` | Passed in 28.095s. Includes the boundary corrections and the matrix below. |
+
+The independent final review then reproduced an acquisition input-snapshot defect
+at `d8744d3`. The adopted actual SDK/TLS test is retained at red `d06edba`:
+a synchronous response-boundary mutation of the caller's request slice from 42 to
+43 incorrectly changed the known response42 to unknown (acquire1/continuation0,
+0.612s). The correction snapshots the input at entry for all response comparisons
+and receipt fields; it does not rely on caller-owned storage after the SDK call.
+The focused regression passed in 1.689s, the fresh full `go test -race ./livecanary
+-count=1` suite passed in 31.507s, and `go vet ./livecanary` passed with
+`GOTOOLCHAIN=go1.26.8`. This is synchronous input mutation, not a claim of isolation
+from hostile concurrent Go memory access.
 
 The final matrix covers owned-set/update/statistics drift before session POST;
 all seven presence/value fields in set, session, nested session and both poll
@@ -120,7 +131,7 @@ history; stable renewal/reference encoding; closed/retained scope; and secret
 canaries. Loss fixtures observed one session/ACK/acquire request as applicable,
 zero replacement/PATCH or unrelated requests, and no continuation after refusal.
 
-Additional checks passed on the final source:
+Additional checks passed at `d8744d3` before that narrow snapshot correction:
 
 - `GOTOOLCHAIN=go1.26.8 go test -race ./...` — core 1.455s,
   livecanary 43.711s and existing liveworker 4.985s.
