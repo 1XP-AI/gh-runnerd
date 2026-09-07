@@ -44,10 +44,19 @@ unresolved. A name-only join cannot recover it.
 | Identity | Established fact | Limit that remains |
 |---|---|---|
 | SDK runner | JIT returns `RunnerReference{ID, Name, RunnerScaleSetID}`. `GetRunner(ID)` addresses that exact agent; `GetRunnerByName(name)` returns the same reference type. | Read-back has no busy state, JIT secret, creation nonce or creation time. Name lookup does not show that this controller created the runner. |
-| SDK request/job | `RunnerRequestID` is `int64`; `JobID` is an independent opaque string. Available, Assigned, Started and Completed messages carry both plus owner/repository/workflow reference/run ID. Started and Completed add runner ID/name; Assigned has no runner ID. | No numeric conversion or equality with the public REST job ID is specified. The SDK payload has no run-attempt or execution-head field. |
+| SDK request/job | `RunnerRequestID` is `int64`; `JobID` is an independent opaque string. All four SDK types embed `JobMessageBase`, which exposes both IDs and owner/repository/workflow reference/run ID. Started and Completed add runner ID/name; Assigned has no runner ID. | No numeric conversion or equality with the public REST job ID is specified. The SDK types have no run-attempt or execution-head field, and their field definitions do not prove per-message wire population. |
 | REST workflow job | Attempt-specific listing supplies the numeric job identity. Exact job GET supplies status/conclusion, run/head, runner ID/name/group and check-run URL. | REST has no SDK request ID or opaque SDK `JobID`. Names and labels are not identity. Enumeration must stay within the approved attempt and bounded scope. |
 | Runner application | The pinned runner copies `Runner.Id` to `TaskAgent.Id` in its REST list conversion and copies the agent ID into `RunnerSettings.AgentId` during registration. | This supports a shared agent/REST runner ID, but does not prove that a Scale Set JIT reference is visible at the organization REST endpoint or that every service flow preserves equality. |
 | Executed job context | `job.check_run_id` is documented; the pinned runner copies the server-supplied context and its `JobContext` supports the numeric field. | It identifies a check run, not the opaque SDK job string. `runner.name` is explicitly not globally unique. Missing `check_run_id` cannot be represented as `0`. |
+
+The pinned decoder unmarshals each message directly into its corresponding SDK
+type, so the shared fields are representable on all four types. Fields omitted
+from a response become zero values; source inventory does not establish wire
+completeness. A future reconciler should retain a validated `JobAvailable`
+source record durably and bind later events by the exact request and opaque job
+IDs. Missing later source fields do not establish a source match, and populated
+fields that contradict the validated source must be refused. Live evidence must
+establish which fields the service supplies for each lifecycle message.
 
 Keep these fields separate throughout any future journal:
 `SDKRunnerRequestID`, `SDKJobID`, `RESTJobID`, `check_run_id`, SDK runner ID,
