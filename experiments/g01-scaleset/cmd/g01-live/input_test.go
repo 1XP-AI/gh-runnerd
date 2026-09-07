@@ -6,10 +6,47 @@ import (
 	"context"
 	"io"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestInheritedCredentialPipeStopsAtDeadline(t *testing.T) {
+	if os.Getenv("G01_INPUT_CHILD") == "blocked" {
+		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+		defer cancel()
+		done := make(chan error, 1)
+		go func() { _, err := readCredentialInput(ctx, os.Stdin); done <- err }()
+		select {
+		case err := <-done:
+			if err == nil {
+				os.Exit(3)
+			}
+			os.Exit(0)
+		case <-time.After(250 * time.Millisecond):
+			os.Exit(2)
+		}
+	}
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	child := exec.CommandContext(ctx, executable, "-test.run=^TestInheritedCredentialPipeStopsAtDeadline$")
+	child.Env = []string{"G01_INPUT_CHILD=blocked"}
+	child.Stdin = r
+	if err := child.Run(); err != nil {
+		t.Fatal("inherited stdin did not stop at its input deadline")
+	}
+}
 
 func TestBlockedCredentialPipeStopsAtDeadline(t *testing.T) {
 	r, w, err := os.Pipe()
