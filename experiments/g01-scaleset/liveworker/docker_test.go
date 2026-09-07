@@ -263,6 +263,13 @@ func unixFixture(t *testing.T) *dockerFixture {
 			}
 		case strings.HasSuffix(r.URL.Path, "/json") && r.Method == http.MethodGet:
 			if response := f.inspectResponse.Load(); response != nil {
+				if response.serve != nil {
+					response.serve(w, r)
+					return
+				}
+				if response.status >= 300 && response.status < 400 {
+					w.Header().Set("Location", "http://unapproved.example/synthetic-private-redirect")
+				}
 				w.WriteHeader(response.status)
 				_, _ = w.Write(response.body)
 				return

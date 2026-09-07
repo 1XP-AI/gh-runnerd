@@ -29,4 +29,42 @@ known status and present Running, Paused, Restarting and Dead before a legacy
 worker decision is this experiment's policy, not a claim that Docker requires
 every field. The existing created/exited cleanup policy does not require exit 0.
 
-Implementation, green checks and review remain pending in this red commit.
+## Implementation and green evidence
+
+`Docker.InspectExact` now returns the exact full target ID, GET path, received
+HTTP status, outcome and presence-aware state. Its raw `Container` is excluded
+from JSON serialization and retained for the existing full profile verifier.
+Unknown status is normalized. A supported 404 requires the bounded v1.45 error
+object with a non-null string message; the message is discarded, and the result
+is only `not-found-reported`. NewDocker does not remember successful daemon
+preflight, so this fact proves neither daemon verification nor ownership.
+
+The decoder rejects exact duplicate object keys everywhere and folded aliases
+of fields decoded into structs, including Unicode aliases and escaped duplicates.
+Config, HostConfig, Labels and other maps retain case-sensitive keys. Bodies
+remain capped at the existing response limit; JSON nesting is additionally
+limited to 64 levels. Unknown or ill-typed decision fields, contradictory IDs,
+unsupported responses, cancellation and socket replacement cannot authorize a
+subsequent standalone start/delete.
+
+`Docker.Inspect` delegates to the exact read and requires known status and the
+four present booleans before returning legacy zero-valued fields. Signed exit
+values are retained; absent/null/nonzero exits do not change legacy cleanup.
+Runtime, Container, Driver.Run, journal schemas and non-force deletion parameters
+are unchanged. This contains no paired controller API or live command change.
+
+Passed with the pinned toolchain, from the G01 module:
+
+```text
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s ./liveworker -run '^TestUnixInspectRequiresStateFlagsBeforeMutation$'
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s ./liveworker
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s ./liveworker -run '^TestDockerInspectExactRejectsMalformedOrAmbiguousBodiesBeforeMutation$'
+GOTOOLCHAIN=go1.26.8 go vet ./liveworker
+```
+
+The last focused run includes the additional escaped-duplicate and Unicode State
+alias cases added after the full worker run. `git diff --check` also passed.
+The independent Astra xhigh reviewer reproduced the red failure at `1ae7d12`.
+Final-head independent review, repository-wide checks, hosted CI and GitHub Codex
+review remain pending at this green commit. No real Docker/GitHub live behavior,
+paired execution, account admission or daemon-verified absence was tested.
