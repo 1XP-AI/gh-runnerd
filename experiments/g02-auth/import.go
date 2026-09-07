@@ -42,6 +42,7 @@ type Installation struct {
 	Login, AccountType, TargetType string
 	Permissions                    map[string]string
 	Suspended                      bool
+	SuspensionKnown                bool // response explicitly supplied suspended_at
 }
 type API interface {
 	App(context.Context, Credential) (int64, error)

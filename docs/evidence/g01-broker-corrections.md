@@ -1,0 +1,93 @@
+# G01 broker external-review corrections
+
+This continuation addresses the six original valid findings and the later canonical-journal preflight finding in
+[PR29](https://github.com/1XP-AI/gh-runnerd/pull/29), tracked with
+[issue30](https://github.com/1XP-AI/gh-runnerd/issues/30) and G01. The earlier audit
+at `4acc93fd` retained all seven original findings, including the dot-component
+false positive. The current review workflow reads status and all finding details,
+including stale sources; a prior internal approval is not merge clearance.
+
+Paused input work was preserved verbatim in local checkpoint commit `d821749`
+before integrating main `2fd5844`. That checkpoint is incomplete historical work,
+not the selected input implementation. The broker adopts main's independently
+reviewed shared private-input helper, including its inherited-pipe poller and
+short deadline probes. Existing ownership and byte checks still wrap that helper;
+regular-file reads have a byte bound, not a filesystem-stall deadline guarantee.
+
+Red commit `ccead3c` preserves four reproduced failures after main integration:
+
+- [Folded JSON keys](https://github.com/1XP-AI/gh-runnerd/pull/29#discussion_r3949548267)
+  still changed interpreted authority. Duplicate matching now uses the same
+  Unicode simple-fold equivalence as Go struct-field decoding, including long-s;
+  depth/byte budgets and single-alias acceptance remain intact.
+- [Organization casing](https://github.com/1XP-AI/gh-runnerd/pull/29#discussion_r3949682046)
+  consumed one mint before refusal. The installation login must now exactly match
+  the approved canonical organization before issuance.
+- [Private broker HTTP debug](https://github.com/1XP-AI/gh-runnerd/pull/29#discussion_r3949682038)
+  exposed synthetic Authorization and response canaries at levels1/2. The broker's
+  own cloned transport now pins both HTTP protocols and TLS ALPN to HTTP/1.1;
+  main's separate G02 default transport fix did not cover this injected transport.
+- [Inherited input](https://github.com/1XP-AI/gh-runnerd/pull/29#discussion_r3949682027)
+  exceeded the child guard for deadline and cancellation on a real inherited
+  current-UID private FIFO. The retained checkpoint test exercises immediate and
+  delayed EOF as positive controls, plus both broker/manual cancellation routes.
+
+The fresh red command was
+`GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s -run 'TestBrokerFolded|TestBrokerCanonical|TestBrokerRepositoryDot|TestBrokerHTTPDebug|TestPrivateInheritedInput$' .`
+in the G02 module (expected failure, 5.952s). The same focused suite passed after
+the corrections (3.222s). An additional HTTP test preserves an inherited `h2`
+ALPN list through the production constructor, changes only loopback trust/dial
+configuration afterward, and passes (1.550s). All exchanges use local fixtures;
+no real credential or GitHub endpoint is contacted.
+
+The existing first-character-alphanumeric repository rule rejects `.` and `..`
+before any API call. Its zero-call behavioral control passes; no source change
+is made for the [rebutted finding](https://github.com/1XP-AI/gh-runnerd/pull/29#discussion_r3949548246).
+The wrapper may still list that original finding; listing is not a claim that its
+thread remains unresolved after the integrator's evidence-based reply.
+
+Red commit `5c80d40` adds the remaining two reproductions:
+
+- [Cross-directory duplicate mint](https://github.com/1XP-AI/gh-runnerd/pull/29#discussion_r3949548235): the same discovery with a changed expiry and new attempt directory minted twice. The finite native-account ledger now consumes a permanent slot before any API call. A distinct broker lock avoids holding the controller admission lock over child execution.
+- [Late snapshot reservation](https://github.com/1XP-AI/gh-runnerd/pull/29#discussion_r3949548251): both an existing regular snapshot and a symlink consumed one mint. The exact digest-verified bytes are now exclusively reserved, written and synced before issuance; retained inode/hash checks gate later authenticated effects and handoff.
+
+The red commands in the G02 module were `go test -race -count=1 -run 'TestBrokerDifferentAttempt|TestBrokerBuildUnsupported' .` (failed, 0.621s) and `go test -race -count=1 -run TestBrokerSnapshotCollision .` with a clean metadata-only controller fixture (failed, 0.845s). The controller was built from a clean standalone main `2fd5844` clone with Go1.26.8, CGO enabled, native Darwin/ARM64 and SDKv0.4.0, then only read/hashed. It was never executed. Fixture-based tests skip explicitly when those optional private paths are absent; default synthetic snapshot tests still exercise pre-mint collisions and post-mint replacement refusal.
+
+The reviewed main controller now requires native account lookup. An adjacent actual-binary reproduction confirmed that the older broker accepted both a clean no-CGO binary and an `osusergo` binary even though that controller deterministically refuses its admission lookup. The verifier now also requires native host GOOS/GOARCH, CGO_ENABLED=1 and absence of the exact osusergo tag, preserving Go/path/clean SHA/SDK checks. An independently built native positive control remains accepted. Real unsupported binaries were tested through the private front door with synthetic API fixtures and a guaranteed snapshot collision; they never execute, even on a regression. Replaying that added fixture against production source at red `5c80d40` failed with one mint for all four unsupported/collision combinations (0.985s); this is an added scratch-test replay, not a claim that the added fixture was in the original red commit. The native-positive plus unsupported front-door matrix then passed on the correction (2.182s).
+
+The finite contract is described in [the updated operator guide](g01-broker.md): one discovery and one of each named controller phase, including only one inspection and cleanup. The first controller authority must include all intended mutating phases. Expiry/phase renewal is later recovery only, with stable resource, binary/harness, workflow/hosts/nonce and state identity. Earlier incomplete slots survive later recovery completion. Further reconciliation, repeated inspection and production refresh remain unresolved gates. No automatic root creation, state adoption, reset or migration is supplied.
+
+Supplemental negative/positive fixtures cover malformed and contradictory valid-JSON receipts, authority rollback/rebinding, missing/symlinked root, directory sync failure/re-sync, root/parent replacement, cross-process lock contention, killing only an owned synthetic child after its issuance intent, and restart refusal with unchanged permanent record bytes. Matching pre-existing controller claim metadata is accepted; conflicting, symlinked, empty or partial inventory refuses before mint. A separate G01 package fixture invoked main2fd's actual local `openJournalAtAdmission` with injected private directories, wrote its typed approval/claim, closed it, and the broker read-only compatibility check passed against those files. No G01 Driver or API method ran. This establishes the actual typed JSON/ownership digest and inode contract without a cross-module replace or production import.
+
+The four non-admission corrections at `20cdb53c8e4a16a439b1726cbfb560595b1c3bbd` received independent Astra review and fresh external-probe reruns (1.918s; inherited FIFO/debug suite 3.006s). The final combined ledger/build-profile delta still requires independent exact-head review, hosted CI and external Codex review. Passing these synthetic tests is not live authorization.
+
+No live use, resource approval, production recovery, credential persistence or
+G01 completion is established by these synthetic checks.
+
+Current supplemental checks passed on Darwin ARM64/Go1.26.8: finite phase, directory/expiry, build metadata and authority cases (2.622s); malformed receipts, renewal and existing claim cases (3.892s); separate-process crash and sync/replacement cases (1.950s); source-wide ledger cases (4.830s); actual G01 typed claim bridge and native snapshot fixture (1.915s). A full default module race suite passed before the final documentation/replay-history tightening (library17.768s, broker CLI1.501s, enrollment CLI2.486s). Final integrated checks are recorded separately when complete; these numbers do not imply final-head review.
+
+A simultaneous-initialization regression was then found in the shared admission pattern: creating the content file before its flock allowed a noncreator to lock the still-empty file while the creator failed to lock, yielding zero winners. Separate red commit `27f88bb` reproduces this in actual concurrent first-claim attempts (failed at iteration9;0.723s). The correction acquires a distinct permanent private zero-length `broker-admission.lock` before creating or reading the ledger, pins its inode and the root in the header, and holds that lock through effects. Empty/corrupt ledger bytes are never adopted. Replacing or writing the lock is a refusal, including on reopen. This changes initialization serialization only; no phase or recovery slot is added.
+
+Latest main `c1c0b6a` was integrated. The combined check at `bba5e74` stopped in the newly merged worker suite: `TestWorkerAdmissionCapsIndependentDirectories` observed zero creates where one was required. The integrator independently reproduced and owns the separate controller/worker serialization correction. The broker author did not modify those files and does not claim a combined pass. Broker-only default race/vet subsequently passed (library19.523s, broker CLI1.510s, enrollment CLI2.257s); all-nine-slots synthetic positive passed2.082s. Final corrected-head results follow after the initialization fix.
+
+The separate-lock correction passed `go test -race -count=3 -timeout=60s -run 'TestBrokerConcurrentFirstClaim|TestBrokerAdmissionSeparate|TestBrokerAdmissionResync|TestBrokerFinite|TestBrokerAllFinite' .` (29.396s, including600 actual simultaneous-first-claim iterations). An adjacent bridge regression in red `0edea4a` showed controller claim inspection ignored a held root-directory initialization lease (failed0.698s). The bridge now takes that same short nonblocking directory flock before opening or testing absence of the controller claim; it retains it through validation and releases it before child launch. This prevents it from contending for a newly created empty controller claim. No new recovery authority is introduced.
+
+After the directory-lease bridge correction, its held-lock/compatible-inventory/all-slots suite passed2.514s. The full broker/G02 race suite and vet passed (library45.349s, broker CLI1.508s, enrollment CLI2.488s); only synthetic APIs/children ran. This is a checkpoint, not final clearance: a later seventh review finding about canonical controller-journal preflight is now being reproduced. The prior six corrections and initialization fixes remain preserved.
+
+## Seventh finding: canonical preparation before issuance
+
+The later [journal-preflight P2](https://github.com/1XP-AI/gh-runnerd/pull/29#discussion_r3950475093) is valid. Red `fff3ee3` preserves five failures: a locked, malformed, oversized, authority-mismatched or phase-ineligible journal each consumed one mint and reached a synthetic launcher (1.029s). An independent paired fixture used the same actual G01-generated approval/journal/claim and confirmed canonical refusal for malformed tail, used-create history and pending-create intent while the old broker minted. A prior compatible-inode check did not establish canonical replay/authority validity.
+
+The correction adds only the approved `--prepare-approved-journal` path to the reviewed controller. It reuses `OpenJournal` and factored `authorizePhase`, whose pre-append create-history semantics match execution; it never reads credentials, constructs an API/SDK, records a phase/remote intent, or invokes Driver.Run. Actual local initialization/pinning or recovery-authority writes remain explicit. The returned bounded typed receipt binds the files validated under the canonical lease. The broker's short journal/claim/root leases compare exact returned identities and SHA256 before authenticated work, preserving the existing checks through handoff. It does not introduce a second replay parser, cross-module replace dependency or long-lived readiness protocol.
+
+Canonical preparation and CLI tests passed1.704s/1.411s. The entire livecanary suite and tagged controller CLI suite passed6.604s/4.671s with vet. Broker sequencing/finite-phase/invalid-preparation receipt checks passed6.129s. A controlled test-sensitivity replay removing the new child-receipt/body comparison failed on a changed journal between receipt and capture (0.610s); the implementation was restored immediately. This is a deliberately weakened-check experiment, not a historical red-commit claim.
+
+An optional cross-module test builds **only the G01 Go test executable**. Its dedicated fixture entry invokes the canonical preparation helper with an injected newly owned admission root, empty stdin, fixed arguments and minimal environment; it never executes Driver.Run or an API. The broker invokes this fixture through its bounded preparation subprocess code. Fresh preparation permits exactly one synthetic mint/handoff, while locked, malformed, oversized, permissive, mismatched, used-phase, pending-intent and changed-after-receipt cases permit zero authenticated calls (passed3.024s). This avoids claiming that an actual production controller binary was executed. The production metadata constructor remains separately required and tested.
+
+To reproduce that explicit optional fixture in a fresh private directory, build from the reviewed source with `GOTOOLCHAIN=go1.26.8 go test -c -o "$G01_PREPARATION_TEST_BINARY" ./livecanary` in the G01 module, restrict that owned binary to0500, then set only the non-secret fixture path `G01_BROKER_CANONICAL_PREPARER_FIXTURE="$G01_PREPARATION_TEST_BINARY"` for `go test -race -count=1 -run TestBrokerCanonicalPreparationExecutableBridge .` in G02. Default tests do not run a real controller or use the real native-account admission root.
+
+The routine first-claim contention test now uses50 pairs to stay within the existing45s CI budget; the earlier targeted600-iteration result remains recorded. The broker/G02 default race suite then passed26.081s (CLI2.552s/enrollment CLI2.298s) with vet before the final small receipt/lease controls. Final integrated checks and independent/external review still gate publication and any future authorization.
+
+The seventh correction is committed as `1f8e52d`, preserving red `fff3ee3`. Main `63b456a`, including the independently reviewed controller/worker initialization correction, was integrated at clean source `943c014fe69498dd92fdf3e83e7374d028bb20ca`. Fresh `make check` passed: G01 core1.438s, livecanary5.104s, liveworker2.592s, tagged controller4.836s and worker1.782s; G02 library26.434s, broker CLI2.192s and enrollment CLI1.968s. Formatting, build, vet, dependency/license checks and the pinned root vulnerability scan passed; fuzz was explicitly skipped because no targets are present. This supersedes the earlier combined failure without claiming that it passed before the separate initializer correction.
+
+The optional canonical Go-test-executable fixture was rebuilt from that exact integrated source and passed2.939s. Additional current checks passed for actual receipt hashes/inodes after canonical close (1.420s), bounded preparation output/deadline and empty stdin (3.670s), and receipt/file replacement plus lease-release controls (3.080s). G02's tagged cleanup behavior tests/vet passed1.365s without executing the Keychain probe; unsupported native account lookup refused under `osusergo` (race1.431s) and no-CGO (0.394s). No real controller, account admission root, Keychain or remote resource was used. Independent final-head review, hosted CI, external Codex completion and any future live approval remain separate gates.

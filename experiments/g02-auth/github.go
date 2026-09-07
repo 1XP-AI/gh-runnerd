@@ -69,12 +69,12 @@ func (a *GitHubAPI) OrganizationInstallation(ctx context.Context, c Credential, 
 			Type  string `json:"type"`
 		} `json:"account"`
 		Permissions map[string]string `json:"permissions"`
-		SuspendedAt *string           `json:"suspended_at"`
+		SuspendedAt json.RawMessage   `json:"suspended_at"`
 	}
 	if err := a.call(ctx, http.MethodGet, "/orgs/"+org+"/installation", &c, http.StatusOK, &result); err != nil {
 		return Installation{}, errors.New("installation lookup failed")
 	}
-	return Installation{ID: result.ID, AppID: result.AppID, AccountID: result.Account.ID, Login: result.Account.Login, AccountType: result.Account.Type, TargetID: result.TargetID, TargetType: result.TargetType, Permissions: result.Permissions, Suspended: result.SuspendedAt != nil}, nil
+	return Installation{ID: result.ID, AppID: result.AppID, AccountID: result.Account.ID, Login: result.Account.Login, AccountType: result.Account.Type, TargetID: result.TargetID, TargetType: result.TargetType, Permissions: result.Permissions, Suspended: len(result.SuspendedAt) > 0 && string(result.SuspendedAt) != "null", SuspensionKnown: len(result.SuspendedAt) > 0}, nil
 }
 
 // Convert exchanges a code once. It does not retry, create additional Apps, or
