@@ -43,6 +43,7 @@ type baselineSource struct {
 	Attempt      int    `json:"attempt"`
 }
 type baselineRecord struct {
+	Terminal   *baselineTerminalPayload `json:"terminal,omitempty"`
 	Pair       *baselinePair            `json:"pair,omitempty"`
 	Host       *baselineHost            `json:"host,omitempty"`
 	Roster     *baselineRoster          `json:"roster,omitempty"`
@@ -190,6 +191,9 @@ func validBaselineShape(e Event) bool {
 	if r.Outcome != "intent" && r.Outcome != "result" && r.Outcome != "unknown" && r.Outcome != "observed" {
 		return false
 	}
+	if terminalStage(r.Stage) {
+		return terminalShape(*r)
+	}
 	if executionStage(r.Stage) {
 		return executionShape(*r)
 	}
@@ -259,6 +263,13 @@ func validBaselineShape(e Event) bool {
 }
 
 type baselineHistory struct {
+	terminalIntent, terminalResult, terminalLast, terminalDecision                                              controllerRecordRef
+	terminalEvidence                                                                                            *terminalEvidence
+	terminalStep                                                                                                int
+	sessionCloseIntent, sessionCloseResult, workerDeleteRef, setDeleteIntent, setDeleteResult, setAbsenceResult controllerRecordRef
+	workerDeletion                                                                                              *liveworker.DeletionReceipt
+	startedRef                                                                                                  controllerRecordRef
+
 	pair                                       *baselinePair
 	pairIntent, pairRef, hostRef, rosterRef    controllerRecordRef
 	jit                                        *baselineJIT
@@ -334,13 +345,19 @@ func replayBaseline(events []Event, identity controllerJournalIdentity, a Approv
 		if r.SetID != s.setID || r.Creation != s.creation {
 			return s, ErrJournal
 		}
+		if terminalStage(r.Stage) {
+			if err := s.terminalRecord(*r, ref, lookup, a); err != nil {
+				return s, err
+			}
+			continue
+		}
 		if executionStage(r.Stage) {
 			if err := s.executionRecord(*r, ref, lookup, identity, a); err != nil {
 				return s, err
 			}
 			continue
 		}
-		if s.collectionRef.Sequence != 0 || (s.uncertain && !(r.Stage == "continuation" && r.Outcome == "unknown" && s.child == nil && s.pending != nil && s.pending.Stage == "continuation")) {
+		if s.terminalIntent.Sequence != 0 || s.collectionRef.Sequence != 0 || (s.uncertain && !(r.Stage == "continuation" && r.Outcome == "unknown" && s.child == nil && s.pending != nil && s.pending.Stage == "continuation")) {
 			return s, ErrJournal
 		}
 		if r.Outcome == "intent" {
@@ -424,6 +441,9 @@ func replayBaseline(events []Event, identity controllerJournalIdentity, a Approv
 					return s, ErrJournal
 				}
 				s.callbacks[*r.ItemIndex] = true
+				if r.Stage == "started" {
+					s.startedRef = ref
+				}
 				if r.Stage == "completed" {
 					s.complete = true
 					s.completedRef = ref

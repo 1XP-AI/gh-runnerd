@@ -46,6 +46,7 @@ func newTerminalFixture(t *testing.T, cleanup bool) *terminalFixture {
 		case r.Method == "GET" && f.c.polls.Load() >= 2 && strings.HasSuffix(r.URL.Path, "/agents/81"):
 			f.sdkReads.Add(1)
 			w.WriteHeader(404)
+			_, _ = w.Write([]byte(`{"typeName":"AgentNotFoundException","message":"synthetic missing runner"}`))
 			return true
 		case r.Method == "GET" && f.c.polls.Load() >= 2 && strings.HasSuffix(r.URL.Path, "/actions/runners/9001"):
 			f.restReads.Add(1)
@@ -70,6 +71,7 @@ func newTerminalFixture(t *testing.T, cleanup bool) *terminalFixture {
 			if f.deletedWorker.Load() {
 				f.workerAbsences.Add(1)
 				w.WriteHeader(404)
+				_, _ = w.Write([]byte(`{"message":"synthetic no such container"}`))
 				return true
 			}
 			if f.c.polls.Load() >= 2 {
