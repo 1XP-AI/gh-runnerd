@@ -31,6 +31,9 @@ func TestPairedReplayRejectsForgedUnknownFacts(t *testing.T) {
 		{"jit-negative-id", "jit", func(r *baselineRecord) { r.JIT.Runner.ID = -1 }},
 		{"pair-wrong-receipt", "pair", func(r *baselineRecord) { r.Pair.Receipt.PairSHA256 = strings.Repeat("f", 64) }},
 		{"host-unprefixed-image", "host-preflight", func(r *baselineRecord) { r.Host.ImageID = strings.TrimPrefix(r.Host.ImageID, "sha256:") }},
+		{"sample-unrecognized-outcome", "identity-sample", func(r *baselineRecord) { r.Sample.SDK.Response.Outcome = "arbitrary-remote-text" }},
+		{"sample-negative-job", "identity-sample", func(r *baselineRecord) { r.Sample.Job.ID = -1 }},
+		{"sample-invalid-local-ref", "identity-sample", func(r *baselineRecord) { r.Sample.Local.Result.Sequence = -1 }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

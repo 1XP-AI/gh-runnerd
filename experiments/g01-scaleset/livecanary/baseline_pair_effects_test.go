@@ -189,3 +189,69 @@ func TestPairedCloseDrainsBothActualJournals(t *testing.T) {
 		t.Fatal("worker close blocked")
 	}
 }
+
+func TestPairedOriginalDeadlineStopsHostRead(t *testing.T) {
+	f := newPairedIntegrationFixture(t)
+	entered := false
+	f.dockerBefore = func(_ http.ResponseWriter, r *http.Request) bool {
+		if r.URL.Path == "/version" {
+			entered = true
+			<-r.Context().Done()
+			return true
+		}
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	out, err := runPairedBaselineWithCadence(ctx, &Driver{Approval: f.c.a, Journal: f.c.j, API: f.c.api}, f.w, fastPairCadence())
+	if !entered || err == nil || out.Outcome != collectionUnresolved || time.Since(start) > 2*time.Second || f.c.sessions.Load() != 0 || f.jit.Load() != 0 || f.creates.Load() != 0 {
+		t.Fatal("original deadline failed to bound host work")
+	}
+}
+
+func TestPairedCapacityAtRealIntentBoundary(t *testing.T) {
+	for _, stage := range []string{"entry", "pair", "jit", "handoff"} {
+		t.Run(stage, func(t *testing.T) {
+			f := newPairedIntegrationFixture(t)
+			fired := false
+			fill := func(file *os.File) error {
+				info, err := file.Stat()
+				if err != nil {
+					return err
+				}
+				if _, err = file.Write(bytes.Repeat([]byte{' '}, baselineJournalLimit-int(info.Size()))); err != nil {
+					return err
+				}
+				return file.Sync()
+			}
+			if stage == "entry" {
+				if fill(f.c.j.file) != nil {
+					t.Fatal("fixture budget")
+				}
+				fired = true
+			} else {
+				f.c.j.syncFile = func(file *os.File) error {
+					raw, _ := os.ReadFile(file.Name())
+					lines := bytes.Split(bytes.TrimSpace(raw), []byte{'\n'})
+					var e Event
+					if json.Unmarshal(lines[len(lines)-1], &e) == nil && e.Baseline != nil && e.Baseline.Stage == stage && e.Baseline.Outcome == "intent" && !fired {
+						fired = true
+						return fill(file)
+					}
+					return file.Sync()
+				}
+			}
+			out, err := runFastPair(f)
+			if !fired || err == nil || out.Outcome != collectionUnresolved || f.creates.Load() != 0 || f.starts.Load() != 0 {
+				t.Fatal("full journal permitted effect")
+			}
+			if stage != "handoff" && f.jit.Load() != 0 {
+				t.Fatal("JIT ran without result capacity")
+			}
+			if (stage == "entry" || stage == "pair") && f.c.sessions.Load() != 0 {
+				t.Fatal("session ran without pair capacity")
+			}
+		})
+	}
+}
