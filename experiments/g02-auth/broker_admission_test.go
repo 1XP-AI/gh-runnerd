@@ -439,3 +439,30 @@ func TestBrokerActualG01ClaimSerializationCompatibility(t *testing.T) {
 		t.Fatal("actual G01 typed serialization/admission claim incompatible")
 	}
 }
+
+func TestBrokerAllFiniteSlotsUseSameControllerAuthority(t *testing.T) {
+	a, c, api, f, root := newBrokerFixture(t)
+	parent := filepath.Dir(root)
+	if _, e := brokerExecute(context.Background(), a, brokerInput{PEM: string(c.PEM)}, root, api, nil); e != nil {
+		t.Fatal("discovery")
+	}
+	phases := []string{"create", "before-ack", "after-ack", "before-acquire", "acquire-loss", "jit-loss", "inspect", "cleanup"}
+	a.Mode = "controller"
+	a.AllowVerificationAuthority = true
+	for _, phase := range phases {
+		a.Phase = phase
+		f.root = filepath.Join(parent, phase)
+		p := brokerTestPlan(t, &a, parent, func(context.Context, []byte, string) error { return nil })
+		p.controller.Phases = phases
+		p.controller.WorkflowRunID = 7
+		p.raw, _ = json.Marshal(p.controller)
+		a.ControllerApprovalSHA256 = brokerBytesDigest(p.raw)
+		p.approval = a
+		if _, e := brokerExecute(context.Background(), a, brokerInput{PEM: string(c.PEM), VerificationToken: "synthetic-distinct-workflow-authority"}, f.root, api, p); e != nil {
+			t.Fatalf("approved slot %s refused", phase)
+		}
+	}
+	if f.tokenCalls != 9 {
+		t.Fatalf("finite issuance count=%d", f.tokenCalls)
+	}
+}

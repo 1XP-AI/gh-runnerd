@@ -3,10 +3,12 @@ package enrollment
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -85,5 +87,51 @@ func TestBrokerAdmissionSeparateProcessCrashKeepsSlot(t *testing.T) {
 	after, e := os.ReadFile(ledger)
 	if e != nil || !bytes.Equal(before, after) {
 		t.Fatal("crash/close changed permanent claim")
+	}
+}
+
+func TestBrokerConcurrentFirstClaimAdmitsOne(t *testing.T) {
+	for iteration := 0; iteration < 200; iteration++ {
+		parent, e := filepath.EvalSymlinks(t.TempDir())
+		if e != nil {
+			t.Fatal("fixture")
+		}
+		os.Chmod(parent, 0700)
+		directory := filepath.Join(parent, "admission")
+		if os.Mkdir(directory, 0700) != nil {
+			t.Fatal("fixture root")
+		}
+		a := brokerApprovalFixture()
+		journals := make([]*brokerJournal, 2)
+		claims := make([]*brokerAdmission, 2)
+		for i := range journals {
+			journals[i], e = openBrokerJournal(filepath.Join(parent, fmt.Sprintf("attempt-%d", i)), a)
+			if e != nil {
+				t.Fatal("fixture journal")
+			}
+		}
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for i := range journals {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				<-start
+				claims[i], _ = openBrokerAdmission(directory, a, journals[i], nil, syncDirectory)
+			}(i)
+		}
+		close(start)
+		wg.Wait()
+		admitted := 0
+		for i := range journals {
+			if claims[i] != nil {
+				admitted++
+				claims[i].close()
+			}
+			journals[i].close()
+		}
+		if admitted != 1 {
+			t.Fatalf("first-claim contenders admitted %d; want exactly one (iteration %d)", admitted, iteration)
+		}
 	}
 }
