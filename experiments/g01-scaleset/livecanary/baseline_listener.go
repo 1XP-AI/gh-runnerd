@@ -18,6 +18,7 @@ var errBaselineCollected = errors.New("baseline callback collection complete")
 // No current phase/CLI calls this. The future pair orchestrator must prove
 // completed pairing and host preflight before invoking this experiment slice.
 type baselineListener struct {
+	pairGuard              func() error
 	mu                     sync.Mutex
 	ctx                    context.Context
 	cancel                 context.CancelFunc
@@ -89,6 +90,11 @@ func (b *baselineListener) check() error {
 	id, err := b.journal.controllerIdentity()
 	if err != nil || id != b.identity {
 		return ErrJournal
+	}
+	if b.pairGuard != nil {
+		if err := b.pairGuard(); err != nil {
+			return err
+		}
 	}
 	if b.session != nil && b.session.Session().SessionID.String() != b.sessionID {
 		return ErrQuarantine

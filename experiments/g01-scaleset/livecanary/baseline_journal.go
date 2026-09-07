@@ -8,6 +8,7 @@ import (
 	"slices"
 	"syscall"
 
+	"github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/liveworker"
 	"github.com/google/uuid"
 )
 
@@ -42,6 +43,15 @@ type baselineSource struct {
 	Attempt      int    `json:"attempt"`
 }
 type baselineRecord struct {
+	Pair       *baselinePair            `json:"pair,omitempty"`
+	Host       *baselineHost            `json:"host,omitempty"`
+	Roster     *baselineRoster          `json:"roster,omitempty"`
+	JIT        *baselineJIT             `json:"jit,omitempty"`
+	Handoff    *baselineHandoff         `json:"handoff,omitempty"`
+	Start      *baselineStart           `json:"start,omitempty"`
+	Sample     *baselineSample          `json:"sample,omitempty"`
+	Collection *baselineCollectionFacts `json:"collection,omitempty"`
+
 	Version    int                   `json:"version"`
 	Stage      string                `json:"stage"`
 	Outcome    string                `json:"outcome"`
@@ -180,6 +190,9 @@ func validBaselineShape(e Event) bool {
 	if r.Outcome != "intent" && r.Outcome != "result" && r.Outcome != "unknown" && r.Outcome != "observed" {
 		return false
 	}
+	if executionStage(r.Stage) {
+		return executionShape(*r)
+	}
 	switch r.Stage {
 	case "set-observe", "session-open", "poll", "source", "ack", "acquire", "continuation", "started", "completed", "desired":
 	default:
@@ -246,6 +259,23 @@ func validBaselineShape(e Event) bool {
 }
 
 type baselineHistory struct {
+	pair                                       *baselinePair
+	pairIntent, pairRef, hostRef, rosterRef    controllerRecordRef
+	jit                                        *baselineJIT
+	jitRef, handoffRef, startRef, completedRef controllerRecordRef
+	handoff                                    *baselineHandoff
+	start                                      *baselineStart
+	child                                      *baselineRecord
+	childRef                                   controllerRecordRef
+	sessionIntent, sessionResult               controllerRecordRef
+	rounds                                     int
+	lastSample                                 controllerRecordRef
+	lastSDK                                    *sdkRunnerObservation
+	lastJob                                    *restJobObservation
+	lastREST                                   *restRunnerObservation
+	lastLocal                                  *liveworker.LocalReceipt
+	collectionRef                              controllerRecordRef
+
 	seen                                    bool
 	uncertain                               bool
 	setID                                   int
@@ -287,14 +317,14 @@ func replayBaseline(events []Event, identity controllerJournalIdentity, a Approv
 			}
 			continue
 		}
-		if !validBaselineShape(e) || s.uncertain {
+		if !validBaselineShape(e) {
 			return s, ErrJournal
 		}
 		r := e.Baseline
 		ref := controllerEventRef(identity, e)
 		if !s.seen {
 			created := lookup(r.Creation)
-			if r.Stage != "set-observe" || r.Outcome != "intent" || created == nil || created.Sequence >= e.Sequence || created.Kind != "result" || created.Operation != "create" || created.ID != r.SetID {
+			if (r.Stage != "set-observe" && r.Stage != "pair") || r.Outcome != "intent" || created == nil || created.Sequence >= e.Sequence || created.Kind != "result" || created.Operation != "create" || created.ID != r.SetID {
 				return s, ErrJournal
 			}
 			s.setID = r.SetID
@@ -304,13 +334,22 @@ func replayBaseline(events []Event, identity controllerJournalIdentity, a Approv
 		if r.SetID != s.setID || r.Creation != s.creation {
 			return s, ErrJournal
 		}
+		if executionStage(r.Stage) {
+			if err := s.executionRecord(*r, ref, lookup, identity, a); err != nil {
+				return s, err
+			}
+			continue
+		}
+		if s.collectionRef.Sequence != 0 || (s.uncertain && !(r.Stage == "continuation" && r.Outcome == "unknown" && s.child == nil && s.pending != nil && s.pending.Stage == "continuation")) {
+			return s, ErrJournal
+		}
 		if r.Outcome == "intent" {
 			if s.pending != nil || r.Intent != (controllerRecordRef{}) || r.Set != nil || r.Session != nil || r.Batch != nil || r.Source != nil || r.Accepted != nil || r.HTTPStatus != 0 || r.NoMessage || r.Desired != nil || r.ItemIndex != nil {
 				return s, ErrJournal
 			}
 			switch r.Stage {
 			case "set-observe":
-				if s.setObserved || s.sessionID != "" || r.SessionID != "" {
+				if s.setObserved || s.sessionID != "" || r.SessionID != "" || (s.pair != nil && s.rosterRef.Sequence == 0) {
 					return s, ErrJournal
 				}
 			case "session-open":
@@ -348,6 +387,9 @@ func replayBaseline(events []Event, identity controllerJournalIdentity, a Approv
 			}
 			s.pending = r
 			s.pendingRef = ref
+			if r.Stage == "session-open" {
+				s.sessionIntent = ref
+			}
 			continue
 		}
 		if r.Outcome == "observed" {
@@ -384,12 +426,20 @@ func replayBaseline(events []Event, identity controllerJournalIdentity, a Approv
 				s.callbacks[*r.ItemIndex] = true
 				if r.Stage == "completed" {
 					s.complete = true
+					s.completedRef = ref
 				}
 			}
 			continue
 		}
 		if s.pending == nil || r.Intent != s.pendingRef || r.Stage != s.pending.Stage || r.SessionID != s.pending.SessionID || r.Cursor != s.pending.Cursor || r.MessageID != s.pending.MessageID || r.BatchRef != s.pending.BatchRef || r.SourceRef != s.pending.SourceRef || r.ACKRef != s.pending.ACKRef || r.AcquireRef != s.pending.AcquireRef {
 			return s, ErrJournal
+		}
+		if r.Stage == "continuation" && (s.child != nil || (r.Outcome == "result" && s.pair != nil && (s.startRef.Sequence == 0 || s.rounds != 4))) {
+			return s, ErrJournal
+		}
+		if r.Stage == "session-open" {
+			s.sessionIntent = r.Intent
+			s.sessionResult = ref
 		}
 		s.pending = nil
 		if r.Outcome == "unknown" {
@@ -496,6 +546,14 @@ func (s *baselineHistory) admitBatch(b *baselineBatch, a Approval) error {
 		}
 		if (x.Kind == "JobAvailable" || x.Kind == "JobAssigned") && (x.RunnerID != nil || x.RunnerName != nil || x.Result != nil) {
 			return ErrJournal
+		}
+		if s.jit != nil && s.jit.Runner != nil {
+			if x.RunnerID != nil && *x.RunnerID > 0 && int(*x.RunnerID) != int(s.jit.Runner.ID) {
+				return ErrJournal
+			}
+			if x.RunnerName != nil && *x.RunnerName != "" && *x.RunnerName != s.jit.Runner.Name {
+				return ErrJournal
+			}
 		}
 		if x.RunnerID != nil {
 			if *x.RunnerID < 0 || (*x.RunnerID > 0 && s.runnerID > 0 && *x.RunnerID != s.runnerID) {
