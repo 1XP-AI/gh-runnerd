@@ -2,6 +2,7 @@ package livecanary
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -63,7 +64,11 @@ func runSDKHTTPDebugFixture(t *testing.T) {
 	a := approval()
 	transport := newSDKTransport(a)
 	defer transport.CloseIdleConnections()
-	transport.TLSClientConfig = server.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
+	if transport.TLSClientConfig == nil {
+		transport.TLSClientConfig = new(tls.Config)
+	}
+	// Replace only fixture trust, retaining the production ALPN configuration.
+	transport.TLSClientConfig.RootCAs = server.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs
 	transport.TLSClientConfig.ServerName = server.Certificate().DNSNames[0]
 	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 		if address != "api.github.com:443" {
@@ -78,4 +83,16 @@ func runSDKHTTPDebugFixture(t *testing.T) {
 		t.Fatal("fixture credential request failed")
 	}
 	fmt.Println("SDK_FIXTURE_OK", <-protocol)
+}
+
+func TestSDKTransportOwnership(t *testing.T) {
+	original := http.DefaultTransport.(*http.Transport)
+	protocols := original.Protocols
+	private := newSDKTransport(approval())
+	if private == original || private.Protocols == nil || private.Protocols == protocols {
+		t.Fatal("SDK transport did not own its protocol configuration")
+	}
+	if !private.Protocols.HTTP1() || private.Protocols.HTTP2() || original.Protocols != protocols {
+		t.Fatal("SDK transport changed default protocols or retained HTTP/2")
+	}
 }

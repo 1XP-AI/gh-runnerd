@@ -88,9 +88,10 @@ func runGitHubHTTPDebugFixture(t *testing.T) {
 
 func TestGitHubTransportOwnership(t *testing.T) {
 	original := http.DefaultTransport.(*http.Transport)
+	protocols := original.Protocols
 	api := NewGitHubAPI(time.Now, nil)
 	private, ok := api.client.Transport.(*http.Transport)
-	if !ok || private == original {
+	if !ok || private == original || private.Protocols == protocols || original.Protocols != protocols {
 		t.Fatal("default API did not own its transport")
 	}
 	if private.Protocols == nil || !private.Protocols.HTTP1() || private.Protocols.HTTP2() {

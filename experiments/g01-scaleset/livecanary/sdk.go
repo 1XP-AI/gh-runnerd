@@ -3,6 +3,7 @@ package livecanary
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -81,6 +82,15 @@ func NewSDKAPI(a Approval, c Credentials) (*SDKAPI, error) {
 // destination gates can be exercised against a private local TLS fixture.
 func newSDKTransport(a Approval) *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	// HTTP/2 GODEBUG traces can print Authorization and response data. Pin the
+	// inner credential transport, not just the response wrapper, to HTTP/1.
+	transport.Protocols = new(http.Protocols)
+	transport.Protocols.SetHTTP1(true)
+	// Clone can inherit an already initialized HTTP/2 ALPN advertisement.
+	if transport.TLSClientConfig == nil {
+		transport.TLSClientConfig = new(tls.Config)
+	}
+	transport.TLSClientConfig.NextProtos = []string{"http/1.1"}
 	transport.Proxy = func(req *http.Request) (*url.URL, error) {
 		host := req.URL.Hostname()
 		if req.URL.Scheme != "https" || req.URL.User != nil || (req.URL.Port() != "" && req.URL.Port() != "443") || (host != "api.github.com" && !slices.Contains(a.ActionsHosts, host)) {
