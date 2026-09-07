@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/actions/scaleset"
 )
 
 func TestAuditPR25ObservedJobsMustBlockCleanup(t *testing.T) {
@@ -25,6 +27,38 @@ func TestAuditPR25ObservedJobsMustBlockCleanup(t *testing.T) {
 			err := d.Run(context.Background(), "cleanup")
 			if !errors.Is(err, ErrQuarantine) || f.deleteCalls != 0 {
 				t.Fatalf("unresolved observed job allowed cleanup: error=%v delete_calls=%d", err, f.deleteCalls)
+			}
+		})
+	}
+}
+
+func TestUnexpectedWorkMessageQuarantinesBeforeSafeClose(t *testing.T) {
+	for _, shape := range []string{"started", "assigned", "completed", "empty", "nil"} {
+		t.Run(shape, func(t *testing.T) {
+			d, f, j := created(t)
+			f.session.message.JobAvailableMessages = nil
+			switch shape {
+			case "started":
+				f.session.message.JobStartedMessages = []*scaleset.JobStarted{{}}
+			case "assigned":
+				f.session.message.JobAssignedMessages = []*scaleset.JobAssigned{{}}
+			case "completed":
+				f.session.message.JobCompletedMessages = []*scaleset.JobCompleted{{}}
+			case "nil":
+				f.session.message = nil
+			}
+			err := d.Run(context.Background(), "before-ack")
+			if shape == "empty" || shape == "nil" {
+				if !errors.Is(err, ErrNoMessage) || f.session.close != 1 {
+					t.Fatal("empty queue did not retain no-message behavior")
+				}
+				return
+			}
+			if !errors.Is(err, ErrQuarantine) || f.session.close != 0 || !replay(j.Events()).uncertain {
+				t.Errorf("unexpected work was treated as empty: error=%v close=%d", err, f.session.close)
+			}
+			if d.Run(context.Background(), "cleanup") == nil || f.deleteCalls != 0 {
+				t.Error("unexpected work followed by stale zero permitted cleanup")
 			}
 		})
 	}
