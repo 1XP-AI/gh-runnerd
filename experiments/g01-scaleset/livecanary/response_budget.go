@@ -39,6 +39,7 @@ func (t responseBudgetTransport) RoundTrip(req *http.Request) (*http.Response, e
 	if err != nil {
 		return nil, err
 	}
+	captureRunnerResponse(req, response.StatusCode)
 	if response.ContentLength > responseBodyLimit {
 		_ = response.Body.Close()
 		return nil, errResponseBudget
