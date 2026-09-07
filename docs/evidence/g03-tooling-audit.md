@@ -48,8 +48,16 @@ both offline modules, the tagged G01 CLI tests/vet, and pinned root vulnerabilit
 scan with no vulnerabilities found. Fuzz explicitly skipped because no target
 exists. The CLI packages passed (`1.765s` and `1.422s`) using synthetic fixtures;
 the G02 library passed (`5.249s`). Shell syntax and diff whitespace checks passed.
-An additional focused check verifies the Make build recipe itself receives the
-pin, so the standalone checker's own selection cannot mask a Make regression.
+An additional focused check then exposed a Make 3.81 portability defect at
+`ddddbaf`: combining `override export` in one assignment did not export the
+selection to the build recipe. The standalone checker's own selection had masked
+that path in earlier checks. Separate `override` and `export` directives fix it;
+the regression exercises the build recipe directly under the newer-Go fixture.
+That focused race test passed (`1.724s`). The final full `make check` then passed
+again with the portable export: tooling tests `4.477s`, race `4.767s`, tagged
+G01 commands `1.419s`/`1.245s`, G02 library `5.041s`, and the same successful
+build/vet/dependency/license and vulnerability gates. Fuzz remained explicitly
+skipped. These results supersede the intermediate portability failure.
 
 Independent review, external Codex review of the exact final PR head and hosted
 CI are still required.

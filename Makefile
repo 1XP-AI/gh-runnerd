@@ -3,7 +3,8 @@ SHELL := /usr/bin/env bash
 GO ?= go
 GOFLAGS ?=
 # A go directive is a minimum under auto, including on a newer installation.
-override export GOTOOLCHAIN := go1.26.8
+override GOTOOLCHAIN := go1.26.8
+export GOTOOLCHAIN
 export GOFLAGS
 FUZZTIME ?= 1s
 GOVULNCHECK_VERSION ?= v1.7.0
