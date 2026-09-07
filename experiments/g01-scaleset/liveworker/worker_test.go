@@ -68,6 +68,7 @@ func (f *fakeRuntime) Create(ctx context.Context, name string, payload map[strin
 		}
 	}
 	c.State.Status = "created"
+	c.NetworkSettings.Networks = map[string]any{"bridge": map[string]any{}}
 	f.container = c
 	return c.ID, f.warnings, f.createErr
 }

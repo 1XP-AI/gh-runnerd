@@ -47,6 +47,11 @@ func (p *probeClient) GetMessage(_ context.Context, last, capacity int) (*scales
 	if m.MessageID <= 0 || len(m.JobAvailableMessages) > 2 || len(m.JobStartedMessages) > 0 || len(m.JobCompletedMessages) > 0 || len(m.JobAssignedMessages) > 0 {
 		return nil, ErrQuarantine
 	}
+	// The listener ACKs a returned message before AcquireJobs. Validate the
+	// single-request acquisition boundary here, before that ACK can occur.
+	if (p.phase == "before-acquire" || p.phase == "acquire-loss") && len(m.JobAvailableMessages) != 1 {
+		return nil, ErrQuarantine
+	}
 	for _, j := range m.JobAvailableMessages {
 		if j == nil || j.RunnerRequestID <= 0 || j.WorkflowRunID != p.driver.Approval.WorkflowRunID || j.OwnerName != p.driver.Approval.Organization || j.RepositoryName != p.driver.Approval.Repository {
 			return nil, ErrQuarantine

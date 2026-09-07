@@ -87,11 +87,12 @@ type state struct {
 	sessionID                    string
 	reserved, uncertain, deleted bool
 	phaseSeen                    map[string]bool
+	observedJobs                 map[int64]bool
 	inventory                    string
 }
 
 func replay(events []Event) state {
-	s := state{phaseSeen: make(map[string]bool)}
+	s := state{phaseSeen: make(map[string]bool), observedJobs: make(map[int64]bool)}
 	pending := ""
 	for _, e := range events {
 		switch e.Kind {
@@ -99,6 +100,12 @@ func replay(events []Event) state {
 			s.phaseSeen[e.Operation] = true
 		case "inventory":
 			s.inventory = e.Digest
+		case "observation":
+			if e.Operation == "poll" {
+				for _, id := range e.RequestIDs {
+					s.observedJobs[id] = true
+				}
+			}
 		case "intent":
 			if pending != "" {
 				s.uncertain = true
@@ -249,7 +256,9 @@ func (d *Driver) Run(ctx context.Context, phase string) error {
 		// Aggregate zero alone never authorizes deletion. This scope has never
 		// issued JIT/acquired a job, has no unresolved session, and must match
 		// its original runner inventory as well as its immutable create receipt.
-		if set.Statistics == nil || *set.Statistics != (scaleset.RunnerScaleSetStatistic{}) {
+		// No terminal-job reconciliation exists in this bounded harness.
+		// A closed session or aggregate zero never clears observed requests.
+		if len(s.observedJobs) != 0 || set.Statistics == nil || *set.Statistics != (scaleset.RunnerScaleSetStatistic{}) {
 			return ErrQuarantine
 		}
 		inventory, err := boundedRead(ctx, d.API.Inventory)

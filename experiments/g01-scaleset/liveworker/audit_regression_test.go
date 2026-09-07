@@ -15,6 +15,9 @@ func TestAuditPR28MissingBridgeMustNotStart(t *testing.T) {
 			if d.Run(context.Background(), "create", syntheticJIT) != nil {
 				t.Fatal("fixture create failed")
 			}
+			if shape == "nil" {
+				f.container.NetworkSettings.Networks = nil
+			}
 			if shape == "empty" {
 				f.container.NetworkSettings.Networks = map[string]any{}
 			}
