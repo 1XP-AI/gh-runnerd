@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -37,11 +38,17 @@ func fixtureHandoff(pair string, a Approval) HandoffReceipt {
 
 type pairedFakeRuntime struct {
 	*fakeRuntime
-	reads int
+	reads      atomic.Int64
+	preflights atomic.Int64
+}
+
+func (f *pairedFakeRuntime) Preflight(ctx context.Context, a Approval) (ImageProfile, error) {
+	f.preflights.Add(1)
+	return f.fakeRuntime.Preflight(ctx, a)
 }
 
 func (f *pairedFakeRuntime) InspectExact(ctx context.Context, target string) (DockerInspectObservation, error) {
-	f.reads++
+	f.reads.Add(1)
 	falseValue, exit := false, int64(0)
 	result := DockerInspectObservation{TargetID: target, Method: http.MethodGet, Path: "/v1.45/containers/" + target + "/json", HTTPStatus: http.StatusOK, Outcome: DockerInspectPresent, Container: f.container}
 	if f.deletes.Load() != 0 {

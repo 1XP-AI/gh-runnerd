@@ -241,7 +241,7 @@ func unixFixture(t *testing.T) *dockerFixture {
 			}
 		case r.URL.Path == "/v1.45/containers/create" && r.Method == http.MethodPost:
 			events := f.driver.Journal.Events()
-			if len(events) == 0 || events[len(events)-1].Kind != "intent" || events[len(events)-1].Operation != "create" {
+			if !fixtureHasIntent(events, "create") {
 				t.Error("create reached runtime before durable intent")
 			}
 			var payload map[string]any
@@ -280,7 +280,7 @@ func unixFixture(t *testing.T) *dockerFixture {
 			}
 		case strings.HasSuffix(r.URL.Path, "/start") && r.Method == http.MethodPost:
 			events := f.driver.Journal.Events()
-			if events[len(events)-1].Operation != "start" || events[len(events)-1].Kind != "intent" {
+			if !fixtureHasIntent(events, "start") {
 				t.Error("start reached runtime before durable intent")
 			}
 			ctx, cancel := context.WithTimeout(r.Context(), time.Second)
