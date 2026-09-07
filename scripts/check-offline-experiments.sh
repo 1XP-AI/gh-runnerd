@@ -4,7 +4,7 @@ set -euo pipefail
 
 go_cmd="${GO:-go}"
 exact_toolchain="go1.26.8"
-storage_regex='^TestPairedTerminal(Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure)$'
+storage_regex='^TestPairedTerminal(Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$'
 
 # These are the two established offline gate modules. Keep this list explicit so
 # a new or unreviewed experiment cannot enter public CI by directory naming.

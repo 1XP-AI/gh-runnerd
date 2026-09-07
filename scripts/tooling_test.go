@@ -195,7 +195,7 @@ package livecanary
 
 import "testing"
 
-func TestPairedTerminalClosedReplayActualFile(t *testing.T) {
+func TestPairedTerminalFixtureStorageFailure(t *testing.T) {
 	t.Fatal("tagged-pair-fixture-storage-regression")
 }
 `
@@ -235,8 +235,8 @@ func TestPairedTerminalClosedReplayActualFile(t *testing.T) {
 	lines := strings.Split(strings.TrimSpace(log), "\n")
 	for _, invocation := range []string{
 		"go1.26.8\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -skip ^TestPairedTerminal ./livecanary",
-		"go1.26.8\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run ^TestPairedTerminal -skip ^TestPairedTerminal(Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure)$ ./livecanary",
-		"go1.26.8\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run ^TestPairedTerminal(Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure)$ ./livecanary",
+		"go1.26.8\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run ^TestPairedTerminal -skip ^TestPairedTerminal(Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$ ./livecanary",
+		"go1.26.8\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run ^TestPairedTerminal(Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$ ./livecanary",
 		"go1.26.8\tvet -tags=g01_pair_fixture ./livecanary",
 	} {
 		count := 0
