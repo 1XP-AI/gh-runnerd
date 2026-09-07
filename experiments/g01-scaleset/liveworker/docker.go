@@ -84,32 +84,43 @@ func NewDocker(a Approval) (*Docker, error) {
 }
 
 func (d *Docker) request(ctx context.Context, method, path string, payload any, want int, result any) error {
+	data, status, err := d.response(ctx, method, path, payload)
+	if err != nil {
+		return err
+	}
+	if status != want || (result != nil && json.Unmarshal(data, result) != nil) {
+		return ErrRemote
+	}
+	return nil
+}
+
+// response retains the existing client, socket pin and bounded body handling.
+// A fully received mutation result remains available if cancellation arrives
+// at EOF. InspectExact separately checks cancellation before returning facts.
+func (d *Docker) response(ctx context.Context, method, path string, payload any) ([]byte, int, error) {
 	var body []byte
 	var err error
 	if payload != nil {
 		body, err = json.Marshal(payload)
 		if err != nil || len(body) > 2*maxJIT {
-			return ErrApproval
+			return nil, 0, ErrApproval
 		}
 	}
 	req, err := http.NewRequestWithContext(ctx, method, "http://docker.invalid"+path, bytes.NewReader(body))
 	if err != nil {
-		return ErrRemote
+		return nil, 0, ErrRemote
 	}
 	req.Header.Set("Content-Type", "application/json")
 	response, err := d.client.Do(req)
 	if err != nil {
-		return ErrRemote
+		return nil, 0, ErrRemote
 	}
 	defer response.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(response.Body, responseLimit+1))
-	if err != nil || len(data) > responseLimit || response.StatusCode != want {
-		return ErrRemote
+	if err != nil || len(data) > responseLimit {
+		return nil, response.StatusCode, ErrRemote
 	}
-	if result != nil && json.Unmarshal(data, result) != nil {
-		return ErrRemote
-	}
-	return nil
+	return data, response.StatusCode, nil
 }
 
 func versionNumber(version string) (int, error) {
@@ -206,15 +217,17 @@ func (d *Docker) Create(ctx context.Context, name string, payload map[string]any
 	return response.ID, len(response.Warnings) > 0, err
 }
 func (d *Docker) Inspect(ctx context.Context, containerID string) (*Container, error) {
-	if !id.MatchString(containerID) {
-		return nil, ErrApproval
-	}
-	var result Container
-	err := d.request(ctx, http.MethodGet, "/v"+apiVersion+"/containers/"+containerID+"/json", nil, http.StatusOK, &result)
+	observation, err := d.InspectExact(ctx, containerID)
 	if err != nil {
 		return nil, err
 	}
-	return &result, nil
+	state := observation.State
+	if observation.Outcome != DockerInspectPresent || state == nil || state.Status == ContainerStatusUnknown || state.Running == nil || state.Paused == nil || state.Restarting == nil || state.Dead == nil {
+		return nil, ErrRemote
+	}
+	// Preserve the standalone created/exited cleanup policy. ExitCode is an
+	// observation for future paired policy, not an added exit-zero requirement.
+	return observation.Container, nil
 }
 func (d *Docker) Start(ctx context.Context, containerID string) error {
 	if !id.MatchString(containerID) {
