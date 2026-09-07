@@ -27,11 +27,16 @@ func (f fixtureSDK) VerifyRun(context.Context, Approval, int64) error { return n
 // transport is permanently fenced to its own loopback server, like the original
 // offline spike; no endpoint flag or environment can repoint it to GitHub.
 func TestDriverBarriersThroughPinnedSDK(t *testing.T) {
-	for _, phase := range []string{"after-ack", "acquire-loss", "jit-loss"} {
-		t.Run(phase, func(t *testing.T) {
+	for _, scenario := range []string{"after-ack", "acquire-loss", "jit-loss", "ack-refresh", "create-oversize", "create-error-oversize"} {
+		t.Run(scenario, func(t *testing.T) {
+			phase := scenario
+			if scenario == "ack-refresh" {
+				phase = "after-ack"
+			}
 			a := approval()
 			j := &memoryJournal{}
 			acks, acquires, jits, closes := 0, 0, 0, 0
+			creates, refreshes, replacementACKs := 0, 0, 0
 			set := &scaleset.RunnerScaleSet{ID: 7, Name: a.setName(), RunnerGroupID: a.RunnerGroupID, Labels: []scaleset.Label{{Name: a.setName()}}, Statistics: &scaleset.RunnerScaleSetStatistic{}}
 			var server *httptest.Server
 			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -46,6 +51,13 @@ func TestDriverBarriersThroughPinnedSDK(t *testing.T) {
 					body = map[string]string{"url": server.URL + "/tenant/", "token": "eyJhbGciOiJub25lIn0." + base64.RawURLEncoding.EncodeToString(claims) + "."}
 				case strings.HasSuffix(r.URL.Path, "/sessions"):
 					body = scaleset.RunnerScaleSetSession{SessionID: uuid.MustParse("00000000-0000-4000-8000-000000000001"), OwnerName: a.setName(), MessageQueueURL: server.URL + "/queue", MessageQueueAccessToken: "synthetic-queue", Statistics: &scaleset.RunnerScaleSetStatistic{}}
+				case strings.Contains(r.URL.Path, "/sessions/") && r.Method == http.MethodPatch:
+					refreshes++
+					body = scaleset.RunnerScaleSetSession{SessionID: uuid.MustParse("00000000-0000-4000-8000-000000000002"), OwnerName: a.setName(), MessageQueueURL: server.URL + "/replacement", MessageQueueAccessToken: "synthetic-replacement", Statistics: &scaleset.RunnerScaleSetStatistic{}}
+				case r.URL.Path == "/replacement/9":
+					replacementACKs++
+					w.WriteHeader(http.StatusNoContent)
+					return
 				case strings.Contains(r.URL.Path, "/sessions/") && r.Method == http.MethodDelete:
 					closes++
 					w.WriteHeader(http.StatusNoContent)
@@ -58,6 +70,10 @@ func TestDriverBarriersThroughPinnedSDK(t *testing.T) {
 					body = map[string]any{"messageId": 9, "messageType": "RunnerScaleSetJobMessages", "body": string(jobs), "statistics": map[string]int{"totalAssignedJobs": 1}}
 				case r.URL.Path == "/queue/9":
 					acks++
+					if scenario == "ack-refresh" {
+						w.WriteHeader(http.StatusUnauthorized)
+						return
+					}
 					w.WriteHeader(http.StatusNoContent)
 					return
 				case strings.HasSuffix(r.URL.Path, "/acquirejobs"):
@@ -68,6 +84,15 @@ func TestDriverBarriersThroughPinnedSDK(t *testing.T) {
 					body = scaleset.RunnerScaleSetJitRunnerConfig{EncodedJITConfig: "synthetic-secret-jit", Runner: &scaleset.RunnerReference{ID: 8, Name: a.workerName(), RunnerScaleSetID: 7}}
 				case strings.HasSuffix(r.URL.Path, "/runners"):
 					body = map[string]any{"count": 0, "value": []any{}}
+				case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/runnerscalesets"):
+					creates++
+					body = set
+					if strings.HasPrefix(scenario, "create-") {
+						if scenario == "create-error-oversize" {
+							w.WriteHeader(http.StatusForbidden)
+						}
+						body = map[string]any{"id": set.ID, "name": set.Name, "runnerGroupId": set.RunnerGroupID, "extra": strings.Repeat("synthetic-secret-body", int(responseBodyLimit)/8)}
+					}
 				case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/runnerscalesets"):
 					body = map[string]any{"count": 0, "value": []any{}}
 				default:
@@ -89,6 +114,7 @@ func TestDriverBarriersThroughPinnedSDK(t *testing.T) {
 				return (&net.Dialer{}).DialContext(ctx, network, address)
 			}
 			defer transport.CloseIdleConnections()
+			retry.HTTPClient.Transport = withResponseBudget(transport)
 			options := []scaleset.HTTPOption{scaleset.WithRetryableHTTPClint(retry)}
 			client, err := scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{GitHubConfigURL: server.URL + "/fixture-org", PersonalAccessToken: "synthetic-installation"}, options...)
 			if err != nil {
@@ -96,10 +122,30 @@ func TestDriverBarriersThroughPinnedSDK(t *testing.T) {
 			}
 			api := fixtureSDK{&SDKAPI{client: client, options: options}}
 			d := Driver{a, j, api}
-			if d.Run(context.Background(), "create") != nil {
+			createErr := d.Run(context.Background(), "create")
+			if strings.HasPrefix(scenario, "create-") {
+				if !errors.Is(createErr, ErrQuarantine) || creates != 1 || !replay(j.Events()).uncertain {
+					t.Fatal("oversize SDK effect did not quarantine")
+				}
+				if d.Run(context.Background(), "create") == nil || creates != 1 {
+					t.Fatal("oversize response caused side effect retry")
+				}
+				data, _ := json.Marshal(j.Events())
+				if strings.Contains(string(data), "synthetic-secret") {
+					t.Fatal("oversize SDK body leaked")
+				}
+				return
+			}
+			if createErr != nil {
 				t.Fatal("SDK create failed")
 			}
 			err = d.Run(context.Background(), phase)
+			if scenario == "ack-refresh" {
+				if !errors.Is(err, ErrQuarantine) || acks != 1 || refreshes != 0 || replacementACKs != 0 || closes != 0 || !replay(j.Events()).uncertain {
+					t.Fatal("SDK refreshed and acknowledged through a replaced session")
+				}
+				return
+			}
 			switch phase {
 			case "after-ack":
 				if err != nil || acks != 1 || acquires != 0 || closes != 1 {

@@ -82,7 +82,7 @@ func NewSDKAPI(a Approval, c Credentials) (*SDKAPI, error) {
 	retry := retryablehttp.NewClient()
 	retry.RetryMax = 0
 	retry.Logger = nil
-	retry.HTTPClient = &http.Client{Transport: transport, Timeout: operationTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	retry.HTTPClient = &http.Client{Transport: withResponseBudget(transport), Timeout: operationTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	options := []scaleset.HTTPOption{scaleset.WithRetryableHTTPClint(retry), scaleset.WithLogger(slog.New(slog.DiscardHandler))}
 	client, err := scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{GitHubConfigURL: "https://github.com/" + a.Organization, PersonalAccessToken: c.InstallationToken}, options...)
 	if err != nil {

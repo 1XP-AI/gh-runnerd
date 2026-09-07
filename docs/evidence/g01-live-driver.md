@@ -74,9 +74,20 @@ authentication flow. It never enrolls an App.
 
 Transport permits only direct TLS to `api.github.com` or exact approved Actions
 hostnames. No proxy, redirect, raw SDK error or retry logger is allowed. Unknown
-hosts fail closed. HTTP retries are explicitly zero; the SDK's one queue-token
-401 refresh/retry remains and is distinct from retrying a transport-ambiguous
-effect. Public output uses fixed categories, never input/error values.
+hosts fail closed. Every REST/SDK response body, including error bodies, has a
+fixed **1 MiB decoded-body budget**. Known oversize lengths are refused immediately;
+chunked/unknown lengths and gzip decoding consume at most that budget plus one
+detection byte, then fail instead of accepting a truncated prefix. This budget
+is ample for this one-worker/two-job controller experiment, not a general fleet
+API limit. An oversized result after an effect retains ambiguity and cannot retry.
+
+HTTP retries are explicitly zero. The live transport also rejects **all PATCH
+requests before network transmission**: no phase intentionally PATCHes, and this
+prevents the SDK's automatic 401 session refresh from changing the queue and
+retrying an ACK on a replacement session before the adapter can fence it. A 401
+now stops/quarantines this live slice; refresh is intentionally unsupported.
+The original offline SDK refresh contract evidence remains unchanged. Public
+output uses fixed categories, never input/error values.
 
 ## Private approval and invocation
 
@@ -175,6 +186,16 @@ locking/restart/torn tails, ownership, workload policy, secret-bearing failures,
 empty cleanup, replaced sessions, TLS restrictions and offline CLI refusal. A
 later failing check caught empty polls counted as success and missing distinction
 between server receipt and application suppression; both were fixed.
+
+Independent review reproduced a further blocking case: ACK received 401, SDK
+PATCH returned a replacement session, and the SDK sent ACK to that replacement
+before the adapter's post-call ID check. The transport PATCH fence fixes it;
+the actual pinned-SDK regression now observes one original ACK attempt, zero
+PATCH requests reaching the server, zero replacement ACKs and retained uncertainty.
+Response-budget red tests separately rejected the original unbounded behavior
+for successful/error and known/chunked bodies. Green tests additionally prove
+the budget-plus-one read bound, gzip coverage, and quarantine/no retry after
+oversized SDK creation success/error responses.
 
 Validation (all offline):
 
