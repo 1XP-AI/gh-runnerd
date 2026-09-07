@@ -60,11 +60,17 @@ func (j *FileJournal) authorize(a Approval) (func(), error) {
 	if !j.life.TryLock() {
 		return nil, ErrJournal
 	}
-	if j.closed || !j.claim.matches(j) || !j.ownsCurrentJournal() || a.Validate(time.Now()) != nil || j.ownership != ownershipDigest(a) || j.authority.Digest != approvalDigest(a) {
+	if !j.authorityHeld(a) {
 		j.life.Unlock()
 		return nil, ErrJournal
 	}
 	return j.life.Unlock, nil
+}
+
+// Called only by approved code already holding life; never reacquire it from
+// a scoped listener or continuation. Close cannot release the claim meanwhile.
+func (j *FileJournal) authorityHeld(a Approval) bool {
+	return !j.closed && !j.writeFailed && j.claim != nil && j.claim.matches(j) && j.ownsCurrentJournal() && a.Validate(time.Now()) == nil && j.ownership == ownershipDigest(a) && j.authority.Digest == approvalDigest(a)
 }
 
 func (j *FileJournal) ownsCurrentJournal() bool {

@@ -45,7 +45,7 @@ func (t responseBudgetTransport) RoundTrip(req *http.Request) (*http.Response, e
 		return nil, errResponseBudget
 	}
 	response.Body = &responseBudgetBody{source: response.Body, remaining: responseBodyLimit}
-	return response, nil
+	return guardBaselineResponse(req, response)
 }
 
 // Read at most the budget plus one detection byte, including decoded gzip and
