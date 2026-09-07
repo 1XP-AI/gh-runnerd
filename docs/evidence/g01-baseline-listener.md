@@ -1,11 +1,13 @@
 # G01 private baseline listener evidence
 
-Issue [#47](https://github.com/1XP-AI/gh-runnerd/issues/47) adds a private protocol
-collector under the concrete controller journal lease. It uses Scale Set SDK
-v0.4.0 and the existing strict REST source reader. No phase, command, broker slot,
-JIT request, worker invocation, automatic session close or live execution is added.
-G01 remains open: the paired caller, actual job/runner reconciliation and safe
-cleanup still require their own implementation and evidence.
+Issue [#47](https://github.com/1XP-AI/gh-runnerd/issues/47) adds a private collection
+listener under the concrete controller journal lease. It uses Scale Set SDK v0.4.0
+and the existing strict REST source reader. This listener-only slice adds no public
+CLI/broker entry or approval phase/API, JIT request, worker invocation, automatic
+session close or live execution. Issue54 adds private terminal journal stages
+through a separate caller; see the [terminal evidence](g01-paired-terminal.md).
+G01 remains open: live job/runner reconciliation and safe production cleanup still
+require their own implementation and evidence.
 
 ## Implemented boundary
 
@@ -14,7 +16,9 @@ the real controller execution lease, supply the matching captured SDK approval a
 separate verification credential, and have the original assigned scale-set creation
 record. A future caller must additionally prove completed controller/worker pairing
 and host preflight. Merely constructing or entering this private listener does not
-supply that integration proof or create new phase authority.
+supply that integration proof or create public phase authority. The later paired
+collection and terminal callers keep that proof outside this listener; see the
+[paired collection](g01-paired-baseline.md) and [terminal evidence](g01-paired-terminal.md).
 
 `run` first journals an exact owned-set GET and checks its ID, name, group, owned
 label, updates-disabled setting and all seven statistics. It then records the

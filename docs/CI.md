@@ -31,14 +31,18 @@ Individual commands are available when iterating:
 | `make fuzz-smoke` | Run each discovered fuzz target for a fixed one-second smoke window, or print an explicit `SKIPPED` result when no target exists. |
 | `make deps` | Require a clean `go mod tidy -diff`, verified module sums and a read-only dependency load. |
 | `make licenses` | Compare the exact runtime module/version/replacement graph with its inventory and require a top-level license file. |
-| `make experiments` | Require both established G01/G02 modules, run their default race/vet suites, then exercise the two explicitly reviewed G01 CLI packages with `g01_live,g01_worker` tags. |
+| `make experiments` | Require both established G01/G02 modules, run their default race/vet suites, then exercise the two explicitly reviewed G01 CLI packages with `g01_live,g01_worker` tags and the reviewed `g01_pair_fixture` livecanary collection/terminal partitions with tagged vet. |
 | `make vuln` | Run the exact `golang.org/x/vuln/cmd/govulncheck@v1.7.0` tool. |
 
 No hardware, live GitHub, Docker or daemon suite is part of this public check. Those profiles remain explicit future or maintainer-controlled runs; they are not silently converted into passing tests here. G04 introduces the first application behavior contracts and should add meaningful unit and fuzz targets before claiming those forms of coverage.
 
 The tagged CLI tests use synthetic input/subprocess fixtures and static plan or
-refusal paths. They do not execute approved live controller/worker operations.
-The script permits only `cmd/g01-live` and `cmd/g01-worker`; it does not discover
-other opt-in commands or enable the `g02runtime` Keychain probe.
+refusal paths. The `g01_pair_fixture` livecanary checks use private synthetic
+fixtures: one collection run excludes `^TestPairedTerminal`, and a complementary
+run selects that prefix, followed by one tagged vet. None of these tagged checks
+executes approved live controller/worker operations or exposes a public terminal
+phase/API. The script permits only `cmd/g01-live`, `cmd/g01-worker` and the reviewed
+`livecanary` package; it does not discover other opt-in commands or enable the
+`g02runtime` Keychain probe.
 
 There is no runtime migration or runner cleanup to roll back in G03. If the workflow or toolchain baseline causes a hosted failure, revert the G03 commit or make the focused workflow/module correction under a reviewed follow-up; no runner enrollment, daemon installation or host cleanup is required.
