@@ -42,7 +42,16 @@ license inventory verified: 1 module(s)
 No vulnerabilities found.
 ```
 
-At the time of this record the G01/G02 experiment modules were in their separate review worktrees, so the current branch's `make experiments` output is an explicit absence message. The same target is included in public CI and runs only the reviewed offline module paths after those commits are integrated, with `go test -race` and `go vet`; it never enables the `g02runtime` build tag or invokes a live experiment.
+The initial G03 branch recorded both experiment paths as absent. After G01 was integrated on `main` at `1396e20`, the combined `make check` run executed its reviewed module and printed:
+
+```text
+offline experiment: experiments/g01-scaleset (toolchain=go1.26.8)
+ok   github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset  1.503s
+SKIPPED: experiments/g02-auth is not present in this checkout.
+offline experiment checks passed: 1 module(s)
+```
+
+The same target is included in public CI and runs only the reviewed offline module paths after those commits are integrated, with `go test -race` and `go vet`; it never enables the `g02runtime` build tag or invokes a live experiment.
 
 For integration coverage, temporary links to those reviewed modules were used solely for the check; both completed `go test -race -count=1` and `go vet`, ending with `offline experiment checks passed: 2 module(s)`. The links were removed after the run.
 
