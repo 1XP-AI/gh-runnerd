@@ -40,11 +40,14 @@ func (p *probeClient) GetMessage(_ context.Context, last, capacity int) (*scales
 	if m.Statistics == nil {
 		return nil, ErrQuarantine
 	}
+	if len(m.JobStartedMessages) > 0 || len(m.JobCompletedMessages) > 0 || len(m.JobAssignedMessages) > 0 {
+		return nil, ErrQuarantine
+	}
 	if len(m.JobAvailableMessages) == 0 {
 		return nil, ErrNoMessage
 	}
 	ids := make([]int64, 0, len(m.JobAvailableMessages))
-	if m.MessageID <= 0 || len(m.JobAvailableMessages) > 2 || len(m.JobStartedMessages) > 0 || len(m.JobCompletedMessages) > 0 || len(m.JobAssignedMessages) > 0 {
+	if m.MessageID <= 0 || len(m.JobAvailableMessages) > 2 {
 		return nil, ErrQuarantine
 	}
 	// The listener ACKs a returned message before AcquireJobs. Validate the

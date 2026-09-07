@@ -6,6 +6,13 @@ all six external findings from merged PR25/28 against main `f1fe70c`. The PR25
 comments were stale by reviewed commit, but remained unresolved defects. No live
 credentials, GitHub mutation, Docker operation or worker execution was used.
 
+An adjacent cleanup regression is preserved at red commit `68eb032`: started-,
+assigned- and completed-only messages previously took the empty-poll safe-close
+path, leaving cleanup possible under stale zero. Unexpected work kinds are now
+quarantined before testing for an empty available-job list. Genuine nil/empty
+poll controls retain the intended no-message behavior; no terminal reconciliation
+is inferred from these unexpected messages.
+
 ## Initial corrections
 
 The immutable red commit `f6fc90b` preserves regressions for these findings:
