@@ -14,22 +14,37 @@ if [[ ! -f "${inventory}" ]]; then
 	exit 1
 fi
 
-main_module="$("${go_cmd}" list -m -f '{{.Path}}')"
-module_paths="$("${go_cmd}" list -m -f '{{.Path}}' all)"
+# The Runtime modules table is the exact selected graph, including replacement
+# identity. Other tables describe the toolchain/actions and are not module rows.
+inventory_records="$(awk -F '|' '
+	function field(value) {
+		gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+		sub(/^`/, "", value); sub(/`$/, "", value)
+		return value
+	}
+	/^## / { runtime = ($0 == "## Runtime modules"); next }
+	runtime && /^\|[[:space:]]*`/ {
+		if (NF != 7) exit 1
+		print field($2) "|" field($3) "|" field($4)
+	}
+' "${inventory}" | LC_ALL=C sort)"
+module_records="$("${go_cmd}" list -m -f '{{.Path}}|{{if .Main}}local{{else}}{{.Version}}{{end}}|{{with .Replace}}{{.Path}}{{if .Version}}@{{.Version}}{{end}}{{else}}none{{end}}|{{.Dir}}' all)"
+expected_records="$(printf '%s\n' "${module_records}" | awk -F '|' '
+	NF != 4 || $1 == "" || $2 == "" || $3 == "" { exit 1 }
+	{ print $1 "|" $2 "|" $3 }
+' | LC_ALL=C sort)"
+if [[ -z "${expected_records}" || "${inventory_records}" != "${expected_records}" ]]; then
+	printf 'license check failed: runtime module/version/replacement inventory differs from the selected graph\n' >&2
+	exit 1
+fi
 module_count=0
 
-while IFS= read -r module_path; do
+while IFS='|' read -r module_path module_version replacement module_dir; do
 	[[ -n "${module_path}" ]] || continue
 	module_count=$((module_count + 1))
-	if ! grep -F -q -- "| \`${module_path}\` |" "${inventory}"; then
-		printf 'license check failed: %s is absent from %s\n' "${module_path}" "${inventory}" >&2
+	if [[ -z "${module_dir}" || ! -d "${module_dir}" ]]; then
+		printf 'license check failed: selected source directory for %s is unavailable\n' "${module_path}" >&2
 		exit 1
-	fi
-
-	if [[ "${module_path}" == "${main_module}" ]]; then
-		module_dir="."
-	else
-		module_dir="$("${go_cmd}" list -m -f '{{.Dir}}' "${module_path}")"
 	fi
 	license_file=""
 	for candidate in LICENSE LICENSE.txt LICENSE.md COPYING COPYING.txt NOTICE NOTICE.txt COPYRIGHT UNLICENSE; do
@@ -42,7 +57,7 @@ while IFS= read -r module_path; do
 		printf 'license check failed: no top-level license file found for %s\n' "${module_path}" >&2
 		exit 1
 	fi
-	printf 'license: %s (%s)\n' "${module_path}" "${license_file}"
-done <<< "${module_paths}"
+	printf 'license: %s %s (%s)\n' "${module_path}" "${module_version}" "${license_file}"
+done <<< "${module_records}"
 
 printf 'license inventory verified: %s module(s)\n' "${module_count}"

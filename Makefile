@@ -2,6 +2,9 @@ SHELL := /usr/bin/env bash
 
 GO ?= go
 GOFLAGS ?=
+# A go directive is a minimum under auto, including on a newer installation.
+override export GOTOOLCHAIN := go1.26.8
+export GOFLAGS
 FUZZTIME ?= 1s
 GOVULNCHECK_VERSION ?= v1.7.0
 
@@ -17,9 +20,9 @@ help:
 		'  make vuln         run pinned govulncheck (network access may be needed)'
 
 build:
-	$(GO) $(GOFLAGS) build -o /dev/null ./cmd/gh-runnerd
+	"$(GO)" build -o /dev/null ./cmd/gh-runnerd
 
-check: toolchain fmt-check vet test test-race fuzz-smoke deps licenses experiments vuln
+check: toolchain fmt-check build vet test test-race fuzz-smoke deps licenses experiments vuln
 
 toolchain:
 	GO="$(GO)" bash scripts/check-toolchain.sh
@@ -31,21 +34,21 @@ fmt-check:
 	GO="$(GO)" bash scripts/gofmt.sh check
 
 vet:
-	$(GO) $(GOFLAGS) vet ./...
+	"$(GO)" vet ./...
 
 test:
-	$(GO) $(GOFLAGS) test -count=1 ./...
+	"$(GO)" test -count=1 ./...
 
 test-race:
-	$(GO) $(GOFLAGS) test -race -count=1 ./...
+	"$(GO)" test -race -count=1 ./...
 
 fuzz-smoke:
 	GO="$(GO)" FUZZTIME="$(FUZZTIME)" bash scripts/fuzz-smoke.sh
 
 deps:
-	$(GO) mod tidy -diff
-	$(GO) mod verify
-	$(GO) list -mod=readonly -deps ./... >/dev/null
+	"$(GO)" mod tidy -diff
+	"$(GO)" mod verify
+	"$(GO)" list -mod=readonly -deps ./... >/dev/null
 
 licenses:
 	GO="$(GO)" bash scripts/check-licenses.sh

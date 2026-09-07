@@ -84,6 +84,12 @@ func TestToolingPinsNewerSystemGo(t *testing.T) {
 			t.Errorf("newer system selection did not use pin: %s", out)
 		}
 	}
+	// The standalone checker setting its own environment must not mask a Make
+	// regression: a separate build recipe must also receive the exact selection.
+	env := []string{"GOTOOLCHAIN=auto", "TOOLING_REAL_GO=" + realGo}
+	if out, err := toolingRun(t, root, env, "make", "GO="+filepath.Join(root, "newer-go"), "build"); err != nil {
+		t.Errorf("build did not receive the exact toolchain selection: %s", out)
+	}
 }
 
 func TestToolingCheckRequiresExecutableLink(t *testing.T) {
