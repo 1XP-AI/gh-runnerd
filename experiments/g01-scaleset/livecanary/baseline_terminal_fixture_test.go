@@ -11,6 +11,7 @@ import (
 )
 
 type terminalFixture struct {
+	controllerResponse func(string, any) any
 	*pairedIntegrationFixture
 	sessionDeletes, workerDeletes, setDeletes, setAbsences, workerAbsences, rosters atomic.Int32
 	deletedSet, deletedWorker                                                       atomic.Bool
@@ -20,7 +21,13 @@ func newTerminalFixture(t *testing.T, cleanup bool) *terminalFixture {
 	t.Helper()
 	f := &terminalFixture{}
 	config := &pairedFixtureConfiguration{controllerResponse: func(stage string, value any) any {
+		if f.controllerResponse != nil {
+			value = f.controllerResponse(stage, value)
+		}
 		if stage == "set" && f.deletedSet.Load() {
+			if _, ok := value.(baselineReply); ok {
+				return value
+			}
 			f.setAbsences.Add(1)
 			return baselineReply{status: 404}
 		}
