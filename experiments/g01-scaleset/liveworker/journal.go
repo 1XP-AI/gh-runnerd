@@ -122,6 +122,12 @@ func OpenJournal(directory string, a Approval) (*FileJournal, error) {
 	return openJournalWithSync(directory, a, func(f *os.File) error { return f.Sync() })
 }
 
+// The admission entry seam exposes the current per-directory behavior to the
+// private regression fixtures before account-wide admission is implemented.
+func openJournalAtAdmission(directory string, a Approval, admissionDirectory string, syncDirectory func(*os.File) error) (*FileJournal, error) {
+	return openJournalWithSync(directory, a, syncDirectory)
+}
+
 func openJournalWithSync(directory string, a Approval, syncDirectory func(*os.File) error) (*FileJournal, error) {
 	info, err := os.Lstat(directory)
 	if err != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
