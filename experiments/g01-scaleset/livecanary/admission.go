@@ -100,6 +100,18 @@ func openAdmission(directory string, j *FileJournal, syncDirectory func(*os.File
 	if err != nil || !os.SameFile(info, captured) {
 		return nil, ErrJournal
 	}
+	// Serialize the empty-file creation window before taking the claim's
+	// lifetime flock. Otherwise a second opener can lock the creator's empty
+	// claim, causing both contenders to refuse and strand an empty claim.
+	dir, err := root.Open(".")
+	if err != nil {
+		return nil, ErrJournal
+	}
+	defer dir.Close()
+	lockedDirectory, err := dir.Stat()
+	if err != nil || !os.SameFile(info, lockedDirectory) || syscall.Flock(int(dir.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+		return nil, ErrJournal
+	}
 	created := true
 	file, err := root.OpenFile("admission.json", os.O_RDWR|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0600)
 	if os.IsExist(err) {
@@ -133,13 +145,7 @@ func openAdmission(directory string, j *FileJournal, syncDirectory func(*os.File
 	if !claim.matches(j) || file.Sync() != nil {
 		return nil, ErrJournal
 	}
-	dir, err := root.Open(".")
-	if err != nil {
-		return nil, ErrJournal
-	}
-	err = syncDirectory(dir)
-	_ = dir.Close()
-	if err != nil {
+	if syncDirectory(dir) != nil {
 		return nil, ErrJournal
 	}
 	kept = true
