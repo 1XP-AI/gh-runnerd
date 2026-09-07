@@ -19,7 +19,27 @@ type pairedBaselineCollection struct {
 	SessionIntent      controllerRecordRef `json:"session_intent"`
 	SessionResult      controllerRecordRef `json:"session_result"`
 }
+type pairedBaselineCadence struct {
+	now  func() time.Time
+	wait func(context.Context, time.Duration) error
+}
+
+func realBaselineCadence() pairedBaselineCadence {
+	return pairedBaselineCadence{now: time.Now, wait: func(ctx context.Context, d time.Duration) error {
+		timer := time.NewTimer(d)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ErrQuarantine
+		case <-timer.C:
+			return nil
+		}
+	}}
+}
+
 type pairedBaselineScope struct {
+	cadence pairedBaselineCadence
+
 	ctx                 context.Context
 	driver              *Driver
 	workerDriver        *liveworker.Driver
@@ -41,9 +61,15 @@ type pairedBaselineScope struct {
 	lastRound           time.Time
 }
 
-func runPairedBaseline(ctx context.Context, d *Driver, w *liveworker.Driver) (out pairedBaselineCollection, err error) {
+func runPairedBaseline(ctx context.Context, d *Driver, w *liveworker.Driver) (pairedBaselineCollection, error) {
+	return runPairedBaselineWithCadence(ctx, d, w, realBaselineCadence())
+}
+
+// The production entry fixes the real clock. Tests can advance only cadence;
+// approval, network and scope deadlines always use their original real context.
+func runPairedBaselineWithCadence(ctx context.Context, d *Driver, w *liveworker.Driver, cadence pairedBaselineCadence) (out pairedBaselineCollection, err error) {
 	out = pairedBaselineCollection{Outcome: collectionUnresolved, OutstandingSession: sessionNone}
-	if ctx == nil || ctx.Err() != nil || d == nil || w == nil {
+	if ctx == nil || ctx.Err() != nil || d == nil || w == nil || cadence.now == nil || cadence.wait == nil {
 		return out, ErrApproval
 	}
 	j, ok := d.Journal.(*FileJournal)
@@ -80,7 +106,7 @@ func runPairedBaseline(ctx context.Context, d *Driver, w *liveworker.Driver) (ou
 	}
 	outer, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	s := &pairedBaselineScope{ctx: outer, driver: d, workerDriver: w, approval: a, workerApproval: wa, api: api, captured: initial.api, docker: docker, journal: j, workerJournal: wj, identity: initial.identity, creation: initial.creation, setID: history.setID, listener: initial}
+	s := &pairedBaselineScope{cadence: cadence, ctx: outer, driver: d, workerDriver: w, approval: a, workerApproval: wa, api: api, captured: initial.api, docker: docker, journal: j, workerJournal: wj, identity: initial.identity, creation: initial.creation, setID: history.setID, listener: initial}
 	for _, e := range j.Events() {
 		if e.Kind == "inventory" {
 			if s.inventory.Sequence != 0 {

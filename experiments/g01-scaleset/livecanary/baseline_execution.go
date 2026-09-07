@@ -82,15 +82,14 @@ func (s *pairedBaselineScope) afterAcquire(ctx context.Context, acquisition base
 func (s *pairedBaselineScope) sampleRounds(first, last int) error {
 	for number := first; number <= last; number++ {
 		if !s.lastRound.IsZero() {
-			wait := time.Until(s.lastRound.Add(5 * time.Second))
+			wait := s.lastRound.Add(5 * time.Second).Sub(s.cadence.now())
 			if wait > 0 {
-				timer := time.NewTimer(wait)
-				select {
-				case <-s.ctx.Done():
-					timer.Stop()
-					return ErrQuarantine
-				case <-timer.C:
+				if err := s.cadence.wait(s.ctx, wait); err != nil {
+					return err
 				}
+			}
+			if s.cadence.now().Before(s.lastRound.Add(5 * time.Second)) {
+				return ErrQuarantine
 			}
 		}
 		if err := s.boundary(); err != nil {
@@ -110,7 +109,7 @@ func (s *pairedBaselineScope) sampleRounds(first, last int) error {
 		if err != nil {
 			return err
 		}
-		s.lastRound = time.Now()
+		s.lastRound = s.cadence.now()
 		request, cancel := context.WithTimeout(s.ctx, operationTimeout)
 		callErr := s.sample(request, f, state)
 		cancel()

@@ -64,3 +64,16 @@ func (f *PairFileFixture) Reopen(a Approval) error {
 
 func (f *PairFileFixture) StateDirectory() string     { return f.stateDirectory }
 func (f *PairFileFixture) AdmissionDirectory() string { return f.admissionDirectory }
+
+// FailRecordSyncForTest fails one selected write's durability result in this
+// generated journal. It accepts neither another file nor an opener override.
+func (f *PairFileFixture) FailRecordSyncForTest(n int) {
+	count := 0
+	f.Journal.recordSync = func(file *os.File) error {
+		count++
+		if count == n {
+			return ErrState
+		}
+		return file.Sync()
+	}
+}
