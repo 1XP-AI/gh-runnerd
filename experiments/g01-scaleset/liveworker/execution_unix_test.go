@@ -3,6 +3,7 @@ package liveworker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -317,5 +318,67 @@ func TestPairedActualUnixCleanupOnlyRenewalCanDeleteKnownTerminal(t *testing.T) 
 		return nil
 	}); err != nil || f.runtime.deletes.Load() != 1 || f.runtime.creates.Load() != 1 || f.runtime.starts.Load() != 1 {
 		t.Fatal("eligible recovered cleanup failed")
+	}
+}
+
+// A known DELETE result and a subsequent absence report are separate facts.
+// Reusing the first cannot turn a failed/missing second fact into success.
+func TestPairedActualUnixCachedDeletionPreservesMissingAbsenceUncertainty(t *testing.T) {
+	for _, post := range []string{"still-present", "http-failure", "malformed", "lost-response", "confirmed-absence"} {
+		t.Run(post, func(t *testing.T) {
+			f, j, in := pairedUnixFixture(t)
+			err := f.driver.WithPairedExecution(context.Background(), in, func(ControllerCheck) error { return nil }, func(w *PairedWorker) error {
+				handoff, created := bindAndCreate(t, w, f.approval)
+				body := pairedTerminalBody(t, f)
+				f.inspectResponse.Store(&inspectFixtureResponse{serve: func(response http.ResponseWriter, request *http.Request) {
+					if f.runtime.deletes.Load() == 0 || post == "still-present" {
+						response.WriteHeader(http.StatusOK)
+						_, _ = response.Write(body)
+						return
+					}
+					switch post {
+					case "http-failure":
+						response.WriteHeader(http.StatusInternalServerError)
+						_, _ = response.Write([]byte(`{"message":"synthetic-private-post-delete-error"}`))
+					case "malformed":
+						response.WriteHeader(http.StatusOK)
+						_, _ = response.Write([]byte(`{"State":`))
+					case "lost-response":
+						connection, _, err := response.(http.Hijacker).Hijack()
+						if err == nil {
+							_ = connection.Close()
+						}
+					case "confirmed-absence":
+						response.WriteHeader(http.StatusNotFound)
+						_, _ = response.Write([]byte(`{"message":"synthetic not found"}`))
+					}
+				}})
+				decision := TerminalDecisionRef{handoff.PairSHA256, created.ContainerID, created.CreateResult, fixtureRef(8)}
+				first, firstErr := w.DeleteTerminal(decision)
+				confirmed := post == "confirmed-absence"
+				if !validRef(first.Result) || f.runtime.deletes.Load() != 1 || (first.AbsenceResult != nil) != confirmed || (firstErr == nil) != confirmed {
+					t.Fatal("initial DELETE/absence fixture boundary failed")
+				}
+				before, events := f.requests.Load(), len(j.Events())
+				again, againErr := w.DeleteTerminal(decision)
+				if again.Result != first.Result || again.Intent != first.Intent || (again.AbsenceResult != nil) != confirmed {
+					t.Fatal("historical known deletion receipt was discarded or fabricated")
+				}
+				if confirmed {
+					if againErr != nil || *again.AbsenceResult != *first.AbsenceResult {
+						t.Fatal("completed absence control lost success")
+					}
+				} else if !errors.Is(againErr, ErrUncertain) {
+					t.Error("cached DELETE converted missing absence into API success")
+				}
+				if f.requests.Load() != before || len(j.Events()) != events || f.runtime.deletes.Load() != 1 {
+					t.Fatal("historical deletion repeated DELETE or automatically retried observation")
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatal("deletion history fixture scope failed")
+			}
+		})
 	}
 }
