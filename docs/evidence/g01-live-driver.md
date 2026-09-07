@@ -43,6 +43,13 @@ before any SDK/API construction, and refusal releases the journal lock. Actual
 inherited-stdin test subprocesses reproduce both blocked and complete input;
 testing only a Go-created pipe missed the original failure. No real controller
 or API ran, and this input timeout does not cancel remote work.
+A further actual inherited named-FIFO regression (`e412f3f`) reproduced Darwin
+missing the final EOF notification when the writer closed after the payload
+had already been consumed. Short read-deadline probes now retry nonblocking
+reads within the original context deadline; a probe timeout is never accepted
+as EOF. The tagged CLI race suite passed three repetitions after this fix.
+PR33 separately adds both reviewed tagged G01 CLI packages to the hosted offline
+test list. No live approval, credentials or self-hosted runner enters that CI.
 
 Creation requests `RunnerSetting.DisableUpdate=true` using the pinned SDK's
 [`RunnerSetting` field](https://github.com/actions/scaleset/blob/v0.4.0/types.go).
