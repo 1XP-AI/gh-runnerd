@@ -82,9 +82,23 @@ setting this boolean without that evidence is not a substitute.
 ## Runtime and secret boundaries
 
 The helper connects directly to one approved absolute Unix socket. It ignores
-Docker/environment contexts and proxies, rejects a symlink or world-accessible
-socket, disables keepalive reuse and redirects, and never uses a TCP daemon.
-Each phase verifies the approved daemon ID and Docker API 1.45 compatibility.
+Docker/environment contexts and proxies, rejects symlinks, requires ownership by
+the controller's current UID and denies group/other write bits (`0022`). It accepts
+read/execute bits such as mode `0755`: Apple's Unix-domain `connect(2)` contract
+uses write access to the named socket. A read-only inventory observed `0755` on
+the current Desktop endpoint; synthetic tests verify the permission rule, but
+this helper has not contacted that daemon. No socket mode or owner is changed.
+This is a private-controller ownership requirement, not proof against an
+adversarial socket administrator or ACL changes.
+
+The client pins the socket's file identity on its first preflight connection and
+checks identity, owner and mode before every dial and again after connect, before
+any HTTP request bytes can be sent. Replacement or permission changes close the
+connection and refuse the request; replacement during a mutation retains the
+durable uncertain intent without retries. A new command repeats preflight before
+using a new socket instance. Keepalive reuse and redirects are disabled; a TCP
+daemon is never used. Each phase verifies the approved daemon ID and Docker API
+1.45 compatibility.
 Preflight requires Linux ARM64, at least 2 configured CPUs and 2 GiB configured
 memory, memory/swap/CPU/PID enforcement capabilities and no daemon warnings.
 These metadata checks do not measure idle capacity, disk space or other running
@@ -186,6 +200,13 @@ are included. A blocked input regression failed its timing assertion before the
 bounded reader was implemented. All fixtures are isolated local HTTP servers;
 they have no Docker backend and cannot pull images or start containers.
 
+Independent review reproduced a socket replacement after preflight. Red commit
+`f03555c` captured one request reaching the replacement for create/start/delete,
+including synthetic JIT on create. The corrected client sends zero requests to
+the replacement, preserves uncertainty and does not retry. Additional synthetic
+checks cover replacement/permission changes between connect and transmission,
+`0755` acceptance, `0757`/`0775` refusal and foreign-UID metadata refusal.
+
 Default/tagged tests and independent source review are necessary preparation.
 They do not establish actual image startup, resource enforcement, GitHub job
 assignment, runner self-removal, cleanup completeness or protocol refresh/loss
@@ -199,3 +220,4 @@ Primary contracts:
 - [Runner wrapper restart behavior](https://github.com/actions/runner/blob/v2.337.0/src/Misc/layoutroot/run.sh).
 - [Docker Engine API 1.45](https://docs.docker.com/reference/api/engine/version/v1.45/) and [pinned Moby schema](https://github.com/moby/moby/blob/v26.1.5/api/swagger.yaml).
 - [Moby non-force removal](https://github.com/moby/moby/blob/v26.1.5/daemon/delete.go) and [start/removal exclusion](https://github.com/moby/moby/blob/v26.1.5/daemon/start.go).
+- [Apple Unix-domain connection access checks](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/connect.2.html).

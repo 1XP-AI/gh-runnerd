@@ -12,6 +12,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 )
 
@@ -23,7 +25,50 @@ type Docker struct {
 }
 
 func socketAllowed(info os.FileInfo) bool {
-	return info != nil && info.Mode()&os.ModeSocket != 0 && info.Mode().Perm()&0007 == 0
+	if info == nil || info.Mode()&os.ModeSocket == 0 || info.Mode().Perm()&0022 != 0 {
+		return false
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && int(stat.Uid) == os.Geteuid()
+}
+
+type socketDialer struct {
+	endpoint string
+	mu       sync.Mutex
+	pinned   os.FileInfo
+	connect  func(context.Context, string, string) (net.Conn, error)
+}
+
+func newSocketDialer(endpoint string) *socketDialer {
+	return &socketDialer{endpoint: endpoint, connect: (&net.Dialer{Timeout: 5 * time.Second}).DialContext}
+}
+
+// Pin the socket inode used by preflight for this client lifetime. Check before
+// dialing and again after connect, before net/http can transmit any request.
+// A later command may establish a new pin only by repeating daemon preflight.
+func (d *socketDialer) dial(ctx context.Context, network, address string) (net.Conn, error) {
+	if network != "tcp" || address != "docker.invalid:80" {
+		return nil, ErrApproval
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	info, err := os.Lstat(d.endpoint)
+	if err != nil || !socketAllowed(info) || (d.pinned != nil && !os.SameFile(d.pinned, info)) || ctx.Err() != nil {
+		return nil, ErrApproval
+	}
+	if d.pinned == nil {
+		d.pinned = info
+	}
+	connection, err := d.connect(ctx, "unix", d.endpoint)
+	if err != nil {
+		return nil, ErrApproval
+	}
+	observed, err := os.Lstat(d.endpoint)
+	if err != nil || !socketAllowed(observed) || !os.SameFile(d.pinned, observed) || ctx.Err() != nil {
+		connection.Close()
+		return nil, ErrApproval
+	}
+	return connection, nil
 }
 
 // NewDocker does not connect or read environment-based Docker configuration.
@@ -34,16 +79,7 @@ func NewDocker(a Approval) (*Docker, error) {
 		return nil, ErrApproval
 	}
 	transport := &http.Transport{Proxy: nil, DisableKeepAlives: true, MaxResponseHeaderBytes: 64 << 10}
-	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
-		if network != "tcp" || address != "docker.invalid:80" {
-			return nil, ErrApproval
-		}
-		info, err := os.Lstat(a.Endpoint)
-		if err != nil || !socketAllowed(info) {
-			return nil, ErrApproval
-		}
-		return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "unix", a.Endpoint)
-	}
+	transport.DialContext = newSocketDialer(a.Endpoint).dial
 	return &Docker{a, &http.Client{Transport: transport, Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
 }
 

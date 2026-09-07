@@ -141,6 +141,36 @@ func TestSocketModesAndControllerOwnership(t *testing.T) {
 	}
 }
 
+func TestSocketPostConnectRecheckClosesBeforeHTTP(t *testing.T) {
+	for _, change := range []string{"replace", "permissions"} {
+		t.Run(change, func(t *testing.T) {
+			f := unixFixture(t)
+			connector := newSocketDialer(f.socket)
+			connect := connector.connect
+			var replacement *replacementSocket
+			connector.connect = func(ctx context.Context, network, path string) (net.Conn, error) {
+				connection, err := connect(ctx, network, path)
+				events := f.driver.Journal.Events()
+				if err == nil && len(events) != 0 && events[len(events)-1].Kind == "intent" {
+					if change == "replace" {
+						replacement = replaceSocket(t, f.socket)
+					} else if os.Chmod(f.socket, 0775) != nil {
+						t.Error("synthetic permission change failed")
+					}
+				}
+				return connection, err
+			}
+			f.driver.Runtime.(*Docker).client.Transport.(*http.Transport).DialContext = connector.dial
+			if f.driver.Run(context.Background(), "create", syntheticJIT) == nil || f.requests.Load() != 3 || !replay(f.driver.Journal.Events()).uncertain {
+				t.Fatal("request bytes transmitted before post-connect identity/permission check")
+			}
+			if replacement != nil && (replacement.calls.Load() != 0 || replacement.receivedJIT.Load()) {
+				t.Fatal("replacement received request")
+			}
+		})
+	}
+}
+
 // The actual production Unix HTTP client connects only to this private synthetic
 // listener. These tests never contact a real Docker endpoint or pull/run an image.
 func unixFixture(t *testing.T) *dockerFixture {
