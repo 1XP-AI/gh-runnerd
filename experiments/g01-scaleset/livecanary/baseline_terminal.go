@@ -118,7 +118,7 @@ func (s *pairedBaselineScope) terminalStepCall(stage string) error {
 	case stage == "terminal-set" || stage == "terminal-set-recheck" || stage == "terminal-set-absence":
 		capture := &baselineWireCapture{stage: stage, setID: s.setID}
 		ctx, cancel := context.WithTimeout(s.ctx, operationTimeout)
-		set, e := s.captured.client.GetRunnerScaleSetByID(capture.context(ctx), s.setID)
+		set, e := s.captured.GetScaleSet(capture.context(ctx), s.setID)
 		callErr = e
 		cancel()
 		_, _, _, r.HTTPStatus = capture.facts()
@@ -154,7 +154,7 @@ func (s *pairedBaselineScope) terminalStepCall(stage string) error {
 	case stage == "terminal-set-delete":
 		capture := &baselineWireCapture{stage: stage, setID: s.setID}
 		ctx, cancel := context.WithTimeout(s.ctx, operationTimeout)
-		callErr = s.captured.client.DeleteRunnerScaleSet(capture.context(ctx), s.setID)
+		callErr = s.captured.DeleteScaleSet(capture.context(ctx), s.setID)
 		cancel()
 		_, _, _, r.HTTPStatus = capture.facts()
 		known = capture.observed() && r.HTTPStatus == 204

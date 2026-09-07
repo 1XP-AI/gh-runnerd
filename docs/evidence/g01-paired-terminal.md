@@ -148,6 +148,12 @@ Recorded checkpoints:
   unchanged collection-only, four original W-phase and full terminal positive
   controls passed with race in 5.697 seconds.
 
+The terminal exact-set GET and DELETE calls use the existing captured `SDKAPI`
+methods with the same marked context and target. Those methods forward to the
+same pinned SDK calls; this routing refactor adds no behavior or injection seam.
+Existing actual eligibility, acknowledgement/cancellation, failed postcheck and
+full terminal controls passed with race in 19.320 seconds after the refactor.
+
 The bounded matrix exercises missing original controller cleanup and all four
 missing original worker phases; fresh
 job/runner/local eligibility; assigned/running nonzero and missing statistics,
