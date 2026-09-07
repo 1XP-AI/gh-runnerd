@@ -223,6 +223,9 @@ func (s *baselineHistory) executionRecord(r baselineRecord, ref controllerRecord
 		}
 		s.rounds = r.Sample.Round
 		s.lastSample = ref
+		if s.collected() {
+			s.measurementEvidence = s.evidence(lookup)
+		}
 	default:
 		return ErrJournal
 	}

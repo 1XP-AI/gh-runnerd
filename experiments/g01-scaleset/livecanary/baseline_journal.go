@@ -263,6 +263,7 @@ func validBaselineShape(e Event) bool {
 }
 
 type baselineHistory struct {
+	measurementEvidence                                                                                         *terminalEvidence
 	terminalIntent, terminalResult, terminalLast, terminalDecision                                              controllerRecordRef
 	terminalEvidence                                                                                            *terminalEvidence
 	terminalStep                                                                                                int

@@ -99,14 +99,14 @@ func (s *baselineHistory) evidence(lookup func(controllerRecordRef) *Event) *ter
 }
 func (s *baselineHistory) terminalSummary() *terminalCollectionFacts {
 	m := collectionUnresolved
-	if s.terminalEvidence != nil || s.collected() {
+	if s.measurementEvidence != nil {
 		m = collectionCollected
 	}
 	o := terminalUnresolved
 	if refPresent(s.terminalResult) && !s.uncertain {
 		o = terminalComplete
 	}
-	return &terminalCollectionFacts{Measurement: m, Evidence: s.terminalEvidence, Outcome: o, Intent: s.terminalIntent, Result: s.terminalResult, Decision: s.terminalDecision, SessionCloseIntent: s.sessionCloseIntent, SessionCloseResult: s.sessionCloseResult, WorkerDeleteResult: s.workerDeleteRef, WorkerDeletion: s.workerDeletion, SetDeleteIntent: s.setDeleteIntent, SetDeleteResult: s.setDeleteResult, SetAbsenceResult: s.setAbsenceResult}
+	return &terminalCollectionFacts{Measurement: m, Evidence: s.measurementEvidence, Outcome: o, Intent: s.terminalIntent, Result: s.terminalResult, Decision: s.terminalDecision, SessionCloseIntent: s.sessionCloseIntent, SessionCloseResult: s.sessionCloseResult, WorkerDeleteResult: s.workerDeleteRef, WorkerDeletion: s.workerDeletion, SetDeleteIntent: s.setDeleteIntent, SetDeleteResult: s.setDeleteResult, SetAbsenceResult: s.setAbsenceResult}
 }
 func terminalZeroSet(f *baselineSetFacts, a Approval, id int) bool {
 	if !f.eligible(a, id) {
