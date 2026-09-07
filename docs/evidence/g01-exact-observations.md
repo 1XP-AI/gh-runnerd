@@ -86,7 +86,14 @@ endpoint, image, worker or workflow was used.
 A disk-space interruption affected an independent review link step; it is an
 infrastructure interruption, not a failed application assertion. Source and
 red evidence were preserved while only reproducible Go caches were cleared.
-Final combined validation after integration is recorded below before publication.
+After integration of main `bb4a8fee0025e7f3c6ac7974cdb416bafde7bf78`,
+`GOTOOLCHAIN=go1.26.8 make check` passed at
+`a6c1eff0b463ab1df93837919a87607cfd9e2384`. It included root build/vet/tests/race,
+the configured root fuzz target, module/license checks, both offline experiment
+modules and their tagged commands, and the configured vulnerability scan. G01
+livecanary passed in 6.055s; G02 auth passed in 28.630s. No vulnerability was
+reported by that configured scan. This final documentation update changes no
+implementation or tests.
 
 ## Work still required
 
