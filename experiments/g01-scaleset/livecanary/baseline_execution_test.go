@@ -389,3 +389,35 @@ func TestBaselineOriginalContextCancelsInflightSDK(t *testing.T) {
 		})
 	}
 }
+
+// Independent reviewer reproduction: synchronous mutation after the real SDK response.
+func TestBaselineAcquisitionCapturesRequestSlice(t *testing.T) {
+	f := newBaselineFixture(t, nil)
+	b := baselineStepped(t, f)
+	m, err := b.GetMessage(context.Background(), 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = b.DeleteMessage(context.Background(), m.MessageID); err != nil {
+		t.Fatal(err)
+	}
+	ids := []int64{42}
+	changed := false
+	f.afterResponse = func(r *http.Request, response *http.Response) {
+		if strings.HasSuffix(r.URL.Path, "/acquirejobs") {
+			ids[0] = 43
+			changed = true
+		}
+	}
+	got, err := b.AcquireJobs(context.Background(), ids)
+	if !changed {
+		t.Fatal("actual acquired-response boundary not reached")
+	}
+	if err != nil || len(got) != 1 || got[0] != 42 || f.acquires.Load() != 1 || f.continuations.Load() != 1 {
+		t.Fatalf("caller slice changed captured request: error=%v result=%v acquire=%d continuation=%d", err, got, f.acquires.Load(), f.continuations.Load())
+	}
+	last := baselineLast(t, f)
+	if last.Stage != "continuation" || last.Outcome != "result" {
+		t.Fatal("durable singleton continuation lost")
+	}
+}
