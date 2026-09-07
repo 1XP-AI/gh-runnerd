@@ -78,6 +78,21 @@ func TestPairedDistinctIDsAndOriginalCadence(t *testing.T) {
 			t.Fatal("shortened cadence")
 		}
 	}
+	// One bound record, two create records, two start records, and eighteen
+	// local records (Start's inspect plus eight Observe calls). Cached Bind
+	// guards must not add another bound event or any other worker record.
+	bound, paired := 0, 0
+	for _, e := range f.wf.Journal.Events() {
+		if e.Paired != nil {
+			paired++
+			if e.Paired.Bound != nil {
+				bound++
+			}
+		}
+	}
+	if bound != 1 || paired != 23 {
+		t.Fatalf("cached guards appended worker records: bound=%d paired=%d", bound, paired)
+	}
 	if f.c.forbidden.Load() != 0 || f.cleanup.Load() != 0 {
 		t.Fatal("unexpected target or cleanup")
 	}

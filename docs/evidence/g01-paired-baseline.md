@@ -12,7 +12,9 @@ Docker, captures their approvals/dependencies, and holds C before W. W drains an
 releases before C. The earliest caller, approval, credential or ten-minute deadline
 bounds the original scope. Current authority is checked after durable intents and
 before each actual operation. Cached W.Bind verifies the original receipt without
-another W write/request; its C-only checker never enters the listener or W again.
+another W write/request; the actual worker-journal control checks exactly one bound
+record and 23 total paired records for create/start and nine inspections. Its C-only
+checker never enters the listener or W again.
 This also works inside the listener's mutex-held acquisition continuation.
 
 The same invocation must record C pair intent → actual W bound → C pair result,
@@ -53,7 +55,9 @@ before each; a contradiction or failed reader prevents later readers. An unknown
 round retains every earlier returned fact and the exact W receipt when available.
 
 The first round is immediate. Later rounds wait at least five seconds after the
-prior durable round result. C reads share one 30-second child context. W.Observe
+prior durable round result. Exact per-gap assertions use a private test clock;
+the real positive invokes the production timer/guard. Total suite duration is not
+a recorded trace of individual gaps. C reads share one 30-second child context. W.Observe
 keeps its existing separate preflight/inspect bounds under the outer lifetime;
 there is no claimed 30-second bound for the whole round. Four rounds occur inside
 the acquisition continuation and four only after durable matching SDK Completed
@@ -95,6 +99,11 @@ Subsequent immutable behavioral reds and corrections cover:
   receipt/sample facts (2.005s and 2.127s); closed replay validation now rejects them.
 - `be89071`: a ten-second simulated reader latency consumed all required gaps
   under a start-based anchor (2.119s); the clock now anchors at durable completion.
+- `7d35f3d`: the final independent review's present-without-ID finding and six
+  adjacent impossible REST job normalization forms reproduced through same-inode
+  replay (2.321s). Positive IDs now require exact detail provenance, and present
+  requires the complete positive runner association. Empty pending lists,
+  unresolved/404 outcomes and partial positive pending associations remain valid.
 
 The matrix uses actual controller stage intent/result fsyncs, selected worker
 record fsyncs and same-file reopen; C/W journal and claim inode replacement;
@@ -129,15 +138,20 @@ GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=120s -tags=g01_pair_fixture
 GOTOOLCHAIN=go1.26.8 go vet -tags=g01_pair_fixture ./livecanary
 ```
 
-Final author verification of the complete implementation passed:
+At the initial frozen head `6a378ef`, the full tagged livecanary race suite passed
+(exit 0, 99.814s), including the real-cadence positive, legacy listener tests and
+paired failure matrices. Root also completed full make check on that head.
 
-- Full tagged livecanary race suite: exit 0, 99.814s, including the actual real-
-  cadence positive, legacy listener tests and all paired failure matrices.
-- Tagged vet for livecanary and the consumed liveworker fixture helper: exit 0.
-- Diff/format checks: clean. No dependency or worker runtime/API changes.
+After the final REST normalization correction, focused replay/cross-round/early-
+stop/distinct-ID/canceled-JIT race tests passed (11.265s). The added actual worker
+bound/paired-record count control passed (2.976s); it strengthens evidence for
+existing cached behavior and is not claimed as a new behavioral red. Tagged vet
+for livecanary and the consumed liveworker helper passed; diff/format checks are
+clean. No dependency or worker runtime/API changes were made.
 
-The root integrator still owns full make check, hosted CI and exact-head
-independent/external review. No live or platform evidence is claimed.
+The root integrator owns the changed-head full make check, hosted CI and exact-
+head independent/external review. These remain pending at this correction
+checkpoint. No live or platform evidence is claimed.
 
 The next separately reviewed terminal slice must move the same four post-Completed
 rounds into the original-session finalizer before revocation, then establish

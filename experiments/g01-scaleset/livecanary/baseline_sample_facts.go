@@ -155,10 +155,14 @@ func (s *baselineHistory) validSampleRepresentation(f *baselineSample, a Approva
 		if r.ID != 0 {
 			attempt := r.Attempt
 			w := observedJobWire{ID: r.ID, RunID: r.RunID, RunAttempt: &attempt, HeadSHA: r.HeadSHA, Status: r.Status, Conclusion: r.Conclusion, RunnerID: r.RunnerID, RunnerName: r.RunnerName, RunnerGroupID: r.RunnerGroupID}
-			if !w.valid(a) || r.Attempt != 1 || r.Response.Outcome != observationPresent && r.Response.Outcome != observationPending {
+			if !w.valid(a) || r.Attempt != 1 || r.Response.Endpoint != "rest_job" || r.Response.Outcome != observationPresent && r.Response.Outcome != observationPending {
 				return false
 			}
-		} else if !reflect.DeepEqual(*r, restJobObservation{Response: r.Response}) {
+			associated := r.RunnerID != nil && *r.RunnerID > 0 && r.RunnerName != nil && *r.RunnerName != "" && r.RunnerGroupID != nil && *r.RunnerGroupID > 0
+			if (r.Response.Outcome == observationPresent) != associated {
+				return false
+			}
+		} else if r.Response.Outcome == observationPresent || (r.Response.Outcome == observationPending && r.Response.Endpoint != "rest_attempt_jobs") || !reflect.DeepEqual(*r, restJobObservation{Response: r.Response}) {
 			return false
 		}
 	}
