@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"os/user"
 	"strings"
 	"sync"
 	"syscall"
@@ -17,6 +18,7 @@ import (
 // single locked inode is retained even after crashes. A damaged tail is rejected,
 // never truncated, repaired or interpreted as permission to retry.
 type FileJournal struct {
+	claim         *admissionClaim
 	root          *os.Root
 	directory     string
 	directoryInfo os.FileInfo
@@ -119,10 +121,17 @@ func ReadApproval(path string) (Approval, error) {
 }
 
 func OpenJournal(directory string, a Approval) (*FileJournal, error) {
-	return openJournalWithSync(directory, a, func(f *os.File) error { return f.Sync() })
+	if !nativeAccountLookup {
+		return nil, ErrState
+	}
+	admissionDirectory, err := admissionDirectoryForAccount(user.LookupId)
+	if err != nil {
+		return nil, ErrState
+	}
+	return openJournalAtAdmission(directory, a, admissionDirectory, func(f *os.File) error { return f.Sync() })
 }
 
-func openJournalWithSync(directory string, a Approval, syncDirectory func(*os.File) error) (*FileJournal, error) {
+func openJournalAtAdmission(directory string, a Approval, admissionDirectory string, syncDirectory func(*os.File) error) (*FileJournal, error) {
 	info, err := os.Lstat(directory)
 	if err != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
 		return nil, ErrState
@@ -227,6 +236,10 @@ func openJournalWithSync(directory string, a Approval, syncDirectory func(*os.Fi
 	if err != nil {
 		return nil, ErrState
 	}
+	j.claim, err = openAdmission(admissionDirectory, j, syncDirectory)
+	if err != nil {
+		return nil, err
+	}
 	rootKept = true
 	ok = true
 	return j, nil
@@ -281,9 +294,10 @@ func (j *FileJournal) Close() error {
 		return nil
 	}
 	j.closed = true
+	claimErr := j.claim.close()
 	fileErr := j.file.Close()
 	rootErr := j.root.Close()
-	if fileErr != nil || rootErr != nil {
+	if claimErr != nil || fileErr != nil || rootErr != nil {
 		return ErrState
 	}
 	return nil
