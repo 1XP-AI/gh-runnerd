@@ -9,9 +9,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 type verifiedBrokerBinary struct {
@@ -25,8 +28,17 @@ func validBrokerBuild(info *debug.BuildInfo, expected string) bool {
 		return false
 	}
 	revision, clean, sdk := "", false, false
+	goos, goarch, cgo, tags := "", "", "", ""
 	for _, setting := range info.Settings {
 		switch setting.Key {
+		case "GOOS":
+			goos = setting.Value
+		case "GOARCH":
+			goarch = setting.Value
+		case "CGO_ENABLED":
+			cgo = setting.Value
+		case "-tags":
+			tags = setting.Value
 		case "vcs.revision":
 			revision = setting.Value
 		case "vcs.modified":
@@ -38,7 +50,12 @@ func validBrokerBuild(info *debug.BuildInfo, expected string) bool {
 			sdk = dep.Version == "v0.4.0" && dep.Replace == nil
 		}
 	}
-	return revision == expected && clean && sdk
+	for _, tag := range strings.FieldsFunc(tags, func(r rune) bool { return r == ',' || unicode.IsSpace(r) }) {
+		if tag == "osusergo" {
+			return false
+		}
+	}
+	return goos == runtime.GOOS && goarch == runtime.GOARCH && cgo == "1" && revision == expected && clean && sdk
 }
 func openBrokerBinary(path string, a BrokerApproval) (*verifiedBrokerBinary, error) {
 	f, err := openBrokerPrivateFile(path, 0500, 128<<20)

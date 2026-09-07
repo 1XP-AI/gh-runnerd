@@ -14,17 +14,18 @@ import (
 )
 
 func brokerApprovalFixture() BrokerApproval {
-	return BrokerApproval{Mode: "discover-actions-host", AppID: 71, AppName: "synthetic-app", AppOwner: "org-a", AppOwnerID: 101, InstallationID: 201, Organization: "org-a", OrganizationID: 101, Repository: "canary", RepositoryID: 501, RunnerGroupID: 3, RunnerGroupName: "synthetic-group", ExpiresAt: time.Now().Add(time.Hour)}
+	return BrokerApproval{OwnerNonce: strings.Repeat("a", 32), Mode: "discover-actions-host", AppID: 71, AppName: "synthetic-app", AppOwner: "org-a", AppOwnerID: 101, InstallationID: 201, Organization: "org-a", OrganizationID: 101, Repository: "canary", RepositoryID: 501, RunnerGroupID: 3, RunnerGroupName: "synthetic-group", ExpiresAt: time.Now().Add(time.Hour)}
 }
 
 type brokerHTTPFixture struct {
-	t          *testing.T
-	calls      []string
-	tokenCalls int
-	badGroup   bool
-	mintError  bool
-	token      string
-	root       string
+	t             *testing.T
+	calls         []string
+	tokenCalls    int
+	badGroup      bool
+	mintError     bool
+	token         string
+	root          string
+	admissionRoot string
 }
 
 func (f *brokerHTTPFixture) RoundTrip(r *http.Request) (*http.Response, error) {
@@ -89,7 +90,15 @@ func newBrokerFixture(t *testing.T) (BrokerApproval, Candidate, *brokerAPI, *bro
 	}
 	root := filepath.Join(parent, "attempt")
 	f := &brokerHTTPFixture{t: t, token: "synthetic-private-installation-token", root: root}
-	return brokerApprovalFixture(), syntheticCandidate(t), newBrokerAPI(time.Now, f), f, root
+	admission := filepath.Join(parent, "admission")
+	if os.Mkdir(admission, 0700) != nil {
+		t.Fatal("fixture admission")
+	}
+	admission, _ = filepath.EvalSymlinks(admission)
+	f.admissionRoot = admission
+	api := newBrokerAPI(time.Now, f)
+	api.admissionDirectory = func() (string, error) { return admission, nil }
+	return brokerApprovalFixture(), syntheticCandidate(t), api, f, root
 }
 func TestBrokerDiscoveryUsesOneRestrictedTokenThenScopeBeforeAuth(t *testing.T) {
 	a, c, api, f, root := newBrokerFixture(t)
@@ -109,9 +118,8 @@ func TestBrokerDiscoveryUsesOneRestrictedTokenThenScopeBeforeAuth(t *testing.T) 
 func TestBrokerFailedGroupNeverObtainsAuthOrHandsOff(t *testing.T) {
 	a, c, api, f, root := newBrokerFixture(t)
 	f.badGroup = true
-	called := false
-	_, err := brokerExecute(context.Background(), a, brokerInput{PEM: string(c.PEM)}, root, api, func(context.Context, []byte) error { called = true; return nil })
-	if err == nil || called {
+	_, err := brokerExecute(context.Background(), a, brokerInput{PEM: string(c.PEM)}, root, api, nil)
+	if err == nil {
 		t.Fatal("unsafe group handed off")
 	}
 	for _, call := range f.calls {
@@ -142,7 +150,7 @@ func TestBrokerControllerPayloadUsesActualIssuanceAndPrivateHandoff(t *testing.T
 	a.Mode = "controller"
 	a.Phase = "create"
 	calls := 0
-	result, err := brokerExecute(context.Background(), a, brokerInput{PEM: string(c.PEM)}, root, api, func(_ context.Context, data []byte) error {
+	plan := brokerTestPlan(t, &a, filepath.Dir(root), func(_ context.Context, data []byte, _ string) error {
 		calls++
 		var payload map[string]any
 		if json.Unmarshal(data, &payload) != nil {
@@ -156,6 +164,7 @@ func TestBrokerControllerPayloadUsesActualIssuanceAndPrivateHandoff(t *testing.T
 		}
 		return nil
 	})
+	result, err := brokerExecute(context.Background(), a, brokerInput{PEM: string(c.PEM)}, root, api, plan)
 	if err != nil || result.Status != "controller_completed" || calls != 1 {
 		t.Fatal("private controller handoff incomplete")
 	}

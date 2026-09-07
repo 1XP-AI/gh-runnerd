@@ -1,0 +1,441 @@
+package enrollment
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+// Fixtures inject only this canonical newly-owned root. No production input,
+// approval, environment variable or flag selects the admission directory.
+func brokerTestPlan(t *testing.T, a *BrokerApproval, parent string, launch func(context.Context, []byte, string) error) *brokerControllerPlan {
+	t.Helper()
+	a.ControllerHarnessSHA = strings.Repeat("c", 40)
+	a.ControllerBinarySHA256 = strings.Repeat("d", 64)
+	state := filepath.Join(parent, "controller-state")
+	if e := os.Mkdir(state, 0700); e != nil && !os.IsExist(e) {
+		t.Fatal("fixture state")
+	}
+	root, e := openBrokerPrivateDirectory(state)
+	if e != nil {
+		t.Fatal(e)
+	}
+	t.Cleanup(func() { root.Close() })
+	c := controllerApproval{AppID: a.AppID, InstallationID: a.InstallationID, Organization: a.Organization, Repository: a.Repository, RepositoryID: a.RepositoryID, RunnerGroupID: a.RunnerGroupID, OwnerNonce: a.OwnerNonce, HarnessSHA: a.ControllerHarnessSHA, WorkflowSHA: strings.Repeat("b", 40), WorkflowPath: ".github/workflows/canary.yml", Controller: "trusted-controller", ExpiresAt: a.ExpiresAt, ActionsHosts: []string{"fixture.actions.githubusercontent.com"}, Phases: []string{"create", "jit-loss", "inspect", "cleanup"}}
+	raw, _ := json.Marshal(c)
+	a.ControllerApprovalSHA256 = brokerBytesDigest(raw)
+	p, e := newBrokerControllerPlan(*a, c, raw, root, state, func() error { return nil }, launch)
+	if e != nil {
+		t.Fatal(e)
+	}
+	return p
+}
+func TestBrokerFinitePhasesAndUnknownRetention(t *testing.T) {
+	for _, unknown := range []bool{false, true} {
+		t.Run(map[bool]string{false: "complete", true: "unknown"}[unknown], func(t *testing.T) {
+			a, c, api, f, root := newBrokerFixture(t)
+			parent := filepath.Dir(root)
+			if _, e := brokerExecute(context.Background(), a, brokerInput{PEM: string(c.PEM)}, root, api, nil); e != nil {
+				t.Fatal("discovery positive")
+			}
+			a.Mode = "controller"
+			for _, phase := range []string{"create", "jit-loss", "inspect", "cleanup"} {
+				a.Phase = phase
+				f.root = filepath.Join(parent, phase)
+				plan := brokerTestPlan(t, &a, parent, func(context.Context, []byte, string) error {
+					if unknown && phase == "create" {
+						return errBroker
+					}
+					return nil
+				})
+				_, e := brokerExecute(context.Background(), a, brokerInput{PEM: string(c.PEM)}, f.root, api, plan)
+				refused := unknown && (phase == "create" || phase == "jit-loss")
+				if (e != nil) != refused {
+					t.Fatalf("phase=%s refused=%t want=%t", phase, e != nil, refused)
+				}
+			}
+			want := 5
+			if unknown {
+				want = 4
+			}
+			if f.tokenCalls != want {
+				t.Fatalf("mint=%d want=%d", f.tokenCalls, want)
+			}
+			for _, phase := range []string{"inspect", "cleanup", "create"} {
+				a.Phase = phase
+				a.ExpiresAt = a.ExpiresAt.Add(time.Minute)
+				f.root = filepath.Join(parent, phase+"-retry")
+				plan := brokerTestPlan(t, &a, parent, func(context.Context, []byte, string) error { return nil })
+				if _, e := brokerExecute(context.Background(), a, brokerInput{PEM: string(c.PEM)}, f.root, api, plan); e == nil {
+					t.Fatal("consumed phase retried")
+				}
+			}
+			if f.tokenCalls != want {
+				t.Fatal("retry consumed token")
+			}
+			data, e := os.ReadFile(filepath.Join(f.admissionRoot, "broker-admission.jsonl"))
+			if e != nil {
+				t.Fatal("ledger")
+			}
+			if unknown {
+				var claim, complete int
+				for _, line := range strings.Split(string(data), "\n") {
+					var event brokerClaimEvent
+					if json.Unmarshal([]byte(line), &event) == nil && event.Slot == "create" {
+						if event.Kind == "claim" {
+							claim++
+						}
+						if event.Kind == "complete" {
+							complete++
+						}
+					}
+				}
+				if claim != 1 || complete != 0 {
+					t.Fatal("earlier unknown erased by recovery")
+				}
+			}
+		})
+	}
+}
+func TestBrokerAdmissionFailureBeforeAPIAndResync(t *testing.T) {
+	for _, kind := range []string{"missing", "symlink", "sync", "existing-sync"} {
+		t.Run(kind, func(t *testing.T) {
+			a, c, api, f, root := newBrokerFixture(t)
+			switch kind {
+			case "missing":
+				api.admissionDirectory = func() (string, error) { return filepath.Join(f.admissionRoot, "absent"), nil }
+			case "symlink":
+				link := filepath.Join(filepath.Dir(f.admissionRoot), "alias")
+				if os.Symlink(f.admissionRoot, link) != nil {
+					t.Fatal("fixture link")
+				}
+				api.admissionDirectory = func() (string, error) { return link, nil }
+			case "sync", "existing-sync":
+				api.syncDirectory = func(*os.Root) error { return errBroker }
+			}
+			attempts := 1
+			if kind == "existing-sync" {
+				attempts = 2
+			}
+			for i := 0; i < attempts; i++ {
+				if i > 0 {
+					root = filepath.Join(filepath.Dir(root), "again")
+					f.root = root
+				}
+				if _, e := brokerExecute(context.Background(), a, brokerInput{PEM: string(c.PEM)}, root, api, nil); e == nil {
+					t.Fatal("invalid admission accepted")
+				}
+			}
+			if len(f.calls) != 0 {
+				t.Fatal("admission failure contacted API")
+			}
+		})
+	}
+}
+func TestBrokerSnapshotReservedAndRecheckedBeforeHandoff(t *testing.T) {
+	for _, kind := range []string{"regular", "symlink", "changed", "replaced"} {
+		t.Run(kind, func(t *testing.T) {
+			a, c, api, f, root := newBrokerFixture(t)
+			a.Mode = "controller"
+			a.Phase = "create"
+			called := false
+			p := brokerTestPlan(t, &a, filepath.Dir(root), func(context.Context, []byte, string) error { called = true; return nil })
+			if kind == "regular" || kind == "symlink" {
+				if os.Mkdir(root, 0700) != nil {
+					t.Fatal("fixture")
+				}
+				name := filepath.Join(root, "controller-approval.json")
+				if kind == "regular" {
+					os.WriteFile(name, []byte("existing"), 0600)
+				} else {
+					os.Symlink(filepath.Join(filepath.Dir(root), "absent"), name)
+				}
+			} else {
+				old := p.binaryCheck
+				p.binaryCheck = func() error {
+					if p.snapshot != nil && f.tokenCalls > 0 {
+						name := filepath.Join(root, "controller-approval.json")
+						if kind == "replaced" {
+							os.Rename(name, name+".retained")
+						}
+						os.WriteFile(name, []byte("altered"), 0600)
+					}
+					return old()
+				}
+			}
+			_, e := brokerExecute(context.Background(), a, brokerInput{PEM: string(c.PEM)}, root, api, p)
+			if e == nil || called {
+				t.Fatal("unsafe snapshot reached handoff")
+			}
+			want := 0
+			if kind == "changed" || kind == "replaced" {
+				want = 1
+			}
+			if f.tokenCalls != want {
+				t.Fatalf("mint=%d want=%d", f.tokenCalls, want)
+			}
+		})
+	}
+}
+
+func TestBrokerMalformedLedgerCannotBecomePartialAuthority(t *testing.T) {
+	for _, kind := range []string{"missing controller", "missing authority", "bad snapshot", "bad ownership", "discovery controller", "invalid renewal", "duplicate complete", "missing newline", "work after unknown", "late completion"} {
+		t.Run(kind, func(t *testing.T) {
+			a, c, api, f, root := newBrokerFixture(t)
+			a.Mode = "controller"
+			a.Phase = "create"
+			parent := filepath.Dir(root)
+			p := brokerTestPlan(t, &a, parent, func(context.Context, []byte, string) error { return nil })
+			if _, e := brokerExecute(context.Background(), a, brokerInput{PEM: string(c.PEM)}, root, api, p); e != nil {
+				t.Fatal("initial phase")
+			}
+			path := filepath.Join(f.admissionRoot, "broker-admission.jsonl")
+			data, _ := os.ReadFile(path)
+			lines := strings.Split(string(data), "\n")
+			var event brokerClaimEvent
+			if json.Unmarshal([]byte(lines[1]), &event) != nil {
+				t.Fatal("event")
+			}
+			switch kind {
+			case "missing controller":
+				event.Controller = nil
+			case "missing authority":
+				event.Authority = nil
+			case "bad snapshot":
+				event.Snapshot = brokerInode{}
+			case "bad ownership":
+				event.Controller.Ownership = strings.Repeat("e", 64)
+			case "discovery controller":
+				event.Slot = "discover-actions-host"
+			case "invalid renewal":
+				event.Attempt.Inode++
+				event.Journal.Inode++
+				event.Snapshot.Inode++
+				event.Slot = "jit-loss"
+				event.Authority.Approval.ExpiresAt = event.Authority.Approval.ExpiresAt.Add(time.Minute)
+				event.Authority.Digest = brokerDigest(event.Authority.Approval)
+				b, _ := json.Marshal(event)
+				lines = append(lines[:len(lines)-1], string(b), "")
+			case "work after unknown", "late completion":
+				originalComplete := lines[2]
+				event.Attempt.Inode++
+				event.Journal.Inode++
+				event.Snapshot.Inode++
+				event.Slot = "inspect"
+				if kind == "work after unknown" {
+					event.Slot = "jit-loss"
+				}
+				b, _ := json.Marshal(event)
+				lines = []string{lines[0], lines[1], string(b), ""}
+				if kind == "late completion" {
+					lines = []string{lines[0], lines[1], string(b), originalComplete, ""}
+				}
+			case "duplicate complete":
+				lines = append(lines[:len(lines)-1], lines[2], "")
+			}
+			if kind != "invalid renewal" && kind != "duplicate complete" && kind != "work after unknown" && kind != "late completion" {
+				b, _ := json.Marshal(event)
+				lines[1] = string(b)
+			}
+			altered := strings.Join(lines, "\n")
+			if kind == "missing newline" {
+				altered = strings.TrimSuffix(altered, "\n")
+			}
+			if os.WriteFile(path, []byte(altered), 0600) != nil {
+				t.Fatal("fixture write")
+			}
+			a.Phase = "inspect"
+			f.root = filepath.Join(parent, "inspect")
+			p = brokerTestPlan(t, &a, parent, func(context.Context, []byte, string) error { return nil })
+			before := len(f.calls)
+			if _, e := brokerExecute(context.Background(), a, brokerInput{PEM: string(c.PEM)}, f.root, api, p); e == nil || f.tokenCalls != 1 || len(f.calls) != before {
+				t.Fatal("corrupt ledger permitted authenticated effects")
+			}
+		})
+	}
+}
+func TestBrokerControllerRenewalOnlyRecoveryAndSameOwnership(t *testing.T) {
+	for _, kind := range []string{"recovery", "expiry rollback", "new work", "workflow", "state", "binary", "nonce"} {
+		t.Run(kind, func(t *testing.T) {
+			a, c, api, f, root := newBrokerFixture(t)
+			a.Mode = "controller"
+			a.Phase = "create"
+			parent := filepath.Dir(root)
+			p := brokerTestPlan(t, &a, parent, func(context.Context, []byte, string) error { return nil })
+			if _, e := brokerExecute(context.Background(), a, brokerInput{PEM: string(c.PEM)}, root, api, p); e != nil {
+				t.Fatal("initial controller")
+			}
+			a.Phase = "inspect"
+			a.ExpiresAt = a.ExpiresAt.Add(time.Minute)
+			f.root = filepath.Join(parent, "inspect")
+			p = brokerTestPlan(t, &a, parent, func(context.Context, []byte, string) error { return nil })
+			p.controller.Phases = []string{"inspect", "cleanup"}
+			switch kind {
+			case "expiry rollback":
+				p.controller.ExpiresAt = p.controller.ExpiresAt.Add(-2 * time.Minute)
+				a.ExpiresAt = p.controller.ExpiresAt
+			case "new work":
+				p.controller.Phases = []string{"inspect", "create"}
+			case "workflow":
+				p.controller.WorkflowSHA = strings.Repeat("e", 40)
+			case "state":
+				os.Rename(p.statePath, p.statePath+"-retained")
+				os.Mkdir(p.statePath, 0700)
+			case "binary":
+				a.ControllerBinarySHA256 = strings.Repeat("e", 64)
+			case "nonce":
+				a.OwnerNonce = strings.Repeat("e", 32)
+				p.controller.OwnerNonce = a.OwnerNonce
+			}
+			p.raw, _ = json.Marshal(p.controller)
+			a.ControllerApprovalSHA256 = brokerBytesDigest(p.raw)
+			p.approval = a
+			_, e := brokerExecute(context.Background(), a, brokerInput{PEM: string(c.PEM)}, f.root, api, p)
+			if kind == "recovery" {
+				if e != nil || f.tokenCalls != 2 {
+					t.Fatal("authorized stable recovery refused")
+				}
+			} else if e == nil || f.tokenCalls != 1 {
+				t.Fatal("ownership or authority rebound before mint")
+			}
+		})
+	}
+}
+func TestBrokerPreexistingControllerClaimRefusesBeforeMint(t *testing.T) {
+	for _, kind := range []string{"conflict", "empty", "symlink", "partial journal", "matching"} {
+		t.Run(kind, func(t *testing.T) {
+			a, c, api, f, root := newBrokerFixture(t)
+			a.Mode = "controller"
+			a.Phase = "create"
+			p := brokerTestPlan(t, &a, filepath.Dir(root), func(context.Context, []byte, string) error { return nil })
+			path := filepath.Join(f.admissionRoot, "admission.json")
+			stateJournal := filepath.Join(p.statePath, "journal.jsonl")
+			if os.WriteFile(stateJournal, []byte("synthetic owned journal\n"), 0600) != nil {
+				t.Fatal("fixture journal")
+			}
+			ji, _ := os.Stat(stateJournal)
+			jid := brokerFileIdentity(ji)
+			binding, _ := p.binding()
+			record := map[string]any{"version": 1, "ownership": binding.Ownership, "state_device": binding.State.Device, "state_inode": binding.State.Inode, "journal_device": jid.Device, "journal_inode": jid.Inode}
+			if kind == "conflict" {
+				record["ownership"] = strings.Repeat("e", 64)
+			}
+			data, _ := json.Marshal(record)
+			switch kind {
+			case "empty":
+				data = nil
+			case "symlink":
+				os.Symlink(stateJournal, path)
+			}
+			if kind != "symlink" && kind != "partial journal" {
+				if os.WriteFile(path, data, 0600) != nil {
+					t.Fatal("fixture claim")
+				}
+			}
+			_, e := brokerExecute(context.Background(), a, brokerInput{PEM: string(c.PEM)}, root, api, p)
+			if kind == "matching" {
+				if e != nil || f.tokenCalls != 1 {
+					t.Fatal("compatible claim refused")
+				}
+			} else if e == nil || f.tokenCalls != 0 {
+				t.Fatal("conflicting/ambiguous inventory consumed token")
+			}
+		})
+	}
+}
+
+func TestBrokerAdmissionResyncFailureAndRootReplacement(t *testing.T) {
+	for _, kind := range []string{"existing root sync", "claim root sync", "root replacement", "parent replacement"} {
+		t.Run(kind, func(t *testing.T) {
+			a, _, api, f, root := newBrokerFixture(t)
+			j, e := openBrokerJournal(root, a)
+			if e != nil {
+				t.Fatal(e)
+			}
+			defer j.close()
+			calls := 0
+			syncFn := func(r *os.Root) error {
+				calls++
+				if kind == "claim root sync" && calls >= 5 {
+					return errBroker
+				}
+				return syncDirectory(r)
+			}
+			claim, e := openBrokerAdmission(f.admissionRoot, a, j, nil, syncFn)
+			if kind == "claim root sync" {
+				if e == nil {
+					claim.close()
+					t.Fatal("failed claim sync accepted")
+				}
+				api.syncDirectory = func(*os.Root) error { return errBroker }
+				j2, e := openBrokerJournal(filepath.Join(filepath.Dir(root), "retry"), a)
+				if e != nil {
+					t.Fatal(e)
+				}
+				defer j2.close()
+				if c, e := openBrokerAdmission(f.admissionRoot, a, j2, nil, api.syncDirectory); e == nil {
+					c.close()
+					t.Fatal("existing failed record skipped resync")
+				}
+				return
+			}
+			if e != nil {
+				t.Fatal("claim positive")
+			}
+			defer claim.close()
+			switch kind {
+			case "existing root sync":
+				claim.sync = func(*os.Root) error { return errBroker }
+			case "root replacement":
+				os.Rename(f.admissionRoot, f.admissionRoot+"-retained")
+				os.Mkdir(f.admissionRoot, 0700)
+			case "parent replacement":
+				parent := filepath.Dir(f.admissionRoot)
+				os.Rename(parent, parent+"-retained")
+				t.Cleanup(func() { os.RemoveAll(parent); os.Rename(parent+"-retained", parent) })
+				os.Mkdir(parent, 0700)
+				os.Mkdir(f.admissionRoot, 0700)
+			}
+			if claim.check() == nil {
+				t.Fatal("lost durability/identity still authorized")
+			}
+		})
+	}
+}
+
+func TestBrokerActualG01ClaimSerializationCompatibility(t *testing.T) {
+	directory := os.Getenv("G01_BROKER_BRIDGE_FIXTURE")
+	if directory == "" {
+		t.Skip("requires separately generated G01 local journal fixture")
+	}
+	raw, e := os.ReadFile(filepath.Join(directory, "controller.json"))
+	var c controllerApproval
+	if e != nil || decodeBrokerJSON(raw, &c, true) != nil {
+		t.Fatal("G01 typed approval fixture")
+	}
+	a := brokerApprovalFixture()
+	a.Mode = "controller"
+	a.Phase = "create"
+	a.ExpiresAt = c.ExpiresAt
+	a.ControllerHarnessSHA = c.HarnessSHA
+	a.ControllerBinarySHA256 = strings.Repeat("d", 64)
+	a.ControllerApprovalSHA256 = brokerBytesDigest(raw)
+	state, e := openBrokerPrivateDirectory(filepath.Join(directory, "state"))
+	if e != nil {
+		t.Fatal("G01 state fixture")
+	}
+	defer state.Close()
+	root, e := openBrokerPrivateDirectory(filepath.Join(directory, "admission"))
+	if e != nil {
+		t.Fatal("G01 claim fixture")
+	}
+	defer root.Close()
+	p, e := newBrokerControllerPlan(a, c, raw, state, filepath.Join(directory, "state"), func() error { return nil }, func(context.Context, []byte, string) error { return nil })
+	if e != nil || p.compatibleControllerClaim(root) != nil {
+		t.Fatal("actual G01 typed serialization/admission claim incompatible")
+	}
+}

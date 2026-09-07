@@ -39,6 +39,7 @@ func TestBrokerCanonicalOrganizationRequiredBeforeMint(t *testing.T) {
 		response.Body = io.NopCloser(strings.NewReader(strings.ReplaceAll(string(data), "org-a", "ORG-A")))
 		return response, nil
 	}))
+	api.admissionDirectory = func() (string, error) { return f.admissionRoot, nil }
 	_, err := brokerExecute(context.Background(), a, brokerInput{PEM: string(c.PEM)}, root, api, nil)
 	if err == nil || f.tokenCalls != 0 {
 		t.Fatalf("canonical mismatch consumed issuance: stopped=%t mints=%d", err != nil, f.tokenCalls)

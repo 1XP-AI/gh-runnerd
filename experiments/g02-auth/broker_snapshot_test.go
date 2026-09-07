@@ -19,6 +19,20 @@ func TestBrokerSnapshotCollisionBeforeMint(t *testing.T) {
 	if path == "" {
 		t.Skip("requires clean metadata-only controller fixture")
 	}
+	brokerSnapshotFrontDoorFixture(t, path, true)
+}
+func TestBrokerUnsupportedMetadataFrontDoor(t *testing.T) {
+	for _, name := range []string{"G01_BROKER_NO_CGO_FIXTURE", "G01_BROKER_OSUSERGO_FIXTURE"} {
+		t.Run(name, func(t *testing.T) {
+			path := os.Getenv(name)
+			if path == "" {
+				t.Skip("requires clean unsupported metadata-only controller fixture")
+			}
+			brokerSnapshotFrontDoorFixture(t, path, false)
+		})
+	}
+}
+func brokerSnapshotFrontDoorFixture(t *testing.T, path string, supported bool) {
 	info, err := buildinfo.ReadFile(path)
 	if err != nil {
 		t.Fatal("fixture metadata")
@@ -73,16 +87,22 @@ func TestBrokerSnapshotCollisionBeforeMint(t *testing.T) {
 			if err != nil {
 				t.Fatal("fixture collision")
 			}
-			// Positive metadata acceptance is required so early rejection cannot pass.
+			// Require the expected constructor result; only this metadata read is done.
 			verified, e := openBrokerBinary(binary, a)
-			if e != nil {
-				t.Fatal("supported fixture was not accepted")
+			if supported {
+				if e != nil {
+					t.Fatal("supported fixture was not accepted")
+				}
+				verified.file.Close()
+			} else if e == nil {
+				verified.file.Close()
+				t.Error("unsupported metadata accepted")
 			}
-			verified.file.Close()
+
 			input, _ := os.Open(inputPath)
 			defer input.Close()
 			_, e = runBrokerWithAPI(context.Background(), BrokerFiles{approvalPath, root, binary, ctrlPath, state}, input, api)
-			if e == nil || f.tokenCalls != 0 {
+			if e == nil || f.tokenCalls != 0 || (!supported && len(f.calls) != 0) {
 				t.Fatalf("snapshot collision accepted or minted: mint=%d", f.tokenCalls)
 			}
 		})

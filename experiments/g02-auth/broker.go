@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ import (
 // BrokerApproval describes one future, explicitly approved credential issuance
 // and either hostname discovery or one already-reviewed controller phase.
 type BrokerApproval struct {
+	OwnerNonce                 string    `json:"owner_nonce"`
 	Mode                       string    `json:"mode"`
 	AppID                      int64     `json:"app_id"`
 	AppName                    string    `json:"app_name"`
@@ -49,7 +51,7 @@ var brokerComponent = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$`)
 var brokerPhases = map[string]bool{"create": true, "before-ack": true, "after-ack": true, "before-acquire": true, "acquire-loss": true, "jit-loss": true, "inspect": true, "cleanup": true}
 
 func (a BrokerApproval) validate(now time.Time) error {
-	if a.AppID < 1 || a.AppOwnerID < 1 || a.InstallationID < 1 || a.OrganizationID < 1 || a.RepositoryID < 1 || a.RunnerGroupID < 1 || !appSlug.MatchString(a.AppName) || !organizationLogin.MatchString(a.AppOwner) || !organizationLogin.MatchString(a.Organization) || !brokerComponent.MatchString(a.Repository) || !brokerComponent.MatchString(a.RunnerGroupName) || !a.ExpiresAt.After(now.Add(time.Minute)) || a.ExpiresAt.After(now.Add(24*time.Hour)) {
+	if !brokerNonce.MatchString(a.OwnerNonce) || a.AppID < 1 || a.AppOwnerID < 1 || a.InstallationID < 1 || a.OrganizationID < 1 || a.RepositoryID < 1 || a.RunnerGroupID < 1 || !appSlug.MatchString(a.AppName) || !organizationLogin.MatchString(a.AppOwner) || !organizationLogin.MatchString(a.Organization) || !brokerComponent.MatchString(a.Repository) || !brokerComponent.MatchString(a.RunnerGroupName) || !a.ExpiresAt.After(now.Add(time.Minute)) || a.ExpiresAt.After(now.Add(24*time.Hour)) {
 		return errBroker
 	}
 	if a.Mode == "discover-actions-host" {
@@ -72,8 +74,8 @@ func validBrokerToken(token string) bool {
 	}
 	return true
 }
-func brokerExecute(parent context.Context, a BrokerApproval, input brokerInput, path string, api *brokerAPI, launch func(context.Context, []byte) error) (BrokerResult, error) {
-	if parent == nil || api == nil || a.validate(api.now()) != nil || (input.VerificationToken != "" && (!a.AllowVerificationAuthority || !validBrokerToken(input.VerificationToken))) || (a.Mode == "controller" && launch == nil) {
+func brokerExecute(parent context.Context, a BrokerApproval, input brokerInput, path string, api *brokerAPI, plan *brokerControllerPlan) (BrokerResult, error) {
+	if parent == nil || api == nil || a.validate(api.now()) != nil || (a.AllowVerificationAuthority && input.VerificationToken == "") || (input.VerificationToken != "" && (!a.AllowVerificationAuthority || !validBrokerToken(input.VerificationToken))) || (a.Mode == "controller" && plan == nil) || (a.Mode != "controller" && plan != nil) {
 		return BrokerResult{}, errBroker
 	}
 	ctx, cancel := context.WithDeadline(parent, minTime(a.ExpiresAt, api.now().Add(10*time.Minute)))
@@ -84,11 +86,45 @@ func brokerExecute(parent context.Context, a BrokerApproval, input brokerInput, 
 	if err != nil {
 		return BrokerResult{}, errBroker
 	}
+	if api.admissionDirectory == nil {
+		return BrokerResult{}, errBroker
+	}
+	directory, e := api.admissionDirectory()
+	if e != nil {
+		return BrokerResult{}, errBroker
+	}
 	j, err := openBrokerJournal(path, a)
 	if err != nil {
 		return BrokerResult{}, errBroker
 	}
 	defer j.close()
+	if plan != nil {
+		defer plan.close()
+		if plan.prepare(a, j, api.now()) != nil {
+			return BrokerResult{}, errBroker
+		}
+	}
+
+	claim, e := openBrokerAdmission(directory, a, j, plan, api.syncDirectory)
+	if e != nil {
+		return BrokerResult{}, errBroker
+	}
+	defer claim.close()
+	guard := func() error {
+		if claim.check() != nil || j.check() != nil {
+			return errBroker
+		}
+		if plan != nil && (plan.check() != nil || plan.compatibleControllerClaim(claim.root) != nil) {
+			return errBroker
+		}
+		return nil
+	}
+	if guard() != nil {
+		return BrokerResult{}, errBroker
+	}
+	// Every authenticated call revalidates the still-held durable claim.
+	scoped := newBrokerAPI(api.now, brokerGuardTransport{api.client.Transport, guard})
+	api = scoped
 	// JWT identity verification precedes the one token mint. Private repository
 	// and runner-group APIs require that installation token, so scope preflight
 	// necessarily follows minting and precedes every subsequent auth/child effect.
@@ -118,7 +154,7 @@ func brokerExecute(parent context.Context, a BrokerApproval, input brokerInput, 
 	}
 	if a.Mode == "discover-actions-host" {
 		host, err := api.discover(ctx, a, issued.Token, j)
-		if err != nil || j.append("actions_host_observed", map[string]any{"actions_host": host}) != nil {
+		if err != nil || j.append("actions_host_observed", map[string]any{"actions_host": host}) != nil || claim.complete() != nil {
 			return BrokerResult{}, errBroker
 		}
 		return BrokerResult{Status: "actions_host_observed", ActionsHost: host}, nil
@@ -140,7 +176,7 @@ func brokerExecute(parent context.Context, a BrokerApproval, input brokerInput, 
 	if len(data) > 16384 || j.append("controller_handoff_started", nil) != nil {
 		return BrokerResult{}, errBroker
 	}
-	if launch(ctx, data) != nil || j.append("controller_completed", nil) != nil {
+	if (plan.controller.needsVerification() && api.verifyWorkflow(ctx, a, plan.controller, input.VerificationToken) != nil) || guard() != nil || plan.launch(ctx, data, filepath.Join(path, "controller-approval.json")) != nil || j.append("controller_completed", nil) != nil || claim.complete() != nil {
 		return BrokerResult{}, errBroker
 	}
 	return BrokerResult{Status: "controller_completed"}, nil

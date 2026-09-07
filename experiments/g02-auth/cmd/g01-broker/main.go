@@ -39,7 +39,7 @@ func run(ctx context.Context, args []string, input *os.File, out io.Writer) (cod
 		return reject()
 	}
 	if *plan && !*execute {
-		fmt.Fprintln(out, "Modes in the exact private approval: discover-actions-host or controller. One restricted installation-token request; temporary registration/admin authentication only in approved discovery; one hash-verified controller phase only in controller mode. No worker, App creation, workflow dispatch or persistent credentials. Live execution requires separate explicit authorization.")
+		fmt.Fprintln(out, "Modes in the exact private approval: discover-actions-host or controller. Required fixed private native-account admission root and owner nonce; one permanently consumed issuance slot per approved phase, including one inspect and cleanup; temporary registration/admin authentication only in approved discovery; one hash-verified controller phase only in controller mode. No worker, App creation, workflow dispatch or persistent credentials. Live execution requires separate explicit authorization.")
 		return 0
 	}
 	if !*execute || *plan || files.ApprovalPath == "" || files.StateDirectory == "" {

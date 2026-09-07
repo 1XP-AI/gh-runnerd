@@ -43,7 +43,7 @@ func (c controllerApproval) needsVerification() bool {
 	})
 }
 func (c controllerApproval) validate(a BrokerApproval, now time.Time) error {
-	if c.AppID != a.AppID || c.InstallationID != a.InstallationID || c.Organization != a.Organization || c.Repository != a.Repository || c.RepositoryID != a.RepositoryID || c.RunnerGroupID != a.RunnerGroupID || c.HarnessSHA != a.ControllerHarnessSHA || !brokerSHA40.MatchString(c.HarnessSHA) || !brokerSHA40.MatchString(c.WorkflowSHA) || !brokerNonce.MatchString(c.OwnerNonce) || !brokerWorkflow.MatchString(c.WorkflowPath) || !brokerComponent.MatchString(c.Controller) || !c.ExpiresAt.After(now.Add(time.Minute)) || c.ExpiresAt.After(now.Add(24*time.Hour)) || c.ExpiresAt.Before(a.ExpiresAt) || len(c.ActionsHosts) < 1 || len(c.ActionsHosts) > 8 || len(c.Phases) < 1 || len(c.Phases) > 8 || !slices.Contains(c.Phases, a.Phase) || c.needsVerification() != a.AllowVerificationAuthority || (c.needsVerification() && c.WorkflowRunID < 1) {
+	if c.OwnerNonce != a.OwnerNonce || c.AppID != a.AppID || c.InstallationID != a.InstallationID || c.Organization != a.Organization || c.Repository != a.Repository || c.RepositoryID != a.RepositoryID || c.RunnerGroupID != a.RunnerGroupID || c.HarnessSHA != a.ControllerHarnessSHA || !brokerSHA40.MatchString(c.HarnessSHA) || !brokerSHA40.MatchString(c.WorkflowSHA) || !brokerNonce.MatchString(c.OwnerNonce) || !brokerWorkflow.MatchString(c.WorkflowPath) || !brokerComponent.MatchString(c.Controller) || !c.ExpiresAt.After(now.Add(time.Minute)) || c.ExpiresAt.After(now.Add(24*time.Hour)) || c.ExpiresAt.Before(a.ExpiresAt) || len(c.ActionsHosts) < 1 || len(c.ActionsHosts) > 8 || len(c.Phases) < 1 || len(c.Phases) > 8 || !slices.Contains(c.Phases, a.Phase) || c.needsVerification() != a.AllowVerificationAuthority || (c.needsVerification() && c.WorkflowRunID < 1) {
 		return errBroker
 	}
 	seen := map[string]bool{}
@@ -143,38 +143,20 @@ func runBrokerWithAPI(ctx context.Context, files BrokerFiles, input *os.File, ap
 	if err != nil || (approval.AllowVerificationAuthority && credentialInput.VerificationToken == "") {
 		return BrokerResult{}, errBroker
 	}
-	var launch func(context.Context, []byte) error
+
+	var plan *brokerControllerPlan
 	if approval.Mode == "controller" {
-		launch = func(ctx context.Context, data []byte) error {
-			if controller.needsVerification() && api.verifyWorkflow(ctx, approval, controller, credentialInput.VerificationToken) != nil {
+		plan, err = newBrokerControllerPlan(approval, controller, controllerData, controllerRoot, files.ControllerStateDirectory, binary.check, func(ctx context.Context, data []byte, snapshotPath string) error {
+			if plan.check() != nil {
 				return errBroker
 			}
-			actual, e := controllerRoot.Stat(".")
-			named, err := os.Lstat(files.ControllerStateDirectory)
-			if e != nil || err != nil || !os.SameFile(actual, named) {
-				return errBroker
-			}
-			root, err := openBrokerPrivateDirectory(files.StateDirectory)
-			if err != nil {
-				return errBroker
-			}
-			defer root.Close()
-			// Only the non-secret, digest-verified approval snapshot is written. The
-			// child never reopens the operator's original mutable approval path.
-			snapshot, err := root.OpenFile("controller-approval.json", os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0600)
-			if err != nil {
-				return errBroker
-			}
-			_, writeErr := snapshot.Write(controllerData)
-			syncErr := snapshot.Sync()
-			closeErr := snapshot.Close()
-			if writeErr != nil || syncErr != nil || closeErr != nil || syncDirectory(root) != nil {
-				return errBroker
-			}
-			return invokeBrokerController(ctx, binary, files.StateDirectory, filepath.Join(files.StateDirectory, "controller-approval.json"), files.ControllerStateDirectory, approval.Phase, data)
+			return invokeBrokerController(ctx, binary, files.StateDirectory, snapshotPath, files.ControllerStateDirectory, approval.Phase, data)
+		})
+		if err != nil {
+			return BrokerResult{}, errBroker
 		}
 	}
-	return brokerExecute(ctx, approval, credentialInput, files.StateDirectory, api, launch)
+	return brokerExecute(ctx, approval, credentialInput, files.StateDirectory, api, plan)
 }
 func (a *brokerAPI) verifyWorkflow(ctx context.Context, approval BrokerApproval, controller controllerApproval, token string) error {
 	var run struct {

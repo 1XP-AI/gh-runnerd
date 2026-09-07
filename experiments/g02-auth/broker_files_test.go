@@ -89,6 +89,7 @@ func TestBrokerDuplicateAPIJSONCannotReachMint(t *testing.T) {
 		}
 		return f.RoundTrip(r)
 	}))
+	api.admissionDirectory = func() (string, error) { return f.admissionRoot, nil }
 	if _, err := brokerExecute(context.Background(), a, brokerInput{PEM: string(c.PEM)}, root, api, nil); err == nil || f.tokenCalls != 0 {
 		t.Fatal("ambiguous identity response minted a token")
 	}
@@ -214,6 +215,7 @@ func TestBrokerMissingPolicyFactsAndForgedIssuanceRefuse(t *testing.T) {
 				res.Body = io.NopCloser(strings.NewReader(string(data)))
 				return res, nil
 			}))
+			api.admissionDirectory = func() (string, error) { return f.admissionRoot, nil }
 			if _, err := brokerExecute(context.Background(), a, brokerInput{PEM: string(c.PEM)}, root, api, nil); err == nil {
 				t.Fatal("missing/forged policy accepted")
 			}
@@ -289,6 +291,7 @@ func TestBrokerJournalRequiresPrivateParentBeforeAPI(t *testing.T) {
 	if os.Chmod(filepath.Dir(root), 0755) != nil {
 		t.Fatal("fixture")
 	}
+	api.admissionDirectory = func() (string, error) { return f.admissionRoot, nil }
 	if _, err := brokerExecute(context.Background(), a, brokerInput{PEM: string(c.PEM)}, root, api, nil); err == nil || len(f.calls) != 0 {
 		t.Fatal("shared journal parent permitted issuance")
 	}

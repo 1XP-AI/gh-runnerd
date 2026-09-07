@@ -10,8 +10,10 @@ import (
 )
 
 type brokerJournal struct {
-	file *os.File
-	root *os.Root
+	file                    *os.File
+	root                    *os.Root
+	path                    string
+	directoryInfo, fileInfo os.FileInfo
 }
 
 func openBrokerJournal(path string, a BrokerApproval) (j *brokerJournal, err error) {
@@ -40,7 +42,7 @@ func openBrokerJournal(path string, a BrokerApproval) (j *brokerJournal, err err
 	if e != nil {
 		return nil, errBroker
 	}
-	j = &brokerJournal{root: root}
+	j = &brokerJournal{root: root, path: path, directoryInfo: info}
 	defer func() {
 		if err != nil {
 			j.close()
@@ -57,6 +59,7 @@ func openBrokerJournal(path string, a BrokerApproval) (j *brokerJournal, err err
 		return j, errBroker
 	}
 	j.file = f
+	j.fileInfo, _ = f.Stat()
 	if !privateFile(f) || syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
 		return j, errBroker
 	}
@@ -74,7 +77,7 @@ func (j *brokerJournal) append(phase string, metadata map[string]any) error {
 	}{phase, metadata}
 	data, _ := json.Marshal(record)
 	data = append(data, '\n')
-	if _, err := j.file.Write(data); err != nil {
+	if n, err := j.file.Write(data); err != nil || n != len(data) {
 		return errBroker
 	}
 	if j.file.Sync() != nil {
@@ -92,4 +95,16 @@ func (j *brokerJournal) close() {
 	if j.root != nil {
 		_ = j.root.Close()
 	}
+}
+
+func (j *brokerJournal) check() error {
+	if j == nil || j.file == nil || !privateFile(j.file) {
+		return errBroker
+	}
+	d, e := os.Lstat(j.path)
+	f, fe := j.root.Lstat("broker.jsonl")
+	if e != nil || fe != nil || !brokerOwnedDirectory(d, true) || !os.SameFile(d, j.directoryInfo) || !os.SameFile(f, j.fileInfo) {
+		return errBroker
+	}
+	return nil
 }
