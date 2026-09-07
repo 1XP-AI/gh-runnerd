@@ -255,6 +255,8 @@ func (s *baselineHistory) collected() bool {
 
 func (s *baselineHistory) validExecutionResponse(r baselineRecord, a Approval) bool {
 	switch r.Stage {
+	case "identity-sample":
+		return s.validSampleRepresentation(r.Sample, a)
 	case "pair":
 		receipt := r.Pair.Receipt
 		return receipt == nil || receipt.ControllerIntent == workerRef(r.Intent) && receipt.PairSHA256 == pairDigest(r.Pair.Binding) && refPresent(controllerRef(receipt.WorkerBound))

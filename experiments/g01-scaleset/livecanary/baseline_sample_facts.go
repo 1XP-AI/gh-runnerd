@@ -1,6 +1,9 @@
 package livecanary
 
-import "github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/liveworker"
+import (
+	"github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/liveworker"
+	"reflect"
+)
 
 func validResponse(r observationResponse, endpoint string) bool {
 	if r.Endpoint != endpoint || r.Status != 0 && (r.Status < 100 || r.Status > 599) {
@@ -121,6 +124,94 @@ func (s *baselineHistory) acceptSampleThrough(f *baselineSample, a Approval, thr
 		s.lastLocal = l
 	} else if l.Outcome != liveworker.LocalNotFoundReported || l.HTTPStatus != 404 || l.State != nil {
 		return false
+	}
+	return true
+}
+
+// Unknown rounds still use the same bounded vocabulary. Nil is not attempted;
+// a nonnil zero W receipt means Observe returned before an owned inspect result.
+func (s *baselineHistory) validSampleRepresentation(f *baselineSample, a Approval) bool {
+	if f.SDK != nil {
+		r := f.SDK
+		if !validResponse(r.Response, "sdk_runner") {
+			return false
+		}
+		if r.Response.Outcome == observationPresent {
+			if r.ID != sdkRunnerID(s.jit.Runner.ID) || r.Name != s.jit.Runner.Name || r.ScaleSetID != s.setID {
+				return false
+			}
+		} else if (r.Response.Outcome != observationUnresolved && r.Response.Outcome != observationNotFound) || r.ID != 0 || r.Name != "" || r.ScaleSetID != 0 {
+			return false
+		}
+	}
+	if f.Job != nil {
+		if f.SDK == nil {
+			return false
+		}
+		r := f.Job
+		if r.Response.Endpoint != "rest_run" && r.Response.Endpoint != "rest_attempt_jobs" && r.Response.Endpoint != "rest_job" || !validResponse(r.Response, r.Response.Endpoint) {
+			return false
+		}
+		if r.ID != 0 {
+			attempt := r.Attempt
+			w := observedJobWire{ID: r.ID, RunID: r.RunID, RunAttempt: &attempt, HeadSHA: r.HeadSHA, Status: r.Status, Conclusion: r.Conclusion, RunnerID: r.RunnerID, RunnerName: r.RunnerName, RunnerGroupID: r.RunnerGroupID}
+			if !w.valid(a) || r.Attempt != 1 || r.Response.Outcome != observationPresent && r.Response.Outcome != observationPending {
+				return false
+			}
+		} else if !reflect.DeepEqual(*r, restJobObservation{Response: r.Response}) {
+			return false
+		}
+	}
+	if f.RESTAddressable && f.Job == nil || f.REST != nil && !f.RESTAddressable {
+		return false
+	}
+	if f.REST != nil {
+		r := f.REST
+		if !validResponse(r.Response, "rest_runner") {
+			return false
+		}
+		if r.Response.Outcome == observationPresent {
+			if r.ID <= 0 || r.Name != s.jit.Runner.Name || r.Busy == nil || r.Status != "online" && r.Status != "offline" {
+				return false
+			}
+		} else if r.Response.Outcome != observationUnresolved && r.Response.Outcome != observationNotFound || !reflect.DeepEqual(*r, restRunnerObservation{Response: r.Response}) {
+			return false
+		}
+	}
+	if f.Local != nil {
+		if f.SDK == nil || f.Job == nil || f.RESTAddressable && f.REST == nil {
+			return false
+		}
+		l := f.Local
+		if reflect.DeepEqual(*l, liveworker.LocalReceipt{}) {
+			return true
+		}
+		if l.PairSHA256 != s.pair.Receipt.PairSHA256 || l.ContainerID != s.handoff.Container.ContainerID || !refPresent(controllerRef(l.Intent)) || !refPresent(controllerRef(l.Result)) || l.Result.Sequence <= l.Intent.Sequence || l.Method != "GET" || l.Path != "/v1.45/containers/"+l.ContainerID+"/json" {
+			return false
+		}
+		switch l.Outcome {
+		case liveworker.LocalUnknown:
+			if l.HTTPStatus != 0 && (l.HTTPStatus < 100 || l.HTTPStatus > 599) || l.State != nil {
+				return false
+			}
+		case liveworker.LocalNotFoundReported:
+			if l.HTTPStatus != 404 || l.State != nil {
+				return false
+			}
+		case liveworker.LocalProfilePresent:
+			if l.HTTPStatus != 200 {
+				return false
+			}
+			if l.State != nil {
+				switch l.State.Status {
+				case liveworker.ContainerStatusUnknown, liveworker.ContainerStatusCreated, liveworker.ContainerStatusRunning, liveworker.ContainerStatusPaused, liveworker.ContainerStatusRestarting, liveworker.ContainerStatusRemoving, liveworker.ContainerStatusExited, liveworker.ContainerStatusDead:
+				default:
+					return false
+				}
+			}
+		default:
+			return false
+		}
 	}
 	return true
 }
