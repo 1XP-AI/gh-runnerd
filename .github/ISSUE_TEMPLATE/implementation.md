@@ -25,7 +25,7 @@ Meaningful failing test, passing contract/fault checks, and any required real-ru
 
 ## Agent and review
 
-Primary: Astra xhigh or Luna max. Reviewer and risk rationale:
+Primary: Luna max (`gpt-5.6-luna`, `max`). Reviewer and risk rationale:
 
 ## Completion
 
