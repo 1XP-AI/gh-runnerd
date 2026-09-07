@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -327,6 +328,40 @@ func TestPairedCrossStagePayloadsRefused(t *testing.T) {
 			if validBaselineShape(Event{Kind: "baseline", Baseline: &r}) {
 				t.Fatal("new payload accepted on legacy baseline stage")
 			}
+		}
+	}
+}
+
+func TestPairedCadenceWaitsAfterSlowRoundResult(t *testing.T) {
+	f := newPairedIntegrationFixture(t)
+	base := time.Now()
+	var elapsed atomic.Int64
+	var waits []time.Duration
+	clock := pairedBaselineCadence{now: func() time.Time { return base.Add(time.Duration(elapsed.Load())) }, wait: func(ctx context.Context, d time.Duration) error {
+		if ctx.Err() != nil {
+			return ErrQuarantine
+		}
+		waits = append(waits, d)
+		elapsed.Add(int64(d))
+		return nil
+	}}
+	// Real transport response, synthetic elapsed reader time. Operation and
+	// approval contexts keep their real deadlines throughout this fixture.
+	f.c.afterResponse = func(req *http.Request, _ *http.Response) {
+		if strings.HasSuffix(req.URL.Path, "/agents/81") {
+			elapsed.Add(int64(10 * time.Second))
+		}
+	}
+	out, err := runPairedBaselineWithCadence(context.Background(), &Driver{Approval: f.c.a, Journal: f.c.j, API: f.c.api}, f.w, clock)
+	if err != nil || out.Outcome != collectionCollected {
+		t.Fatal("slow round fixture")
+	}
+	if len(waits) != 7 {
+		t.Fatalf("missing completion-to-next-round gaps: %d", len(waits))
+	}
+	for _, d := range waits {
+		if d < 5*time.Second {
+			t.Fatal("round latency consumed the required gap")
 		}
 	}
 }
