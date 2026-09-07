@@ -99,8 +99,8 @@ func convertDriver(t *testing.T, d *Driver, state string) {
 	t.Helper()
 	res := requestDriver(t, d, "GET", "/manifest/callback?state="+url.QueryEscape(state)+"&code=synthetic-code", "", "")
 	bodyOf(t, res)
-	if res.StatusCode != 303 {
-		t.Fatalf("conversion status=%d", res.StatusCode)
+	if res.StatusCode != 303 || res.Header.Get("Location") != "/" {
+		t.Fatalf("conversion did not use clean redirect: status=%d", res.StatusCode)
 	}
 }
 func assertNoSecretFiles(t *testing.T, root string, secrets ...string) {
@@ -187,8 +187,8 @@ func TestManifestDriverConversionAmbiguityRetainsNameAndBlocksNewApp(t *testing.
 	api.convertError = errors.New("synthetic-secret-upstream")
 	state := beginDriver(t, d)
 	res := requestDriver(t, d, "GET", "/manifest/callback?state="+url.QueryEscape(state)+"&code=synthetic-code", "", "")
-	if res.StatusCode != 502 {
-		t.Fatal("conversion failure hidden")
+	if res.StatusCode != 303 || res.Header.Get("Location") != "/callback-result" {
+		t.Fatal("failed callback query not redirected away")
 	}
 	if strings.Contains(bodyOf(t, res), "synthetic-secret") {
 		t.Fatal("raw error leaked")
@@ -271,8 +271,8 @@ func TestCallbackBeforeRegistrationDoesNotConsumeAttempt(t *testing.T) {
 	d, api, _ := newDriverFixture(t)
 	csrf := csrfFrom(t, bodyOf(t, requestDriver(t, d, "GET", "/", "", "")))
 	res := requestDriver(t, d, "GET", "/manifest/callback?state="+csrf+"&code=synthetic-code", "", "")
-	if res.StatusCode != 409 {
-		t.Error("out-of-order callback not rejected")
+	if res.StatusCode != 303 || res.Header.Get("Location") != "/callback-result" {
+		t.Error("out-of-order callback not redirected away")
 	}
 	bodyOf(t, res)
 	if api.conversions != 0 {

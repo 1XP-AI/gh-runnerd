@@ -143,6 +143,7 @@ func StartManifest(parent context.Context, p Proposal, path string, api DriverAP
 		return nil, errDriver
 	}
 	d.attempt.onSuccess = func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/", http.StatusSeeOther) }
+	d.attempt.onReject = cleanCallbackFailure
 	d.server = &http.Server{Handler: d, ReadHeaderTimeout: 2 * time.Second, ReadTimeout: 5 * time.Second, WriteTimeout: 20 * time.Second, IdleTimeout: 2 * time.Second, MaxHeaderBytes: 8192, ErrorLog: log.New(io.Discard, "", 0), BaseContext: func(net.Listener) context.Context { return ctx }}
 	served := make(chan error, 1)
 	go func() { served <- d.server.Serve(listener) }()
@@ -216,7 +217,7 @@ func (d *Driver) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		prepared := d.journal.record.Phase == "prepared"
 		d.mu.Unlock()
 		if prepared {
-			http.Error(w, "registration has not started", http.StatusConflict)
+			cleanCallbackFailure(w, r)
 			return
 		}
 		d.attempt.ServeHTTP(w, r)
@@ -226,10 +227,15 @@ func (d *Driver) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request", 400)
 		return
 	}
-	if r.Method == http.MethodGet && r.URL.Path == "/" {
+	if r.Method == http.MethodGet && (r.URL.Path == "/" || r.URL.Path == "/callback-result") {
 		origins := r.Header.Values("Origin")
 		if len(origins) > 1 || (len(origins) == 1 && origins[0] != d.baseURL) {
 			http.Error(w, "invalid request", 403)
+			return
+		}
+		if r.URL.Path == "/callback-result" {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			_, _ = w.Write([]byte("Callback not accepted. Return to the local enrollment page. If conversion failed or was interrupted, inspect the recorded App and use manual import.\n"))
 			return
 		}
 		d.mu.Lock()
@@ -305,6 +311,11 @@ func (d *Driver) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(d.summary)
 	close(d.success)
+}
+
+func cleanCallbackFailure(w http.ResponseWriter, r *http.Request) {
+	// Fixed local path: never copy any query parameter into Location or the page.
+	http.Redirect(w, r, "/callback-result", http.StatusSeeOther)
 }
 func (d *Driver) localForm(w http.ResponseWriter, r *http.Request) (url.Values, error) {
 	origins := r.Header.Values("Origin")

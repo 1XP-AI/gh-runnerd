@@ -2,6 +2,7 @@ package enrollment
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -35,5 +36,46 @@ func TestJournalAbruptExitPreservesOwnershipAndReleasesLock(t *testing.T) {
 	p.Organizations = api.candidate.Organizations
 	if result, err := VerifyManual(context.Background(), p, root, 71, io.NopCloser(strings.NewReader(string(api.candidate.PEM))), api); err != nil || result.VerifiedOrganizations != 2 {
 		t.Fatal("same-App recovery failed after child exit")
+	}
+}
+
+func TestJournalParentSyncPrecedesIntentAndRepeatsAfterFailure(t *testing.T) {
+	parent := t.TempDir()
+	path := filepath.Join(parent, "attempt")
+	calls := 0
+	syncFailure := func(root *os.Root) error {
+		calls++
+		actual, err := root.Stat(".")
+		expected, e := os.Stat(parent)
+		if err != nil || e != nil || !os.SameFile(actual, expected) {
+			t.Error("sync did not capture the existing parent")
+		}
+		if _, err := root.Stat("attempt"); err != nil {
+			t.Error("parent sync preceded directory creation")
+		}
+		if _, err := root.Stat("attempt/attempt.json"); !os.IsNotExist(err) {
+			t.Error("intent written before parent sync")
+		}
+		return errors.New("synthetic-sync-failure")
+	}
+	for i := 0; i < 2; i++ {
+		j, err := openJournalWithParentSync(path, driverProposal(), false, 0, syncFailure)
+		if j != nil {
+			j.close()
+		}
+		if err == nil {
+			t.Fatal("unsynced directory accepted")
+		}
+	}
+	if calls != 2 {
+		t.Fatalf("parent sync attempts=%d; retry skipped existing entry", calls)
+	}
+	j, err := openJournalWithParentSync(path, driverProposal(), false, 0, func(root *os.Root) error { calls++; return nil })
+	if err != nil {
+		t.Fatal("successful sync did not permit initial journal")
+	}
+	defer j.close()
+	if calls != 3 || j.phase("registration_started", 0, nil) != nil {
+		t.Fatal("registration did not follow parent sync")
 	}
 }

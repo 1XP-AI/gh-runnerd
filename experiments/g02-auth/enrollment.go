@@ -26,6 +26,7 @@ type Attempt struct {
 	now         func() time.Time
 	convert     func(context.Context, string) error
 	onSuccess   http.HandlerFunc // optional driver continuation; set before serving
+	onReject    http.HandlerFunc // driver removes callback query on rejection too
 	mu          sync.Mutex
 	consumed    bool
 }
@@ -53,7 +54,13 @@ func (a *Attempt) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	reject := func(status int, message string) { http.Error(w, message, status) }
+	reject := func(status int, message string) {
+		if a.onReject != nil {
+			a.onReject(w, r)
+			return
+		}
+		http.Error(w, message, status)
+	}
 	if r.Method != http.MethodGet || r.Host != a.host || r.URL.Path != callbackPath || r.URL.EscapedPath() != callbackPath || r.URL.Fragment != "" || len(r.URL.RawQuery) > 2048 {
 		reject(http.StatusBadRequest, "invalid callback")
 		return

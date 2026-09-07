@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"reflect"
 	"syscall"
 )
@@ -35,11 +36,26 @@ func privateFile(f *os.File) bool {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	return ok && info.Mode().IsRegular() && info.Mode().Perm() == 0600 && stat.Uid == uint32(os.Getuid()) && stat.Nlink == 1
 }
-func openJournal(path string, p Proposal, manual bool, appID int64) (j *journal, err error) {
-	if e := os.Mkdir(path, 0700); e != nil && !os.IsExist(e) {
+func openJournal(path string, p Proposal, manual bool, appID int64) (*journal, error) {
+	return openJournalWithParentSync(path, p, manual, appID, syncDirectory)
+}
+func openJournalWithParentSync(path string, p Proposal, manual bool, appID int64, syncParent func(*os.Root) error) (j *journal, err error) {
+	path = filepath.Clean(path)
+	name := filepath.Base(path)
+	if name == "." || name == ".." || name == string(filepath.Separator) || syncParent == nil {
 		return nil, errJournal
 	}
-	info, e := os.Lstat(path)
+	// Capture the existing parent before creating the child. Sync its directory
+	// entry even on reopen: a previous invocation may have failed this sync.
+	parent, e := os.OpenRoot(filepath.Dir(path))
+	if e != nil {
+		return nil, errJournal
+	}
+	defer parent.Close()
+	if e := parent.Mkdir(name, 0700); e != nil && !os.IsExist(e) {
+		return nil, errJournal
+	}
+	info, e := parent.Lstat(name)
 	if e != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
 		return nil, errJournal
 	}
@@ -47,7 +63,7 @@ func openJournal(path string, p Proposal, manual bool, appID int64) (j *journal,
 	if !ok || stat.Uid != uint32(os.Getuid()) {
 		return nil, errJournal
 	}
-	root, e := os.OpenRoot(path)
+	root, e := parent.OpenRoot(name)
 	if e != nil {
 		return nil, errJournal
 	}
@@ -59,6 +75,9 @@ func openJournal(path string, p Proposal, manual bool, appID int64) (j *journal,
 	}()
 	actual, e := root.Stat(".")
 	if e != nil || !os.SameFile(info, actual) {
+		return j, errJournal
+	}
+	if syncParent(parent) != nil {
 		return j, errJournal
 	}
 	lock, e := root.OpenFile("active.lock", os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
@@ -122,7 +141,10 @@ func sameOrganizations(a, b []Binding) bool {
 	return reflect.DeepEqual(a, b)
 }
 func (j *journal) syncDir() error {
-	f, e := j.root.Open(".")
+	return syncDirectory(j.root)
+}
+func syncDirectory(root *os.Root) error {
+	f, e := root.Open(".")
 	if e != nil {
 		return e
 	}
