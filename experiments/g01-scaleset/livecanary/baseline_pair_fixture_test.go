@@ -38,7 +38,15 @@ type pairedIntegrationFixture struct {
 	remote                                     func(*http.Request, any) any
 }
 
+type pairedFixtureConfiguration struct {
+	workerPhases       []string
+	controllerResponse func(string, any) any
+}
+
 func newPairedIntegrationFixture(t *testing.T) *pairedIntegrationFixture {
+	return newPairedIntegrationFixtureConfigured(t, nil)
+}
+func newPairedIntegrationFixtureConfigured(t *testing.T, config *pairedFixtureConfiguration) *pairedIntegrationFixture {
 	t.Helper()
 	f := &pairedIntegrationFixture{}
 	a := approval()
@@ -51,6 +59,9 @@ func newPairedIntegrationFixture(t *testing.T) *pairedIntegrationFixture {
 					m["runnerName"] = a.workerName()
 				}
 			}
+		}
+		if config != nil && config.controllerResponse != nil {
+			return config.controllerResponse(stage, value)
 		}
 		return value
 	}, hex.EncodeToString(empty[:]))
@@ -98,6 +109,9 @@ func newPairedIntegrationFixture(t *testing.T) *pairedIntegrationFixture {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	wa := liveworker.Approval{RunnerUpdatesDisabled: true, HarnessSHA: a.HarnessSHA, WorkflowSHA: a.WorkflowSHA, OwnerNonce: a.OwnerNonce, Controller: a.Controller, Endpoint: filepath.Join(dir, "api.sock"), DaemonID: "fixture-daemon", ImageID: "sha256:" + strings.Repeat("a", 64), Image: liveworker.ImageReference, ExpiresAt: a.ExpiresAt, Phases: []string{"create", "start", "inspect"}}
+	if config != nil && config.workerPhases != nil {
+		wa.Phases = append([]string(nil), config.workerPhases...)
+	}
 	listener, err := net.Listen("unix", wa.Endpoint)
 	if err != nil {
 		t.Fatal("private Unix listener")
