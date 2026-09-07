@@ -22,6 +22,10 @@ type Docker struct {
 	client   *http.Client
 }
 
+func socketAllowed(info os.FileInfo) bool {
+	return info != nil && info.Mode()&os.ModeSocket != 0 && info.Mode().Perm()&0007 == 0
+}
+
 // NewDocker does not connect or read environment-based Docker configuration.
 // Each request goes directly to the one approved local Unix socket; Docker CLI,
 // contexts, credential helpers, image pulls and host/TCP endpoints are absent.
@@ -35,7 +39,7 @@ func NewDocker(a Approval) (*Docker, error) {
 			return nil, ErrApproval
 		}
 		info, err := os.Lstat(a.Endpoint)
-		if err != nil || info.Mode()&os.ModeSocket == 0 || info.Mode().Perm()&0007 != 0 {
+		if err != nil || !socketAllowed(info) {
 			return nil, ErrApproval
 		}
 		return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "unix", a.Endpoint)

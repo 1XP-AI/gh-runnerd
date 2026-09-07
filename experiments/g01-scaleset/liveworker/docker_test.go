@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -22,6 +23,122 @@ type dockerFixture struct {
 	requests atomic.Int64
 	approval Approval
 	socket   string
+}
+
+type hookJournal struct {
+	Journal
+	operation   string
+	afterIntent func()
+}
+
+func (j hookJournal) Append(e Event) error {
+	if err := j.Journal.Append(e); err != nil {
+		return err
+	}
+	if e.Kind == "intent" && e.Operation == j.operation {
+		j.afterIntent()
+	}
+	return nil
+}
+
+type replacementSocket struct {
+	calls       atomic.Int64
+	receivedJIT atomic.Bool
+}
+
+func replaceSocket(t *testing.T, path string) *replacementSocket {
+	t.Helper()
+	if os.Rename(path, path+".original") != nil {
+		t.Fatal("rename synthetic socket failed")
+	}
+	listener, err := net.Listen("unix", path)
+	if err != nil || os.Chmod(path, 0600) != nil {
+		t.Fatal("replacement synthetic socket failed")
+	}
+	replacement := &replacementSocket{}
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		replacement.calls.Add(1)
+		data, _ := io.ReadAll(io.LimitReader(r.Body, 2*maxJIT))
+		if strings.Contains(string(data), syntheticJIT) {
+			replacement.receivedJIT.Store(true)
+		}
+		if strings.HasSuffix(r.URL.Path, "/create") {
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"Id": strings.Repeat("c", 64), "Warnings": []string{}})
+		} else {
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}), ErrorLog: log.New(io.Discard, "", 0)}
+	go server.Serve(listener)
+	t.Cleanup(func() { server.Close(); listener.Close() })
+	return replacement
+}
+
+func TestSocketReplacementAfterPreflightCannotReceiveAnyMutation(t *testing.T) {
+	for _, phase := range []string{"create", "start", "cleanup"} {
+		t.Run(phase, func(t *testing.T) {
+			f := unixFixture(t)
+			if phase != "create" && f.driver.Run(context.Background(), "create", syntheticJIT) != nil {
+				t.Fatal("synthetic setup failed")
+			}
+			operation := phase
+			if phase == "cleanup" {
+				operation = "delete"
+			}
+			var replacement *replacementSocket
+			f.driver.Journal = hookJournal{f.driver.Journal, operation, func() { replacement = replaceSocket(t, f.socket) }}
+			jit := ""
+			if phase == "create" {
+				jit = syntheticJIT
+			}
+			err := f.driver.Run(context.Background(), phase, jit)
+			if replacement == nil {
+				t.Fatal("replacement boundary not reached")
+			}
+			if err == nil || replacement.calls.Load() != 0 || replacement.receivedJIT.Load() || !replay(f.driver.Journal.Events()).uncertain {
+				t.Fatalf("socket replacement crossed authority boundary: error=%v calls=%d received_jit=%t", err, replacement.calls.Load(), replacement.receivedJIT.Load())
+			}
+			requests := f.requests.Load()
+			_ = f.driver.Run(context.Background(), phase, jit)
+			if f.requests.Load() != requests || replacement.calls.Load() != 0 {
+				t.Fatal("replacement mutation retried")
+			}
+		})
+	}
+}
+
+type socketMetadata struct {
+	os.FileInfo
+	uid uint32
+}
+
+func (s socketMetadata) Sys() any {
+	copy := *s.FileInfo.Sys().(*syscall.Stat_t)
+	copy.Uid = s.uid
+	return &copy
+}
+
+func TestSocketModesAndControllerOwnership(t *testing.T) {
+	for _, mode := range []os.FileMode{0600, 0755, 0757, 0775} {
+		t.Run(mode.String(), func(t *testing.T) {
+			f := unixFixture(t)
+			if os.Chmod(f.socket, mode) != nil {
+				t.Fatal("synthetic chmod failed")
+			}
+			err := f.driver.Run(context.Background(), "create", syntheticJIT)
+			allowed := mode == 0600 || mode == 0755
+			if (err == nil) != allowed || (!allowed && f.requests.Load() != 0) {
+				t.Fatal("socket mode policy mismatch")
+			}
+			info, err := os.Lstat(f.socket)
+			if err != nil {
+				t.Fatal("synthetic stat failed")
+			}
+			if socketAllowed(socketMetadata{info, uint32(os.Geteuid() + 1)}) {
+				t.Fatal("foreign socket owner accepted")
+			}
+		})
+	}
 }
 
 // The actual production Unix HTTP client connects only to this private synthetic
