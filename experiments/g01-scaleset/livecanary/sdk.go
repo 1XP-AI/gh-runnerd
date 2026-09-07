@@ -194,7 +194,7 @@ type workflowRun struct {
 }
 
 func matchesApprovedRun(approval Approval, id int64, run workflowRun) bool {
-	return !(run.ID != id || run.HeadSHA != approval.WorkflowSHA || run.Event != "workflow_dispatch" || run.Path != approval.WorkflowPath || run.RunAttempt != 1 || run.Repository.ID != approval.RepositoryID || run.HeadRepository.ID != approval.RepositoryID || !run.Repository.Private || !run.HeadRepository.Private || run.HeadRepository.Fork)
+	return !(run.ID != id || run.HeadSHA != approval.WorkflowSHA || run.Event != "workflow_dispatch" || run.Path != approval.WorkflowPath || run.RunAttempt != 1 || run.Repository.ID != approval.RepositoryID || run.HeadRepository.ID != approval.RepositoryID || !run.Repository.Private || !run.HeadRepository.Private || run.Repository.Fork || run.HeadRepository.Fork)
 }
 
 func (a *SDKAPI) VerifyRun(ctx context.Context, approval Approval, id int64) error {

@@ -24,6 +24,11 @@ phase, CLI/broker slot, journal schema, admission claim or worker operation chan
   remain unresolved. It rejects pagination, identity contradictions, retracted
   positive associations, status regression and changed terminal conclusions
   between list and detail. Forward status progression is allowed.
+  The exact job detail must explicitly report `run_attempt: 1`; missing/null
+  detail attempts remain unresolved. The attempt-specific list may omit that
+  optional field, but a populated contradiction refuses before the detail read.
+  This is a stricter experiment evidence policy, not a GitHub wire-presence
+  guarantee. Both base and head repository fork flags must be false.
 
 The readers are stateless. SDK runner IDs, REST runner IDs and numeric REST job
 IDs have distinct private types. No unused SDK job/request fields, history merger
@@ -35,8 +40,9 @@ still do not establish worker exit, completion of the SDK request or cleanup.
 
 New REST decoders reject malformed/trailing JSON and duplicate/folded keys,
 including nested approved-source identities, while accepting unrelated fields.
-The original fault-harness decoder and its ownership/statistics fences retain
-their behavior. The supported SDK decoder remains unchanged; no stricter SDK
+The shared run predicate also rejects a forked base repository in the existing
+`VerifyRun` path. The original fault-harness decoder and ownership/statistics
+fences remain unchanged. The supported SDK decoder remains unchanged; no stricter SDK
 wire-validation guarantee is implied.
 
 ## Authority and request bounds
@@ -93,7 +99,17 @@ the configured root fuzz target, module/license checks, both offline experiment
 modules and their tagged commands, and the configured vulnerability scan. G01
 livecanary passed in 6.055s; G02 auth passed in 28.630s. No vulnerability was
 reported by that configured scan. This final documentation update changes no
-implementation or tests.
+implementation or tests at that head.
+
+GitHub review subsequently found two source/attempt contradictions. Behavioral
+red `7747531` failed in 0.570s: a base-only fork passed both source readers, and
+missing or conflicting job attempts were accepted and reported as attempt 1.
+The test fixtures now use independent base/head repository maps, preserving
+isolated fork mutations. Complete matching attempt facts and omitted/null list
+attempts are positive controls. The correction checks both fork values,
+rejects any populated job-attempt contradiction and requires explicit exact-job
+corroboration before returning an attempt fact. Final corrected-head checks and
+reviews are recorded in the PR; the earlier full check does not cover this fix.
 
 ## Work still required
 

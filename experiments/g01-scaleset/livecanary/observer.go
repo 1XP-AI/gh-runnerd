@@ -120,6 +120,7 @@ func (a *SDKAPI) observeRESTRunner(ctx context.Context, id restRunnerID, name st
 type observedJobWire struct {
 	ID            restJobID     `json:"id"`
 	RunID         int64         `json:"run_id"`
+	RunAttempt    *int          `json:"run_attempt"`
 	HeadSHA       string        `json:"head_sha"`
 	Status        string        `json:"status"`
 	Conclusion    *string       `json:"conclusion"`
@@ -167,10 +168,13 @@ func (a *SDKAPI) observeRESTJob(ctx context.Context, attempt int, previous restJ
 	if err != nil || out.Response.Outcome == observationNotFound {
 		return out, err
 	}
-	if !detail.valid(a.approval) || detail.ID != candidate.ID || !samePositiveAssociation(candidate, detail) || !jobProgresses(candidate, detail) {
+	// The list's path fixes its attempt, but this unscoped exact GET must
+	// explicitly corroborate it. The optional wire field is required by this
+	// experiment's evidence policy, not guaranteed to be present by GitHub.
+	if detail.RunAttempt == nil || !detail.valid(a.approval) || detail.ID != candidate.ID || !samePositiveAssociation(candidate, detail) || !jobProgresses(candidate, detail) {
 		return out, ErrRemote
 	}
-	out.ID, out.RunID, out.Attempt, out.HeadSHA = detail.ID, detail.RunID, attempt, detail.HeadSHA
+	out.ID, out.RunID, out.Attempt, out.HeadSHA = detail.ID, detail.RunID, *detail.RunAttempt, detail.HeadSHA
 	out.Status, out.Conclusion = detail.Status, detail.Conclusion
 	out.RunnerID, out.RunnerName, out.RunnerGroupID = detail.RunnerID, detail.RunnerName, detail.RunnerGroupID
 	out.Response.Outcome = observationPending
@@ -181,7 +185,7 @@ func (a *SDKAPI) observeRESTJob(ctx context.Context, attempt int, previous restJ
 }
 
 func (j observedJobWire) valid(a Approval) bool {
-	if j.ID <= 0 || j.RunID != a.WorkflowRunID || j.HeadSHA != a.WorkflowSHA {
+	if j.ID <= 0 || j.RunID != a.WorkflowRunID || j.HeadSHA != a.WorkflowSHA || (j.RunAttempt != nil && *j.RunAttempt != 1) {
 		return false
 	}
 	switch j.Status {
