@@ -17,12 +17,10 @@ gofmt_bin="${goroot}/bin/gofmt"
 files_file="$(mktemp "${TMPDIR:-/tmp}/gh-runnerd-gofmt.XXXXXX")"
 trap 'rm -f "${files_file}"' EXIT
 
-rg_status=0
-rg --files -g '*.go' -0 > "${files_file}" || rg_status=$?
-if ((rg_status != 0 && rg_status != 1)); then
-	printf 'gofmt file discovery failed (rg exit %s)\n' "${rg_status}" >&2
-	exit "${rg_status}"
-fi
+# Git is already required by checkout/development. Include tracked and new
+# non-ignored files without requiring ripgrep on hosted runners. NUL delimiters
+# preserve paths containing spaces or newlines.
+git ls-files --cached --others --exclude-standard -z -- '*.go' > "${files_file}"
 
 file_count=0
 format_status=0

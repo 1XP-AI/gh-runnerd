@@ -57,6 +57,26 @@ For integration coverage, temporary links to those reviewed modules were used so
 
 The fuzz command was also checked with a disposable valid `FuzzSmokeFixture`. `make fuzz-smoke FUZZTIME=1s` discovered `FuzzSmokeFixture`, ran it for the one-second smoke window, and returned `PASS`; the fixture was removed afterward. The repository currently has no product fuzz target, so the normal public run reports a visible skip rather than claiming fuzz coverage.
 
+## Independent review corrections
+
+An independent Astra `xhigh` review identified that source-text fuzz discovery
+could report execution for a build-excluded target, and that `rg` was an
+undeclared prerequisite on the hosted image. The integrator reproduced the
+first problem before fixing it: a disposable target guarded by an absent build
+tag printed `[no test files]` followed by `RAN: 1`, while exiting zero.
+
+Discovery now uses Go's compiled test listing, with checked package/compilation
+exit status. The same excluded-target fixture reports `SKIPPED`; adding one real
+`FuzzActive` target and an ordinary `Fuzzhelper` function runs exactly one target.
+That smoke run completed seed coverage and 1,221,073 fuzz executions before
+`PASS`. A malformed active test then made discovery exit 1 without `RAN` or
+`SKIPPED`. All disposable fixtures were removed. These are script validation
+results, not product fuzz coverage.
+
+Formatting uses NUL-delimited Git file discovery and license inventory lookup
+uses standard `grep`, so public CI does not require ripgrep. The combined
+`make check` suite was rerun after these fixes.
+
 ## Gaps and rollback
 
 The bootstrap package has no product behavior tests yet; `go test` and `go test -race` therefore compile the package and visibly report `[no test files]`. G04 owns the first behavior contracts and should add meaningful unit and fuzz targets. Live GitHub, Docker, native hardware, credential and daemon suites remain explicit maintainer-controlled profiles outside this public workflow.

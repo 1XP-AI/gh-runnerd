@@ -21,7 +21,7 @@ module_count=0
 while IFS= read -r module_path; do
 	[[ -n "${module_path}" ]] || continue
 	module_count=$((module_count + 1))
-	if ! rg --fixed-strings --quiet -- "| \`${module_path}\` |" "${inventory}"; then
+	if ! grep -F -q -- "| \`${module_path}\` |" "${inventory}"; then
 		printf 'license check failed: %s is absent from %s\n' "${module_path}" "${inventory}" >&2
 		exit 1
 	fi
