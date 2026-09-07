@@ -158,6 +158,10 @@ func (s *baselineHistory) executionRecord(r baselineRecord, ref controllerRecord
 	if r.Stage == "roster-anchor" && (r.Roster.Observation == nil || !validRosterObservation(*r.Roster.Observation, a.Organization)) {
 		return ErrJournal
 	}
+	// Unknown preserves observations, not malformed identities or invented refs.
+	if !s.validExecutionResponse(r, a) {
+		return ErrJournal
+	}
 	if r.Outcome == "unknown" {
 		s.uncertain = true
 		return nil
@@ -247,4 +251,25 @@ func (s *baselineHistory) outstanding() sessionOutstanding {
 }
 func (s *baselineHistory) collected() bool {
 	return !s.uncertain && s.rounds == 8 && s.complete && s.continued && s.jit != nil && s.jit.Runner != nil && s.runnerID == sdkRunnerID(s.jit.Runner.ID) && s.runnerName == s.jit.Runner.Name && s.lastSDK != nil && s.lastJob != nil && s.lastREST != nil && s.lastLocal != nil
+}
+
+func (s *baselineHistory) validExecutionResponse(r baselineRecord, a Approval) bool {
+	switch r.Stage {
+	case "pair":
+		receipt := r.Pair.Receipt
+		return receipt == nil || receipt.ControllerIntent == workerRef(r.Intent) && receipt.PairSHA256 == pairDigest(r.Pair.Binding) && refPresent(controllerRef(receipt.WorkerBound))
+	case "jit":
+		runner := r.JIT.Runner
+		return (r.HTTPStatus == 0 || r.HTTPStatus >= 100 && r.HTTPStatus <= 599) && (runner == nil || r.HTTPStatus == 200 && runner.ID > 0 && runner.Name == a.workerName() && runner.ScaleSetID == s.setID)
+	case "handoff":
+		if r.Handoff.Input != s.expectedHandoff(r.Intent) {
+			return false
+		}
+		c := r.Handoff.Container
+		return c == nil || c.PairSHA256 == s.pair.Receipt.PairSHA256 && c.HandoffIntent == workerRef(r.Intent) && refPresent(controllerRef(c.CreateIntent)) && refPresent(controllerRef(c.CreateResult)) && c.CreateResult.Sequence > c.CreateIntent.Sequence && validSHA256(c.ContainerID) && validSHA256(c.EnvDigest) && validSHA256(c.LabelsDigest)
+	case "worker-start":
+		ref := r.Start.WorkerResult
+		return ref == (liveworker.RecordRef{}) || refPresent(controllerRef(ref)) && ref.Sequence > r.Start.Container.CreateResult.Sequence
+	}
+	return true
 }
