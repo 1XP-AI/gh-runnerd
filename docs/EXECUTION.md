@@ -8,7 +8,7 @@ The [GitHub Project](https://github.com/orgs/1XP-AI/projects/2) is the planning/
 |---|---|---|
 | All implementation areas, including auth, protocol, concurrency, resource admission, lifecycle, providers, architecture, tests, packaging and docs | Luna / `gpt-5.6-luna`, `max` | Independent Luna `max`; use a second independent Luna `max` pass for security/recovery boundaries |
 
-Use Luna max after the contract and dependencies are settled. Escalate discovered architecture, secret handling, process isolation or concurrency changes to an additional independent Luna max review; do not stretch a small issue into an unreviewed redesign. Parallelize only independent issues with non-overlapping file ownership; no simultaneous edits to shared protocol/state definitions. Earlier Astra/Luna allocations in historical review and evidence records are preserved as historical facts.
+Use Luna max for every issue, including contract-setting evidence gates such as G01, G02 and G04. Verify each issue's contract and dependencies before dependent implementation begins. Escalate discovered architecture, secret handling, process isolation or concurrency changes to an additional independent Luna max review; do not stretch a small issue into an unreviewed redesign. Parallelize only independent issues with non-overlapping file ownership; no simultaneous edits to shared protocol/state definitions. Earlier Astra/Luna allocations in historical review and evidence records are preserved as historical facts.
 
 ## Per-issue goal workflow
 

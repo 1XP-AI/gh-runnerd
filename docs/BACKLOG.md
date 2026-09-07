@@ -40,7 +40,7 @@ The machine-readable source is [backlog.json](backlog.json). Published issue num
 ## Independent G12 arithmetic slice
 
 [G12a #40](https://github.com/1XP-AI/gh-runnerd/issues/40) extracts only the
-already specified numeric rules from G12 after independent Luna max contract
+already specified numeric rules from G12 after the independent Astra contract
 review. It depends on completed G03 and its issue's numeric contract. It can
 proceed alongside G01/G02 because it has no GitHub, credential, provider,
 configuration, persistence or worker-operation dependency. G04's shared

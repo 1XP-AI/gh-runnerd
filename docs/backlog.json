@@ -442,7 +442,7 @@
       "acceptance": [
         "Three pure calculations implement the approved numeric contract without overflow or input mutation.",
         "No new dependency or live integration; future caller accounting, stale calculation and atomic application limits are explicit.",
-        "Independent Luna max contract/counterexample review and exact-head GitHub Codex review resolved before merge.",
+        "Independent Astra contract/counterexample review and exact-head GitHub Codex review resolved before merge.",
         "Completing this child does not complete G12 or waive G01/G02/G04/G05 integration gates."
       ],
       "risk": "High",
