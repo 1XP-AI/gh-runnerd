@@ -191,3 +191,54 @@ func TestStatisticsResultWriteFailureRetainsFenceAcrossRestart(t *testing.T) {
 		t.Fatalf("failed observation persistence lost the pre-read fence: cleanup=%v deletes=%d", err, f.deleteCalls)
 	}
 }
+
+func TestUnsafeStatisticsStopNewEffectsBeforeControlledMessage(t *testing.T) {
+	for _, source := range []string{"owned", "session", "session-set", "poll"} {
+		for _, phase := range []string{"after-ack", "acquire-loss", "jit-loss"} {
+			if phase == "jit-loss" && source != "owned" {
+				continue
+			}
+			t.Run(source+"/"+phase, func(t *testing.T) {
+				d, f, j := created(t)
+				message := f.session.message
+				statisticsSource(d, f, j, source, &scaleset.RunnerScaleSetStatistic{TotalRunningJobs: 1})
+				if source == "poll" {
+					message.Statistics.TotalRunningJobs = 1
+				}
+				f.session.message = message
+				if err := d.Run(context.Background(), phase); !errors.Is(err, ErrQuarantine) || f.session.ack != 0 || f.session.acquire != 0 || f.session.close != 0 || f.jitCalls != 0 {
+					t.Fatalf("unsafe statistics admitted effects: phase=%v ack=%d acquire=%d close=%d jit=%d", err, f.session.ack, f.session.acquire, f.session.close, f.jitCalls)
+				}
+			})
+		}
+	}
+}
+
+func TestZeroStatisticsAndOptionalAbsencePermitEmptyCleanup(t *testing.T) {
+	for _, source := range []string{"create", "owned", "inspect", "session", "session-set", "poll"} {
+		t.Run(source, func(t *testing.T) {
+			d, f, j := created(t)
+			phase := statisticsSource(d, f, j, source, &scaleset.RunnerScaleSetStatistic{})
+			err := d.Run(context.Background(), phase)
+			if err != nil && !errors.Is(err, ErrNoMessage) {
+				t.Fatalf("zero/optional absence fixture refused: %v", err)
+			}
+			if err := d.Run(context.Background(), "cleanup"); err != nil || f.deleteCalls != 1 {
+				t.Fatalf("genuine empty cleanup refused: %v", err)
+			}
+		})
+	}
+}
+
+func TestOlderPendingIntentSurvivesSuccessfulZeroInspection(t *testing.T) {
+	d, f, j := created(t)
+	if j.Append(Event{Kind: "intent", Operation: "session-open"}) != nil {
+		t.Fatal("synthetic pending intent")
+	}
+	if err := d.Run(context.Background(), "inspect"); err != nil {
+		t.Fatalf("read-only zero inspection refused: %v", err)
+	}
+	if !replay(j.Events()).uncertain || d.Run(context.Background(), "cleanup") == nil || f.deleteCalls != 0 {
+		t.Fatal("a later successful observation released an older pending intent")
+	}
+}
