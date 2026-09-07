@@ -32,13 +32,25 @@ func runPairedTerminalWithCadence(ctx context.Context, d *Driver, w *liveworker.
 	return result, err
 }
 
-// A terminal child reserves its own maximum intent/result plus a parent unknown
-// and final summary. Capacity is rechecked after every durable intent boundary.
+// Reserve only records still needed by the actual replayed terminal stage.
+// Every caller retains the current pair/authority check before this capacity check.
 func (s *pairedBaselineScope) terminalCapacity() error {
+	state, err := s.state()
+	if err != nil {
+		return err
+	}
+	records := 4 // Next child intent/result, parent closure and collection summary.
+	if state.pending != nil && state.pending.Stage == "terminal" {
+		if state.child != nil {
+			records = 3 // The actual child intent is already durable.
+		} else if state.terminalStep == len(terminalSteps) {
+			records = 2 // All children finished; only parent and summary remain.
+		}
+	}
 	s.journal.mu.Lock()
 	defer s.journal.mu.Unlock()
 	f, err := s.journal.file.Stat()
-	if err != nil || s.journal.writeFailed || f.Size()+4*baselineRecordLimit > baselineJournalLimit {
+	if err != nil || s.journal.writeFailed || f.Size()+int64(records*baselineRecordLimit) > baselineJournalLimit {
 		return ErrJournal
 	}
 	return nil
@@ -167,14 +179,6 @@ func (s *pairedBaselineScope) terminalStepCall(stage string) error {
 	}
 	if callErr != nil {
 		return ErrQuarantine
-	}
-	if stage == "terminal-roster-final" {
-		// This actual final child result is durable. Only its parent closure and
-		// collection summary remain; keep both journals' current-authority check.
-		if err := s.checkPair(); err != nil {
-			return err
-		}
-		return s.journal.baselineCapacity()
 	}
 	return s.boundary()
 }

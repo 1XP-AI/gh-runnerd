@@ -76,12 +76,12 @@ experiment. It does not establish a general SDK scale-set absence guarantee.
 
 Terminal children use the existing private baseline event branch and the existing
 single parent/serial child slots. Each effect is preceded by a durable intent and
-fresh authority/capacity checks. The controller reserves the maximum bounded
-intent/result, parent-unknown and summary space; the limits remain 16 KiB per
-record and 1 MiB per journal. After the actual final roster result is durable,
-only the parent closure and collection summary remain, so the final boundary
-reserves two maximum records while retaining the same current C/W authority
-check. All pre-effect reservations remain unchanged. No effect follows uncertainty, lost authority,
+fresh authority/capacity checks. Actual replay determines the remaining bounded
+records: four before a child intent (intent/result, parent closure and summary),
+three once that child intent is durable, and two after the final child result
+while its parent remains open. The limits remain 16 KiB per record and 1 MiB per
+journal. Every boundary retains the same current C/W authority check. A later
+child still requires its own four-record reserve. No effect follows uncertainty, lost authority,
 insufficient capacity or persistence failure. A child unknown can close its
 actual parent unknown; it cannot resume collection or legacy cleanup.
 
@@ -147,6 +147,13 @@ Recorded checkpoints:
   deletes. The guard now refuses before the prefix. Its missing-C-cleanup,
   unchanged collection-only, four original W-phase and full terminal positive
   controls passed with race in 5.697 seconds.
+- Pending-child capacity red `94f6558`, race 5.937 seconds: legal four-record
+  reserves passed before real child intents, but their actual bytes reduced
+  remaining space to 64,805/64,803 bytes and incorrectly prevented set DELETE or
+  the final roster read. Exact three-record cases also failed. Replay-derived
+  four/three/two accounting passed focused valid-file capacity, cancellation and
+  storage controls with race in 20.246 seconds. Insufficient-three cases still
+  refuse; successful set DELETE cannot start another child without four records.
 
 The terminal exact-set GET and DELETE calls use the existing captured `SDKAPI`
 methods with the same marked context and target. Those methods forward to the
