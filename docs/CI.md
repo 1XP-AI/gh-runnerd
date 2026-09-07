@@ -38,11 +38,15 @@ No hardware, live GitHub, Docker or daemon suite is part of this public check. T
 
 The tagged CLI tests use synthetic input/subprocess fixtures and static plan or
 refusal paths. The `g01_pair_fixture` livecanary checks use private synthetic
-fixtures: one collection run excludes `^TestPairedTerminal`, and a complementary
-run selects that prefix, followed by one tagged vet. None of these tagged checks
+fixtures: one collection run excludes `^TestPairedTerminal`, one terminal run
+selects that prefix while skipping the reviewed persistence set, and a third run
+selects the exact persistence set
+`^TestPairedTerminal(Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure)$`.
+One tagged vet follows those three race-tested runs. None of these tagged checks
 executes approved live controller/worker operations or exposes a public terminal
-phase/API. The script permits only `cmd/g01-live`, `cmd/g01-worker` and the reviewed
-`livecanary` package; it does not discover other opt-in commands or enable the
-`g02runtime` Keychain probe.
+phase/API. The implementation and evidence boundaries are recorded in the
+[G01 paired terminal guide](evidence/g01-paired-terminal.md). The script permits
+only `cmd/g01-live`, `cmd/g01-worker` and the reviewed `livecanary` package; it
+does not discover other opt-in commands or enable the `g02runtime` Keychain probe.
 
 There is no runtime migration or runner cleanup to roll back in G03. If the workflow or toolchain baseline causes a hosted failure, revert the G03 commit or make the focused workflow/module correction under a reviewed follow-up; no runner enrollment, daemon installation or host cleanup is required.
