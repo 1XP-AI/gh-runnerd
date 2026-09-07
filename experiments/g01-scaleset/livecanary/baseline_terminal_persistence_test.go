@@ -133,3 +133,30 @@ func TestPairedTerminalPostIntentAuthorityBoundaries(t *testing.T) {
 		}
 	}
 }
+
+func TestPairedTerminalWorkerReceiptSurvivesControllerWriteFailure(t *testing.T) {
+	f := newTerminalFixture(t, true)
+	fired := false
+	f.c.j.syncFile = func(file *os.File) error {
+		e := terminalLastDiskEvent(file)
+		if !fired && e.Baseline != nil && e.Baseline.Stage == "terminal-worker-delete" && e.Baseline.Outcome == "result" {
+			fired = true
+			return ErrJournal
+		}
+		return file.Sync()
+	}
+	out, err := f.run()
+	facts := out.Collection.Terminal
+	events := f.wf.Journal.Events()
+	if !fired || err == nil || out.Terminal != terminalUnresolved || facts == nil || facts.WorkerDeleteResult.Sequence != 0 || out.Collection.Result.Sequence != 0 || f.setDeletes.Load() != 0 {
+		t.Fatal("failed bridge persistence returned C authority")
+	}
+	if len(events) != 29 || events[26].Paired.Delete == nil || events[26].Paired.Delete.Kind != "result" || events[28].Paired.Local == nil || events[28].Paired.Local.HTTPStatus != 404 {
+		t.Fatal("actual worker receipt fixture did not persist")
+	}
+	receipt := facts.WorkerDeletion
+	if receipt == nil || receipt.Result.Sequence != 27 || receipt.AbsenceResult == nil || receipt.AbsenceResult.Sequence != 29 {
+		t.Fatal("independently durable worker deletion/absence receipt lost")
+	}
+	terminalNoReplay(t, f)
+}
