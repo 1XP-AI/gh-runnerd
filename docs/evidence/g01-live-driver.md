@@ -32,12 +32,17 @@ empty poll is **unresolved**, never a passed barrier. The high-level listener
 retains upstream ACK ordering; fault barriers use its public client interface.
 Adapter deadlines remain effective after the listener removes cancellation.
 
-The preceding credential-input wait is separately capped at thirty seconds and
-approval expiry. A blocked stdin pipe is closed on expiry, before any SDK/API
-construction; input remains limited to 16 KiB. The journal lock is released when
-the command refuses input. A synthetic blocked-pipe regression exceeded its
-deadline before this fix and now returns a fixed refusal. This does not cancel
-any remote operation or running worker.
+The preceding credential-input wait accepts only the broker's stdin pipe and is
+separately capped at thirty seconds and approval expiry; terminal and regular
+file descriptors are refused. The helper duplicates the owned pipe, marks it
+nonblocking before wrapping it in a fresh Go file, and requires read-deadline
+support. This is necessary because closing a plain inherited blocking stdin
+does not reliably interrupt its read. No later `Fd()` call changes the prepared
+reader back to blocking mode. Input remains limited to 16 KiB; timeout occurs
+before any SDK/API construction, and refusal releases the journal lock. Actual
+inherited-stdin test subprocesses reproduce both blocked and complete input;
+testing only a Go-created pipe missed the original failure. No real controller
+or API ran, and this input timeout does not cancel remote work.
 
 Creation requests `RunnerSetting.DisableUpdate=true` using the pinned SDK's
 [`RunnerSetting` field](https://github.com/actions/scaleset/blob/v0.4.0/types.go).
