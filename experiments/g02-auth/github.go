@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -27,6 +28,19 @@ type GitHubAPI struct {
 func NewGitHubAPI(now func() time.Time, transport http.RoundTripper) *GitHubAPI {
 	if now == nil {
 		now = time.Now
+	}
+	if transport == nil {
+		// HTTP/2 debug traces can include App JWTs and Manifest credentials.
+		// Own the HTTP/1 transport; leave shared defaults and test inputs alone.
+		private := http.DefaultTransport.(*http.Transport).Clone()
+		private.Protocols = new(http.Protocols)
+		private.Protocols.SetHTTP1(true)
+		// Clone may retain h2 ALPN even when Protocols disables HTTP/2.
+		if private.TLSClientConfig == nil {
+			private.TLSClientConfig = new(tls.Config)
+		}
+		private.TLSClientConfig.NextProtos = []string{"http/1.1"}
+		transport = private
 	}
 	return &GitHubAPI{now: now, client: &http.Client{Timeout: 10 * time.Second, Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 }

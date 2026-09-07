@@ -216,7 +216,7 @@ func (a Approval) verify(c *Container, s state) error {
 	if !matches(config, a.configProfile()) || !matches(c.HostConfig, hostProfile()) {
 		return ErrUncertain
 	}
-	if len(c.NetworkSettings.Networks) > 1 {
+	if len(c.NetworkSettings.Networks) != 1 {
 		return ErrUncertain
 	}
 	for name := range c.NetworkSettings.Networks {

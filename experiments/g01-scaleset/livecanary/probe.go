@@ -16,9 +16,10 @@ type probeClient struct {
 	session          Session
 	ctx              context.Context
 	phase, sessionID string
+	initial          scaleset.RunnerScaleSetSession
 }
 
-func (p *probeClient) Session() scaleset.RunnerScaleSetSession { return p.session.Session() }
+func (p *probeClient) Session() scaleset.RunnerScaleSetSession { return p.initial }
 func (p *probeClient) sameSession() bool {
 	return p.session.Session().SessionID.String() == p.sessionID
 }
@@ -27,7 +28,18 @@ func (p *probeClient) GetMessage(_ context.Context, last, capacity int) (*scales
 	if !p.sameSession() || last != 0 || capacity != 1 {
 		return nil, ErrQuarantine
 	}
-	m, err := boundedRead(p.ctx, func(c context.Context) (*scaleset.RunnerScaleSetMessage, error) { return p.session.GetMessage(c, 0, 1) })
+	var m *scaleset.RunnerScaleSetMessage
+	err := p.driver.effect(p.ctx, "observe-poll", nil, func(c context.Context) (Event, error) {
+		var err error
+		m, err = p.session.GetMessage(c, 0, 1)
+		if err != nil {
+			return Event{}, err
+		}
+		if m == nil { // No observation; never erase a previous positive result.
+			return Event{}, nil
+		}
+		return Event{Work: statisticsWork(m.Statistics)}, nil
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -40,11 +52,24 @@ func (p *probeClient) GetMessage(_ context.Context, last, capacity int) (*scales
 	if m.Statistics == nil {
 		return nil, ErrQuarantine
 	}
+	if len(m.JobStartedMessages) > 0 || len(m.JobCompletedMessages) > 0 || len(m.JobAssignedMessages) > 0 {
+		return nil, ErrQuarantine
+	}
 	if len(m.JobAvailableMessages) == 0 {
+		// Positive counts are unresolved-work evidence, not owned runner IDs.
+		// This harness cannot reconcile them against a later stale zero.
+		if *m.Statistics != (scaleset.RunnerScaleSetStatistic{}) {
+			return nil, ErrQuarantine
+		}
 		return nil, ErrNoMessage
 	}
 	ids := make([]int64, 0, len(m.JobAvailableMessages))
-	if m.MessageID <= 0 || len(m.JobAvailableMessages) > 2 || len(m.JobStartedMessages) > 0 || len(m.JobCompletedMessages) > 0 || len(m.JobAssignedMessages) > 0 {
+	if m.MessageID <= 0 || len(m.JobAvailableMessages) > 2 {
+		return nil, ErrQuarantine
+	}
+	// The listener ACKs a returned message before AcquireJobs. Validate the
+	// single-request acquisition boundary here, before that ACK can occur.
+	if (p.phase == "before-acquire" || p.phase == "acquire-loss") && len(m.JobAvailableMessages) != 1 {
 		return nil, ErrQuarantine
 	}
 	for _, j := range m.JobAvailableMessages {
@@ -134,6 +159,7 @@ func (observeOnly) HandleJobCompleted(context.Context, *scaleset.JobCompleted) e
 func (d *Driver) probe(ctx context.Context, phase string, setID int) error {
 	var session Session
 	var sid string
+	var initial scaleset.RunnerScaleSetSession
 	err := d.effect(ctx, "session-open", nil, func(c context.Context) (Event, error) {
 		var err error
 		session, err = d.API.OpenSession(c, setID, d.Approval.setName())
@@ -145,12 +171,17 @@ func (d *Driver) probe(ctx context.Context, phase string, setID int) error {
 			return Event{}, ErrQuarantine
 		}
 		sid = s.SessionID.String()
-		return Event{SessionID: sid}, nil
+		initial = s
+		work := statisticsWork(s.Statistics)
+		if s.RunnerScaleSet != nil {
+			work = combinedWork(work, statisticsWork(s.RunnerScaleSet.Statistics))
+		}
+		return Event{SessionID: sid, Work: work}, nil
 	})
 	if err != nil {
 		return err
 	}
-	p := &probeClient{d, session, ctx, phase, sid}
+	p := &probeClient{d, session, ctx, phase, sid, initial}
 	l, err := listener.New(p, listener.Config{ScaleSetID: setID, MaxRunners: 1})
 	if err != nil {
 		return ErrQuarantine

@@ -88,7 +88,9 @@ func openJournalWithParentSync(path string, p Proposal, manual bool, appID int64
 	if !privateFile(lock) || syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
 		return j, errJournal
 	}
-	j.record = attemptRecord{Version: 1, Owner: p.Owner, AppName: p.AppName, Organizations: append([]Binding(nil), p.Organizations...), Phase: "prepared", AppID: appID}
+	// Manual input is only a candidate. VerifyManual pins its ID in the verifying
+	// transition after the key authenticates the exact proposed App identity.
+	j.record = attemptRecord{Version: 1, Owner: p.Owner, AppName: p.AppName, Organizations: append([]Binding(nil), p.Organizations...), Phase: "prepared"}
 	existing, e := root.OpenFile("attempt.json", os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if e == nil {
 		defer existing.Close()
@@ -100,7 +102,7 @@ func openJournalWithParentSync(path string, p Proposal, manual bool, appID int64
 			return j, errJournal
 		}
 		var old attemptRecord
-		if json.Unmarshal(data, &old) != nil || old.Version != 1 || old.Owner != p.Owner || old.AppName != p.AppName || old.AppID < 0 || (old.AppID != 0 && old.AppID != appID) || !sameOrganizations(old.Organizations, p.Organizations) {
+		if json.Unmarshal(data, &old) != nil || old.Version != 1 || old.Owner != p.Owner || old.AppName != p.AppName || old.AppID < 0 || !sameOrganizations(old.Organizations, p.Organizations) {
 			return j, errJournal
 		}
 		switch old.Phase {
@@ -108,8 +110,12 @@ func openJournalWithParentSync(path string, p Proposal, manual bool, appID int64
 		default:
 			return j, errJournal
 		}
-		// Keep ownership and identity on recovery; imported IDs must still be checked
-		// with the App's JWT before they can become verified bindings.
+		// Older prepared records could contain an unverified manual ID. Only that
+		// phase may correct it; later known identities, including ambiguous Manifest
+		// conversion results, remain pinned. Opening never rewrites the old record.
+		if old.Phase != "prepared" && old.AppID != 0 && old.AppID != appID {
+			return j, errJournal
+		}
 		j.record = old
 		return j, nil
 	}

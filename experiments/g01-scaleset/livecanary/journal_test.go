@@ -20,11 +20,11 @@ func privateDir(t *testing.T) string {
 func TestJournalLocksBindsApprovalAndRetainsIncompleteIntent(t *testing.T) {
 	dir := privateDir(t)
 	a := approval()
-	j, err := OpenJournal(dir, a)
+	j, err := openTestJournal(t, dir, a)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if other, err := OpenJournal(dir, a); err == nil {
+	if other, err := openTestJournal(t, dir, a); err == nil {
 		other.Close()
 		t.Fatal("second session owner obtained journal")
 	}
@@ -32,7 +32,7 @@ func TestJournalLocksBindsApprovalAndRetainsIncompleteIntent(t *testing.T) {
 		t.Fatal("intent failed")
 	}
 	j.Close()
-	reopened, err := OpenJournal(dir, a)
+	reopened, err := openTestJournal(t, dir, a)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +42,7 @@ func TestJournalLocksBindsApprovalAndRetainsIncompleteIntent(t *testing.T) {
 	}
 	reopened.Close()
 	a.OwnerNonce = strings.Repeat("a", 32)
-	if j, err := OpenJournal(dir, a); err == nil {
+	if j, err := openTestJournal(t, dir, a); err == nil {
 		j.Close()
 		t.Fatal("changed approval adopted prior state")
 	}
@@ -53,7 +53,7 @@ func TestJournalRejectsTornTailSymlinksAndSharedModes(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			dir := privateDir(t)
 			a := approval()
-			j, err := OpenJournal(dir, a)
+			j, err := openTestJournal(t, dir, a)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -77,7 +77,7 @@ func TestJournalRejectsTornTailSymlinksAndSharedModes(t *testing.T) {
 			case "directory":
 				os.Chmod(dir, 0755)
 			}
-			if j, err := OpenJournal(dir, a); err == nil {
+			if j, err := openTestJournal(t, dir, a); err == nil {
 				j.Close()
 				t.Fatal("unsafe journal accepted")
 			}
@@ -88,7 +88,7 @@ func TestJournalRejectsTornTailSymlinksAndSharedModes(t *testing.T) {
 func TestRealJournalCreateFailureBlocksRetryAndContainsNoErrorBody(t *testing.T) {
 	dir := privateDir(t)
 	a := approval()
-	j, err := OpenJournal(dir, a)
+	j, err := openTestJournal(t, dir, a)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +101,7 @@ func TestRealJournalCreateFailureBlocksRetryAndContainsNoErrorBody(t *testing.T)
 		t.Fatal("remote failure accepted")
 	}
 	j.Close()
-	j, err = OpenJournal(dir, a)
+	j, err = openTestJournal(t, dir, a)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,3 +125,20 @@ func TestStrictJSONRejectsDuplicateAuthorityFields(t *testing.T) {
 }
 
 func (*inventoryAPI) Inventory(context.Context) (string, error) { return strings.Repeat("0", 64), nil }
+
+func testAdmissionDirectory(t *testing.T, directory string) string {
+	t.Helper()
+	path := filepath.Join(filepath.Dir(directory), "admission")
+	if err := os.Mkdir(path, 0700); err != nil && !os.IsExist(err) {
+		t.Fatal("fixture admission directory")
+	}
+	canonical, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal("fixture admission identity")
+	}
+	return canonical
+}
+func openTestJournal(t *testing.T, directory string, a Approval) (*FileJournal, error) {
+	t.Helper()
+	return openJournalAtAdmission(directory, a, testAdmissionDirectory(t, directory), func(f *os.File) error { return f.Sync() })
+}

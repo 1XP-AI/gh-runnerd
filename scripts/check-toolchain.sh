@@ -5,6 +5,8 @@ set -euo pipefail
 go_cmd="${GO:-go}"
 expected_toolchain="go1.26.8"
 expected_go_directive="1.26.8"
+# Standalone invocation must select the pin too; auto never downgrades a newer Go.
+export GOTOOLCHAIN="${expected_toolchain}"
 
 if [[ ! -f go.mod ]]; then
 	printf 'toolchain check failed: go.mod is missing\n' >&2

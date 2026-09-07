@@ -33,16 +33,18 @@ type Approval struct {
 }
 
 type Event struct {
-	Status       string `json:"status,omitempty"`
-	Sequence     int    `json:"sequence"`
-	Kind         string `json:"kind"`
-	Operation    string `json:"operation,omitempty"`
-	ID           string `json:"id,omitempty"`
-	Digest       string `json:"digest,omitempty"`
-	EnvDigest    string `json:"env_digest,omitempty"`
-	LabelsDigest string `json:"labels_digest,omitempty"`
+	Authority    *phaseAuthority `json:"authority,omitempty"`
+	Status       string          `json:"status,omitempty"`
+	Sequence     int             `json:"sequence"`
+	Kind         string          `json:"kind"`
+	Operation    string          `json:"operation,omitempty"`
+	ID           string          `json:"id,omitempty"`
+	Digest       string          `json:"digest,omitempty"`
+	EnvDigest    string          `json:"env_digest,omitempty"`
+	LabelsDigest string          `json:"labels_digest,omitempty"`
 }
 type Journal interface {
+	authorize(Approval) (func(), error)
 	Events() []Event
 	Append(Event) error
 }
@@ -171,6 +173,14 @@ func (d *Driver) Run(ctx context.Context, phase, jit string) error {
 	if d.Approval.Validate(time.Now()) != nil || !slices.Contains(d.Approval.Phases, phase) {
 		return ErrApproval
 	}
+	if d.Journal == nil {
+		return ErrState
+	}
+	release, err := d.Journal.authorize(d.Approval)
+	if err != nil {
+		return ErrState
+	}
+	defer release()
 	s := replay(d.Journal.Events())
 	if phase != "inspect" && (s.uncertain || s.deleted) {
 		return ErrUncertain
