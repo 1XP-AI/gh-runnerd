@@ -94,7 +94,9 @@ suffix; it is not a source or artifact check and is not used below.
 
 | Input | Required private record |
 |---|---|
-| G02 source for both binaries | `G02_SOURCE_SHA=<REVIEWED_FULL_SOURCE_SHA_40_HEX>`; exactly 40 lowercase hexadecimal characters, detached in a standalone clone with a real `.git` directory |
+| G02 source for both binaries | `G02_SOURCE_SHA=<REVIEWED_FULL_SOURCE_SHA_40_HEX>`; exactly 40 lowercase hexadecimal characters, cloned by pinned `g02_git` into a fresh destination |
+| G02 repository URL | `G02_REPOSITORY_URL=<APPROVED_CLONE_URL_OR_LOCAL_PATH>` used only after `/usr/bin/git` is pinned |
+| G02 staged toolchain | `G02_GO=<PRIVATE_PARENT>/toolchain/go/bin/go`; independently staged Go 1.26.8 under the private parent, not a Homebrew Cellar path |
 | G02 enrollment artifact | `G02_ENROLL_SHA256=<APPROVED_ENROLL_ARTIFACT_SHA256_64_HEX>` plus an independently recorded private `codesign` identity record |
 | G02 synthetic probe artifact | `G02_PROBE_SHA256=<APPROVED_PROBE_ARTIFACT_SHA256_64_HEX>` plus an independently recorded private `codesign` identity record |
 | G01 controller/harness | `G01_HARNESS_SHA=<REVIEWED_G01_HARNESS_SHA_40_HEX>` |
@@ -112,24 +114,23 @@ Neither `g02-enroll` nor `g02-keychain-probe` verifies its own source revision,
 working-tree state, digest, or signing identity. The shell preflight below is
 the documented gate and must complete successfully before **any** G02 binary
 execution. It is not a runtime verifier and does not add product-runtime
-scope. An owner first creates an owned temporary **standalone clone** (not an
-Orca linked worktree), preserves its real `.git` directory, detaches it at the
-approved full SHA, and sets `G02_PRIVATE_PARENT` to a separate private
-directory outside that clone. The expected artifact SHA-256 values and
-normalized signing-fact files come from an independent private approval
-record; do not calculate and trust them in the same invocation.
+scope. An owner first creates `G02_PRIVATE_PARENT` at mode `0700`, stages a
+reviewed Go 1.26.8 toolchain under that tree, and sets a fresh
+`G02_SOURCE_DIR` that does not yet exist and does not overlap the private
+parent. The gate itself pins `/usr/bin/git`, clones, and detaches at the
+approved full SHA. The expected artifact SHA-256 values and normalized
+signing-fact files come from an independent private approval record; do not
+calculate and trust them in the same invocation.
 
-Create the checkout as an owned temporary clone and preserve its Git metadata;
-do not use `git worktree` or change an Orca-managed checkout:
-
-```sh
-git clone --no-local "$G02_REPOSITORY_URL" "$G02_SOURCE_DIR"
-git -C "$G02_SOURCE_DIR" checkout --detach "$G02_SOURCE_SHA"
-```
+The checkout is part of the same Bash process as the rest of the gate. Do
+not run a `PATH` `git` before that process pins `/usr/bin/git` and defines
+`g02_git`. Do not use `git worktree` or change an Orca-managed checkout.
+`G02_SOURCE_DIR` must not already exist; `g02_git clone` creates it.
 
 Run this as Bash with the private values already set; `set -Eeuo pipefail`, the
-explicit `-buildvcs=true`, `GOENV=off`, and removal of `GOFLAGS` are required.
-Any failed command or mismatch aborts the gate.
+explicit `-buildvcs=true`, `GOTOOLCHAIN=local`, `GOENV=off`, `GOWORK=off`, and
+empty-environment Git/Go helpers are required. Any failed command or mismatch
+aborts the gate.
 
 Source and artifact policies are distinct. The source clone must be a real
 directory owned by the current UID, with no group/other write bit; `0700` is
@@ -151,28 +152,32 @@ ancestor is refused even when `0755`, `0711`, or `0700` has no group/other
 write bit, because its owner can rename descendants through owner-write
 access.
 
-Darwin system tools used by the gate, including `sort`, `cc`, and `c++`, are
-pinned to absolute `/usr/bin` and `/bin` paths. Each pinned file is resolved to
-a regular non-symlink physical path, owner/mode checked, and then checked
-through its entire parent chain with the same root-or-current-UID
-replaceability allowlist as source and artifacts. A leaf `stat` of the
-executable is not ancestry proof. `go` may be a Homebrew symlink: the gate
-follows that alias, retains the physical cellar path, and refuses a
-foreign-owned ancestor. Tool ancestors owned by the current UID may be
-group-writable, which is the normal Homebrew Cellar layout; they may not be
-other-writable. Relative `go` is refused. Source and artifact chains stay
-stricter and still refuse current-UID group-write unless sticky.
+Darwin system tools used by the gate, including `git`, `sort`, `cc`, `c++`,
+and `ls`, are pinned to absolute `/usr/bin` and `/bin` paths before any clone,
+checkout, or Go command. Each pinned file is resolved to a regular non-symlink
+physical path with a hop limit of 32, owner/mode checked with fail-closed
+parsing, ACL-checked, and then checked through its entire parent chain. A
+leaf `stat` of the executable is not ancestry proof. Group-write or
+other-write on a non-sticky ancestor is refused even when the owner is the
+current UID: another group member can rename a descendant. A Homebrew Cellar
+path is therefore not a trusted toolchain. Stage a reviewed Go 1.26.8
+`darwin/arm64` distribution under the private parent independently; do not
+copy a group-writable Cellar tree and treat a self-hash as approval.
 
+Every Git clone, checkout, and identity query runs through `g02_git`, which
+starts from an empty environment and does not inherit `GIT_DIR`,
+`GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`,
+`GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_COMMON_DIR`, or `GIT_NAMESPACE`.
 Every `go build`, `go test`, `go vet`, `go run`, `go version`, and G01 plan
-build runs through one helper, `g02_go`. That helper starts from an empty
-environment (`env -i`) and sets only `PATH=/usr/bin:/bin`, `HOME`, `TMPDIR=/tmp`,
-`LANG/LC_ALL=C`, `GOTOOLCHAIN=go1.26.8`, `GOENV=off`, `GOWORK=off`,
-`GOOS=darwin`, `GOARCH=arm64`, `CGO_ENABLED=1`, and the pinned `CC`/`CXX`.
-Inherited `GOFLAGS` (`-overlay`, `-toolexec`), `GOENV` files, `GOWORK`
-workspaces, `CC`/`CGO_*`, and `PATH` aliases therefore cannot reach child Git
-or the compiler. Unsetting a single flag is not sufficient. Mode masks use
-`8#` constants so macOS `/bin/bash` 3.2 does not treat leading-zero literals
-as decimal.
+build runs through `g02_go` with `HOME`, `GOCACHE`, `GOMODCACHE`, `GOPATH`,
+`GOROOT`, and `TMPDIR` rooted under the private `0700` tree. `GOTOOLCHAIN` is
+`local`; the gate does not download a toolchain into an untrusted caller
+`HOME`. `GOPROXY=off` and `GOSUMDB=off` refuse module-proxy substitution.
+POSIX mode `0700` is not enough: writable macOS ACL grants (`add_file`,
+`delete_child`, and other allow-write rights) are refused on every protected
+component. Mode masks use `8#` constants so macOS `/bin/bash` 3.2 does not
+treat leading-zero literals as decimal. SIP-protected `/usr/bin` and `/bin`
+are the bootstrap trust root; this is not hostile-code isolation.
 
 Each signing-fact file is an independently recorded, singly-linked regular file
 owned by the current UID with mode `0600`. The gate canonicalizes the record
@@ -191,7 +196,9 @@ unset CDPATH || true
 
 : "${G02_SOURCE_SHA:?set the approved full 40-hex source SHA}"
 : "${G02_PRIVATE_PARENT:?set the owned private artifact directory}"
-: "${G02_SOURCE_DIR:?set the owned standalone clone directory}"
+: "${G02_SOURCE_DIR:?set a fresh absolute clone destination that does not yet exist}"
+: "${G02_REPOSITORY_URL:?set the repository URL for the pinned git clone}"
+: "${G02_GO:?set the staged Go 1.26.8 binary under the private parent}"
 : "${G02_ENROLL_SHA256:?set the independently recorded enrollment digest}"
 : "${G02_PROBE_SHA256:?set the independently recorded probe digest}"
 : "${G02_ENROLL_SIGNING_RECORD:?set the private enrollment signing-facts file}"
@@ -203,6 +210,8 @@ G02_STAT=/usr/bin/stat
 G02_DIRNAME=/usr/bin/dirname
 G02_READLINK=/usr/bin/readlink
 G02_BASENAME=/usr/bin/basename
+G02_LS=/bin/ls
+G02_MKDIR=/bin/mkdir
 G02_CURRENT_UID="$("$G02_ID" -u)" || die 'could not determine the current UID'
 if ! [[ "$G02_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
   die 'source SHA is not exactly 40 lowercase hexadecimal characters'
@@ -211,16 +220,59 @@ if ! [[ "$G02_ENROLL_SHA256" =~ ^[0-9a-f]{64}$ && "$G02_PROBE_SHA256" =~ ^[0-9a-
   die 'artifact SHA-256 is not exactly 64 lowercase hexadecimal characters'
 fi
 if ! [[ "$G02_SOURCE_DIR" = /* && "$G02_PRIVATE_PARENT" = /* && \
+        "$G02_GO" = /* && \
         "$G02_ENROLL_SIGNING_RECORD" = /* && "$G02_PROBE_SIGNING_RECORD" = /* ]]; then
-  die 'source, artifact, and signing-record paths must be absolute'
+  die 'source, artifact, toolchain, and signing-record paths must be absolute'
 fi
+if [[ -z "$G02_REPOSITORY_URL" ]]; then
+  die 'repository URL is empty'
+fi
+
+parse_owner_mode() {
+  local line="$1" dest_owner="$2" dest_mode="$3" parsed_owner parsed_mode parsed_extra
+  IFS=' ' read -r parsed_owner parsed_mode parsed_extra <<<"$line"
+  [[ -n "$parsed_owner" && -n "$parsed_mode" && -z "${parsed_extra:-}" ]] || die "malformed stat output: $line"
+  [[ "$parsed_owner" =~ ^[0-9]+$ ]] || die "malformed owner: $line"
+  [[ "$parsed_mode" =~ ^[0-7]{3,4}$ ]] || die "malformed mode: $line"
+  printf -v "$dest_owner" '%s' "$parsed_owner"
+  printf -v "$dest_mode" '%s' "$parsed_mode"
+}
+
+check_no_writable_acl() {
+  local path="$1" kind="$2" listing line first=1
+  listing="$("$G02_LS" -led "$path")" || die "could not inspect ACL: $path"
+  [[ -n "$listing" ]] || die "empty ACL listing: $path"
+  while IFS= read -r line; do
+    if [[ "$first" == 1 ]]; then
+      first=0
+      continue
+    fi
+    [[ -n "$line" ]] || continue
+    if [[ "$line" =~ ^[[:space:]]*[0-9]+: ]]; then
+      if [[ "$line" == *' allow '* ]]; then
+        case "$line" in
+          *add_file*|*delete_child*|*add_subdirectory*|*write*|*append*|*chown*|*delete*)
+            die "writable ACL on ${kind}: $path"
+            ;;
+        esac
+        die "unrecognized allow ACL on ${kind}: $path"
+      elif [[ "$line" == *' deny '* ]]; then
+        continue
+      else
+        die "malformed ACL entry on ${kind}: $path"
+      fi
+    else
+      die "unexpected ls -le line on ${kind}: $path"
+    fi
+  done <<<"$listing"
+}
 
 check_safe_path_chain() {
   local path="$1" kind="$2" line owner mode
   while :; do
     [[ -d "$path" && ! -L "$path" ]] || die "unsafe ${kind} component: $path"
     line="$("$G02_STAT" -f '%u %A' "$path")" || die "could not inspect ${kind} component: $path"
-    read -r owner mode <<<"$line"
+    parse_owner_mode "$line" owner mode
     if [[ "$owner" != 0 && "$owner" != "$G02_CURRENT_UID" ]]; then
       die "${kind} chain permits cross-UID rename: $path"
     fi
@@ -229,6 +281,7 @@ check_safe_path_chain() {
         die "${kind} chain permits cross-UID rename: $path"
       fi
     fi
+    check_no_writable_acl "$path" "$kind"
     [[ "$path" == / ]] && break
     path="$("$G02_DIRNAME" "$path")"
   done
@@ -243,29 +296,15 @@ check_safe_source_chain() {
 }
 
 check_safe_tool_chain() {
-  local path="$1" kind="$2" line owner mode
-  while :; do
-    [[ -d "$path" && ! -L "$path" ]] || die "unsafe ${kind} component: $path"
-    line="$("$G02_STAT" -f '%u %A' "$path")" || die "could not inspect ${kind} component: $path"
-    read -r owner mode <<<"$line"
-    if [[ "$owner" != 0 && "$owner" != "$G02_CURRENT_UID" ]]; then
-      die "${kind} chain permits cross-UID rename: $path"
-    fi
-    if (( (8#$mode & 8#2) != 0 )); then
-      die "${kind} chain is other-writable: $path"
-    fi
-    if (( (8#$mode & 8#20) != 0 )) && [[ "$owner" != "$G02_CURRENT_UID" ]]; then
-      die "${kind} chain is group-writable by another owner: $path"
-    fi
-    [[ "$path" == / ]] && break
-    path="$("$G02_DIRNAME" "$path")"
-  done
+  check_safe_path_chain "$1" "$2"
 }
 
 resolve_physical_file() {
-  local path="$1" label="$2" target dir base
+  local path="$1" label="$2" target dir base hops=0
   [[ "$path" = /* ]] || die "$label is not absolute: $path"
   while [[ -L "$path" ]]; do
+    hops=$((hops + 1))
+    [[ "$hops" -le 32 ]] || die "$label symlink hop limit exceeded: $path"
     target="$("$G02_READLINK" "$path")" || die "could not read $label symlink: $path"
     [[ -n "$target" ]] || die "$label symlink is empty: $path"
     if [[ "$target" != /* ]]; then
@@ -284,15 +323,16 @@ pin_trusted_file() {
   local varname="$1" path="$2" label="$3" physical line owner mode dir
   physical="$(resolve_physical_file "$path" "$label")" || die "could not resolve $label: $path"
   line="$("$G02_STAT" -f '%u %A' "$physical")" || die "could not inspect $label: $physical"
-  read -r owner mode <<<"$line"
+  parse_owner_mode "$line" owner mode
   if [[ "$owner" != 0 && "$owner" != "$G02_CURRENT_UID" ]]; then
     die "$label is foreign-owned: $physical"
   fi
   if (( (8#$mode & 8#22) != 0 )); then
     die "$label is group/other-writable: $physical"
   fi
+  check_no_writable_acl "$physical" "$label"
   dir="$("$G02_DIRNAME" "$physical")"
-  check_safe_tool_chain "$dir" "$label"
+  check_safe_path_chain "$dir" "$label"
   printf -v "$varname" '%s' "$physical"
 }
 
@@ -312,6 +352,8 @@ pin_trusted_file G02_ID "$G02_ID" id
 [[ "$("$G02_ID" -u)" == "$G02_CURRENT_UID" ]] || die 'current UID changed during bootstrap'
 pin_trusted_file G02_READLINK "$G02_READLINK" readlink
 pin_trusted_file G02_BASENAME "$G02_BASENAME" basename
+pin_trusted_file G02_LS "$G02_LS" ls
+pin_trusted_file G02_MKDIR "$G02_MKDIR" mkdir
 G02_GIT=/usr/bin/git
 G02_ENV=/usr/bin/env
 G02_AWK=/usr/bin/awk
@@ -330,26 +372,55 @@ pin_trusted_file G02_CHMOD "$G02_CHMOD" chmod
 pin_trusted_file G02_SORT "$G02_SORT" sort
 pin_trusted_file G02_CC "$G02_CC" cc
 pin_trusted_file G02_CXX "$G02_CXX" c++
-G02_GO="$(type -P go)" || die 'go is not on PATH'
-[[ "$G02_GO" = /* ]] || die 'go is not an absolute executable'
-pin_trusted_file G02_GO "$G02_GO" go
 G02_TOOL_PATH=/usr/bin:/bin
 
-g02_go() {
-  [[ -f "$G02_GO" && ! -L "$G02_GO" ]] || die 'go is no longer a regular non-symlink file'
-  check_safe_tool_chain "$("$G02_DIRNAME" "$G02_GO")" "go"
-  [[ -f "$G02_CC" && ! -L "$G02_CC" ]] || die 'cc is no longer a regular non-symlink file'
-  check_safe_tool_chain "$("$G02_DIRNAME" "$G02_CC")" "cc"
-  : "${HOME:?HOME must be set for the pinned Go toolchain}"
+install_private_dir() {
+  local path="$1" kind="$2" line owner mode
+  "$G02_MKDIR" -m 0700 "$path" || die "could not create ${kind}: $path"
+  line="$("$G02_STAT" -f '%u %A' "$path")" || die "could not inspect ${kind}: $path"
+  parse_owner_mode "$line" owner mode
+  [[ "$owner" == "$G02_CURRENT_UID" && "$mode" == 700 ]] \
+    || die "${kind} must be current-UID mode 0700: $path"
+  check_no_writable_acl "$path" "$kind"
+  check_safe_path_chain "$path" "$kind"
+}
+
+g02_git() {
+  [[ -n "${G02_HOME:-}" && -d "$G02_HOME" ]] || die 'private Git HOME is not ready'
   "$G02_ENV" -i \
     PATH="$G02_TOOL_PATH" \
-    HOME="$HOME" \
-    TMPDIR=/tmp \
+    HOME="$G02_HOME" \
+    TMPDIR="$G02_TMPDIR" \
     LANG=C \
     LC_ALL=C \
-    GOTOOLCHAIN=go1.26.8 \
+    GIT_CONFIG_NOSYSTEM=1 \
+    GIT_CONFIG_GLOBAL=/dev/null \
+    GIT_CONFIG_SYSTEM=/dev/null \
+    "$G02_GIT" "$@"
+}
+
+g02_go() {
+  [[ -n "${G02_HOME:-}" && -d "$G02_HOME" ]] || die 'private Go HOME is not ready'
+  [[ -f "$G02_GO" && ! -L "$G02_GO" ]] || die 'go is no longer a regular non-symlink file'
+  check_safe_path_chain "$("$G02_DIRNAME" "$G02_GO")" "go"
+  check_no_writable_acl "$G02_GO" "go"
+  [[ -f "$G02_CC" && ! -L "$G02_CC" ]] || die 'cc is no longer a regular non-symlink file'
+  check_safe_path_chain "$("$G02_DIRNAME" "$G02_CC")" "cc"
+  "$G02_ENV" -i \
+    PATH="$G02_TOOL_PATH" \
+    HOME="$G02_HOME" \
+    TMPDIR="$G02_TMPDIR" \
+    LANG=C \
+    LC_ALL=C \
+    GOTOOLCHAIN=local \
     GOENV=off \
     GOWORK=off \
+    GOPROXY=off \
+    GOSUMDB=off \
+    GOCACHE="$G02_GOCACHE" \
+    GOMODCACHE="$G02_GOMODCACHE" \
+    GOPATH="$G02_GOPATH" \
+    GOROOT="$G02_GOROOT" \
     GOOS=darwin \
     GOARCH=arm64 \
     CGO_ENABLED=1 \
@@ -358,34 +429,69 @@ g02_go() {
     "$G02_GO" "$@"
 }
 
+if ! [[ -d "$G02_PRIVATE_PARENT" && ! -L "$G02_PRIVATE_PARENT" ]]; then
+  die 'artifact parent must be an existing private directory'
+fi
+artifact_root="$(cd "$G02_PRIVATE_PARENT" && pwd -P)"
+parent_stat="$("$G02_STAT" -f '%u %A' "$artifact_root")" || die 'could not inspect artifact parent'
+parse_owner_mode "$parent_stat" parent_uid parent_mode
+[[ "$parent_uid" == "$G02_CURRENT_UID" && "$parent_mode" == 700 ]] \
+  || die 'artifact parent must be owned by the current UID with mode 0700'
+check_no_writable_acl "$artifact_root" "artifact parent"
+check_safe_parent_chain "$artifact_root"
+G02_PRIVATE_PARENT="$artifact_root"
+
+G02_HOME="$G02_PRIVATE_PARENT/g02-home"
+G02_TMPDIR="$G02_HOME/tmp"
+G02_GOCACHE="$G02_HOME/gocache"
+G02_GOMODCACHE="$G02_HOME/gomodcache"
+G02_GOPATH="$G02_HOME/gopath"
+install_private_dir "$G02_HOME" "private Go HOME"
+install_private_dir "$G02_TMPDIR" "private tmp"
+install_private_dir "$G02_GOCACHE" "Go build cache"
+install_private_dir "$G02_GOMODCACHE" "Go module cache"
+install_private_dir "$G02_GOPATH" "GOPATH"
+
+pin_trusted_file G02_GO "$G02_GO" go
+[[ "$G02_GO" == "$G02_PRIVATE_PARENT/"* ]] \
+  || die 'staged go must be under the private artifact parent'
+G02_GOROOT="$(cd "$("$G02_DIRNAME" "$G02_GO")/.." && pwd -P)" \
+  || die 'could not resolve GOROOT'
+[[ "$G02_GOROOT" == "$G02_PRIVATE_PARENT/"* && -f "$G02_GOROOT/bin/go" && ! -L "$G02_GOROOT/bin/go" ]] \
+  || die 'GOROOT must be a staged distribution under the private parent'
+g02_go_ver="$(g02_go version)" || die 'could not read staged go version'
+[[ "$g02_go_ver" == *'go1.26.8'* ]] || die 'staged toolchain is not Go 1.26.8'
+
+if [[ "$G02_SOURCE_DIR" == "$G02_PRIVATE_PARENT" || "$G02_SOURCE_DIR" == "$G02_PRIVATE_PARENT/"* || "$G02_PRIVATE_PARENT" == "$G02_SOURCE_DIR/"* ]]; then
+  die 'source clone and artifact directory must not overlap'
+fi
+src_parent="$("$G02_DIRNAME" "$G02_SOURCE_DIR")"
+[[ -d "$src_parent" && ! -L "$src_parent" ]] || die 'source parent must be a real directory'
+check_safe_path_chain "$src_parent" "source parent"
+[[ ! -e "$G02_SOURCE_DIR" && ! -L "$G02_SOURCE_DIR" ]] \
+  || die 'source clone destination already exists; use a fresh path'
+g02_git clone --no-local "$G02_REPOSITORY_URL" "$G02_SOURCE_DIR"
+g02_git --git-dir "$G02_SOURCE_DIR/.git" --work-tree "$G02_SOURCE_DIR" \
+  checkout --detach "$G02_SOURCE_SHA"
+
 if ! [[ -d "$G02_SOURCE_DIR" && ! -L "$G02_SOURCE_DIR" && \
         -d "$G02_SOURCE_DIR/.git" && ! -L "$G02_SOURCE_DIR/.git" ]]; then
   die 'source must be a standalone clone with a real .git directory'
 fi
-if ! [[ -d "$G02_PRIVATE_PARENT" && ! -L "$G02_PRIVATE_PARENT" ]]; then
-  die 'artifact parent must be an existing private directory'
-fi
 source_root="$(cd "$G02_SOURCE_DIR" && pwd -P)"
-artifact_root="$(cd "$G02_PRIVATE_PARENT" && pwd -P)"
-parent_stat="$("$G02_STAT" -f '%u %A' "$artifact_root")" || die 'could not inspect artifact parent'
-read -r parent_uid parent_mode <<<"$parent_stat"
-[[ "$parent_uid" == "$G02_CURRENT_UID" && "$parent_mode" == 700 ]] \
-  || die 'artifact parent must be owned by the current UID with mode 0700'
-check_safe_parent_chain "$artifact_root"
-
 source_stat="$("$G02_STAT" -f '%u %A' "$source_root")" || die 'could not inspect source'
-read -r source_uid source_mode <<<"$source_stat"
+parse_owner_mode "$source_stat" source_uid source_mode
 [[ "$source_uid" == "$G02_CURRENT_UID" ]] || die 'source must be owned by the current UID'
 if (( (8#$source_mode & 8#22) != 0 )); then
   die 'source directory is group/other-writable'
 fi
+check_no_writable_acl "$source_root" "source"
 check_safe_source_chain "$source_root"
 if [[ "$source_root" == "$artifact_root" || "$source_root" == "$artifact_root/"* || "$artifact_root" == "$source_root/"* ]]; then
   die 'source clone and artifact directory must not overlap'
 fi
 # Use the checked physical paths for every later git, build, and invocation;
 # do not carry a user-supplied symlink alias forward.
-G02_PRIVATE_PARENT="$artifact_root"
 G02_SOURCE_DIR="$source_root"
 
 recheck_source() {
@@ -396,19 +502,23 @@ recheck_source() {
      -d "$G02_SOURCE_DIR/.git" && ! -L "$G02_SOURCE_DIR/.git" ]] \
     || die 'source must remain a standalone clone with a real .git directory'
   line="$("$G02_STAT" -f '%u %A' "$G02_SOURCE_DIR")" || die 'could not recheck source'
-  read -r source_uid source_mode <<<"$line"
+  parse_owner_mode "$line" source_uid source_mode
   [[ "$source_uid" == "$G02_CURRENT_UID" ]] || die 'source must be owned by the current UID'
   if (( (8#$source_mode & 8#22) != 0 )); then
     die 'source directory is group/other-writable'
   fi
+  check_no_writable_acl "$G02_SOURCE_DIR" "source"
   check_safe_source_chain "$G02_SOURCE_DIR"
-  if "$G02_GIT" -C "$G02_SOURCE_DIR" symbolic-ref --quiet HEAD >/dev/null 2>&1; then
+  if g02_git --git-dir "$G02_SOURCE_DIR/.git" --work-tree "$G02_SOURCE_DIR" \
+       symbolic-ref --quiet HEAD >/dev/null 2>&1; then
     die 'source must be detached at the approved commit'
   fi
-  if [[ "$("$G02_GIT" -C "$G02_SOURCE_DIR" rev-parse --verify HEAD^{commit})" != "$G02_SOURCE_SHA" ]]; then
+  if [[ "$(g02_git --git-dir "$G02_SOURCE_DIR/.git" --work-tree "$G02_SOURCE_DIR" \
+            rev-parse --verify HEAD^{commit})" != "$G02_SOURCE_SHA" ]]; then
     die 'source HEAD does not equal the approved full SHA'
   fi
-  if [[ -n "$("$G02_GIT" -C "$G02_SOURCE_DIR" status --porcelain=v1 --untracked-files=all --ignored)" ]]; then
+  if [[ -n "$(g02_git --git-dir "$G02_SOURCE_DIR/.git" --work-tree "$G02_SOURCE_DIR" \
+            status --porcelain=v1 --untracked-files=all --ignored)" ]]; then
     die 'source has tracked, untracked, or ignored changes'
   fi
 }
@@ -425,7 +535,8 @@ require_g01_plan_source() {
   [[ ! -e "$G01_PRIVATE_BINARY" && ! -L "$G01_PRIVATE_BINARY" ]] \
     || die 'G01 plan binary path already exists; use a fresh private path'
   recheck_source
-  if [[ "$("$G02_GIT" -C "$G02_SOURCE_DIR" rev-parse --verify HEAD^{commit})" != "$G01_HARNESS_SHA" ]]; then
+  if [[ "$(g02_git --git-dir "$G02_SOURCE_DIR/.git" --work-tree "$G02_SOURCE_DIR" \
+            rev-parse --verify HEAD^{commit})" != "$G01_HARNESS_SHA" ]]; then
     die 'G01 plan source is not the approved G01 harness SHA'
   fi
 }
@@ -445,9 +556,14 @@ read_signing_record() {
   base="$("$G02_BASENAME" "$record")"
   physical="$dir/$base"
   [[ -f "$physical" && ! -L "$physical" ]] || die "signing-facts record is not a regular file: $physical"
+  check_no_writable_acl "$physical" "signing-facts record"
   check_safe_path_chain "$dir" "signing-facts record"
   line="$("$G02_STAT" -f '%u %A %l' "$physical")" || die "could not inspect signing-facts record: $physical"
-  read -r record_uid record_mode record_links <<<"$line"
+  IFS=' ' read -r record_uid record_mode record_links extra <<<"$line"
+  [[ -n "$record_uid" && -n "$record_mode" && -n "$record_links" && -z "${extra:-}" ]] \
+    || die "malformed signing-facts stat output: $physical"
+  [[ "$record_uid" =~ ^[0-9]+$ && "$record_mode" =~ ^[0-7]{3,4}$ && "$record_links" =~ ^[0-9]+$ ]] \
+    || die "malformed signing-facts stat fields: $physical"
   [[ "$record_uid" == "$G02_CURRENT_UID" && "$record_mode" == 600 && "$record_links" == 1 ]] \
     || die "signing-facts record is not private and singly linked: $physical"
   raw="$(<"$physical")"
@@ -491,12 +607,18 @@ check_artifact() {
   [[ "$live_uid" == "$G02_CURRENT_UID" ]] || die 'current UID changed during the gate'
   check_safe_parent_chain "$artifact_root"
   parent_stat="$("$G02_STAT" -f '%u %A' "$artifact_root")" || die 'could not recheck artifact parent'
-  read -r parent_uid parent_mode <<<"$parent_stat"
+  parse_owner_mode "$parent_stat" parent_uid parent_mode
   [[ "$parent_uid" == "$G02_CURRENT_UID" && "$parent_mode" == 700 ]] \
     || die 'artifact parent changed from current-UID mode 0700'
+  check_no_writable_acl "$artifact_root" "artifact parent"
   [[ -f "$binary" && ! -L "$binary" ]] || die "artifact is not a regular file: $binary"
+  check_no_writable_acl "$binary" "artifact"
   line="$("$G02_STAT" -f '%u %A %l' "$binary")" || die "could not inspect artifact: $binary"
-  read -r binary_uid binary_mode binary_links <<<"$line"
+  IFS=' ' read -r binary_uid binary_mode binary_links extra <<<"$line"
+  [[ -n "$binary_uid" && -n "$binary_mode" && -n "$binary_links" && -z "${extra:-}" ]] \
+    || die "malformed artifact stat output: $binary"
+  [[ "$binary_uid" =~ ^[0-9]+$ && "$binary_mode" =~ ^[0-7]{3,4}$ && "$binary_links" =~ ^[0-9]+$ ]] \
+    || die "malformed artifact stat fields: $binary"
   [[ "$binary_uid" == "$G02_CURRENT_UID" && "$binary_mode" == 500 && "$binary_links" == 1 ]] \
     || die "artifact is not current-UID-owned, mode 0500, and singly linked: $binary"
   local actual_digest
@@ -538,10 +660,11 @@ call `recheck_source` immediately before any later build or offline
 `go test`/`go vet`/`go run`, and `run_verified` immediately before a binary
 start; `run_verified` rechecks the current UID, private parent, safe parent
 chain, artifact owner/mode/link count, digest, and signing identity.
-Later Go invocations must use `g02_go` so they keep the same empty-environment
-toolchain bounds. This is a trusted-UID boundary and provides no hostile
-same-UID guarantee: same-UID code can still mutate the source tree, `PATH`
-entries, or artifact paths after a check. The preflight intentionally refuses the current
+Later Go invocations must use `g02_go`, and later Git identity queries must
+use `g02_git`, so they keep the same empty-environment bounds. This is a
+trusted-UID boundary and provides no hostile same-UID guarantee: same-UID
+code can still mutate the source tree, `PATH` entries, or artifact paths after
+a check. SIP `/usr/bin` bootstrap trust is assumed, not proven. The preflight intentionally refuses the current
 linked-worktree layout because its `.git` file can produce missing VCS
 metadata even when `-buildvcs=true` is requested.
 
@@ -932,8 +1055,9 @@ g02_go env-i: GOFLAGS/GOENV/GOWORK/CC/PATH/GIT_DIR absent or bounded
 g02_go GOWORK=off against a parent go.work fixture
 PATH sort alias no longer used; /usr/bin/sort sorts
 pin_trusted_file follows a Homebrew-style relative symlink and retains pwd -P
-real Homebrew go alias resolved to a non-symlink Cellar path (rc=0)
-current-UID 0775 tool parent rc=0; current-UID 0777 tool parent rc=1
+real Homebrew go alias resolved to a non-symlink Cellar path (rc=0) at e0a90
+current-UID 0775 tool parent rc=0 at e0a90 (later refused; see next section)
+current-UID 0777 tool parent rc=1
 current-UID 0775 source parent still rc=1
 pin_trusted_file refuses synthetic foreign parent of a regular executable
 read_signing_record refuses synthetic foreign parent
@@ -946,10 +1070,44 @@ an independently reviewed detached clone and the pinned toolchain. Same-UID
 workdirs, `HOME`, and post-check mutation remain non-isolation.
 
 No live App, key, Keychain, signing-state, account, `chown`, launchd, runner,
-Docker, Lima, service, or workflow operation was performed. Remaining gaps:
-hosted CI and exact-head Codex review of the new SHA, independent Luna review,
-and the original G02 live evidence. Rollback is to restore this file from
-`7ce16651117f47470f06545d73067f3cdbdcfa6d`.
+Docker, Lima, service, or workflow operation was performed. Exact-head Codex
+review of `e0a90e2` completed at 2026-09-08T10:51:49Z with five P1 findings;
+that head was not mergeable.
+
+### PR59 clone, Git env, private caches, ACL, and strict tool-ancestry correction
+
+The five current P1s on `e0a90e2` were reproduced with exact extracted helpers
+and, for Git overrides, real disposable clones. `chmod +a` was used only on a
+task-owned temporary directory and removed afterward. No host Homebrew/system
+directory was chmod'd. No live App, Keychain, probe, signing-state, launchd,
+runner, workflow, Docker, Lima, account, or `chown` operation was run.
+
+| Finding | Frozen-e0a90 red | Current disposition |
+|---|---|---|
+| [P1 `r3957102705`](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3957102705) | Documented `git clone` / `git -C checkout` ran before `/usr/bin/git` was pinned. | Clone/checkout are inside the gate after pin and use `g02_git`. |
+| [P1 `r3957102697`](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3957102697) | `pin_trusted_file` accepted a current-UID `0775` tool parent (`rc=0`). | Tool ancestry uses the same group/other-write rule as source/artifacts; `0775` parent `rc=1`. Homebrew Cellar is not a trusted toolchain. Stage Go 1.26.8 under the private parent. |
+| [P1 `r3957102724`](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3957102724) | `g02_go` used caller `HOME`; caches and GOTOOLCHAIN download lived outside the private tree. | `HOME`/`GOCACHE`/`GOMODCACHE`/`GOPATH`/`TMPDIR`/`GOROOT` are created at `0700` under the private parent. `GOTOOLCHAIN=local`, `GOPROXY=off`. A proxy download is not an independent maintainer approval. |
+| [P1 `r3957102685`](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3957102685) | `GIT_DIR`/`GIT_WORK_TREE` pointing at a clean clone made `git -C dirty status --ignored` empty (`yes`), so ignored injected source was invisible before Go. | `g02_git` `env -i` plus `--git-dir`/`--work-tree` still listed `injected.go` under the same inherited `GIT_DIR`. Recheck refuses dirty/ignored source before any `g02_go`. |
+| [P1 `r3957102712`](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3957102712) | Whole gate accepted POSIX `0700` with `everyone allow add_file,delete_child`. | `check_no_writable_acl` via `ls -le`; writable allow ACL `rc=1`; ACL removed `rc=0`. Fail-closed on malformed entries. |
+| hop/stat | Unbounded symlink resolver timed out 124. | Hop limit 32 `rc=1`. `parse_owner_mode` refuses non-octal modes and extra fields. |
+
+All 21 wrapper records were re-read. The 16 historical records remain green for their original conditions except where a later current P1 reopened a related surface (Git identity vs `r3956402913`/`r3956164344`; toolchain trust vs `r3956164372`). Staleness is not resolution.
+
+```text
+g02_git clone is the documented checkout; no PATH git clone fence remains
+current-UID 0775 tool parent rc=1
+writable ACL on 0700 parent rc=1; after chmod -a rc=0
+old GIT_DIR override hid ignored file; g02_git still reports it
+g02_go env HOME/GOCACHE private; GIT_DIR absent; GOTOOLCHAIN=local; GOPROXY=off
+pin /usr/bin/stat rc=0; artifact 0700 rc=0
+symlink cycle hop limit rc=1; malformed mode rc=1
+```
+
+These are exact extracted-helper and real-git reproductions. They are not a
+full cgo `go build` of G02 binaries: that requires an independently staged
+Go 1.26.8 under the private parent. A self-hash of a copy from a
+group-writable Cellar is not that approval. Rollback is to restore this file
+from `e0a90e28325d96860d13389d7a5fe11ddf5f9f84`.
 
 Factual sources used without adding private identifiers:
 
