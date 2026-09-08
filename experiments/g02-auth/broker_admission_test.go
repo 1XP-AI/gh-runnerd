@@ -154,6 +154,24 @@ func TestBrokerPairedAdmissionAcceptsHistoricalControllerClaim(t *testing.T) {
 	if f.tokenCalls != 2 {
 		t.Fatalf("historical controller claim blocked current paired issuance: mints=%d", f.tokenCalls)
 	}
+	ledger, err := os.ReadFile(filepath.Join(f.admissionRoot, "broker-admission.jsonl"))
+	if err != nil {
+		t.Fatal("paired ledger")
+	}
+	lines := strings.Split(strings.TrimSpace(string(ledger)), "\n")
+	var pairedEvent brokerClaimEvent
+	for _, line := range lines {
+		var candidate brokerClaimEvent
+		if json.Unmarshal([]byte(line), &candidate) == nil && candidate.Slot == "paired-terminal" && candidate.Kind == "claim" {
+			pairedEvent = candidate
+			break
+		}
+	}
+	controllerView := a
+	controllerView.Mode, controllerView.Phase = "controller", "inspect"
+	if pairedEvent.Slot == "" || !validBrokerClaimEvent(controllerView, pairedEvent) {
+		t.Fatal("historical paired claim was rejected under the reciprocal controller mode")
+	}
 }
 func TestBrokerAdmissionFailureBeforeAPIAndResync(t *testing.T) {
 	for _, kind := range []string{"missing", "symlink", "sync", "existing-sync"} {

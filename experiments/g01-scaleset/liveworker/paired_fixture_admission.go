@@ -1,4 +1,4 @@
-//go:build g01_pair_fixture && !g01_live && !g01_worker
+//go:build g01_pair_fixture
 
 package liveworker
 

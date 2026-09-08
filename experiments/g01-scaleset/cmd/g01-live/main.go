@@ -41,6 +41,15 @@ func buildRevision() (string, bool) {
 	return version, clean && sdk && len(version) == 40
 }
 
+var openJournalForCommand = livecanary.OpenJournal
+var pairedPrepareJournalForCommand = livecanary.PreparePairedJournal
+var newSDKAPIForCommand = func(a livecanary.Approval, c livecanary.Credentials, _ string) (*livecanary.SDKAPI, error) {
+	return livecanary.NewSDKAPI(a, c)
+}
+var runPairedTerminalForCommand = func(ctx context.Context, files livecanary.PairedTerminalFiles, c livecanary.Credentials) error {
+	return livecanary.RunPairedTerminal(ctx, files, c)
+}
+
 func run(args []string, in io.Reader, out io.Writer) int {
 	return runWithPreparation(args, in, out, buildRevision, livecanary.PrepareJournal)
 }
@@ -129,7 +138,7 @@ func runWithPreparation(args []string, in io.Reader, out io.Writer, revisionForB
 		}
 	}
 	if *pairedPrepare {
-		receipt, e := livecanary.PreparePairedJournal(*statePath, a)
+		receipt, e := pairedPrepareJournalForCommand(*statePath, a)
 		if e != nil || json.NewEncoder(out).Encode(receipt) != nil {
 			return reject()
 		}
@@ -150,7 +159,7 @@ func runWithPreparation(args []string, in io.Reader, out io.Writer, revisionForB
 	}
 	var j *livecanary.FileJournal
 	if !*pairedExecute {
-		j, err = livecanary.OpenJournal(*statePath, a)
+		j, err = openJournalForCommand(*statePath, a)
 		if err != nil {
 			return reject()
 		}
@@ -179,14 +188,14 @@ func runWithPreparation(args []string, in io.Reader, out io.Writer, revisionForB
 		if credentials.PairedBinding == nil || *credentials.PairedBinding != binding {
 			return reject()
 		}
-		if livecanary.RunPairedTerminal(context.Background(), livecanary.PairedTerminalFiles{ControllerApprovalPath: *approvalPath, ControllerStateDirectory: *statePath, WorkerApprovalPath: *workerApprovalPath, WorkerStateDirectory: *workerStatePath}, credentials) != nil {
+		if runPairedTerminalForCommand(context.Background(), livecanary.PairedTerminalFiles{ControllerApprovalPath: *approvalPath, ControllerStateDirectory: *statePath, WorkerApprovalPath: *workerApprovalPath, WorkerStateDirectory: *workerStatePath}, credentials) != nil {
 			fmt.Fprintln(out, "paired terminal stopped; retain private state and all uncertain resources; no automatic retry")
 			return 1
 		}
 		fmt.Fprintln(out, "paired terminal completed; inspect private evidence")
 		return 0
 	}
-	api, err := livecanary.NewSDKAPI(a, credentials)
+	api, err := newSDKAPIForCommand(a, credentials, *statePath)
 	if err != nil {
 		return reject()
 	}

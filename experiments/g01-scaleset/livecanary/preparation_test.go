@@ -53,16 +53,35 @@ func TestPairedPreparationUsesDedicatedPhaseWithoutCleanupAuthority(t *testing.T
 	open := func(path string, a Approval) (*FileJournal, error) {
 		return openJournalAtAdmission(path, a, capRoot, func(f *os.File) error { return f.Sync() })
 	}
+	j, err := open(directory, a)
+	if err != nil {
+		t.Fatal("canonical controller journal")
+	}
+	for _, event := range []Event{
+		{Kind: "phase", Operation: "create"},
+		{Kind: "inventory", Digest: strings.Repeat("a", 64)},
+		{Kind: "intent", Operation: "observe-discovery"},
+		{Kind: "result", Operation: "observe-discovery"},
+		{Kind: "intent", Operation: "create"},
+		{Kind: "result", Operation: "create", ID: 7},
+	} {
+		if err := j.Append(event); err != nil {
+			t.Fatalf("canonical prerequisite event %q: %v", event.Operation, err)
+		}
+	}
+	if err := j.Close(); err != nil {
+		t.Fatal("close canonical controller journal")
+	}
 	receipt, err := preparePairedJournal(directory, a, open)
 	if err != nil || receipt.Phase != pairedPreparationPhase || receipt.Status != "controller_journal_prepared" {
 		t.Fatalf("paired preparation did not produce its own receipt: receipt=%+v err=%v", receipt, err)
 	}
-	j, err := open(directory, a)
+	j, err = open(directory, a)
 	if err != nil {
 		t.Fatal("paired journal reopen")
 	}
 	defer j.Close()
-	if len(j.Events()) != 0 {
+	if len(j.Events()) != 6 {
 		t.Fatal("paired preparation borrowed cleanup authority or recorded an effect")
 	}
 	withoutVerification := a
@@ -88,6 +107,8 @@ func TestPairedPreparationPreservesCanonicalControllerHistory(t *testing.T) {
 	for _, event := range []Event{
 		{Kind: "phase", Operation: "create"},
 		{Kind: "inventory", Digest: strings.Repeat("a", 64)},
+		{Kind: "intent", Operation: "observe-discovery"},
+		{Kind: "result", Operation: "observe-discovery"},
 		{Kind: "intent", Operation: "create"},
 		{Kind: "result", Operation: "create", ID: 7},
 	} {
@@ -118,7 +139,7 @@ func TestPairedPreparationPreservesCanonicalControllerHistory(t *testing.T) {
 		t.Fatal("reopen prepared controller journal")
 	}
 	defer reopened.Close()
-	if events := reopened.Events(); len(events) != 4 || events[1].Kind != "inventory" || events[3].Operation != "create" || events[3].ID != 7 {
+	if events := reopened.Events(); len(events) != 6 || events[1].Kind != "inventory" || events[5].Operation != "create" || events[5].ID != 7 {
 		t.Fatalf("paired preparation did not preserve canonical events: %+v", events)
 	}
 }

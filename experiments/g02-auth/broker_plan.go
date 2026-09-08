@@ -27,7 +27,7 @@ type pairedWorkerApproval struct {
 }
 
 func (a pairedWorkerApproval) validate(now time.Time) error {
-	if !a.RunnerUpdatesDisabled || !brokerSHA40.MatchString(a.HarnessSHA) || !brokerSHA40.MatchString(a.WorkflowSHA) || !brokerNonce.MatchString(a.OwnerNonce) || !brokerComponent.MatchString(a.Controller) || !brokerComponent.MatchString(a.DaemonID) || !strings.HasPrefix(a.ImageID, "sha256:") || !brokerSHA256.MatchString(strings.TrimPrefix(a.ImageID, "sha256:")) || a.Image != pairedWorkerImage || !filepath.IsAbs(a.Endpoint) || filepath.Clean(a.Endpoint) != a.Endpoint || len(a.Endpoint) > 103 || strings.ContainsAny(a.Endpoint, "\x00\r\n") || !a.ExpiresAt.After(now) || a.ExpiresAt.After(now.Add(24*time.Hour)) || len(a.Phases) != 4 {
+	if !a.RunnerUpdatesDisabled || !brokerSHA40.MatchString(a.HarnessSHA) || !brokerSHA40.MatchString(a.WorkflowSHA) || !brokerNonce.MatchString(a.OwnerNonce) || !brokerComponent.MatchString(a.Controller) || !brokerWorkerComponent.MatchString(a.DaemonID) || !strings.HasPrefix(a.ImageID, "sha256:") || !brokerSHA256.MatchString(strings.TrimPrefix(a.ImageID, "sha256:")) || a.Image != pairedWorkerImage || !filepath.IsAbs(a.Endpoint) || filepath.Clean(a.Endpoint) != a.Endpoint || len(a.Endpoint) > 103 || strings.ContainsAny(a.Endpoint, "\x00\r\n") || !a.ExpiresAt.After(now) || a.ExpiresAt.After(now.Add(24*time.Hour)) || len(a.Phases) != 4 {
 		return errBroker
 	}
 	seen := map[string]bool{}

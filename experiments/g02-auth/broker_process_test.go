@@ -256,6 +256,27 @@ func TestBrokerPairedChildBoundsTimeoutOverflowAndCancel(t *testing.T) {
 		})
 	}
 }
+
+func TestBrokerPairedChildDeadlineIsBoundedAndLeavesCadenceMargin(t *testing.T) {
+	now := time.Now()
+	deadline, err := pairedChildDeadline(context.Background(), now)
+	if err != nil || !deadline.Equal(now.Add(pairedTerminalMaximumChildBudget)) {
+		t.Fatalf("background child deadline=%v err=%v", deadline.Sub(now), err)
+	}
+	parentDeadline := now.Add(2 * time.Minute)
+	parent, cancel := context.WithDeadline(context.Background(), parentDeadline)
+	defer cancel()
+	deadline, err = pairedChildDeadline(parent, now)
+	if err != nil || !deadline.Equal(parentDeadline) {
+		t.Fatalf("parent authority deadline=%v err=%v", deadline.Sub(now), err)
+	}
+	short, cancel := context.WithDeadline(context.Background(), now.Add(pairedTerminalMinimumChildBudget))
+	defer cancel()
+	if _, err := pairedChildDeadline(short, now); err == nil {
+		t.Fatal("child deadline accepted without a complete cadence margin")
+	}
+}
+
 func TestBrokerChildBoundsAndReplacedBinaryRefuse(t *testing.T) {
 	binary := testBrokerBinary(t)
 	root := t.TempDir()

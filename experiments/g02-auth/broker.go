@@ -48,10 +48,28 @@ type BrokerResult struct {
 
 var errBroker = errors.New("broker stopped; retain private intent and review; no automatic retry")
 var brokerComponent = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$`)
+var brokerWorkerComponent = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`)
 var brokerPhases = map[string]bool{"create": true, "before-ack": true, "after-ack": true, "before-acquire": true, "acquire-loss": true, "jit-loss": true, "inspect": true, "cleanup": true}
 
+const (
+	// Terminal collection has seven five-second cadence gaps in production.
+	// Keep a complete cadence plus a separate execution margin available to the
+	// child, and reserve one more minute for the short-lived installation token
+	// context that precedes it.
+	pairedTerminalCadenceBudget      = 35 * time.Second
+	pairedTerminalChildMargin        = 25 * time.Second
+	pairedTerminalMinimumChildBudget = pairedTerminalCadenceBudget + pairedTerminalChildMargin
+	pairedTerminalCredentialMargin   = time.Minute
+	pairedTerminalMinimumAuthority   = pairedTerminalMinimumChildBudget + pairedTerminalCredentialMargin
+	pairedTerminalMaximumChildBudget = 10 * time.Minute
+)
+
 func (a BrokerApproval) validate(now time.Time) error {
-	if !brokerNonce.MatchString(a.OwnerNonce) || a.AppID < 1 || a.AppOwnerID < 1 || a.InstallationID < 1 || a.OrganizationID < 1 || a.RepositoryID < 1 || a.RunnerGroupID < 1 || !appSlug.MatchString(a.AppName) || !organizationLogin.MatchString(a.AppOwner) || !organizationLogin.MatchString(a.Organization) || !brokerComponent.MatchString(a.Repository) || !brokerComponent.MatchString(a.RunnerGroupName) || !a.ExpiresAt.After(now.Add(time.Minute)) || a.ExpiresAt.After(now.Add(24*time.Hour)) {
+	minimumLifetime := time.Minute
+	if a.Mode == "paired-terminal" {
+		minimumLifetime = pairedTerminalMinimumAuthority
+	}
+	if !brokerNonce.MatchString(a.OwnerNonce) || a.AppID < 1 || a.AppOwnerID < 1 || a.InstallationID < 1 || a.OrganizationID < 1 || a.RepositoryID < 1 || a.RunnerGroupID < 1 || !appSlug.MatchString(a.AppName) || !organizationLogin.MatchString(a.AppOwner) || !organizationLogin.MatchString(a.Organization) || !brokerComponent.MatchString(a.Repository) || !brokerComponent.MatchString(a.RunnerGroupName) || !a.ExpiresAt.After(now.Add(minimumLifetime)) || a.ExpiresAt.After(now.Add(24*time.Hour)) {
 		return errBroker
 	}
 	if a.Mode == "discover-actions-host" {
@@ -82,11 +100,48 @@ func validBrokerToken(token string) bool {
 	}
 	return true
 }
+
+func brokerPairedAuthorityDeadline(parent context.Context, a BrokerApproval, plan *brokerControllerPlan, now time.Time) (time.Time, error) {
+	if parent == nil || parent.Err() != nil {
+		return time.Time{}, errBroker
+	}
+	deadline := a.ExpiresAt
+	if plan != nil {
+		if plan.controller.ExpiresAt.IsZero() {
+			return time.Time{}, errBroker
+		}
+		deadline = minTime(deadline, plan.controller.ExpiresAt)
+		if plan.worker != nil {
+			if plan.worker.approval.ExpiresAt.IsZero() {
+				return time.Time{}, errBroker
+			}
+			deadline = minTime(deadline, plan.worker.approval.ExpiresAt)
+		}
+	}
+	if parentDeadline, ok := parent.Deadline(); ok {
+		deadline = minTime(deadline, parentDeadline)
+	}
+	if !deadline.After(now.Add(pairedTerminalMinimumAuthority)) {
+		return time.Time{}, errBroker
+	}
+	return deadline, nil
+}
+
 func brokerExecute(parent context.Context, a BrokerApproval, input brokerInput, path string, api *brokerAPI, plan *brokerControllerPlan) (BrokerResult, error) {
 	if parent == nil || api == nil || a.validate(api.now()) != nil || (a.AllowVerificationAuthority && input.VerificationToken == "") || (input.VerificationToken != "" && (!a.AllowVerificationAuthority || !validBrokerToken(input.VerificationToken))) || ((a.Mode == "controller" || a.Mode == "paired-terminal") && plan == nil) || (a.Mode != "controller" && a.Mode != "paired-terminal" && plan != nil) {
 		return BrokerResult{}, errBroker
 	}
-	ctx, cancel := context.WithDeadline(parent, minTime(a.ExpiresAt, api.now().Add(10*time.Minute)))
+	now := api.now()
+	deadline := minTime(a.ExpiresAt, now.Add(10*time.Minute))
+	if a.Mode == "paired-terminal" {
+		var err error
+		deadline, err = brokerPairedAuthorityDeadline(parent, a, plan, now)
+		if err != nil {
+			return BrokerResult{}, errBroker
+		}
+		deadline = minTime(deadline, now.Add(10*time.Minute))
+	}
+	ctx, cancel := context.WithDeadline(parent, deadline)
 	defer cancel()
 	candidate := Candidate{AppID: a.AppID, PEM: []byte(input.PEM)}
 	defer clear(candidate.PEM)
@@ -169,6 +224,9 @@ func brokerExecute(parent context.Context, a BrokerApproval, input brokerInput, 
 	}
 	issued, err := api.mint(ctx, a, cred)
 	if err != nil {
+		return BrokerResult{}, errBroker
+	}
+	if a.Mode == "paired-terminal" && !issued.ExpiresAt.After(api.now().Add(pairedTerminalMinimumAuthority)) {
 		return BrokerResult{}, errBroker
 	}
 	tokenCtx, stopToken := context.WithDeadline(ctx, issued.ExpiresAt.Add(-time.Minute))

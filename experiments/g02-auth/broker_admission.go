@@ -397,26 +397,39 @@ func validBrokerClaimEvent(a BrokerApproval, e brokerClaimEvent) bool {
 		return false
 	}
 	if paired {
-		if a.Mode != "paired-terminal" || e.Worker == nil || !brokerSHA256.MatchString(e.Worker.Approval) || e.Worker.ApprovalFile.Device == 0 || e.Worker.ApprovalFile.Inode == 0 || e.Worker.State.Device == 0 || e.Worker.State.Inode == 0 {
+		if e.Worker == nil || !brokerSHA256.MatchString(e.Worker.Approval) || e.Worker.ApprovalFile.Device == 0 || e.Worker.ApprovalFile.Inode == 0 || e.Worker.State.Device == 0 || e.Worker.State.Inode == 0 {
 			return false
 		}
-	} else if e.Worker != nil || a.Mode == "paired-terminal" {
+	} else if e.Worker != nil {
 		return false
 	}
 	c := e.Authority.Approval
 	if c.ExpiresAt.IsZero() || e.Authority.Digest != brokerDigest(c) {
 		return false
 	}
+	// Validate a historical event against the mode and slot it records. The
+	// current request may be reciprocal (for example, a paired retry after a
+	// controller create, or an inspect/cleanup after a failed paired claim), so
+	// using its mode here would incorrectly turn current authority into a
+	// prerequisite for replaying old ledger records.
+	eventApproval := a
 	if paired {
-		a.Mode = "paired-terminal"
+		eventApproval.Mode = "paired-terminal"
 	} else {
-		a.Mode = "controller"
+		eventApproval.Mode = "controller"
 	}
-	a.Phase = e.Slot
-	a.ExpiresAt = c.ExpiresAt
-	a.ControllerHarnessSHA = e.Controller.Harness
-	a.AllowVerificationAuthority = c.needsVerification()
-	if c.validate(a, c.ExpiresAt.Add(-2*time.Minute)) != nil {
+	eventApproval.Phase = e.Slot
+	eventApproval.ExpiresAt = c.ExpiresAt
+	eventApproval.ControllerHarnessSHA = e.Controller.Harness
+	eventApproval.AllowVerificationAuthority = c.needsVerification()
+	validationNow := c.ExpiresAt.Add(-2 * time.Minute)
+	if paired {
+		// Paired approvals reserve a two-minute completion budget. Validate the
+		// historical authority at a point before that budget, rather than at the
+		// exact expiry boundary where the current-mode minimum would fail.
+		validationNow = c.ExpiresAt.Add(-pairedTerminalMinimumAuthority - time.Second)
+	}
+	if c.validate(eventApproval, validationNow) != nil {
 		return false
 	}
 	c.ExpiresAt = time.Time{}

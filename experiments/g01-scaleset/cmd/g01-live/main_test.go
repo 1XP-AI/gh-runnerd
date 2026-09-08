@@ -28,8 +28,8 @@ func (r unreadable) Read([]byte) (int, error) {
 
 type countedInput struct {
 	io.Reader
-	reads       int
-	eofs        int
+	reads         int
+	eofs          int
 	readsAfterEOF int
 }
 

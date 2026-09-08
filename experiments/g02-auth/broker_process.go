@@ -29,6 +29,20 @@ type verifiedBrokerBinary struct {
 // production build metadata gate.
 var brokerBinaryOpener = openBrokerBinary
 
+func pairedChildDeadline(parent context.Context, now time.Time) (time.Time, error) {
+	if parent == nil || parent.Err() != nil {
+		return time.Time{}, errBroker
+	}
+	deadline := now.Add(pairedTerminalMaximumChildBudget)
+	if parentDeadline, ok := parent.Deadline(); ok {
+		deadline = minTime(deadline, parentDeadline)
+	}
+	if !deadline.After(now.Add(pairedTerminalMinimumChildBudget)) {
+		return time.Time{}, errBroker
+	}
+	return deadline, nil
+}
+
 func validBrokerBuild(info *debug.BuildInfo, expected string) bool {
 	if info == nil || info.GoVersion != "go1.26.8" || info.Path != "github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/cmd/g01-live" || !brokerSHA40.MatchString(expected) {
 		return false
@@ -172,7 +186,11 @@ func invokeBrokerPairedTerminal(parent context.Context, binary *verifiedBrokerBi
 	if err != nil || len(data) > 16384 {
 		return errBroker
 	}
-	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+	deadline, err := pairedChildDeadline(parent, time.Now())
+	if err != nil {
+		return errBroker
+	}
+	ctx, cancel := context.WithDeadline(parent, deadline)
 	defer cancel()
 	command := exec.CommandContext(ctx, binary.path, "--execute-approved-paired-terminal", "--approval", approvalPath, "--state-dir", stateDirectory, "--worker-approval", workerApprovalPath, "--worker-state-dir", workerStateDirectory, "--paired-binding", string(bindingData))
 	command.Dir = workingDirectory
