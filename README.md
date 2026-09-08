@@ -14,20 +14,20 @@ gh-runnerd logs tests --follow
 gh-runnerd stop tests --drain
 ```
 
-## Intended first release
+## Intended delivery
 
-- A native macOS ARM64 Go executable, with a CLI and separately supervised daemon.
-- User-owned GitHub App authentication; no management SaaS, shared vendor private key, public inbound endpoint, or Kubernetes requirement.
-- Linux runners through an explicit Docker Engine connection. Existing Docker Desktop or Lima engines can be used without changing the user's global Docker context.
-- Native macOS process runners for explicitly trusted repositories only. A fresh working directory is **not** OS or credential isolation. macOS VM isolation is a later, separately gated provider.
-- Multiple organizations, per-pool limits, and a shared host-wide capacity budget.
-- One-job runners, durable state reconciliation, safe scale-down, structured diagnostics, and tests that exercise crashes and concurrent work.
+The original product envelope is still a native macOS ARM64 Go CLI plus supervised daemon, user-owned GitHub App authentication, Linux workers through an explicit Docker Engine connection, trusted-only native macOS processes, multiple organizations and a shared host budget. **There is no runnable product yet** (`cmd/gh-runnerd` is an empty entry point). Maintainer-accepted sequencing in [#66](https://github.com/1XP-AI/gh-runnerd/issues/66) splits that envelope:
 
-Linux still needs a Linux kernel/runtime on macOS. The first release connects to an existing engine; it does not make Linux containers native macOS processes or provision a Kubernetes cluster.
+- **R1 Internal MVP:** this Mac, one organization, one private test repository, the existing Linux-container backend, concurrency one, manual App, foreground command. Full G01 ACK/acquisition/JIT recovery remains required.
+- **R2 Everyday operations:** install/start/stop/status, restart recovery, bounded scaling.
+- **R3 General distribution:** multi-organization support, additional native backend, automated onboarding, signing/update/diagnostics.
+- **Future:** optional macOS VM / multi-host research ([#21](https://github.com/1XP-AI/gh-runnerd/issues/21)).
+
+Linux still needs a Linux kernel/runtime on macOS. R1 connects to an existing engine; it does not make Linux containers native macOS processes, add a second backend, or provision a Kubernetes cluster. See [approved delivery releases](docs/PLAN.md#approved-delivery-releases).
 
 ## Track implementation
 
-[GitHub Project](https://github.com/orgs/1XP-AI/projects/2) provides [Goals](https://github.com/orgs/1XP-AI/projects/2/views/1), [Ready](https://github.com/orgs/1XP-AI/projects/2/views/2) and [Board](https://github.com/orgs/1XP-AI/projects/2/views/3) views. All 21 issues carry a goal, model/effort, TDD cases, acceptance criteria and dependencies. Start with G01/G02/G03; the board does not dispatch agents automatically.
+[GitHub Project](https://github.com/orgs/1XP-AI/projects/2) provides [Goals](https://github.com/orgs/1XP-AI/projects/2/views/1), [Ready](https://github.com/orgs/1XP-AI/projects/2/views/2) and [Board](https://github.com/orgs/1XP-AI/projects/2/views/3) views. The original 21 goal issues remain; the live board has 36 items after additive Release metadata and R1 children. Start from currently Ready work; the board does not dispatch agents automatically.
 
 ## Read the plan
 
@@ -42,7 +42,7 @@ Linux still needs a Linux kernel/runtime on macOS. The first release connects to
 - [Ordered backlog](docs/BACKLOG.md)
 - [Sources and unresolved experiments](docs/SOURCES.md)
 
-The implementation target begins with one Apple Silicon Mac and two organizational installations. Organization examples in configuration are illustrative. No existing runner is migrated or removed by this repository.
+R1 is one Apple Silicon Mac and one organizational installation. Two-organization qualification remains the G16/R3 target. Organization examples in configuration are illustrative. No existing runner is migrated or removed by this repository.
 
 ## License
 

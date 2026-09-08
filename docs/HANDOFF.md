@@ -7,7 +7,7 @@ Treat the live GitHub Project and the issue body as authoritative when they diff
 from this snapshot. Re-read this file, `AGENTS.md` and the linked design documents
 before changing code.
 
-Snapshot: 2026-09-08 KST, repository `main` at `0d0412981d766350d15dfa667ffe74f81ea88edc` (`docs: route future work through Luna max (#56)`).
+Snapshot: 2026-09-08 KST, documentation branch `orca/release-reframe` based on `main` `31ae8102f6f20f8e79258eb824af1400eba21954` (`[CI] Split default G01 deadline checks (#65)`). Live Project #2 has 36 items after the maintainer-accepted release reorganization ([#66](https://github.com/1XP-AI/gh-runnerd/issues/66)). This file is a snapshot; the live Project and issue bodies win when they differ.
 
 ## Mission and product boundary
 
@@ -19,19 +19,33 @@ safe drain, durable reconciliation and a shared host resource budget.
 The repository is still a design and implementation backlog. The commands in the
 README are intended interfaces, not a runnable product or a stability claim.
 
-The first release is deliberately bounded:
+The original product envelope is deliberately bounded and is now sequenced as
+three maintainer-accepted releases ([PLAN.md](PLAN.md#approved-delivery-releases)):
 
-- one macOS ARM64 manager on one Mac;
+- **R1 Internal MVP:** this Mac, one organization, one private test repository,
+  the existing reviewed Linux-container backend, concurrency one, manual App,
+  foreground command. Full G01 ACK/acquisition/JIT recovery remains required.
+  Daemon/install/launchd service are not implemented.
+- **R2 Everyday operations:** install/start/stop/status, restart recovery and
+  bounded scaling.
+- **R3 General distribution:** multi-organization support, trusted native macOS
+  backend, automated onboarding, signing/update/diagnostics.
+- **Future:** G21 optional macOS VM / multi-host research.
+
+Shared envelope limits that still apply:
+
+- one macOS ARM64 manager on one Mac for R1/R2/R3;
 - Linux workers through an explicitly selected Docker Engine connection (an existing
   Lima or Docker Desktop engine may be used without changing the global Docker
   context);
 - one-job Linux workers with a worker-specific Docker daemon for service/container
   actions;
-- native macOS one-job processes only for an explicitly trusted repository/domain;
+- native macOS one-job processes only for an explicitly trusted repository/domain
+  (R3, not R1);
 - GitHub App authentication owned by the operator and outbound GitHub connections;
 - no public inbound endpoint, management SaaS, Kubernetes requirement, Windows
   provider, cloud overflow, fleet controller, billing service or macOS VM provider
-  in v0.1;
+  in this envelope;
 - no automatic replay of an interrupted workflow and no claim that reconciliation
   is checkpointing or exactly-once execution;
 - no implicit installation of software or global Docker context changes.
@@ -39,7 +53,7 @@ The first release is deliberately bounded:
 Linux still needs a Linux kernel/runtime on macOS. A native macOS runner cannot run
 a Linux Actions job, and a Linux container cannot provide a macOS runner. Native
 macOS execution remains a host process; optional VM/multi-host work is future
-research in G21.
+research in G21. Issue #1's exact Goal is unchanged.
 
 ## Host and current fallback runners
 
@@ -105,7 +119,12 @@ current board; verify them with `gh project field-list` if GitHub reports a mism
 | Project | `2` / `PVT_kwDOD2M2gs4Bismw` |
 | Agent field | `PVTSSF_lADOD2M2gs4Bismwzhhjobs` |
 | Agent: Astra xhigh | `cf617d72` (historical only for completed work) |
-| Agent: Luna max | `9317c27f` (all current/future dispatch) |
+| Agent: Luna max | `9317c27f` (repository default dispatch) |
+| Release field | `PVTSSF_lADOD2M2gs4Bismwzhhr3bc` |
+| Release: R1 - Internal MVP | `a0a78eb0` |
+| Release: R2 - Everyday operations | `58b696ee` |
+| Release: R3 - General distribution | `428d845e` |
+| Release: Future research | `c52ca8fd` |
 | Status field | `PVTSSF_lADOD2M2gs4BismwzhhjoZA` |
 | Status: Backlog | `a4ee9f7f` |
 | Status: Ready | `b2cc6cc3` |
@@ -117,26 +136,35 @@ current board; verify them with `gh project field-list` if GitHub reports a mism
 
 `Agent` is routing metadata. Setting it does not start a Codex agent. A goal in a
 Project item is a durable work specification; it is not an active Codex goal.
+Grok 4.6 xhigh is recorded on #66/#67/#68/#69 issue bodies; it is not currently a
+Project Agent option. Do not overwrite #1/#2/#60 Agent values for this planning
+change.
 
 ### Live board snapshot
 
 Run `gh project item-list 2 --owner 1XP-AI --limit 1000 --format json` before
-dispatch. The last verified snapshot is:
+dispatch. The last verified snapshot is 36 items. The full map is in
+[ISSUES.md](ISSUES.md). Compact routing:
 
-| Issues | Project status | Current routing |
-|---|---|---|
-| #1 G01, #2 G02 | In progress | Luna max; evidence gates unresolved |
-| #3 G03, #40 G12a | Done | completed; historical review facts remain in docs |
-| #4 G04 through #20 G20 | Backlog | Luna max |
-| #21 G21 | Future | optional macOS VM/multi-host research |
-| #44 G01a, #46 G01b, #47 G01c, #50 G01d, #52 G01e | Done | historical Astra xhigh work; preserve the record |
-| #54 G01f | In review | Luna max; PR #55 is still held |
-| #30 | Done | merged-PR audit item; no current Agent value |
+| Issues | Project status | Release | Current routing |
+|---|---|---|---|
+| #1 G01 | In progress | R1 | Luna max; **full** ACK/acquisition/JIT Goal unresolved |
+| #2 G02 | In progress | R3 | Luna max; Manifest/multi-org/launchd remains here |
+| #67 | Ready | R1 | Grok 4.6 xhigh / Luna review; child of #2; no native blockers |
+| #60 G01g | In progress | R1 | Luna max; separate worktree/PR #62; do not edit from #66 |
+| #66 | In progress | R1 | Grok 4.6 xhigh / Luna review; this documentation change |
+| #68 | Blocked | R1 | child of #13; blocked by #60/#66/#67; contract-before-implementation |
+| #69 | Blocked | R1 | child of #16; blocked by #1/#68 |
+| #3 G03, #30, #40 G12a, #44, #46, #47, #50, #52, #54 G01f, #61, #64 | Done | R1 except #40 R2 | historical records preserved; #54 Done does not close #1 |
+| #4–#7, #9, #10, #12–#15, #20 | Backlog | R2 | Luna max; original dependencies unchanged |
+| #8, #11, #16–#19 | Backlog | R3 | Luna max |
+| #21 G21 | Future | Future | optional macOS VM/multi-host research |
 
 Issue labels and the initial planning inventory can retain historical Astra values.
 For current dispatch, use the Project `Agent` field and the issue's current
 execution contract. Do not rewrite historical records to make them look like new
-work.
+work. Do not add further child issues or native edges without an explicit ask;
+the R1 mapping is already applied.
 
 ### Status meanings
 
@@ -155,23 +183,28 @@ to Done when only a PR was opened or a test was planned.
 
 ## Model and delegation policy
 
-The current user policy routes **all future implementation, contract work,
-architecture, authentication, protocol, concurrency, documentation, coordination
-and independent review through `gpt-5.6-luna` with `max` reasoning**. This includes
-G01/G02/G04 evidence gates. Historical Astra/Luna assignments in old review and
-evidence records are facts about who did that work and must stay unchanged. If a
-later task contains an explicit current user model or effort override, that override
-takes precedence and the Project Agent field must retain the selected routing.
+The repository default routes **implementation, contract work, architecture,
+authentication, protocol, concurrency, documentation, coordination and independent
+review through `gpt-5.6-luna` with `max` reasoning**. This includes G01/G02/G04
+evidence gates unless an issue records an explicit current user override.
+Historical Astra/Luna assignments in old review and evidence records are facts
+about who did that work and must stay unchanged. If a later task contains an
+explicit current user model or effort override, that override takes precedence.
+
+The maintainer-authorized override for [#66](https://github.com/1XP-AI/gh-runnerd/issues/66)
+and R1 children [#67](https://github.com/1XP-AI/gh-runnerd/issues/67)/[#68](https://github.com/1XP-AI/gh-runnerd/issues/68)/[#69](https://github.com/1XP-AI/gh-runnerd/issues/69)
+is main author Grok 4.6 xhigh with independent Luna max review. Do not create a
+second native Goal on #1 while this planning work runs.
 
 For every new issue, after checking for an explicit current user override:
 
 - set the Project Agent field to `Luna max` when no override exists, otherwise set
-  it to the explicitly requested routing;
+  it to the explicitly requested routing when that option exists;
 - use one active goal whose objective is exactly the issue's `Goal` statement;
 - do not invent a token budget;
-- use an independent contract review with the current selected model/effort (the
-  default is Luna max), plus a second independent pass with that same routing for
-  security, recovery, secret handling, ownership or concurrency boundaries;
+- use an independent contract review with the current selected review model/effort
+  (the default is Luna max), plus a second independent Luna max pass for security,
+  recovery, secret handling, ownership or concurrency boundaries;
 - parallelize only independent issues with explicit non-overlapping file ownership;
   one integrator owns shared protocol/state definitions;
 - a Project field never launches work by itself.
@@ -428,52 +461,54 @@ Use this compact map to orient a new agent; the live Project decides what is Rea
 | G19 | #19 | Trust admission and cross-worker secret boundaries |
 | G20 | #20 | Reversible pilot/migration with legacy fallback |
 | G21 | #21 | Optional macOS VM and multi-host provider research (Future) |
+| G02-R1 | #67 | R1 manual single-organization credentials (child of #2; parent remains R3) |
+| G13-R1 | #68 | R1 foreground command, capacity one (child of #13; blocked by #60/#66/#67) |
+| G16-R1 | #69 | R1 authorized real job plus required recovery (child of #16; blocked by #1/#68) |
+| P66 | #66 | Delivery-plan documentation; not a runtime Goal |
 
-G01 and G02 are evidence gates. G04 and all dependent implementation remain behind
-their acceptance evidence. G10/G16 require real ARM64 Docker and private test
-repositories. G11/G19 require trusted native-process evidence. G17 is the reliability
+G01 and G02 are evidence gates. G01's exact Goal and full ACK/acquisition/JIT
+recovery remain required; child merges are not completion. G04 and all dependent
+full-scope implementation remain behind their acceptance evidence. #68 is not a
+G04/G13 bypass. G10/G16 require real ARM64 Docker and private test repositories.
+G11/G19 require trusted native-process evidence and are R3. G17 is the reliability
 release gate. G20 is the reversible pilot, not a license to remove the fallback
-runners early.
+runners early. G20 remains natively blocked by #17/#18.
 
 ## Current review state and next action
 
-### Merged policy PR #56
+### Merged policy and G01f
 
 PR [#56](https://github.com/1XP-AI/gh-runnerd/pull/56) (`docs: route future work through Luna max`)
-is merged at the snapshot SHA. It aligned `AGENTS.md`, `docs/EXECUTION.md`, the
-current issue contracts, backlog routing and review/evidence policy with the Luna
-max user policy. It intentionally preserved historical Astra records.
+aligned default routing to Luna max and preserved historical Astra records.
+PR [#55](https://github.com/1XP-AI/gh-runnerd/pull/55) / issue [#54](https://github.com/1XP-AI/gh-runnerd/issues/54)
+G01f is merged and Done. Do not start a second G01f implementation. #1 remains
+open because its full recovery Goal is not complete.
 
-### Held PR #55 / issue #54
+### Active runtime work in other worktrees (do not edit from #66)
 
-PR [#55](https://github.com/1XP-AI/gh-runnerd/pull/55) implements G01f, linked to
-issue [#54](https://github.com/1XP-AI/gh-runnerd/issues/54). At the snapshot:
+- [#60](https://github.com/1XP-AI/gh-runnerd/issues/60) G01g / open PR [#62](https://github.com/1XP-AI/gh-runnerd/pull/62): bounded broker handoff. Blocks #68.
+- [#2](https://github.com/1XP-AI/gh-runnerd/issues/2) readiness review / open PR [#59](https://github.com/1XP-AI/gh-runnerd/pull/59): G02 macOS live-validation packet. Do not treat it as R1 completion of #67.
 
-- branch: `feat/g01-terminal`;
-- head: `8a848ad5b373866e1a6a01ce2a462ecfe37655df`;
-- Project status: In review, Agent Luna max;
-- a generated storage witness name collision was fixed and the targeted tooling
-  partition passed locally;
-- hosted run `34168590856` still failed in environment-sensitive timeout paths:
-  one attempt failed a G02 manual delayed-EOF partition, and a rerun failed
-  `TestResponseBudgetAppliesAfterGzipDecompression` after 45 seconds;
-- a local exact subtest race run passed, but no blind rerun or “clean” exact-head
-  Codex verdict should be inferred from that;
-- keep the PR unmerged until current CI and current-head Codex review are clean.
+Inspect those PRs in their own worktrees. This documentation change must not
+modify runtime, CI or evidence docs belonging to those PRs.
 
-The first action for an agent inheriting this state is to inspect the current PR
-head, hosted checks and Codex findings with the wrapper. Do not start a second
-implementation of G01f, do not merge on a stale review, and do not mask a timeout
-by widening limits or deleting tests without a reproduced root cause and a reviewed
-contract change.
+### This planning change
+
+Issue [#66](https://github.com/1XP-AI/gh-runnerd/issues/66) on `orca/release-reframe`.
+Main author Grok 4.6 xhigh; independent Luna max review; exact-head Codex+CI before
+merge. #68 stays Blocked until #60, #66 and #67 are complete and the minimal
+foreground contract is reviewed. No live authorization and no merge of blocked
+implementation are implied.
 
 ## Live-operation gate
 
-The next live integration draft is a paired private canary after PR #55 has passed
-its gates. It must use a reviewed immutable commit, a disposable private
-repository/App installation, scoped runner-group access and explicit maintainer
-authorization for the concrete target. No live authorization is present in this
-handoff.
+The next live integration draft remains a paired private canary after current
+G01 recovery evidence and the R1 command path exist. PR #55 / G01f is already
+merged and does not by itself authorize live work. It must use a reviewed
+immutable commit, a disposable private repository/App installation, scoped
+runner-group access and explicit maintainer authorization for the concrete
+target. No live authorization is present in this handoff. Issue #69 tracks R1
+qualification and stays blocked by #1 and #68.
 
 Until that authorization exists, an agent may build offline fakes, local temporary
 SQLite journals, private TLS/Unix fixtures and static tooling checks. It may not
@@ -489,7 +524,8 @@ Before handing work onward, confirm:
 - [ ] The issue Goal was copied exactly into one active goal; no invented budget.
 - [ ] Dependencies and Project status were checked live.
 - [ ] Project Agent matches the current user-selected model/effort (default:
-      `Luna max`); historical records were not rewritten.
+      `Luna max`, with the recorded Grok 4.6 xhigh override on #66/#67/#68/#69);
+      historical records and #1/#2/#60 Agent values were not rewritten.
 - [ ] A meaningful red case, minimal green fix and relevant boundary tests are
       recorded, with actual commands/results and remaining gaps.
 - [ ] No secrets, personal paths, raw SDK errors, live tokens or unreviewed runner

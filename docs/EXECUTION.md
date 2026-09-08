@@ -6,9 +6,12 @@ The [GitHub Project](https://github.com/orgs/1XP-AI/projects/2) is the planning/
 
 | Work | Implementer | Review |
 |---|---|---|
-| All implementation areas, including auth, protocol, concurrency, resource admission, lifecycle, providers, architecture, tests, packaging and docs | Luna / `gpt-5.6-luna`, `max` | Independent Luna `max`; use a second independent Luna `max` pass for security/recovery boundaries |
+| Default, including auth, protocol, concurrency, resource admission, lifecycle, providers, architecture, tests, packaging and docs | Luna / `gpt-5.6-luna`, `max` | Independent Luna `max`; use a second independent Luna `max` pass for security/recovery boundaries |
+| Explicit current override on [#66](https://github.com/1XP-AI/gh-runnerd/issues/66) and R1 children [#67](https://github.com/1XP-AI/gh-runnerd/issues/67)/[#68](https://github.com/1XP-AI/gh-runnerd/issues/68)/[#69](https://github.com/1XP-AI/gh-runnerd/issues/69) | Grok 4.6 xhigh | Independent Luna `max` |
 
-Use Luna max for every issue, including contract-setting evidence gates such as G01, G02 and G04. Verify each issue's contract and dependencies before dependent implementation begins. Escalate discovered architecture, secret handling, process isolation or concurrency changes to an additional independent Luna max review; do not stretch a small issue into an unreviewed redesign. Parallelize only independent issues with non-overlapping file ownership; no simultaneous edits to shared protocol/state definitions. Earlier Astra/Luna allocations in historical review and evidence records are preserved as historical facts.
+The repository default is Luna max, including contract-setting evidence gates such as G01, G02 and G04, unless an explicit current user override is recorded on the issue. Do not overwrite that override with the default. Historical Astra/Luna assignments in review and evidence records stay unchanged. The Project `Agent` field currently offers Astra xhigh and Luna max; Grok 4.6 xhigh is recorded in the named issue bodies until a Project option exists. Do not rewrite #1/#2/#60 Agent values to make this planning change look like those issues changed owners.
+
+Verify each issue's contract and dependencies before dependent implementation begins. Escalate discovered architecture, secret handling, process isolation or concurrency changes to an additional independent Luna max review; do not stretch a small issue into an unreviewed redesign. Parallelize only independent issues with non-overlapping file ownership; no simultaneous edits to shared protocol/state definitions.
 
 ## Per-issue goal workflow
 
@@ -36,8 +39,8 @@ was complete at merge time.
 
 ## Board fields
 
-Status, Stage, Priority, Agent, Risk, Goal, Dependencies and Test profile. Initial gates/bootstrap work is Ready; dependent work is Backlog. VM/fleet research is explicitly Future. Machine-readable `status` and `test_profile` values are in `backlog.json`; trusted-runtime and trusted-live-github profiles require maintainer-controlled execution and never run on public PR code.
+Status, Stage, Priority, Agent, Risk, Goal, Dependencies, Test profile and Release. Stage/milestones preserve the original M0–M5 taxonomy. Release is additive sequencing (R1 Internal MVP, R2 Everyday operations, R3 General distribution, Future research) and does not change acceptance text or native dependency gates. Initial gates/bootstrap work is Ready; dependent full-scope work is Backlog. R1 children use their own documented dependencies: #67 is Ready with no production dependency; #68 is Blocked by #60/#66/#67 until those complete and its minimal contract is reviewed; #69 is Blocked by #1/#68. Ready on a child is not a bypass of the parent's remaining blockers. VM/fleet research is explicitly Future. Machine-readable `status` and `test_profile` values are in `backlog.json`; trusted-runtime and trusted-live-github profiles require maintainer-controlled execution and never run on public PR code.
 
-G08 enrollment and G15 service lifecycle remain gated by their contracts and independent review. Luna max handles both implementation and review; G12 computes pure proposals, while G05/G13 own atomic reservation and live admission under the same Luna max review policy.
+G08 enrollment and G15 service lifecycle remain gated by their contracts and independent review. Default implementation and review are Luna max; recorded overrides such as Grok 4.6 xhigh on #66/#67/#68/#69 still require independent Luna max review. G12 computes pure proposals, while G05/G13 own atomic reservation and live admission under the parent full-scope gates.
 
 Use one issue per bounded outcome and linked dependencies instead of assigning all future work active goals at once.

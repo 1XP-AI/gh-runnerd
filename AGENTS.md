@@ -3,7 +3,7 @@
 This is a plan-first repository. Do not treat example CLI commands as implemented features.
 
 - Work from a GitHub issue and its Goal, acceptance criteria and dependencies. One issue, one branch/worktree, one active goal when the task requests goal execution.
-- Follow docs/EXECUTION.md. The current user-authorized policy routes all future implementation, review and coordination work through Luna (`gpt-5.6-luna`, `max`), regardless of area. Preserve the TDD, independent-review and live-operation authorization gates. Historical records keep the model that actually produced them. Do not override an explicit current user setting.
+- Follow docs/EXECUTION.md. The repository default routes implementation, review and coordination through Luna (`gpt-5.6-luna`, `max`) unless an explicit current user override is recorded on the issue. The maintainer-authorized override for delivery-reframe issue #66 and R1 children #67/#68/#69 is main author Grok 4.6 xhigh with independent Luna max review. Preserve the TDD, independent-review, exact-head Codex+CI and live-operation authorization gates. Historical records keep the model that actually produced them. Do not override an explicit current user setting.
 - Use TDD for implementation: meaningful failing test -> minimal implementation -> refactor -> relevant verification. Document actual results; never claim planned/skipped/live tests passed.
 - Preserve live manually installed runners during development. No global Docker prune/context change, broad process kill, unreviewed destructive cleanup or automatic workflow replay.
 - Credentials, raw SDK response errors, JIT configs, personal machine paths and private test logs must not enter commits/issues/diagnostic bundles.
