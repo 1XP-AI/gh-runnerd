@@ -4,6 +4,7 @@ set -euo pipefail
 
 go_cmd="${GO:-go}"
 exact_toolchain="go1.26.8"
+default_heavy_test_regex='^TestBaselineStatisticsPresenceAndEligibility$'
 paired_collection_regex='^TestPaired'
 storage_regex='^TestPairedTerminal(Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$'
 
@@ -29,7 +30,17 @@ for module_dir in "${offline_modules[@]}"; do
 	printf 'offline experiment: %s (toolchain=%s)\n' "${module_dir}" "${exact_toolchain}"
 	(
 		cd "${module_dir}"
-		GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s ./...
+		if [[ "${module_dir}" == "experiments/g01-scaleset" ]]; then
+			# Run the known cumulative-cost test family through the same package
+			# discovery as the remainder. This keeps same-name tests in another
+			# package in the selected partition rather than silently skipping them.
+			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -run "${default_heavy_test_regex}" ./...
+			# Keep the remainder unfiltered so examples and fuzz seeds execute;
+			# the exact heavy name is the only member of the first partition.
+			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -skip "${default_heavy_test_regex}" ./...
+		else
+			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s ./...
+		fi
 		GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" vet ./...
 		if [[ "${module_dir}" == "experiments/g01-scaleset" ]]; then
 			# These reviewed command tests use synthetic fixtures and refusal/plan

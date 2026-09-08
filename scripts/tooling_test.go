@@ -453,6 +453,245 @@ func TestPairedTerminalFixtureStorageFailure(t *testing.T) {
 	}
 }
 
+func TestToolingDefaultG01PartitionsRun(t *testing.T) {
+	root := toolingFixture(t)
+	const heavyName = "TestBaselineStatisticsPresenceAndEligibility"
+	const heavySentinel = "default-g01-heavy-regression"
+	const remainderSentinel = "default-g01-remainder-regression"
+	const otherPackageSentinel = "default-g01-other-package-regression"
+	const sameNameOtherPackageSentinel = "default-g01-same-name-other-package-regression"
+	const exampleSentinel = "default-g01-example-output-regression"
+	const fuzzSentinel = "default-g01-fuzz-seed-regression"
+	livecanaryBase := "experiments/g01-scaleset/livecanary"
+	otherPackageBase := "experiments/g01-scaleset/otherfixture"
+	defaultTestSource := func(pkg, testName, marker, failure string) string {
+		failureLine := ""
+		if failure != "" {
+			failureLine = "\n\tt.Fatal(\"" + failure + "\")"
+		}
+		return `//go:build !g01_pair_fixture && !g01_live && !g01_worker
+
+package ` + pkg + `
+
+import (
+	"os"
+	"testing"
+)
+
+func ` + testName + `(t *testing.T) {
+	path := os.Getenv("TOOLING_SENTINEL_LOG")
+	if path == "" {
+		t.Fatal("TOOLING_SENTINEL_LOG is not set")
+	}
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if _, err := file.WriteString("` + marker + `\n"); err != nil {
+		t.Fatal(err)
+	}` + failureLine + `
+}
+`
+	}
+	defaultExampleSource := func(marker, expected string) string {
+		return `//go:build !g01_pair_fixture && !g01_live && !g01_worker
+
+package livecanary
+
+import (
+	"fmt"
+	"os"
+)
+
+func Example_defaultG01Fixture() {
+	path := os.Getenv("TOOLING_SENTINEL_LOG")
+	if path == "" {
+		panic("TOOLING_SENTINEL_LOG is not set")
+	}
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		panic(err)
+	}
+	defer file.Close()
+	if _, err := file.WriteString("` + marker + `\n"); err != nil {
+		panic(err)
+	}
+	fmt.Println("` + marker + `")
+	// Output: ` + expected + `
+}
+`
+	}
+	defaultFuzzSource := func(marker, failure string) string {
+		failureLine := ""
+		if failure != "" {
+			failureLine = "\n\t\tt.Fatal(\"" + failure + "\")"
+		}
+		return `//go:build !g01_pair_fixture && !g01_live && !g01_worker
+
+package livecanary
+
+import (
+	"os"
+	"testing"
+)
+
+func FuzzDefaultG01Fixture(f *testing.F) {
+	f.Add("fixture-seed")
+	f.Fuzz(func(t *testing.T, _ string) {
+		path := os.Getenv("TOOLING_SENTINEL_LOG")
+		if path == "" {
+			t.Fatal("TOOLING_SENTINEL_LOG is not set")
+		}
+		file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer file.Close()
+		if _, err := file.WriteString("` + marker + `\n"); err != nil {
+			t.Fatal(err)
+		}` + failureLine + `
+	})
+}
+`
+	}
+	type fixture struct {
+		name, path, marker, positiveSource, failureSource string
+	}
+	fixtures := []fixture{
+		{
+			name:           "heavy",
+			path:           livecanaryBase + "/default_heavy_regression_test.go",
+			marker:         heavySentinel,
+			positiveSource: defaultTestSource("livecanary", heavyName, heavySentinel, ""),
+			failureSource:  defaultTestSource("livecanary", heavyName, heavySentinel, heavySentinel),
+		},
+		{
+			name:           "remainder",
+			path:           livecanaryBase + "/default_remainder_regression_test.go",
+			marker:         remainderSentinel,
+			positiveSource: defaultTestSource("livecanary", "TestDefaultG01RemainderFixture", remainderSentinel, ""),
+			failureSource:  defaultTestSource("livecanary", "TestDefaultG01RemainderFixture", remainderSentinel, remainderSentinel),
+		},
+		{
+			name:           "other package",
+			path:           otherPackageBase + "/default_other_package_regression_test.go",
+			marker:         otherPackageSentinel,
+			positiveSource: defaultTestSource("otherfixture", "TestDefaultG01OtherPackageFixture", otherPackageSentinel, ""),
+			failureSource:  defaultTestSource("otherfixture", "TestDefaultG01OtherPackageFixture", otherPackageSentinel, otherPackageSentinel),
+		},
+		{
+			name:           "same-name other package",
+			path:           otherPackageBase + "/default_same_name_regression_test.go",
+			marker:         sameNameOtherPackageSentinel,
+			positiveSource: defaultTestSource("otherfixture", heavyName, sameNameOtherPackageSentinel, ""),
+			failureSource:  defaultTestSource("otherfixture", heavyName, sameNameOtherPackageSentinel, sameNameOtherPackageSentinel),
+		},
+		{
+			name:           "Example Output",
+			path:           livecanaryBase + "/default_example_regression_test.go",
+			marker:         exampleSentinel,
+			positiveSource: defaultExampleSource(exampleSentinel, exampleSentinel),
+			failureSource:  defaultExampleSource(exampleSentinel, "unexpected-default-g01-example-output"),
+		},
+		{
+			name:           "Fuzz seed",
+			path:           livecanaryBase + "/default_fuzz_regression_test.go",
+			marker:         fuzzSentinel,
+			positiveSource: defaultFuzzSource(fuzzSentinel, ""),
+			failureSource:  defaultFuzzSource(fuzzSentinel, fuzzSentinel),
+		},
+	}
+	toolingFile(t, root, otherPackageBase+"/fixture.go", "package otherfixture\n", 0600)
+	for _, tc := range fixtures {
+		toolingFile(t, root, tc.path, tc.positiveSource, 0600)
+	}
+	wrapper, logPath, realGo := toolingGoWrapper(t, root)
+	sentinelLogPath := filepath.Join(root, "default-sentinel.log")
+	env := []string{
+		"GO=" + wrapper,
+		"TOOLING_REAL_GO=" + realGo,
+		"TOOLING_GO_LOG=" + logPath,
+		"TOOLING_SENTINEL_LOG=" + sentinelLogPath,
+	}
+	if out, err := toolingRun(t, root, env, "bash", "scripts/check-offline-experiments.sh"); err != nil {
+		t.Fatalf("default G01 positive control: %s", out)
+	}
+	sentinelData, err := os.ReadFile(sentinelLogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sentinelLines := strings.Split(strings.TrimSpace(string(sentinelData)), "\n")
+	for _, tc := range fixtures {
+		count := 0
+		for _, line := range sentinelLines {
+			if line == tc.marker {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Fatalf("positive %s sentinel %q ran %d times; sentinel log:\n%s", tc.name, tc.marker, count, sentinelData)
+		}
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logData)
+	lines := strings.Split(strings.TrimSpace(log), "\n")
+	for _, invocation := range []string{
+		"go1.26.8\ttest -race -count=1 -timeout=45s -run ^TestBaselineStatisticsPresenceAndEligibility$ ./...",
+		"go1.26.8\ttest -race -count=1 -timeout=45s -skip ^TestBaselineStatisticsPresenceAndEligibility$ ./...",
+	} {
+		count := 0
+		for _, line := range lines {
+			if line == invocation {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Fatalf("default G01 partition invocation %q ran %d times; wrapper log:\n%s", invocation, count, log)
+		}
+	}
+	legacyInvocation := "go1.26.8\ttest -race -count=1 -timeout=45s ./..."
+	legacyCount := 0
+	for _, line := range lines {
+		if line == legacyInvocation {
+			legacyCount++
+		}
+	}
+	if legacyCount != 1 {
+		t.Fatalf("default G01 retained %d unsplit invocations; want only the G02 invocation; wrapper log:\n%s", legacyCount, log)
+	}
+	for _, tc := range fixtures {
+		toolingFile(t, root, tc.path, tc.failureSource, 0600)
+		if err := os.WriteFile(logPath, nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(sentinelLogPath, nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		out, runErr := toolingRun(t, root, env, "bash", "scripts/check-offline-experiments.sh")
+		if runErr == nil || !strings.Contains(out, tc.marker) {
+			t.Errorf("default G01 %s failure was skipped: %s", tc.name, out)
+		}
+		data, readErr := os.ReadFile(sentinelLogPath)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		count := 0
+		for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+			if line == tc.marker {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Errorf("default G01 %s sentinel %q ran %d times; sentinel log:\n%s", tc.name, tc.marker, count, data)
+		}
+		toolingFile(t, root, tc.path, tc.positiveSource, 0600)
+	}
+}
+
 func TestToolingLicenseIdentityAndStaleRows(t *testing.T) {
 	root := toolingFixture(t)
 	toolingFile(t, root, "go.mod", "module example.test/audit\n\ngo 1.26.8\n\nrequire example.test/dependency v1.2.0\n\nreplace example.test/dependency => ./replacement\n", 0600)
