@@ -357,7 +357,8 @@ func (f *pairedBrokerBridge) handleGitHub(w http.ResponseWriter, r *http.Request
 	// All remaining routes are Actions service calls. The SDK pins the admin
 	// token in the generated private client and never follows redirects.
 	if strings.HasPrefix(path, "/_apis/") || path == "/queue" || strings.HasPrefix(path, "/queue/") {
-		if f.adminToken != "" && !f.auth(r, "Bearer "+f.adminToken) && path != "/queue" && !strings.HasPrefix(path, "/queue/") {
+		queueCredentialPath := strings.HasSuffix(path, "/acquirejobs")
+		if f.adminToken != "" && !f.auth(r, "Bearer "+f.adminToken) && !queueCredentialPath && path != "/queue" && !strings.HasPrefix(path, "/queue/") {
 			f.markUnexpected()
 			writeBridgeJSON(w, http.StatusForbidden, nil)
 			return
@@ -457,6 +458,11 @@ func (f *pairedBrokerBridge) handleActions(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if strings.HasSuffix(path, "/acquirejobs") && r.Method == http.MethodPost {
+		if !f.auth(r, "Bearer "+f.queueToken) {
+			f.markUnexpected()
+			writeBridgeJSON(w, http.StatusForbidden, nil)
+			return
+		}
 		f.acquireCalls++
 		writeBridgeJSON(w, http.StatusOK, map[string]any{"count": 1, "value": []int64{42}})
 		return
