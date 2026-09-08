@@ -255,7 +255,6 @@ func openJournalAtAdmission(directory string, a Approval, admissionDirectory str
 	}
 	j.claim, err = openAdmission(admissionDirectory, j, syncDirectory)
 	if err != nil {
-		tracePairedFixtureJournal(directory, "admission-open")
 		return nil, err
 	}
 	if j.paired.binding != nil && j.paired.binding.Worker != j.pairedIdentity() {
