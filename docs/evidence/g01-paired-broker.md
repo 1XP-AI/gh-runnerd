@@ -13,10 +13,10 @@ The implementation started at frozen head
 integrated with a normal merge as `74efbdef37fba91b91d2315dae9c7e01cfd1b34b`.
 No rebase, amend, force update, workflow replay, or live operation was used.
 
-Both required settled Luna/max reports were read:
-
-- `/tmp/g01-paired-broker-review-0ecb06c.md`
-- `/tmp/g01-paired-broker-independent-review-0ecb06c.md`
+Both required settled Luna/max reports for frozen head
+`0ecb06c1755bc3a2f49724c9b7d5fa2bc9a0c3a9` were read as GitHub-backed review
+dispositions on [PR 62](https://github.com/1XP-AI/gh-runnerd/pull/62). Private
+local report files are not repository artifacts and are not committed.
 
 The Codex wrapper inventory, including stale inline and issue-comment findings,
 was read. The three live findings at the frozen head were:
@@ -58,15 +58,11 @@ GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=120s -run '^TestPairedBrokerRejec
 FAIL: malformed worker journal crossed pre-mint boundary; mints=1
 ```
 
-The independent report's clean temporary overlay also reproduced the tenth-slot
-failure with:
-
-```text
-GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=120s \
-  -overlay=/tmp/g01-review-overlay.json \
-  -run '^TestReviewPairedTenthSlotLedgerBound$' .
-ok: the test expected reopen rejection of the valid 21-line ledger
-```
+An independent disposable overlay against that prior frozen source reproduced
+the tenth-slot reopen refusal expected by
+[discussion r3956753229](https://github.com/1XP-AI/gh-runnerd/pull/62#discussion_r3956753229).
+The overlay was local to that reviewer, is not a repository artifact, and is
+not committed.
 
 The implementation then progressed through focused green tests and normal
 commits `6a35fe7`, `9df5d42`, `8c59523`, and `4aab247`; the current source head
@@ -91,6 +87,34 @@ the 45-second unfiltered remainder and the 120-second named invocation
 
 These failures exercise the CI command contract and generated coverage
 boundaries, rather than a missing runtime symbol or an unavailable fixture.
+
+The current follow-up at frozen PR head
+`bf278729a4e42bc3d2358f9debdbdfa6bf8b2e63` independently reproduced three
+still-live findings before the fixes:
+
+```text
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=60s \
+  -run '^TestPairedWorkerPreparationReceiptFencesClaimMutation$' .
+FAIL: worker admission claim mutation crossed receipt fence
+  (hash, replacement, missing, malformed, and locked)
+
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=60s \
+  -run '^TestPairedBrokerRejectsWorkerClaimChangeBeforeMint$' .
+FAIL: worker admission claim hash crossed pre-mint fence:
+  err=<nil> mints=1 launches=1
+  (same for replacement, missing, malformed, and locked)
+
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=180s \
+  -run '^TestToolingDefaultG02PartitionsRun$' ./scripts
+FAIL: expected remaining TestPaired 45-second invocation ran 0 times;
+wrapper log retained the two-command skip-only-cadence remainder
+```
+
+Same-inode mutation and replacement of the worker `admission.json` after
+canonical preparation reached mint and launch. That is
+[discussion r3957639894](https://github.com/1XP-AI/gh-runnerd/pull/62#discussion_r3957639894).
+Committed reviewer-local report/overlay paths are
+[discussion r3957639908](https://github.com/1XP-AI/gh-runnerd/pull/62#discussion_r3957639908).
 
 ## Implemented boundaries
 
@@ -119,12 +143,19 @@ which validates approval, replays the complete journal, holds the canonical
 worker authority/admission lease, rejects prior effects/uncertainty/reservation
 histories, and returns only a credential-free receipt. The broker binds the
 receipt's approval digest, state/journal/claim identities, and journal/claim
-digests; it also checks the journal inode and bytes without duplicating G01's
-event schema. The child later reopens the worker journal and admission claim
-through the same canonical parser before worker effects, so replacement,
-symlink, hash, reopen, and prior-history cases cannot mint/launch or authorize
-a retry. `TestPairedWorkerPreparationReceiptFencesJournalMutation` covers
-same-inode mutation and replacement, while the real malformed-journal test
+digests. Every later `checkPrepared` reopens the worker journal and the
+canonical admission claim (the receipt inode/digest, never a newly invented
+root), compares both to the stored receipt, and checks the claim's version-1
+ownership/state/journal schema under a short exclusive file lease. Same-inode
+mutation, replacement, missing, malformed, and locked claims fail at the
+pre-auth, mint, and launch fences with zero remote/mint/launch as appropriate.
+The child later reopens the worker journal and admission claim through the same
+canonical parser before worker effects, so those cases cannot mint/launch or
+authorize a retry. `TestPairedWorkerPreparationReceiptFencesJournalMutation`
+and `TestPairedWorkerPreparationReceiptFencesClaimMutation` cover journal and
+claim fences; `TestPairedBrokerRejectsWorkerClaimChangeBeforeAuth` asserts zero
+authenticated calls; `TestPairedBrokerRejectsWorkerClaimChangeBeforeMint`
+asserts zero mints and zero launches. The real malformed-journal test still
 asserts zero mints and zero authenticated calls.
 
 The singleton JIT/acquire/start/ACK/session-close sequence, owned non-force
@@ -167,9 +198,10 @@ No fast clock is used by this regression. Its fixture/test tags are explicitly
 rejected by the production binary gate; the bridge's opener override is only a
 test seam for the offline endpoint and does not weaken the production path.
 
-The follow-up then ran both static G02 partitions with the exact anchored name,
-the unfiltered complement, race detection, count one, the pinned Go toolchain,
-and the unchanged 45-second per-process timeout:
+The previous two-partition follow-up recorded these 45-second runs at
+`1ebf0b1e50ac200a26b69d0352a61e5a622bbeeb` / `bf278729a4e42bc3d2358f9debdbdfa6bf8b2e63`.
+They are historical measurements only and are not current proof that the
+two-command remainder gate is green:
 
 ```text
 /usr/bin/time -p env GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s \
@@ -181,12 +213,19 @@ PASS; g02-auth package wall time 40.151s; process wall time 41.22s
 PASS; g02-auth package wall time 40.471s; process wall time 41.50s
 ```
 
-Both reproducible runs fit the existing 45-second per-process budget, so no
-timeout widening or coordinator approval was needed.
+Independent exact-head repeats at `bf278729a4e42bc3d2358f9debdbdfa6bf8b2e63`
+found the named cadence partition still passing (~40–43s) but the unfiltered
+remainder hitting the 45-second test-binary deadline on repeat while generating
+an RSA fixture key, and the declared offline gate exiting 1. Those red results
+are the current Codex finding
+[r3957835501](https://github.com/1XP-AI/gh-runnerd/pull/62#discussion_r3957835501).
+The 45-second per-process default was not widened.
 
 ## Verification record
 
-Focused and module checks that passed on the current source include:
+Historical module checks at the prior two-partition follow-up (`1ebf0b1` /
+`bf27872`) are retained below as historical measurements. They are not current
+proof of the three-partition G02 gate:
 
 ```text
 GOTOOLCHAIN=go1.26.8 go test -count=1 ./...
@@ -196,52 +235,85 @@ GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s \
   -tags=g01_live,g01_worker ./cmd/g01-live ./cmd/g01-worker
 PASS; g01-live 5.320s; g01-worker 1.497s
 
-GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s \
-  -run '^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$' ./...
-PASS; g02-auth 40.151s; all G02 command packages had no matching tests
-
-GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s \
-  -skip '^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$' ./...
-PASS; g02-auth 40.471s; all G02 command packages passed
-
 GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=120s \
   -run '^(TestBrokerRejectsCleanFixtureBinaryBeforeMint|TestBrokerAllowsCleanProductionBinaryArtifact|TestPairedWorkerPreparationReceiptFencesJournalMutation|TestBrokerLedgerCapacityDerivesFromFiniteSlotSchema)$' .
 PASS
 ```
 
-The G02 offline script now runs the exact real-cadence name first and then an
-unfiltered `./...` complement with that exact name skipped. Both invocations use
-`-race -count=1 -timeout=45s`; the generated positive and failure witness matrix
-proves each named/remainder boundary executes exactly once and propagates
-nonzero failures. The historical 120-second cadence measurement above remains
-timing evidence only and is not an approved CI proof.
+The G02 offline script now keeps the 45-second per-process default and the real
+seven-times-five-second cadence, and splits G02 into three static partitions
+with `./...` package discovery: the exact cadence name; the remaining
+`^TestPaired` family with that exact name skipped; and an unfiltered complement
+that skips `^TestPaired`. Synthetic RSA candidates are generated once per
+test-binary. The generated positive and failure witness matrix proves cadence,
+remaining `TestPaired` family, remainder, other package, same-name cadence,
+same-name remaining `TestPaired`, Example Output, and fuzz seed each execute
+exactly once and propagate nonzero failures. The historical 120-second cadence
+measurement above remains timing evidence only and is not an approved CI proof.
 
-The focused tooling matrix passed after the script correction:
+Current exact 45-second G02 partitions after the split:
+
+```text
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s \
+  -run '^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$' ./...
+PASS; g02-auth 41.338s; process wall time 42.37s
+
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s \
+  -run '^TestPaired' -skip '^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$' ./...
+PASS; g02-auth 11.297s; process wall time 12.42s
+
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s \
+  -skip '^TestPaired' ./...
+PASS; g02-auth 23.600s; process wall time 24.34s
+
+# Repeat unfiltered complement without changes:
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s \
+  -skip '^TestPaired' ./...
+PASS; g02-auth 24.639s; process wall time 25.48s
+```
+
+Focused claim-fence and related tests:
+
+```text
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=90s \
+  -run '^(TestPairedWorkerPreparationReceiptFencesClaimMutation|TestPairedBrokerRejectsWorkerClaimChangeBeforeAuth|TestPairedBrokerRejectsWorkerClaimChangeBeforeMint|TestPairedWorkerPreparationReceiptFencesJournalMutation|TestPairedBrokerRejectsMalformedWorkerJournalBeforeMint|TestPairedBrokerRealEntrypointUsesPairedPreparationClosure|TestBrokerPreparedFilesChangeAfterCaptureStopsBeforeMint|TestBrokerAccountRootIgnoresEnvironmentAndFailsClosed)$' .
+PASS; g02-auth 2.317s
+```
+
+The focused tooling matrix passed after the three-partition script correction:
 
 ```text
 GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=180s \
-  -run '^TestToolingDefaultG02PartitionsRun$' -v ./scripts
-PASS; TestToolingDefaultG02PartitionsRun 84.063s
+  -run '^TestToolingDefaultG02PartitionsRun$' ./scripts
+PASS; TestToolingDefaultG02PartitionsRun 122.103s
 ```
 
-The declared offline gate itself passed after these edits:
+The declared offline gate passed after these edits:
 
 ```text
 /usr/bin/time -p env GOTOOLCHAIN=go1.26.8 bash scripts/check-offline-experiments.sh
-G02 named partition: g02-auth 40.454s
-G02 unfiltered complement: g02-auth 38.798s
+G02 named cadence: g02-auth 40.421s
+G02 remaining TestPaired family: g02-auth 10.994s
+G02 unfiltered complement: g02-auth 23.360s
 offline experiment checks passed: 2 module(s)
-exit 0; process wall time 348.80s
+exit 0; process wall time 358.06s
+
+# Repeat without source changes:
+G02 named cadence: g02-auth 40.359s
+G02 remaining TestPaired family: g02-auth 10.756s
+G02 unfiltered complement: g02-auth 24.922s
+offline experiment checks passed: 2 module(s)
+exit 0; process wall time 352.57s
 ```
 
-Root validation also passed after updating the tooling-log assertion for the
-two-command G02 split:
+Root validation after the G01 tooling-log assertion for the three-command G02
+split:
 
 ```text
 GOTOOLCHAIN=go1.26.8 go test -count=1 ./...
-PASS; scripts 167.125s
+PASS; scripts 203.625s
 GOTOOLCHAIN=go1.26.8 go test -race -count=1 ./...
-PASS; scripts 167.818s
+PASS; scripts 205.307s
 GOTOOLCHAIN=go1.26.8 go vet ./...
 PASS
 git diff --check
@@ -249,10 +321,15 @@ PASS
 GOTOOLCHAIN=go1.26.8 bash scripts/gofmt.sh check
 PASS
 
-GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=120s \
-  -run '^TestToolingDefaultG01PartitionsRun$' -v ./scripts
-PASS; TestToolingDefaultG01PartitionsRun 27.749s
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=180s \
+  -run '^(TestToolingDefaultG01PartitionsRun|TestToolingDefaultG02PartitionsRun)$' ./scripts
+PASS; scripts 145.223s
 ```
+
+The named cadence partition remains close to the 45-second budget because the
+production seven-times-five-second cadence is preserved (~36s child wall time
+plus clone/build/bridge). That timeout was not widened. Remainder headroom is
+now the unfiltered complement at ~24s rather than a 45-second near miss.
 
 All fixtures use disposable local files, synthetic nonsecret values, generated
 loopback TLS, and a private Unix socket. No live endpoint, App, credential,
@@ -262,8 +339,10 @@ checks are not hostile-code isolation.
 
 ## Remaining gates
 
-This worker does not merge PR 62. The coordinator must push the frozen final
-head, request two fresh independent reviews and `@codex review`, wait for
-completion, read inline and issue-comment findings including stale/outdated
-ones, verify hosted CI, and confirm an exact-head clean Codex review before any
-merge decision. Live recovery remains unauthorized and unproven.
+This worker does not merge PR 62. After push, request `@codex review` on the
+exact new head, wait for completion, and read inline and issue-comment findings
+including stale/outdated ones. Hosted CI, independent review of the new head,
+and a clean exact-head Codex verdict remain required before any merge decision.
+Live recovery remains unauthorized and unproven. The named cadence 45-second
+partition still has only a few seconds of local headroom; that is a remaining
+gap, not an approved timeout change.

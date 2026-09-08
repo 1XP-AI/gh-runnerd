@@ -65,6 +65,7 @@ func brokerSyntheticWorkerPreparation(t *testing.T, p *brokerWorkerPlan, directo
 	if err := os.Mkdir(directory, 0700); err != nil && !os.IsExist(err) {
 		return brokerPreparationReceipt{}, errBroker
 	}
+	p.claimDirectory = directory
 	path := filepath.Join(p.statePath, "journal.jsonl")
 	if _, e := os.Stat(path); os.IsNotExist(e) {
 		if os.WriteFile(path, []byte("synthetic prepared worker journal\n"), 0600) != nil {

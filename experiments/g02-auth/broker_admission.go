@@ -22,7 +22,15 @@ func brokerAdmissionDirectory() (string, error) {
 	}
 	return brokerDirectoryForAccount(user.LookupId)
 }
-func brokerDirectoryForAccount(lookup func(string) (*user.User, error)) (string, error) {
+
+func workerAdmissionDirectory() (string, error) {
+	if !brokerNativeAccountLookup {
+		return "", errBroker
+	}
+	return workerDirectoryForAccount(user.LookupId)
+}
+
+func brokerHomeDir(lookup func(string) (*user.User, error)) (string, error) {
 	if lookup == nil {
 		return "", errBroker
 	}
@@ -36,7 +44,23 @@ func brokerDirectoryForAccount(lookup func(string) (*user.User, error)) (string,
 	if e != nil || ie != nil || real != u.HomeDir || !brokerOwnedDirectory(info, false) {
 		return "", errBroker
 	}
-	return filepath.Join(u.HomeDir, ".gh-runnerd-g01-experiment"), nil
+	return u.HomeDir, nil
+}
+
+func brokerDirectoryForAccount(lookup func(string) (*user.User, error)) (string, error) {
+	home, err := brokerHomeDir(lookup)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".gh-runnerd-g01-experiment"), nil
+}
+
+func workerDirectoryForAccount(lookup func(string) (*user.User, error)) (string, error) {
+	home, err := brokerHomeDir(lookup)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".gh-runnerd-g01-worker-experiment"), nil
 }
 func brokerOwnedDirectory(i os.FileInfo, private bool) bool {
 	if i == nil || !i.IsDir() || i.Mode().Perm()&0022 != 0 || (private && i.Mode().Perm() != 0700) {

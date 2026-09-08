@@ -3,9 +3,11 @@ package enrollment
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -104,6 +106,65 @@ func TestPairedWorkerPreparationReceiptFencesJournalMutation(t *testing.T) {
 	}
 }
 
+func TestPairedWorkerPreparationReceiptFencesClaimMutation(t *testing.T) {
+	for _, kind := range []string{"hash", "replacement", "missing", "malformed", "locked"} {
+		t.Run(kind, func(t *testing.T) {
+			a, c, controllerState, workerState, workerPath := pairedPlanInputs(t)
+			plan, err := openBrokerWorkerPlan(workerPath, workerState, controllerState, a, c)
+			if err != nil {
+				t.Fatal("valid paired worker plan refused")
+			}
+			defer plan.close()
+			admission := filepath.Join(filepath.Dir(workerState), "receipt-worker-claim")
+			plan.prepare = func(context.Context) (brokerPreparationReceipt, error) {
+				return brokerSyntheticWorkerPreparation(t, plan, admission)
+			}
+			if err := plan.checkPrepared(context.Background()); err != nil {
+				t.Fatalf("fresh worker preparation refused: %v", err)
+			}
+			claimPath := filepath.Join(admission, "admission.json")
+			data, err := os.ReadFile(claimPath)
+			if err != nil {
+				t.Fatal("worker admission claim")
+			}
+			var held *os.File
+			switch kind {
+			case "hash":
+				if err := os.WriteFile(claimPath, append(data, 'x'), 0600); err != nil {
+					t.Fatal("mutate worker claim")
+				}
+			case "replacement":
+				if err := os.Rename(claimPath, claimPath+".retained"); err != nil || os.WriteFile(claimPath, data, 0600) != nil {
+					t.Fatal("replace worker claim")
+				}
+			case "missing":
+				if err := os.Remove(claimPath); err != nil {
+					t.Fatal("remove worker claim")
+				}
+			case "malformed":
+				if err := os.WriteFile(claimPath, []byte("{"), 0600); err != nil {
+					t.Fatal("malform worker claim")
+				}
+			case "locked":
+				held, err = os.OpenFile(claimPath, os.O_RDWR, 0)
+				if err != nil || syscall.Flock(int(held.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+					t.Fatal("lock worker claim")
+				}
+			}
+			if err := plan.checkPrepared(context.Background()); err == nil {
+				t.Fatal("worker admission claim mutation crossed receipt fence")
+			}
+			if held != nil {
+				syscall.Flock(int(held.Fd()), syscall.LOCK_UN)
+				held.Close()
+				if err := plan.checkPrepared(context.Background()); err != nil {
+					t.Fatalf("released worker claim lock remained fail-stop: %v", err)
+				}
+			}
+		})
+	}
+}
+
 func TestPairedWorkerApprovalMismatchRefusesBeforeBinding(t *testing.T) {
 	a, c, controllerState, workerState, workerPath := pairedPlanInputs(t)
 	raw, err := os.ReadFile(workerPath)
@@ -167,6 +228,142 @@ func TestPairedApprovalRejectsInsufficientTerminalAuthority(t *testing.T) {
 	a.ExpiresAt = time.Now().Add(90 * time.Second)
 	if err := a.validate(time.Now()); err == nil {
 		t.Fatal("paired approval accepted less than the bounded terminal completion budget")
+	}
+}
+
+func pairedWorkerExecutePlan(t *testing.T, a *BrokerApproval, parent string, launch func(context.Context, []byte, string) error) (*brokerControllerPlan, string) {
+	t.Helper()
+	plan := brokerTestPlan(t, a, parent, launch)
+	plan.controller.Phases = []string{"create", "before-ack", "inspect", "cleanup"}
+	plan.controller.WorkflowRunID = 7
+	plan.raw, _ = json.Marshal(plan.controller)
+	a.ControllerApprovalSHA256 = brokerBytesDigest(plan.raw)
+	plan.approval = *a
+	workerState := filepath.Join(parent, "worker-state")
+	if err := os.Mkdir(workerState, 0700); err != nil && !os.IsExist(err) {
+		t.Fatal("worker state")
+	}
+	worker := pairedWorkerApproval{RunnerUpdatesDisabled: true, HarnessSHA: plan.controller.HarnessSHA, WorkflowSHA: plan.controller.WorkflowSHA, OwnerNonce: plan.controller.OwnerNonce, Controller: plan.controller.Controller, Endpoint: "/tmp/g01-paired-claim-fence.sock", DaemonID: "fixture-daemon", ImageID: "sha256:" + strings.Repeat("d", 64), Image: pairedWorkerImage, ExpiresAt: plan.controller.ExpiresAt, Phases: []string{"create", "start", "inspect", "cleanup"}}
+	workerData, err := json.Marshal(worker)
+	if err != nil {
+		t.Fatal("worker approval")
+	}
+	workerPath := filepath.Join(parent, "worker-approval.json")
+	if err := os.WriteFile(workerPath, workerData, 0600); err != nil {
+		t.Fatal("worker approval file")
+	}
+	plan.worker, err = openBrokerWorkerPlan(workerPath, workerState, plan.statePath, *a, plan.controller)
+	if err != nil {
+		t.Fatal("valid paired worker plan refused")
+	}
+	admission := filepath.Join(parent, "worker-admission")
+	brokerAttachSyntheticWorkerPreparation(t, plan, admission)
+	return plan, admission
+}
+
+func TestPairedBrokerRejectsWorkerClaimChangeBeforeAuth(t *testing.T) {
+	for _, kind := range []string{"hash", "replacement"} {
+		t.Run(kind, func(t *testing.T) {
+			a, candidate, api, fixture, attempt := newBrokerFixture(t)
+			a.Mode, a.Phase, a.AllowVerificationAuthority = "paired-terminal", "paired-terminal", true
+			parent := filepath.Dir(attempt)
+			launches := 0
+			plan, admission := pairedWorkerExecutePlan(t, &a, parent, func(context.Context, []byte, string) error {
+				launches++
+				return nil
+			})
+			prepare := plan.worker.prepare
+			plan.worker.prepare = func(ctx context.Context) (brokerPreparationReceipt, error) {
+				receipt, err := prepare(ctx)
+				if err != nil {
+					return receipt, err
+				}
+				claimPath := filepath.Join(admission, "admission.json")
+				data, readErr := os.ReadFile(claimPath)
+				if readErr != nil {
+					t.Fatal("worker admission claim")
+				}
+				switch kind {
+				case "hash":
+					if os.WriteFile(claimPath, append(data, 'x'), 0600) != nil {
+						t.Fatal("mutate worker claim")
+					}
+				case "replacement":
+					if os.Rename(claimPath, claimPath+".retained") != nil || os.WriteFile(claimPath, data, 0600) != nil {
+						t.Fatal("replace worker claim")
+					}
+				}
+				return receipt, nil
+			}
+			_, err := brokerExecute(context.Background(), a, brokerInput{PEM: string(candidate.PEM), VerificationToken: "synthetic-private-verification-token"}, attempt, api, plan)
+			if err == nil || fixture.tokenCalls != 0 || len(fixture.calls) != 0 || launches != 0 {
+				t.Fatalf("worker admission claim %s crossed pre-auth fence: err=%v mints=%d calls=%v launches=%d", kind, err, fixture.tokenCalls, fixture.calls, launches)
+			}
+		})
+	}
+}
+
+func TestPairedBrokerRejectsWorkerClaimChangeBeforeMint(t *testing.T) {
+	for _, kind := range []string{"hash", "replacement", "missing", "malformed", "locked"} {
+		t.Run(kind, func(t *testing.T) {
+			a, candidate, _, fixture, attempt := newBrokerFixture(t)
+			a.Mode, a.Phase, a.AllowVerificationAuthority = "paired-terminal", "paired-terminal", true
+			parent := filepath.Dir(attempt)
+			launches := 0
+			plan, admission := pairedWorkerExecutePlan(t, &a, parent, func(context.Context, []byte, string) error {
+				launches++
+				return nil
+			})
+			claimPath := filepath.Join(admission, "admission.json")
+			var held *os.File
+			api := newBrokerAPI(time.Now, transportFunc(func(r *http.Request) (*http.Response, error) {
+				response, err := fixture.RoundTrip(r)
+				if r.URL.Path == "/app" {
+					data, readErr := os.ReadFile(claimPath)
+					if readErr != nil {
+						t.Fatal("worker admission claim")
+					}
+					switch kind {
+					case "hash":
+						if os.WriteFile(claimPath, append(data, 'x'), 0600) != nil {
+							t.Fatal("mutate worker claim")
+						}
+					case "replacement":
+						if os.Rename(claimPath, claimPath+".retained") != nil || os.WriteFile(claimPath, data, 0600) != nil {
+							t.Fatal("replace worker claim")
+						}
+					case "missing":
+						if os.Remove(claimPath) != nil {
+							t.Fatal("remove worker claim")
+						}
+					case "malformed":
+						if os.WriteFile(claimPath, []byte("{"), 0600) != nil {
+							t.Fatal("malform worker claim")
+						}
+					case "locked":
+						held, err = os.OpenFile(claimPath, os.O_RDWR, 0)
+						if err != nil || syscall.Flock(int(held.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+							t.Fatal("lock worker claim")
+						}
+					}
+				}
+				return response, err
+			}))
+			api.admissionDirectory = func() (string, error) { return fixture.admissionRoot, nil }
+			_, err := brokerExecute(context.Background(), a, brokerInput{PEM: string(candidate.PEM), VerificationToken: "synthetic-private-verification-token"}, attempt, api, plan)
+			if held != nil {
+				syscall.Flock(int(held.Fd()), syscall.LOCK_UN)
+				held.Close()
+			}
+			if err == nil || fixture.tokenCalls != 0 || launches != 0 {
+				t.Fatalf("worker admission claim %s crossed pre-mint fence: err=%v mints=%d calls=%v launches=%d", kind, err, fixture.tokenCalls, fixture.calls, launches)
+			}
+			for _, call := range fixture.calls {
+				if strings.Contains(call, "access_tokens") {
+					t.Fatal("worker admission claim change reached token mint")
+				}
+			}
+		})
 	}
 }
 

@@ -11,16 +11,30 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+)
+
+var (
+	syntheticCandidateOnce sync.Once
+	syntheticCandidatePEM  []byte
+	syntheticCandidateErr  error
 )
 
 func syntheticCandidate(t *testing.T) Candidate {
 	t.Helper()
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatal(err)
+	syntheticCandidateOnce.Do(func() {
+		key, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			syntheticCandidateErr = err
+			return
+		}
+		syntheticCandidatePEM = pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	})
+	if syntheticCandidateErr != nil {
+		t.Fatal(syntheticCandidateErr)
 	}
-	return Candidate{AppID: 71, PEM: pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}), Organizations: []Binding{{Login: "org-a", OrganizationID: 101, InstallationID: 201}, {Login: "org-b", OrganizationID: 102, InstallationID: 202}}}
+	return Candidate{AppID: 71, PEM: append([]byte(nil), syntheticCandidatePEM...), Organizations: []Binding{{Login: "org-a", OrganizationID: 101, InstallationID: 201}, {Login: "org-b", OrganizationID: 102, InstallationID: 202}}}
 }
 
 type fakeAPI struct {

@@ -37,23 +37,25 @@ Individual commands are available when iterating:
 No hardware, live GitHub, Docker or daemon suite is part of this public check. Those profiles remain explicit future or maintainer-controlled runs; they are not silently converted into passing tests here. G04 introduces the first application behavior contracts and should add meaningful unit and fuzz targets before claiming those forms of coverage.
 
 The default untagged G01 and G02 race suites keep their existing 45-second
-per-process deadline while using two sequential, static partitions. G01 first
-runs the exact `TestBaselineStatisticsPresenceAndEligibility` name through
-`./...`; G02 first runs the exact
-`TestPairedBrokerRealCadenceChildExceedsThirtySeconds` name through `./...`.
-Each second partition runs an unfiltered `./...` with only its exact name
-skipped. Keeping package discovery in both commands means a same-named test in
-another package is run in the named partition rather than silently dropped by a
-global skip, while each unfiltered remainder still executes every ordinary test,
-Example Output and fuzz seed. The G02 cadence test and its complement both use
-`-race -count=1 -timeout=45s`; no widened named-test timeout is part of the
-public contract.
+per-process deadline. G01 uses two sequential static partitions: the exact
+`TestBaselineStatisticsPresenceAndEligibility` name through `./...`, then an
+unfiltered `./...` with only that exact name skipped. G02 uses three sequential
+static partitions, all with `-race -count=1 -timeout=45s` and `./...` package
+discovery: the exact `TestPairedBrokerRealCadenceChildExceedsThirtySeconds`
+name; the remaining `^TestPaired` family with that exact cadence name skipped;
+and an unfiltered complement that skips `^TestPaired`. Keeping package
+discovery in every command means a same-named test in another package is run in
+the matching named partition rather than silently dropped by a global skip,
+while the unfiltered G02 complement still executes every ordinary non-paired
+test, Example Output and fuzz seed. No widened named-test timeout is part of
+the public contract.
 
 The tooling regression matrix generates positive and independent failing
-witnesses for each G02 partition boundary: the named heavy test, remainder,
-another package, a same-name test in another package, an Example Output and a
-fuzz seed. Each witness must execute exactly once, and each failing witness must
-propagate a nonzero offline-gate result.
+witnesses for each G02 partition boundary: the named cadence test, the remaining
+`TestPaired` family, remainder, another package, a same-name cadence test in
+another package, a same-name remaining `TestPaired` test in another package, an
+Example Output and a fuzz seed. Each witness must execute exactly once, and
+each failing witness must propagate a nonzero offline-gate result.
 
 The tagged CLI tests use synthetic input/subprocess fixtures and static plan or
 refusal paths. The `g01_pair_fixture` livecanary checks use private synthetic

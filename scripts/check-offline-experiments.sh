@@ -8,6 +8,7 @@ default_heavy_test_regex='^TestBaselineStatisticsPresenceAndEligibility$'
 paired_collection_regex='^TestPaired'
 storage_regex='^TestPairedTerminal(Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$'
 real_pair_cadence_regex='^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$'
+paired_broker_regex='^TestPaired'
 
 # These are the two established offline gate modules. Keep this list explicit so
 # a new or unreviewed experiment cannot enter public CI by directory naming.
@@ -40,8 +41,12 @@ for module_dir in "${offline_modules[@]}"; do
 			# the exact heavy name is the only member of the first partition.
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -skip "${default_heavy_test_regex}" ./...
 		else
+			# Keep the exact cadence name isolated, then the remaining TestPaired
+			# family, then an unfiltered complement so Example Output and fuzz
+			# seeds still run. Package discovery stays on ./... in every command.
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -run "${real_pair_cadence_regex}" ./...
-			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -skip "${real_pair_cadence_regex}" ./...
+			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -run "${paired_broker_regex}" -skip "${real_pair_cadence_regex}" ./...
+			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -skip "${paired_broker_regex}" ./...
 		fi
 		GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" vet ./...
 		if [[ "${module_dir}" == "experiments/g01-scaleset" ]]; then

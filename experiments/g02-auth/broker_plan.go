@@ -49,6 +49,7 @@ type brokerWorkerPlan struct {
 	statePath          string
 	state              *os.Root
 	stateInfo          os.FileInfo
+	claimDirectory     string
 	prepare            func(context.Context) (brokerPreparationReceipt, error)
 	preparationReceipt brokerPreparationReceipt
 }
@@ -135,25 +136,101 @@ func (p *brokerWorkerPlan) checkPrepared(ctx context.Context) error {
 	return p.checkJournalSnapshot()
 }
 
-// checkJournalSnapshot binds the returned receipt to the worker journal inode
-// and bytes without reproducing G01's event schema. The child remains the
-// authority for the admission claim and full replay before worker effects.
+func (p *brokerWorkerPlan) workerClaimPath() (string, error) {
+	if p == nil || p.preparationReceipt.Claim == (brokerInode{}) {
+		return "", errBroker
+	}
+	match := func(path string) bool {
+		if path == "" {
+			return false
+		}
+		info, err := os.Lstat(path)
+		return err == nil && info.Mode().IsRegular() && brokerFileIdentity(info) == p.preparationReceipt.Claim
+	}
+	var candidates []string
+	if p.claimDirectory != "" {
+		candidates = append(candidates, filepath.Join(p.claimDirectory, "admission.json"))
+	}
+	candidates = append(candidates, filepath.Join(filepath.Dir(p.statePath), "worker-admission", "admission.json"))
+	seen := map[string]bool{}
+	for _, path := range candidates {
+		if seen[path] {
+			continue
+		}
+		seen[path] = true
+		if match(path) {
+			return path, nil
+		}
+	}
+	directory, err := workerAdmissionDirectory()
+	if err == nil && match(filepath.Join(directory, "admission.json")) {
+		return filepath.Join(directory, "admission.json"), nil
+	}
+	return "", errBroker
+}
+
+func flockBrokerHandle(file *os.File) error {
+	if file == nil || syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+		return errBroker
+	}
+	return nil
+}
+
+// checkJournalSnapshot binds the returned receipt to the worker journal and
+// canonical admission-claim inodes and bytes. It does not reproduce G01's
+// event schema or select a new admission root.
 func (p *brokerWorkerPlan) checkJournalSnapshot() error {
 	if p == nil || p.check() != nil || !p.preparationReceipt.validWorker(p) {
 		return errBroker
 	}
-	path := filepath.Join(p.statePath, "journal.jsonl")
-	file, err := openBrokerPrivateFile(path, 0600, 1<<20)
+	journalPath := filepath.Join(p.statePath, "journal.jsonl")
+	journal, err := openBrokerPrivateFile(journalPath, 0600, 1<<20)
 	if err != nil {
 		return errBroker
 	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil || brokerFileIdentity(info) != p.preparationReceipt.Journal {
+	defer journal.Close()
+	journalInfo, err := journal.Stat()
+	namedJournal, namedErr := os.Lstat(journalPath)
+	if err != nil || namedErr != nil || !os.SameFile(journalInfo, namedJournal) || brokerFileIdentity(journalInfo) != p.preparationReceipt.Journal {
 		return errBroker
 	}
-	data, err := io.ReadAll(io.NewSectionReader(file, 0, (1<<20)+1))
-	if err != nil || brokerBytesDigest(data) != p.preparationReceipt.JournalDigest {
+	journalData, err := io.ReadAll(io.NewSectionReader(journal, 0, (1<<20)+1))
+	if err != nil || brokerBytesDigest(journalData) != p.preparationReceipt.JournalDigest {
+		return errBroker
+	}
+	claimPath, err := p.workerClaimPath()
+	if err != nil {
+		return errBroker
+	}
+	claim, err := openBrokerPrivateFile(claimPath, 0600, 4096)
+	if err != nil {
+		return errBroker
+	}
+	defer claim.Close()
+	if flockBrokerHandle(claim) != nil {
+		return errBroker
+	}
+	defer syscall.Flock(int(claim.Fd()), syscall.LOCK_UN)
+	claimInfo, err := claim.Stat()
+	namedClaim, namedClaimErr := os.Lstat(claimPath)
+	if err != nil || namedClaimErr != nil || !privateFile(claim) || !os.SameFile(claimInfo, namedClaim) || brokerFileIdentity(claimInfo) != p.preparationReceipt.Claim {
+		return errBroker
+	}
+	claimData, err := io.ReadAll(io.NewSectionReader(claim, 0, 4097))
+	if err != nil || brokerBytesDigest(claimData) != p.preparationReceipt.ClaimDigest {
+		return errBroker
+	}
+	var record struct {
+		Version       int    `json:"version"`
+		Ownership     string `json:"ownership"`
+		StateDevice   uint64 `json:"state_device"`
+		StateInode    uint64 `json:"state_inode"`
+		JournalDevice uint64 `json:"journal_device"`
+		JournalInode  uint64 `json:"journal_inode"`
+	}
+	state := brokerFileIdentity(p.stateInfo)
+	journalID := brokerFileIdentity(journalInfo)
+	if decodeBrokerJSON(claimData, &record, true) != nil || record.Version != 1 || !brokerSHA256.MatchString(record.Ownership) || record.StateDevice != state.Device || record.StateInode != state.Inode || record.JournalDevice != journalID.Device || record.JournalInode != journalID.Inode {
 		return errBroker
 	}
 	return nil

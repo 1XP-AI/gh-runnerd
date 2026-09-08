@@ -643,7 +643,8 @@ func FuzzDefaultG01Fixture(f *testing.F) {
 		"go1.26.8\ttest -race -count=1 -timeout=45s -run ^TestBaselineStatisticsPresenceAndEligibility$ ./...",
 		"go1.26.8\ttest -race -count=1 -timeout=45s -skip ^TestBaselineStatisticsPresenceAndEligibility$ ./...",
 		"go1.26.8\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
-		"go1.26.8\ttest -race -count=1 -timeout=45s -skip ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
+		"go1.26.8\ttest -race -count=1 -timeout=45s -run ^TestPaired -skip ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
+		"go1.26.8\ttest -race -count=1 -timeout=45s -skip ^TestPaired ./...",
 	} {
 		count := 0
 		for _, line := range lines {
@@ -666,6 +667,7 @@ func FuzzDefaultG01Fixture(f *testing.F) {
 		t.Fatalf("offline gate retained %d unsplit G02 invocations; wrapper log:\n%s", legacyCount, log)
 	}
 	for _, invocation := range []string{
+		"go1.26.8\ttest -race -count=1 -timeout=45s -skip ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
 		"go1.26.8\ttest -race -count=1 -timeout=120s -run ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
 	} {
 		for _, line := range lines {
@@ -707,15 +709,19 @@ func TestToolingDefaultG02PartitionsRun(t *testing.T) {
 	root := toolingFixture(t)
 	const heavyName = "TestPairedBrokerRealCadenceChildExceedsThirtySeconds"
 	const heavySentinel = "default-g02-heavy-regression"
+	const pairedFamilyName = "TestPairedBrokerClaimFenceFixture"
+	const pairedFamilySentinel = "default-g02-paired-family-regression"
 	const remainderSentinel = "default-g02-remainder-regression"
 	const otherPackageSentinel = "default-g02-other-package-regression"
 	const sameNameOtherPackageSentinel = "default-g02-same-name-other-package-regression"
+	const sameNamePairedFamilySentinel = "default-g02-same-name-paired-family-regression"
 	const exampleSentinel = "default-g02-example-output-regression"
 	const fuzzSentinel = "default-g02-fuzz-seed-regression"
 	g02Base := "experiments/g02-auth"
 	remainderPackageBase := g02Base + "/remainderfixture"
 	otherPackageBase := g02Base + "/otherfixture"
 	sameNamePackageBase := g02Base + "/samefixture"
+	pairedFamilyPackageBase := g02Base + "/pairedfixture"
 	defaultTestSource := func(pkg, testName, marker, failure string) string {
 		failureLine := ""
 		if failure != "" {
@@ -813,6 +819,13 @@ func FuzzG02Fixture(f *testing.F) {
 			failureSource:  defaultTestSource("fixture", heavyName, heavySentinel, heavySentinel),
 		},
 		{
+			name:           "paired family",
+			path:           g02Base + "/default_paired_family_regression_test.go",
+			marker:         pairedFamilySentinel,
+			positiveSource: defaultTestSource("fixture", pairedFamilyName, pairedFamilySentinel, ""),
+			failureSource:  defaultTestSource("fixture", pairedFamilyName, pairedFamilySentinel, pairedFamilySentinel),
+		},
+		{
 			name:           "remainder",
 			path:           remainderPackageBase + "/default_remainder_regression_test.go",
 			marker:         remainderSentinel,
@@ -834,6 +847,13 @@ func FuzzG02Fixture(f *testing.F) {
 			failureSource:  defaultTestSource("samefixture", heavyName, sameNameOtherPackageSentinel, sameNameOtherPackageSentinel),
 		},
 		{
+			name:           "same-name paired family other package",
+			path:           pairedFamilyPackageBase + "/default_same_name_paired_family_regression_test.go",
+			marker:         sameNamePairedFamilySentinel,
+			positiveSource: defaultTestSource("pairedfixture", pairedFamilyName, sameNamePairedFamilySentinel, ""),
+			failureSource:  defaultTestSource("pairedfixture", pairedFamilyName, sameNamePairedFamilySentinel, sameNamePairedFamilySentinel),
+		},
+		{
 			name:           "Example Output",
 			path:           g02Base + "/default_example_regression_test.go",
 			marker:         exampleSentinel,
@@ -851,6 +871,7 @@ func FuzzG02Fixture(f *testing.F) {
 	toolingFile(t, root, remainderPackageBase+"/fixture.go", "package remainderfixture\n", 0600)
 	toolingFile(t, root, otherPackageBase+"/fixture.go", "package otherfixture\n", 0600)
 	toolingFile(t, root, sameNamePackageBase+"/fixture.go", "package samefixture\n", 0600)
+	toolingFile(t, root, pairedFamilyPackageBase+"/fixture.go", "package pairedfixture\n", 0600)
 	for _, tc := range fixtures {
 		toolingFile(t, root, tc.path, tc.positiveSource, 0600)
 	}
@@ -889,7 +910,8 @@ func FuzzG02Fixture(f *testing.F) {
 	lines := strings.Split(strings.TrimSpace(log), "\n")
 	for _, invocation := range []string{
 		"go1.26.8\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
-		"go1.26.8\ttest -race -count=1 -timeout=45s -skip ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
+		"go1.26.8\ttest -race -count=1 -timeout=45s -run ^TestPaired -skip ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
+		"go1.26.8\ttest -race -count=1 -timeout=45s -skip ^TestPaired ./...",
 	} {
 		count := 0
 		for _, line := range lines {
@@ -903,6 +925,7 @@ func FuzzG02Fixture(f *testing.F) {
 	}
 	for _, invocation := range []string{
 		"go1.26.8\ttest -race -count=1 -timeout=45s ./...",
+		"go1.26.8\ttest -race -count=1 -timeout=45s -skip ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
 		"go1.26.8\ttest -race -count=1 -timeout=120s -run ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
 		"go1.26.8\ttest -race -count=1 -timeout=120s -skip ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
 	} {
