@@ -203,7 +203,7 @@ timeout, plus one tagged vet pass:
 ```sh
 terminal_storage_tests='^TestPairedTerminal(Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$'
 GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run '^TestPaired' -skip '^TestPairedTerminal'
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run '^Test' -skip '^TestPaired'
+GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -skip '^TestPaired'
 GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run '^TestPairedTerminal' -skip "$terminal_storage_tests"
 GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run "$terminal_storage_tests"
 GOTOOLCHAIN=go1.26.8 go vet -C experiments/g01-scaleset -tags=g01_pair_fixture ./livecanary
@@ -217,8 +217,10 @@ storage-only group. The two terminal groups remain exhaustive and disjoint:
 every other top-level `TestPairedTerminal` test stays in terminal behavior,
 while only the named persistence tests stay in storage. The two
 collection/listener groups are likewise exhaustive and disjoint: non-terminal
-`TestPaired*` tests stay in paired collection, and every other `Test*` test stays
-in remaining collection/listener.
+`TestPaired*` tests stay in paired collection, and every other test, example or
+fuzz seed stays in remaining collection/listener. The unrestricted remaining
+command is intentional because Go's `-run` filter also selects examples and
+fuzz tests; `-skip '^TestPaired'` excludes only the paired test prefix.
 
 The fixture tag remains excluded with either live command tag. The earlier
 two-part tooling red

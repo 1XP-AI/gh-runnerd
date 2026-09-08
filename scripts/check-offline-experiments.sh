@@ -40,7 +40,7 @@ for module_dir in "${offline_modules[@]}"; do
 			# paired collection first, then every non-paired test. The terminal
 			# partitions below remain the only consumers of TestPairedTerminal.
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run "${paired_collection_regex}" -skip '^TestPairedTerminal' ./livecanary
-			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run '^Test' -skip "${paired_collection_regex}" ./livecanary
+			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -skip "${paired_collection_regex}" ./livecanary
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run '^TestPairedTerminal' -skip "${storage_regex}" ./livecanary
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run "${storage_regex}" ./livecanary
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" vet -tags=g01_pair_fixture ./livecanary

@@ -152,12 +152,13 @@ From `experiments/g01-scaleset`, required fixture checks are:
 
 ```text
 GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run '^TestPaired' -skip '^TestPairedTerminal' ./livecanary
-GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run '^Test' -skip '^TestPaired' ./livecanary
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=120s -tags=g01_pair_fixture -skip '^TestPaired' ./livecanary
 ```
 
 The first command selects the non-terminal paired collection tests; the second
-selects the remaining collection/listener tests. Their static prefixes are
-exhaustive and disjoint. The terminal behavior and terminal
+leaves `-run` unrestricted so tagged tests, examples and fuzz seeds remain
+eligible while excluding the paired prefix. The commands are exhaustive and
+disjoint for the collection/listener work. The terminal behavior and terminal
 persistence/identity partitions, including their exact storage expression, are
 maintained in the canonical
 [terminal evidence guide](g01-paired-terminal.md). Use the repository's
