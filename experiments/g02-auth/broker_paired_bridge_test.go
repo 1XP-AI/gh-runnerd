@@ -622,8 +622,10 @@ func runBridgeCommand(t *testing.T, ctx context.Context, binary string, args []s
 	command.Stdin = bytes.NewReader(input)
 	output, err := command.CombinedOutput()
 	if err != nil {
-		_ = output
-		t.Fatal("reviewed g01 bridge command failed")
+		// g01-live's output boundary is fixed text; retaining it here makes a
+		// local fixture failure diagnosable without exposing credentials or SDK
+		// response bodies.
+		t.Fatalf("reviewed g01 bridge command failed: %q", strings.TrimSpace(string(output)))
 	}
 	return output
 }
