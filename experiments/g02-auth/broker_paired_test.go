@@ -66,6 +66,44 @@ func TestPairedWorkerBindingRetainsApprovalAndStateIdentity(t *testing.T) {
 	}
 }
 
+func TestPairedWorkerPreparationReceiptFencesJournalMutation(t *testing.T) {
+	for _, kind := range []string{"hash", "replacement"} {
+		t.Run(kind, func(t *testing.T) {
+			a, c, controllerState, workerState, workerPath := pairedPlanInputs(t)
+			plan, err := openBrokerWorkerPlan(workerPath, workerState, controllerState, a, c)
+			if err != nil {
+				t.Fatal("valid paired worker plan refused")
+			}
+			defer plan.close()
+			admission := filepath.Join(filepath.Dir(workerState), "receipt-worker-admission")
+			plan.prepare = func(context.Context) (brokerPreparationReceipt, error) {
+				return brokerSyntheticWorkerPreparation(t, plan, admission)
+			}
+			if err := plan.checkPrepared(context.Background()); err != nil {
+				t.Fatalf("fresh worker preparation refused: %v", err)
+			}
+			journalPath := filepath.Join(workerState, "journal.jsonl")
+			data, err := os.ReadFile(journalPath)
+			if err != nil {
+				t.Fatal("worker journal")
+			}
+			switch kind {
+			case "hash":
+				if err := os.WriteFile(journalPath, append(data, 'x'), 0600); err != nil {
+					t.Fatal("mutate worker journal")
+				}
+			case "replacement":
+				if err := os.Rename(journalPath, journalPath+".retained"); err != nil || os.WriteFile(journalPath, data, 0600) != nil {
+					t.Fatal("replace worker journal")
+				}
+			}
+			if err := plan.checkPrepared(context.Background()); err == nil {
+				t.Fatal("worker journal mutation crossed receipt fence")
+			}
+		})
+	}
+}
+
 func TestPairedWorkerApprovalMismatchRefusesBeforeBinding(t *testing.T) {
 	a, c, controllerState, workerState, workerPath := pairedPlanInputs(t)
 	raw, err := os.ReadFile(workerPath)

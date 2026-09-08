@@ -122,14 +122,41 @@ func (p *brokerWorkerPlan) prepareJournal(ctx context.Context) error {
 // exact receipt snapshot captured before authentication. This catches journal,
 // admission-claim or worker-state replacement without granting a retry.
 func (p *brokerWorkerPlan) checkPrepared(ctx context.Context) error {
-	if p == nil || p.prepare == nil || p.check() != nil || !p.preparationReceipt.validWorker(p) {
+	if p == nil || p.check() != nil {
 		return errBroker
 	}
-	receipt, err := p.prepare(ctx)
-	if err != nil || receipt != p.preparationReceipt || !receipt.validWorker(p) {
+	if p.preparationReceipt == (brokerPreparationReceipt{}) {
+		if p.prepareJournal(ctx) != nil {
+			return errBroker
+		}
+	} else if !p.preparationReceipt.validWorker(p) {
 		return errBroker
 	}
-	return p.check()
+	return p.checkJournalSnapshot()
+}
+
+// checkJournalSnapshot binds the returned receipt to the worker journal inode
+// and bytes without reproducing G01's event schema. The child remains the
+// authority for the admission claim and full replay before worker effects.
+func (p *brokerWorkerPlan) checkJournalSnapshot() error {
+	if p == nil || p.check() != nil || !p.preparationReceipt.validWorker(p) {
+		return errBroker
+	}
+	path := filepath.Join(p.statePath, "journal.jsonl")
+	file, err := openBrokerPrivateFile(path, 0600, 1<<20)
+	if err != nil {
+		return errBroker
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || brokerFileIdentity(info) != p.preparationReceipt.Journal {
+		return errBroker
+	}
+	data, err := io.ReadAll(io.NewSectionReader(file, 0, (1<<20)+1))
+	if err != nil || brokerBytesDigest(data) != p.preparationReceipt.JournalDigest {
+		return errBroker
+	}
+	return nil
 }
 
 func (p *brokerWorkerPlan) binding() (brokerWorkerBinding, error) {

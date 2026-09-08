@@ -7,6 +7,7 @@ exact_toolchain="go1.26.8"
 default_heavy_test_regex='^TestBaselineStatisticsPresenceAndEligibility$'
 paired_collection_regex='^TestPaired'
 storage_regex='^TestPairedTerminal(Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$'
+real_pair_cadence_regex='^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$'
 
 # These are the two established offline gate modules. Keep this list explicit so
 # a new or unreviewed experiment cannot enter public CI by directory naming.
@@ -39,7 +40,12 @@ for module_dir in "${offline_modules[@]}"; do
 			# the exact heavy name is the only member of the first partition.
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -skip "${default_heavy_test_regex}" ./...
 		else
-			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s ./...
+			# The checked-in real wall-clock paired bridge deliberately exceeds the
+			# historical 45-second package budget. Keep the ordinary package suite
+			# bounded, then run that one named regression with its explicit budget;
+			# no coverage is dropped or hidden behind a blind rerun.
+			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -skip "${real_pair_cadence_regex}" ./...
+			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -run "${real_pair_cadence_regex}" ./...
 		fi
 		GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" vet ./...
 		if [[ "${module_dir}" == "experiments/g01-scaleset" ]]; then

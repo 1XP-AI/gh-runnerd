@@ -413,12 +413,15 @@ func TestBrokerBuildUnsupportedNativeAdmissionRefuses(t *testing.T) {
 			}
 		})
 	}
-	for _, tags := range []string{"g01_live", "g01_live,notosusergo", "g01_live osusergo_extra"} {
+	if !validBrokerBuild(&base, sha) {
+		t.Fatal("exact production tag set refused")
+	}
+	for _, tags := range []string{"g01_live,notosusergo", "g01_live osusergo_extra"} {
 		good := base
 		good.Settings = append([]debug.BuildSetting(nil), base.Settings...)
 		good.Settings[len(good.Settings)-1].Value = tags
-		if !validBrokerBuild(&good, sha) {
-			t.Fatal("exact supported tags refused")
+		if validBrokerBuild(&good, sha) {
+			t.Fatal("unreviewed production tag set accepted")
 		}
 	}
 }

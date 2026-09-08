@@ -171,9 +171,6 @@ func brokerExecute(parent context.Context, a BrokerApproval, input brokerInput, 
 	defer j.close()
 	if plan != nil {
 		defer plan.close()
-		if a.Mode == "paired-terminal" && (plan.worker == nil || plan.worker.prepareJournal(ctx) != nil) {
-			return BrokerResult{}, errBroker
-		}
 		if plan.prepare(a, j, api.now()) != nil {
 			return BrokerResult{}, errBroker
 		}
@@ -188,7 +185,7 @@ func brokerExecute(parent context.Context, a BrokerApproval, input brokerInput, 
 		if claim.check() != nil || j.check() != nil {
 			return errBroker
 		}
-		if plan != nil && (plan.check() != nil || plan.compatibleControllerClaim(claim.root) != nil || (checkPrepared && plan.prepared != nil && plan.preparedState(claim.root, false) != nil) || (checkPrepared && a.Mode == "paired-terminal" && (plan.worker == nil || plan.worker.checkPrepared(ctx) != nil))) {
+		if plan != nil && (plan.check() != nil || plan.compatibleControllerClaim(claim.root) != nil || (checkPrepared && plan.prepared != nil && plan.preparedState(claim.root, false) != nil) || (checkPrepared && plan.prepared != nil && a.Mode == "paired-terminal" && (plan.worker == nil || plan.worker.checkPrepared(ctx) != nil))) {
 			return errBroker
 		}
 		return nil
