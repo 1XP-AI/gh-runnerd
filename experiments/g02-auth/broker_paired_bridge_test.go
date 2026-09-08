@@ -770,6 +770,10 @@ func TestPairedBrokerChainsRealControllerCreatePreparationAndTerminal(t *testing
 	result, err := runBrokerWithAPI(brokerCtx, BrokerFiles{ApprovalPath: approvalPath, StateDirectory: attempt, ControllerBinary: binaryPath, ControllerApproval: controllerPath, ControllerStateDirectory: controllerState, WorkerApproval: workerPath, WorkerStateDirectory: workerState}, input, api)
 	brokerCancel()
 	if err != nil || result.Status != "paired_terminal_completed" {
+		bridge.mu.Lock()
+		t.Logf("bridge counters: registration=%d exchange=%d inventory=%d setCreate=%d sessionOpen=%d jit=%d acquire=%d ack=%d create=%d start=%d polls=%d unexpected=%d", bridge.registrationCalls, bridge.exchangeCalls, bridge.controllerInventory, bridge.setCreateCalls, bridge.sessionOpenCalls, bridge.jitCalls, bridge.acquireCalls, bridge.ackCalls, bridge.createCalls, bridge.startCalls, bridge.polls, bridge.unexpected)
+		bridge.mu.Unlock()
+		t.Logf("broker API calls: %v", brokerFixture.calls)
 		t.Fatalf("real paired bridge did not complete: status=%q err=%v", result.Status, err)
 	}
 	bridge.mu.Lock()
