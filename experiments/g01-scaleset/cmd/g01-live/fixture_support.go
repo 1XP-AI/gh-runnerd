@@ -58,7 +58,11 @@ func init() {
 		// Worker admission is a distinct disposable fixture root. It is derived
 		// from the worker state identity, never supplied by production approval
 		// or the broker's controller admission root.
-		admissionDirectory := filepath.Join(filepath.Dir(stateDirectory), "worker-admission")
+		workerStateReal, err := filepath.EvalSymlinks(stateDirectory)
+		if err != nil || !filepath.IsAbs(workerStateReal) || filepath.Clean(workerStateReal) != workerStateReal {
+			return liveworker.PreparationReceipt{}, liveworker.ErrState
+		}
+		admissionDirectory := filepath.Join(filepath.Dir(workerStateReal), "worker-admission")
 		if err := os.Mkdir(admissionDirectory, 0700); err != nil && !os.IsExist(err) {
 			return liveworker.PreparationReceipt{}, liveworker.ErrState
 		}
