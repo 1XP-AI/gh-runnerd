@@ -52,6 +52,7 @@ type pairedBrokerBridge struct {
 	workerImage         string
 	workerImageID       string
 	workerDaemonID      string
+	calls               []string
 	setExists           bool
 	setCreated          bool
 	setDeleted          bool
@@ -224,6 +225,7 @@ func (f *pairedBrokerBridge) handleGitHub(w http.ResponseWriter, r *http.Request
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	path := f.actionPath(r.URL.Path)
+	f.calls = append(f.calls, r.Method+" "+path)
 
 	// These are the only REST calls that carry the temporary installation or
 	// verification authorities. The bridge compares them but never records them.
@@ -476,6 +478,7 @@ func (f *pairedBrokerBridge) handleDocker(w http.ResponseWriter, r *http.Request
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	path := r.URL.Path
+	f.calls = append(f.calls, r.Method+" "+path)
 	if path == "/version" && r.Method == http.MethodGet {
 		writeBridgeJSON(w, http.StatusOK, map[string]string{"ApiVersion": "1.51", "MinAPIVersion": "1.24"})
 		return
@@ -778,6 +781,7 @@ func TestPairedBrokerChainsRealControllerCreatePreparationAndTerminal(t *testing
 	if err != nil || result.Status != "paired_terminal_completed" {
 		bridge.mu.Lock()
 		t.Logf("bridge counters: registration=%d exchange=%d inventory=%d setCreate=%d sessionOpen=%d jit=%d acquire=%d ack=%d create=%d start=%d polls=%d unexpected=%d", bridge.registrationCalls, bridge.exchangeCalls, bridge.controllerInventory, bridge.setCreateCalls, bridge.sessionOpenCalls, bridge.jitCalls, bridge.acquireCalls, bridge.ackCalls, bridge.createCalls, bridge.startCalls, bridge.polls, bridge.unexpected)
+		t.Logf("bridge calls: %v", bridge.calls)
 		bridge.mu.Unlock()
 		t.Logf("broker API calls: %v", brokerFixture.calls)
 		if category, readErr := os.ReadFile(filepath.Join(controllerState, "paired-fixture-result")); readErr == nil {
