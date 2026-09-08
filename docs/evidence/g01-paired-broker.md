@@ -1,117 +1,179 @@
 # G01g: paired terminal executable and bounded broker handoff
 
-Issue [60](https://github.com/1XP-AI/gh-runnerd/issues/60) connects the reviewed
-paired terminal sequence to one tagged `g01-live` executable and a dedicated
+Issue [60](https://github.com/1XP-AI/gh-runnerd/issues/60) and PR
+[62](https://github.com/1XP-AI/gh-runnerd/pull/62) connect the reviewed paired
+terminal sequence to one tagged `g01-live` executable and a dedicated
 `g01-broker` mode. This is an offline experiment continuation, not a live
 authorization, production daemon, or closure of G01/G02.
 
+## Reviewed baseline and finding ledger
+
+The required first step was a normal fetch and merge of reviewed
+`origin/main` at `8dd64adc551ba5174892807a678e8bc614d0a474` (the merged CI fix).
+It produced merge commit `a5fcffd`; no rebase, amend, force update, workflow
+replay, or live operation was performed. The implementation and focused tests
+were then completed through source head
+`895a478eb1ed894710c75b3426e23cb3b1bceac9` (the evidence-only commit follows
+this tested source head).
+
+Both settled Luna/max reports were read: `/tmp/g01-paired-broker-review-ad7c2cf.md`
+and `/tmp/g01-paired-review-ad7c2cf.md`.
+
+The exact-head Codex surfaces were also read, including the stale inline
+finding, all current inline findings, review summaries, and the prior issue
+comment:
+
+- stale phase-receipt finding: [discussion 3955069674](https://github.com/1XP-AI/gh-runnerd/pull/62#discussion_r3955069674)
+- historical ledger mode: [discussion 3955069682](https://github.com/1XP-AI/gh-runnerd/pull/62#discussion_r3955069682)
+- daemon-ID contract: [discussion 3955069689](https://github.com/1XP-AI/gh-runnerd/pull/62#discussion_r3955069689)
+- canonical prerequisite history: [discussion 3955590270](https://github.com/1XP-AI/gh-runnerd/pull/62#discussion_r3955590270)
+- child deadline: [discussion 3955590276](https://github.com/1XP-AI/gh-runnerd/pull/62#discussion_r3955590276)
+- old Codex review: [review 5138884210](https://github.com/1XP-AI/gh-runnerd/pull/62#pullrequestreview-5138884210)
+- Codex review summary: [comment 5580386456](https://github.com/1XP-AI/gh-runnerd/pull/62#issuecomment-5580386456)
+- prior integrator note: [comment 5580442642](https://github.com/1XP-AI/gh-runnerd/pull/62#issuecomment-5580442642)
+
+The stale phase-receipt finding is resolved by a dedicated paired preparation
+phase and paired receipt validation; the newer prerequisite-history finding
+was the deeper version of that contract and is resolved below. The historical
+ledger finding is reproduced by
+`TestBrokerPairedAdmissionAcceptsHistoricalControllerClaim` and
+`TestPairedFailureAllowsAuthorizedInspectWithoutPairedRetry`; both now accept
+a prior controller claim under a paired request and a failed paired claim
+under an authorized controller inspect while preserving one-shot slots. The
+daemon-ID finding is reproduced at the colon and 128-byte boundaries by
+`TestPairedWorkerDaemonIDMatchesCanonicalBoundaries`. The history and deadline
+findings were reproduced by the red tests in `a0df276` and `278d8e9`, then fixed
+in `419f9cd` and subsequent focused commits.
+
 ## Implementation boundary
 
-The paired broker approval now requires the explicit `paired-terminal` phase.
-The canonical `runBrokerWithAPI` path invokes a dedicated fixed
-`--prepare-approved-paired-journal` child contract and accepts only its
-paired-terminal preparation receipt. The preparation contract proves a fresh
-controller journal and admission claim under controller authority; it does
-not borrow cleanup authority, read credentials, contact a remote service, or
-authorize worker effects.
+`PreparePairedJournal` now requires the exact canonical controller-create
+prefix: create phase, nonempty lowercase SHA-256 inventory, discovery intent
+and result, create intent and successful create result. It preserves those
+events byte-for-byte and only captures the intended preparation receipt under
+the existing controller claim. Fresh, pending, deleted, uncertain, reserved,
+previous-paired, malformed, or noncanonical histories are rejected; cleanup
+authority is never borrowed and no remote effect or credential read occurs.
 
-After preparation, the broker captures the exact controller snapshot and
-worker approval byte hashes plus controller/worker approval and state-root
-device/inode identities. The fixed child argv carries only those paths and a
-bounded credential-free binding; the controller-only credential payload is
-bounded and contains no PEM. The child validates the binding before reading
-controller credentials and before constructing SDK/Docker adapters, compares
-the argv binding with the broker-supplied payload binding, and revalidates the
-same identities throughout the terminal sequence and before completion. The
-canonical controller approval and journal-derived `PairInput` remain the only
-pairing authority; the binding is identity evidence, not a second pairing
-manifest.
+Broker admission replays every historical ledger event against the mode,
+phase, schema, and authority recorded in that event's slot. Current paired
+mode therefore does not reject a historical controller create, and current
+controller inspect/cleanup can inspect a retained failed paired claim. The
+cross-identity, tamper, ownership, authority-transition, incomplete-claim,
+and one-shot current-attempt checks remain in force.
 
-The exported `livecanary.RunPairedTerminal` path now owns paired journal/API/
-Unix adapter construction. A private `g01_pair_fixture` seam redirects only
-generated temporary journal/admission roots, the synthetic private TLS API,
-and the Unix fixture; it does not expose runtime authority or alter account,
-Keychain, runner, Docker, or service state. The tagged fixture calls the
-exported entrypoint and verifies two session acknowledgements, one acquire,
-JIT, create/start, original-session close, non-force worker deletion plus
-absence, owned-set deletion plus absence, complete rosters, real journal/lease
-behavior, and secret-free journals. Cancellation, lost response, reopened
-history, changed approval bytes/inodes, changed state roots, and symlinked
-roots fail before new effects.
+Paired approval validation reserves a complete terminal budget. The child
+deadline is the minimum of parent, broker, controller, and worker authority,
+then capped at ten minutes; it must leave a 35-second production cadence plus
+25 seconds of child margin and a separate credential margin. Insufficient
+remaining authority fails before mint/launch. Cancellation, expiry, deadline
+overflow, output overflow, lost response, and retry paths remain fail-stop
+with no automatic cleanup or retry; the ordinary 30-second preparation bound
+is unchanged.
 
-Paired child execution has a fixed argv and `LANG=C`/`LC_ALL=C` environment,
-bounded output, a 30-second child timeout, cancellation handling, no retry,
-and one logical controller stdin consumption. Existing controller-only,
-discovery, and separate-worker paths retain their prior refusal and authority
-boundaries.
+The paired worker daemon ID uses the authoritative worker contract
+`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`; unrelated controller fields retain their
+narrower validators.
 
-## TDD evidence and checks
+The tagged offline bridge starts a fresh private TLS server and private Unix
+Docker endpoint. It builds the reviewed `g01-live` executable from a clean
+temporary clone with VCS metadata, then runs the real controller-create CLI,
+real paired-preparation child, broker entrypoint, and exported
+`RunPairedTerminal`. The fixture seam only supplies generated private roots,
+loopback TLS CA, and the Unix endpoint; it cannot select production account,
+Keychain, runner, Docker, service, or GitHub state.
 
-The immutable review baseline retained meaningful red behavior in commit
-`3acd5ab`:
+## End-to-end evidence
+
+The critical chain is
+`TestPairedBrokerChainsRealControllerCreatePreparationAndTerminal` in
+`experiments/g02-auth/broker_paired_bridge_test.go`. The controller-create
+child first produced the same six canonical history records used by paired
+execution; the broker then ran the real paired preparation contract against
+that history and launched the actual tagged executable through the private
+TLS/Unix bridge. The terminal child appended baseline records to the original
+controller journal and created the separate worker paired journal.
+
+The successful run asserted these exact bridge counts:
 
 ```text
-GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=60s -tags=g01_live -run '^TestPairedTerminalMode' ./cmd/g01-live
-exit 1: paired mode refused before its credential input gate (reads=0)
-
-GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=60s -run '^TestPairedTerminalBrokerApprovalUsesDedicatedMode$' ./...
-exit 1: paired terminal broker approval was refused
+create=1 start=1 JIT=1 acquire=1 acknowledgements=2
+session-open=1 session-close=1 worker-delete=1 worker-absence=1
+set-create=1 set-delete=1 set-absence=1 complete-rosters=4 unexpected=0
+broker installation-token mints=1
 ```
 
-Before implementing the canonical entrypoint fix, the new behavioral
-regression test was run against the frozen implementation:
+It also asserted the broker ledger's paired controller/worker claim, original
+session close, non-force worker deletion plus absence, set deletion plus
+absence, canonical journal continuation, separate worker journal, and
+secret-free attempt/controller/worker/admission roots. Reopening the completed
+real broker entrypoint stopped before a second mint or terminal effect.
+
+The failed-paired recovery test separately proves an incomplete paired claim
+is retained, one explicitly authorized controller inspect can proceed in its
+own slot, and a repeated inspect cannot mint or launch again. Hash/inode and
+symlink replacement fences are covered by the paired binding and snapshot
+tests. Existing paired terminal partitions cover cancellation, expired
+authority, lost responses, journal uncertainty, reopened histories, receipt
+separation, worker/set absence, and no-replay behavior.
+
+The fast cadence used only by the tagged bridge is a deterministic test clock;
+it advances the same seven five-second waits as production. The production
+cadence proof is `TestPairedDistinctIDsAndOriginalCadence`, which requires
+eight rounds and seven waits of at least five seconds (at least 35 seconds).
+Together with the real child bridge run and
+`TestBrokerPairedChildDeadlineIsBoundedAndLeavesCadenceMargin`, this proves a
+bounded child may complete beyond the old 30-second limit while retaining a
+finite authority cap. No production timeout was made unbounded.
+
+## TDD and verification record
+
+The meaningful red tests were committed before implementation:
 
 ```text
-GOTOOLCHAIN=go1.26.8 go test -count=1 -run '^TestPairedBrokerRealEntrypointUsesPairedPreparationClosure$' .
-exit 1: real paired entrypoint did not complete one handoff ... mints=0
+GOTOOLCHAIN=go1.26.8 go test -count=1 -run '^TestPairedPreparationPreservesCanonicalControllerHistory|^TestPairedPreparationRejectsFreshAndNonCanonicalHistory$' ./livecanary
+exit 1 on the pre-fix implementation: the canonical history contract was absent.
+
+GOTOOLCHAIN=go1.26.8 go test -count=1 -run '^TestBrokerPairedAdmissionAcceptsHistoricalControllerClaim|^TestPairedWorkerDaemonIDMatchesCanonicalBoundaries|^TestPairedApprovalRejectsInsufficientTerminalAuthority$' .
+exit 1 on the pre-fix implementation: historical mode, daemon-ID boundaries, and authority budget were wrong.
 ```
 
-The focused green checks then passed:
+Focused green checks on the tested source head were:
 
 ```text
-GOTOOLCHAIN=go1.26.8 go test -count=1 -run '^TestPairedBrokerRealEntrypointUsesPairedPreparationClosure$|^TestBrokerPaired' .
-ok   github.com/1XP-AI/gh-runnerd/experiments/g02-auth  1.665s
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=180s ./livecanary
+ok  27.089s
 
-GOTOOLCHAIN=go1.26.8 go test -tags g01_live -count=1 ./cmd/g01-live
-ok   github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/cmd/g01-live  0.846s
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=120s -tags='g01_live,g01_pair_fixture' ./cmd/g01-live
+ok  0.844s
 
-GOTOOLCHAIN=go1.26.8 go test -tags g01_pair_fixture -count=1 -timeout=120s -run '^TestPairedTerminalExported|^TestPairedTerminalBinding' ./livecanary
-ok   github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/livecanary
-```
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=300s -run 'Test(Paired|BrokerPaired|BrokerChild|BrokerBuild|BrokerPipe)' .
+ok  11.240s before the final recovery-only test; the added recovery and parent-authority tests also passed in 0.679s.
 
-Pinned verification completed without live resources:
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=240s -run '^TestPairedBrokerChainsRealControllerCreatePreparationAndTerminal$' .
+ok  3.337s after fixture cleanup; the same test passed at 3.147s before cleanup.
 
-```text
-GOTOOLCHAIN=go1.26.8 bash scripts/check-offline-experiments.sh
-offline experiment checks passed: 2 module(s)
-
-GOTOOLCHAIN=go1.26.8 go test -race -count=1 ./...
-ok: root module
-
-GOTOOLCHAIN=go1.26.8 go vet ./...
-ok: root module
-
+gofmt -d experiments/g01-scaleset/cmd/g01-live/main_test.go
+no output
 git diff --check
 ok
 ```
 
-The offline gate covers both module race/vet suites, tagged `g01-live`/
-`g01-worker` CLI tests, tagged paired fixture partitions, and the G02 module
-suites on Go 1.26.8. The command and tooling files owned by issue #61 were not
-edited; their canonical command updates still need integration by that task.
+The mandated full root `make check` result must be recorded here after the
+final evidence edit; it includes formatting, build, vet, root tests and race
+tests, fuzz smoke, dependency/license checks, both offline experiment modules,
+and the pinned vulnerability check. No claim of full-goal completion is made
+until the coordinator confirms independent exact-head review and hosted CI.
 
-No live GitHub endpoint, App, credential, runner/group/workflow, Docker/Lima
-configuration, Keychain, launchd service, reboot, or manually installed
-runner was touched. The same-UID private-file model is not hostile-code
-isolation, and no production daemon or G01 recovery/live completion is
-claimed.
+## Safety limits and remaining gates
 
-## Remaining gates and rollback
+All tests use disposable local files, synthetic nonsecret credentials, private
+loopback TLS, and private Unix sockets. No live GitHub endpoint, App,
+credential, runner/group/workflow, Docker/Lima context, Keychain, launchd
+service, reboot, or manually installed runner was touched. Same-UID private
+file ownership is not hostile-code isolation; same-UID races after released
+short checks remain outside the proof.
 
-Independent Luna/max review, hosted CI, and exact-head GitHub Codex review are
-still required. The coordinator owns those review, stale-finding, CI, and
-merge gates; a pending or unreviewed exact head blocks merge.
-
-Offline rollback is source-only: revert the focused issue-60 commit(s). The
-tests create only temporary local TLS/Unix fixtures and require no runner,
-Docker, Keychain, launchd, or GitHub cleanup.
+The coordinator owns pushing evidence, requesting two independent reviews of
+the exact final head, reading all inline and issue-comment findings including
+stale ones, waiting for fresh Codex review and hosted CI, and merge gating.
