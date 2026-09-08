@@ -59,4 +59,12 @@ func openBrokerPrivateDirectory(path string) (*os.Root, error) {
 	return root, nil
 }
 
-type BrokerFiles struct{ ApprovalPath, StateDirectory, ControllerBinary, ControllerApproval, ControllerStateDirectory string }
+type BrokerFiles struct {
+	ApprovalPath             string
+	StateDirectory           string
+	ControllerBinary         string
+	ControllerApproval       string
+	ControllerStateDirectory string
+	WorkerApproval           string
+	WorkerStateDirectory     string
+}

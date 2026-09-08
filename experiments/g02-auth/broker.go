@@ -58,7 +58,15 @@ func (a BrokerApproval) validate(now time.Time) error {
 		if a.Phase != "" || a.AllowVerificationAuthority {
 			return errBroker
 		}
-	} else if a.Mode != "controller" || !brokerPhases[a.Phase] {
+	} else if a.Mode == "controller" {
+		if !brokerPhases[a.Phase] {
+			return errBroker
+		}
+	} else if a.Mode == "paired-terminal" {
+		if a.Phase != "" && a.Phase != "paired-terminal" {
+			return errBroker
+		}
+	} else {
 		return errBroker
 	}
 	return nil
@@ -75,7 +83,7 @@ func validBrokerToken(token string) bool {
 	return true
 }
 func brokerExecute(parent context.Context, a BrokerApproval, input brokerInput, path string, api *brokerAPI, plan *brokerControllerPlan) (BrokerResult, error) {
-	if parent == nil || api == nil || a.validate(api.now()) != nil || (a.AllowVerificationAuthority && input.VerificationToken == "") || (input.VerificationToken != "" && (!a.AllowVerificationAuthority || !validBrokerToken(input.VerificationToken))) || (a.Mode == "controller" && plan == nil) || (a.Mode != "controller" && plan != nil) {
+	if parent == nil || api == nil || a.validate(api.now()) != nil || (a.AllowVerificationAuthority && input.VerificationToken == "") || (input.VerificationToken != "" && (!a.AllowVerificationAuthority || !validBrokerToken(input.VerificationToken))) || ((a.Mode == "controller" || a.Mode == "paired-terminal") && plan == nil) || (a.Mode != "controller" && a.Mode != "paired-terminal" && plan != nil) {
 		return BrokerResult{}, errBroker
 	}
 	ctx, cancel := context.WithDeadline(parent, minTime(a.ExpiresAt, api.now().Add(10*time.Minute)))
@@ -194,8 +202,11 @@ func brokerExecute(parent context.Context, a BrokerApproval, input brokerInput, 
 	if len(data) > 16384 || j.append("controller_handoff_started", nil) != nil {
 		return BrokerResult{}, errBroker
 	}
-	if (plan.controller.needsVerification() && api.verifyWorkflow(ctx, a, plan.controller, input.VerificationToken) != nil) || guard() != nil || plan.launch(ctx, data, filepath.Join(path, "controller-approval.json")) != nil || j.append("controller_completed", nil) != nil || claim.complete() != nil {
+	if ((a.Mode == "paired-terminal" || plan.controller.needsVerification()) && api.verifyWorkflow(ctx, a, plan.controller, input.VerificationToken) != nil) || guard() != nil || plan.launch(ctx, data, filepath.Join(path, "controller-approval.json")) != nil || j.append("controller_completed", nil) != nil || claim.complete() != nil {
 		return BrokerResult{}, errBroker
+	}
+	if a.Mode == "paired-terminal" {
+		return BrokerResult{Status: "paired_terminal_completed"}, nil
 	}
 	return BrokerResult{Status: "controller_completed"}, nil
 }

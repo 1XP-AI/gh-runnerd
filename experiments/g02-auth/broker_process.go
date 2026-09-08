@@ -145,3 +145,47 @@ func invokeBrokerController(parent context.Context, binary *verifiedBrokerBinary
 	}
 	return nil
 }
+
+// invokeBrokerPairedTerminal has one fixed argv shape. The worker is supplied
+// as approval/state input to the same g01-live process; it is never started as
+// a separate child and no arbitrary phase/command reaches exec.
+func invokeBrokerPairedTerminal(parent context.Context, binary *verifiedBrokerBinary, workingDirectory, approvalPath, stateDirectory, workerApprovalPath, workerStateDirectory string, data []byte) error {
+	if len(data) > 16384 || binary == nil || binary.check() != nil || !filepath.IsAbs(approvalPath) || !filepath.IsAbs(stateDirectory) || !filepath.IsAbs(workerApprovalPath) || !filepath.IsAbs(workerStateDirectory) || filepath.Clean(approvalPath) != approvalPath || filepath.Clean(stateDirectory) != stateDirectory || filepath.Clean(workerApprovalPath) != workerApprovalPath || filepath.Clean(workerStateDirectory) != workerStateDirectory {
+		return errBroker
+	}
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+	command := exec.CommandContext(ctx, binary.path, "--execute-approved-paired-terminal", "--approval", approvalPath, "--state-dir", stateDirectory, "--worker-approval", workerApprovalPath, "--worker-state-dir", workerStateDirectory)
+	command.Dir = workingDirectory
+	command.Env = []string{"LANG=C", "LC_ALL=C"}
+	command.WaitDelay = time.Second
+	output := &brokerOutputBudget{cancel: cancel}
+	command.Stdout = output
+	command.Stderr = output
+	pipe, err := command.StdinPipe()
+	if err != nil {
+		return errBroker
+	}
+	if command.Start() != nil {
+		pipe.Close()
+		return errBroker
+	}
+	wrote := make(chan error, 1)
+	go func() {
+		_, e := pipe.Write(data)
+		closeErr := pipe.Close()
+		if e == nil {
+			e = closeErr
+		}
+		wrote <- e
+	}()
+	waited := command.Wait()
+	writeErr := <-wrote
+	output.mu.Lock()
+	overflow := output.overflow
+	output.mu.Unlock()
+	if waited != nil || writeErr != nil || overflow || ctx.Err() != nil {
+		return errBroker
+	}
+	return nil
+}

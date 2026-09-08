@@ -80,6 +80,11 @@ type brokerControllerBinding struct {
 	Harness   string      `json:"harness"`
 	State     brokerInode `json:"state"`
 }
+type brokerWorkerBinding struct {
+	Approval     string      `json:"approval"`
+	ApprovalFile brokerInode `json:"approval_file"`
+	State        brokerInode `json:"state"`
+}
 type brokerControllerAuthority struct {
 	Digest   string             `json:"digest"`
 	Approval controllerApproval `json:"approval"`
@@ -91,6 +96,7 @@ type brokerClaimEvent struct {
 	Attempt        brokerInode                `json:"attempt"`
 	Journal        brokerInode                `json:"journal"`
 	Controller     *brokerControllerBinding   `json:"controller,omitempty"`
+	Worker         *brokerWorkerBinding       `json:"worker,omitempty"`
 	Authority      *brokerControllerAuthority `json:"authority,omitempty"`
 	Snapshot       brokerInode                `json:"snapshot"`
 	SnapshotDigest string                     `json:"snapshot_digest,omitempty"`
@@ -258,6 +264,7 @@ func openBrokerAdmission(directory string, a BrokerApproval, j *brokerJournal, p
 	slots := map[string]brokerClaimEvent{}
 	done := map[string]bool{}
 	var binding *brokerControllerBinding
+	var workerBinding *brokerWorkerBinding
 	var authority *brokerControllerAuthority
 	latestSlot := ""
 	for _, line := range lines[1 : len(lines)-1] {
@@ -268,7 +275,7 @@ func openBrokerAdmission(directory string, a BrokerApproval, j *brokerJournal, p
 		switch event.Kind {
 		case "claim":
 			for previous, receipt := range slots {
-				if (!done[previous] && event.Slot != "inspect" && event.Slot != "cleanup") || receipt.Attempt == event.Attempt || receipt.Journal == event.Journal || (event.Controller != nil && receipt.Controller != nil && receipt.Snapshot == event.Snapshot) {
+				if (!done[previous] && event.Slot != "inspect" && event.Slot != "cleanup") || receipt.Attempt == event.Attempt || receipt.Journal == event.Journal || (event.Controller != nil && receipt.Controller != nil && receipt.Snapshot == event.Snapshot) || (event.Worker != nil && receipt.Worker != nil && receipt.Worker.State == event.Worker.State) {
 					return nil, errBroker
 				}
 			}
@@ -287,6 +294,12 @@ func openBrokerAdmission(directory string, a BrokerApproval, j *brokerJournal, p
 					return nil, errBroker
 				}
 				binding = event.Controller
+				if event.Worker != nil {
+					if workerBinding != nil && *workerBinding != *event.Worker {
+						return nil, errBroker
+					}
+					workerBinding = event.Worker
+				}
 				authority = event.Authority
 			}
 			slots[event.Slot] = event
@@ -304,6 +317,8 @@ func openBrokerAdmission(directory string, a BrokerApproval, j *brokerJournal, p
 	slot := a.Phase
 	if a.Mode == "discover-actions-host" {
 		slot = a.Mode
+	} else if a.Mode == "paired-terminal" {
+		slot = "paired-terminal"
 	}
 	if _, ok := slots[slot]; ok {
 		return nil, errBroker
@@ -332,6 +347,15 @@ func openBrokerAdmission(directory string, a BrokerApproval, j *brokerJournal, p
 		c.event.Authority = &next
 		c.event.Snapshot = brokerFileIdentity(p.snapshotInfo)
 		c.event.SnapshotDigest = a.ControllerApprovalSHA256
+		if p.worker != nil {
+			worker, e := p.worker.binding()
+			if e != nil || (workerBinding != nil && *workerBinding != worker) {
+				return nil, errBroker
+			}
+			c.event.Worker = &worker
+		} else if a.Mode == "paired-terminal" {
+			return nil, errBroker
+		}
 	} else if a.Mode == "controller" {
 		return nil, errBroker
 	}
@@ -366,16 +390,28 @@ func validBrokerClaimEvent(a BrokerApproval, e brokerClaimEvent) bool {
 		return false
 	}
 	if e.Slot == "discover-actions-host" {
-		return e.Controller == nil && e.Authority == nil && e.Snapshot == (brokerInode{}) && e.SnapshotDigest == ""
+		return e.Controller == nil && e.Worker == nil && e.Authority == nil && e.Snapshot == (brokerInode{}) && e.SnapshotDigest == ""
 	}
-	if !brokerPhases[e.Slot] || e.Controller == nil || e.Authority == nil || e.Controller.State.Inode == 0 || e.Snapshot.Inode == 0 || !brokerSHA256.MatchString(e.SnapshotDigest) || !brokerSHA256.MatchString(e.Controller.Ownership) || !brokerSHA256.MatchString(e.Controller.Binary) || !brokerSHA40.MatchString(e.Controller.Harness) {
+	paired := e.Slot == "paired-terminal"
+	if (!brokerPhases[e.Slot] && !paired) || e.Controller == nil || e.Authority == nil || e.Controller.State.Inode == 0 || e.Snapshot.Inode == 0 || !brokerSHA256.MatchString(e.SnapshotDigest) || !brokerSHA256.MatchString(e.Controller.Ownership) || !brokerSHA256.MatchString(e.Controller.Binary) || !brokerSHA40.MatchString(e.Controller.Harness) {
+		return false
+	}
+	if paired {
+		if a.Mode != "paired-terminal" || e.Worker == nil || !brokerSHA256.MatchString(e.Worker.Approval) || e.Worker.ApprovalFile.Device == 0 || e.Worker.ApprovalFile.Inode == 0 || e.Worker.State.Device == 0 || e.Worker.State.Inode == 0 {
+			return false
+		}
+	} else if e.Worker != nil || a.Mode == "paired-terminal" {
 		return false
 	}
 	c := e.Authority.Approval
 	if c.ExpiresAt.IsZero() || e.Authority.Digest != brokerDigest(c) {
 		return false
 	}
-	a.Mode = "controller"
+	if paired {
+		a.Mode = "paired-terminal"
+	} else {
+		a.Mode = "controller"
+	}
 	a.Phase = e.Slot
 	a.ExpiresAt = c.ExpiresAt
 	a.ControllerHarnessSHA = e.Controller.Harness

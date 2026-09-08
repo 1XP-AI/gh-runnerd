@@ -5,9 +5,136 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
+
+const pairedWorkerImage = "ghcr.io/actions/actions-runner@sha256:f5a0d9a3d857315f2aed7075a02a29f46927ad198221c3b1c66585ae9fe36c0d"
+
+type pairedWorkerApproval struct {
+	RunnerUpdatesDisabled bool      `json:"runner_updates_disabled"`
+	HarnessSHA            string    `json:"harness_sha"`
+	WorkflowSHA           string    `json:"workflow_sha"`
+	OwnerNonce            string    `json:"owner_nonce"`
+	Controller            string    `json:"controller"`
+	Endpoint              string    `json:"endpoint"`
+	DaemonID              string    `json:"daemon_id"`
+	ImageID               string    `json:"image_id"`
+	Image                 string    `json:"image"`
+	ExpiresAt             time.Time `json:"expires_at"`
+	Phases                []string  `json:"phases"`
+}
+
+func (a pairedWorkerApproval) validate(now time.Time) error {
+	if !a.RunnerUpdatesDisabled || !brokerSHA40.MatchString(a.HarnessSHA) || !brokerSHA40.MatchString(a.WorkflowSHA) || !brokerNonce.MatchString(a.OwnerNonce) || !brokerComponent.MatchString(a.Controller) || !brokerComponent.MatchString(a.DaemonID) || !strings.HasPrefix(a.ImageID, "sha256:") || !brokerSHA256.MatchString(strings.TrimPrefix(a.ImageID, "sha256:")) || a.Image != pairedWorkerImage || !filepath.IsAbs(a.Endpoint) || filepath.Clean(a.Endpoint) != a.Endpoint || len(a.Endpoint) > 103 || strings.ContainsAny(a.Endpoint, "\x00\r\n") || !a.ExpiresAt.After(now) || a.ExpiresAt.After(now.Add(24*time.Hour)) || len(a.Phases) != 4 {
+		return errBroker
+	}
+	seen := map[string]bool{}
+	for _, phase := range a.Phases {
+		if phase != "create" && phase != "start" && phase != "inspect" && phase != "cleanup" || seen[phase] {
+			return errBroker
+		}
+		seen[phase] = true
+	}
+	return nil
+}
+
+type brokerWorkerPlan struct {
+	approval     pairedWorkerApproval
+	raw          []byte
+	approvalPath string
+	approvalFile *os.File
+	approvalInfo os.FileInfo
+	statePath    string
+	state        *os.Root
+	stateInfo    os.FileInfo
+}
+
+func (p *brokerWorkerPlan) close() {
+	if p == nil {
+		return
+	}
+	if p.approvalFile != nil {
+		_ = p.approvalFile.Close()
+	}
+	if p.state != nil {
+		_ = p.state.Close()
+	}
+}
+
+func (p *brokerWorkerPlan) check() error {
+	if p == nil || p.approvalFile == nil || p.state == nil || !filepath.IsAbs(p.approvalPath) || filepath.Clean(p.approvalPath) != p.approvalPath || !filepath.IsAbs(p.statePath) || filepath.Clean(p.statePath) != p.statePath {
+		return errBroker
+	}
+	approvalInfo, err := p.approvalFile.Stat()
+	namedApproval, namedErr := os.Lstat(p.approvalPath)
+	stateInfo, stateErr := p.state.Stat(".")
+	namedState, namedStateErr := os.Lstat(p.statePath)
+	if err != nil || namedErr != nil || stateErr != nil || namedStateErr != nil || !privateFile(p.approvalFile) || !brokerOwnedDirectory(namedState, true) || !os.SameFile(approvalInfo, p.approvalInfo) || !os.SameFile(namedApproval, p.approvalInfo) || !os.SameFile(stateInfo, p.stateInfo) || !os.SameFile(namedState, p.stateInfo) {
+		return errBroker
+	}
+	data, err := io.ReadAll(io.NewSectionReader(p.approvalFile, 0, 16385))
+	if err != nil || len(data) != len(p.raw) || brokerBytesDigest(data) != brokerBytesDigest(p.raw) {
+		return errBroker
+	}
+	return nil
+}
+
+func (p *brokerWorkerPlan) binding() (brokerWorkerBinding, error) {
+	if p.check() != nil {
+		return brokerWorkerBinding{}, errBroker
+	}
+	return brokerWorkerBinding{Approval: brokerBytesDigest(p.raw), ApprovalFile: brokerFileIdentity(p.approvalInfo), State: brokerFileIdentity(p.stateInfo)}, nil
+}
+
+func openBrokerWorkerPlan(path, statePath, controllerStatePath string, a BrokerApproval, c controllerApproval) (*brokerWorkerPlan, error) {
+	if a.Mode != "paired-terminal" || !filepath.IsAbs(path) || filepath.Clean(path) != path || !filepath.IsAbs(statePath) || filepath.Clean(statePath) != statePath || filepath.Clean(statePath) == filepath.Clean(controllerStatePath) {
+		return nil, errBroker
+	}
+	controllerReal, err := filepath.EvalSymlinks(controllerStatePath)
+	workerReal, workerErr := filepath.EvalSymlinks(statePath)
+	if err != nil || workerErr != nil || controllerReal == workerReal {
+		return nil, errBroker
+	}
+	file, err := openBrokerPrivateFile(path, 0600, 16384)
+	if err != nil {
+		return nil, errBroker
+	}
+	data, err := io.ReadAll(io.NewSectionReader(file, 0, 16385))
+	if err != nil || len(data) > 16384 {
+		file.Close()
+		return nil, errBroker
+	}
+	var worker pairedWorkerApproval
+	if decodeBrokerJSON(data, &worker, true) != nil || worker.validate(time.Now()) != nil || worker.OwnerNonce != c.OwnerNonce || worker.HarnessSHA != c.HarnessSHA || worker.WorkflowSHA != c.WorkflowSHA || worker.Controller != c.Controller || !worker.ExpiresAt.Equal(c.ExpiresAt) {
+		file.Close()
+		return nil, errBroker
+	}
+	root, err := openBrokerPrivateDirectory(statePath)
+	if err != nil {
+		file.Close()
+		return nil, errBroker
+	}
+	stateInfo, err := root.Stat(".")
+	if err != nil {
+		file.Close()
+		root.Close()
+		return nil, errBroker
+	}
+	approvalInfo, err := file.Stat()
+	if err != nil {
+		file.Close()
+		root.Close()
+		return nil, errBroker
+	}
+	plan := &brokerWorkerPlan{approval: worker, raw: data, approvalPath: path, approvalFile: file, approvalInfo: approvalInfo, statePath: statePath, state: root, stateInfo: stateInfo}
+	if plan.check() != nil {
+		plan.close()
+		return nil, errBroker
+	}
+	return plan, nil
+}
 
 // Private prepared inputs are constructed only after the front door verifies
 // source, binary, authority and private paths. Test launchers are synthetic.
@@ -25,6 +152,7 @@ type brokerControllerPlan struct {
 	localPrepare       func(context.Context, string) (brokerPreparationReceipt, error)
 	preparationReceipt brokerPreparationReceipt
 	prepared           *brokerPreparedState
+	worker             *brokerWorkerPlan
 	launch             func(context.Context, []byte, string) error
 }
 
@@ -34,6 +162,9 @@ func (p *brokerControllerPlan) close() {
 	}
 	if p != nil && p.snapshot != nil {
 		p.snapshot.Close()
+	}
+	if p != nil {
+		p.worker.close()
 	}
 }
 func (p *brokerControllerPlan) authority() brokerControllerAuthority {
@@ -54,7 +185,10 @@ func (p *brokerControllerPlan) binding() (brokerControllerBinding, error) {
 	return brokerControllerBinding{brokerDigest(c), p.approval.ControllerBinarySHA256, p.approval.ControllerHarnessSHA, brokerFileIdentity(i)}, nil
 }
 func (p *brokerControllerPlan) prepare(a BrokerApproval, j *brokerJournal, now time.Time) error {
-	if p == nil || p.binaryCheck == nil || p.launch == nil || p.localPrepare == nil || brokerDigest(p.approval) != brokerDigest(a) || p.controller.validate(a, now) != nil || brokerBytesDigest(p.raw) != a.ControllerApprovalSHA256 || p.binaryCheck() != nil {
+	if p == nil || p.binaryCheck == nil || p.launch == nil || p.localPrepare == nil || brokerDigest(p.approval) != brokerDigest(a) || p.controller.validate(a, now) != nil || brokerBytesDigest(p.raw) != a.ControllerApprovalSHA256 || p.binaryCheck() != nil || (a.Mode == "paired-terminal" && p.worker == nil) {
+		return errBroker
+	}
+	if p.worker != nil && p.worker.check() != nil {
 		return errBroker
 	}
 	if _, e := p.binding(); e != nil {
@@ -79,7 +213,7 @@ func (p *brokerControllerPlan) check() error {
 	if _, e := p.binding(); e != nil {
 		return errBroker
 	}
-	if p.binaryCheck() != nil || p.snapshot == nil || p.journal.check() != nil || !privateFile(p.snapshot) {
+	if p.binaryCheck() != nil || p.snapshot == nil || p.journal.check() != nil || !privateFile(p.snapshot) || (p.worker != nil && p.worker.check() != nil) {
 		return errBroker
 	}
 	named, e := p.journal.root.Lstat("controller-approval.json")

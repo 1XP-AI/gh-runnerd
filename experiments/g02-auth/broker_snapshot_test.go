@@ -101,7 +101,7 @@ func brokerSnapshotFrontDoorFixture(t *testing.T, path string, supported bool) {
 
 			input, _ := os.Open(inputPath)
 			defer input.Close()
-			_, e = runBrokerWithAPI(context.Background(), BrokerFiles{approvalPath, root, binary, ctrlPath, state}, input, api)
+			_, e = runBrokerWithAPI(context.Background(), BrokerFiles{ApprovalPath: approvalPath, StateDirectory: root, ControllerBinary: binary, ControllerApproval: ctrlPath, ControllerStateDirectory: state}, input, api)
 			if e == nil || f.tokenCalls != 0 || (!supported && len(f.calls) != 0) {
 				t.Fatalf("snapshot collision accepted or minted: mint=%d", f.tokenCalls)
 			}

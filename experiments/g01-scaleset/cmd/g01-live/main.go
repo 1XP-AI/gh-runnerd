@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/livecanary"
+	"github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/liveworker"
 )
 
 func buildRevision() (string, bool) {
@@ -56,10 +57,13 @@ func runWithPreparation(args []string, in io.Reader, out io.Writer, revisionForB
 	flags.SetOutput(io.Discard)
 	plan := flags.Bool("plan", false, "")
 	execute := flags.Bool("execute-approved-canary", false, "")
+	pairedExecute := flags.Bool("execute-approved-paired-terminal", false, "")
 	prepare := flags.Bool("prepare-approved-journal", false, "")
 	approvalPath := flags.String("approval", "", "")
 	statePath := flags.String("state-dir", "", "")
 	phase := flags.String("phase", "", "")
+	workerApprovalPath := flags.String("worker-approval", "", "")
+	workerStatePath := flags.String("worker-state-dir", "", "")
 	reject := func() int {
 		fmt.Fprintln(out, "canary refused; approval, authority or private state requires review")
 		return 1
@@ -67,20 +71,49 @@ func runWithPreparation(args []string, in io.Reader, out io.Writer, revisionForB
 	if flags.Parse(args) != nil || flags.NArg() != 0 {
 		return reject()
 	}
-	if *plan && !*execute && !*prepare {
-		fmt.Fprintln(out, "Controller-only phases: create, before-ack, after-ack, before-acquire, acquire-loss, jit-loss, inspect, cleanup. No worker launch or workflow dispatch. Live execution requires an immutable reviewed build, exact private approval and controller-side broker input.")
+	workerInputs := *workerApprovalPath != "" || *workerStatePath != ""
+	if *plan && !*execute && !*pairedExecute && !*prepare {
+		if *approvalPath != "" || *statePath != "" || *phase != "" || workerInputs {
+			return reject()
+		}
+		fmt.Fprintln(out, "Controller-only phases: create, before-ack, after-ack, before-acquire, acquire-loss, jit-loss, inspect, cleanup. Paired terminal mode uses one same-process executable with explicit worker approval/state inputs and fixed terminal sequencing; no worker launch or workflow dispatch. Live execution requires an immutable reviewed build, exact private approval and controller-side broker input.")
 		return 0
 	}
-	if (*execute == *prepare) || *plan || *approvalPath == "" || *statePath == "" || *phase == "" {
+	modeCount := 0
+	if *execute {
+		modeCount++
+	}
+	if *pairedExecute {
+		modeCount++
+	}
+	if *prepare {
+		modeCount++
+	}
+	if modeCount != 1 || *plan || *approvalPath == "" || *statePath == "" {
+		return reject()
+	}
+	if *pairedExecute {
+		if *phase != "" || *workerApprovalPath == "" || *workerStatePath == "" {
+			return reject()
+		}
+	} else if *phase == "" || workerInputs {
 		return reject()
 	}
 	a, err := livecanary.ReadApproval(*approvalPath)
-	if err != nil || a.Validate(time.Now()) != nil || !slices.Contains(a.Phases, *phase) {
+	if err != nil || a.Validate(time.Now()) != nil || (!*pairedExecute && !slices.Contains(a.Phases, *phase)) {
 		return reject()
 	}
 	revision, ok := revisionForBuild()
 	if !ok || revision != a.HarnessSHA {
 		return reject()
+	}
+	var worker liveworker.Approval
+	if *pairedExecute {
+		var workerErr error
+		worker, workerErr = liveworker.ReadApproval(*workerApprovalPath)
+		if workerErr != nil || livecanary.ValidatePairedApprovals(a, worker) != nil || livecanary.ValidatePairedStatePaths(*statePath, *workerStatePath) != nil {
+			return reject()
+		}
 	}
 	if *prepare {
 		if prepareJournal == nil {
@@ -95,11 +128,14 @@ func runWithPreparation(args []string, in io.Reader, out io.Writer, revisionForB
 		}
 		return 0
 	}
-	j, err := livecanary.OpenJournal(*statePath, a)
-	if err != nil {
-		return reject()
+	var j *livecanary.FileJournal
+	if !*pairedExecute {
+		j, err = livecanary.OpenJournal(*statePath, a)
+		if err != nil {
+			return reject()
+		}
+		defer j.Close()
 	}
-	defer j.Close()
 	closable, ok := in.(io.ReadCloser)
 	if !ok {
 		return reject()
@@ -118,6 +154,14 @@ func runWithPreparation(args []string, in io.Reader, out io.Writer, revisionForB
 	var credentials livecanary.Credentials
 	if livecanary.DecodeStrict(data, &credentials) != nil {
 		return reject()
+	}
+	if *pairedExecute {
+		if livecanary.RunPairedTerminal(context.Background(), livecanary.PairedTerminalFiles{ControllerApprovalPath: *approvalPath, ControllerStateDirectory: *statePath, WorkerApprovalPath: *workerApprovalPath, WorkerStateDirectory: *workerStatePath}, credentials) != nil {
+			fmt.Fprintln(out, "paired terminal stopped; retain private state and all uncertain resources; no automatic retry")
+			return 1
+		}
+		fmt.Fprintln(out, "paired terminal completed; inspect private evidence")
+		return 0
 	}
 	api, err := livecanary.NewSDKAPI(a, credentials)
 	if err != nil {

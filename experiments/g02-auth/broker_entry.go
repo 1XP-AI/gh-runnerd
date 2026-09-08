@@ -43,7 +43,19 @@ func (c controllerApproval) needsVerification() bool {
 	})
 }
 func (c controllerApproval) validate(a BrokerApproval, now time.Time) error {
-	if c.OwnerNonce != a.OwnerNonce || c.AppID != a.AppID || c.InstallationID != a.InstallationID || c.Organization != a.Organization || c.Repository != a.Repository || c.RepositoryID != a.RepositoryID || c.RunnerGroupID != a.RunnerGroupID || c.HarnessSHA != a.ControllerHarnessSHA || !brokerSHA40.MatchString(c.HarnessSHA) || !brokerSHA40.MatchString(c.WorkflowSHA) || !brokerNonce.MatchString(c.OwnerNonce) || !brokerWorkflow.MatchString(c.WorkflowPath) || !brokerComponent.MatchString(c.Controller) || !c.ExpiresAt.After(now.Add(time.Minute)) || c.ExpiresAt.After(now.Add(24*time.Hour)) || c.ExpiresAt.Before(a.ExpiresAt) || len(c.ActionsHosts) < 1 || len(c.ActionsHosts) > 8 || len(c.Phases) < 1 || len(c.Phases) > 8 || !slices.Contains(c.Phases, a.Phase) || c.needsVerification() != a.AllowVerificationAuthority || (c.needsVerification() && c.WorkflowRunID < 1) {
+	if c.OwnerNonce != a.OwnerNonce || c.AppID != a.AppID || c.InstallationID != a.InstallationID || c.Organization != a.Organization || c.Repository != a.Repository || c.RepositoryID != a.RepositoryID || c.RunnerGroupID != a.RunnerGroupID || c.HarnessSHA != a.ControllerHarnessSHA || !brokerSHA40.MatchString(c.HarnessSHA) || !brokerSHA40.MatchString(c.WorkflowSHA) || !brokerNonce.MatchString(c.OwnerNonce) || !brokerWorkflow.MatchString(c.WorkflowPath) || !brokerComponent.MatchString(c.Controller) || !c.ExpiresAt.After(now.Add(time.Minute)) || c.ExpiresAt.After(now.Add(24*time.Hour)) || c.ExpiresAt.Before(a.ExpiresAt) || len(c.ActionsHosts) < 1 || len(c.ActionsHosts) > 8 || len(c.Phases) < 1 || len(c.Phases) > 8 || c.needsVerification() != a.AllowVerificationAuthority || (c.needsVerification() && c.WorkflowRunID < 1) {
+		return errBroker
+	}
+	if a.Mode == "paired-terminal" {
+		if !a.AllowVerificationAuthority || !c.needsVerification() || c.WorkflowRunID < 1 {
+			return errBroker
+		}
+		for _, phase := range []string{"create", "inspect", "cleanup"} {
+			if !slices.Contains(c.Phases, phase) {
+				return errBroker
+			}
+		}
+	} else if !slices.Contains(c.Phases, a.Phase) {
 		return errBroker
 	}
 	seen := map[string]bool{}
@@ -112,11 +124,18 @@ func runBrokerWithAPI(ctx context.Context, files BrokerFiles, input *os.File, ap
 	if _, err := readBrokerPrivateJSON(files.ApprovalPath, &approval); err != nil || approval.validate(api.now()) != nil {
 		return BrokerResult{}, errBroker
 	}
+	if approval.Mode != "paired-terminal" && (files.WorkerApproval != "" || files.WorkerStateDirectory != "") {
+		return BrokerResult{}, errBroker
+	}
+	if approval.Mode == "paired-terminal" && (files.WorkerApproval == "" || files.WorkerStateDirectory == "") {
+		return BrokerResult{}, errBroker
+	}
 	var binary *verifiedBrokerBinary
 	var controller controllerApproval
 	var controllerData []byte
 	var controllerRoot *os.Root
-	if approval.Mode == "controller" {
+	var workerPlan *brokerWorkerPlan
+	if approval.Mode == "controller" || approval.Mode == "paired-terminal" {
 		if !brokerSHA256.MatchString(approval.ControllerBinarySHA256) || !brokerSHA256.MatchString(approval.ControllerApprovalSHA256) || !brokerSHA40.MatchString(approval.ControllerHarnessSHA) {
 			return BrokerResult{}, errBroker
 		}
@@ -136,7 +155,14 @@ func runBrokerWithAPI(ctx context.Context, files BrokerFiles, input *os.File, ap
 			return BrokerResult{}, errBroker
 		}
 		defer controllerRoot.Close()
-	} else if files.ControllerBinary != "" || files.ControllerApproval != "" || files.ControllerStateDirectory != "" || approval.ControllerBinarySHA256 != "" || approval.ControllerApprovalSHA256 != "" || approval.ControllerHarnessSHA != "" {
+		if approval.Mode == "paired-terminal" {
+			workerPlan, err = openBrokerWorkerPlan(files.WorkerApproval, files.WorkerStateDirectory, files.ControllerStateDirectory, approval, controller)
+			if err != nil {
+				return BrokerResult{}, errBroker
+			}
+			defer workerPlan.close()
+		}
+	} else if files.ControllerBinary != "" || files.ControllerApproval != "" || files.ControllerStateDirectory != "" || files.WorkerApproval != "" || files.WorkerStateDirectory != "" || approval.ControllerBinarySHA256 != "" || approval.ControllerApprovalSHA256 != "" || approval.ControllerHarnessSHA != "" {
 		return BrokerResult{}, errBroker
 	}
 	credentialInput, err := readBrokerInput(ctx, input)
@@ -145,10 +171,13 @@ func runBrokerWithAPI(ctx context.Context, files BrokerFiles, input *os.File, ap
 	}
 
 	var plan *brokerControllerPlan
-	if approval.Mode == "controller" {
+	if approval.Mode == "controller" || approval.Mode == "paired-terminal" {
 		plan, err = newBrokerControllerPlan(approval, controller, controllerData, controllerRoot, files.ControllerStateDirectory, binary.check, func(ctx context.Context, data []byte, snapshotPath string) error {
 			if plan.check() != nil {
 				return errBroker
+			}
+			if approval.Mode == "paired-terminal" {
+				return invokeBrokerPairedTerminal(ctx, binary, files.StateDirectory, snapshotPath, files.ControllerStateDirectory, files.WorkerApproval, files.WorkerStateDirectory, data)
 			}
 			return invokeBrokerController(ctx, binary, files.StateDirectory, snapshotPath, files.ControllerStateDirectory, approval.Phase, data)
 		})
@@ -156,8 +185,13 @@ func runBrokerWithAPI(ctx context.Context, files BrokerFiles, input *os.File, ap
 			return BrokerResult{}, errBroker
 		}
 		plan.localPrepare = func(ctx context.Context, snapshotPath string) (brokerPreparationReceipt, error) {
-			return invokeBrokerPreparation(ctx, binary, files.StateDirectory, snapshotPath, files.ControllerStateDirectory, approval.Phase)
+			phase := approval.Phase
+			if approval.Mode == "paired-terminal" {
+				phase = "cleanup"
+			}
+			return invokeBrokerPreparation(ctx, binary, files.StateDirectory, snapshotPath, files.ControllerStateDirectory, phase)
 		}
+		plan.worker = workerPlan
 	}
 	return brokerExecute(ctx, approval, credentialInput, files.StateDirectory, api, plan)
 }

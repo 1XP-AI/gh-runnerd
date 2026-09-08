@@ -71,6 +71,22 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
+	if len(os.Args) > 1 && os.Args[1] == "--execute-approved-paired-terminal" {
+		if len(os.Args) != 10 || os.Args[2] != "--approval" || os.Args[4] != "--state-dir" || os.Args[6] != "--worker-approval" || os.Args[8] != "--worker-state-dir" {
+			os.Exit(3)
+		}
+		for _, entry := range os.Environ() {
+			if entry != "LANG=C" && entry != "LC_ALL=C" {
+				os.Exit(4)
+			}
+		}
+		data, err := io.ReadAll(io.LimitReader(os.Stdin, 16385))
+		if err != nil || !bytes.Contains(data, []byte("synthetic-private-installation-token")) || bytes.Contains(data, []byte("PRIVATE KEY")) {
+			os.Exit(5)
+		}
+		fmt.Fprintln(os.Stdout, "synthetic-private-paired-output")
+		os.Exit(0)
+	}
 	os.Exit(m.Run())
 }
 func testBrokerBinary(t *testing.T) *verifiedBrokerBinary {
@@ -97,6 +113,19 @@ func TestBrokerPipeUsesFixedArgsMinimalEnvAndDiscardsChildSecrets(t *testing.T) 
 	root := t.TempDir()
 	if err := invokeBrokerController(context.Background(), binary, root, filepath.Join(root, "approval.json"), root, "create", []byte(`{"installation_token":"synthetic-private-installation-token"}`)); err != nil {
 		t.Fatal("private fixed child handoff failed")
+	}
+}
+
+func TestBrokerPairedTerminalPipeUsesFixedArgsAndOneControllerInput(t *testing.T) {
+	binary := testBrokerBinary(t)
+	root := t.TempDir()
+	workerState := filepath.Join(root, "worker-state")
+	if err := os.Mkdir(workerState, 0700); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte(`{"installation_token":"synthetic-private-installation-token"}`)
+	if err := invokeBrokerPairedTerminal(context.Background(), binary, root, filepath.Join(root, "approval.json"), root, filepath.Join(root, "worker.json"), workerState, data); err != nil {
+		t.Fatal("private fixed paired terminal handoff failed")
 	}
 }
 func TestBrokerChildBoundsAndReplacedBinaryRefuse(t *testing.T) {
