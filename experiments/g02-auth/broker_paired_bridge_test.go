@@ -53,6 +53,8 @@ type pairedBrokerBridge struct {
 	workerImageID       string
 	workerDaemonID      string
 	calls               []string
+	unexpectedCalls     []string
+	lastCall            string
 	setExists           bool
 	setCreated          bool
 	setDeleted          bool
@@ -137,6 +139,7 @@ func newPairedBrokerBridge(t *testing.T) *pairedBrokerBridge {
 
 func (f *pairedBrokerBridge) markUnexpected() {
 	f.unexpected++
+	f.unexpectedCalls = append(f.unexpectedCalls, f.lastCall)
 }
 
 func writeBridgeJSON(w http.ResponseWriter, status int, value any) {
@@ -225,7 +228,8 @@ func (f *pairedBrokerBridge) handleGitHub(w http.ResponseWriter, r *http.Request
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	path := f.actionPath(r.URL.Path)
-	f.calls = append(f.calls, r.Method+" "+path)
+	f.lastCall = r.Method + " " + path
+	f.calls = append(f.calls, f.lastCall)
 
 	// These are the only REST calls that carry the temporary installation or
 	// verification authorities. The bridge compares them but never records them.
@@ -478,7 +482,8 @@ func (f *pairedBrokerBridge) handleDocker(w http.ResponseWriter, r *http.Request
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	path := r.URL.Path
-	f.calls = append(f.calls, r.Method+" "+path)
+	f.lastCall = r.Method + " " + path
+	f.calls = append(f.calls, f.lastCall)
 	if path == "/version" && r.Method == http.MethodGet {
 		writeBridgeJSON(w, http.StatusOK, map[string]string{"ApiVersion": "1.51", "MinAPIVersion": "1.24"})
 		return
@@ -782,6 +787,7 @@ func TestPairedBrokerChainsRealControllerCreatePreparationAndTerminal(t *testing
 		bridge.mu.Lock()
 		t.Logf("bridge counters: registration=%d exchange=%d inventory=%d setCreate=%d sessionOpen=%d jit=%d acquire=%d ack=%d create=%d start=%d polls=%d unexpected=%d", bridge.registrationCalls, bridge.exchangeCalls, bridge.controllerInventory, bridge.setCreateCalls, bridge.sessionOpenCalls, bridge.jitCalls, bridge.acquireCalls, bridge.ackCalls, bridge.createCalls, bridge.startCalls, bridge.polls, bridge.unexpected)
 		t.Logf("bridge calls: %v", bridge.calls)
+		t.Logf("bridge unexpected calls: %v", bridge.unexpectedCalls)
 		bridge.mu.Unlock()
 		t.Logf("broker API calls: %v", brokerFixture.calls)
 		if category, readErr := os.ReadFile(filepath.Join(controllerState, "paired-fixture-result")); readErr == nil {
