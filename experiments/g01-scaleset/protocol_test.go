@@ -330,30 +330,64 @@ func TestSDKBusyRemovalSentinelAndRawErrorExposure(t *testing.T) {
 	// only a live assignment/deletion race can establish the server-side barrier.
 }
 
-func TestSDKJITResponseLossDiscoversIdentityWithoutReissuing(t *testing.T) {
-	var creates atomic.Int32
-	_, client := newServer(t, func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case strings.HasSuffix(r.URL.Path, "/generatejitconfig"):
-			creates.Add(1)
-			dropResponse(w)
-		case strings.HasSuffix(r.URL.Path, "/runnerscalesets/7"):
-			writeJSON(w, scaleset.RunnerScaleSet{ID: 7, Statistics: &scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: 1}})
-		case strings.HasSuffix(r.URL.Path, "/agents"):
-			if r.URL.Query().Get("agentName") != "owned-1" {
-				t.Error("unstable lookup identity")
-			}
-			writeJSON(w, scaleset.RunnerReferenceList{Count: 1, RunnerReferences: []scaleset.RunnerReference{{ID: 11, Name: "owned-1", RunnerScaleSetID: 7}}})
-		default:
-			w.WriteHeader(http.StatusNotFound)
+type jitResponseLossFixture struct {
+	t         *testing.T
+	requested atomic.Int32
+}
+
+func newJITResponseLossFixture(t *testing.T) (*jitResponseLossFixture, *scaleset.Client) {
+	t.Helper()
+	fixture := &jitResponseLossFixture{t: t}
+	_, client := newServer(t, fixture.handle)
+	return fixture, client
+}
+
+func (f *jitResponseLossFixture) handle(w http.ResponseWriter, r *http.Request) {
+	switch {
+	case strings.HasSuffix(r.URL.Path, "/generatejitconfig"):
+		f.requested.Add(1)
+		dropResponse(w)
+	case strings.HasSuffix(r.URL.Path, "/runnerscalesets/7"):
+		writeJSON(w, scaleset.RunnerScaleSet{ID: 7, Statistics: &scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: 1}})
+	case strings.HasSuffix(r.URL.Path, "/agents"):
+		if r.URL.Query().Get("agentName") != "owned-1" {
+			f.t.Error("unstable lookup identity")
+			return
 		}
-	})
+		writeJSON(w, scaleset.RunnerReferenceList{Count: 1, RunnerReferences: []scaleset.RunnerReference{{ID: 11, Name: "owned-1", RunnerScaleSetID: 7}}})
+	default:
+		w.WriteHeader(http.StatusNotFound)
+	}
+}
+
+func TestSDKJITLookupBeforeCreationDoesNotDiscoverIdentity(t *testing.T) {
+	fixture, client := newJITResponseLossFixture(t)
+	got, err := recoverState(context.Background(), client, recoveryState{Workers: map[string]string{"owned-1": "creating"}})
+	if err != nil || fixture.requested.Load() != 0 || got.References["owned-1"] != 0 || got.Workers["owned-1"] != "quarantined" || !got.AdmissionPaused {
+		t.Fatal("pre-create lookup fabricated a runner identity or changed recovery quarantine")
+	}
+}
+
+func TestSDKJITResponseLossWithoutCommitDoesNotDiscoverIdentity(t *testing.T) {
+	fixture, client := newJITResponseLossFixture(t)
 	jit, err := client.GenerateJitRunnerConfig(context.Background(), &scaleset.RunnerScaleSetJitRunnerSetting{Name: "owned-1", WorkFolder: "_work"}, 7)
 	if err == nil || jit != nil {
 		t.Fatal("expected missing JIT response")
 	}
 	got, err := recoverState(context.Background(), client, recoveryState{Workers: map[string]string{"owned-1": "creating"}})
-	if err != nil || creates.Load() != 1 || got.References["owned-1"] != 11 || got.Workers["owned-1"] != "quarantined" || !got.AdmissionPaused {
+	if err != nil || fixture.requested.Load() != 1 || got.References["owned-1"] != 0 || got.Workers["owned-1"] != "quarantined" || !got.AdmissionPaused {
+		t.Fatal("non-committed response loss fabricated a runner identity or changed recovery quarantine")
+	}
+}
+
+func TestSDKJITResponseLossDiscoversIdentityWithoutReissuing(t *testing.T) {
+	fixture, client := newJITResponseLossFixture(t)
+	jit, err := client.GenerateJitRunnerConfig(context.Background(), &scaleset.RunnerScaleSetJitRunnerSetting{Name: "owned-1", WorkFolder: "_work"}, 7)
+	if err == nil || jit != nil {
+		t.Fatal("expected missing JIT response")
+	}
+	got, err := recoverState(context.Background(), client, recoveryState{Workers: map[string]string{"owned-1": "creating"}})
+	if err != nil || fixture.requested.Load() != 1 || got.References["owned-1"] != 11 || got.Workers["owned-1"] != "quarantined" || !got.AdmissionPaused {
 		t.Fatal("expected discovered reference and quarantine without JIT retry")
 	}
 }
