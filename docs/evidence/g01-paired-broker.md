@@ -159,11 +159,19 @@ git diff --check
 ok
 ```
 
-The mandated full root `make check` result must be recorded here after the
-final evidence edit; it includes formatting, build, vet, root tests and race
-tests, fuzz smoke, dependency/license checks, both offline experiment modules,
-and the pinned vulnerability check. No claim of full-goal completion is made
-until the coordinator confirms independent exact-head review and hosted CI.
+The mandated full root check was run after all source and test edits, before
+this evidence-only update:
+
+```text
+make check
+exit 0
+toolchain, fmt-check, build, vet, root tests, root race tests, fuzz smoke,
+dependency/license checks, both offline experiment modules, and govulncheck
+all passed.
+```
+
+No claim of full-goal completion is made until the coordinator confirms
+independent exact-head review and hosted CI.
 
 ## Safety limits and remaining gates
 
