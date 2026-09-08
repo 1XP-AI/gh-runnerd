@@ -780,6 +780,9 @@ func TestPairedBrokerChainsRealControllerCreatePreparationAndTerminal(t *testing
 		t.Logf("bridge counters: registration=%d exchange=%d inventory=%d setCreate=%d sessionOpen=%d jit=%d acquire=%d ack=%d create=%d start=%d polls=%d unexpected=%d", bridge.registrationCalls, bridge.exchangeCalls, bridge.controllerInventory, bridge.setCreateCalls, bridge.sessionOpenCalls, bridge.jitCalls, bridge.acquireCalls, bridge.ackCalls, bridge.createCalls, bridge.startCalls, bridge.polls, bridge.unexpected)
 		bridge.mu.Unlock()
 		t.Logf("broker API calls: %v", brokerFixture.calls)
+		if category, readErr := os.ReadFile(filepath.Join(controllerState, "paired-fixture-result")); readErr == nil {
+			t.Logf("paired child category: %q", strings.TrimSpace(string(category)))
+		}
 		t.Fatalf("real paired bridge did not complete: status=%q err=%v", result.Status, err)
 	}
 	bridge.mu.Lock()
