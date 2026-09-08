@@ -18,6 +18,9 @@ func fixtureWorkerStage(directory, stage string) {
 // production OpenJournal continues to derive its permanent root from the
 // native account.
 func OpenJournalForPairedFixture(directory string, a Approval, admissionDirectory string) (*FileJournal, error) {
+	oldTrace := pairedFixtureJournalTrace
+	pairedFixtureJournalTrace = fixtureWorkerStage
+	defer func() { pairedFixtureJournalTrace = oldTrace }()
 	fixtureWorkerStage(directory, "start")
 	info, err := os.Lstat(directory)
 	if err != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
