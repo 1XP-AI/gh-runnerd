@@ -88,21 +88,155 @@ owner-controlled record only.
 
 The following markers are intentionally invalid until replaced in a private
 approval by exact, independently reviewed values. Never run a command with a
-marker. A branch name, mutable tag, or working-tree build is not an immutable
-input.
+marker. A branch name, mutable tag, filename suffix, or working-tree build is
+not an immutable input. `G02_HARNESS_SHA` was previously only a filename
+suffix; it is not a source or artifact check and is not used below.
 
 | Input | Required private record |
 |---|---|
-| G02 source/harness | `G02_HARNESS_SHA=<REVIEWED_HARNESS_SHA_40_HEX>` |
-| G02 synthetic probe source | `G02_PROBE_SHA=<REVIEWED_PROBE_SHA_40_HEX>` |
+| G02 source for both binaries | `G02_SOURCE_SHA=<REVIEWED_FULL_SOURCE_SHA_40_HEX>`; exactly 40 lowercase hexadecimal characters, detached in a standalone clone with a real `.git` directory |
+| G02 enrollment artifact | `G02_ENROLL_SHA256=<APPROVED_ENROLL_ARTIFACT_SHA256_64_HEX>` plus an independently recorded private `codesign` identity record |
+| G02 synthetic probe artifact | `G02_PROBE_SHA256=<APPROVED_PROBE_ARTIFACT_SHA256_64_HEX>` plus an independently recorded private `codesign` identity record |
 | G01 controller/harness | `G01_HARNESS_SHA=<REVIEWED_G01_HARNESS_SHA_40_HEX>` |
 | G01 workflow | `G01_WORKFLOW_SHA=<REVIEWED_WORKFLOW_SHA_40_HEX>` |
 | Mac release artifact | `MAC_RELEASE_SHA=<REVIEWED_RELEASE_SHA_40_HEX>` plus signing identity record |
 | Resource identity | `OWNER_NONCE=<NEW_APPROVED_NONSECRET_NONCE>` plus private App/org/repository IDs |
 
-These commands are proposals for implemented, bounded experiments only. They
-require the approvals above and a freshly reviewed exact artifact; they were
-not run by this docs continuation.
+The live-effect commands below are proposals for implemented, bounded
+experiments only. They require the approvals above and a freshly reviewed exact
+artifact; no live-effect command was run by this docs continuation.
+
+### Mandatory G02 source and artifact gate
+
+Neither `g02-enroll` nor `g02-keychain-probe` verifies its own source revision,
+working-tree state, digest, or signing identity. The shell preflight below is
+the documented gate and must complete successfully before **any** G02 binary
+execution. It is not a runtime verifier and does not add product-runtime
+scope. An owner first creates an owned temporary **standalone clone** (not an
+Orca linked worktree), preserves its real `.git` directory, detaches it at the
+approved full SHA, and sets `G02_PRIVATE_PARENT` to a separate private
+directory outside that clone. The expected artifact SHA-256 values and
+normalized signing-fact files come from an independent private approval
+record; do not calculate and trust them in the same invocation.
+
+Create the checkout as an owned temporary clone and preserve its Git metadata;
+do not use `git worktree` or change an Orca-managed checkout:
+
+```sh
+git clone --no-local "$G02_REPOSITORY_URL" "$G02_SOURCE_DIR"
+git -C "$G02_SOURCE_DIR" checkout --detach "$G02_SOURCE_SHA"
+```
+
+Run this as Bash with the private values already set; `set -Eeuo pipefail`, the
+explicit `-buildvcs=true`, `GOENV=off`, and removal of `GOFLAGS` are required.
+Any failed command or mismatch aborts the gate. Each signing-fact file contains
+the sorted, non-path lines emitted by `codesign -d --verbose=4` for that exact
+artifact (`Identifier=`, `Authority=` and/or `Signature=`, and
+`TeamIdentifier=`).
+
+```bash
+set -Eeuo pipefail
+
+: "${G02_SOURCE_SHA:?set the approved full 40-hex source SHA}"
+: "${G02_PRIVATE_PARENT:?set the owned private artifact directory}"
+: "${G02_SOURCE_DIR:?set the owned standalone clone directory}"
+: "${G02_ENROLL_SHA256:?set the independently recorded enrollment digest}"
+: "${G02_PROBE_SHA256:?set the independently recorded probe digest}"
+: "${G02_ENROLL_SIGNING_RECORD:?set the private enrollment signing-facts file}"
+: "${G02_PROBE_SIGNING_RECORD:?set the private probe signing-facts file}"
+
+die() { printf 'G02 provenance refusal: %s\n' "$1" >&2; exit 1; }
+if ! [[ "$G02_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+  die 'source SHA is not exactly 40 lowercase hexadecimal characters'
+fi
+if ! [[ "$G02_ENROLL_SHA256" =~ ^[0-9a-f]{64}$ && "$G02_PROBE_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+  die 'artifact SHA-256 is not exactly 64 lowercase hexadecimal characters'
+fi
+if ! [[ "$G02_SOURCE_DIR" = /* && "$G02_PRIVATE_PARENT" = /* ]]; then
+  die 'source and artifact paths must be absolute'
+fi
+if ! [[ -d "$G02_SOURCE_DIR/.git" && ! -L "$G02_SOURCE_DIR/.git" ]]; then
+  die 'source must be a standalone clone with a real .git directory'
+fi
+if ! [[ -d "$G02_PRIVATE_PARENT" && ! -L "$G02_PRIVATE_PARENT" ]]; then
+  die 'artifact parent must be an existing private directory'
+fi
+source_root="$(cd "$G02_SOURCE_DIR" && pwd -P)"
+artifact_root="$(cd "$G02_PRIVATE_PARENT" && pwd -P)"
+if [[ "$source_root" == "$artifact_root" || "$source_root" == "$artifact_root/"* || "$artifact_root" == "$source_root/"* ]]; then
+  die 'source clone and artifact directory must not overlap'
+fi
+if git -C "$G02_SOURCE_DIR" symbolic-ref --quiet HEAD >/dev/null 2>&1; then
+  die 'source must be detached at the approved commit'
+fi
+if [[ "$(git -C "$G02_SOURCE_DIR" rev-parse --verify HEAD^{commit})" != "$G02_SOURCE_SHA" ]]; then
+  die 'source HEAD does not equal the approved full SHA'
+fi
+if [[ -n "$(git -C "$G02_SOURCE_DIR" status --porcelain=v1 --untracked-files=all --ignored)" ]]; then
+  die 'source has tracked, untracked, or ignored changes'
+fi
+for record in "$G02_ENROLL_SIGNING_RECORD" "$G02_PROBE_SIGNING_RECORD"; do
+  [[ -s "$record" && ! -L "$record" ]] || die 'missing private signing-facts record'
+done
+
+G02_ENROLL_BINARY="$G02_PRIVATE_PARENT/g02-enroll"
+G02_PROBE_BINARY="$G02_PRIVATE_PARENT/g02-keychain-probe"
+[[ ! -e "$G02_ENROLL_BINARY" && ! -L "$G02_ENROLL_BINARY" && ! -e "$G02_PROBE_BINARY" && ! -L "$G02_PROBE_BINARY" ]] \
+  || die 'artifact path already exists; use a fresh private path'
+
+cd "$G02_SOURCE_DIR/experiments/g02-auth"
+env -u GOFLAGS GOENV=off GOTOOLCHAIN=go1.26.8 GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 \
+  go build -buildvcs=true -trimpath -o "$G02_ENROLL_BINARY" ./cmd/g02-enroll
+env -u GOFLAGS GOENV=off GOTOOLCHAIN=go1.26.8 GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 \
+  go build -buildvcs=true -trimpath -tags=g02runtime -o "$G02_PROBE_BINARY" ./cmd/g02-keychain-probe
+chmod 0500 "$G02_ENROLL_BINARY" "$G02_PROBE_BINARY"
+
+check_buildinfo() {
+  local binary="$1" info="$G02_PRIVATE_PARENT/$(basename "$1").buildinfo"
+  env -u GOFLAGS GOENV=off GOTOOLCHAIN=go1.26.8 go version -m "$binary" >"$info"
+  awk -v want="$G02_SOURCE_SHA" '
+    $1 == "build" && $2 ~ /^vcs\.revision=/ { revisions++; revision = substr($2, index($2, "=") + 1) }
+    $1 == "build" && $2 ~ /^vcs\.modified=/ { modifieds++; modified = substr($2, index($2, "=") + 1) }
+    END { exit !(revisions == 1 && modifieds == 1 && revision == want && modified == "false") }
+  ' "$info" || die "missing, wrong, or dirty VCS metadata in $binary"
+}
+
+signing_facts() {
+  awk -F= '$1 == "Identifier" || $1 == "Authority" || $1 == "Signature" || $1 == "TeamIdentifier" { print }' "$1" | LC_ALL=C sort
+}
+
+check_artifact() {
+  local binary="$1" expected_digest="$2" expected_signing="$3"
+  [[ -f "$binary" && ! -L "$binary" ]] || die "artifact is not a regular file: $binary"
+  local actual_digest
+  actual_digest="$(shasum -a 256 "$binary" | awk 'NF == 2 { count++; digest = $1 } END { if (count != 1) exit 1; print digest }')" \
+    || die "could not hash $binary"
+  [[ "$actual_digest" == "$expected_digest" ]] || die "artifact digest mismatch: $binary"
+  codesign --verify --strict --verbose=2 "$binary" >/dev/null 2>&1 \
+    || die "codesign verification failed: $binary"
+  local dump="$G02_PRIVATE_PARENT/.$(basename "$binary").codesign"
+  local actual_signing="$G02_PRIVATE_PARENT/.$(basename "$binary").signing-facts"
+  codesign -d --verbose=4 "$binary" >"$dump" 2>&1 \
+    || die "could not inspect signing identity: $binary"
+  signing_facts "$dump" >"$actual_signing"
+  cmp -s "$actual_signing" "$expected_signing" \
+    || die "signing identity mismatch: $binary"
+}
+
+check_buildinfo "$G02_ENROLL_BINARY"
+check_buildinfo "$G02_PROBE_BINARY"
+check_artifact "$G02_ENROLL_BINARY" "$G02_ENROLL_SHA256" "$G02_ENROLL_SIGNING_RECORD"
+check_artifact "$G02_PROBE_BINARY" "$G02_PROBE_SHA256" "$G02_PROBE_SIGNING_RECORD"
+printf '%s\n' 'G02 provenance gate passed; binary execution remains separately authorized.'
+```
+
+The two binaries are now referred to by their private absolute paths, never by
+a SHA-bearing filename. Inspect and retain the private `go version -m`, digest,
+and signing records. Do not execute either path if any record is absent,
+different, or stale; rebuild and obtain a fresh independent approval. The
+preflight intentionally refuses the current linked-worktree layout because
+its `.git` file can produce missing VCS metadata even when `-buildvcs=true` is
+requested.
 
 Read-only host inventory:
 
@@ -130,8 +264,7 @@ non-persistent experiment. It must use a new private temporary binary path and
 only the current-login mode:
 
 ```sh
-cd experiments/g02-auth
-GOTOOLCHAIN=go1.26.8 go build -tags=g02runtime -trimpath -o "$G02_PROBE_BINARY" ./cmd/g02-keychain-probe
+# G02_PROBE_BINARY is built and passes the mandatory provenance gate above.
 "$G02_PROBE_BINARY" --synthetic-current-login
 ```
 
@@ -141,17 +274,16 @@ following one-shot forms; the values remain private placeholders and the
 credential input is never placed in the command line:
 
 ```sh
-cd experiments/g02-auth
-GOTOOLCHAIN=go1.26.8 go build -trimpath -o "$G02_PRIVATE_PARENT/g02-enroll-$G02_HARNESS_SHA" ./cmd/g02-enroll
+# G02_ENROLL_BINARY is built and passes the mandatory provenance gate above.
 
 # Only after the Manifest-specific approval; submit the remote form once.
-"$G02_PRIVATE_PARENT/g02-enroll-$G02_HARNESS_SHA" manifest --live-github \
+"$G02_ENROLL_BINARY" manifest --live-github \
   --owner "$APP_OWNER_ALIAS" --app-name "$DISPOSABLE_APP_ALIAS" \
   --org "$ORG_A_ALIAS:$ORG_A_ID" --org "$ORG_B_ALIAS:$ORG_B_ID" \
   --journal-dir "$G02_PRIVATE_PARENT/g02-attempt-$OWNER_NONCE"
 
 # Only for the same-App manual fallback, after owner supplies protected input.
-"$G02_PRIVATE_PARENT/g02-enroll-$G02_HARNESS_SHA" manual --live-github \
+"$G02_ENROLL_BINARY" manual --live-github \
   --owner "$APP_OWNER_ALIAS" --app-name "$DISPOSABLE_APP_ALIAS" --app-id "$APP_ID" \
   --org "$ORG_A_ALIAS:$ORG_A_ID:$INSTALL_A_ID" \
   --org "$ORG_B_ALIAS:$ORG_B_ID:$INSTALL_B_ID" \
@@ -237,10 +369,26 @@ acquisition ambiguity; no cleanup override is introduced by this packet.
 ## Packet validation and source refs
 
 This is documentation-only continuation work; no artificial red application
-test and no live test was created. Validation for this file is limited to
-`git diff --check`, local-link resolution, and a secret-pattern scan. The
-offline/live results cited above remain those recorded in the linked evidence;
-they are not upgraded or re-audited here.
+test and no live test was created. No G02 probe or enrollment binary was
+executed. The provenance correction was reproduced offline with nonsecret
+disposable snapshots and the commands above: the former linked-worktree build
+(`go build -trimpath`, both packages) produced no `vcs.revision` or
+`vcs.modified` lines; it was not executed. In an owned standalone clone,
+detached at the approved full SHA, both explicit `-buildvcs=true` builds passed
+the clean source, `vcs.revision`, `vcs.modified=false`, SHA-256, and
+`codesign --verify` checks. The failure matrix was also run through the same
+preflight: wrong revision (HEAD mismatch), tracked edit plus untracked file
+(clean-check refusal), missing `.git`/VCS metadata (standalone-clone or
+build-info refusal), and one-byte artifact tampering (digest refusal) all
+exited nonzero before execution; the clean snapshot exited zero. These checks
+used no PEM, App, GitHub, Keychain, launchd, or probe/enrollment side effects.
+An inherited `GOFLAGS=-buildvcs=false` and unrelated `GOTOOLCHAIN`/`GOENV`
+override were also present during a clean run; the explicit environment
+sanitization and pinned toolchain still passed.
+
+Remaining file validation is `git diff --check`, local-link resolution, and a
+secret-pattern scan. The offline/live results cited above remain those recorded
+in the linked evidence; they are not upgraded or re-audited here.
 
 Factual sources used without adding private identifiers:
 
