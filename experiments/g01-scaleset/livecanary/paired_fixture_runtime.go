@@ -42,6 +42,13 @@ func PreparePairedJournalForFixtureAt(directory string, a Approval, admissionDir
 	})
 }
 
+// PrepareWorkerJournalForPairedFixtureAt routes worker preparation through the
+// canonical liveworker journal/admission parser while keeping the root inside
+// the generated offline fixture.
+func PrepareWorkerJournalForPairedFixtureAt(directory string, a liveworker.Approval, admissionDirectory string) (liveworker.PreparationReceipt, error) {
+	return liveworker.PrepareJournalForPairedFixture(directory, a, admissionDirectory)
+}
+
 func fixtureEndpoint(baseURL string, caPEM []byte) (*url.URL, *x509.CertPool, *x509.Certificate, error) {
 	u, err := url.Parse(baseURL)
 	if err != nil || u.Scheme != "https" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path != "" {

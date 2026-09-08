@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/livecanary"
+	"github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/liveworker"
 )
 
 type fixtureEndpointConfig struct {
@@ -52,6 +53,16 @@ func init() {
 			return livecanary.PreparationReceipt{}, err
 		}
 		return livecanary.PreparePairedJournalForFixtureAt(stateDirectory, a, config.AdmissionDirectory)
+	}
+	prepareWorkerJournalForCommand = func(stateDirectory string, a liveworker.Approval) (liveworker.PreparationReceipt, error) {
+		// Worker admission is a distinct disposable fixture root. It is derived
+		// from the worker state identity, never supplied by production approval
+		// or the broker's controller admission root.
+		admissionDirectory := filepath.Join(filepath.Dir(stateDirectory), "worker-admission")
+		if err := os.Mkdir(admissionDirectory, 0700); err != nil && !os.IsExist(err) {
+			return liveworker.PreparationReceipt{}, liveworker.ErrState
+		}
+		return livecanary.PrepareWorkerJournalForPairedFixtureAt(stateDirectory, a, admissionDirectory)
 	}
 	newSDKAPIForCommand = func(a livecanary.Approval, c livecanary.Credentials, stateDirectory string) (*livecanary.SDKAPI, error) {
 		config, err := readFixtureEndpointConfig(stateDirectory)

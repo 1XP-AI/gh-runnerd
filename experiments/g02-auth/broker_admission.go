@@ -46,8 +46,9 @@ func brokerOwnedDirectory(i os.FileInfo, private bool) bool {
 	return ok && int(s.Uid) == os.Geteuid()
 }
 
-// Nine slots, at most one claim and completion each. Each stored controller
-// authority is bounded by the 16 KiB input contract; allow all finite slots.
+// The finite slot schema has eight controller phases plus discovery and paired
+// terminal. Each stored controller authority is bounded by the 16 KiB input
+// contract; allow one claim and completion for every schema slot.
 const maxBrokerLedgerBytes = 512 << 10
 
 type brokerInode struct {
@@ -254,7 +255,7 @@ func openBrokerAdmission(directory string, a BrokerApproval, j *brokerJournal, p
 		return nil, errBroker
 	}
 	lines := bytes.Split(c.data, []byte{'\n'})
-	if len(lines) < 2 || len(lines) > 20 || len(lines[len(lines)-1]) != 0 {
+	if len(lines) < 2 || len(lines) > brokerLedgerMaxLines() || len(lines[len(lines)-1]) != 0 {
 		return nil, errBroker
 	}
 	var header brokerLedgerHeader
@@ -393,7 +394,7 @@ func validBrokerClaimEvent(a BrokerApproval, e brokerClaimEvent) bool {
 		return e.Controller == nil && e.Worker == nil && e.Authority == nil && e.Snapshot == (brokerInode{}) && e.SnapshotDigest == ""
 	}
 	paired := e.Slot == "paired-terminal"
-	if (!brokerPhases[e.Slot] && !paired) || e.Controller == nil || e.Authority == nil || e.Controller.State.Inode == 0 || e.Snapshot.Inode == 0 || !brokerSHA256.MatchString(e.SnapshotDigest) || !brokerSHA256.MatchString(e.Controller.Ownership) || !brokerSHA256.MatchString(e.Controller.Binary) || !brokerSHA40.MatchString(e.Controller.Harness) {
+	if !brokerSlotAllowed(e.Slot) || e.Slot == "discover-actions-host" || (paired && e.Slot != "paired-terminal") || e.Controller == nil || e.Authority == nil || e.Controller.State.Inode == 0 || e.Snapshot.Inode == 0 || !brokerSHA256.MatchString(e.SnapshotDigest) || !brokerSHA256.MatchString(e.Controller.Ownership) || !brokerSHA256.MatchString(e.Controller.Binary) || !brokerSHA40.MatchString(e.Controller.Harness) {
 		return false
 	}
 	if paired {

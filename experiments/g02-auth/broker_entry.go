@@ -195,6 +195,11 @@ func runBrokerWithAPI(ctx context.Context, files BrokerFiles, input *os.File, ap
 			return invokeBrokerPreparation(ctx, binary, files.StateDirectory, snapshotPath, files.ControllerStateDirectory, approval.Phase)
 		}
 		plan.worker = workerPlan
+		if approval.Mode == "paired-terminal" {
+			workerPlan.prepare = func(ctx context.Context) (brokerPreparationReceipt, error) {
+				return invokeBrokerPairedWorkerPreparation(ctx, binary, files.StateDirectory, files.WorkerApproval, files.WorkerStateDirectory)
+			}
+		}
 	}
 	return brokerExecute(ctx, approval, credentialInput, files.StateDirectory, api, plan)
 }

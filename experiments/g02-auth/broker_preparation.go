@@ -37,6 +37,13 @@ func (r brokerPreparationReceipt) valid(p *brokerControllerPlan) bool {
 	return r.Version == 1 && r.Status == "controller_journal_prepared" && r.Phase == phase && r.ApprovalDigest == brokerDigest(p.controller) && r.State.Device != 0 && r.State.Inode != 0 && r.Journal.Device != 0 && r.Journal.Inode != 0 && r.Claim.Device != 0 && r.Claim.Inode != 0 && brokerSHA256.MatchString(r.JournalDigest) && brokerSHA256.MatchString(r.ClaimDigest)
 }
 
+func (r brokerPreparationReceipt) validWorker(p *brokerWorkerPlan) bool {
+	if p == nil || p.stateInfo == nil {
+		return false
+	}
+	return r.Version == 1 && r.Status == "worker_journal_prepared" && r.Phase == "paired-worker" && r.ApprovalDigest == brokerDigest(p.approval) && r.State == brokerFileIdentity(p.stateInfo) && r.Journal.Device != 0 && r.Journal.Inode != 0 && r.Claim.Device != 0 && r.Claim.Inode != 0 && brokerSHA256.MatchString(r.JournalDigest) && brokerSHA256.MatchString(r.ClaimDigest)
+}
+
 type brokerPreparationOutput struct {
 	mu       sync.Mutex
 	data     []byte

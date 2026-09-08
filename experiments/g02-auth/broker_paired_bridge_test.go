@@ -668,7 +668,12 @@ func TestPairedBrokerChainsRealControllerCreatePreparationAndTerminal(t *testing
 	_, candidate, api, brokerFixture, attempt := newBrokerFixture(t)
 	admissionConfig["admission_directory"] = brokerFixture.admissionRoot
 	configPath := filepath.Join(controllerState, "paired-fixture.json")
-	writePrivateBridgeJSON(t, configPath, admissionConfig)
+	configData := writePrivateBridgeJSON(t, configPath, admissionConfig)
+	// The worker-preparation command receives only its worker state path. The
+	// fixture-only adapter therefore carries the same generated loopback
+	// endpoint config in that disposable state root; production preparation
+	// never reads this file or accepts a caller-selected admission root.
+	writePrivateBridgeJSON(t, filepath.Join(workerState, "paired-fixture.json"), json.RawMessage(configData))
 
 	now := time.Now()
 	expires := now.Add(20 * time.Minute)

@@ -41,14 +41,16 @@ func (a pairedWorkerApproval) validate(now time.Time) error {
 }
 
 type brokerWorkerPlan struct {
-	approval     pairedWorkerApproval
-	raw          []byte
-	approvalPath string
-	approvalFile *os.File
-	approvalInfo os.FileInfo
-	statePath    string
-	state        *os.Root
-	stateInfo    os.FileInfo
+	approval           pairedWorkerApproval
+	raw                []byte
+	approvalPath       string
+	approvalFile       *os.File
+	approvalInfo       os.FileInfo
+	statePath          string
+	state              *os.Root
+	stateInfo          os.FileInfo
+	prepare            func(context.Context) (brokerPreparationReceipt, error)
+	preparationReceipt brokerPreparationReceipt
 }
 
 // brokerPairedBinding is immutable identity evidence carried to the child.
@@ -99,6 +101,35 @@ func (p *brokerWorkerPlan) check() error {
 		return errBroker
 	}
 	return nil
+}
+
+// prepareJournal delegates replay/admission validation to the canonical G01
+// worker preparer. The broker records only the credential-free receipt and
+// never recreates the worker journal schema here.
+func (p *brokerWorkerPlan) prepareJournal(ctx context.Context) error {
+	if p == nil || p.prepare == nil || p.check() != nil {
+		return errBroker
+	}
+	receipt, err := p.prepare(ctx)
+	if err != nil || !receipt.validWorker(p) {
+		return errBroker
+	}
+	p.preparationReceipt = receipt
+	return p.check()
+}
+
+// checkPrepared reruns the canonical read/replay boundary and requires the
+// exact receipt snapshot captured before authentication. This catches journal,
+// admission-claim or worker-state replacement without granting a retry.
+func (p *brokerWorkerPlan) checkPrepared(ctx context.Context) error {
+	if p == nil || p.prepare == nil || p.check() != nil || !p.preparationReceipt.validWorker(p) {
+		return errBroker
+	}
+	receipt, err := p.prepare(ctx)
+	if err != nil || receipt != p.preparationReceipt || !receipt.validWorker(p) {
+		return errBroker
+	}
+	return p.check()
 }
 
 func (p *brokerWorkerPlan) binding() (brokerWorkerBinding, error) {

@@ -43,6 +43,7 @@ func buildRevision() (string, bool) {
 
 var openJournalForCommand = livecanary.OpenJournal
 var pairedPrepareJournalForCommand = livecanary.PreparePairedJournal
+var prepareWorkerJournalForCommand = liveworker.PrepareJournal
 var newSDKAPIForCommand = func(a livecanary.Approval, c livecanary.Credentials, _ string) (*livecanary.SDKAPI, error) {
 	return livecanary.NewSDKAPI(a, c)
 }
@@ -69,6 +70,7 @@ func runWithPreparation(args []string, in io.Reader, out io.Writer, revisionForB
 	pairedExecute := flags.Bool("execute-approved-paired-terminal", false, "")
 	prepare := flags.Bool("prepare-approved-journal", false, "")
 	pairedPrepare := flags.Bool("prepare-approved-paired-journal", false, "")
+	prepareWorker := flags.Bool("prepare-approved-paired-worker-journal", false, "")
 	approvalPath := flags.String("approval", "", "")
 	statePath := flags.String("state-dir", "", "")
 	phase := flags.String("phase", "", "")
@@ -83,7 +85,7 @@ func runWithPreparation(args []string, in io.Reader, out io.Writer, revisionForB
 		return reject()
 	}
 	workerInputs := *workerApprovalPath != "" || *workerStatePath != ""
-	if *plan && !*execute && !*pairedExecute && !*prepare && !*pairedPrepare {
+	if *plan && !*execute && !*pairedExecute && !*prepare && !*pairedPrepare && !*prepareWorker {
 		if *approvalPath != "" || *statePath != "" || *phase != "" || workerInputs || *pairedBinding != "" {
 			return reject()
 		}
@@ -103,10 +105,17 @@ func runWithPreparation(args []string, in io.Reader, out io.Writer, revisionForB
 	if *pairedPrepare {
 		modeCount++
 	}
+	if *prepareWorker {
+		modeCount++
+	}
 	if modeCount != 1 || *plan || *approvalPath == "" || *statePath == "" {
 		return reject()
 	}
-	if *pairedExecute {
+	if *prepareWorker {
+		if *phase != "" || workerInputs || *pairedBinding != "" || prepareWorkerJournalForCommand == nil {
+			return reject()
+		}
+	} else if *pairedExecute {
 		if *phase != "" || *workerApprovalPath == "" || *workerStatePath == "" || *pairedBinding == "" {
 			return reject()
 		}
@@ -116,6 +125,21 @@ func runWithPreparation(args []string, in io.Reader, out io.Writer, revisionForB
 		}
 	} else if *phase == "" || workerInputs || *pairedBinding != "" {
 		return reject()
+	}
+	if *prepareWorker {
+		worker, workerErr := liveworker.ReadApproval(*approvalPath)
+		if workerErr != nil || worker.Validate(time.Now()) != nil {
+			return reject()
+		}
+		revision, ok := revisionForBuild()
+		if !ok || revision != worker.HarnessSHA {
+			return reject()
+		}
+		receipt, preparationErr := prepareWorkerJournalForCommand(*statePath, worker)
+		if preparationErr != nil || json.NewEncoder(out).Encode(receipt) != nil {
+			return reject()
+		}
+		return 0
 	}
 	a, err := livecanary.ReadApproval(*approvalPath)
 	if err != nil || a.Validate(time.Now()) != nil || (!*pairedExecute && !*pairedPrepare && !slices.Contains(a.Phases, *phase)) {

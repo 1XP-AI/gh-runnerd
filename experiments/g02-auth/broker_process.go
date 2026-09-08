@@ -1,6 +1,7 @@
 package enrollment
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"debug/buildinfo"
@@ -71,11 +72,15 @@ func validBrokerBuild(info *debug.BuildInfo, expected string) bool {
 		}
 	}
 	for _, tag := range strings.FieldsFunc(tags, func(r rune) bool { return r == ',' || unicode.IsSpace(r) }) {
-		if tag == "osusergo" {
+		// The production broker must never accept a binary that can redirect
+		// credentials or runtime calls through a fixture/test-only adapter. Keep
+		// the reviewed production tag set exact; fixture binaries use the
+		// explicit brokerBinaryOpener seam in offline tests instead.
+		if tag != "g01_live" {
 			return false
 		}
 	}
-	return goos == runtime.GOOS && goarch == runtime.GOARCH && cgo == "1" && revision == expected && clean && sdk
+	return goos == runtime.GOOS && goarch == runtime.GOARCH && cgo == "1" && revision == expected && clean && sdk && tags == "g01_live"
 }
 func openBrokerBinary(path string, a BrokerApproval) (*verifiedBrokerBinary, error) {
 	f, err := openBrokerPrivateFile(path, 0500, 128<<20)
@@ -225,4 +230,33 @@ func invokeBrokerPairedTerminal(parent context.Context, binary *verifiedBrokerBi
 		return errBroker
 	}
 	return nil
+}
+
+// invokeBrokerPairedWorkerPreparation is a fixed, credential-free child
+// contract. The g01-live process owns the canonical worker journal/admission
+// parser; the broker only binds its returned receipt to the approved paths.
+func invokeBrokerPairedWorkerPreparation(parent context.Context, binary *verifiedBrokerBinary, workingDirectory, approvalPath, stateDirectory string) (receipt brokerPreparationReceipt, err error) {
+	if binary == nil || binary.check() != nil || !filepath.IsAbs(approvalPath) || !filepath.IsAbs(stateDirectory) || filepath.Clean(approvalPath) != approvalPath || filepath.Clean(stateDirectory) != stateDirectory {
+		return receipt, errBroker
+	}
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, binary.path, "--prepare-approved-paired-worker-journal", "--approval", approvalPath, "--state-dir", stateDirectory)
+	command.Dir = workingDirectory
+	command.Env = []string{"LANG=C", "LC_ALL=C"}
+	command.Stdin = bytes.NewReader(nil)
+	command.WaitDelay = time.Second
+	output := &brokerPreparationOutput{cancel: cancel}
+	errors := &brokerOutputBudget{cancel: cancel}
+	command.Stdout = output
+	command.Stderr = errors
+	e := command.Run()
+	output.mu.Lock()
+	defer output.mu.Unlock()
+	errors.mu.Lock()
+	defer errors.mu.Unlock()
+	if e != nil || ctx.Err() != nil || output.overflow || errors.overflow || decodeBrokerJSON(output.data, &receipt, true) != nil {
+		return receipt, errBroker
+	}
+	return receipt, nil
 }

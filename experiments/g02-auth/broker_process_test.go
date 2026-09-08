@@ -90,6 +90,70 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
+	if len(os.Args) > 1 && os.Args[1] == "--prepare-approved-paired-worker-journal" {
+		if len(os.Args) != 6 || os.Args[2] != "--approval" || os.Args[4] != "--state-dir" {
+			os.Exit(3)
+		}
+		for _, entry := range os.Environ() {
+			if entry != "LANG=C" && entry != "LC_ALL=C" {
+				os.Exit(4)
+			}
+		}
+		data, e := io.ReadAll(io.LimitReader(os.Stdin, 1))
+		if e != nil || len(data) != 0 {
+			os.Exit(5)
+		}
+		var worker pairedWorkerApproval
+		if _, e = readBrokerPrivateJSON(os.Args[3], &worker); e != nil {
+			os.Exit(6)
+		}
+		statePath := os.Args[5]
+		admissionPath := filepath.Join(filepath.Dir(statePath), "worker-admission")
+		if e = os.Mkdir(admissionPath, 0700); e != nil && !os.IsExist(e) {
+			os.Exit(7)
+		}
+		journalPath := filepath.Join(statePath, "journal.jsonl")
+		if _, e = os.Stat(journalPath); os.IsNotExist(e) {
+			if e = os.WriteFile(journalPath, []byte("synthetic prepared worker journal\n"), 0600); e != nil {
+				os.Exit(8)
+			}
+		}
+		journalData, e := os.ReadFile(journalPath)
+		if e != nil || string(journalData) != "synthetic prepared worker journal\n" {
+			os.Exit(9)
+		}
+		journalInfo, e := os.Stat(journalPath)
+		if e != nil {
+			os.Exit(10)
+		}
+		stateInfo, e := os.Stat(statePath)
+		if e != nil {
+			os.Exit(11)
+		}
+		claimPath := filepath.Join(admissionPath, "admission.json")
+		if _, e = os.Stat(claimPath); os.IsNotExist(e) {
+			stateID := brokerFileIdentity(stateInfo)
+			journalID := brokerFileIdentity(journalInfo)
+			claim := map[string]any{"version": 1, "ownership": brokerDigest(worker), "state_device": stateID.Device, "state_inode": stateID.Inode, "journal_device": journalID.Device, "journal_inode": journalID.Inode}
+			claimData, _ := json.Marshal(claim)
+			if e = os.WriteFile(claimPath, append(claimData, '\n'), 0600); e != nil {
+				os.Exit(12)
+			}
+		}
+		claimData, e := os.ReadFile(claimPath)
+		if e != nil {
+			os.Exit(13)
+		}
+		claimInfo, e := os.Stat(claimPath)
+		if e != nil {
+			os.Exit(14)
+		}
+		receipt := brokerPreparationReceipt{Version: 1, Status: "worker_journal_prepared", Phase: "paired-worker", ApprovalDigest: brokerDigest(worker), State: brokerFileIdentity(stateInfo), Journal: brokerFileIdentity(journalInfo), Claim: brokerFileIdentity(claimInfo), JournalDigest: brokerBytesDigest(journalData), ClaimDigest: brokerBytesDigest(claimData)}
+		if json.NewEncoder(os.Stdout).Encode(receipt) != nil {
+			os.Exit(15)
+		}
+		os.Exit(0)
+	}
 	if len(os.Args) > 1 && os.Args[1] == "--prepare-approved-journal" {
 		if len(os.Args) != 8 || os.Args[2] != "--approval" || os.Args[4] != "--state-dir" || os.Args[6] != "--phase" {
 			os.Exit(3)
@@ -157,6 +221,9 @@ func TestMain(m *testing.M) {
 		var payload map[string]json.RawMessage
 		if json.Unmarshal(data, &payload) != nil {
 			os.Exit(6)
+		}
+		if journalData, e := os.ReadFile(filepath.Join(os.Args[9], "journal.jsonl")); e == nil && string(journalData) != "synthetic prepared worker journal\n" {
+			os.Exit(8)
 		}
 		var argvBinding brokerPairedBinding
 		var payloadBinding brokerPairedBinding
@@ -318,6 +385,14 @@ func TestBrokerBuildMustMatchReviewedController(t *testing.T) {
 		if validBrokerBuild(&bad, sha) {
 			t.Errorf("accepted %s", kind)
 		}
+	}
+}
+
+func TestBrokerBuildRejectsFixtureCapability(t *testing.T) {
+	sha := strings.Repeat("a", 40)
+	fixture := debug.BuildInfo{GoVersion: "go1.26.8", Path: "github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/cmd/g01-live", Deps: []*debug.Module{{Path: "github.com/actions/scaleset", Version: "v0.4.0"}}, Settings: []debug.BuildSetting{{Key: "vcs.revision", Value: sha}, {Key: "vcs.modified", Value: "false"}, {Key: "GOOS", Value: runtime.GOOS}, {Key: "GOARCH", Value: runtime.GOARCH}, {Key: "CGO_ENABLED", Value: "1"}, {Key: "-tags", Value: "g01_live,g01_pair_fixture"}}}
+	if validBrokerBuild(&fixture, sha) {
+		t.Fatal("fixture-enabled controller build accepted by production broker gate")
 	}
 }
 

@@ -50,6 +50,14 @@ var errBroker = errors.New("broker stopped; retain private intent and review; no
 var brokerComponent = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$`)
 var brokerWorkerComponent = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`)
 var brokerPhases = map[string]bool{"create": true, "before-ack": true, "after-ack": true, "before-acquire": true, "acquire-loss": true, "jit-loss": true, "inspect": true, "cleanup": true}
+var brokerSpecialSlots = map[string]bool{"discover-actions-host": true, "paired-terminal": true}
+
+func brokerSlotAllowed(slot string) bool { return brokerPhases[slot] || brokerSpecialSlots[slot] }
+
+// One header, one claim and one completion for every finite schema slot, and
+// the final empty split element from the required trailing newline. This is a
+// structural bound derived from the actual slot schema, not an unbounded log.
+func brokerLedgerMaxLines() int { return 1 + 2*(len(brokerPhases)+len(brokerSpecialSlots)) + 1 }
 
 const (
 	// Terminal collection has seven five-second cadence gaps in production.
@@ -163,6 +171,9 @@ func brokerExecute(parent context.Context, a BrokerApproval, input brokerInput, 
 	defer j.close()
 	if plan != nil {
 		defer plan.close()
+		if a.Mode == "paired-terminal" && (plan.worker == nil || plan.worker.prepareJournal(ctx) != nil) {
+			return BrokerResult{}, errBroker
+		}
 		if plan.prepare(a, j, api.now()) != nil {
 			return BrokerResult{}, errBroker
 		}
@@ -177,7 +188,7 @@ func brokerExecute(parent context.Context, a BrokerApproval, input brokerInput, 
 		if claim.check() != nil || j.check() != nil {
 			return errBroker
 		}
-		if plan != nil && (plan.check() != nil || plan.compatibleControllerClaim(claim.root) != nil || (checkPrepared && plan.prepared != nil && plan.preparedState(claim.root, false) != nil)) {
+		if plan != nil && (plan.check() != nil || plan.compatibleControllerClaim(claim.root) != nil || (checkPrepared && plan.prepared != nil && plan.preparedState(claim.root, false) != nil) || (checkPrepared && a.Mode == "paired-terminal" && (plan.worker == nil || plan.worker.checkPrepared(ctx) != nil))) {
 			return errBroker
 		}
 		return nil

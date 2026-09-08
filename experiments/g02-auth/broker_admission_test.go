@@ -147,6 +147,7 @@ func TestBrokerPairedAdmissionAcceptsHistoricalControllerClaim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("paired worker plan: %v", err)
 	}
+	brokerAttachSyntheticWorkerPreparation(t, pairedPlan, filepath.Join(parent, "paired-worker-admission"))
 	defer pairedPlan.worker.close()
 	if _, err := brokerExecute(context.Background(), a, brokerInput{PEM: string(c.PEM), VerificationToken: "synthetic-private-workflow-token"}, pairedRoot, api, pairedPlan); err != nil {
 		t.Fatalf("paired attempt rejected historical controller claim: %v", err)
