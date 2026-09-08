@@ -132,7 +132,8 @@ explicit `-buildvcs=true`, `GOENV=off`, and removal of `GOFLAGS` are required.
 Any failed command or mismatch aborts the gate. The artifact parent must be an
 existing directory owned by the current UID with mode `0700`; every ancestor
 must be a real directory with no group/other write permission unless its sticky
-bit prevents a cross-UID rename (for example, the system temporary directory).
+bit prevents a cross-UID rename and the sticky directory is owned by root or the
+current UID (for example, the system temporary directory).
 Each signing-fact file is an independently recorded, singly-linked regular file
 owned by the current UID with mode `0600`; it contains the sorted, non-path
 lines emitted by `codesign -d --verbose=4` for that exact artifact
@@ -183,8 +184,11 @@ check_safe_parent_chain() {
     [[ -d "$path" && ! -L "$path" ]] || die "unsafe artifact parent component: $path"
     line="$(stat -f '%u %A' "$path")" || die "could not inspect artifact parent component: $path"
     read -r owner mode <<<"$line"
-    if (( (8#$mode & 0022) != 0 && (8#$mode & 01000) == 0 )); then
-      die "artifact parent chain permits cross-UID rename: $path"
+    if (( (8#$mode & 0022) != 0 )); then
+      if (( (8#$mode & 01000) == 0 )) || \
+         [[ "$owner" != 0 && "$owner" != "$G02_CURRENT_UID" ]]; then
+        die "artifact parent chain permits cross-UID rename: $path"
+      fi
     fi
     [[ "$path" == / ]] && break
     path="$(dirname "$path")"
@@ -235,12 +239,14 @@ G02_PROBE_BINARY="$G02_PRIVATE_PARENT/g02-keychain-probe"
 [[ ! -e "$G02_ENROLL_BINARY" && ! -L "$G02_ENROLL_BINARY" && ! -e "$G02_PROBE_BINARY" && ! -L "$G02_PROBE_BINARY" ]] \
   || die 'artifact path already exists; use a fresh private path'
 
+(
 cd "$G02_SOURCE_DIR/experiments/g02-auth"
 env -u GOFLAGS GOENV=off GOTOOLCHAIN=go1.26.8 GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 \
   go build -buildvcs=true -trimpath -o "$G02_ENROLL_BINARY" ./cmd/g02-enroll
 env -u GOFLAGS GOENV=off GOTOOLCHAIN=go1.26.8 GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 \
   go build -buildvcs=true -trimpath -tags=g02runtime -o "$G02_PROBE_BINARY" ./cmd/g02-keychain-probe
 chmod 0500 "$G02_ENROLL_BINARY" "$G02_PROBE_BINARY"
+)
 
 check_buildinfo() {
   local binary="$1" info
@@ -445,9 +451,10 @@ acquisition ambiguity; no cleanup override is introduced by this packet.
 
 ## Packet validation and source refs
 
-This is documentation-only continuation work; no artificial red application
-test and no live test was created. No G02 probe or enrollment binary was
-executed. The provenance correction was reproduced offline with nonsecret
+This is documentation-only continuation work; no G02 probe or enrollment
+binary, live test, PEM, App, GitHub, Keychain, launchd, service, Docker, or
+repository-runtime operation was performed. No artificial application red test
+was created. The provenance correction was reproduced offline with nonsecret
 disposable snapshots and the commands above: the former linked-worktree build
 (`go build -trimpath`, both packages) produced no `vcs.revision` or
 `vcs.modified` lines; it was not executed. In an owned standalone clone,
@@ -462,12 +469,64 @@ tamper were each refused; stdin hashing accepted the spaced artifact path; and
 the clean singly-linked, current-UID-owned snapshot passed. The immediate
 `run_verified` recheck was exercised after changing the parent mode and refused
 before any executable start.
-For the red-before-fix comparison, the frozen wrapper accepted a `0777`
+For the earlier red-before-fix comparison, the frozen wrapper accepted a `0777`
 artifact parent (`rc=0`, leaving eight generated files), rejected a spaced
 artifact path at `could not hash`, and accepted an expected signing record
 pointing at its generated observed-facts path (`rc=0` after overwriting and
 self-comparing that record). These controls were offline only and establish
-why the new checks are required.
+why the original provenance, hash, signing, and alias checks are required.
+
+### PR59 exact-head Codex finding follow-up
+
+On the integrated PR59 head `e25c2f1cd9b07ed131f29156ff41e943005f11a8`, the
+installed review wrapper was read with both commands below; `all` included the
+four earlier findings, and `detail-all` included their full stale/outdated
+records:
+
+```sh
+bash "$CODEX_REVIEW" all 59 --repo 1XP-AI/gh-runnerd
+bash "$CODEX_REVIEW" detail-all 59 --repo 1XP-AI/gh-runnerd
+```
+
+The wrapper reported two actionable findings on that exact head and four
+earlier stale/outdated findings:
+
+| Finding | Exact-head disposition and evidence |
+|---|---|
+| [P1 `r3955817035`](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3955817035) | Fixed by requiring a writable sticky ancestor's owner to be root (`0`) or `G02_CURRENT_UID`; a foreign-UID sticky fixture now refuses before any artifact check can return. The artifact parent remains current-UID-owned and mode `0700`. |
+| [P2 `r3955817042`](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3955817042) | Fixed by running both builds and `chmod` in a subshell. A real temporary-directory fixture preserved the caller's `PWD` on both success and failure, while the failing build status propagated. `run_verified` remains defined and called in the caller shell. |
+| [P1 `r3954505806`](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3954505806) | Stale/outdated; the earlier filename-only pin was removed. The current packet verifies the detached full source SHA, clean status, embedded `vcs.revision`, `vcs.modified=false`, binary digest, and signing identity before execution. |
+| [P1 `r3954677724`](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3954677724) | Stale; current-UID ownership and mode `0700` are required for the artifact parent and rechecked before each artifact verification. |
+| [P2 `r3954677733`](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3954677733) | Stale/outdated; hashing reads the binary through stdin, so spaces in the private artifact path are not parsed as filename fields. |
+| [P2 `r3954677731`](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3954677731) | Stale/outdated; independently approved signing records are loaded and normalized before builds, expected facts stay in memory, generated codesign/output files are not used, and symlink/hard-link aliases are refused. |
+
+The red/green boundary commands used only `mktemp -d` fixtures and a shell
+`stat()` stub returning synthetic owner/mode tuples; they did not use `chown`,
+create accounts, or change system state. The extracted function command was:
+
+```sh
+eval "$(sed -n '/^check_safe_parent_chain() {/,/^}/p' \
+  docs/evidence/g02-mac-live-readiness.md)"
+```
+
+Before the edit, the fixture matrix was red: `foreign-sticky` (synthetic
+foreign UID/mode `1777`) incorrectly returned `rc=0` where refusal was
+required; `root-sticky` returned `rc=0`; `current-sticky` returned `rc=0`; and
+`unsafe-writable` (synthetic foreign UID/mode `0777`) returned `rc=1`. After
+the edit, the same extracted-function harness was green: `foreign-sticky`
+returned `rc=1`, `root-sticky` `rc=0`, `current-sticky` `rc=0`, and
+`unsafe-writable` `rc=1`.
+
+Before the edit, a real temporary `experiments/g02-auth` directory and direct
+`cd "$G02_SOURCE_DIR/experiments/g02-auth"` left the caller in the module
+directory, so the cwd assertion exited `1` (red). After the edit, the
+subshell-shaped harness returned `success rc=0` and `failure rc=17`; both
+left the caller cwd unchanged (green), proving failure propagation without
+poisoning the later relative `docs`/`experiments` commands. A syntax-only
+`bash -n` check of the extracted gate and a guard audit for source SHA, clean
+checkout, current-UID `0700` parent, stdin hash, signing-record checks,
+`! -L` alias checks, and `run_verified` all passed.
+
 The existing failure matrix also remained nonzero before execution: wrong
 revision (HEAD mismatch), tracked edit plus untracked file (clean-check
 refusal), missing `.git`/VCS metadata (standalone-clone or build-info refusal),
@@ -477,9 +536,14 @@ App, GitHub, Keychain, launchd, or probe/enrollment side effects. An inherited
 present during a clean run; the explicit environment sanitization and pinned
 toolchain still passed.
 
-Remaining file validation is `git diff --check`, local-link resolution, and a
-secret-pattern scan. The offline/live results cited above remain those recorded
-in the linked evidence; they are not upgraded or re-audited here.
+Current file validation passed: `git diff --check`, `make fmt-check`, the
+local-link target check, the secret-pattern scan, and the syntax-only gate check
+above. Hosted PR59 CI was not edited or rerun here; its default 45-second
+failure remains the separate issue-64 worker blocker, so no CI pass is claimed.
+The coordinator must freeze the post-fix head and obtain fresh independent
+security and exact-head Codex/CI results before merge. The offline/live results
+cited above remain those recorded in the linked evidence; they are not upgraded
+or re-audited here.
 
 Factual sources used without adding private identifiers:
 
