@@ -51,6 +51,23 @@ or live authentication comparison was performed. Source:
 | `TestSDKJITResponseLossDiscoversIdentityWithoutReissuing` | Lost fake JIT response, one create attempt, stable-name lookup recovers runner ID, reservation stays quarantined | Recovering JIT secret, duplicate-name/idempotency guarantees, real runner launch |
 | `TestRecoveryErrorsHoldReservationsAndRedact` | Missing/invalid stats, denied inventory, foreign scale set and absent reference retain reservations and pause admission; error marker does not escape recovery errors | Transactional persistence, OS isolation or all application sinks |
 
+## Follow-up: causal JIT fixture correction
+
+The table above and its original Astra (`gpt-6-astra`, `xhigh`) authorship are
+historical and remain unchanged. An independent Luna max review later found an
+evidence-quality gap in the JIT row: the original fixture returned `owned-1`
+from `/agents` even before any JIT request, so its green assertion did not
+distinguish a committed creation whose response was lost from no creation.
+
+The bounded offline correction adds separately observed requested and committed
+synthetic creation, makes stable-name lookup return a reference only for a
+committed fixture record, and adds pre-create and non-committed response-loss
+controls alongside the committed response-loss case. It does not assert a live
+service defect, add SDK/transport/retry or production behavior, assume GitHub
+idempotency, or alter the historical protocol conclusions. See the detailed
+[JIT causality follow-up](g01-jit-causality.md) for exact red/green results,
+limitations and rollback.
+
 Tests exercise the imported SDK rather than a reimplementation of its loop. The
 server intentionally supplies scripted statistics, queue retention, side effects
 and busy refusal; those are **fixture assumptions**. Channel barriers are causal
