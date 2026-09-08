@@ -642,6 +642,8 @@ func FuzzDefaultG01Fixture(f *testing.F) {
 	for _, invocation := range []string{
 		"go1.26.8\ttest -race -count=1 -timeout=45s -run ^TestBaselineStatisticsPresenceAndEligibility$ ./...",
 		"go1.26.8\ttest -race -count=1 -timeout=45s -skip ^TestBaselineStatisticsPresenceAndEligibility$ ./...",
+		"go1.26.8\ttest -race -count=1 -timeout=45s -skip ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
+		"go1.26.8\ttest -race -count=1 -timeout=120s -run ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
 	} {
 		count := 0
 		for _, line := range lines {
@@ -660,8 +662,8 @@ func FuzzDefaultG01Fixture(f *testing.F) {
 			legacyCount++
 		}
 	}
-	if legacyCount != 1 {
-		t.Fatalf("default G01 retained %d unsplit invocations; want only the G02 invocation; wrapper log:\n%s", legacyCount, log)
+	if legacyCount != 0 {
+		t.Fatalf("offline gate retained %d unsplit G02 invocations; wrapper log:\n%s", legacyCount, log)
 	}
 	for _, tc := range fixtures {
 		toolingFile(t, root, tc.path, tc.failureSource, 0600)

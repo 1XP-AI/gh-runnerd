@@ -1,100 +1,118 @@
 # G01g: paired terminal executable and bounded broker handoff
 
 Issue [60](https://github.com/1XP-AI/gh-runnerd/issues/60) and PR
-[62](https://github.com/1XP-AI/gh-runnerd/pull/62) connect the reviewed paired
-terminal sequence to one tagged `g01-live` executable and a dedicated
-`g01-broker` mode. This is an offline experiment continuation, not a live
-authorization, production daemon, or closure of G01/G02.
+[62](https://github.com/1XP-AI/gh-runnerd/pull/62) remain an offline experiment
+continuation. This evidence does not authorize live GitHub, runner, Docker,
+Keychain, launchd, or recovery operations and does not claim G01/G02 closure.
 
-## Reviewed baseline and finding ledger
+## Review inputs and baseline
 
-The required first step was a normal fetch and merge of reviewed
-`origin/main` at `8dd64adc551ba5174892807a678e8bc614d0a474` (the merged CI fix).
-It produced merge commit `a5fcffd`; no rebase, amend, force update, workflow
-replay, or live operation was performed. The implementation and focused tests
-were then completed through source head
-`895a478eb1ed894710c75b3426e23cb3b1bceac9` (the evidence-only commit follows
-this tested source head).
+The implementation started at frozen head
+`0ecb06c1755bc3a2f49724c9b7d5fa2bc9a0c3a9`. Reviewed `origin/main` at
+`31ae8102f6f20f8e79258eb824af1400eba21954` was not an ancestor, so it was
+integrated with a normal merge as `74efbdef37fba91b91d2315dae9c7e01cfd1b34b`.
+No rebase, amend, force update, workflow replay, or live operation was used.
 
-Both settled Luna/max reports were read: `/tmp/g01-paired-broker-review-ad7c2cf.md`
-and `/tmp/g01-paired-review-ad7c2cf.md`.
+Both required settled Luna/max reports were read:
 
-The exact-head Codex surfaces were also read, including the stale inline
-finding, all current inline findings, review summaries, and the prior issue
-comment:
+- `/tmp/g01-paired-broker-review-0ecb06c.md`
+- `/tmp/g01-paired-broker-independent-review-0ecb06c.md`
 
-- stale phase-receipt finding: [discussion 3955069674](https://github.com/1XP-AI/gh-runnerd/pull/62#discussion_r3955069674)
-- historical ledger mode: [discussion 3955069682](https://github.com/1XP-AI/gh-runnerd/pull/62#discussion_r3955069682)
-- daemon-ID contract: [discussion 3955069689](https://github.com/1XP-AI/gh-runnerd/pull/62#discussion_r3955069689)
-- canonical prerequisite history: [discussion 3955590270](https://github.com/1XP-AI/gh-runnerd/pull/62#discussion_r3955590270)
-- child deadline: [discussion 3955590276](https://github.com/1XP-AI/gh-runnerd/pull/62#discussion_r3955590276)
-- old Codex review: [review 5138884210](https://github.com/1XP-AI/gh-runnerd/pull/62#pullrequestreview-5138884210)
-- Codex review summary: [comment 5580386456](https://github.com/1XP-AI/gh-runnerd/pull/62#issuecomment-5580386456)
-- prior integrator note: [comment 5580442642](https://github.com/1XP-AI/gh-runnerd/pull/62#issuecomment-5580442642)
+The Codex wrapper inventory, including stale inline and issue-comment findings,
+was read. The three live findings at the frozen head were:
 
-The stale phase-receipt finding is resolved by a dedicated paired preparation
-phase and paired receipt validation; the newer prerequisite-history finding
-was the deeper version of that contract and is resolved below. The historical
-ledger finding is reproduced by
-`TestBrokerPairedAdmissionAcceptsHistoricalControllerClaim` and
-`TestPairedFailureAllowsAuthorizedInspectWithoutPairedRetry`; both now accept
-a prior controller claim under a paired request and a failed paired claim
-under an authorized controller inspect while preserving one-shot slots. The
-daemon-ID finding is reproduced at the colon and 128-byte boundaries by
-`TestPairedWorkerDaemonIDMatchesCanonicalBoundaries`. The history and deadline
-findings were reproduced by the red tests in `a0df276` and `278d8e9`, then fixed
-in `419f9cd` and subsequent focused commits.
+- P1 fixture-enabled executable accepted by the production gate:
+  [discussion r3956753241](https://github.com/1XP-AI/gh-runnerd/pull/62#discussion_r3956753241)
+- P2 tenth finite ledger slot exceeded the structural line bound:
+  [discussion r3956753229](https://github.com/1XP-AI/gh-runnerd/pull/62#discussion_r3956753229)
+- P2 worker journal/admission was not prepared before mint:
+  [discussion r3956753245](https://github.com/1XP-AI/gh-runnerd/pull/62#discussion_r3956753245)
 
-## Implementation boundary
+The stale findings were also retained in review history and checked against
+the current fixes: canonical controller history
+([r3955590270](https://github.com/1XP-AI/gh-runnerd/pull/62#discussion_r3955590270)),
+historical claims
+([r3955069682](https://github.com/1XP-AI/gh-runnerd/pull/62#discussion_r3955069682)),
+paired preparation phase
+([r3955069674](https://github.com/1XP-AI/gh-runnerd/pull/62#discussion_r3955069674)),
+worker daemon-ID boundaries
+([r3955069689](https://github.com/1XP-AI/gh-runnerd/pull/62#discussion_r3955069689)),
+and bounded child authority
+([r3955590276](https://github.com/1XP-AI/gh-runnerd/pull/62#discussion_r3955590276)).
 
-`PreparePairedJournal` now requires the exact canonical controller-create
-prefix: create phase, nonempty lowercase SHA-256 inventory, discovery intent
-and result, create intent and successful create result. It preserves those
-events byte-for-byte and only captures the intended preparation receipt under
-the existing controller claim. Fresh, pending, deleted, uncertain, reserved,
-previous-paired, malformed, or noncanonical histories are rejected; cleanup
-authority is never borrowed and no remote effect or credential read occurs.
+## TDD red evidence
 
-Broker admission replays every historical ledger event against the mode,
-phase, schema, and authority recorded in that event's slot. Current paired
-mode therefore does not reject a historical controller create, and current
-controller inspect/cleanup can inspect a retained failed paired claim. The
-cross-identity, tamper, ownership, authority-transition, incomplete-claim,
-and one-shot current-attempt checks remain in force.
+The current findings were independently reproduced before the fixes. The
+actual red commands/results were:
 
-Paired approval validation reserves a complete terminal budget. The child
-deadline is the minimum of parent, broker, controller, and worker authority,
-then capped at ten minutes; it must leave a 35-second production cadence plus
-25 seconds of child margin and a separate credential margin. Insufficient
-remaining authority fails before mint/launch. Cancellation, expiry, deadline
-overflow, output overflow, lost response, and retry paths remain fail-stop
-with no automatic cleanup or retry; the ordinary 30-second preparation bound
-is unchanged.
+```text
+GOTOOLCHAIN=go1.26.8 go test -count=1 -run '^TestBrokerBuildRejectsFixtureCapability$' .
+FAIL: fixture-enabled controller build accepted by production broker gate
 
-The paired worker daemon ID uses the authoritative worker contract
-`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`; unrelated controller fields retain their
-narrower validators.
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=120s -run '^TestPairedBrokerRejectsMalformedWorkerJournalBeforeMint$' .
+FAIL: malformed worker journal crossed pre-mint boundary; mints=1
+```
 
-The tagged offline bridge starts a fresh private TLS server and private Unix
-Docker endpoint. It builds the reviewed `g01-live` executable from a clean
-temporary clone with VCS metadata, then runs the real controller-create CLI,
-real paired-preparation child, broker entrypoint, and exported
-`RunPairedTerminal`. The fixture seam only supplies generated private roots,
-loopback TLS CA, and the Unix endpoint; it cannot select production account,
-Keychain, runner, Docker, service, or GitHub state.
+The independent report's clean temporary overlay also reproduced the tenth-slot
+failure with:
 
-## End-to-end evidence
+```text
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=120s \
+  -overlay=/tmp/g01-review-overlay.json \
+  -run '^TestReviewPairedTenthSlotLedgerBound$' .
+ok: the test expected reopen rejection of the valid 21-line ledger
+```
 
-The critical chain is
-`TestPairedBrokerChainsRealControllerCreatePreparationAndTerminal` in
-`experiments/g02-auth/broker_paired_bridge_test.go`. The controller-create
-child first produced the same six canonical history records used by paired
-execution; the broker then ran the real paired preparation contract against
-that history and launched the actual tagged executable through the private
-TLS/Unix bridge. The terminal child appended baseline records to the original
-controller journal and created the separate worker paired journal.
+The implementation then progressed through focused green tests and normal
+commits `6a35fe7`, `9df5d42`, `8c59523`, and `4aab247`; the current source head
+before this evidence update is `4aab247cb2bc0ec9820e341db84db6b0a4b1743d`.
 
-The successful run asserted these exact bridge counts:
+## Implemented boundaries
+
+Production `validBrokerBuild` now requires the exact reviewed tag set
+`g01_live`; any fixture or unreviewed test tag is rejected, even when the
+revision, SDK, VCS cleanliness, OS, architecture, and CGO metadata are valid.
+The checked-in bridge still uses an explicit `brokerBinaryOpener` seam for its
+offline fixture binary, and the new `TestBrokerRejectsCleanFixtureBinaryBeforeMint`
+proves the real production opener rejects that clean fixture artifact before
+any API call or token mint. `TestBrokerAllowsCleanProductionBinaryArtifact`
+proves a clean `g01_live` artifact is accepted. Fixture support remains absent
+from ordinary production-tag builds.
+
+The broker ledger derives its structural line limit from the finite schema:
+eight controller phases plus `discover-actions-host` and `paired-terminal`.
+The bound is one header, two records per slot, and the required trailing split
+element: `1 + 2*10 + 1 = 22` lines. The existing byte bound remains in force;
+unknown slots, malformed/duplicate records, oversize records, and invalid
+authority transitions remain rejected. `TestBrokerLedgerCapacityDerivesFromFiniteSlotSchema`
+locks the formula and the finite slot set.
+
+Worker preparation now crosses the actual G01 boundary. The fixed
+`--prepare-approved-paired-worker-journal` child command calls canonical
+`liveworker.PrepareJournal` (or its explicitly nonproduction fixture adapter),
+which validates approval, replays the complete journal, holds the canonical
+worker authority/admission lease, rejects prior effects/uncertainty/reservation
+histories, and returns only a credential-free receipt. The broker binds the
+receipt's approval digest, state/journal/claim identities, and journal/claim
+digests; it also checks the journal inode and bytes without duplicating G01's
+event schema. The child later reopens the worker journal and admission claim
+through the same canonical parser before worker effects, so replacement,
+symlink, hash, reopen, and prior-history cases cannot mint/launch or authorize
+a retry. `TestPairedWorkerPreparationReceiptFencesJournalMutation` covers
+same-inode mutation and replacement, while the real malformed-journal test
+asserts zero mints and zero authenticated calls.
+
+The singleton JIT/acquire/start/ACK/session-close sequence, owned non-force
+worker deletion plus set cleanup, historical claims, controller snapshot
+receipts, and one-shot reopen behavior remain unchanged.
+
+## Real offline bridge and cadence evidence
+
+`TestPairedBrokerChainsRealControllerCreatePreparationAndTerminal` builds a
+clean clone with VCS metadata, runs the real controller-create executable, the
+real paired-preparation child, the broker entrypoint, and exported
+`RunPairedTerminal` through generated loopback TLS and a private Unix socket.
+It asserts:
 
 ```text
 create=1 start=1 JIT=1 acquire=1 acknowledgements=2
@@ -103,85 +121,87 @@ set-create=1 set-delete=1 set-absence=1 complete-rosters=4 unexpected=0
 broker installation-token mints=1
 ```
 
-It also asserted the broker ledger's paired controller/worker claim, original
-session close, non-force worker deletion plus absence, set deletion plus
-absence, canonical journal continuation, separate worker journal, and
-secret-free attempt/controller/worker/admission roots. Reopening the completed
-real broker entrypoint stopped before a second mint or terminal effect.
+It also checks original controller-journal continuation, separate worker
+journal, secret-free private roots, non-force worker deletion, and no second
+mint/effect after reopening the completed claim.
 
-The failed-paired recovery test separately proves an incomplete paired claim
-is retained, one explicitly authorized controller inspect can proceed in its
-own slot, and a repeated inspect cannot mint or launch again. Hash/inode and
-symlink replacement fences are covered by the paired binding and snapshot
-tests. Existing paired terminal partitions cover cancellation, expired
-authority, lost responses, journal uncertainty, reopened histories, receipt
-separation, worker/set absence, and no-replay behavior.
-
-The fast cadence used only by the tagged bridge is a deterministic test clock;
-it advances the same seven five-second waits as production. The production
-cadence proof is `TestPairedDistinctIDsAndOriginalCadence`, which requires
-eight rounds and seven waits of at least five seconds (at least 35 seconds).
-Together with the real child bridge run and
-`TestBrokerPairedChildDeadlineIsBoundedAndLeavesCadenceMargin`, this proves a
-bounded child may complete beyond the old 30-second limit while retaining a
-finite authority cap. No production timeout was made unbounded.
-
-## TDD and verification record
-
-The meaningful red tests were committed before implementation:
+`TestPairedBrokerRealCadenceChildExceedsThirtySeconds` builds the explicit
+`g01_live,g01_pair_fixture,g01_pair_real_cadence` offline artifact, selects the
+production wall clock (seven five-second cadence gaps), and runs the same
+TLS/Unix bridge. The measured checked-in result was:
 
 ```text
-GOTOOLCHAIN=go1.26.8 go test -count=1 -run '^TestPairedPreparationPreservesCanonicalControllerHistory|^TestPairedPreparationRejectsFreshAndNonCanonicalHistory$' ./livecanary
-exit 1 on the pre-fix implementation: the canonical history contract was absent.
-
-GOTOOLCHAIN=go1.26.8 go test -count=1 -run '^TestBrokerPairedAdmissionAcceptsHistoricalControllerClaim|^TestPairedWorkerDaemonIDMatchesCanonicalBoundaries|^TestPairedApprovalRejectsInsufficientTerminalAuthority$' .
-exit 1 on the pre-fix implementation: historical mode, daemon-ID boundaries, and authority budget were wrong.
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=120s \
+  -run '^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$' -v .
+real cadence bridge wall time: 36.153600625s
+PASS; package wall time 40.261s
 ```
 
-Focused green checks on the tested source head were:
+No fast clock is used by this regression. Its fixture/test tags are explicitly
+rejected by the production binary gate; the bridge's opener override is only a
+test seam for the offline endpoint and does not weaken the production path.
+
+## Verification record
+
+Focused and module checks that passed on the current source include:
 
 ```text
-GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=180s ./livecanary
-ok  27.089s
+GOTOOLCHAIN=go1.26.8 go test -count=1 ./...
+ok g01-scaleset; livecanary 37.487s; liveworker 10.221s
 
-GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=120s -tags='g01_live,g01_pair_fixture' ./cmd/g01-live
-ok  0.844s
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s \
+  -tags=g01_live,g01_worker ./cmd/g01-live ./cmd/g01-worker
+PASS; g01-live 5.320s; g01-worker 1.497s
 
-GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=300s -run 'Test(Paired|BrokerPaired|BrokerChild|BrokerBuild|BrokerPipe)' .
-ok  11.240s before the final recovery-only test; the added recovery and parent-authority tests also passed in 0.679s.
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s \
+  -skip '^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$' ./...
+PASS; g02-auth 46.113s; all G02 command packages passed
 
-GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=240s -run '^TestPairedBrokerChainsRealControllerCreatePreparationAndTerminal$' .
-ok  3.337s after fixture cleanup; the same test passed at 3.147s before cleanup.
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=120s \
+  -run '^(TestBrokerRejectsCleanFixtureBinaryBeforeMint|TestBrokerAllowsCleanProductionBinaryArtifact|TestPairedWorkerPreparationReceiptFencesJournalMutation|TestBrokerLedgerCapacityDerivesFromFiniteSlotSchema)$' .
+PASS
+```
 
-gofmt -d experiments/g01-scaleset/cmd/g01-live/main_test.go
-no output
+The G02 offline script now runs the ordinary suite with the exact real-cadence
+test excluded from its historical 45-second package budget, then runs only that
+named test with a 120-second budget. This preserves coverage and records the
+long test explicitly; it is not a blind rerun or a skipped security test.
+
+The declared offline gate itself passed after these edits:
+
+```text
+GOTOOLCHAIN=go1.26.8 bash scripts/check-offline-experiments.sh
+exit 0: both modules, command-tag tests, four G01 fixture partitions, vets,
+the bounded G02 suite, the named real-cadence regression, and CLI packages;
+offline experiment checks passed: 2 module(s)
+```
+
+Root validation also passed after updating the tooling-log assertion for the
+two-command G02 split:
+
+```text
+GOTOOLCHAIN=go1.26.8 go test -count=1 ./...
+PASS; scripts 84.373s
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 ./...
+PASS; scripts 85.227s
+GOTOOLCHAIN=go1.26.8 go vet ./...
+PASS
 git diff --check
-ok
+PASS
+GOTOOLCHAIN=go1.26.8 bash scripts/gofmt.sh check
+PASS
 ```
 
-The mandated full root check was run after all source and test edits, before
-this evidence-only update:
+All fixtures use disposable local files, synthetic nonsecret values, generated
+loopback TLS, and a private Unix socket. No live endpoint, App, credential,
+runner/group/workflow, Docker/Lima context, Keychain, launchd service, or
+manually installed runner was touched. Same-UID ownership and short released
+checks are not hostile-code isolation.
 
-```text
-make check
-exit 0
-toolchain, fmt-check, build, vet, root tests, root race tests, fuzz smoke,
-dependency/license checks, both offline experiment modules, and govulncheck
-all passed.
-```
+## Remaining gates
 
-No claim of full-goal completion is made until the coordinator confirms
-independent exact-head review and hosted CI.
-
-## Safety limits and remaining gates
-
-All tests use disposable local files, synthetic nonsecret credentials, private
-loopback TLS, and private Unix sockets. No live GitHub endpoint, App,
-credential, runner/group/workflow, Docker/Lima context, Keychain, launchd
-service, reboot, or manually installed runner was touched. Same-UID private
-file ownership is not hostile-code isolation; same-UID races after released
-short checks remain outside the proof.
-
-The coordinator owns pushing evidence, requesting two independent reviews of
-the exact final head, reading all inline and issue-comment findings including
-stale ones, waiting for fresh Codex review and hosted CI, and merge gating.
+This worker does not merge PR 62. The coordinator must push the frozen final
+head, request two fresh independent reviews and `@codex review`, wait for
+completion, read inline and issue-comment findings including stale/outdated
+ones, verify hosted CI, and confirm an exact-head clean Codex review before any
+merge decision. Live recovery remains unauthorized and unproven.
