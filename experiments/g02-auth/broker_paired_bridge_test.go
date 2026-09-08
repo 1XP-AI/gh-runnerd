@@ -783,6 +783,9 @@ func TestPairedBrokerChainsRealControllerCreatePreparationAndTerminal(t *testing
 		if category, readErr := os.ReadFile(filepath.Join(controllerState, "paired-fixture-result")); readErr == nil {
 			t.Logf("paired child category: %q", strings.TrimSpace(string(category)))
 		}
+		if stage, readErr := os.ReadFile(filepath.Join(controllerState, "paired-fixture-stage")); readErr == nil {
+			t.Logf("paired child stage: %q", strings.TrimSpace(string(stage)))
+		}
 		t.Fatalf("real paired bridge did not complete: status=%q err=%v", result.Status, err)
 	}
 	bridge.mu.Lock()
