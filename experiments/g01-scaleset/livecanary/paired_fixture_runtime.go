@@ -133,6 +133,10 @@ func RunPairedTerminalForFixture(ctx context.Context, files PairedTerminalFiles,
 	if !filepath.IsAbs(controllerAdmissionDirectory) || filepath.Clean(controllerAdmissionDirectory) != controllerAdmissionDirectory {
 		return ErrApproval
 	}
+	workerAdmissionDirectory := filepath.Join(filepath.Dir(files.WorkerStateDirectory), "worker-admission")
+	if err := os.Mkdir(workerAdmissionDirectory, 0700); err != nil && !os.IsExist(err) {
+		return ErrJournal
+	}
 	fixtureStage(files.ControllerStateDirectory, "start")
 	oldAdapters, oldCadence := pairedTerminalFixtureAdapters, pairedTerminalFixtureCadence
 	pairedTerminalFixtureAdapters = &pairedTerminalAdapters{
@@ -148,7 +152,7 @@ func RunPairedTerminalForFixture(ctx context.Context, files PairedTerminalFiles,
 		},
 		openWorker: func(path string, a liveworker.Approval) (*liveworker.FileJournal, error) {
 			fixtureStage(files.ControllerStateDirectory, "open-worker")
-			j, err := liveworker.OpenJournalForPairedFixture(path, a, path)
+			j, err := liveworker.OpenJournalForPairedFixture(path, a, workerAdmissionDirectory)
 			if err != nil {
 				fixtureStage(files.ControllerStateDirectory, "open-worker-error")
 			} else {
