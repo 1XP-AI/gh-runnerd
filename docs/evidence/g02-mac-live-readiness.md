@@ -151,23 +151,43 @@ ancestor is refused even when `0755`, `0711`, or `0700` has no group/other
 write bit, because its owner can rename descendants through owner-write
 access.
 
-Darwin system tools used by the gate are pinned to absolute `/usr/bin` and
-`/bin` paths and refused when foreign-owned or group/other-writable. `go` is
-resolved once from `PATH` to an absolute path and then subjected to the same
-executable owner/mode check; a relative or foreign-owned `go` is refused.
-Mode masks use `8#` constants so macOS `/bin/bash` 3.2 does not treat
-leading-zero literals as decimal.
+Darwin system tools used by the gate, including `sort`, `cc`, and `c++`, are
+pinned to absolute `/usr/bin` and `/bin` paths. Each pinned file is resolved to
+a regular non-symlink physical path, owner/mode checked, and then checked
+through its entire parent chain with the same root-or-current-UID
+replaceability allowlist as source and artifacts. A leaf `stat` of the
+executable is not ancestry proof. `go` may be a Homebrew symlink: the gate
+follows that alias, retains the physical cellar path, and refuses a
+foreign-owned ancestor. Tool ancestors owned by the current UID may be
+group-writable, which is the normal Homebrew Cellar layout; they may not be
+other-writable. Relative `go` is refused. Source and artifact chains stay
+stricter and still refuse current-UID group-write unless sticky.
+
+Every `go build`, `go test`, `go vet`, `go run`, `go version`, and G01 plan
+build runs through one helper, `g02_go`. That helper starts from an empty
+environment (`env -i`) and sets only `PATH=/usr/bin:/bin`, `HOME`, `TMPDIR=/tmp`,
+`LANG/LC_ALL=C`, `GOTOOLCHAIN=go1.26.8`, `GOENV=off`, `GOWORK=off`,
+`GOOS=darwin`, `GOARCH=arm64`, `CGO_ENABLED=1`, and the pinned `CC`/`CXX`.
+Inherited `GOFLAGS` (`-overlay`, `-toolexec`), `GOENV` files, `GOWORK`
+workspaces, `CC`/`CGO_*`, and `PATH` aliases therefore cannot reach child Git
+or the compiler. Unsetting a single flag is not sufficient. Mode masks use
+`8#` constants so macOS `/bin/bash` 3.2 does not treat leading-zero literals
+as decimal.
 
 Each signing-fact file is an independently recorded, singly-linked regular file
-owned by the current UID with mode `0600`; it contains the sorted, non-path
-lines emitted by `codesign -d --verbose=4` for that exact artifact
-(`Identifier=`, `Authority=` and/or `Signature=`, and `TeamIdentifier=`).
-The gate does not create or overwrite signing-fact, build-info, or codesign
-output files: it reads the expected record first and compares all observed
-facts and digests in memory.
+owned by the current UID with mode `0600`. The gate canonicalizes the record
+path, retains that physical path, and checks every ancestor with the same
+root-or-current-UID replaceability allowlist before reading it. Normalization
+uses the pinned `awk` and `/usr/bin/sort`, never a `PATH` `sort`. The file
+contains the sorted, non-path lines emitted by `codesign -d --verbose=4` for
+that exact artifact (`Identifier=`, `Authority=` and/or `Signature=`, and
+`TeamIdentifier=`). The gate does not create or overwrite signing-fact,
+build-info, or codesign output files: it reads the expected record first and
+compares all observed facts and digests in memory.
 
 ```bash
 set -Eeuo pipefail
+unset CDPATH || true
 
 : "${G02_SOURCE_SHA:?set the approved full 40-hex source SHA}"
 : "${G02_PRIVATE_PARENT:?set the owned private artifact directory}"
@@ -181,6 +201,8 @@ die() { printf 'G02 provenance refusal: %s\n' "$1" >&2; exit 1; }
 G02_ID=/usr/bin/id
 G02_STAT=/usr/bin/stat
 G02_DIRNAME=/usr/bin/dirname
+G02_READLINK=/usr/bin/readlink
+G02_BASENAME=/usr/bin/basename
 G02_CURRENT_UID="$("$G02_ID" -u)" || die 'could not determine the current UID'
 if ! [[ "$G02_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
   die 'source SHA is not exactly 40 lowercase hexadecimal characters'
@@ -220,17 +242,58 @@ check_safe_source_chain() {
   check_safe_path_chain "$1" "source"
 }
 
-require_trusted_exec() {
-  local path="$1" label="$2" line owner mode
-  [[ "$path" = /* && -f "$path" ]] || die "$label is missing or not absolute: $path"
-  line="$("$G02_STAT" -f '%u %A' "$path")" || die "could not inspect $label: $path"
+check_safe_tool_chain() {
+  local path="$1" kind="$2" line owner mode
+  while :; do
+    [[ -d "$path" && ! -L "$path" ]] || die "unsafe ${kind} component: $path"
+    line="$("$G02_STAT" -f '%u %A' "$path")" || die "could not inspect ${kind} component: $path"
+    read -r owner mode <<<"$line"
+    if [[ "$owner" != 0 && "$owner" != "$G02_CURRENT_UID" ]]; then
+      die "${kind} chain permits cross-UID rename: $path"
+    fi
+    if (( (8#$mode & 8#2) != 0 )); then
+      die "${kind} chain is other-writable: $path"
+    fi
+    if (( (8#$mode & 8#20) != 0 )) && [[ "$owner" != "$G02_CURRENT_UID" ]]; then
+      die "${kind} chain is group-writable by another owner: $path"
+    fi
+    [[ "$path" == / ]] && break
+    path="$("$G02_DIRNAME" "$path")"
+  done
+}
+
+resolve_physical_file() {
+  local path="$1" label="$2" target dir base
+  [[ "$path" = /* ]] || die "$label is not absolute: $path"
+  while [[ -L "$path" ]]; do
+    target="$("$G02_READLINK" "$path")" || die "could not read $label symlink: $path"
+    [[ -n "$target" ]] || die "$label symlink is empty: $path"
+    if [[ "$target" != /* ]]; then
+      target="$("$G02_DIRNAME" "$path")/$target"
+    fi
+    dir="$("$G02_DIRNAME" "$target")"
+    base="$("$G02_BASENAME" "$target")"
+    dir="$(cd "$dir" && pwd -P)" || die "could not canonicalize $label: $path"
+    path="$dir/$base"
+  done
+  [[ -f "$path" && ! -L "$path" ]] || die "$label is not a regular non-symlink file: $path"
+  printf '%s\n' "$path"
+}
+
+pin_trusted_file() {
+  local varname="$1" path="$2" label="$3" physical line owner mode dir
+  physical="$(resolve_physical_file "$path" "$label")" || die "could not resolve $label: $path"
+  line="$("$G02_STAT" -f '%u %A' "$physical")" || die "could not inspect $label: $physical"
   read -r owner mode <<<"$line"
   if [[ "$owner" != 0 && "$owner" != "$G02_CURRENT_UID" ]]; then
-    die "$label is foreign-owned: $path"
+    die "$label is foreign-owned: $physical"
   fi
   if (( (8#$mode & 8#22) != 0 )); then
-    die "$label is group/other-writable: $path"
+    die "$label is group/other-writable: $physical"
   fi
+  dir="$("$G02_DIRNAME" "$physical")"
+  check_safe_tool_chain "$dir" "$label"
+  printf -v "$varname" '%s' "$physical"
 }
 
 require_owner_nonce() {
@@ -243,24 +306,57 @@ require_owner_nonce() {
     || die 'journal path is not a direct child of the private parent'
 }
 
+pin_trusted_file G02_STAT "$G02_STAT" stat
+pin_trusted_file G02_DIRNAME "$G02_DIRNAME" dirname
+pin_trusted_file G02_ID "$G02_ID" id
+[[ "$("$G02_ID" -u)" == "$G02_CURRENT_UID" ]] || die 'current UID changed during bootstrap'
+pin_trusted_file G02_READLINK "$G02_READLINK" readlink
+pin_trusted_file G02_BASENAME "$G02_BASENAME" basename
 G02_GIT=/usr/bin/git
 G02_ENV=/usr/bin/env
 G02_AWK=/usr/bin/awk
 G02_SHASUM=/usr/bin/shasum
 G02_CODESIGN=/usr/bin/codesign
 G02_CHMOD=/bin/chmod
-require_trusted_exec "$G02_ID" id
-require_trusted_exec "$G02_STAT" stat
-require_trusted_exec "$G02_DIRNAME" dirname
-require_trusted_exec "$G02_GIT" git
-require_trusted_exec "$G02_ENV" env
-require_trusted_exec "$G02_AWK" awk
-require_trusted_exec "$G02_SHASUM" shasum
-require_trusted_exec "$G02_CODESIGN" codesign
-require_trusted_exec "$G02_CHMOD" chmod
+G02_SORT=/usr/bin/sort
+G02_CC=/usr/bin/cc
+G02_CXX=/usr/bin/c++
+pin_trusted_file G02_GIT "$G02_GIT" git
+pin_trusted_file G02_ENV "$G02_ENV" env
+pin_trusted_file G02_AWK "$G02_AWK" awk
+pin_trusted_file G02_SHASUM "$G02_SHASUM" shasum
+pin_trusted_file G02_CODESIGN "$G02_CODESIGN" codesign
+pin_trusted_file G02_CHMOD "$G02_CHMOD" chmod
+pin_trusted_file G02_SORT "$G02_SORT" sort
+pin_trusted_file G02_CC "$G02_CC" cc
+pin_trusted_file G02_CXX "$G02_CXX" c++
 G02_GO="$(type -P go)" || die 'go is not on PATH'
 [[ "$G02_GO" = /* ]] || die 'go is not an absolute executable'
-require_trusted_exec "$G02_GO" go
+pin_trusted_file G02_GO "$G02_GO" go
+G02_TOOL_PATH=/usr/bin:/bin
+
+g02_go() {
+  [[ -f "$G02_GO" && ! -L "$G02_GO" ]] || die 'go is no longer a regular non-symlink file'
+  check_safe_tool_chain "$("$G02_DIRNAME" "$G02_GO")" "go"
+  [[ -f "$G02_CC" && ! -L "$G02_CC" ]] || die 'cc is no longer a regular non-symlink file'
+  check_safe_tool_chain "$("$G02_DIRNAME" "$G02_CC")" "cc"
+  : "${HOME:?HOME must be set for the pinned Go toolchain}"
+  "$G02_ENV" -i \
+    PATH="$G02_TOOL_PATH" \
+    HOME="$HOME" \
+    TMPDIR=/tmp \
+    LANG=C \
+    LC_ALL=C \
+    GOTOOLCHAIN=go1.26.8 \
+    GOENV=off \
+    GOWORK=off \
+    GOOS=darwin \
+    GOARCH=arm64 \
+    CGO_ENABLED=1 \
+    CC="$G02_CC" \
+    CXX="$G02_CXX" \
+    "$G02_GO" "$@"
+}
 
 if ! [[ -d "$G02_SOURCE_DIR" && ! -L "$G02_SOURCE_DIR" && \
         -d "$G02_SOURCE_DIR/.git" && ! -L "$G02_SOURCE_DIR/.git" ]]; then
@@ -338,20 +434,26 @@ recheck_source
 
 signing_facts_from_text() {
   "$G02_AWK" -F= '$1 == "Identifier" || $1 == "Authority" || $1 == "Signature" || $1 == "TeamIdentifier" { print }' \
-    | LC_ALL=C sort
+    | LC_ALL=C "$G02_SORT"
 }
 
 read_signing_record() {
-  local record="$1" output_name="$2" line record_uid record_mode record_links raw normalized
+  local record="$1" output_name="$2" dir base physical line record_uid record_mode record_links raw normalized
+  [[ "$record" = /* ]] || die "signing-facts record is not absolute: $record"
   [[ -f "$record" && ! -L "$record" ]] || die "signing-facts record is not a regular file: $record"
-  line="$("$G02_STAT" -f '%u %A %l' "$record")" || die "could not inspect signing-facts record: $record"
+  dir="$(cd "$("$G02_DIRNAME" "$record")" && pwd -P)" || die "could not canonicalize signing-facts record: $record"
+  base="$("$G02_BASENAME" "$record")"
+  physical="$dir/$base"
+  [[ -f "$physical" && ! -L "$physical" ]] || die "signing-facts record is not a regular file: $physical"
+  check_safe_path_chain "$dir" "signing-facts record"
+  line="$("$G02_STAT" -f '%u %A %l' "$physical")" || die "could not inspect signing-facts record: $physical"
   read -r record_uid record_mode record_links <<<"$line"
   [[ "$record_uid" == "$G02_CURRENT_UID" && "$record_mode" == 600 && "$record_links" == 1 ]] \
-    || die "signing-facts record is not private and singly linked: $record"
-  raw="$(<"$record")"
-  [[ -n "$raw" ]] || die "signing-facts record is empty: $record"
+    || die "signing-facts record is not private and singly linked: $physical"
+  raw="$(<"$physical")"
+  [[ -n "$raw" ]] || die "signing-facts record is empty: $physical"
   normalized="$(printf '%s\n' "$raw" | signing_facts_from_text)"
-  [[ "$raw" == "$normalized" ]] || die "signing-facts record is not normalized: $record"
+  [[ "$raw" == "$normalized" ]] || die "signing-facts record is not normalized: $physical"
   printf -v "$output_name" '%s' "$raw"
 }
 
@@ -367,16 +469,14 @@ recheck_source
 (
 recheck_source
 cd "$G02_SOURCE_DIR/experiments/g02-auth"
-"$G02_ENV" -u GOFLAGS GOENV=off GOTOOLCHAIN=go1.26.8 GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 \
-  "$G02_GO" build -buildvcs=true -trimpath -o "$G02_ENROLL_BINARY" ./cmd/g02-enroll
-"$G02_ENV" -u GOFLAGS GOENV=off GOTOOLCHAIN=go1.26.8 GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 \
-  "$G02_GO" build -buildvcs=true -trimpath -tags=g02runtime -o "$G02_PROBE_BINARY" ./cmd/g02-keychain-probe
+g02_go build -buildvcs=true -trimpath -o "$G02_ENROLL_BINARY" ./cmd/g02-enroll
+g02_go build -buildvcs=true -trimpath -tags=g02runtime -o "$G02_PROBE_BINARY" ./cmd/g02-keychain-probe
 "$G02_CHMOD" 0500 "$G02_ENROLL_BINARY" "$G02_PROBE_BINARY"
 )
 
 check_buildinfo() {
   local binary="$1" want_sha="${2:-$G02_SOURCE_SHA}" info
-  info="$("$G02_ENV" -u GOFLAGS GOENV=off GOTOOLCHAIN=go1.26.8 "$G02_GO" version -m "$binary")" \
+  info="$(g02_go version -m "$binary")" \
     || die "could not inspect build metadata: $binary"
   "$G02_AWK" -v want="$want_sha" '
     $1 == "build" && $2 ~ /^vcs\.revision=/ { revisions++; revision = substr($2, index($2, "=") + 1) }
@@ -438,9 +538,10 @@ call `recheck_source` immediately before any later build or offline
 `go test`/`go vet`/`go run`, and `run_verified` immediately before a binary
 start; `run_verified` rechecks the current UID, private parent, safe parent
 chain, artifact owner/mode/link count, digest, and signing identity.
-This is a trusted-UID boundary and provides no hostile same-UID guarantee:
-same-UID code can still mutate the source tree, `PATH` entries, or artifact
-paths after a check. The preflight intentionally refuses the current
+Later Go invocations must use `g02_go` so they keep the same empty-environment
+toolchain bounds. This is a trusted-UID boundary and provides no hostile
+same-UID guarantee: same-UID code can still mutate the source tree, `PATH`
+entries, or artifact paths after a check. The preflight intentionally refuses the current
 linked-worktree layout because its `.git` file can produce missing VCS
 metadata even when `-buildvcs=true` is requested.
 
@@ -464,9 +565,9 @@ commands in a subshell so the caller directory is unchanged:
 (
 recheck_source
 cd "$G02_SOURCE_DIR/experiments/g02-auth"
-GOTOOLCHAIN=go1.26.8 "$G02_GO" test -race -count=1 -timeout=45s ./...
-GOTOOLCHAIN=go1.26.8 "$G02_GO" vet ./...
-GOTOOLCHAIN=go1.26.8 "$G02_GO" run ./cmd/g02-synthetic
+g02_go test -race -count=1 -timeout=45s ./...
+g02_go vet ./...
+g02_go run ./cmd/g02-synthetic
 )
 ```
 
@@ -527,8 +628,7 @@ detached clone that has passed the same source-chain gate.
 (
 require_g01_plan_source
 cd "$G02_SOURCE_DIR/experiments/g01-scaleset"
-"$G02_ENV" -u GOFLAGS GOENV=off GOTOOLCHAIN=go1.26.8 CGO_ENABLED=1 \
-  "$G02_GO" build -buildvcs=true -trimpath -tags=g01_live -o "$G01_PRIVATE_BINARY" ./cmd/g01-live
+g02_go build -buildvcs=true -trimpath -tags=g01_live -o "$G01_PRIVATE_BINARY" ./cmd/g01-live
 check_buildinfo "$G01_PRIVATE_BINARY" "$G01_HARNESS_SHA"
 "$G01_PRIVATE_BINARY" --plan
 )
@@ -784,22 +884,72 @@ artifact-current-0700 rc=0
 artifact-parent-0700-retained
 ```
 
-Related helpers: `OWNER_NONCE` values `../escaped`, `foo/bar`,
+Related helpers at `7ce1665`: `OWNER_NONCE` values `../escaped`, `foo/bar`,
 `../../../outside`, empty, and `has space` each returned `rc=1`; `canary1`
-returned `rc=0` as a direct child of the private parent. `require_trusted_exec`
-accepted `/usr/bin/stat` and `/usr/bin/git` (`rc=0`) and refused a missing
-path, a relative `./go`, and a synthetic foreign-owned executable (`rc=1`).
-Offline/G01-shaped subshells returned success `rc=0` and injected failure
-`rc=17` without changing caller `PWD`. `/bin/bash -n` of the extracted gate
-passed. Same-UID workdirs, `PATH` entries, and source trees remain
-non-isolation.
+returned `rc=0` as a direct child of the private parent. Offline/G01-shaped
+subshells returned success `rc=0` and injected failure `rc=17` without changing
+caller `PWD`. Those subshell results were cwd/failure-propagation shape tests,
+not proof that inherited Go environment inputs were bounded. Exact-head Codex
+review of `7ce1665` completed at 2026-09-08T10:11:57Z with three new P1
+findings; that head was not mergeable.
+
+### PR59 bounded toolchain and execution-environment correction
+
+Exact-head Codex P1s on `7ce1665` were independently reproduced with synthetic
+fixtures and `/bin/bash` 3.2; no live G02/G01 binary, `codesign`, App, key,
+Keychain, `chown`, launchd, Docker, Lima, runner, or workflow command was run.
+
+| Finding | Frozen-7ce red | Current disposition |
+|---|---|---|
+| [P1 `r3956754482`](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3956754482) | Offline prefix `GOTOOLCHAIN=go1.26.8 "$G02_GO" ...` retained inherited `GOFLAGS=-overlay=... -toolexec=...`, `GOENV`, and `CC`. | Fixed: every Go invocation uses `g02_go` (`env -i` plus an explicit allowlist). |
+| [P1 `r3956754493`](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3956754493) | `env -u GOFLAGS GOENV=off GOTOOLCHAIN=go1.26.8 CGO_ENABLED=1 go env GOWORK` discovered a parent `go.work`. | Fixed: `g02_go` sets `GOWORK=off` and does not inherit `GOWORK`. |
+| [P1 `r3956754505`](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3956754505) | Bare `sort` with a `PATH` alias (symlink to `cat`) left signing facts unsorted. | Fixed: pinned `/usr/bin/sort` via `pin_trusted_file`; `signing_facts_from_text` calls `"$G02_SORT"`. |
+| Independent P1 go symlink/ancestor | `type -P go` was a Homebrew symlink; `require_trusted_exec` accepted it (`rc=0`) and accepted a regular fixture under a synthetic foreign ancestor because it never walked parents. | Fixed: `resolve_physical_file` follows Homebrew aliases, retains the physical path, and `pin_trusted_file` walks the parent chain. A leaf `stat` is not ancestry proof. |
+| Independent P1 child Git/CC/CGO | `env -u GOFLAGS` still forwarded inherited `CC`. | Fixed: `g02_go` empty environment plus pinned `CC`/`CXX` and `PATH=/usr/bin:/bin`. |
+| Independent P2 signing-record parent | `read_signing_record` accepted a current-UID `0600` record whose parent stub was foreign `0755` (`rc=0`); it never asked for the parent. | Fixed: canonicalize, `check_safe_path_chain` on the physical parent, then owner/mode/nlink. |
+| [P1 `r3956164372`](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3956164372) | Incomplete at 7ce: leaf owner check, symlink go, bare sort. | Closed by the physical-file pin plus `g02_go`. A full `PATH` directory walk is still not used; it false-refuses macOS system prefixes. |
+| [P1 `r3954505806`](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3954505806) / [P1 `r3956164362`](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3956164362) | Source SHA/VCS checks existed; workspace/tool env did not. | VCS checks retained; `g02_go` now bounds the build/test/plan environment. |
+
+The other historical records remain green for their original conditions:
+[r3956402913](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3956402913),
+[r3954677724](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3954677724),
+[r3955817035](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3955817035),
+[r3956164334](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3956164334),
+[r3954677733](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3954677733),
+[r3954677731](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3954677731),
+[r3955817042](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3955817042),
+[r3956164354](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3956164354),
+[r3956164344](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3956164344),
+[r3956164383](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3956164383).
+Staleness is not resolution; each was re-read.
+
+Extracted-helper commands used `/bin/bash` 3.2, `mktemp` trees, and `stat`
+stubs. They are shape tests, not an actual `go build`/`go test`/`codesign`
+proof:
+
+```text
+g02_go env-i: GOFLAGS/GOENV/GOWORK/CC/PATH/GIT_DIR absent or bounded
+g02_go GOWORK=off against a parent go.work fixture
+PATH sort alias no longer used; /usr/bin/sort sorts
+pin_trusted_file follows a Homebrew-style relative symlink and retains pwd -P
+real Homebrew go alias resolved to a non-symlink Cellar path (rc=0)
+current-UID 0775 tool parent rc=0; current-UID 0777 tool parent rc=1
+current-UID 0775 source parent still rc=1
+pin_trusted_file refuses synthetic foreign parent of a regular executable
+read_signing_record refuses synthetic foreign parent
+source/artifact chain matrix unchanged
+```
+
+No actual G02 enrollment/probe binary, G01 plan binary, or live packet command
+was built or executed in this correction. A future operator build still needs
+an independently reviewed detached clone and the pinned toolchain. Same-UID
+workdirs, `HOME`, and post-check mutation remain non-isolation.
 
 No live App, key, Keychain, signing-state, account, `chown`, launchd, runner,
-Docker, Lima, service, or workflow operation was performed. Commands in this
-packet were not executed as live authorization. Remaining gaps: hosted CI and
-exact-head Codex review of the new SHA, independent Luna review, and the
-original G02 live evidence. Rollback is to restore this file from
-`974999b5b0fce5e69867d166e57db21b7cac30ea`.
+Docker, Lima, service, or workflow operation was performed. Remaining gaps:
+hosted CI and exact-head Codex review of the new SHA, independent Luna review,
+and the original G02 live evidence. Rollback is to restore this file from
+`7ce16651117f47470f06545d73067f3cdbdcfa6d`.
 
 Factual sources used without adding private identifiers:
 
