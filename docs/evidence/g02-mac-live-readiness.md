@@ -96,10 +96,10 @@ suffix; it is not a source or artifact check and is not used below.
 |---|---|
 | G02 source for both binaries | `G02_SOURCE_SHA=<REVIEWED_FULL_SOURCE_SHA_40_HEX>`; exactly 40 lowercase hexadecimal characters, cloned by pinned `g02_git` into a fresh destination |
 | G02 repository URL | `G02_REPOSITORY_URL=<APPROVED_CLONE_URL_OR_LOCAL_PATH>` used only after `/usr/bin/git` is pinned |
-| G02 staged toolchain | `G02_GO=<PRIVATE_PARENT>/toolchain/go/bin/go`; independently staged Go 1.26.8 under the private parent, not a Homebrew Cellar path |
+| G02 staged toolchain | `G02_GO_ARCHIVE=<OFFICIAL_go1.26.8.darwin-arm64.tar.gz>` and `G02_GO_ARCHIVE_SHA256=<PUBLISHED_64_HEX>` from go.dev; extract only after the archive digest matches. Do not trust a self-hash of an extracted tree |
 | G02 enrollment artifact | `G02_ENROLL_SHA256=<APPROVED_ENROLL_ARTIFACT_SHA256_64_HEX>` plus an independently recorded private `codesign` identity record |
 | G02 synthetic probe artifact | `G02_PROBE_SHA256=<APPROVED_PROBE_ARTIFACT_SHA256_64_HEX>` plus an independently recorded private `codesign` identity record |
-| G01 controller/harness | `G01_HARNESS_SHA=<REVIEWED_G01_HARNESS_SHA_40_HEX>` |
+| G01 controller/harness | `G01_HARNESS_SHA=<REVIEWED_G01_HARNESS_SHA_40_HEX>` plus `G01_PLAN_SHA256` and `G01_PLAN_SIGNING_RECORD` before `--plan` |
 | G01 workflow | `G01_WORKFLOW_SHA=<REVIEWED_WORKFLOW_SHA_40_HEX>` |
 | Mac release artifact | `MAC_RELEASE_SHA=<REVIEWED_RELEASE_SHA_40_HEX>` plus signing identity record |
 | Resource identity | `OWNER_NONCE=<NEW_APPROVED_NONSECRET_NONCE>` plus private App/org/repository IDs |
@@ -114,18 +114,23 @@ Neither `g02-enroll` nor `g02-keychain-probe` verifies its own source revision,
 working-tree state, digest, or signing identity. The shell preflight below is
 the documented gate and must complete successfully before **any** G02 binary
 execution. It is not a runtime verifier and does not add product-runtime
-scope. An owner first creates `G02_PRIVATE_PARENT` at mode `0700`, stages a
-reviewed Go 1.26.8 toolchain under that tree, and sets a fresh
-`G02_SOURCE_DIR` that does not yet exist and does not overlap the private
-parent. The gate itself pins `/usr/bin/git`, clones, and detaches at the
-approved full SHA. The expected artifact SHA-256 values and normalized
-signing-fact files come from an independent private approval record; do not
-calculate and trust them in the same invocation.
+scope. An owner first creates `G02_PRIVATE_PARENT` at mode `0700`, supplies the
+official `go1.26.8.darwin-arm64.tar.gz` and its published SHA-256, and sets
+`G02_SOURCE_DIR` that does not overlap the private parent. The gate rejects
+UID 0, pins `/usr/bin/git`, verifies the archive digest before any `go`
+execution, extracts into the private tree, clones if needed, and detaches at
+the approved full SHA. An interrupted gate may be rerun against the same
+private parent and nonce; existing validated directories are reused and
+unknown live journals are never reset. The expected artifact SHA-256 values
+and normalized signing-fact files come from an independent private approval
+record; do not calculate and trust them in the same invocation.
 
 The checkout is part of the same Bash process as the rest of the gate. Do
 not run a `PATH` `git` before that process pins `/usr/bin/git` and defines
 `g02_git`. Do not use `git worktree` or change an Orca-managed checkout.
-`G02_SOURCE_DIR` must not already exist; `g02_git clone` creates it.
+If `G02_SOURCE_DIR` does not exist, `g02_git clone` creates a standalone
+clone and detaches it. If it already exists, the gate reuses that standalone
+`.git` directory after identity checks and does not delete or reset it.
 
 Run this as Bash with the private values already set; `set -Eeuo pipefail`, the
 explicit `-buildvcs=true`, `GOTOOLCHAIN=local`, `GOENV=off`, `GOWORK=off`, and
@@ -160,9 +165,10 @@ parsing, ACL-checked, and then checked through its entire parent chain. A
 leaf `stat` of the executable is not ancestry proof. Group-write or
 other-write on a non-sticky ancestor is refused even when the owner is the
 current UID: another group member can rename a descendant. A Homebrew Cellar
-path is therefore not a trusted toolchain. Stage a reviewed Go 1.26.8
-`darwin/arm64` distribution under the private parent independently; do not
-copy a group-writable Cellar tree and treat a self-hash as approval.
+path is therefore not a trusted toolchain. Trust the official published
+archive digest, then extract under the private parent; do not copy a
+group-writable Cellar tree or treat a self-hash of extracted files as
+approval. The operator identity must not be UID 0.
 
 Every Git clone, checkout, and identity query runs through `g02_git`, which
 starts from an empty environment and does not inherit `GIT_DIR`,
@@ -172,7 +178,12 @@ Every `go build`, `go test`, `go vet`, `go run`, `go version`, and G01 plan
 build runs through `g02_go` with `HOME`, `GOCACHE`, `GOMODCACHE`, `GOPATH`,
 `GOROOT`, and `TMPDIR` rooted under the private `0700` tree. `GOTOOLCHAIN` is
 `local`; the gate does not download a toolchain into an untrusted caller
-`HOME`. `GOPROXY=off` and `GOSUMDB=off` refuse module-proxy substitution.
+`HOME`. Default `GOPROXY=off` and `GOSUMDB=off` refuse module-proxy
+substitution. G01 first runs `g02_mod_bootstrap`: it copies `go.mod` and
+`go.sum` into a private stage directory, fetches with
+`GOPROXY=https://proxy.golang.org,direct` and `GOSUMDB=sum.golang.org`, then
+`go mod verify` twice (fetch, then offline) into the private module cache.
+The approved clone is not written. The plan build itself stays offline.
 POSIX mode `0700` is not enough: writable macOS ACL grants (`add_file`,
 `delete_child`, and other allow-write rights) are refused on every protected
 component. Mode masks use `8#` constants so macOS `/bin/bash` 3.2 does not
@@ -198,7 +209,8 @@ unset CDPATH || true
 : "${G02_PRIVATE_PARENT:?set the owned private artifact directory}"
 : "${G02_SOURCE_DIR:?set a fresh absolute clone destination that does not yet exist}"
 : "${G02_REPOSITORY_URL:?set the repository URL for the pinned git clone}"
-: "${G02_GO:?set the staged Go 1.26.8 binary under the private parent}"
+: "${G02_GO_ARCHIVE:?set the official go1.26.8.darwin-arm64.tar.gz path}"
+: "${G02_GO_ARCHIVE_SHA256:?set the published official archive SHA-256}"
 : "${G02_ENROLL_SHA256:?set the independently recorded enrollment digest}"
 : "${G02_PROBE_SHA256:?set the independently recorded probe digest}"
 : "${G02_ENROLL_SIGNING_RECORD:?set the private enrollment signing-facts file}"
@@ -213,6 +225,7 @@ G02_BASENAME=/usr/bin/basename
 G02_LS=/bin/ls
 G02_MKDIR=/bin/mkdir
 G02_CURRENT_UID="$("$G02_ID" -u)" || die 'could not determine the current UID'
+[[ "$G02_CURRENT_UID" != 0 ]] || die 'root UID is not a trusted operator identity'
 if ! [[ "$G02_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
   die 'source SHA is not exactly 40 lowercase hexadecimal characters'
 fi
@@ -220,9 +233,12 @@ if ! [[ "$G02_ENROLL_SHA256" =~ ^[0-9a-f]{64}$ && "$G02_PROBE_SHA256" =~ ^[0-9a-
   die 'artifact SHA-256 is not exactly 64 lowercase hexadecimal characters'
 fi
 if ! [[ "$G02_SOURCE_DIR" = /* && "$G02_PRIVATE_PARENT" = /* && \
-        "$G02_GO" = /* && \
+        "$G02_GO_ARCHIVE" = /* && \
         "$G02_ENROLL_SIGNING_RECORD" = /* && "$G02_PROBE_SIGNING_RECORD" = /* ]]; then
-  die 'source, artifact, toolchain, and signing-record paths must be absolute'
+  die 'source, artifact, archive, and signing-record paths must be absolute'
+fi
+if ! [[ "$G02_GO_ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+  die 'Go archive SHA-256 is not exactly 64 lowercase hexadecimal characters'
 fi
 if [[ -z "$G02_REPOSITORY_URL" ]]; then
   die 'repository URL is empty'
@@ -363,6 +379,8 @@ G02_CHMOD=/bin/chmod
 G02_SORT=/usr/bin/sort
 G02_CC=/usr/bin/cc
 G02_CXX=/usr/bin/c++
+G02_TAR=/usr/bin/tar
+G02_CAT=/bin/cat
 pin_trusted_file G02_GIT "$G02_GIT" git
 pin_trusted_file G02_ENV "$G02_ENV" env
 pin_trusted_file G02_AWK "$G02_AWK" awk
@@ -372,11 +390,20 @@ pin_trusted_file G02_CHMOD "$G02_CHMOD" chmod
 pin_trusted_file G02_SORT "$G02_SORT" sort
 pin_trusted_file G02_CC "$G02_CC" cc
 pin_trusted_file G02_CXX "$G02_CXX" c++
+pin_trusted_file G02_TAR "$G02_TAR" tar
+pin_trusted_file G02_CAT "$G02_CAT" cat
 G02_TOOL_PATH=/usr/bin:/bin
 
-install_private_dir() {
+ensure_private_dir() {
   local path="$1" kind="$2" line owner mode
-  "$G02_MKDIR" -m 0700 "$path" || die "could not create ${kind}: $path"
+  if [[ -L "$path" ]]; then
+    die "${kind} must not be a symlink: $path"
+  fi
+  if [[ -e "$path" ]]; then
+    [[ -d "$path" ]] || die "${kind} exists and is not a directory: $path"
+  else
+    "$G02_MKDIR" -m 0700 "$path" || die "could not create ${kind}: $path"
+  fi
   line="$("$G02_STAT" -f '%u %A' "$path")" || die "could not inspect ${kind}: $path"
   parse_owner_mode "$line" owner mode
   [[ "$owner" == "$G02_CURRENT_UID" && "$mode" == 700 ]] \
@@ -400,12 +427,20 @@ g02_git() {
 }
 
 g02_go() {
+  local proxy="${G02_GOPROXY_MODE:-off}" sumdb
   [[ -n "${G02_HOME:-}" && -d "$G02_HOME" ]] || die 'private Go HOME is not ready'
   [[ -f "$G02_GO" && ! -L "$G02_GO" ]] || die 'go is no longer a regular non-symlink file'
   check_safe_path_chain "$("$G02_DIRNAME" "$G02_GO")" "go"
   check_no_writable_acl "$G02_GO" "go"
   [[ -f "$G02_CC" && ! -L "$G02_CC" ]] || die 'cc is no longer a regular non-symlink file'
   check_safe_path_chain "$("$G02_DIRNAME" "$G02_CC")" "cc"
+  if [[ "$proxy" == fetch ]]; then
+    proxy='https://proxy.golang.org,direct'
+    sumdb=sum.golang.org
+  else
+    proxy=off
+    sumdb=off
+  fi
   "$G02_ENV" -i \
     PATH="$G02_TOOL_PATH" \
     HOME="$G02_HOME" \
@@ -415,8 +450,8 @@ g02_go() {
     GOTOOLCHAIN=local \
     GOENV=off \
     GOWORK=off \
-    GOPROXY=off \
-    GOSUMDB=off \
+    GOPROXY="$proxy" \
+    GOSUMDB="$sumdb" \
     GOCACHE="$G02_GOCACHE" \
     GOMODCACHE="$G02_GOMODCACHE" \
     GOPATH="$G02_GOPATH" \
@@ -427,6 +462,80 @@ g02_go() {
     CC="$G02_CC" \
     CXX="$G02_CXX" \
     "$G02_GO" "$@"
+}
+
+g02_mod_bootstrap() {
+  local modroot="$1" stage
+  [[ -d "$modroot" && ! -L "$modroot" ]] || die "module root is not a real directory: $modroot"
+  [[ -f "$modroot/go.mod" && ! -L "$modroot/go.mod" && \
+     -f "$modroot/go.sum" && ! -L "$modroot/go.sum" ]] \
+    || die "module root must contain regular go.mod and go.sum files: $modroot"
+  stage="$G02_PRIVATE_PARENT/mod-bootstrap"
+  ensure_private_dir "$stage" "module bootstrap"
+  # Copy only go.mod/go.sum into the private stage. Never write the approved clone.
+  "$G02_CAT" "$modroot/go.mod" > "$stage/go.mod" || die "could not stage go.mod"
+  "$G02_CAT" "$modroot/go.sum" > "$stage/go.sum" || die "could not stage go.sum"
+  [[ -f "$stage/go.mod" && ! -L "$stage/go.mod" && \
+     -f "$stage/go.sum" && ! -L "$stage/go.sum" ]] \
+    || die "staged module files must be regular files"
+  "$G02_CHMOD" 600 "$stage/go.mod" "$stage/go.sum" \
+    || die "could not restrict staged module files"
+  (
+    cd "$stage"
+    G02_GOPROXY_MODE=fetch
+    g02_go mod download
+    g02_go mod verify
+    unset G02_GOPROXY_MODE
+    g02_go mod verify
+  )
+}
+
+g02_exec() {
+  [[ -n "${G02_HOME:-}" && -d "$G02_HOME" ]] || die 'private HOME is not ready'
+  "$G02_ENV" -i \
+    PATH="$G02_TOOL_PATH" \
+    HOME="$G02_HOME" \
+    TMPDIR="$G02_TMPDIR" \
+    LANG=C \
+    LC_ALL=C \
+    "$@"
+}
+
+check_private_input() {
+  local path="$1" dir base physical line record_uid record_mode record_links extra listing acl_line first=1
+  [[ "$path" = /* ]] || die "private input is not absolute: $path"
+  [[ -f "$path" && ! -L "$path" ]] || die "private input is not a regular file: $path"
+  dir="$(cd "$("$G02_DIRNAME" "$path")" && pwd -P)" || die "could not canonicalize private input: $path"
+  base="$("$G02_BASENAME" "$path")"
+  physical="$dir/$base"
+  [[ -f "$physical" && ! -L "$physical" ]] || die "private input is not a regular file: $physical"
+  check_safe_path_chain "$dir" "private input parent"
+  check_no_writable_acl "$physical" "private input"
+  listing="$("$G02_LS" -led "$physical")" || die "could not inspect private input ACL: $physical"
+  while IFS= read -r acl_line; do
+    if [[ "$first" == 1 ]]; then
+      first=0
+      continue
+    fi
+    [[ -n "$acl_line" ]] || continue
+    if [[ "$acl_line" =~ ^[[:space:]]*[0-9]+: ]]; then
+      if [[ "$acl_line" == *' allow '* ]]; then
+        die "allow ACL on private input: $physical"
+      elif [[ "$acl_line" == *' deny '* ]]; then
+        continue
+      else
+        die "malformed ACL on private input: $physical"
+      fi
+    else
+      die "unexpected ls -le line on private input: $physical"
+    fi
+  done <<<"$listing"
+  line="$("$G02_STAT" -f '%u %A %l' "$physical")" || die "could not inspect private input: $physical"
+  IFS=' ' read -r record_uid record_mode record_links extra <<<"$line"
+  [[ -n "$record_uid" && -n "$record_mode" && -n "$record_links" && -z "${extra:-}" ]] \
+    || die "malformed private input stat: $physical"
+  [[ "$record_uid" == "$G02_CURRENT_UID" && "$record_mode" == 600 && "$record_links" == 1 ]] \
+    || die "private input must be current-UID mode 0600 and singly linked: $physical"
 }
 
 if ! [[ -d "$G02_PRIVATE_PARENT" && ! -L "$G02_PRIVATE_PARENT" ]]; then
@@ -446,21 +555,36 @@ G02_TMPDIR="$G02_HOME/tmp"
 G02_GOCACHE="$G02_HOME/gocache"
 G02_GOMODCACHE="$G02_HOME/gomodcache"
 G02_GOPATH="$G02_HOME/gopath"
-install_private_dir "$G02_HOME" "private Go HOME"
-install_private_dir "$G02_TMPDIR" "private tmp"
-install_private_dir "$G02_GOCACHE" "Go build cache"
-install_private_dir "$G02_GOMODCACHE" "Go module cache"
-install_private_dir "$G02_GOPATH" "GOPATH"
+ensure_private_dir "$G02_HOME" "private Go HOME"
+ensure_private_dir "$G02_TMPDIR" "private tmp"
+ensure_private_dir "$G02_GOCACHE" "Go build cache"
+ensure_private_dir "$G02_GOMODCACHE" "Go module cache"
+ensure_private_dir "$G02_GOPATH" "GOPATH"
 
+[[ -f "$G02_GO_ARCHIVE" && ! -L "$G02_GO_ARCHIVE" ]] \
+  || die 'Go archive must be a regular non-symlink file'
+archive_digest="$("$G02_SHASUM" -a 256 < "$G02_GO_ARCHIVE" | "$G02_AWK" 'NF >= 1 { count++; digest = $1 } END { if (count != 1) exit 1; print digest }')" \
+  || die 'could not hash the official Go archive'
+[[ "$archive_digest" == "$G02_GO_ARCHIVE_SHA256" ]] \
+  || die 'Go archive digest does not match the published official SHA-256'
+G02_TOOLCHAIN="$G02_PRIVATE_PARENT/toolchain"
+ensure_private_dir "$G02_TOOLCHAIN" "toolchain parent"
+if [[ ! -e "$G02_TOOLCHAIN/go/bin/go" ]]; then
+  "$G02_TAR" -C "$G02_TOOLCHAIN" -xzf "$G02_GO_ARCHIVE" \
+    || die 'could not extract the official Go archive'
+fi
+G02_GO="$G02_TOOLCHAIN/go/bin/go"
+[[ -f "$G02_GO" && ! -L "$G02_GO" ]] || die 'extracted go is missing or is a symlink'
 pin_trusted_file G02_GO "$G02_GO" go
 [[ "$G02_GO" == "$G02_PRIVATE_PARENT/"* ]] \
-  || die 'staged go must be under the private artifact parent'
+  || die 'extracted go must be under the private artifact parent'
 G02_GOROOT="$(cd "$("$G02_DIRNAME" "$G02_GO")/.." && pwd -P)" \
   || die 'could not resolve GOROOT'
 [[ "$G02_GOROOT" == "$G02_PRIVATE_PARENT/"* && -f "$G02_GOROOT/bin/go" && ! -L "$G02_GOROOT/bin/go" ]] \
-  || die 'GOROOT must be a staged distribution under the private parent'
+  || die 'GOROOT must be the extracted official distribution under the private parent'
 g02_go_ver="$(g02_go version)" || die 'could not read staged go version'
-[[ "$g02_go_ver" == *'go1.26.8'* ]] || die 'staged toolchain is not Go 1.26.8'
+[[ "$g02_go_ver" == 'go version go1.26.8 darwin/arm64' ]] \
+  || die 'staged toolchain is not exactly go1.26.8 darwin/arm64'
 
 if [[ "$G02_SOURCE_DIR" == "$G02_PRIVATE_PARENT" || "$G02_SOURCE_DIR" == "$G02_PRIVATE_PARENT/"* || "$G02_PRIVATE_PARENT" == "$G02_SOURCE_DIR/"* ]]; then
   die 'source clone and artifact directory must not overlap'
@@ -468,11 +592,15 @@ fi
 src_parent="$("$G02_DIRNAME" "$G02_SOURCE_DIR")"
 [[ -d "$src_parent" && ! -L "$src_parent" ]] || die 'source parent must be a real directory'
 check_safe_path_chain "$src_parent" "source parent"
-[[ ! -e "$G02_SOURCE_DIR" && ! -L "$G02_SOURCE_DIR" ]] \
-  || die 'source clone destination already exists; use a fresh path'
-g02_git clone --no-local "$G02_REPOSITORY_URL" "$G02_SOURCE_DIR"
-g02_git --git-dir "$G02_SOURCE_DIR/.git" --work-tree "$G02_SOURCE_DIR" \
-  checkout --detach "$G02_SOURCE_SHA"
+if [[ -e "$G02_SOURCE_DIR" || -L "$G02_SOURCE_DIR" ]]; then
+  [[ -d "$G02_SOURCE_DIR" && ! -L "$G02_SOURCE_DIR" && \
+     -d "$G02_SOURCE_DIR/.git" && ! -L "$G02_SOURCE_DIR/.git" ]] \
+    || die 'existing source path is not a standalone clone; will not reset it'
+else
+  g02_git clone --no-local "$G02_REPOSITORY_URL" "$G02_SOURCE_DIR"
+  g02_git --git-dir "$G02_SOURCE_DIR/.git" --work-tree "$G02_SOURCE_DIR" \
+    checkout --detach "$G02_SOURCE_SHA"
+fi
 
 if ! [[ -d "$G02_SOURCE_DIR" && ! -L "$G02_SOURCE_DIR" && \
         -d "$G02_SOURCE_DIR/.git" && ! -L "$G02_SOURCE_DIR/.git" ]]; then
@@ -530,10 +658,16 @@ require_g01_plan_source() {
     die 'G01 harness SHA is not exactly 40 lowercase hexadecimal characters'
   fi
   [[ "$G01_PRIVATE_BINARY" = /* ]] || die 'G01 plan binary path must be absolute'
+  : "${G01_PLAN_SHA256:?set the independently recorded G01 plan digest}"
+  : "${G01_PLAN_SIGNING_RECORD:?set the private G01 plan signing-facts file}"
+  if ! [[ "$G01_PLAN_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+    die 'G01 plan SHA-256 is not exactly 64 lowercase hexadecimal characters'
+  fi
   [[ "$("$G02_DIRNAME" "$G01_PRIVATE_BINARY")" == "$G02_PRIVATE_PARENT" ]] \
     || die 'G01 plan binary must be a direct child of the private artifact parent'
-  [[ ! -e "$G01_PRIVATE_BINARY" && ! -L "$G01_PRIVATE_BINARY" ]] \
-    || die 'G01 plan binary path already exists; use a fresh private path'
+  if [[ -L "$G01_PRIVATE_BINARY" ]]; then
+    die 'G01 plan binary must not be a symlink'
+  fi
   recheck_source
   if [[ "$(g02_git --git-dir "$G02_SOURCE_DIR/.git" --work-tree "$G02_SOURCE_DIR" \
             rev-parse --verify HEAD^{commit})" != "$G01_HARNESS_SHA" ]]; then
@@ -578,17 +712,21 @@ read_signing_record "$G02_PROBE_SIGNING_RECORD" G02_PROBE_SIGNING_FACTS
 
 G02_ENROLL_BINARY="$G02_PRIVATE_PARENT/g02-enroll"
 G02_PROBE_BINARY="$G02_PRIVATE_PARENT/g02-keychain-probe"
-[[ ! -e "$G02_ENROLL_BINARY" && ! -L "$G02_ENROLL_BINARY" && ! -e "$G02_PROBE_BINARY" && ! -L "$G02_PROBE_BINARY" ]] \
-  || die 'artifact path already exists; use a fresh private path'
-
+if [[ -e "$G02_ENROLL_BINARY" || -L "$G02_ENROLL_BINARY" || -e "$G02_PROBE_BINARY" || -L "$G02_PROBE_BINARY" ]]; then
+  [[ -f "$G02_ENROLL_BINARY" && ! -L "$G02_ENROLL_BINARY" && \
+     -f "$G02_PROBE_BINARY" && ! -L "$G02_PROBE_BINARY" ]] \
+    || die 'partial artifacts exist; will not reset unknown live state'
+else
+  recheck_source
+  (
+  recheck_source
+  cd "$G02_SOURCE_DIR/experiments/g02-auth"
+  g02_go build -buildvcs=true -trimpath -o "$G02_ENROLL_BINARY" ./cmd/g02-enroll
+  g02_go build -buildvcs=true -trimpath -tags=g02runtime -o "$G02_PROBE_BINARY" ./cmd/g02-keychain-probe
+  "$G02_CHMOD" 0500 "$G02_ENROLL_BINARY" "$G02_PROBE_BINARY"
+  )
+fi
 recheck_source
-(
-recheck_source
-cd "$G02_SOURCE_DIR/experiments/g02-auth"
-g02_go build -buildvcs=true -trimpath -o "$G02_ENROLL_BINARY" ./cmd/g02-enroll
-g02_go build -buildvcs=true -trimpath -tags=g02runtime -o "$G02_PROBE_BINARY" ./cmd/g02-keychain-probe
-"$G02_CHMOD" 0500 "$G02_ENROLL_BINARY" "$G02_PROBE_BINARY"
-)
 
 check_buildinfo() {
   local binary="$1" want_sha="${2:-$G02_SOURCE_SHA}" info
@@ -639,7 +777,7 @@ run_verified() {
   local binary="$1" expected_digest="$2" expected_signing="$3"
   shift 3
   check_artifact "$binary" "$expected_digest" "$expected_signing"
-  "$binary" "$@"
+  g02_exec "$binary" "$@"
 }
 
 check_buildinfo "$G02_ENROLL_BINARY"
@@ -724,6 +862,8 @@ run_verified "$G02_ENROLL_BINARY" "$G02_ENROLL_SHA256" "$G02_ENROLL_SIGNING_FACT
   --journal-dir "$G02_JOURNAL_DIR"
 
 # Only for the same-App manual fallback, after owner supplies protected input.
+# Do not read the PEM here except through the redirected stdin of run_verified.
+check_private_input "$G02_PRIVATE_PEM"
 run_verified "$G02_ENROLL_BINARY" "$G02_ENROLL_SHA256" "$G02_ENROLL_SIGNING_FACTS" \
   manual --live-github \
   --owner "$APP_OWNER_ALIAS" --app-name "$DISPOSABLE_APP_ALIAS" --app-id "$APP_ID" \
@@ -742,18 +882,30 @@ relaxation.
 The G01 controller has a safe plan-only command. Live execution remains
 separately gated by the reviewed controller broker and the [G01 driver
 procedure](g01-live-driver.md); this packet does not provide a credential
-invocation. Keep the Bash process that passed the gate above. The G01 plan
-builds only when the already-validated detached source equals
-`G01_HARNESS_SHA`; a different G01 revision needs a separately reviewed
-detached clone that has passed the same source-chain gate.
+invocation. Keep the Bash process that passed the gate above. First seed the
+private module cache with a verified download (`g02_mod_bootstrap`), then
+build and run offline. The G01 plan builds only when the already-validated
+detached source equals `G01_HARNESS_SHA`; a different G01 revision needs a
+separately reviewed detached clone that has passed the same source-chain
+gate. The plan binary uses the same digest/signing `check_artifact` path as
+G02, then `g02_exec`.
 
 ```sh
 (
+recheck_source
+g02_mod_bootstrap "$G02_SOURCE_DIR/experiments/g01-scaleset"
+)
+(
 require_g01_plan_source
+read_signing_record "$G01_PLAN_SIGNING_RECORD" G01_PLAN_SIGNING_FACTS
 cd "$G02_SOURCE_DIR/experiments/g01-scaleset"
-g02_go build -buildvcs=true -trimpath -tags=g01_live -o "$G01_PRIVATE_BINARY" ./cmd/g01-live
+if [[ ! -e "$G01_PRIVATE_BINARY" ]]; then
+  g02_go build -buildvcs=true -trimpath -tags=g01_live -o "$G01_PRIVATE_BINARY" ./cmd/g01-live
+  "$G02_CHMOD" 0500 "$G01_PRIVATE_BINARY"
+fi
 check_buildinfo "$G01_PRIVATE_BINARY" "$G01_HARNESS_SHA"
-"$G01_PRIVATE_BINARY" --plan
+check_artifact "$G01_PRIVATE_BINARY" "$G01_PLAN_SHA256" "$G01_PLAN_SIGNING_FACTS"
+g02_exec "$G01_PRIVATE_BINARY" --plan
 )
 ```
 
@@ -1108,6 +1260,108 @@ full cgo `go build` of G02 binaries: that requires an independently staged
 Go 1.26.8 under the private parent. A self-hash of a copy from a
 group-writable Cellar is not that approval. Rollback is to restore this file
 from `e0a90e28325d96860d13389d7a5fe11ddf5f9f84`.
+
+### PR59 official-archive, root, restart, env, PEM-ACL, and G01 bootstrap correction
+
+Frozen starting head for this pass:
+`4e41f7bbfb5ba1d1ae5514f7899d51fa8ed395cb`. Independent rereview of that
+head was not approvable. The wrapper's apparent clean verdict named
+`3cb19ce7fe`, not that head; the same query reported eight open findings
+(five P1) and wrapper exit 2. This pass owns only this file. No live App,
+Keychain, launchd, runner, Docker, Lima, account, `chown`, host Homebrew,
+or workflow operation was run. No actual PEM was read. Public official Go
+download and module-proxy staging used task-owned temporary private
+directories only.
+
+The eight current exact-head records were reproduced as old-red at `4e41f7b`
+and current-green here. Staleness of the 21 historical records is not
+resolution; each was re-read.
+
+| Finding | Frozen-4e41 red | Current disposition |
+|---|---|---|
+| [P1 `r3957558157`](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3957558157) | `G02_CURRENT_UID` was captured with no UID 0 refusal. | Guard immediately after `id -u`: `[[ "$G02_CURRENT_UID" != 0 ]]`. Predicate refuses UID 0 before ownership checks. No sudo test. |
+| [P2 `r3957565934`](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3957565934) / [P2 `r3957558142`](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3957558142) | Fresh private `GOMODCACHE` plus `GOPROXY=off` failed G01 (`module lookup disabled by GOPROXY=off`). `go mod download all` also rewrote `go.sum` in the clone. | `g02_mod_bootstrap` copies `go.mod`/`go.sum` with pinned `/bin/cat` into a private stage, fetches `proxy.golang.org`/`sum.golang.org`, verifies, then verifies offline. The approved clone stays clean. The plan build uses default `GOPROXY=off`. |
+| [P1 `r3957565941`](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3957565941) | `install_private_dir` / `mkdir -m 0700` on existing `g02-home` returned `File exists` (`rc=1`). | `ensure_private_dir` reuses a validated current-UID `0700` directory. Same-parent restart `rc=0` twice. Partial artifacts refuse without reset. Existing standalone clones are reused; unknown live state is not deleted. |
+| [P1 `r3957565906`](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3957565906) | Staged `go` was accepted on location/owner/version text; a fake printer of `go1.26.8 darwin/arm64` executed. | Required `G02_GO_ARCHIVE` + published `G02_GO_ARCHIVE_SHA256`. Archive is hashed before extract and before any `go` execution. Wrong digest `rc=1` (`Go archive digest does not match`). Extracted `go` must be a regular non-symlink under the private parent. |
+| [P2 `r3957558154`](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3957558154) | `[[ "$g02_go_ver" == *'go1.26.8'* ]]` accepted `go1.26.80` and `darwin/amd64`. | Exact match `go version go1.26.8 darwin/arm64`. Old substring red; current exact green. |
+| [P1 `r3957565923`](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3957565923) | `run_verified` invoked `"$binary" "$@"` and inherited `UNTRUSTED_SENTINEL=1`. | `g02_exec` is `env -i` with `PATH`/`HOME`/`TMPDIR`/`LANG`/`LC_ALL` only. Inherited sentinel and `GOFLAGS` were absent. G01 `--plan` uses `g02_exec`. |
+| [P1 `r3957558151`](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3957558151) | Mode-0600 dummy PEM with `everyone allow read` passed the old UID/mode/nlink predicate. | `check_private_input` walks parent ACL/owner chain, refuses any `allow` ACL on the file, and requires current-UID mode `0600` nlink 1. Dummy no-ACL `rc=0`; allow-read `rc=1`; ACL removed `rc=0`. |
+| G01 plan artifact identity | Plan built and ran without `check_artifact`. | `require_g01_plan_source` requires `G01_PLAN_SHA256` and `G01_PLAN_SIGNING_RECORD`. Plan binary is `check_buildinfo` + `check_artifact` then `g02_exec --plan`. |
+
+Helper TDD (`/bin/bash` 3.2, `mktemp` physical paths, no host chmod): `FAIL=0 ALL_GREEN`. Extracted-gate `bash -n` `rc=0`. Old `mkdir -m 0700` restart `rc=1`; `ensure_private_dir` restart `rc=0`.
+
+Official `go1.26.8.darwin-arm64.tar.gz` published SHA-256
+`a012b25b571bd0138a03dcd25375ceba866fe5ca822f426d2c66a4de56fd3f4b` matched
+`shasum -a 256` before extract. Full gate used a detached clone at
+`4e41f7b` and private parent/source/archive/signing paths containing spaces,
+with inherited `UNTRUSTED_SENTINEL`, `GOFLAGS`, `GIT_DIR`, and `GIT_WORK_TREE`
+set. Results:
+
+```text
+first_run dummy digest: rc=1 artifact digest mismatch; both binaries built
+same-parent second run: rc=0 G02 provenance gate passed
+same-parent third run: rc=0
+partial probe missing: rc=1 partial artifacts exist; enroll not reset
+wrong archive digest: rc=1 before go execution
+go version: go version go1.26.8 darwin/arm64
+CGO_ENABLED=1 GOARCH=arm64 GOOS=darwin
+vcs.revision=4e41f7bbfb5ba1d1ae5514f7899d51fa8ed395cb vcs.modified=false
+g02_exec_sentinel=absent g02_exec_goflags=absent
+```
+
+Disposable exercise SHA-256 values (not maintainer-approved release facts):
+
+```text
+g02-enroll:         6d3d68d4d908e61cec0b9f8f038e9bbb4b966e513ed39a61cd8248eca06ff53a
+g02-keychain-probe: 272e8ab840815e11d4bd00398eb9197b342a560878bdcb7a2c0927e716056eba
+g01-live --plan:    e6cf6ef21d9670506e64ddb77888431d2b572b3caeeae40b699be7767c40c943
+signing facts: Identifier=a.out Signature=adhoc TeamIdentifier=not set
+```
+
+Offline G02 via `g02_go` under the same spaced private caches: one
+`TestManualInheritedInput/manual/delayed-eof` flake (`FAIL` at ~5s), then a
+full retry `ok` on attempt 1 (`g02-auth` 32.639s, `g01-broker` 1.770s,
+`g02-enroll` 1.769s), `g02_go vet` pass, and
+`g02_go run ./cmd/g02-synthetic` JSON
+`{"profile":"synthetic","verified_organizations":2,"in_memory_commit":true,"live_github":false}`.
+No GitHub, Keychain, runner, or launchd operation.
+
+G01: `g02_mod_bootstrap` printed `all modules verified` twice; clone
+`status --porcelain --ignored` stayed empty. Documented plan rebuild matched
+the recorded digest/signing facts and `g02_exec --plan` printed the
+controller-only phase list (`rc=0`). Direct `GOPROXY=off` without bootstrap
+remains the independently reproduced old red.
+
+The 21 historical records remain green for their original conditions:
+
+[r3957102705](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3957102705),
+[r3954505806](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3954505806),
+[r3956402913](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3956402913),
+[r3955817035](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3955817035),
+[r3956164334](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3956164334),
+[r3954677733](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3954677733),
+[r3954677731](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3954677731),
+[r3956164372](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3956164372),
+[r3957102697](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3957102697),
+[r3956164354](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3956164354),
+[r3956164344](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3956164344),
+[r3956754505](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3956754505),
+[r3957102724](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3957102724),
+[r3956164383](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3956164383),
+[r3956164362](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3956164362),
+[r3957102685](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3957102685),
+[r3954677724](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3954677724),
+[r3956754482](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3956754482),
+[r3956754493](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3956754493),
+[r3955817042](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3955817042),
+[r3957102712](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3957102712).
+
+Remaining gaps: this is still not live G02/G01 authorization, not hostile
+same-UID isolation, not a maintainer-approved binary/signing identity, and
+not a merge. Same-UID code can still replace extracted `go` after the
+archive check. Exact-head Codex review of the new commit is required before
+merge. Rollback is to restore this file from
+`4e41f7bbfb5ba1d1ae5514f7899d51fa8ed395cb`.
 
 Factual sources used without adding private identifiers:
 
