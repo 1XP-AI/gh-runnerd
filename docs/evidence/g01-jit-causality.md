@@ -24,9 +24,10 @@ returns an empty list until that committed name exists, then returns only the
 committed synthetic reference. No retry, duplicate-name guarantee or GitHub
 idempotency behavior is inferred.
 
-Each control also requires the missing JIT response (`jit == nil` with an error),
-keeps admission paused, and retains the creating worker as quarantined. The
-pre-create control issues no JIT POST; the two response-loss controls issue
+The two response-loss controls each require the missing JIT response (`jit == nil`
+with an error), keep admission paused, and retain the creating worker as
+quarantined. The pre-create control issues no JIT POST and checks the same
+quarantine and admission invariants; the two response-loss controls issue
 exactly one.
 
 ## TDD record
@@ -52,6 +53,8 @@ requests and no recovered reference; non-committed response loss requires one
 request and no recovered reference; both require a quarantined worker and paused
 admission. The minimal stateful fixture and positive/negative boundary tests
 were then committed as `7079b25` (`test(g01): bind JIT lookup to fixture commit`).
+The current naming and evidence-wording corrections preserve that prior red
+checkpoint; no additional red run is claimed for identifier or prose changes.
 
 ## Validation record
 
@@ -90,6 +93,9 @@ durability, prove runner ownership/current activity, provide idempotency, or
 authorize deletion, drain, worker launch or live evidence. Existing recovery
 behavior intentionally keeps the worker quarantined and admission paused.
 
-Rollback is limited to reverting `7079b25` and, if desired, the preceding red
-checkpoint `5694fd6`; no live resource or persistent production state was
-created.
+Rollback must restore the prior green baseline by reversing the complete
+correction, including red `5694fd6`, green `7079b25`, and the documentation and
+naming corrections in `0c97e5f` and `4198507` as applicable (or by applying one
+equivalent reverse patch). Reverting `7079b25` alone is not usable because it
+restores the known failing assertions from `5694fd6`. No live resource or
+persistent production state was created.

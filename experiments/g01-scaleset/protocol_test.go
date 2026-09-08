@@ -332,89 +332,89 @@ func TestSDKBusyRemovalSentinelAndRawErrorExposure(t *testing.T) {
 }
 
 type jitResponseLossFixture struct {
-	t               *testing.T
+	testContext     *testing.T
 	requested       int
 	mu              sync.Mutex
 	commitOnRequest bool
 	committed       map[string]scaleset.RunnerReference
 }
 
-func newJITResponseLossFixture(t *testing.T, commitOnRequest bool) (*jitResponseLossFixture, *scaleset.Client) {
-	t.Helper()
+func newJITResponseLossFixture(testContext *testing.T, commitOnRequest bool) (*jitResponseLossFixture, *scaleset.Client) {
+	testContext.Helper()
 	fixture := &jitResponseLossFixture{
-		t:               t,
+		testContext:     testContext,
 		commitOnRequest: commitOnRequest,
 		committed:       make(map[string]scaleset.RunnerReference),
 	}
-	_, client := newServer(t, fixture.handle)
+	_, client := newServer(testContext, fixture.handle)
 	return fixture, client
 }
 
-func (f *jitResponseLossFixture) observed(name string) (requested int, committed bool) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	_, committed = f.committed[name]
-	return f.requested, committed
+func (fixture *jitResponseLossFixture) observed(name string) (requested int, committed bool) {
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	_, committed = fixture.committed[name]
+	return fixture.requested, committed
 }
 
-func (f *jitResponseLossFixture) handle(w http.ResponseWriter, r *http.Request) {
+func (fixture *jitResponseLossFixture) handle(response http.ResponseWriter, request *http.Request) {
 	switch {
-	case strings.HasSuffix(r.URL.Path, "/generatejitconfig"):
-		f.mu.Lock()
-		f.requested++
-		f.mu.Unlock()
+	case strings.HasSuffix(request.URL.Path, "/generatejitconfig"):
+		fixture.mu.Lock()
+		fixture.requested++
+		fixture.mu.Unlock()
 		var setting scaleset.RunnerScaleSetJitRunnerSetting
-		if err := json.NewDecoder(r.Body).Decode(&setting); err != nil {
-			f.t.Errorf("JIT request decode failed: %v", err)
-			dropResponse(w)
+		if err := json.NewDecoder(request.Body).Decode(&setting); err != nil {
+			fixture.testContext.Errorf("JIT request decode failed: %v", err)
+			dropResponse(response)
 			return
 		}
-		f.mu.Lock()
-		if f.commitOnRequest {
-			f.committed[setting.Name] = scaleset.RunnerReference{ID: 11, Name: setting.Name, RunnerScaleSetID: 7}
+		fixture.mu.Lock()
+		if fixture.commitOnRequest {
+			fixture.committed[setting.Name] = scaleset.RunnerReference{ID: 11, Name: setting.Name, RunnerScaleSetID: 7}
 		}
-		f.mu.Unlock()
-		dropResponse(w)
-	case strings.HasSuffix(r.URL.Path, "/runnerscalesets/7"):
-		writeJSON(w, scaleset.RunnerScaleSet{ID: 7, Statistics: &scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: 1}})
-	case strings.HasSuffix(r.URL.Path, "/agents"):
-		name := r.URL.Query().Get("agentName")
+		fixture.mu.Unlock()
+		dropResponse(response)
+	case strings.HasSuffix(request.URL.Path, "/runnerscalesets/7"):
+		writeJSON(response, scaleset.RunnerScaleSet{ID: 7, Statistics: &scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: 1}})
+	case strings.HasSuffix(request.URL.Path, "/agents"):
+		name := request.URL.Query().Get("agentName")
 		if name != "owned-1" {
-			f.t.Error("unstable lookup identity")
+			fixture.testContext.Error("unstable lookup identity")
 			return
 		}
-		f.mu.Lock()
-		ref, ok := f.committed[name]
-		f.mu.Unlock()
+		fixture.mu.Lock()
+		ref, ok := fixture.committed[name]
+		fixture.mu.Unlock()
 		if !ok {
-			writeJSON(w, scaleset.RunnerReferenceList{Count: 0, RunnerReferences: []scaleset.RunnerReference{}})
+			writeJSON(response, scaleset.RunnerReferenceList{Count: 0, RunnerReferences: []scaleset.RunnerReference{}})
 			return
 		}
-		writeJSON(w, scaleset.RunnerReferenceList{Count: 1, RunnerReferences: []scaleset.RunnerReference{ref}})
+		writeJSON(response, scaleset.RunnerReferenceList{Count: 1, RunnerReferences: []scaleset.RunnerReference{ref}})
 	default:
-		w.WriteHeader(http.StatusNotFound)
+		response.WriteHeader(http.StatusNotFound)
 	}
 }
 
-func TestSDKJITLookupBeforeCreationDoesNotDiscoverIdentity(t *testing.T) {
-	fixture, client := newJITResponseLossFixture(t, false)
+func TestSDKJITLookupBeforeCreationDoesNotDiscoverIdentity(testContext *testing.T) {
+	fixture, client := newJITResponseLossFixture(testContext, false)
 	got, err := recoverState(context.Background(), client, recoveryState{Workers: map[string]string{"owned-1": "creating"}})
 	requested, committed := fixture.observed("owned-1")
 	if err != nil || requested != 0 || committed || got.References["owned-1"] != 0 || got.Workers["owned-1"] != "quarantined" || !got.AdmissionPaused {
-		t.Fatal("pre-create lookup fabricated a runner identity or changed recovery quarantine")
+		testContext.Fatal("pre-create lookup fabricated a runner identity or changed recovery quarantine")
 	}
 }
 
-func TestSDKJITResponseLossWithoutCommitDoesNotDiscoverIdentity(t *testing.T) {
-	fixture, client := newJITResponseLossFixture(t, false)
+func TestSDKJITResponseLossWithoutCommitDoesNotDiscoverIdentity(testContext *testing.T) {
+	fixture, client := newJITResponseLossFixture(testContext, false)
 	jit, err := client.GenerateJitRunnerConfig(context.Background(), &scaleset.RunnerScaleSetJitRunnerSetting{Name: "owned-1", WorkFolder: "_work"}, 7)
 	if err == nil || jit != nil {
-		t.Fatal("expected missing JIT response")
+		testContext.Fatal("expected missing JIT response")
 	}
 	got, err := recoverState(context.Background(), client, recoveryState{Workers: map[string]string{"owned-1": "creating"}})
 	requested, committed := fixture.observed("owned-1")
 	if err != nil || requested != 1 || committed || got.References["owned-1"] != 0 || got.Workers["owned-1"] != "quarantined" || !got.AdmissionPaused {
-		t.Fatal("non-committed response loss fabricated a runner identity or changed recovery quarantine")
+		testContext.Fatal("non-committed response loss fabricated a runner identity or changed recovery quarantine")
 	}
 }
 
