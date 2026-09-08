@@ -31,19 +31,29 @@ Individual commands are available when iterating:
 | `make fuzz-smoke` | Run each discovered fuzz target for a fixed one-second smoke window, or print an explicit `SKIPPED` result when no target exists. |
 | `make deps` | Require a clean `go mod tidy -diff`, verified module sums and a read-only dependency load. |
 | `make licenses` | Compare the exact runtime module/version/replacement graph with its inventory and require a top-level license file. |
-| `make experiments` | Require both established G01/G02 modules, run their default race/vet suites, then exercise the two explicitly reviewed G01 CLI packages with `g01_live,g01_worker` tags and the reviewed `g01_pair_fixture` livecanary collection/listener and terminal partitions with tagged vet. |
+| `make experiments` | Require both established G01/G02 modules, run their static-partitioned default race/vet suites, then exercise the two explicitly reviewed G01 CLI packages with `g01_live,g01_worker` tags and the reviewed `g01_pair_fixture` livecanary collection/listener and terminal partitions with tagged vet. |
 | `make vuln` | Run the exact `golang.org/x/vuln/cmd/govulncheck@v1.7.0` tool. |
 
 No hardware, live GitHub, Docker or daemon suite is part of this public check. Those profiles remain explicit future or maintainer-controlled runs; they are not silently converted into passing tests here. G04 introduces the first application behavior contracts and should add meaningful unit and fuzz targets before claiming those forms of coverage.
 
-The default untagged G01 race suite keeps its existing 45-second per-process
-deadline while using two sequential, static partitions. The first runs the exact
-`TestBaselineStatisticsPresenceAndEligibility` name through `./...`; the second
-runs an unfiltered `./...` with only that exact name skipped. Keeping package
-discovery in both commands means a same-named test in another package is run in
-the first partition rather than silently dropped by a global skip, while the
-unfiltered remainder still executes every ordinary test, Example Output and fuzz
-seed. G02 retains its single default race invocation.
+The default untagged G01 and G02 race suites keep their existing 45-second
+per-process deadline while using two sequential, static partitions. G01 first
+runs the exact `TestBaselineStatisticsPresenceAndEligibility` name through
+`./...`; G02 first runs the exact
+`TestPairedBrokerRealCadenceChildExceedsThirtySeconds` name through `./...`.
+Each second partition runs an unfiltered `./...` with only its exact name
+skipped. Keeping package discovery in both commands means a same-named test in
+another package is run in the named partition rather than silently dropped by a
+global skip, while each unfiltered remainder still executes every ordinary test,
+Example Output and fuzz seed. The G02 cadence test and its complement both use
+`-race -count=1 -timeout=45s`; no widened named-test timeout is part of the
+public contract.
+
+The tooling regression matrix generates positive and independent failing
+witnesses for each G02 partition boundary: the named heavy test, remainder,
+another package, a same-name test in another package, an Example Output and a
+fuzz seed. Each witness must execute exactly once, and each failing witness must
+propagate a nonzero offline-gate result.
 
 The tagged CLI tests use synthetic input/subprocess fixtures and static plan or
 refusal paths. The `g01_pair_fixture` livecanary checks use private synthetic

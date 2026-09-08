@@ -40,6 +40,11 @@ worker daemon-ID boundaries
 and bounded child authority
 ([r3955590276](https://github.com/1XP-AI/gh-runnerd/pull/62#discussion_r3955590276)).
 
+This bounded CI-contract follow-up starts at frozen PR head
+`1ebf0b1e50ac200a26b69d0352a61e5a622bbeeb` and owns only the offline gate
+script, its tooling regression tests, this CI guide, and this evidence record.
+It does not change the G01 or G02 runtime.
+
 ## TDD red evidence
 
 The current findings were independently reproduced before the fixes. The
@@ -65,7 +70,27 @@ ok: the test expected reopen rejection of the valid 21-line ledger
 
 The implementation then progressed through focused green tests and normal
 commits `6a35fe7`, `9df5d42`, `8c59523`, and `4aab247`; the current source head
-before this evidence update is `4aab247cb2bc0ec9820e341db84db6b0a4b1743d`.
+before the prior evidence update was `4aab247cb2bc0ec9820e341db84db6b0a4b1743d`;
+the frozen PR head for this follow-up is `1ebf0b1e50ac200a26b69d0352a61e5a622bbeeb`.
+
+The CI contract correction also had meaningful red evidence before the script
+fix. The prior G02 invocation was not the approved static split, and the new
+G02 witness matrix therefore rejected its wrapper log:
+
+```text
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=120s \
+  -run '^TestToolingDefaultG01PartitionsRun$' ./scripts
+FAIL: expected named G02 45-second invocation ran 0 times; wrapper log contained
+the 45-second unfiltered remainder and the 120-second named invocation
+
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=120s \
+  -run '^TestToolingDefaultG02PartitionsRun$' ./scripts
+FAIL: expected named G02 45-second invocation ran 0 times; wrapper log contained
+the 45-second unfiltered remainder and the 120-second named invocation
+```
+
+These failures exercise the CI command contract and generated coverage
+boundaries, rather than a missing runtime symbol or an unavailable fixture.
 
 ## Implemented boundaries
 
@@ -128,7 +153,8 @@ mint/effect after reopening the completed claim.
 `TestPairedBrokerRealCadenceChildExceedsThirtySeconds` builds the explicit
 `g01_live,g01_pair_fixture,g01_pair_real_cadence` offline artifact, selects the
 production wall clock (seven five-second cadence gaps), and runs the same
-TLS/Unix bridge. The measured checked-in result was:
+TLS/Unix bridge. The following 120-second result is retained as a historical
+measurement only; it is not approved CI proof or a public timeout allowance:
 
 ```text
 GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=120s \
@@ -140,6 +166,23 @@ PASS; package wall time 39.633s
 No fast clock is used by this regression. Its fixture/test tags are explicitly
 rejected by the production binary gate; the bridge's opener override is only a
 test seam for the offline endpoint and does not weaken the production path.
+
+The follow-up then ran both static G02 partitions with the exact anchored name,
+the unfiltered complement, race detection, count one, the pinned Go toolchain,
+and the unchanged 45-second per-process timeout:
+
+```text
+/usr/bin/time -p env GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s \
+  -run '^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$' ./...
+PASS; g02-auth package wall time 40.151s; process wall time 41.22s
+
+/usr/bin/time -p env GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s \
+  -skip '^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$' ./...
+PASS; g02-auth package wall time 40.471s; process wall time 41.50s
+```
+
+Both reproducible runs fit the existing 45-second per-process budget, so no
+timeout widening or coordinator approval was needed.
 
 ## Verification record
 
@@ -154,26 +197,41 @@ GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s \
 PASS; g01-live 5.320s; g01-worker 1.497s
 
 GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s \
+  -run '^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$' ./...
+PASS; g02-auth 40.151s; all G02 command packages had no matching tests
+
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s \
   -skip '^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$' ./...
-PASS; g02-auth 46.113s; all G02 command packages passed
+PASS; g02-auth 40.471s; all G02 command packages passed
 
 GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=120s \
   -run '^(TestBrokerRejectsCleanFixtureBinaryBeforeMint|TestBrokerAllowsCleanProductionBinaryArtifact|TestPairedWorkerPreparationReceiptFencesJournalMutation|TestBrokerLedgerCapacityDerivesFromFiniteSlotSchema)$' .
 PASS
 ```
 
-The G02 offline script now runs the ordinary suite with the exact real-cadence
-test excluded from its historical 45-second package budget, then runs only that
-named test with a 120-second budget. This preserves coverage and records the
-long test explicitly; it is not a blind rerun or a skipped security test.
+The G02 offline script now runs the exact real-cadence name first and then an
+unfiltered `./...` complement with that exact name skipped. Both invocations use
+`-race -count=1 -timeout=45s`; the generated positive and failure witness matrix
+proves each named/remainder boundary executes exactly once and propagates
+nonzero failures. The historical 120-second cadence measurement above remains
+timing evidence only and is not an approved CI proof.
+
+The focused tooling matrix passed after the script correction:
+
+```text
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=180s \
+  -run '^TestToolingDefaultG02PartitionsRun$' -v ./scripts
+PASS; TestToolingDefaultG02PartitionsRun 84.063s
+```
 
 The declared offline gate itself passed after these edits:
 
 ```text
-GOTOOLCHAIN=go1.26.8 bash scripts/check-offline-experiments.sh
-exit 0: both modules, command-tag tests, four G01 fixture partitions, vets,
-the bounded G02 suite, the named real-cadence regression, and CLI packages;
+/usr/bin/time -p env GOTOOLCHAIN=go1.26.8 bash scripts/check-offline-experiments.sh
+G02 named partition: g02-auth 40.454s
+G02 unfiltered complement: g02-auth 38.798s
 offline experiment checks passed: 2 module(s)
+exit 0; process wall time 348.80s
 ```
 
 Root validation also passed after updating the tooling-log assertion for the
@@ -181,15 +239,19 @@ two-command G02 split:
 
 ```text
 GOTOOLCHAIN=go1.26.8 go test -count=1 ./...
-PASS; scripts 84.373s
+PASS; scripts 167.125s
 GOTOOLCHAIN=go1.26.8 go test -race -count=1 ./...
-PASS; scripts 85.227s
+PASS; scripts 167.818s
 GOTOOLCHAIN=go1.26.8 go vet ./...
 PASS
 git diff --check
 PASS
 GOTOOLCHAIN=go1.26.8 bash scripts/gofmt.sh check
 PASS
+
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=120s \
+  -run '^TestToolingDefaultG01PartitionsRun$' -v ./scripts
+PASS; TestToolingDefaultG01PartitionsRun 27.749s
 ```
 
 All fixtures use disposable local files, synthetic nonsecret values, generated
