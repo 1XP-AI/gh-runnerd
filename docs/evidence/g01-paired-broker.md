@@ -133,8 +133,8 @@ TLS/Unix bridge. The measured checked-in result was:
 ```text
 GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=120s \
   -run '^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$' -v .
-real cadence bridge wall time: 36.153600625s
-PASS; package wall time 40.261s
+real cadence bridge wall time: 36.196312875s
+PASS; package wall time 39.633s
 ```
 
 No fast clock is used by this regression. Its fixture/test tags are explicitly
