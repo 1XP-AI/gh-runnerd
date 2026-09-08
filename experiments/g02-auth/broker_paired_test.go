@@ -132,6 +132,21 @@ func TestPairedApprovalRejectsInsufficientTerminalAuthority(t *testing.T) {
 	}
 }
 
+func TestPairedBrokerParentAuthorityStopsBeforeMintOrLaunch(t *testing.T) {
+	a, candidate, api, fixture, attempt := newBrokerFixture(t)
+	a.Mode, a.Phase = "paired-terminal", "paired-terminal"
+	launches := 0
+	plan := brokerTestPlan(t, &a, filepath.Dir(attempt), func(context.Context, []byte, string) error {
+		launches++
+		return nil
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	if _, err := brokerExecute(ctx, a, brokerInput{PEM: string(candidate.PEM)}, attempt, api, plan); err == nil || fixture.tokenCalls != 0 || len(fixture.calls) != 0 || launches != 0 {
+		t.Fatalf("insufficient parent authority reached effects: err=%v mints=%d calls=%d launches=%d", err, fixture.tokenCalls, len(fixture.calls), launches)
+	}
+}
+
 func TestPairedBrokerBindsWorkerBeforeWorkflowVerifiedHandoff(t *testing.T) {
 	a, candidate, api, fixture, attempt := newBrokerFixture(t)
 	a.Mode, a.Phase, a.AllowVerificationAuthority = "paired-terminal", "paired-terminal", true
