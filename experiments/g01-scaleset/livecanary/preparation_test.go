@@ -73,6 +73,101 @@ func TestPairedPreparationUsesDedicatedPhaseWithoutCleanupAuthority(t *testing.T
 	}
 }
 
+func TestPairedPreparationPreservesCanonicalControllerHistory(t *testing.T) {
+	parent := privateDir(t)
+	directory := admissionState(t, parent, "paired-history")
+	capRoot := testAdmissionDirectory(t, directory)
+	a := approval()
+	open := func(path string, a Approval) (*FileJournal, error) {
+		return openJournalAtAdmission(path, a, capRoot, func(f *os.File) error { return f.Sync() })
+	}
+	j, err := open(directory, a)
+	if err != nil {
+		t.Fatal("canonical controller journal")
+	}
+	for _, event := range []Event{
+		{Kind: "phase", Operation: "create"},
+		{Kind: "inventory", Digest: strings.Repeat("a", 64)},
+		{Kind: "intent", Operation: "create"},
+		{Kind: "result", Operation: "create", ID: 7},
+	} {
+		if err := j.Append(event); err != nil {
+			t.Fatalf("canonical prerequisite event %q: %v", event.Operation, err)
+		}
+	}
+	if err := j.Close(); err != nil {
+		t.Fatal("close canonical controller journal")
+	}
+	before, err := os.ReadFile(filepath.Join(directory, "journal.jsonl"))
+	if err != nil {
+		t.Fatal("read prerequisite journal")
+	}
+	receipt, err := preparePairedJournal(directory, a, open)
+	if err != nil || receipt.Phase != pairedPreparationPhase {
+		t.Fatalf("valid canonical controller history refused: receipt=%+v err=%v", receipt, err)
+	}
+	after, err := os.ReadFile(filepath.Join(directory, "journal.jsonl"))
+	if err != nil {
+		t.Fatal("read prepared journal")
+	}
+	if string(before) != string(after) {
+		t.Fatal("paired preparation changed prerequisite controller history")
+	}
+	reopened, err := open(directory, a)
+	if err != nil {
+		t.Fatal("reopen prepared controller journal")
+	}
+	defer reopened.Close()
+	if events := reopened.Events(); len(events) != 4 || events[1].Kind != "inventory" || events[3].Operation != "create" || events[3].ID != 7 {
+		t.Fatalf("paired preparation did not preserve canonical events: %+v", events)
+	}
+}
+
+func TestPairedPreparationRejectsFreshAndNonCanonicalHistory(t *testing.T) {
+	for _, kind := range []string{"fresh", "pending", "deleted", "previous-paired"} {
+		t.Run(kind, func(t *testing.T) {
+			parent := privateDir(t)
+			directory := admissionState(t, parent, "paired-"+kind)
+			capRoot := testAdmissionDirectory(t, directory)
+			a := approval()
+			open := func(path string, a Approval) (*FileJournal, error) {
+				return openJournalAtAdmission(path, a, capRoot, func(f *os.File) error { return f.Sync() })
+			}
+			j, err := open(directory, a)
+			if err != nil {
+				t.Fatal("fixture journal")
+			}
+			switch kind {
+			case "pending":
+				_ = j.Append(Event{Kind: "phase", Operation: "create"})
+				_ = j.Append(Event{Kind: "inventory", Digest: strings.Repeat("a", 64)})
+				_ = j.Append(Event{Kind: "intent", Operation: "create"})
+			case "deleted":
+				_ = j.Append(Event{Kind: "phase", Operation: "create"})
+				_ = j.Append(Event{Kind: "inventory", Digest: strings.Repeat("a", 64)})
+				_ = j.Append(Event{Kind: "intent", Operation: "create"})
+				_ = j.Append(Event{Kind: "result", Operation: "create", ID: 7})
+				_ = j.Append(Event{Kind: "intent", Operation: "delete"})
+				_ = j.Append(Event{Kind: "result", Operation: "delete"})
+			case "previous-paired":
+				// Baseline records are rejected by replayBaseline before preparation
+				// can issue a receipt, and must never be treated as controller setup.
+				_ = j.Append(Event{Kind: "phase", Operation: "create"})
+				_ = j.Append(Event{Kind: "inventory", Digest: strings.Repeat("a", 64)})
+				_ = j.Append(Event{Kind: "intent", Operation: "create"})
+				_ = j.Append(Event{Kind: "result", Operation: "create", ID: 7})
+				_ = j.Append(Event{Kind: "baseline", Baseline: &baselineRecord{Version: 1, Stage: "pair", Outcome: "intent", SetID: 7}})
+			}
+			if err := j.Close(); err != nil {
+				t.Fatal("close fixture journal")
+			}
+			if _, err := preparePairedJournal(directory, a, open); err == nil {
+				t.Fatal("non-canonical paired preparation state accepted")
+			}
+		})
+	}
+}
+
 func TestCanonicalPreparationRefusesInvalidJournalAndPhase(t *testing.T) {
 	for _, kind := range []string{"locked", "malformed", "oversized", "permission", "authority", "seen phase", "unknown", "deleted", "unapproved"} {
 		t.Run(kind, func(t *testing.T) {
