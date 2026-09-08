@@ -89,6 +89,49 @@ func TestPairedWorkerApprovalMismatchRefusesBeforeBinding(t *testing.T) {
 	}
 }
 
+func TestPairedWorkerDaemonIDMatchesCanonicalBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		daemon string
+		valid bool
+	}{
+		{name: "colon and 128 bytes", daemon: "a:" + strings.Repeat("d", 126), valid: true},
+		{name: "129 bytes", daemon: "a" + strings.Repeat("d", 128), valid: false},
+		{name: "invalid slash", daemon: "a/b", valid: false},
+		{name: "invalid leading punctuation", daemon: ":daemon", valid: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, c, controllerState, workerState, workerPath := pairedPlanInputs(t)
+			data, err := os.ReadFile(workerPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var worker pairedWorkerApproval
+			if err := decodeBrokerJSON(data, &worker, true); err != nil {
+				t.Fatal(err)
+			}
+			worker.DaemonID = tc.daemon
+			data, err = json.Marshal(worker)
+			if err != nil || os.WriteFile(workerPath, data, 0600) != nil {
+				t.Fatal("worker approval rewrite")
+			}
+			_, err = openBrokerWorkerPlan(workerPath, workerState, controllerState, a, c)
+			if (err == nil) != tc.valid {
+				t.Fatalf("daemon ID validity=%v want=%v: %v", err == nil, tc.valid, err)
+			}
+		})
+	}
+}
+
+func TestPairedApprovalRejectsInsufficientTerminalAuthority(t *testing.T) {
+	a := brokerApprovalFixture()
+	a.Mode, a.Phase = "paired-terminal", "paired-terminal"
+	a.ExpiresAt = time.Now().Add(90 * time.Second)
+	if err := a.validate(time.Now()); err == nil {
+		t.Fatal("paired approval accepted less than the bounded terminal completion budget")
+	}
+}
+
 func TestPairedBrokerBindsWorkerBeforeWorkflowVerifiedHandoff(t *testing.T) {
 	a, candidate, api, fixture, attempt := newBrokerFixture(t)
 	a.Mode, a.Phase, a.AllowVerificationAuthority = "paired-terminal", "paired-terminal", true

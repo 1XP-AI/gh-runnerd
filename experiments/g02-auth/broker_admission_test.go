@@ -105,6 +105,56 @@ func TestBrokerFinitePhasesAndUnknownRetention(t *testing.T) {
 		})
 	}
 }
+
+func TestBrokerPairedAdmissionAcceptsHistoricalControllerClaim(t *testing.T) {
+	a, c, api, f, root := newBrokerFixture(t)
+	parent := filepath.Dir(root)
+	a.Mode, a.Phase, a.AllowVerificationAuthority = "controller", "create", true
+	controllerPlan := brokerTestPlan(t, &a, parent, func(context.Context, []byte, string) error { return nil })
+	controllerPlan.controller.Phases = []string{"create", "before-ack", "after-ack", "before-acquire", "acquire-loss", "inspect", "cleanup"}
+	controllerPlan.controller.WorkflowRunID = 7
+	controllerPlan.raw, _ = json.Marshal(controllerPlan.controller)
+	a.ControllerApprovalSHA256 = brokerBytesDigest(controllerPlan.raw)
+	controllerPlan.approval = a
+	if _, err := brokerExecute(context.Background(), a, brokerInput{PEM: string(c.PEM), VerificationToken: "synthetic-private-workflow-token"}, root, api, controllerPlan); err != nil {
+		t.Fatalf("controller prerequisite claim: %v", err)
+	}
+
+	// The paired attempt reuses the same controller identity and durable ledger,
+	// as the real controller-create -> paired-terminal sequence does.
+	a.Mode, a.Phase = "paired-terminal", "paired-terminal"
+	pairedRoot := filepath.Join(parent, "paired-attempt")
+	pairedPlan := brokerTestPlan(t, &a, parent, func(context.Context, []byte, string) error { return nil })
+	pairedPlan.controller.Phases = append([]string(nil), controllerPlan.controller.Phases...)
+	pairedPlan.controller.WorkflowRunID = controllerPlan.controller.WorkflowRunID
+	pairedPlan.raw, _ = json.Marshal(pairedPlan.controller)
+	a.ControllerApprovalSHA256 = brokerBytesDigest(pairedPlan.raw)
+	pairedPlan.approval = a
+	workerState := filepath.Join(parent, "paired-worker-state")
+	if err := os.Mkdir(workerState, 0700); err != nil {
+		t.Fatal("worker state")
+	}
+	worker := pairedWorkerApproval{RunnerUpdatesDisabled: true, HarnessSHA: pairedPlan.controller.HarnessSHA, WorkflowSHA: pairedPlan.controller.WorkflowSHA, OwnerNonce: pairedPlan.controller.OwnerNonce, Controller: pairedPlan.controller.Controller, Endpoint: "/tmp/g01-paired-admission.sock", DaemonID: "fixture-daemon", ImageID: "sha256:" + strings.Repeat("d", 64), Image: pairedWorkerImage, ExpiresAt: pairedPlan.controller.ExpiresAt, Phases: []string{"create", "start", "inspect", "cleanup"}}
+	workerData, err := json.Marshal(worker)
+	if err != nil {
+		t.Fatal("worker approval")
+	}
+	workerPath := filepath.Join(parent, "paired-worker-approval.json")
+	if err := os.WriteFile(workerPath, workerData, 0600); err != nil {
+		t.Fatal("worker approval file")
+	}
+	pairedPlan.worker, err = openBrokerWorkerPlan(workerPath, workerState, pairedPlan.statePath, a, pairedPlan.controller)
+	if err != nil {
+		t.Fatalf("paired worker plan: %v", err)
+	}
+	defer pairedPlan.worker.close()
+	if _, err := brokerExecute(context.Background(), a, brokerInput{PEM: string(c.PEM), VerificationToken: "synthetic-private-workflow-token"}, pairedRoot, api, pairedPlan); err != nil {
+		t.Fatalf("paired attempt rejected historical controller claim: %v", err)
+	}
+	if f.tokenCalls != 2 {
+		t.Fatalf("historical controller claim blocked current paired issuance: mints=%d", f.tokenCalls)
+	}
+}
 func TestBrokerAdmissionFailureBeforeAPIAndResync(t *testing.T) {
 	for _, kind := range []string{"missing", "symlink", "sync", "existing-sync"} {
 		t.Run(kind, func(t *testing.T) {
