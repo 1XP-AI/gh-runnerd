@@ -36,6 +36,15 @@ Individual commands are available when iterating:
 
 No hardware, live GitHub, Docker or daemon suite is part of this public check. Those profiles remain explicit future or maintainer-controlled runs; they are not silently converted into passing tests here. G04 introduces the first application behavior contracts and should add meaningful unit and fuzz targets before claiming those forms of coverage.
 
+The default untagged G01 race suite keeps its existing 45-second per-process
+deadline while using two sequential, static partitions. The first runs the exact
+`TestBaselineStatisticsPresenceAndEligibility` name through `./...`; the second
+runs an unfiltered `./...` with only that exact name skipped. Keeping package
+discovery in both commands means a same-named test in another package is run in
+the first partition rather than silently dropped by a global skip, while the
+unfiltered remainder still executes every ordinary test, Example Output and fuzz
+seed. G02 retains its single default race invocation.
+
 The tagged CLI tests use synthetic input/subprocess fixtures and static plan or
 refusal paths. The `g01_pair_fixture` livecanary checks use private synthetic
 fixtures: one paired-collection run selects `^TestPaired` while excluding
