@@ -129,13 +129,35 @@ git -C "$G02_SOURCE_DIR" checkout --detach "$G02_SOURCE_SHA"
 
 Run this as Bash with the private values already set; `set -Eeuo pipefail`, the
 explicit `-buildvcs=true`, `GOENV=off`, and removal of `GOFLAGS` are required.
-Any failed command or mismatch aborts the gate. The artifact parent must be an
-existing directory owned by the current UID with mode `0700`; every ancestor
-must be a real directory owned by root or the current UID, with no group/other
-write permission unless its sticky bit prevents a cross-UID rename (for
-example, the system temporary directory). A foreign-owned ancestor is refused
-even when `0755`, `0711`, or `0700` has no group/other write bit, because its
-owner can rename descendants through owner-write access.
+Any failed command or mismatch aborts the gate.
+
+Source and artifact policies are distinct. The source clone must be a real
+directory owned by the current UID, with no group/other write bit; `0700` is
+not required because a Git checkout is an identity boundary, not a private
+artifact store. Every source ancestor must be a real directory owned by root
+or the current UID, with no group/other write permission unless its sticky bit
+prevents a cross-UID rename. A foreign-owned source directory or ancestor is
+refused even when `0755`, `0711`, or `0700` has no group/other write bit,
+because its owner can replace the checkout after the SHA/clean checks and
+before `go build` or offline `go test`/`go run`. The gate canonicalizes the
+source path, retains that physical path, and rechecks owner, ancestor chain,
+detached HEAD, approved SHA, and cleanliness immediately before any build or
+offline execution.
+
+The artifact parent must be an existing directory owned by the current UID
+with mode `0700`; every artifact ancestor uses the same root-or-current-UID
+replaceability allowlist as the source chain. A foreign-owned artifact
+ancestor is refused even when `0755`, `0711`, or `0700` has no group/other
+write bit, because its owner can rename descendants through owner-write
+access.
+
+Darwin system tools used by the gate are pinned to absolute `/usr/bin` and
+`/bin` paths and refused when foreign-owned or group/other-writable. `go` is
+resolved once from `PATH` to an absolute path and then subjected to the same
+executable owner/mode check; a relative or foreign-owned `go` is refused.
+Mode masks use `8#` constants so macOS `/bin/bash` 3.2 does not treat
+leading-zero literals as decimal.
+
 Each signing-fact file is an independently recorded, singly-linked regular file
 owned by the current UID with mode `0600`; it contains the sorted, non-path
 lines emitted by `codesign -d --verbose=4` for that exact artifact
@@ -156,7 +178,10 @@ set -Eeuo pipefail
 : "${G02_PROBE_SIGNING_RECORD:?set the private probe signing-facts file}"
 
 die() { printf 'G02 provenance refusal: %s\n' "$1" >&2; exit 1; }
-G02_CURRENT_UID="$(id -u)" || die 'could not determine the current UID'
+G02_ID=/usr/bin/id
+G02_STAT=/usr/bin/stat
+G02_DIRNAME=/usr/bin/dirname
+G02_CURRENT_UID="$("$G02_ID" -u)" || die 'could not determine the current UID'
 if ! [[ "$G02_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
   die 'source SHA is not exactly 40 lowercase hexadecimal characters'
 fi
@@ -167,7 +192,78 @@ if ! [[ "$G02_SOURCE_DIR" = /* && "$G02_PRIVATE_PARENT" = /* && \
         "$G02_ENROLL_SIGNING_RECORD" = /* && "$G02_PROBE_SIGNING_RECORD" = /* ]]; then
   die 'source, artifact, and signing-record paths must be absolute'
 fi
-if ! [[ -d "$G02_SOURCE_DIR/.git" && ! -L "$G02_SOURCE_DIR/.git" ]]; then
+
+check_safe_path_chain() {
+  local path="$1" kind="$2" line owner mode
+  while :; do
+    [[ -d "$path" && ! -L "$path" ]] || die "unsafe ${kind} component: $path"
+    line="$("$G02_STAT" -f '%u %A' "$path")" || die "could not inspect ${kind} component: $path"
+    read -r owner mode <<<"$line"
+    if [[ "$owner" != 0 && "$owner" != "$G02_CURRENT_UID" ]]; then
+      die "${kind} chain permits cross-UID rename: $path"
+    fi
+    if (( (8#$mode & 8#22) != 0 )); then
+      if (( (8#$mode & 8#1000) == 0 )); then
+        die "${kind} chain permits cross-UID rename: $path"
+      fi
+    fi
+    [[ "$path" == / ]] && break
+    path="$("$G02_DIRNAME" "$path")"
+  done
+}
+
+check_safe_parent_chain() {
+  check_safe_path_chain "$1" "artifact parent"
+}
+
+check_safe_source_chain() {
+  check_safe_path_chain "$1" "source"
+}
+
+require_trusted_exec() {
+  local path="$1" label="$2" line owner mode
+  [[ "$path" = /* && -f "$path" ]] || die "$label is missing or not absolute: $path"
+  line="$("$G02_STAT" -f '%u %A' "$path")" || die "could not inspect $label: $path"
+  read -r owner mode <<<"$line"
+  if [[ "$owner" != 0 && "$owner" != "$G02_CURRENT_UID" ]]; then
+    die "$label is foreign-owned: $path"
+  fi
+  if (( (8#$mode & 8#22) != 0 )); then
+    die "$label is group/other-writable: $path"
+  fi
+}
+
+require_owner_nonce() {
+  : "${OWNER_NONCE:?set the approved nonsecret nonce}"
+  if ! [[ "$OWNER_NONCE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$ ]]; then
+    die 'OWNER_NONCE must be one path component of 1-63 characters matching [A-Za-z0-9][A-Za-z0-9._-]*'
+  fi
+  G02_JOURNAL_DIR="$G02_PRIVATE_PARENT/g02-attempt-$OWNER_NONCE"
+  [[ "$("$G02_DIRNAME" "$G02_JOURNAL_DIR")" == "$G02_PRIVATE_PARENT" ]] \
+    || die 'journal path is not a direct child of the private parent'
+}
+
+G02_GIT=/usr/bin/git
+G02_ENV=/usr/bin/env
+G02_AWK=/usr/bin/awk
+G02_SHASUM=/usr/bin/shasum
+G02_CODESIGN=/usr/bin/codesign
+G02_CHMOD=/bin/chmod
+require_trusted_exec "$G02_ID" id
+require_trusted_exec "$G02_STAT" stat
+require_trusted_exec "$G02_DIRNAME" dirname
+require_trusted_exec "$G02_GIT" git
+require_trusted_exec "$G02_ENV" env
+require_trusted_exec "$G02_AWK" awk
+require_trusted_exec "$G02_SHASUM" shasum
+require_trusted_exec "$G02_CODESIGN" codesign
+require_trusted_exec "$G02_CHMOD" chmod
+G02_GO="$(type -P go)" || die 'go is not on PATH'
+[[ "$G02_GO" = /* ]] || die 'go is not an absolute executable'
+require_trusted_exec "$G02_GO" go
+
+if ! [[ -d "$G02_SOURCE_DIR" && ! -L "$G02_SOURCE_DIR" && \
+        -d "$G02_SOURCE_DIR/.git" && ! -L "$G02_SOURCE_DIR/.git" ]]; then
   die 'source must be a standalone clone with a real .git directory'
 fi
 if ! [[ -d "$G02_PRIVATE_PARENT" && ! -L "$G02_PRIVATE_PARENT" ]]; then
@@ -175,56 +271,80 @@ if ! [[ -d "$G02_PRIVATE_PARENT" && ! -L "$G02_PRIVATE_PARENT" ]]; then
 fi
 source_root="$(cd "$G02_SOURCE_DIR" && pwd -P)"
 artifact_root="$(cd "$G02_PRIVATE_PARENT" && pwd -P)"
-parent_stat="$(stat -f '%u %A' "$artifact_root")" || die 'could not inspect artifact parent'
+parent_stat="$("$G02_STAT" -f '%u %A' "$artifact_root")" || die 'could not inspect artifact parent'
 read -r parent_uid parent_mode <<<"$parent_stat"
 [[ "$parent_uid" == "$G02_CURRENT_UID" && "$parent_mode" == 700 ]] \
   || die 'artifact parent must be owned by the current UID with mode 0700'
-
-check_safe_parent_chain() {
-  local path="$1" line owner mode
-  while :; do
-    [[ -d "$path" && ! -L "$path" ]] || die "unsafe artifact parent component: $path"
-    line="$(stat -f '%u %A' "$path")" || die "could not inspect artifact parent component: $path"
-    read -r owner mode <<<"$line"
-    if [[ "$owner" != 0 && "$owner" != "$G02_CURRENT_UID" ]]; then
-      die "artifact parent chain permits cross-UID rename: $path"
-    fi
-    if (( (8#$mode & 0022) != 0 )); then
-      if (( (8#$mode & 01000) == 0 )); then
-        die "artifact parent chain permits cross-UID rename: $path"
-      fi
-    fi
-    [[ "$path" == / ]] && break
-    path="$(dirname "$path")"
-  done
-}
-
 check_safe_parent_chain "$artifact_root"
+
+source_stat="$("$G02_STAT" -f '%u %A' "$source_root")" || die 'could not inspect source'
+read -r source_uid source_mode <<<"$source_stat"
+[[ "$source_uid" == "$G02_CURRENT_UID" ]] || die 'source must be owned by the current UID'
+if (( (8#$source_mode & 8#22) != 0 )); then
+  die 'source directory is group/other-writable'
+fi
+check_safe_source_chain "$source_root"
 if [[ "$source_root" == "$artifact_root" || "$source_root" == "$artifact_root/"* || "$artifact_root" == "$source_root/"* ]]; then
   die 'source clone and artifact directory must not overlap'
 fi
-# Use the checked physical path for every generated artifact and later
-# invocation; do not carry a user-supplied symlink alias forward.
+# Use the checked physical paths for every later git, build, and invocation;
+# do not carry a user-supplied symlink alias forward.
 G02_PRIVATE_PARENT="$artifact_root"
-if git -C "$G02_SOURCE_DIR" symbolic-ref --quiet HEAD >/dev/null 2>&1; then
-  die 'source must be detached at the approved commit'
-fi
-if [[ "$(git -C "$G02_SOURCE_DIR" rev-parse --verify HEAD^{commit})" != "$G02_SOURCE_SHA" ]]; then
-  die 'source HEAD does not equal the approved full SHA'
-fi
-if [[ -n "$(git -C "$G02_SOURCE_DIR" status --porcelain=v1 --untracked-files=all --ignored)" ]]; then
-  die 'source has tracked, untracked, or ignored changes'
-fi
+G02_SOURCE_DIR="$source_root"
+
+recheck_source() {
+  local live_uid line source_uid source_mode
+  live_uid="$("$G02_ID" -u)" || die 'could not recheck the current UID'
+  [[ "$live_uid" == "$G02_CURRENT_UID" ]] || die 'current UID changed during the gate'
+  [[ -d "$G02_SOURCE_DIR" && ! -L "$G02_SOURCE_DIR" && \
+     -d "$G02_SOURCE_DIR/.git" && ! -L "$G02_SOURCE_DIR/.git" ]] \
+    || die 'source must remain a standalone clone with a real .git directory'
+  line="$("$G02_STAT" -f '%u %A' "$G02_SOURCE_DIR")" || die 'could not recheck source'
+  read -r source_uid source_mode <<<"$line"
+  [[ "$source_uid" == "$G02_CURRENT_UID" ]] || die 'source must be owned by the current UID'
+  if (( (8#$source_mode & 8#22) != 0 )); then
+    die 'source directory is group/other-writable'
+  fi
+  check_safe_source_chain "$G02_SOURCE_DIR"
+  if "$G02_GIT" -C "$G02_SOURCE_DIR" symbolic-ref --quiet HEAD >/dev/null 2>&1; then
+    die 'source must be detached at the approved commit'
+  fi
+  if [[ "$("$G02_GIT" -C "$G02_SOURCE_DIR" rev-parse --verify HEAD^{commit})" != "$G02_SOURCE_SHA" ]]; then
+    die 'source HEAD does not equal the approved full SHA'
+  fi
+  if [[ -n "$("$G02_GIT" -C "$G02_SOURCE_DIR" status --porcelain=v1 --untracked-files=all --ignored)" ]]; then
+    die 'source has tracked, untracked, or ignored changes'
+  fi
+}
+
+require_g01_plan_source() {
+  : "${G01_HARNESS_SHA:?set the approved full 40-hex G01 harness SHA}"
+  : "${G01_PRIVATE_BINARY:?set the private G01 plan binary path}"
+  if ! [[ "$G01_HARNESS_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+    die 'G01 harness SHA is not exactly 40 lowercase hexadecimal characters'
+  fi
+  [[ "$G01_PRIVATE_BINARY" = /* ]] || die 'G01 plan binary path must be absolute'
+  [[ "$("$G02_DIRNAME" "$G01_PRIVATE_BINARY")" == "$G02_PRIVATE_PARENT" ]] \
+    || die 'G01 plan binary must be a direct child of the private artifact parent'
+  [[ ! -e "$G01_PRIVATE_BINARY" && ! -L "$G01_PRIVATE_BINARY" ]] \
+    || die 'G01 plan binary path already exists; use a fresh private path'
+  recheck_source
+  if [[ "$("$G02_GIT" -C "$G02_SOURCE_DIR" rev-parse --verify HEAD^{commit})" != "$G01_HARNESS_SHA" ]]; then
+    die 'G01 plan source is not the approved G01 harness SHA'
+  fi
+}
+
+recheck_source
 
 signing_facts_from_text() {
-  awk -F= '$1 == "Identifier" || $1 == "Authority" || $1 == "Signature" || $1 == "TeamIdentifier" { print }' \
+  "$G02_AWK" -F= '$1 == "Identifier" || $1 == "Authority" || $1 == "Signature" || $1 == "TeamIdentifier" { print }' \
     | LC_ALL=C sort
 }
 
 read_signing_record() {
   local record="$1" output_name="$2" line record_uid record_mode record_links raw normalized
   [[ -f "$record" && ! -L "$record" ]] || die "signing-facts record is not a regular file: $record"
-  line="$(stat -f '%u %A %l' "$record")" || die "could not inspect signing-facts record: $record"
+  line="$("$G02_STAT" -f '%u %A %l' "$record")" || die "could not inspect signing-facts record: $record"
   read -r record_uid record_mode record_links <<<"$line"
   [[ "$record_uid" == "$G02_CURRENT_UID" && "$record_mode" == 600 && "$record_links" == 1 ]] \
     || die "signing-facts record is not private and singly linked: $record"
@@ -243,20 +363,22 @@ G02_PROBE_BINARY="$G02_PRIVATE_PARENT/g02-keychain-probe"
 [[ ! -e "$G02_ENROLL_BINARY" && ! -L "$G02_ENROLL_BINARY" && ! -e "$G02_PROBE_BINARY" && ! -L "$G02_PROBE_BINARY" ]] \
   || die 'artifact path already exists; use a fresh private path'
 
+recheck_source
 (
+recheck_source
 cd "$G02_SOURCE_DIR/experiments/g02-auth"
-env -u GOFLAGS GOENV=off GOTOOLCHAIN=go1.26.8 GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 \
-  go build -buildvcs=true -trimpath -o "$G02_ENROLL_BINARY" ./cmd/g02-enroll
-env -u GOFLAGS GOENV=off GOTOOLCHAIN=go1.26.8 GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 \
-  go build -buildvcs=true -trimpath -tags=g02runtime -o "$G02_PROBE_BINARY" ./cmd/g02-keychain-probe
-chmod 0500 "$G02_ENROLL_BINARY" "$G02_PROBE_BINARY"
+"$G02_ENV" -u GOFLAGS GOENV=off GOTOOLCHAIN=go1.26.8 GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 \
+  "$G02_GO" build -buildvcs=true -trimpath -o "$G02_ENROLL_BINARY" ./cmd/g02-enroll
+"$G02_ENV" -u GOFLAGS GOENV=off GOTOOLCHAIN=go1.26.8 GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 \
+  "$G02_GO" build -buildvcs=true -trimpath -tags=g02runtime -o "$G02_PROBE_BINARY" ./cmd/g02-keychain-probe
+"$G02_CHMOD" 0500 "$G02_ENROLL_BINARY" "$G02_PROBE_BINARY"
 )
 
 check_buildinfo() {
-  local binary="$1" info
-  info="$(env -u GOFLAGS GOENV=off GOTOOLCHAIN=go1.26.8 go version -m "$binary")" \
+  local binary="$1" want_sha="${2:-$G02_SOURCE_SHA}" info
+  info="$("$G02_ENV" -u GOFLAGS GOENV=off GOTOOLCHAIN=go1.26.8 "$G02_GO" version -m "$binary")" \
     || die "could not inspect build metadata: $binary"
-  awk -v want="$G02_SOURCE_SHA" '
+  "$G02_AWK" -v want="$want_sha" '
     $1 == "build" && $2 ~ /^vcs\.revision=/ { revisions++; revision = substr($2, index($2, "=") + 1) }
     $1 == "build" && $2 ~ /^vcs\.modified=/ { modifieds++; modified = substr($2, index($2, "=") + 1) }
     END { exit !(revisions == 1 && modifieds == 1 && revision == want && modified == "false") }
@@ -265,26 +387,26 @@ check_buildinfo() {
 
 check_artifact() {
   local binary="$1" expected_digest="$2" expected_signing="$3" line binary_uid binary_mode binary_links live_uid
-  live_uid="$(id -u)" || die 'could not recheck the current UID'
+  live_uid="$("$G02_ID" -u)" || die 'could not recheck the current UID'
   [[ "$live_uid" == "$G02_CURRENT_UID" ]] || die 'current UID changed during the gate'
   check_safe_parent_chain "$artifact_root"
-  parent_stat="$(stat -f '%u %A' "$artifact_root")" || die 'could not recheck artifact parent'
+  parent_stat="$("$G02_STAT" -f '%u %A' "$artifact_root")" || die 'could not recheck artifact parent'
   read -r parent_uid parent_mode <<<"$parent_stat"
   [[ "$parent_uid" == "$G02_CURRENT_UID" && "$parent_mode" == 700 ]] \
     || die 'artifact parent changed from current-UID mode 0700'
   [[ -f "$binary" && ! -L "$binary" ]] || die "artifact is not a regular file: $binary"
-  line="$(stat -f '%u %A %l' "$binary")" || die "could not inspect artifact: $binary"
+  line="$("$G02_STAT" -f '%u %A %l' "$binary")" || die "could not inspect artifact: $binary"
   read -r binary_uid binary_mode binary_links <<<"$line"
   [[ "$binary_uid" == "$G02_CURRENT_UID" && "$binary_mode" == 500 && "$binary_links" == 1 ]] \
     || die "artifact is not current-UID-owned, mode 0500, and singly linked: $binary"
   local actual_digest
-  actual_digest="$(shasum -a 256 < "$binary" | awk 'NF >= 1 { count++; digest = $1 } END { if (count != 1) exit 1; print digest }')" \
+  actual_digest="$("$G02_SHASUM" -a 256 < "$binary" | "$G02_AWK" 'NF >= 1 { count++; digest = $1 } END { if (count != 1) exit 1; print digest }')" \
     || die "could not hash $binary"
   [[ "$actual_digest" == "$expected_digest" ]] || die "artifact digest mismatch: $binary"
-  codesign --verify --strict --verbose=2 "$binary" >/dev/null 2>&1 \
+  "$G02_CODESIGN" --verify --strict --verbose=2 "$binary" >/dev/null 2>&1 \
     || die "codesign verification failed: $binary"
   local dump actual_signing
-  dump="$(codesign -d --verbose=4 "$binary" 2>&1)" \
+  dump="$("$G02_CODESIGN" -d --verbose=4 "$binary" 2>&1)" \
     || die "could not inspect signing identity: $binary"
   actual_signing="$(printf '%s\n' "$dump" | signing_facts_from_text)"
   [[ "$actual_signing" == "$expected_signing" ]] \
@@ -306,18 +428,21 @@ printf '%s\n' 'G02 provenance gate passed; binary execution remains separately a
 ```
 
 The two binaries are now referred to by their private absolute paths, never by
-a SHA-bearing filename. The gate writes no build-info, codesign, or observed
-signing-fact output files; inspect or retain those values only in the private
-approval record. Do not execute either path if any record is absent, different,
-stale, aliased, hard-linked, or symlinked; rebuild and obtain a fresh
-independent approval. Keep this Bash process alive for every separately
-authorized invocation and call `run_verified` immediately before it; the
-helper rechecks the current UID, private parent, safe parent chain, artifact
-owner/mode/link count, digest, and signing identity before starting the binary.
-This is a trusted-UID boundary and provides no hostile same-UID guarantee. The
-preflight intentionally refuses the current linked-worktree layout because its
-`.git` file can produce missing VCS metadata even when `-buildvcs=true` is
-requested.
+a SHA-bearing filename. `G02_SOURCE_DIR` is the checked physical clone path.
+The gate writes no build-info, codesign, or observed signing-fact output files;
+inspect or retain those values only in the private approval record. Do not
+execute either path if any record is absent, different, stale, aliased,
+hard-linked, or symlinked; rebuild and obtain a fresh independent approval.
+Keep this Bash process alive for every separately authorized invocation and
+call `recheck_source` immediately before any later build or offline
+`go test`/`go vet`/`go run`, and `run_verified` immediately before a binary
+start; `run_verified` rechecks the current UID, private parent, safe parent
+chain, artifact owner/mode/link count, digest, and signing identity.
+This is a trusted-UID boundary and provides no hostile same-UID guarantee:
+same-UID code can still mutate the source tree, `PATH` entries, or artifact
+paths after a check. The preflight intentionally refuses the current
+linked-worktree layout because its `.git` file can produce missing VCS
+metadata even when `-buildvcs=true` is requested.
 
 Read-only host inventory:
 
@@ -331,13 +456,18 @@ docker --version
 command -v limactl || true
 ```
 
-Offline G02 checks, with no GitHub access:
+Offline G02 checks, with no GitHub access. Keep the Bash process that passed
+the gate above; recheck the canonical source immediately, and run the module
+commands in a subshell so the caller directory is unchanged:
 
 ```sh
-cd experiments/g02-auth
-GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s ./...
-GOTOOLCHAIN=go1.26.8 go vet ./...
-GOTOOLCHAIN=go1.26.8 go run ./cmd/g02-synthetic
+(
+recheck_source
+cd "$G02_SOURCE_DIR/experiments/g02-auth"
+GOTOOLCHAIN=go1.26.8 "$G02_GO" test -race -count=1 -timeout=45s ./...
+GOTOOLCHAIN=go1.26.8 "$G02_GO" vet ./...
+GOTOOLCHAIN=go1.26.8 "$G02_GO" run ./cmd/g02-synthetic
+)
 ```
 
 The synthetic macOS probe is the existing, independently reviewed
@@ -360,13 +490,14 @@ credential input is never placed in the command line:
 ```sh
 # Keep the Bash process that passed the gate above; run only one separately
 # authorized form, with the immediate `run_verified` recheck.
+require_owner_nonce
 
 # Only after the Manifest-specific approval; submit the remote form once.
 run_verified "$G02_ENROLL_BINARY" "$G02_ENROLL_SHA256" "$G02_ENROLL_SIGNING_FACTS" \
   manifest --live-github \
   --owner "$APP_OWNER_ALIAS" --app-name "$DISPOSABLE_APP_ALIAS" \
   --org "$ORG_A_ALIAS:$ORG_A_ID" --org "$ORG_B_ALIAS:$ORG_B_ID" \
-  --journal-dir "$G02_PRIVATE_PARENT/g02-attempt-$OWNER_NONCE"
+  --journal-dir "$G02_JOURNAL_DIR"
 
 # Only for the same-App manual fallback, after owner supplies protected input.
 run_verified "$G02_ENROLL_BINARY" "$G02_ENROLL_SHA256" "$G02_ENROLL_SIGNING_FACTS" \
@@ -374,7 +505,7 @@ run_verified "$G02_ENROLL_BINARY" "$G02_ENROLL_SHA256" "$G02_ENROLL_SIGNING_FACT
   --owner "$APP_OWNER_ALIAS" --app-name "$DISPOSABLE_APP_ALIAS" --app-id "$APP_ID" \
   --org "$ORG_A_ALIAS:$ORG_A_ID:$INSTALL_A_ID" \
   --org "$ORG_B_ALIAS:$ORG_B_ID:$INSTALL_B_ID" \
-  --journal-dir "$G02_PRIVATE_PARENT/g02-attempt-$OWNER_NONCE" < "$G02_PRIVATE_PEM"
+  --journal-dir "$G02_JOURNAL_DIR" < "$G02_PRIVATE_PEM"
 ```
 
 The forms above are not an installable product flow: they do not persist a
@@ -387,12 +518,20 @@ relaxation.
 The G01 controller has a safe plan-only command. Live execution remains
 separately gated by the reviewed controller broker and the [G01 driver
 procedure](g01-live-driver.md); this packet does not provide a credential
-invocation:
+invocation. Keep the Bash process that passed the gate above. The G01 plan
+builds only when the already-validated detached source equals
+`G01_HARNESS_SHA`; a different G01 revision needs a separately reviewed
+detached clone that has passed the same source-chain gate.
 
 ```sh
-cd experiments/g01-scaleset
-CGO_ENABLED=1 GOTOOLCHAIN=go1.26.8 go build -buildvcs=true -trimpath -tags=g01_live -o "$G01_PRIVATE_BINARY" ./cmd/g01-live
+(
+require_g01_plan_source
+cd "$G02_SOURCE_DIR/experiments/g01-scaleset"
+"$G02_ENV" -u GOFLAGS GOENV=off GOTOOLCHAIN=go1.26.8 CGO_ENABLED=1 \
+  "$G02_GO" build -buildvcs=true -trimpath -tags=g01_live -o "$G01_PRIVATE_BINARY" ./cmd/g01-live
+check_buildinfo "$G01_PRIVATE_BINARY" "$G01_HARNESS_SHA"
 "$G01_PRIVATE_BINARY" --plan
+)
 ```
 
 The inactive [G01 workflow template](../../experiments/g01-canary-assets/canary.yml.template)
@@ -586,6 +725,81 @@ clean-check, stdin hash, signing-record, artifact alias, and immediate
 This remains a trusted-UID boundary: the owner allowlist addresses foreign-UID
 pathname replacement only; same-UID code can still mutate paths after a check,
 so same-UID workdirs are not hostile-code isolation.
+
+### PR59 source-path and related shell-gate correction
+
+Exact-head Codex P1
+[r3956402913](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3956402913)
+was reproduced on frozen `974999b5b0fce5e69867d166e57db21b7cac30ea` with a
+synthetic `stat`/`git` stub: detached approved SHA plus a clean status accepted
+a foreign-owned source (`rc=0`) because owner/ancestor validation applied only
+to `artifact_root`, and `G02_SOURCE_DIR` was not rewritten to the physical
+path. A prospective source-chain check on the same foreign `0755` tuple
+returned `rc=1`. Staleness of the other twelve wrapper records is not
+resolution; each was re-read via `all`/`detail-all` and either re-fixed here
+or recorded with evidence.
+
+The wrapper-reported set of 13 records and this pass:
+
+| Finding | Disposition |
+|---|---|
+| [P1 `r3956402913`](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3956402913) | Fixed: canonical source directory and every ancestor are validated before git identity, builds, and offline `go test`/`go vet`/`go run`; `G02_SOURCE_DIR` is retained as the physical path and `recheck_source` rechecks owner, chain, detached HEAD, approved SHA, and cleanliness immediately before those uses. |
+| [P1 `r3954505806`](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3954505806) | Still addressed: detached full SHA, clean status, `vcs.revision`, `vcs.modified=false`, digest, and signing identity remain before execution. |
+| [P1 `r3954677724`](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3954677724) | Still addressed: artifact parent remains current-UID mode `0700` and is rechecked in `check_artifact`. |
+| [P1 `r3955817035`](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3955817035) | Still addressed: sticky ancestors require root or current UID. |
+| [P1 `r3956164334`](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3956164334) | Still addressed: every artifact ancestor uses the root/current-UID replaceability allowlist. |
+| [P2 `r3954677733`](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3954677733) | Still addressed: hashing reads the binary through stdin. |
+| [P2 `r3954677731`](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3954677731) | Still addressed: expected signing facts stay in memory; symlink/hard-link aliases are refused. |
+| [P2 `r3955817042`](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3955817042) | Still addressed: G02 builds remain in a subshell. |
+| [P1 `r3956164372`](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3956164372) | Fixed: Darwin system tools are pinned to absolute `/usr/bin` and `/bin` paths and owner-checked; `go` is resolved once to an absolute path and owner-checked. A full `PATH` ancestor walk was reproduced and rejected: it false-refuses macOS system prefixes, so it is not used. |
+| [P2 `r3956164354`](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3956164354) | Fixed: offline checks run in a subshell. |
+| [P1 `r3956164344`](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3956164344) | Fixed: offline checks call `recheck_source` and `cd` the validated `$G02_SOURCE_DIR/experiments/g02-auth`. |
+| [P2 `r3956164383`](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3956164383) | Fixed: `require_owner_nonce` allows one `[A-Za-z0-9][A-Za-z0-9._-]{0,62}` component and requires the journal path to be a direct child of the private parent. |
+| [P1 `r3956164362`](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3956164362) | Fixed: `require_g01_plan_source` rechecks the validated source, requires `HEAD == G01_HARNESS_SHA`, builds under the private parent, and runs `check_buildinfo` against `G01_HARNESS_SHA` before `--plan`. |
+
+Source versus artifact policy is distinct. The source clone must be
+current-UID owned with no group/other write; mode `0700` is not required. The
+artifact parent remains current-UID mode `0700`. Both trees share the same
+root-or-current-UID ancestor replaceability allowlist, including the sticky
+exception. Mode masks use `8#22` and `8#1000` because macOS `/bin/bash` 3.2
+does not treat leading-zero literals as octal; a `0755` directory must not be
+classified as group/other-writable.
+
+Red before the source-chain edit, using the frozen prefix and synthetic
+foreign UID `424242` mode `0755` with stubbed detached/clean git: current
+source-validation `rc=0`. After the edit, the extracted `check_safe_source_chain`
+matrix was:
+
+```text
+source-foreign-0755,0711,0700,1777 rc=1
+source-root/current 0755,0711,0700 rc=0
+source-root/current 0775,0777 rc=1
+source-root/current 1777 rc=0
+source-malformed-owner rc=1
+source-symlink-alias rc=1
+source-real-current rc=0
+source-path-with-spaces rc=0
+artifact-foreign-0755 rc=1
+artifact-current-0700 rc=0
+artifact-parent-0700-retained
+```
+
+Related helpers: `OWNER_NONCE` values `../escaped`, `foo/bar`,
+`../../../outside`, empty, and `has space` each returned `rc=1`; `canary1`
+returned `rc=0` as a direct child of the private parent. `require_trusted_exec`
+accepted `/usr/bin/stat` and `/usr/bin/git` (`rc=0`) and refused a missing
+path, a relative `./go`, and a synthetic foreign-owned executable (`rc=1`).
+Offline/G01-shaped subshells returned success `rc=0` and injected failure
+`rc=17` without changing caller `PWD`. `/bin/bash -n` of the extracted gate
+passed. Same-UID workdirs, `PATH` entries, and source trees remain
+non-isolation.
+
+No live App, key, Keychain, signing-state, account, `chown`, launchd, runner,
+Docker, Lima, service, or workflow operation was performed. Commands in this
+packet were not executed as live authorization. Remaining gaps: hosted CI and
+exact-head Codex review of the new SHA, independent Luna review, and the
+original G02 live evidence. Rollback is to restore this file from
+`974999b5b0fce5e69867d166e57db21b7cac30ea`.
 
 Factual sources used without adding private identifiers:
 
