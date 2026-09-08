@@ -133,7 +133,11 @@ func RunPairedTerminalForFixture(ctx context.Context, files PairedTerminalFiles,
 	if !filepath.IsAbs(controllerAdmissionDirectory) || filepath.Clean(controllerAdmissionDirectory) != controllerAdmissionDirectory {
 		return ErrApproval
 	}
-	workerAdmissionDirectory := filepath.Join(filepath.Dir(files.WorkerStateDirectory), "worker-admission")
+	workerStateReal, err := filepath.EvalSymlinks(files.WorkerStateDirectory)
+	if err != nil {
+		return ErrJournal
+	}
+	workerAdmissionDirectory := filepath.Join(filepath.Dir(workerStateReal), "worker-admission")
 	if err := os.Mkdir(workerAdmissionDirectory, 0700); err != nil && !os.IsExist(err) {
 		return ErrJournal
 	}
