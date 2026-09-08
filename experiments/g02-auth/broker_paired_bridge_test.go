@@ -19,7 +19,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -52,9 +51,6 @@ type pairedBrokerBridge struct {
 	workerImage         string
 	workerImageID       string
 	workerDaemonID      string
-	calls               []string
-	unexpectedCalls     []string
-	lastCall            string
 	setExists           bool
 	setCreated          bool
 	setDeleted          bool
@@ -139,7 +135,6 @@ func newPairedBrokerBridge(t *testing.T) *pairedBrokerBridge {
 
 func (f *pairedBrokerBridge) markUnexpected() {
 	f.unexpected++
-	f.unexpectedCalls = append(f.unexpectedCalls, f.lastCall)
 }
 
 func writeBridgeJSON(w http.ResponseWriter, status int, value any) {
@@ -228,8 +223,6 @@ func (f *pairedBrokerBridge) handleGitHub(w http.ResponseWriter, r *http.Request
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	path := f.actionPath(r.URL.Path)
-	f.lastCall = r.Method + " " + path
-	f.calls = append(f.calls, f.lastCall)
 
 	// These are the only REST calls that carry the temporary installation or
 	// verification authorities. The bridge compares them but never records them.
@@ -470,7 +463,9 @@ func (f *pairedBrokerBridge) handleActions(w http.ResponseWriter, r *http.Reques
 	if strings.HasSuffix(path, "/agents/81") && r.Method == http.MethodGet {
 		f.sdkRunnerCalls++
 		if f.polls >= 2 {
-			writeBridgeJSON(w, http.StatusNotFound, map[string]string{"message": "runner absent"})
+			// The real SDK only classifies this as RunnerNotFoundError when the
+			// service error includes its canonical typeName.
+			writeBridgeJSON(w, http.StatusNotFound, map[string]string{"typeName": "AgentNotFoundException", "message": "synthetic missing runner"})
 			return
 		}
 		writeBridgeJSON(w, http.StatusOK, map[string]any{"id": 81, "name": f.workerName, "runnerScaleSetId": 7})
@@ -488,8 +483,6 @@ func (f *pairedBrokerBridge) handleDocker(w http.ResponseWriter, r *http.Request
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	path := r.URL.Path
-	f.lastCall = r.Method + " " + path
-	f.calls = append(f.calls, f.lastCall)
 	if path == "/version" && r.Method == http.MethodGet {
 		writeBridgeJSON(w, http.StatusOK, map[string]string{"ApiVersion": "1.51", "MinAPIVersion": "1.24"})
 		return
@@ -653,34 +646,6 @@ func writePrivateBridgeJSON(t *testing.T, path string, value any) []byte {
 	return data
 }
 
-func pairedBridgeBinding(t *testing.T, controllerPath, controllerState, workerPath, workerState string) map[string]any {
-	t.Helper()
-	identity := func(path string) (uint64, uint64) {
-		info, err := os.Stat(path)
-		if err != nil {
-			t.Fatal("bridge identity")
-		}
-		stat, ok := info.Sys().(*syscall.Stat_t)
-		if !ok {
-			t.Fatal("bridge identity type")
-		}
-		return uint64(stat.Dev), stat.Ino
-	}
-	digest := func(path string) string {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal("bridge approval digest")
-		}
-		h := sha256.Sum256(data)
-		return hexDigest(h[:])
-	}
-	controllerDevice, controllerInode := identity(controllerPath)
-	controllerStateDevice, controllerStateInode := identity(controllerState)
-	workerDevice, workerInode := identity(workerPath)
-	workerStateDevice, workerStateInode := identity(workerState)
-	return map[string]any{"controller_approval_sha256": digest(controllerPath), "controller_approval_device": controllerDevice, "controller_approval_inode": controllerInode, "controller_state_device": controllerStateDevice, "controller_state_inode": controllerStateInode, "worker_approval_sha256": digest(workerPath), "worker_approval_device": workerDevice, "worker_approval_inode": workerInode, "worker_state_device": workerStateDevice, "worker_state_inode": workerStateInode}
-}
-
 func TestPairedBrokerChainsRealControllerCreatePreparationAndTerminal(t *testing.T) {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skip("private Unix fixture requires a Unix host")
@@ -749,13 +714,6 @@ func TestPairedBrokerChainsRealControllerCreatePreparationAndTerminal(t *testing
 	if _, err := os.Stat(filepath.Join(brokerFixture.admissionRoot, "admission.json")); err != nil {
 		t.Fatal("controller admission claim")
 	}
-	// Diagnostic preflight while narrowing the real child boundary; this is
-	// credential-free and does not alter the already-completed controller
-	// history. Remove once the broker-launched preparation path is green.
-	prepCtx, prepCancel := context.WithTimeout(context.Background(), time.Minute)
-	runBridgeCommand(t, prepCtx, binaryPath, []string{"--prepare-approved-paired-journal", "--approval", controllerPath, "--state-dir", controllerState}, nil)
-	prepCancel()
-
 	worker := pairedWorkerApproval{RunnerUpdatesDisabled: true, HarnessSHA: harness, WorkflowSHA: workflow, OwnerNonce: controller.OwnerNonce, Controller: controller.Controller, Endpoint: bridge.dockerEndpoint, DaemonID: bridge.workerDaemonID, ImageID: bridge.workerImageID, Image: pairedWorkerImage, ExpiresAt: expires, Phases: []string{"create", "start", "inspect", "cleanup"}}
 	workerPath := filepath.Join(parent, "worker-approval.json")
 	writePrivateBridgeJSON(t, workerPath, worker)
@@ -790,22 +748,11 @@ func TestPairedBrokerChainsRealControllerCreatePreparationAndTerminal(t *testing
 	result, err := runBrokerWithAPI(brokerCtx, BrokerFiles{ApprovalPath: approvalPath, StateDirectory: attempt, ControllerBinary: binaryPath, ControllerApproval: controllerPath, ControllerStateDirectory: controllerState, WorkerApproval: workerPath, WorkerStateDirectory: workerState}, input, api)
 	brokerCancel()
 	if err != nil || result.Status != "paired_terminal_completed" {
-		bridge.mu.Lock()
-		t.Logf("bridge counters: registration=%d exchange=%d inventory=%d setCreate=%d sessionOpen=%d jit=%d acquire=%d ack=%d create=%d start=%d polls=%d unexpected=%d", bridge.registrationCalls, bridge.exchangeCalls, bridge.controllerInventory, bridge.setCreateCalls, bridge.sessionOpenCalls, bridge.jitCalls, bridge.acquireCalls, bridge.ackCalls, bridge.createCalls, bridge.startCalls, bridge.polls, bridge.unexpected)
-		t.Logf("bridge calls: %v", bridge.calls)
-		t.Logf("bridge unexpected calls: %v", bridge.unexpectedCalls)
-		bridge.mu.Unlock()
-		t.Logf("broker API calls: %v", brokerFixture.calls)
-		if category, readErr := os.ReadFile(filepath.Join(controllerState, "paired-fixture-result")); readErr == nil {
-			t.Logf("paired child category: %q", strings.TrimSpace(string(category)))
-		}
-		if stage, readErr := os.ReadFile(filepath.Join(controllerState, "paired-fixture-stage")); readErr == nil {
-			t.Logf("paired child stage: %q", strings.TrimSpace(string(stage)))
-		}
-		if stage, readErr := os.ReadFile(filepath.Join(workerState, "paired-fixture-worker-stage")); readErr == nil {
-			t.Logf("paired worker journal stage: %q", strings.TrimSpace(string(stage)))
-		}
 		t.Fatalf("real paired bridge did not complete: status=%q err=%v", result.Status, err)
+	}
+	journalData, err = os.ReadFile(filepath.Join(controllerState, "journal.jsonl"))
+	if err != nil {
+		t.Fatal("controller journal after paired terminal")
 	}
 	bridge.mu.Lock()
 	counts := []int{bridge.createCalls, bridge.startCalls, bridge.jitCalls, bridge.acquireCalls, bridge.ackCalls, bridge.sessionOpenCalls, bridge.sessionCloseCalls, bridge.workerDeleteCalls, bridge.workerAbsenceCalls, bridge.setCreateCalls, bridge.setDeleteCalls, bridge.setAbsenceCalls, bridge.rosterCalls, bridge.unexpected}

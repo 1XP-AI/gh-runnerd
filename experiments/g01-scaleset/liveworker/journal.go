@@ -37,16 +37,6 @@ type FileJournal struct {
 	recordSync func(*os.File) error
 }
 
-// The explicit tagged fixture may install a bounded diagnostic callback while
-// production leaves this nil, preserving its fixed redacted error boundary.
-var pairedFixtureJournalTrace func(string, string)
-
-func tracePairedFixtureJournal(directory, stage string) {
-	if pairedFixtureJournalTrace != nil {
-		pairedFixtureJournalTrace(directory, stage)
-	}
-}
-
 func privateFile(info os.FileInfo, mode os.FileMode) bool {
 	s, ok := info.Sys().(*syscall.Stat_t)
 	return ok && int(s.Uid) == os.Geteuid() && info.Mode().Perm() == mode && info.Mode().IsRegular() && s.Nlink == 1
@@ -244,13 +234,11 @@ func openJournalAtAdmission(directory string, a Approval, admissionDirectory str
 	// valid header. File contents alone never prove its entry survived a crash.
 	dir, err := root.Open(".")
 	if err != nil {
-		tracePairedFixtureJournal(directory, "state-open")
 		return nil, ErrState
 	}
 	err = syncDirectory(dir)
 	dir.Close()
 	if err != nil {
-		tracePairedFixtureJournal(directory, "state-sync")
 		return nil, ErrState
 	}
 	j.claim, err = openAdmission(admissionDirectory, j, syncDirectory)
@@ -258,7 +246,6 @@ func openJournalAtAdmission(directory string, a Approval, admissionDirectory str
 		return nil, err
 	}
 	if j.paired.binding != nil && j.paired.binding.Worker != j.pairedIdentity() {
-		tracePairedFixtureJournal(directory, "binding")
 		_ = j.claim.close()
 		return nil, ErrState
 	}

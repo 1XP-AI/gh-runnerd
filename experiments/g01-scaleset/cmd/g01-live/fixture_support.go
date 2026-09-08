@@ -4,7 +4,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -66,19 +65,6 @@ func init() {
 		if err != nil {
 			return err
 		}
-		err = livecanary.RunPairedTerminalForFixture(ctx, files, c, config.BaseURL, []byte(config.CAPEM), config.AdmissionDirectory)
-		// Temporary fixture-only classification for local bridge diagnosis; the
-		// production command still emits only its fixed redacted failure text.
-		category := "other"
-		switch {
-		case errors.Is(err, livecanary.ErrApproval):
-			category = "approval"
-		case errors.Is(err, livecanary.ErrJournal):
-			category = "journal"
-		case errors.Is(err, livecanary.ErrQuarantine):
-			category = "quarantine"
-		}
-		_ = os.WriteFile(filepath.Join(files.ControllerStateDirectory, "paired-fixture-result"), []byte(category), 0600)
-		return err
+		return livecanary.RunPairedTerminalForFixture(ctx, files, c, config.BaseURL, []byte(config.CAPEM), config.AdmissionDirectory)
 	}
 }

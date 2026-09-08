@@ -63,38 +63,31 @@ type admissionClaim struct {
 
 func openAdmission(directory string, j *FileJournal, syncDirectory func(*os.File) error) (*admissionClaim, error) {
 	if !filepath.IsAbs(directory) || filepath.Clean(directory) != directory {
-		tracePairedFixtureJournal(j.directory, "admission-path")
 		return nil, ErrState
 	}
 	canonical, err := filepath.EvalSymlinks(directory)
 	if err != nil || canonical != directory {
-		tracePairedFixtureJournal(j.directory, "admission-real")
 		return nil, ErrState
 	}
 	info, err := os.Lstat(directory)
 	if err != nil || !ownedDirectory(info, true) {
-		tracePairedFixtureJournal(j.directory, "admission-stat")
 		return nil, ErrState
 	}
 	parentInfo, err := os.Lstat(filepath.Dir(directory))
 	if err != nil || !ownedDirectory(parentInfo, false) {
-		tracePairedFixtureJournal(j.directory, "admission-parent-stat")
 		return nil, ErrState
 	}
 	parent, err := os.Open(filepath.Dir(directory))
 	if err != nil {
-		tracePairedFixtureJournal(j.directory, "admission-parent-open")
 		return nil, ErrState
 	}
 	defer parent.Close()
 	capturedParent, err := parent.Stat()
 	if err != nil || !os.SameFile(parentInfo, capturedParent) || syncDirectory(parent) != nil {
-		tracePairedFixtureJournal(j.directory, "admission-parent-sync")
 		return nil, ErrState
 	}
 	root, err := os.OpenRoot(directory)
 	if err != nil {
-		tracePairedFixtureJournal(j.directory, "admission-root-open")
 		return nil, ErrState
 	}
 	kept := false
@@ -105,7 +98,6 @@ func openAdmission(directory string, j *FileJournal, syncDirectory func(*os.File
 	}()
 	captured, err := root.Stat(".")
 	if err != nil || !os.SameFile(info, captured) {
-		tracePairedFixtureJournal(j.directory, "admission-root-stat")
 		return nil, ErrState
 	}
 	// Serialize the empty-file creation window before taking the claim's
@@ -113,13 +105,11 @@ func openAdmission(directory string, j *FileJournal, syncDirectory func(*os.File
 	// claim, causing both contenders to refuse and strand an empty claim.
 	dir, err := root.Open(".")
 	if err != nil {
-		tracePairedFixtureJournal(j.directory, "admission-dir-open")
 		return nil, ErrState
 	}
 	defer dir.Close()
 	lockedDirectory, err := dir.Stat()
 	if err != nil || !os.SameFile(info, lockedDirectory) || syscall.Flock(int(dir.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
-		tracePairedFixtureJournal(j.directory, "admission-dir-lock")
 		return nil, ErrState
 	}
 	created := true
@@ -129,7 +119,6 @@ func openAdmission(directory string, j *FileJournal, syncDirectory func(*os.File
 		file, err = root.OpenFile("admission.json", os.O_RDWR|syscall.O_NOFOLLOW, 0)
 	}
 	if err != nil {
-		tracePairedFixtureJournal(j.directory, "admission-file-open")
 		return nil, ErrState
 	}
 	defer func() {
@@ -139,29 +128,24 @@ func openAdmission(directory string, j *FileJournal, syncDirectory func(*os.File
 	}()
 	fileInfo, err := file.Stat()
 	if err != nil || !privateFile(fileInfo, 0600) || fileInfo.Size() > 4096 || syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
-		tracePairedFixtureJournal(j.directory, "admission-file-lock")
 		return nil, ErrState
 	}
 	want := admissionFor(j)
 	if created {
 		data, err := json.Marshal(want)
 		if err != nil {
-			tracePairedFixtureJournal(j.directory, "admission-marshal")
 			return nil, ErrState
 		}
 		data = append(data, '\n')
 		if n, err := file.Write(data); err != nil || n != len(data) {
-			tracePairedFixtureJournal(j.directory, "admission-write")
 			return nil, ErrState
 		}
 	}
 	claim := &admissionClaim{file, root, directory, info, fileInfo}
 	if !claim.matches(j) || file.Sync() != nil {
-		tracePairedFixtureJournal(j.directory, "admission-claim")
 		return nil, ErrState
 	}
 	if syncDirectory(dir) != nil {
-		tracePairedFixtureJournal(j.directory, "admission-sync")
 		return nil, ErrState
 	}
 	kept = true

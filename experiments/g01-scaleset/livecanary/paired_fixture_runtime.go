@@ -115,10 +115,6 @@ func fixtureFastPairCadence() pairedBaselineCadence {
 	}
 }
 
-func fixtureStage(path, stage string) {
-	_ = os.WriteFile(filepath.Join(path, "paired-fixture-stage"), []byte(stage), 0600)
-}
-
 // RunPairedTerminalForFixture calls the exported production entrypoint with
 // only generated private roots and a loopback TLS endpoint. The fast cadence
 // is a test-only clock seam; it still retains every production HTTP, journal,
@@ -141,48 +137,19 @@ func RunPairedTerminalForFixture(ctx context.Context, files PairedTerminalFiles,
 	if err := os.Mkdir(workerAdmissionDirectory, 0700); err != nil && !os.IsExist(err) {
 		return ErrJournal
 	}
-	fixtureStage(files.ControllerStateDirectory, "start")
 	oldAdapters, oldCadence := pairedTerminalFixtureAdapters, pairedTerminalFixtureCadence
 	pairedTerminalFixtureAdapters = &pairedTerminalAdapters{
 		openController: func(path string, a Approval) (*FileJournal, error) {
-			fixtureStage(files.ControllerStateDirectory, "open-controller")
-			j, err := OpenJournalForPairedFixtureAt(path, a, controllerAdmissionDirectory)
-			if err != nil {
-				fixtureStage(files.ControllerStateDirectory, "open-controller-error")
-			} else {
-				fixtureStage(files.ControllerStateDirectory, "open-controller-ok")
-			}
-			return j, err
+			return OpenJournalForPairedFixtureAt(path, a, controllerAdmissionDirectory)
 		},
 		openWorker: func(path string, a liveworker.Approval) (*liveworker.FileJournal, error) {
-			fixtureStage(files.ControllerStateDirectory, "open-worker")
-			j, err := liveworker.OpenJournalForPairedFixture(path, a, workerAdmissionDirectory)
-			if err != nil {
-				fixtureStage(files.ControllerStateDirectory, "open-worker-error")
-			} else {
-				fixtureStage(files.ControllerStateDirectory, "open-worker-ok")
-			}
-			return j, err
+			return liveworker.OpenJournalForPairedFixture(path, a, workerAdmissionDirectory)
 		},
 		newAPI: func(a Approval, credentials Credentials) (*SDKAPI, error) {
-			fixtureStage(files.ControllerStateDirectory, "new-api")
-			api, err := NewSDKAPIForPairedFixture(a, credentials, baseURL, caPEM)
-			if err != nil {
-				fixtureStage(files.ControllerStateDirectory, "new-api-error")
-			} else {
-				fixtureStage(files.ControllerStateDirectory, "new-api-ok")
-			}
-			return api, err
+			return NewSDKAPIForPairedFixture(a, credentials, baseURL, caPEM)
 		},
 		newDocker: func(a liveworker.Approval) (*liveworker.Docker, error) {
-			fixtureStage(files.ControllerStateDirectory, "new-docker")
-			docker, err := liveworker.NewDocker(a)
-			if err != nil {
-				fixtureStage(files.ControllerStateDirectory, "new-docker-error")
-			} else {
-				fixtureStage(files.ControllerStateDirectory, "new-docker-ok")
-			}
-			return docker, err
+			return liveworker.NewDocker(a)
 		},
 	}
 	pairedTerminalFixtureCadence = fixtureFastPairCadence
