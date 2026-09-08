@@ -151,15 +151,19 @@ Root independently reproduced that tooling red and green.
 From `experiments/g01-scaleset`, required fixture checks are:
 
 ```text
-GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=120s -tags=g01_pair_fixture -skip '^TestPairedTerminal' ./livecanary
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run '^TestPaired' -skip '^TestPairedTerminal' ./livecanary
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run '^Test' -skip '^TestPaired' ./livecanary
 ```
 
-The terminal behavior and terminal persistence/identity partitions, including
-their exact storage expression, are maintained in the canonical
+The first command selects the non-terminal paired collection tests; the second
+selects the remaining collection/listener tests. Their static prefixes are
+exhaustive and disjoint. The terminal behavior and terminal
+persistence/identity partitions, including their exact storage expression, are
+maintained in the canonical
 [terminal evidence guide](g01-paired-terminal.md). Use the repository's
-`scripts/check-offline-experiments.sh` for the complete three-way invocation;
-the collection/listener command above is shown here only to identify this
-collection entry's partition.
+`scripts/check-offline-experiments.sh` for the complete four-way invocation;
+the collection/listener commands above are shown here only to identify the
+collection entry's partitions.
 
 ### Current correction checkpoint
 

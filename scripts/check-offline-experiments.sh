@@ -4,6 +4,7 @@ set -euo pipefail
 
 go_cmd="${GO:-go}"
 exact_toolchain="go1.26.8"
+paired_collection_regex='^TestPaired'
 storage_regex='^TestPairedTerminal(Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$'
 
 # These are the two established offline gate modules. Keep this list explicit so
@@ -35,7 +36,11 @@ for module_dir in "${offline_modules[@]}"; do
 			# paths only. Do not discover arbitrary opt-in tags or platform probes.
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -tags=g01_live,g01_worker ./cmd/g01-live ./cmd/g01-worker
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" vet -tags=g01_live,g01_worker ./cmd/g01-live ./cmd/g01-worker
-			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -skip '^TestPairedTerminal' ./livecanary
+			# Keep the non-terminal collection/listener tests exhaustive and disjoint:
+			# paired collection first, then every non-paired test. The terminal
+			# partitions below remain the only consumers of TestPairedTerminal.
+			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run "${paired_collection_regex}" -skip '^TestPairedTerminal' ./livecanary
+			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run '^Test' -skip "${paired_collection_regex}" ./livecanary
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run '^TestPairedTerminal' -skip "${storage_regex}" ./livecanary
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run "${storage_regex}" ./livecanary
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" vet -tags=g01_pair_fixture ./livecanary
