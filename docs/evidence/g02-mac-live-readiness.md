@@ -131,9 +131,11 @@ Run this as Bash with the private values already set; `set -Eeuo pipefail`, the
 explicit `-buildvcs=true`, `GOENV=off`, and removal of `GOFLAGS` are required.
 Any failed command or mismatch aborts the gate. The artifact parent must be an
 existing directory owned by the current UID with mode `0700`; every ancestor
-must be a real directory with no group/other write permission unless its sticky
-bit prevents a cross-UID rename and the sticky directory is owned by root or the
-current UID (for example, the system temporary directory).
+must be a real directory owned by root or the current UID, with no group/other
+write permission unless its sticky bit prevents a cross-UID rename (for
+example, the system temporary directory). A foreign-owned ancestor is refused
+even when `0755`, `0711`, or `0700` has no group/other write bit, because its
+owner can rename descendants through owner-write access.
 Each signing-fact file is an independently recorded, singly-linked regular file
 owned by the current UID with mode `0600`; it contains the sorted, non-path
 lines emitted by `codesign -d --verbose=4` for that exact artifact
@@ -184,9 +186,11 @@ check_safe_parent_chain() {
     [[ -d "$path" && ! -L "$path" ]] || die "unsafe artifact parent component: $path"
     line="$(stat -f '%u %A' "$path")" || die "could not inspect artifact parent component: $path"
     read -r owner mode <<<"$line"
+    if [[ "$owner" != 0 && "$owner" != "$G02_CURRENT_UID" ]]; then
+      die "artifact parent chain permits cross-UID rename: $path"
+    fi
     if (( (8#$mode & 0022) != 0 )); then
-      if (( (8#$mode & 01000) == 0 )) || \
-         [[ "$owner" != 0 && "$owner" != "$G02_CURRENT_UID" ]]; then
+      if (( (8#$mode & 01000) == 0 )); then
         die "artifact parent chain permits cross-UID rename: $path"
       fi
     fi
@@ -538,12 +542,50 @@ toolchain still passed.
 
 Current file validation passed: `git diff --check`, `make fmt-check`, the
 local-link target check, the secret-pattern scan, and the syntax-only gate check
-above. Hosted PR59 CI was not edited or rerun here; its default 45-second
-failure remains the separate issue-64 worker blocker, so no CI pass is claimed.
-The coordinator must freeze the post-fix head and obtain fresh independent
-security and exact-head Codex/CI results before merge. The offline/live results
-cited above remain those recorded in the linked evidence; they are not upgraded
-or re-audited here.
+above. The pre-edit PR59 head `060766efdb2a84547ed32c3660ddea7ec5263fc1`
+had a successful hosted Go check in run
+`34206178477` / job `101996075580`; no CI files were edited here. That result
+belongs to the old head and does not clear a new commit. Issue #64's separate CI
+hardening remains active. The coordinator must freeze the new head and obtain
+fresh CI, independent security review, and exact-head Codex review before merge.
+The offline/live results cited above remain those recorded in the linked
+evidence; they are not upgraded or re-audited here.
+
+The fresh same-PR P1 [foreign-owned ancestor finding](https://github.com/1XP-AI/gh-runnerd/pull/59#discussion_r3956164334)
+was reproduced and corrected as a TDD boundary check using only a physical
+nested `mktemp -d` directory tree and a shell `stat` stub that returned
+synthetic owner/mode tuples; no `chown`, account creation, live runner, or other
+system mutation was used. The extracted function was evaluated with:
+
+```sh
+eval "$(sed -n '/^check_safe_parent_chain() {/,/^}/p' \
+  docs/evidence/g02-mac-live-readiness.md)"
+```
+
+The frozen pre-sticky-owner version at `e25c2f1` was red for every foreign-owner
+mode: `0755`, `0711`, `0700`, and `1777` each returned `rc=0` where refusal was
+required. The pre-edit `060766e` function preserved the earlier `1777` refusal
+(`rc=1`) but still returned `rc=0` for foreign-owner `0755`, `0711`, and `0700`;
+these are the same-PR ancestor-owner red witnesses. After the owner allowlist
+edit, all four foreign-owner modes returned `rc=1`.
+
+The boundary matrix after the edit was also green for synthetic ancestor
+tuples: root-owned `0755` and current-UID-owned `0711` were accepted as safe
+(`rc=0`); root/current-UID `0777`/`0775` were refused as non-sticky unsafe
+(`rc=1`); root/current-UID `1777` were accepted under the existing sticky
+exception (`rc=0`); a malformed foreign owner tuple was refused (`rc=1`); and
+a symlink alias to the otherwise valid artifact directory was refused by the
+existing `! -L` check (`rc=1`).
+For the whole-chain proof, the immediate artifact parent was synthetic
+current-UID `0700` while its grandparent was synthetic foreign-owner `0755`:
+the pre-edit function returned `rc=0`, and the corrected function returned
+`rc=1`, showing that every canonical ancestor is checked rather than only the
+immediate parent. The existing cwd subshell, detached immutable source SHA and
+clean-check, stdin hash, signing-record, artifact alias, and immediate
+`run_verified` recheck guards remained present and passed the guard audit.
+This remains a trusted-UID boundary: the owner allowlist addresses foreign-UID
+pathname replacement only; same-UID code can still mutate paths after a check,
+so same-UID workdirs are not hostile-code isolation.
 
 Factual sources used without adding private identifiers:
 
