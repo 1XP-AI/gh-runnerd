@@ -214,7 +214,7 @@ For every new issue, after checking for an explicit current user override:
 
 Suggested handoff prompt to give the next agent:
 
-> Work on ISSUE_URL in `1XP-AI/gh-runnerd`. Use the current user-selected model/effort (the default is `gpt-5.6-luna` with `max`) and one active goal exactly equal to the issue's Goal statement; do not invent a token budget. Read `AGENTS.md`, `docs/EXECUTION.md`, the plan, the linked ADRs and the current Project item. Verify dependencies first. Create the goal and isolated branch/worktree, then set the item to In progress. Follow meaningful red test -> minimal green implementation -> refactor -> boundary/failure tests. Preserve no-secrets, no-busy-kill, owned-cleanup, stable-idempotency and trusted-native invariants. Do not change live runners, Docker context, App/Keychain/launchd state or GitHub credentials without explicit maintainer authorization. Open one focused PR with exact commands/results, red evidence, gaps and rollback notes. Obtain independent review using the current user-selected model/effort, then the exact-head GitHub Codex review before merge. Update the Project, issue and goal only when their actual state changes.
+> Work on ISSUE_URL in `1XP-AI/gh-runnerd`. Use the issue's implementer (default `gpt-5.6-luna` with `max`; #66/#67/#68/#69 are Grok 4.6 xhigh) and one active goal exactly equal to the issue's Goal statement; do not invent a token budget. Independent review is Luna max even when the implementer is overridden. Read `AGENTS.md`, `docs/EXECUTION.md`, the plan, the linked ADRs and the current Project item. Verify dependencies first. Create the goal and isolated branch/worktree, then set the item to In progress. Follow meaningful red test -> minimal green implementation -> refactor -> boundary/failure tests. Preserve no-secrets, no-busy-kill, owned-cleanup, stable-idempotency and trusted-native invariants. Do not change live runners, Docker context, App/Keychain/launchd state or GitHub credentials without explicit maintainer authorization. Open one focused PR with exact commands/results, red evidence, gaps and rollback notes. Obtain independent Luna max review, then the exact-head GitHub Codex review before merge. Update the Project, issue and goal only when their actual state changes. Do not write Luna into the Project Agent field over an issue-body-only Grok override.
 
 ## Per-issue Project workflow
 
@@ -540,16 +540,16 @@ Before handing work onward, confirm:
 - [ ] `git status` is clean or the changes are on the declared issue branch.
 - [ ] The issue Goal was copied exactly into one active goal; no invented budget.
 - [ ] Dependencies and Project status were checked live.
-- [ ] Project Agent matches the current user-selected model/effort (default:
-      `Luna max`, with the recorded Grok 4.6 xhigh override on #66/#67/#68/#69);
-      historical records and #1/#2/#60 Agent values were not rewritten.
+- [ ] Implementer matches the current user-selected model/effort (default:
+      `Luna max`; #66/#67/#68/#69 are Grok 4.6 xhigh with Agent left unset).
+      Historical records and #1/#2/#60 Agent values were not rewritten.
 - [ ] A meaningful red case, minimal green fix and relevant boundary tests are
       recorded, with actual commands/results and remaining gaps.
 - [ ] No secrets, personal paths, raw SDK errors, live tokens or unreviewed runner
       operations entered files, issues, logs or artifacts.
 - [ ] Busy work was never killed and cleanup is ownership-bound.
-- [ ] Internal independent review using the current user-selected model/effort
-      (default: Luna max) is recorded.
+- [ ] Internal independent Luna max review is recorded. An implementer override
+      does not change the reviewer.
 - [ ] Codex reviewed the exact current PR head; inline and issue-comment findings
       were read and resolved/rebutted; post-fix review was requested and awaited.
 - [ ] Required CI is green for the SHA being merged.

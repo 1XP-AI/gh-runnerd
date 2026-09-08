@@ -19,7 +19,7 @@ Verify each issue's contract and dependencies before dependent implementation be
 2. In the implementation task, create **one active goal** from the issue's Goal statement. Do not invent a token budget. Record issue URL and goal status in that task.
 3. Create a dedicated branch/worktree. Keep one issue's behavior in one PR; split only if the issue's acceptance contract requires it.
 4. Follow red -> green -> refactor, with meaningful failure evidence before the fix and relevant automated checks afterward.
-5. Ask the assigned independent reviewer to check invariants and failure cases. Record reviewer/model and outcomes in the PR. This internal review is separate from the GitHub Codex review.
+5. Ask the assigned independent reviewer to check invariants and failure cases. Independent review is Luna max unless the issue records a different reviewer; an implementer override does not change the reviewer. Record reviewer/model and outcomes in the PR. This internal review is separate from the GitHub Codex review.
 6. Move Project status to In review. Wait for GitHub Codex to finish reviewing the exact current PR head. Use the configured `codex-review` skill to read both inline reviews and issue-comment findings, including stale/outdated findings. Reproduce each finding; fix it or provide a specific evidence-based rebuttal. After pushing fixes, request `@codex review` and wait for the new result. Merge only when required CI and both review paths are complete, no actionable finding remains unresolved, and the issue's existing authorization permits it. Check the current head immediately before merge and constrain the merge to that SHA.
 7. Close the issue and mark its goal complete only when all acceptance criteria and evidence are satisfied. If the goal includes merge, a merely opened PR is not completion.
 
@@ -35,7 +35,7 @@ was complete at merge time.
 
 ## Reusable dispatch text
 
-> Work on ISSUE_URL using the issue's assigned model/effort and one active goal equal to its Goal statement. Read AGENTS.md and linked design decisions. Verify dependencies first. Use a separate worktree, write the meaningful failing test before implementation, and preserve the no-secrets/no-busy-kill/owned-cleanup invariants. Do not change existing live runners or enroll new Apps unless the issue explicitly authorizes that operation. Open a reviewed PR with commands/results, red evidence, limitations and rollback notes. Update the Project accurately; do not mark the goal complete while required work remains.
+> Work on ISSUE_URL using the issue's implementer (default Luna max; #66/#67/#68/#69 are Grok 4.6 xhigh) and one active goal equal to its Goal statement. Independent review is Luna max even when the implementer is overridden. Read AGENTS.md and linked design decisions. Verify dependencies first. Use a separate worktree, write the meaningful failing test before implementation, and preserve the no-secrets/no-busy-kill/owned-cleanup invariants. Do not change existing live runners or enroll new Apps unless the issue explicitly authorizes that operation. Open a reviewed PR with commands/results, red evidence, limitations and rollback notes. Update the Project accurately; do not mark the goal complete while required work remains.
 
 ## Board fields
 
