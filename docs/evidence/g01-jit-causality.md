@@ -93,9 +93,9 @@ durability, prove runner ownership/current activity, provide idempotency, or
 authorize deletion, drain, worker launch or live evidence. Existing recovery
 behavior intentionally keeps the worker quarantined and admission paused.
 
-Rollback must restore the prior green baseline by reversing the complete
-correction, including red `5694fd6`, green `7079b25`, and the documentation and
-naming corrections in `0c97e5f` and `4198507` as applicable (or by applying one
-equivalent reverse patch). Reverting `7079b25` alone is not usable because it
-restores the known failing assertions from `5694fd6`. No live resource or
+Rollback must revert the entire merged PR, or reverse the complete branch diff
+against the stable baseline `df0c010`, covering red `5694fd6`, green `7079b25`,
+and all related naming and documentation changes. Never perform a green-only
+rollback of `7079b25`: it restores the known failing assertions from `5694fd6`
+while leaving the rest of the correction inconsistent. No live resource or
 persistent production state was created.
