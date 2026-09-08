@@ -91,9 +91,9 @@ func TestPairedWorkerApprovalMismatchRefusesBeforeBinding(t *testing.T) {
 
 func TestPairedWorkerDaemonIDMatchesCanonicalBoundaries(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
+		name   string
 		daemon string
-		valid bool
+		valid  bool
 	}{
 		{name: "colon and 128 bytes", daemon: "a:" + strings.Repeat("d", 126), valid: true},
 		{name: "129 bytes", daemon: "a" + strings.Repeat("d", 128), valid: false},
@@ -205,6 +205,96 @@ func TestPairedBrokerBindsWorkerBeforeWorkflowVerifiedHandoff(t *testing.T) {
 	ledger, err := os.ReadFile(filepath.Join(fixture.admissionRoot, "broker-admission.jsonl"))
 	if err != nil || !strings.Contains(string(ledger), `"slot":"paired-terminal"`) || !strings.Contains(string(ledger), `"worker"`) || strings.Contains(string(ledger), fixture.token) || strings.Contains(string(ledger), string(candidate.PEM)) {
 		t.Fatal("paired admission did not retain bounded worker binding")
+	}
+}
+
+func TestPairedFailureAllowsAuthorizedInspectWithoutPairedRetry(t *testing.T) {
+	a, candidate, api, fixture, attempt := newBrokerFixture(t)
+	a.Mode, a.Phase, a.AllowVerificationAuthority = "paired-terminal", "paired-terminal", true
+	parent := filepath.Dir(attempt)
+	pairedLaunches := 0
+	pairedPlan := brokerTestPlan(t, &a, parent, func(context.Context, []byte, string) error {
+		pairedLaunches++
+		return errBroker
+	})
+	pairedPlan.controller.Phases = []string{"create", "before-ack", "after-ack", "before-acquire", "inspect", "cleanup"}
+	pairedPlan.controller.WorkflowRunID = 7
+	pairedPlan.raw, _ = json.Marshal(pairedPlan.controller)
+	a.ControllerApprovalSHA256 = brokerBytesDigest(pairedPlan.raw)
+	pairedPlan.approval = a
+	workerState := filepath.Join(parent, "failed-paired-worker-state")
+	if err := os.Mkdir(workerState, 0700); err != nil {
+		t.Fatal("worker state")
+	}
+	worker := pairedWorkerApproval{RunnerUpdatesDisabled: true, HarnessSHA: pairedPlan.controller.HarnessSHA, WorkflowSHA: pairedPlan.controller.WorkflowSHA, OwnerNonce: pairedPlan.controller.OwnerNonce, Controller: pairedPlan.controller.Controller, Endpoint: "/tmp/g01-paired-failure.sock", DaemonID: "fixture-daemon", ImageID: "sha256:" + strings.Repeat("d", 64), Image: pairedWorkerImage, ExpiresAt: pairedPlan.controller.ExpiresAt, Phases: []string{"create", "start", "inspect", "cleanup"}}
+	workerData, err := json.Marshal(worker)
+	if err != nil {
+		t.Fatal("worker approval")
+	}
+	workerPath := filepath.Join(parent, "failed-paired-worker-approval.json")
+	if err := os.WriteFile(workerPath, workerData, 0600); err != nil {
+		t.Fatal("worker approval file")
+	}
+	pairedPlan.worker, err = openBrokerWorkerPlan(workerPath, workerState, pairedPlan.statePath, a, pairedPlan.controller)
+	if err != nil {
+		t.Fatal("paired worker plan")
+	}
+	if _, err := brokerExecute(context.Background(), a, brokerInput{PEM: string(candidate.PEM), VerificationToken: "synthetic-private-workflow-token"}, attempt, api, pairedPlan); err == nil || fixture.tokenCalls != 1 || pairedLaunches != 1 {
+		t.Fatalf("failed paired attempt was accepted or retried: err=%v mints=%d launches=%d", err, fixture.tokenCalls, pairedLaunches)
+	}
+
+	// Inspect is a distinct, explicitly authorized controller slot. It may
+	// collect its own authenticated evidence, but it must not replay the
+	// incomplete paired claim or invoke the worker handoff again.
+	a.Mode, a.Phase = "controller", "inspect"
+	inspectLaunches := 0
+	inspectPlan := brokerTestPlan(t, &a, parent, func(context.Context, []byte, string) error {
+		inspectLaunches++
+		return nil
+	})
+	inspectPlan.controller.Phases = append([]string(nil), pairedPlan.controller.Phases...)
+	inspectPlan.controller.WorkflowRunID = pairedPlan.controller.WorkflowRunID
+	inspectPlan.raw, _ = json.Marshal(inspectPlan.controller)
+	a.ControllerApprovalSHA256 = brokerBytesDigest(inspectPlan.raw)
+	inspectPlan.approval = a
+	_ = inspectPlan.state.Close()
+	inspectPlan.state, err = openBrokerPrivateDirectory(pairedPlan.statePath)
+	if err != nil {
+		t.Fatal("reopen controller state")
+	}
+	t.Cleanup(func() { _ = inspectPlan.state.Close() })
+	inspectPlan.statePath = pairedPlan.statePath
+	inspectPlan.stateInfo, err = inspectPlan.state.Stat(".")
+	if err != nil {
+		t.Fatal("controller state identity")
+	}
+	result, err := brokerExecute(context.Background(), a, brokerInput{PEM: string(candidate.PEM), VerificationToken: "synthetic-private-workflow-token"}, filepath.Join(parent, "inspect-attempt"), api, inspectPlan)
+	if err != nil || result.Status != "controller_completed" || fixture.tokenCalls != 2 || pairedLaunches != 1 || inspectLaunches != 1 {
+		t.Fatalf("authorized inspect did not remain distinct from failed pair: result=%+v err=%v mints=%d paired=%d inspect=%d", result, err, fixture.tokenCalls, pairedLaunches, inspectLaunches)
+	}
+	// The inspect slot is also one-shot; reopening it cannot mint or launch.
+	retryPlan := brokerTestPlan(t, &a, parent, func(context.Context, []byte, string) error {
+		t.Fatal("inspect retry launched")
+		return nil
+	})
+	retryPlan.controller.Phases = append([]string(nil), pairedPlan.controller.Phases...)
+	retryPlan.controller.WorkflowRunID = pairedPlan.controller.WorkflowRunID
+	retryPlan.raw, _ = json.Marshal(retryPlan.controller)
+	a.ControllerApprovalSHA256 = brokerBytesDigest(retryPlan.raw)
+	retryPlan.approval = a
+	_ = retryPlan.state.Close()
+	retryPlan.state, err = openBrokerPrivateDirectory(pairedPlan.statePath)
+	if err != nil {
+		t.Fatal("reopen controller state for retry")
+	}
+	t.Cleanup(func() { _ = retryPlan.state.Close() })
+	retryPlan.statePath = pairedPlan.statePath
+	retryPlan.stateInfo, err = retryPlan.state.Stat(".")
+	if err != nil {
+		t.Fatal("controller state retry identity")
+	}
+	if _, err := brokerExecute(context.Background(), a, brokerInput{PEM: string(candidate.PEM), VerificationToken: "synthetic-private-workflow-token"}, filepath.Join(parent, "inspect-retry"), api, retryPlan); err == nil || fixture.tokenCalls != 2 || pairedLaunches != 1 || inspectLaunches != 1 {
+		t.Fatalf("inspect retry replayed paired or inspect effects: err=%v mints=%d paired=%d inspect=%d", err, fixture.tokenCalls, pairedLaunches, inspectLaunches)
 	}
 }
 
