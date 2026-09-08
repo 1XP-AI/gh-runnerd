@@ -63,8 +63,12 @@ func newBaselineFixture(t *testing.T, change func(string, any) any) *baselineFix
 }
 
 func newBaselineFixtureWithInventory(t *testing.T, change func(string, any) any, inventory string) *baselineFixture {
+	return newBaselineFixtureWithApproval(t, change, inventory, approval())
+}
+
+func newBaselineFixtureWithApproval(t *testing.T, change func(string, any) any, inventory string, a Approval) *baselineFixture {
 	t.Helper()
-	f := &baselineFixture{a: approval(), change: change}
+	f := &baselineFixture{a: a, change: change}
 	c := credentials(f.a)
 	var server *httptest.Server
 	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

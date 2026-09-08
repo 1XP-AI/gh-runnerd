@@ -74,15 +74,16 @@ const (
 )
 
 type baselineCollectionFacts struct {
-	Outcome            collectionOutcome   `json:"outcome"`
-	Pair               controllerRecordRef `json:"pair"`
-	Start              controllerRecordRef `json:"start"`
-	Completed          controllerRecordRef `json:"completed"`
-	LastSample         controllerRecordRef `json:"last_sample"`
-	Rounds             int                 `json:"rounds"`
-	OutstandingSession sessionOutstanding  `json:"outstanding_session"`
-	SessionIntent      controllerRecordRef `json:"session_intent"`
-	SessionResult      controllerRecordRef `json:"session_result"`
+	Terminal           *terminalCollectionFacts `json:"terminal,omitempty"`
+	Outcome            collectionOutcome        `json:"outcome"`
+	Pair               controllerRecordRef      `json:"pair"`
+	Start              controllerRecordRef      `json:"start"`
+	Completed          controllerRecordRef      `json:"completed"`
+	LastSample         controllerRecordRef      `json:"last_sample"`
+	Rounds             int                      `json:"rounds"`
+	OutstandingSession sessionOutstanding       `json:"outstanding_session"`
+	SessionIntent      controllerRecordRef      `json:"session_intent"`
+	SessionResult      controllerRecordRef      `json:"session_result"`
 }
 
 func workerRef(r controllerRecordRef) liveworker.RecordRef {

@@ -12,12 +12,13 @@ import (
 )
 
 type pairedBaselineCollection struct {
-	Result             controllerRecordRef `json:"result"`
-	Outcome            collectionOutcome   `json:"outcome"`
-	Rounds             int                 `json:"rounds"`
-	OutstandingSession sessionOutstanding  `json:"outstanding_session"`
-	SessionIntent      controllerRecordRef `json:"session_intent"`
-	SessionResult      controllerRecordRef `json:"session_result"`
+	Terminal           *terminalCollectionFacts `json:"terminal,omitempty"`
+	Result             controllerRecordRef      `json:"result"`
+	Outcome            collectionOutcome        `json:"outcome"`
+	Rounds             int                      `json:"rounds"`
+	OutstandingSession sessionOutstanding       `json:"outstanding_session"`
+	SessionIntent      controllerRecordRef      `json:"session_intent"`
+	SessionResult      controllerRecordRef      `json:"session_result"`
 }
 type pairedBaselineCadence struct {
 	now  func() time.Time
@@ -38,7 +39,9 @@ func realBaselineCadence() pairedBaselineCadence {
 }
 
 type pairedBaselineScope struct {
-	cadence pairedBaselineCadence
+	observedWorkerDeletion *liveworker.DeletionReceipt
+	terminalEnabled        bool
+	cadence                pairedBaselineCadence
 
 	ctx                 context.Context
 	driver              *Driver
@@ -67,10 +70,23 @@ func runPairedBaseline(ctx context.Context, d *Driver, w *liveworker.Driver) (pa
 
 // The production entry fixes the real clock. Tests can advance only cadence;
 // approval, network and scope deadlines always use their original real context.
-func runPairedBaselineWithCadence(ctx context.Context, d *Driver, w *liveworker.Driver, cadence pairedBaselineCadence) (out pairedBaselineCollection, err error) {
+func runPairedBaselineWithCadence(ctx context.Context, d *Driver, w *liveworker.Driver, cadence pairedBaselineCadence) (pairedBaselineCollection, error) {
+	return runPairedBaselineMode(ctx, d, w, cadence, false)
+}
+func runPairedBaselineMode(ctx context.Context, d *Driver, w *liveworker.Driver, cadence pairedBaselineCadence, terminal bool) (out pairedBaselineCollection, err error) {
 	out = pairedBaselineCollection{Outcome: collectionUnresolved, OutstandingSession: sessionNone}
 	if ctx == nil || ctx.Err() != nil || d == nil || w == nil || cadence.now == nil || cadence.wait == nil {
 		return out, ErrApproval
+	}
+	if terminal {
+		if !slices.Contains(d.Approval.Phases, "cleanup") {
+			return out, ErrApproval
+		}
+		for _, phase := range []string{"create", "start", "inspect", "cleanup"} {
+			if !slices.Contains(w.Approval.Phases, phase) {
+				return out, ErrApproval
+			}
+		}
 	}
 	j, ok := d.Journal.(*FileJournal)
 	wj, wok := w.Journal.(*liveworker.FileJournal)
@@ -106,7 +122,7 @@ func runPairedBaselineWithCadence(ctx context.Context, d *Driver, w *liveworker.
 	}
 	outer, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	s := &pairedBaselineScope{cadence: cadence, ctx: outer, driver: d, workerDriver: w, approval: a, workerApproval: wa, api: api, captured: initial.api, docker: docker, journal: j, workerJournal: wj, identity: initial.identity, creation: initial.creation, setID: history.setID, listener: initial}
+	s := &pairedBaselineScope{terminalEnabled: terminal, cadence: cadence, ctx: outer, driver: d, workerDriver: w, approval: a, workerApproval: wa, api: api, captured: initial.api, docker: docker, journal: j, workerJournal: wj, identity: initial.identity, creation: initial.creation, setID: history.setID, listener: initial}
 	for _, e := range j.Events() {
 		if e.Kind == "inventory" {
 			if s.inventory.Sequence != 0 {
@@ -213,6 +229,10 @@ func (s *pairedBaselineScope) checkControllerOnly(c liveworker.ControllerCheck) 
 		if r == nil || r.Stage != "handoff" || r.Outcome != "result" || r.Handoff == nil || r.Handoff.Container == nil || c.ControllerRecord != workerRef(state.handoffRef) || c.WorkerRecord != r.Handoff.Container.CreateResult {
 			return ErrQuarantine
 		}
+	case liveworker.CheckDelete:
+		if !s.terminalEnabled || r == nil || r.Stage != "terminal-decision" || r.Outcome != "observed" || c.ControllerRecord != workerRef(state.terminalDecision) || !refPresent(state.sessionCloseResult) || c.WorkerRecord != state.handoff.Container.CreateResult || state.pending == nil || state.pending.Stage != "terminal" || state.child == nil || state.child.Stage != "terminal-worker-delete" {
+			return ErrQuarantine
+		}
 	default:
 		return ErrQuarantine
 	}
@@ -255,6 +275,9 @@ func (s *pairedBaselineScope) begin(r baselineRecord) (baselineRecord, error) {
 func (s *pairedBaselineScope) boundary() error {
 	if err := s.checkPair(); err != nil {
 		return err
+	}
+	if s.terminalEnabled {
+		return s.terminalCapacity()
 	}
 	return s.journal.baselineCapacity()
 }
@@ -342,6 +365,9 @@ func (s *pairedBaselineScope) execute() error {
 	if err != nil {
 		return err
 	}
+	if s.terminalEnabled {
+		b.finalizer = s
+	}
 	err = b.run(s.afterAcquire)
 	if err != nil {
 		return err
@@ -349,6 +375,9 @@ func (s *pairedBaselineScope) execute() error {
 	state, err = s.state()
 	if err != nil || !state.complete || state.runnerID != sdkRunnerID(state.jit.Runner.ID) || state.runnerName != state.jit.Runner.Name {
 		return ErrQuarantine
+	}
+	if s.terminalEnabled {
+		return nil
 	}
 	return s.sampleRounds(5, 8)
 }
@@ -378,7 +407,30 @@ func (s *pairedBaselineScope) summarize(callErr error) (pairedBaselineCollection
 			out.Outcome = collectionCollected
 		}
 	}
+	if s.terminalEnabled {
+		out.Terminal = state.terminalSummary()
+		if callErr != nil {
+			out.Outcome = collectionUnresolved
+		}
+	}
 	r := baselineRecord{Stage: "collection", Outcome: "observed", SessionID: state.sessionID, Collection: &baselineCollectionFacts{Outcome: out.Outcome, Pair: state.pairRef, Start: state.startRef, Completed: state.completedRef, LastSample: state.lastSample, Rounds: state.rounds, OutstandingSession: state.outstanding(), SessionIntent: state.sessionIntent, SessionResult: state.sessionResult}}
+	// Before an actual terminal intent, supplemental failure measurement is
+	// returned only. This collection reference covers the persisted nil branch.
+	if refPresent(state.terminalIntent) {
+		r.Collection.Terminal = out.Terminal
+	}
+	// The W receipt is independently durable, even if C's bridge append failed.
+	// Keep this returned-only evidence separate from the replay-derived C record.
+	if s.terminalEnabled && out.Terminal.WorkerDeletion == nil && s.observedWorkerDeletion != nil {
+		facts := *out.Terminal
+		receipt := *s.observedWorkerDeletion
+		if receipt.AbsenceResult != nil {
+			ref := *receipt.AbsenceResult
+			receipt.AbsenceResult = &ref
+		}
+		facts.WorkerDeletion = &receipt
+		out.Terminal = &facts
+	}
 	if state.seen && state.pending == nil && state.child == nil {
 		out.Result, err = s.store(r)
 		if err != nil {

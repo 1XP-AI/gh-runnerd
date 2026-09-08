@@ -18,6 +18,7 @@ type baselineWireCapture struct {
 	mu            sync.Mutex
 	stage         string
 	setID         int
+	sessionID     string
 	queue         string // private, captured from the exact session; never journaled
 	cursor        int
 	count, status int
@@ -53,9 +54,17 @@ func (c *baselineWireCapture) target(r *http.Request) bool {
 		return r.Method == "GET" && r.URL.String() == u.String()
 	}
 	suffix := "/runnerscalesets/" + strconv.Itoa(c.setID) + "/"
-	if c.stage == "set-observe" {
+	if c.stage == "set-observe" || c.stage == "terminal-set" || c.stage == "terminal-set-recheck" || c.stage == "terminal-set-absence" || c.stage == "terminal-set-delete" {
 		q := r.URL.Query()
-		return r.Method == "GET" && strings.HasSuffix(r.URL.Path, strings.TrimSuffix(suffix, "/")) && len(q) == 1 && len(q["api-version"]) == 1 && q.Get("api-version") == "6.0-preview"
+		method := "GET"
+		if c.stage == "terminal-set-delete" {
+			method = "DELETE"
+		}
+		return r.Method == method && strings.HasSuffix(r.URL.Path, strings.TrimSuffix(suffix, "/")) && len(q) == 1 && len(q["api-version"]) == 1 && q.Get("api-version") == "6.0-preview"
+	}
+	if c.stage == "terminal-session-close" {
+		q := r.URL.Query()
+		return c.sessionID != "" && r.Method == "DELETE" && strings.HasSuffix(r.URL.Path, suffix+"sessions/"+c.sessionID) && len(q) == 1 && len(q["api-version"]) == 1 && q.Get("api-version") == "6.0-preview"
 	}
 	if c.stage == "session-open" {
 		suffix += "sessions"
@@ -98,7 +107,7 @@ func guardBaselineResponse(req *http.Request, response *http.Response) (*http.Re
 		return nil, ErrRemote
 	}
 	switch c.stage {
-	case "set-observe":
+	case "set-observe", "terminal-set", "terminal-set-recheck", "terminal-set-absence":
 		c.set, err = decodeBaselineSet(data)
 	case "session-open":
 		c.session, err = decodeBaselineSession(data)
