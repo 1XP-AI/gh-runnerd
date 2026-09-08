@@ -11,7 +11,15 @@ const sessionCloseAcknowledged sessionOutstanding = "close-acknowledged204"
 // All terminal decisions resolve these actual historical controller records.
 // The round reference resolves all four measured slots, including their targets.
 type terminalEvidence struct {
-	Pair, Acquire, JIT, Handoff, Start, Source, Started, Completed, Round8 controllerRecordRef
+	Pair      controllerRecordRef `json:"pair"`
+	Acquire   controllerRecordRef `json:"acquire"`
+	JIT       controllerRecordRef `json:"jit"`
+	Handoff   controllerRecordRef `json:"handoff"`
+	Start     controllerRecordRef `json:"start"`
+	Source    controllerRecordRef `json:"source"`
+	Started   controllerRecordRef `json:"started"`
+	Completed controllerRecordRef `json:"completed"`
+	Round8    controllerRecordRef `json:"round8"`
 }
 type baselineTerminalPayload struct {
 	Parent   controllerRecordRef         `json:"parent"`
@@ -22,11 +30,19 @@ type baselineTerminalPayload struct {
 	Deletion *liveworker.DeletionReceipt `json:"deletion,omitempty"`
 }
 type terminalCollectionFacts struct {
-	Measurement                                                                                                                              collectionOutcome       `json:"measurement"`
-	Evidence                                                                                                                                 *terminalEvidence       `json:"evidence,omitempty"`
-	Outcome                                                                                                                                  baselineTerminalOutcome `json:"outcome"`
-	Intent, Result, Decision, SessionCloseIntent, SessionCloseResult, WorkerDeleteResult, SetDeleteIntent, SetDeleteResult, SetAbsenceResult controllerRecordRef
-	WorkerDeletion                                                                                                                           *liveworker.DeletionReceipt `json:"worker_deletion,omitempty"`
+	Measurement        collectionOutcome           `json:"measurement"`
+	Evidence           *terminalEvidence           `json:"evidence,omitempty"`
+	Outcome            baselineTerminalOutcome     `json:"outcome"`
+	Intent             controllerRecordRef         `json:"intent"`
+	Result             controllerRecordRef         `json:"result"`
+	Decision           controllerRecordRef         `json:"decision"`
+	SessionCloseIntent controllerRecordRef         `json:"session_close_intent"`
+	SessionCloseResult controllerRecordRef         `json:"session_close_result"`
+	WorkerDeleteResult controllerRecordRef         `json:"worker_delete_result"`
+	SetDeleteIntent    controllerRecordRef         `json:"set_delete_intent"`
+	SetDeleteResult    controllerRecordRef         `json:"set_delete_result"`
+	SetAbsenceResult   controllerRecordRef         `json:"set_absence_result"`
+	WorkerDeletion     *liveworker.DeletionReceipt `json:"worker_deletion,omitempty"`
 }
 
 var terminalSteps = [...]string{"terminal-roster", "terminal-set", "terminal-decision", "terminal-session-close", "terminal-worker-delete", "terminal-set-recheck", "terminal-roster-recheck", "terminal-set-delete", "terminal-set-absence", "terminal-roster-final"}

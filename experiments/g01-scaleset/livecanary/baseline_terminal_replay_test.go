@@ -57,6 +57,9 @@ func TestPairedTerminalPostIntentJournalIdentity(t *testing.T) {
 	}
 }
 func TestPairedTerminalClosedReplayActualFile(t *testing.T) {
+	t.Run("persisted_references_use_snake_case_json", func(t *testing.T) {
+		checkTerminalReferenceJSONTags(t)
+	})
 	f := newTerminalFixture(t, true)
 	if out, err := f.run(); err != nil || out.Terminal != terminalComplete {
 		t.Fatal("complete private fixture")
@@ -141,5 +144,35 @@ func TestPairedTerminalClosedReplayActualFile(t *testing.T) {
 				t.Fatal("replay issued network request")
 			}
 		})
+	}
+}
+
+func checkTerminalReferenceJSONTags(t *testing.T) {
+	t.Helper()
+	evidence, err := json.Marshal(terminalEvidence{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var evidenceFields map[string]json.RawMessage
+	if err := json.Unmarshal(evidence, &evidenceFields); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"pair", "acquire", "jit", "handoff", "start", "source", "started", "completed", "round8"} {
+		if _, ok := evidenceFields[name]; !ok {
+			t.Fatalf("terminal evidence omitted JSON field %q: %s", name, evidence)
+		}
+	}
+	facts, err := json.Marshal(terminalCollectionFacts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var factFields map[string]json.RawMessage
+	if err := json.Unmarshal(facts, &factFields); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"measurement", "outcome", "intent", "result", "decision", "session_close_intent", "session_close_result", "worker_delete_result", "set_delete_intent", "set_delete_result", "set_absence_result"} {
+		if _, ok := factFields[name]; !ok {
+			t.Fatalf("terminal collection facts omitted JSON field %q: %s", name, facts)
+		}
 	}
 }

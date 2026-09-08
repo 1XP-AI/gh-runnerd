@@ -152,9 +152,59 @@ From `experiments/g01-scaleset`, required fixture checks are:
 
 ```text
 GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=120s -tags=g01_pair_fixture -skip '^TestPairedTerminal' ./livecanary
-GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run '^TestPairedTerminal' ./livecanary
-GOTOOLCHAIN=go1.26.8 go vet -tags=g01_pair_fixture ./livecanary
 ```
+
+The terminal behavior and terminal persistence/identity partitions, including
+their exact storage expression, are maintained in the canonical
+[terminal evidence guide](g01-paired-terminal.md). Use the repository's
+`scripts/check-offline-experiments.sh` for the complete three-way invocation;
+the collection/listener command above is shown here only to identify this
+collection entry's partition.
+
+### Current correction checkpoint
+
+The current review correction first reproduced the persisted-reference schema
+finding with the existing storage witness. Before adding tags, this exact
+command exited 1 in 5.119 seconds because `terminalEvidence` encoded `Pair`,
+`Acquire`, `JIT`, `Handoff`, `Start`, `Source`, `Started`, `Completed` and
+`Round8` instead of their snake_case keys:
+
+```text
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=120s -tags=g01_pair_fixture ./livecanary -run '^TestPairedTerminalClosedReplayActualFile$' -v
+```
+
+After explicit tags were added to both persisted terminal-reference structs,
+the same command passed in 5.867 seconds. The complete terminal persistence,
+authority-boundary, replay and worker-receipt group passed in 42.087 seconds,
+and tagged vet, shell syntax and `git diff --check` passed. The full offline
+gate also passed with the unchanged pins and bounds:
+
+```text
+GOTOOLCHAIN=go1.26.8 GO=go bash scripts/check-offline-experiments.sh
+```
+
+The run completed all three G01 partitions and G02's checks: G01 collection,
+terminal behavior and terminal storage took 105.568, 54.361 and 42.889 seconds
+respectively; G02's library and CLI checks took 27.225, 2.258 and 1.513 seconds.
+`GOTOOLCHAIN=go1.26.8 make check` also passed build, vet, unit/race tests, fuzz
+smoke, dependency/license checks, the offline gate and pinned govulncheck (no
+vulnerabilities found).
+
+Public CI run `34168590856`, attempt 2, job `101885714771` remains a gap. Its
+preceding checks passed, but the offline step's first G01 package command hit
+the package-wide `-timeout=45s`; the failure log listed
+`TestResponseBudgetAppliesAfterGzipDecompression` while the stack was blocked
+in `client.Get`/`responseBudgetTransport.RoundTrip`. Local exact single-test
+and full-package race checks passed, so this does not establish an individual
+test timeout and no limit or response-budget code was changed. The two current
+P2 findings are locally reproduced and corrected; external exact-head Codex
+re-review and hosted CI remain separate gates, while earlier findings remain
+historically stale/outdated per the review reader.
+
+Rollback is file-scoped: revert only the terminal-reference tags, their focused
+storage-schema witness and the paired-evidence documentation edits; the
+published implementation history, test partitions, limits and prior evidence
+remain unchanged.
 
 At the initial frozen head `6a378ef`, the pre-issue54 collection-era tagged
 livecanary race suite passed (exit 0, 99.814s), including the real-cadence positive,
