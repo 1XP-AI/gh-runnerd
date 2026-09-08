@@ -18,6 +18,8 @@ var errBaselineCollected = errors.New("baseline callback collection complete")
 // No current phase/CLI calls this. The future pair orchestrator must prove
 // completed pairing and host preflight before invoking this experiment slice.
 type baselineListener struct {
+	finalizer              *pairedBaselineScope
+	finalizing             bool
 	pairGuard              func() error
 	mu                     sync.Mutex
 	ctx                    context.Context
@@ -84,7 +86,7 @@ func newBaselineListenerHeld(ctx context.Context, a Approval, j *FileJournal, ap
 	return &baselineListener{ctx: original, cancel: stop, approval: a, journal: j, api: captured, identity: id, creation: creation, setID: setID}, nil
 }
 func (b *baselineListener) check() error {
-	if b == nil || !b.running || b.invalid || b.ctx.Err() != nil || !b.journal.authorityHeld(b.approval) {
+	if b == nil || !b.running || b.invalid || b.finalizing || b.ctx.Err() != nil || !b.journal.authorityHeld(b.approval) {
 		return ErrQuarantine
 	}
 	id, err := b.journal.controllerIdentity()
@@ -193,6 +195,17 @@ func (b *baselineListener) run(after func(context.Context, baselineAcquisition) 
 	}
 	err = l.Run(b.ctx, b)
 	if errors.Is(err, errBaselineCollected) {
+		if b.finalizer != nil {
+			b.mu.Lock()
+			if b.check() != nil {
+				b.mu.Unlock()
+				return ErrQuarantine
+			}
+			b.finalizing = true
+			scope := b.finalizer
+			b.mu.Unlock()
+			return scope.finalizeTerminal()
+		}
 		return nil
 	}
 	return ErrQuarantine

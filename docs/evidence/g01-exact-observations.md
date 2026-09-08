@@ -2,8 +2,11 @@
 
 Issue [#1](https://github.com/1XP-AI/gh-runnerd/issues/1) remains open. This is an
 offline-tested prerequisite, not a live baseline or production G04 interface.
-Only package-local tests call the three new private SDKAPI helpers. No driver
-phase, CLI/broker slot, journal schema, admission claim or worker operation changes.
+Only package-local tests in this adapter slice call the three new private SDKAPI
+helpers. This slice adds no public driver approval phase/API, CLI/broker slot,
+journal schema, admission claim or worker operation. The later paired collection
+and private terminal journal stages are documented in the [paired baseline](g01-paired-baseline.md)
+and [terminal evidence](g01-paired-terminal.md).
 
 ## Facts and limits
 
@@ -123,8 +126,9 @@ worker/controller handoff require their own review.
 Live SDK/REST identity correspondence, lifecycle field population/order,
 missing-callback reconciliation, exact worker execution/exit/deregistration,
 assignment/busy/absence behavior and safe terminal or explicit external
-resolution remain unverified. No affirmative recovery, cleanup or successor
-transition is implemented. The rest of G01's ACK/acquisition/JIT/session/drain
-matrix and dependent gates remain open. See the
+resolution remain unverified. This adapter slice implements no affirmative
+recovery, cleanup or successor transition; the private terminal path is covered
+separately and does not establish live behavior. The rest of G01's
+ACK/acquisition/JIT/session/drain matrix and dependent gates remain open. See the
 [identity evidence](g01-identity-reconciliation.md) for the supported-source
 facts and unresolved service behavior.

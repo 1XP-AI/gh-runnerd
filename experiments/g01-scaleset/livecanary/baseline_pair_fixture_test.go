@@ -38,12 +38,24 @@ type pairedIntegrationFixture struct {
 	remote                                     func(*http.Request, any) any
 }
 
+type pairedFixtureConfiguration struct {
+	workerPhases       []string
+	controllerPhases   []string
+	controllerResponse func(string, any) any
+}
+
 func newPairedIntegrationFixture(t *testing.T) *pairedIntegrationFixture {
+	return newPairedIntegrationFixtureConfigured(t, nil)
+}
+func newPairedIntegrationFixtureConfigured(t *testing.T, config *pairedFixtureConfiguration) *pairedIntegrationFixture {
 	t.Helper()
 	f := &pairedIntegrationFixture{}
 	a := approval()
+	if config != nil && config.controllerPhases != nil {
+		a.Phases = append([]string(nil), config.controllerPhases...)
+	}
 	empty := sha256.Sum256([]byte("null"))
-	f.c = newBaselineFixtureWithInventory(t, func(stage string, value any) any {
+	f.c = newBaselineFixtureWithApproval(t, func(stage string, value any) any {
 		if strings.HasSuffix(stage, "-items") {
 			for _, item := range value.([]any) {
 				m := item.(map[string]any)
@@ -52,8 +64,11 @@ func newPairedIntegrationFixture(t *testing.T) *pairedIntegrationFixture {
 				}
 			}
 		}
+		if config != nil && config.controllerResponse != nil {
+			return config.controllerResponse(stage, value)
+		}
 		return value
-	}, hex.EncodeToString(empty[:]))
+	}, hex.EncodeToString(empty[:]), a)
 	// The listener fixture normally owns C life; integration owns both leases.
 	f.c.release()
 	f.c.release = nil
@@ -98,6 +113,9 @@ func newPairedIntegrationFixture(t *testing.T) *pairedIntegrationFixture {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	wa := liveworker.Approval{RunnerUpdatesDisabled: true, HarnessSHA: a.HarnessSHA, WorkflowSHA: a.WorkflowSHA, OwnerNonce: a.OwnerNonce, Controller: a.Controller, Endpoint: filepath.Join(dir, "api.sock"), DaemonID: "fixture-daemon", ImageID: "sha256:" + strings.Repeat("a", 64), Image: liveworker.ImageReference, ExpiresAt: a.ExpiresAt, Phases: []string{"create", "start", "inspect"}}
+	if config != nil && config.workerPhases != nil {
+		wa.Phases = append([]string(nil), config.workerPhases...)
+	}
 	listener, err := net.Listen("unix", wa.Endpoint)
 	if err != nil {
 		t.Fatal("private Unix listener")

@@ -161,25 +161,243 @@ func TestToolingTaggedCLIRegressionRuns(t *testing.T) {
 	}
 }
 
-func TestToolingTaggedPairFixtureRegressionRuns(t *testing.T) {
+func TestToolingTaggedPairFixturePartitionsRun(t *testing.T) {
 	root := toolingFixture(t)
-	const sentinel = "tagged-pair-fixture-regression"
-	fixturePath := "experiments/g01-scaleset/livecanary/pair_fixture_regression_test.go"
-	toolingFile(t, root, fixturePath, `//go:build g01_pair_fixture && !g01_live && !g01_worker
+	const pairedCollectionSentinel = "tagged-pair-fixture-paired-collection-regression"
+	const listenerSentinel = "tagged-pair-fixture-listener-regression"
+	const exampleSentinel = "tagged-pair-fixture-example-regression"
+	const fuzzSentinel = "tagged-pair-fixture-fuzz-seed-regression"
+	const terminalSentinel = "tagged-pair-fixture-terminal-regression"
+	const storageSentinel = "tagged-pair-fixture-storage-regression"
+	pairedCollectionPath := "experiments/g01-scaleset/livecanary/pair_fixture_paired_collection_regression_test.go"
+	listenerPath := "experiments/g01-scaleset/livecanary/pair_fixture_listener_regression_test.go"
+	examplePath := "experiments/g01-scaleset/livecanary/pair_fixture_example_regression_test.go"
+	fuzzPath := "experiments/g01-scaleset/livecanary/pair_fixture_fuzz_regression_test.go"
+	terminalPath := "experiments/g01-scaleset/livecanary/pair_fixture_terminal_regression_test.go"
+	storagePath := "experiments/g01-scaleset/livecanary/pair_fixture_storage_regression_test.go"
+	remainingCollectionInvocation := "go1.26.8\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -skip ^TestPaired ./livecanary"
+	taggedPositiveSource := func(testName, marker string) string {
+		return `//go:build g01_pair_fixture && !g01_live && !g01_worker
+
+package livecanary
+
+import (
+	"os"
+	"testing"
+)
+
+func ` + testName + `(t *testing.T) {
+	path := os.Getenv("TOOLING_SENTINEL_LOG")
+	if path == "" {
+		t.Fatal("TOOLING_SENTINEL_LOG is not set")
+	}
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if _, err := file.WriteString("` + marker + `\n"); err != nil {
+		t.Fatal(err)
+	}
+}
+`
+	}
+	pairedCollectionPositiveSource := taggedPositiveSource("TestPairedCollectionFixturePass", "paired-collection-pass")
+	listenerPositiveSource := taggedPositiveSource("TestListenerFixturePass", "listener-pass")
+	taggedExampleSource := func(exampleName, marker, expected string) string {
+		return `//go:build g01_pair_fixture && !g01_live && !g01_worker
+
+package livecanary
+
+import (
+	"fmt"
+	"os"
+)
+
+func ` + exampleName + `() {
+	path := os.Getenv("TOOLING_SENTINEL_LOG")
+	if path == "" {
+		panic("TOOLING_SENTINEL_LOG is not set")
+	}
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		panic(err)
+	}
+	defer file.Close()
+	if _, err := file.WriteString("` + marker + `\n"); err != nil {
+		panic(err)
+	}
+	fmt.Println("` + marker + `")
+	// Output: ` + expected + `
+}
+`
+	}
+	taggedFuzzSource := func(fuzzName, marker, failure string) string {
+		failureLine := ""
+		if failure != "" {
+			failureLine = `
+	t.Fatal("` + failure + `")`
+		}
+		return `//go:build g01_pair_fixture && !g01_live && !g01_worker
+
+package livecanary
+
+import (
+	"os"
+	"testing"
+)
+
+func ` + fuzzName + `(f *testing.F) {
+	f.Add("fixture-seed")
+	f.Fuzz(func(t *testing.T, _ string) {
+		path := os.Getenv("TOOLING_SENTINEL_LOG")
+		if path == "" {
+			t.Fatal("TOOLING_SENTINEL_LOG is not set")
+		}
+		file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer file.Close()
+		if _, err := file.WriteString("` + marker + `\n"); err != nil {
+			t.Fatal(err)
+		}` + failureLine + `
+	})
+}
+`
+	}
+	examplePositiveSource := taggedExampleSource("Example_fixturePass", "example-pass", "example-pass")
+	exampleSource := taggedExampleSource("Example_fixtureFailure", exampleSentinel, "unexpected-example-output")
+	fuzzPositiveSource := taggedFuzzSource("FuzzRemainingFixturePass", "fuzz-pass", "")
+	fuzzSource := taggedFuzzSource("FuzzRemainingFixtureFailure", fuzzSentinel, fuzzSentinel)
+	terminalPositiveSource := taggedPositiveSource("TestPairedTerminalFixturePass", "terminal-pass")
+	storagePositiveSource := taggedPositiveSource("TestPairedTerminalFixtureStorageFailure", "storage-pass")
+	pairedCollectionSource := `//go:build g01_pair_fixture && !g01_live && !g01_worker
 
 package livecanary
 
 import "testing"
 
-func TestTaggedPairFixtureFailure(t *testing.T) { t.Fatal("tagged-pair-fixture-regression") }
-`, 0600)
+func TestPairedCollectionFixtureFailure(t *testing.T) {
+	t.Fatal("tagged-pair-fixture-paired-collection-regression")
+}
+`
+	listenerSource := `//go:build g01_pair_fixture && !g01_live && !g01_worker
+
+package livecanary
+
+import "testing"
+
+func TestListenerFixtureFailure(t *testing.T) {
+	t.Fatal("tagged-pair-fixture-listener-regression")
+}
+`
+	terminalSource := `//go:build g01_pair_fixture && !g01_live && !g01_worker
+
+package livecanary
+
+import "testing"
+
+func TestPairedTerminalFixtureFailure(t *testing.T) {
+	t.Fatal("tagged-pair-fixture-terminal-regression")
+}
+`
+	storageSource := `//go:build g01_pair_fixture && !g01_live && !g01_worker
+
+package livecanary
+
+import "testing"
+
+func TestPairedTerminalFixtureStorageFailure(t *testing.T) {
+	t.Fatal("tagged-pair-fixture-storage-regression")
+}
+`
 	wrapper, logPath, realGo := toolingGoWrapper(t, root)
-	env := []string{"GO=" + wrapper, "TOOLING_REAL_GO=" + realGo, "TOOLING_GO_LOG=" + logPath}
-	if out, err := toolingRun(t, root, env, "make", "check"); err == nil || !strings.Contains(out, sentinel) {
-		t.Fatalf("tagged livecanary failure was skipped: %s", out)
+	sentinelLogPath := filepath.Join(root, "tagged-sentinel.log")
+	env := []string{"GO=" + wrapper, "TOOLING_REAL_GO=" + realGo, "TOOLING_GO_LOG=" + logPath, "TOOLING_SENTINEL_LOG=" + sentinelLogPath}
+	// Each generated witness must fail through its own reviewed partition. The
+	// terminal witnesses retain their established behavior while the log
+	// assertions below prove the four-way partition contract.
+	partitions := []struct {
+		path, sentinel, name, source, positiveSource, invocation string
+	}{
+		{
+			pairedCollectionPath,
+			pairedCollectionSentinel,
+			"paired-collection",
+			pairedCollectionSource,
+			pairedCollectionPositiveSource,
+			"go1.26.8\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run ^TestPaired -skip ^TestPairedTerminal ./livecanary",
+		},
+		{
+			listenerPath,
+			listenerSentinel,
+			"listener",
+			listenerSource,
+			listenerPositiveSource,
+			remainingCollectionInvocation,
+		},
+		{
+			examplePath,
+			exampleSentinel,
+			"example",
+			exampleSource,
+			examplePositiveSource,
+			remainingCollectionInvocation,
+		},
+		{
+			fuzzPath,
+			fuzzSentinel,
+			"fuzz",
+			fuzzSource,
+			fuzzPositiveSource,
+			remainingCollectionInvocation,
+		},
+		{
+			terminalPath,
+			terminalSentinel,
+			"terminal",
+			terminalSource,
+			terminalPositiveSource,
+			"go1.26.8\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run ^TestPairedTerminal -skip ^TestPairedTerminal(Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$ ./livecanary",
+		},
+		{
+			storagePath,
+			storageSentinel,
+			"storage",
+			storageSource,
+			storagePositiveSource,
+			"go1.26.8\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run ^TestPairedTerminal(Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$ ./livecanary",
+		},
 	}
-	if err := os.Remove(filepath.Join(root, fixturePath)); err != nil {
-		t.Fatal(err)
+	for _, tc := range partitions {
+		toolingFile(t, root, tc.path, tc.source, 0600)
+		if err := os.WriteFile(logPath, nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if out, err := toolingRun(t, root, env, "bash", "scripts/check-offline-experiments.sh"); err == nil || !strings.Contains(out, tc.sentinel) {
+			t.Errorf("tagged %s failure was skipped: %s", tc.name, out)
+		}
+		data, err := os.ReadFile(logPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+		count := 0
+		for _, line := range lines {
+			if line == tc.invocation {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Errorf("tagged %s failure used invocation %q %d times; wrapper log:\n%s", tc.name, tc.invocation, count, data)
+		}
+		if err := os.Remove(filepath.Join(root, tc.path)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range partitions {
+		toolingFile(t, root, tc.path, tc.positiveSource, 0600)
 	}
 	if err := os.WriteFile(logPath, nil, 0600); err != nil {
 		t.Fatal(err)
@@ -192,13 +410,45 @@ func TestTaggedPairFixtureFailure(t *testing.T) { t.Fatal("tagged-pair-fixture-r
 	if err != nil {
 		t.Fatal(err)
 	}
+	sentinelData, err := os.ReadFile(sentinelLogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sentinelLines := strings.Split(strings.TrimSpace(string(sentinelData)), "\n")
+	for _, marker := range []string{"paired-collection-pass", "listener-pass", "example-pass", "fuzz-pass", "terminal-pass", "storage-pass"} {
+		count := 0
+		for _, line := range sentinelLines {
+			if line == marker {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Fatalf("positive sentinel %q ran %d times; sentinel log:\n%s", marker, count, sentinelData)
+		}
+	}
 	log := string(data)
+	lines := strings.Split(strings.TrimSpace(log), "\n")
 	for _, invocation := range []string{
-		"go1.26.8\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture ./livecanary",
+		"go1.26.8\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run ^TestPaired -skip ^TestPairedTerminal ./livecanary",
+		remainingCollectionInvocation,
+		"go1.26.8\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run ^TestPairedTerminal -skip ^TestPairedTerminal(Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$ ./livecanary",
+		"go1.26.8\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run ^TestPairedTerminal(Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$ ./livecanary",
 		"go1.26.8\tvet -tags=g01_pair_fixture ./livecanary",
 	} {
-		if !strings.Contains(log, invocation) {
-			t.Fatalf("offline gate omitted %q; wrapper log:\n%s", invocation, log)
+		count := 0
+		for _, line := range lines {
+			if line == invocation {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Fatalf("offline gate logged %q %d times; wrapper log:\n%s", invocation, count, log)
+		}
+	}
+	legacyCollectionInvocation := "go1.26.8\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -skip ^TestPairedTerminal ./livecanary"
+	for _, line := range lines {
+		if line == legacyCollectionInvocation {
+			t.Fatalf("offline gate retained the unsplit collection invocation: %s", line)
 		}
 	}
 }

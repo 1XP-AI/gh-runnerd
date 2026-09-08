@@ -1,9 +1,12 @@
 # G01 paired execution and collection — issue52
 
-This private library connects the reviewed controller and worker under their real
-journal leases. It acquires one verified job, requests one JIT, creates/starts one
-worker, and records at most eight observation rounds. It has no CLI/broker entry,
-new phase, cleanup, admission reset or live authorization. G01 remains open.
+This private collection entry connects the reviewed controller and worker under
+their real journal leases. It acquires one verified job, requests one JIT,
+creates/starts one worker, and records at most eight observation rounds. The
+`runPairedBaseline` entry has no public CLI/broker entry, approval phase/API,
+terminal cleanup, admission reset or live authorization. Issue54 adds private
+terminal journal stages through a separate `runPairedTerminal` entry; see the
+[terminal evidence](g01-paired-terminal.md). G01 remains open.
 
 ## Recorded protocol
 
@@ -26,8 +29,8 @@ that historical digest a complete or atomic remote snapshot. Legacy Inventory
 keeps its original reader, errors, cancellation behavior and exact sorted-ID
 encoding (including JSON null for explicit empty inventory).
 
-The existing baseline journal branch admits one continuation parent and one serial
-child: JIT, handoff, start, then four rounds. It stores exact assigned predecessors,
+The collection-only baseline journal branch admits one continuation parent and one
+serial child: JIT, handoff, start, then four rounds. It stores exact assigned predecessors,
 16 KiB maximum records and a 1 MiB cumulative budget. The C handoff intent leaves
 its own HandoffIntent ref zero; after append assigns that ref, the exact handoff is
 passed to W and recorded in C's result. Unknown child facts can be followed only by
@@ -54,14 +57,15 @@ from 404 and sends no request. Reads are serial, with a current pair/capacity ch
 before each; a contradiction or failed reader prevents later readers. An unknown
 round retains every earlier returned fact and the exact W receipt when available.
 
-The first round is immediate. Later rounds wait at least five seconds after the
+For `runPairedBaseline`, the first round is immediate. Later rounds wait at least five seconds after the
 prior durable round result. Exact per-gap assertions use a private test clock;
 the real positive invokes the production timer/guard. Total suite duration is not
 a recorded trace of individual gaps. C reads share one 30-second child context. W.Observe
 keeps its existing separate preflight/inspect bounds under the outer lifetime;
 there is no claimed 30-second bound for the whole round. Four rounds occur inside
 the acquisition continuation and four only after durable matching SDK Completed
-callbacks, using the outer scopes after listener revocation.
+callbacks, using the outer scopes after listener revocation. The separate terminal
+entry and its additional journal stages are described in the [terminal evidence](g01-paired-terminal.md).
 
 SDK request, opaque job, SDK runner, REST job and REST runner IDs remain separate.
 The REST runner target comes from the current or previously recorded positive
@@ -70,13 +74,16 @@ do not erase prior positives; contradictions and status/conclusion regressions
 stop collection. The assigned round ref plus its fixed reader field identifies
 each observation in replay. Numeric equality is never targeting/cleanup authority.
 
-The returned outcome is collected, incomplete or unresolved, with an optional
-actual collection ref and explicit none/known-open/open-unknown session facts.
+The collection-only result is collected, incomplete or unresolved, with an
+optional actual collection ref and explicit none/known-open/open-unknown session
+facts. The separate terminal path may additionally report
+`close-acknowledged204` after its session close; see the [terminal evidence](g01-paired-terminal.md).
 Collected requires eight rounds, matching callbacks and a consistent positive
-identity tuple; it does not claim job success, terminal cleanup or absence. A
+identity tuple; this collection outcome does not claim job success, terminal
+cleanup or absence. A
 failed final summary write returns a fixed error, unresolved and no result ref,
 while retaining known rounds and outstanding-session refs. There are zero session
-close, worker delete or scale-set delete calls here.
+close, worker delete or scale-set delete calls in `runPairedBaseline`.
 
 ## Synthetic TDD evidence
 
@@ -107,13 +114,23 @@ Subsequent immutable behavioral reds and corrections cover:
 
 The matrix uses actual controller stage intent/result fsyncs, selected worker
 record fsyncs and same-file reopen; C/W journal and claim inode replacement;
-current dependency/cancellation checks; original 200 ms host deadline; actual file
+current dependency/cancellation checks; original 200 ms bootstrap deadline; actual file
 budget exhaustion; malformed/lost JIT and lost Unix create/start responses;
 known-create cancellation; concurrent Close/drain; source/association regression;
 and retained positives across later empty job listings. A private cadence seam
 advances only test cadence; network and authority deadlines always remain real.
-One full positive retains actual five-second waits. No full suite or live result
+One full collection positive retains actual five-second waits. No full suite or live result
 is inferred from a focused test; final combined results are recorded below.
+
+The original 200 ms deadline may expire during valid local preparation before
+the host request starts. Both early expiry and an entered blocked request must
+return unresolved and prevent later operations. Fixture red `924f032` reproduced
+the former case at an actual C intent sync (race 1.013 seconds); requiring host
+entry incorrectly rejected that safe outcome. The corrected timer test and a
+separate synchronized original-parent cancellation test passed with race in
+2.158 seconds. The latter waits for actual `/version` entry, then cancels the
+parent and observes request exit and zero later operations; it does not claim
+to prove timed expiry inside an active request. No production timeout changed.
 
 The C fixture seeds inventory/create receipts. It does not execute remote policy
 Preflight or prove a live original scale-set creation. Docker fixtures are private
@@ -134,13 +151,141 @@ Root independently reproduced that tooling red and green.
 From `experiments/g01-scaleset`, required fixture checks are:
 
 ```text
-GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=120s -tags=g01_pair_fixture ./livecanary
-GOTOOLCHAIN=go1.26.8 go vet -tags=g01_pair_fixture ./livecanary
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run '^TestPaired' -skip '^TestPairedTerminal' ./livecanary
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=120s -tags=g01_pair_fixture -skip '^TestPaired' ./livecanary
 ```
 
-At the initial frozen head `6a378ef`, the full tagged livecanary race suite passed
-(exit 0, 99.814s), including the real-cadence positive, legacy listener tests and
-paired failure matrices. Root also completed full make check on that head.
+The first command selects the non-terminal paired collection tests; the second
+leaves `-run` unrestricted so tagged tests, examples and fuzz seeds remain
+eligible while excluding the paired prefix. The commands are exhaustive and
+disjoint for the collection/listener work. The terminal behavior and terminal
+persistence/identity partitions, including their exact storage expression, are
+maintained in the canonical
+[terminal evidence guide](g01-paired-terminal.md). Use the repository's
+`scripts/check-offline-experiments.sh` for the complete four-way invocation;
+the collection/listener commands above are shown here only to identify the
+collection entry's partitions.
+
+### Current correction checkpoint
+
+The parent `8a848ad5b373866e1a6a01ce2a462ecfe37655df` is intentionally not
+described as a schema red: its named `TestPairedTerminalClosedReplayActualFile`
+test passes because the schema witness was added only in `03c1b649`. Running that
+parent test alone therefore cannot reproduce the finding. The reproducible red
+uses the uncommitted, test-only patch
+[`g01-terminal-reference-witness.patch`](g01-terminal-reference-witness.patch)
+in a detached temporary snapshot; it adds a separate assertion and does not
+alter the parent ref, branch, published commits or production files.
+
+From the repository root, this exact recipe checks the parent red and the frozen
+03c1 green:
+
+```sh
+set -eu
+repo="$(git rev-parse --show-toplevel)"
+tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/g01-terminal-schema.XXXXXX")"
+old_wt="$tmp_root/old"
+new_wt="$tmp_root/new"
+cleanup() {
+	git worktree remove --force "$old_wt" >/dev/null 2>&1 || true
+	git worktree remove --force "$new_wt" >/dev/null 2>&1 || true
+	rmdir "$tmp_root" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+git worktree add --detach "$old_wt" 8a848ad5b373866e1a6a01ce2a462ecfe37655df
+test "$(git -C "$old_wt" rev-parse HEAD)" = 8a848ad5b373866e1a6a01ce2a462ecfe37655df
+git -C "$old_wt" apply --check "$repo/docs/evidence/g01-terminal-reference-witness.patch"
+git -C "$old_wt" apply "$repo/docs/evidence/g01-terminal-reference-witness.patch"
+set +e
+GOTOOLCHAIN=go1.26.8 go test -C "$old_wt/experiments/g01-scaleset" -race -count=1 -timeout=120s -tags=g01_pair_fixture ./livecanary -run '^TestPairedTerminalPersistedReferenceSchema$' -v
+old_schema_status=$?
+set -e
+test "$old_schema_status" -eq 1
+
+git worktree add --detach "$new_wt" 03c1b649b6081b7ac868bb830f02a6d07319dc95
+test "$(git -C "$new_wt" rev-parse HEAD)" = 03c1b649b6081b7ac868bb830f02a6d07319dc95
+git -C "$new_wt" apply --check "$repo/docs/evidence/g01-terminal-reference-witness.patch"
+git -C "$new_wt" apply "$repo/docs/evidence/g01-terminal-reference-witness.patch"
+GOTOOLCHAIN=go1.26.8 go test -C "$new_wt/experiments/g01-scaleset" -race -count=1 -timeout=120s -tags=g01_pair_fixture ./livecanary -run '^TestPairedTerminalPersistedReferenceSchema$' -v
+
+G01_TERMINAL_JOURNAL_OUT="$tmp_root/old-journal.jsonl" G01_TERMINAL_REFS_OUT="$tmp_root/old-refs.txt" GOTOOLCHAIN=go1.26.8 go test -C "$old_wt/experiments/g01-scaleset" -race -count=1 -timeout=120s -tags=g01_pair_fixture ./livecanary -run '^TestPairedTerminalReferenceJournalBytes$'
+G01_TERMINAL_JOURNAL_OUT="$tmp_root/new-journal.jsonl" G01_TERMINAL_REFS_OUT="$tmp_root/new-refs.txt" GOTOOLCHAIN=go1.26.8 go test -C "$new_wt/experiments/g01-scaleset" -race -count=1 -timeout=120s -tags=g01_pair_fixture ./livecanary -run '^TestPairedTerminalReferenceJournalBytes$'
+if cmp -s "$tmp_root/old-journal.jsonl" "$tmp_root/new-journal.jsonl"; then
+	echo 'unexpected identical old/new terminal journal bytes' >&2
+	exit 1
+fi
+printf 'old refs: '; sed -n 's/^.*ref=//p' "$tmp_root/old-refs.txt"
+printf 'new refs: '; sed -n 's/^.*ref=//p' "$tmp_root/new-refs.txt"
+```
+
+The parent run of the old named test is green (race, 5.992 seconds), which is
+why it is not used as red evidence. With the temporary witness patch, the old
+snapshot fails (race, 0.502 seconds) with CamelCase `Pair`/`Acquire`/`JIT` and
+the other untagged keys; the same witness passes on 03c1 (race, 1.431 seconds).
+The fixture's deterministic terminal and collection-summary JSONL events also
+produce different `controllerEventRef` values: old
+`23:3afde60c183b38bffd4035e7d71f3f05bc91f1cece0f9c844dfe3406eafaf9c5`,
+`24:1c0efa1b52eae355be78bc02e43f5068e3e4c6a33aab28e4065ea021ad48393c`;
+new `23:242dbb81ea3443a21e9c111d9f0e224c872212cb36686436c537c3816bedc71f`,
+`24:88cef33e2f0f772e200e2aefecdbc8560c7315fe868861b5022b78eddef0c6b4`.
+The recipe compares the complete bytes, not only the displayed hashes, and
+observes `cmp` status 1.
+
+The unchanged correction witness on the frozen head is:
+
+```text
+GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=120s -tags=g01_pair_fixture ./livecanary -run '^TestPairedTerminalClosedReplayActualFile$' -v
+```
+
+After explicit tags were added to both persisted terminal-reference structs,
+the unchanged focused correction command passed in 5.867 seconds. The complete
+terminal persistence, authority-boundary, replay and worker-receipt group passed
+in 42.087 seconds, and tagged vet, shell syntax and `git diff --check` passed.
+The full offline gate also passed with the unchanged pins and bounds:
+
+```text
+GOTOOLCHAIN=go1.26.8 GO=go bash scripts/check-offline-experiments.sh
+```
+
+The run completed all three G01 partitions and G02's checks: G01 collection,
+terminal behavior and terminal storage took 105.568, 54.361 and 42.889 seconds
+respectively; G02's library and CLI checks took 27.225, 2.258 and 1.513 seconds.
+`GOTOOLCHAIN=go1.26.8 make check` also passed build, vet, unit/race tests, fuzz
+smoke, dependency/license checks, the offline gate and pinned govulncheck (no
+vulnerabilities found).
+
+Public CI run `34168590856`, attempt 2, job `101885714771` remains a gap. Its
+preceding checks passed, but the offline step's first G01 package command hit
+the package-wide `-timeout=45s`; the failure log listed
+`TestResponseBudgetAppliesAfterGzipDecompression` while the stack was blocked
+in `client.Get`/`responseBudgetTransport.RoundTrip`. Local exact single-test
+and full-package race checks passed, so this does not establish an individual
+test timeout and no limit or response-budget code was changed. The two current
+P2 findings are locally reproduced and corrected; external exact-head Codex
+re-review and hosted CI remain separate gates, while earlier findings remain
+historically stale/outdated per the review reader.
+
+Rollback is source-file-scoped and journal-state-offline-only. `controllerEventRef`
+hashes the domain prefix, serialized journal identity, a NUL separator and the
+`json.Marshal(Event)` bytes; changing the terminal-reference tags therefore
+changes both the persisted JSONL and every affected event hash. The old/new
+fixture witness above proves that the old and new formats have different
+serialized bytes and hashes, so cross-version replay compatibility cannot be
+assumed in either direction. This slice supplies no migration, translation,
+reset or online rollback path: use a fresh offline fixture/journal for the
+selected source revision and quarantine any existing cross-version journal for
+reviewed inspection. Never rewrite, truncate, reset or delete a journal/claim as
+rollback. If a future live resource or authority is unknown, retain its
+journal, claim and session/worker/set references and the resource itself for a
+separately reviewed reconciliation; no live resource was touched here. The
+published implementation history, test partitions, limits and prior evidence
+remain unchanged.
+
+At the initial frozen head `6a378ef`, the pre-issue54 collection-era tagged
+livecanary race suite passed (exit 0, 99.814s), including the real-cadence positive,
+legacy listener tests and paired failure matrices. Root also completed full make
+check on that historical head.
 
 After the final REST normalization correction, focused replay/cross-round/early-
 stop/distinct-ID/canceled-JIT race tests passed (11.265s). The added actual worker
@@ -153,8 +298,7 @@ The root integrator owns the changed-head full make check, hosted CI and exact-
 head independent/external review. These remain pending at this correction
 checkpoint. No live or platform evidence is claimed.
 
-The next separately reviewed terminal slice must move the same four post-Completed
-rounds into the original-session finalizer before revocation, then establish
-eligible completion/roster/zero-work facts and exact non-force deletion/session/set
-results. It must not add eight more rounds, retry ambiguous effects, infer absence
-from errors, release claims automatically or bypass G04 and the remaining G01 gates.
+Issue54's private terminal journal stages and terminal result are documented in the
+[terminal evidence](g01-paired-terminal.md). This collection-only record does not
+infer terminal cleanup, live behavior or the terminal failure matrix from its
+historical checks; G01 and its remaining live/platform gates stay open.

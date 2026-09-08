@@ -1,0 +1,81 @@
+diff --git a/experiments/g01-scaleset/livecanary/terminal_reference_witness_test.go b/experiments/g01-scaleset/livecanary/terminal_reference_witness_test.go
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/experiments/g01-scaleset/livecanary/terminal_reference_witness_test.go
+@@ -0,0 +1,75 @@
++//go:build g01_pair_fixture && !g01_live && !g01_worker
++
++package livecanary
++
++import (
++	"bytes"
++	"encoding/json"
++	"fmt"
++	"os"
++	"testing"
++)
++
++func TestPairedTerminalPersistedReferenceSchema(t *testing.T) {
++	evidence, err := json.Marshal(terminalEvidence{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	var evidenceFields map[string]json.RawMessage
++	if err := json.Unmarshal(evidence, &evidenceFields); err != nil {
++		t.Fatal(err)
++	}
++	for _, name := range []string{"pair", "acquire", "jit", "handoff", "start", "source", "started", "completed", "round8"} {
++		if _, ok := evidenceFields[name]; !ok {
++			t.Fatalf("terminal evidence omitted JSON field %q: %s", name, evidence)
++		}
++	}
++	facts, err := json.Marshal(terminalCollectionFacts{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	var factFields map[string]json.RawMessage
++	if err := json.Unmarshal(facts, &factFields); err != nil {
++		t.Fatal(err)
++	}
++	for _, name := range []string{"measurement", "outcome", "intent", "result", "decision", "session_close_intent", "session_close_result", "worker_delete_result", "set_delete_intent", "set_delete_result", "set_absence_result"} {
++		if _, ok := factFields[name]; !ok {
++			t.Fatalf("terminal collection facts omitted JSON field %q: %s", name, facts)
++		}
++	}
++}
++
++func TestPairedTerminalReferenceJournalBytes(t *testing.T) {
++	ref := func(sequence int) controllerRecordRef {
++		return controllerRecordRef{Sequence: sequence, EventSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
++	}
++	evidence := &terminalEvidence{Pair: ref(2), Acquire: ref(3), JIT: ref(4), Handoff: ref(5), Start: ref(6), Source: ref(7), Started: ref(8), Completed: ref(9), Round8: ref(10)}
++	facts := &terminalCollectionFacts{Measurement: collectionCollected, Evidence: evidence, Outcome: terminalComplete, Intent: ref(11), Result: ref(12), Decision: ref(13), SessionCloseIntent: ref(14), SessionCloseResult: ref(15), WorkerDeleteResult: ref(16), SetDeleteIntent: ref(17), SetDeleteResult: ref(18), SetAbsenceResult: ref(19)}
++	events := []Event{
++		{Sequence: 23, Kind: "baseline", Baseline: &baselineRecord{Terminal: &baselineTerminalPayload{Parent: ref(20), Previous: ref(21), Evidence: evidence}, Version: 1, Stage: "terminal", Outcome: "result", SetID: 7, Intent: ref(22), Creation: ref(1)}},
++		{Sequence: 24, Kind: "baseline", Baseline: &baselineRecord{Collection: &baselineCollectionFacts{Terminal: facts, Outcome: collectionCollected, Pair: ref(2), Start: ref(6), Completed: ref(9), LastSample: ref(10), Rounds: 8, OutstandingSession: sessionNone, SessionIntent: ref(14), SessionResult: ref(15)}, Version: 1, Stage: "collection", Outcome: "observed", SetID: 7, Creation: ref(1)}},
++	}
++	identity := controllerJournalIdentity{OwnershipSHA256: "fixture-owner", State: controllerFileIdentity{Device: 1, Inode: 2}, Journal: controllerFileIdentity{Device: 3, Inode: 4}, AdmissionDirectory: controllerFileIdentity{Device: 5, Inode: 6}, Claim: controllerFileIdentity{Device: 7, Inode: 8}}
++	var journal, refs bytes.Buffer
++	for _, event := range events {
++		raw, err := json.Marshal(event)
++		if err != nil {
++			t.Fatal(err)
++		}
++		r := controllerEventRef(identity, event)
++		journal.Write(raw)
++		journal.WriteByte('\n')
++		fmt.Fprintf(&refs, "sequence=%d ref=%d:%s\n", event.Sequence, r.Sequence, r.EventSHA256)
++	}
++	journalPath := os.Getenv("G01_TERMINAL_JOURNAL_OUT")
++	refsPath := os.Getenv("G01_TERMINAL_REFS_OUT")
++	if journalPath == "" || refsPath == "" {
++		t.Fatal("G01_TERMINAL_JOURNAL_OUT and G01_TERMINAL_REFS_OUT are required")
++	}
++	if err := os.WriteFile(journalPath, journal.Bytes(), 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(refsPath, refs.Bytes(), 0600); err != nil {
++		t.Fatal(err)
++	}
++}

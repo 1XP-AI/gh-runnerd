@@ -16,8 +16,18 @@ func (s *baselineHistory) executionRecord(r baselineRecord, ref controllerRecord
 	if s.collectionRef.Sequence != 0 {
 		return ErrJournal
 	}
+	if s.terminalIntent.Sequence != 0 && r.Stage != "collection" {
+		return ErrJournal
+	}
 	if r.Stage == "collection" {
 		f := r.Collection
+		if s.terminalIntent.Sequence != 0 {
+			if !reflect.DeepEqual(f.Terminal, s.terminalSummary()) {
+				return ErrJournal
+			}
+		} else if f.Terminal != nil {
+			return ErrJournal
+		}
 		if s.pending != nil || s.child != nil || f.Pair != s.pairRef || f.Start != s.startRef || f.Completed != s.completedRef || f.LastSample != s.lastSample || f.Rounds != s.rounds || f.OutstandingSession != s.outstanding() || f.SessionIntent != s.sessionIntent || f.SessionResult != s.sessionResult {
 			return ErrJournal
 		}
@@ -213,6 +223,9 @@ func (s *baselineHistory) executionRecord(r baselineRecord, ref controllerRecord
 		}
 		s.rounds = r.Sample.Round
 		s.lastSample = ref
+		if s.collected() {
+			s.measurementEvidence = s.evidence(lookup)
+		}
 	default:
 		return ErrJournal
 	}
@@ -241,6 +254,9 @@ func validRosterObservation(o rosterObservation, org string) bool {
 	return *o.Count >= o.Pages && *o.Count <= 100*o.Pages
 }
 func (s *baselineHistory) outstanding() sessionOutstanding {
+	if refPresent(s.sessionCloseResult) {
+		return sessionCloseAcknowledged
+	}
 	if s.sessionID != "" {
 		return sessionKnownOpen
 	}
