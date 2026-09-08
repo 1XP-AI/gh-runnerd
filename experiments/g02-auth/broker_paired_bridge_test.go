@@ -735,6 +735,12 @@ func TestPairedBrokerChainsRealControllerCreatePreparationAndTerminal(t *testing
 	if _, err := os.Stat(filepath.Join(brokerFixture.admissionRoot, "admission.json")); err != nil {
 		t.Fatal("controller admission claim")
 	}
+	// Diagnostic preflight while narrowing the real child boundary; this is
+	// credential-free and does not alter the already-completed controller
+	// history. Remove once the broker-launched preparation path is green.
+	prepCtx, prepCancel := context.WithTimeout(context.Background(), time.Minute)
+	runBridgeCommand(t, prepCtx, binaryPath, []string{"--prepare-approved-paired-journal", "--approval", controllerPath, "--state-dir", controllerState}, nil)
+	prepCancel()
 
 	worker := pairedWorkerApproval{RunnerUpdatesDisabled: true, HarnessSHA: harness, WorkflowSHA: workflow, OwnerNonce: controller.OwnerNonce, Controller: controller.Controller, Endpoint: bridge.dockerEndpoint, DaemonID: bridge.workerDaemonID, ImageID: bridge.workerImageID, Image: pairedWorkerImage, ExpiresAt: expires, Phases: []string{"create", "start", "inspect", "cleanup"}}
 	workerPath := filepath.Join(parent, "worker-approval.json")
