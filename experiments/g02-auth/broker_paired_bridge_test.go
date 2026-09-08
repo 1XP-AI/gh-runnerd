@@ -577,9 +577,19 @@ func buildPairedG01Binary(t *testing.T) (string, string, string) {
 	if len(harness) != 40 {
 		t.Fatal("invalid reviewed bridge head")
 	}
+	// The checkout contains nested Go modules and the active worktree's .git
+	// indirection is intentionally not used for build stamping. Build from a
+	// clean temporary clone so Go records vcs.revision and vcs.modified=false
+	// in the executable that the broker verifies.
+	cloneRoot := filepath.Join(t.TempDir(), "repo")
+	command = exec.Command("git", "clone", "--no-hardlinks", "--quiet", repo, cloneRoot)
+	if output, err := command.CombinedOutput(); err != nil {
+		_ = output
+		t.Fatal("clone reviewed g01 bridge source")
+	}
 	out := filepath.Join(t.TempDir(), "g01-live")
-	command = exec.Command("go", "build", "-tags", "g01_live,g01_pair_fixture", "-o", out, "./cmd/g01-live")
-	command.Dir = filepath.Join(repo, "experiments", "g01-scaleset")
+	command = exec.Command("go", "build", "-buildvcs=true", "-tags", "g01_live,g01_pair_fixture", "-o", out, "./cmd/g01-live")
+	command.Dir = filepath.Join(cloneRoot, "experiments", "g01-scaleset")
 	command.Env = append(os.Environ(), "GOTOOLCHAIN=go1.26.8")
 	if output, err := command.CombinedOutput(); err != nil {
 		_ = output
