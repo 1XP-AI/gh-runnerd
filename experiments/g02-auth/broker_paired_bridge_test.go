@@ -439,7 +439,7 @@ func (f *pairedBrokerBridge) handleActions(w http.ResponseWriter, r *http.Reques
 	}
 	if strings.HasSuffix(path, "/runnerscalesets/7/sessions") && r.Method == http.MethodPost {
 		f.sessionOpenCalls++
-		writeBridgeJSON(w, http.StatusOK, map[string]any{"sessionId": "00000000-0000-4000-8000-000000000001", "ownerName": f.setName, "messageQueueUrl": f.server.URL + "/queue", "messageQueueAccessToken": f.queueToken, "statistics": map[string]int{}})
+		writeBridgeJSON(w, http.StatusOK, map[string]any{"sessionId": "00000000-0000-4000-8000-000000000001", "ownerName": f.setName, "messageQueueUrl": f.server.URL + "/queue", "messageQueueAccessToken": f.queueToken, "statistics": map[string]int{"totalAvailableJobs": 0, "totalAcquiredJobs": 0, "totalAssignedJobs": 1, "totalRunningJobs": 0, "totalRegisteredRunners": 0, "totalBusyRunners": 0, "totalIdleRunners": 0}})
 		return
 	}
 	if strings.Contains(path, "/runnerscalesets/7/sessions/") && r.Method == http.MethodDelete {
