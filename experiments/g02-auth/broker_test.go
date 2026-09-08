@@ -17,6 +17,15 @@ func brokerApprovalFixture() BrokerApproval {
 	return BrokerApproval{OwnerNonce: strings.Repeat("a", 32), Mode: "discover-actions-host", AppID: 71, AppName: "synthetic-app", AppOwner: "org-a", AppOwnerID: 101, InstallationID: 201, Organization: "org-a", OrganizationID: 101, Repository: "canary", RepositoryID: 501, RunnerGroupID: 3, RunnerGroupName: "synthetic-group", ExpiresAt: time.Now().Add(time.Hour)}
 }
 
+func TestPairedTerminalBrokerApprovalUsesDedicatedMode(t *testing.T) {
+	a := brokerApprovalFixture()
+	a.Mode = "paired-terminal"
+	a.Phase = "paired-terminal"
+	if err := a.validate(time.Now()); err != nil {
+		t.Fatalf("paired terminal approval was refused: %v", err)
+	}
+}
+
 type brokerHTTPFixture struct {
 	t             *testing.T
 	calls         []string

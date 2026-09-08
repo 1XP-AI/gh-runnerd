@@ -5,12 +5,15 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/livecanary"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/livecanary"
+	"github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/liveworker"
 )
 
 type unreadable struct{ t *testing.T }
@@ -18,6 +21,17 @@ type unreadable struct{ t *testing.T }
 func (r unreadable) Read([]byte) (int, error) {
 	r.t.Fatal("credentials read before explicit exact-build approval")
 	return 0, nil
+}
+
+type countedInput struct {
+	io.Reader
+	reads int
+}
+
+func (r *countedInput) Close() error { return nil }
+func (r *countedInput) Read(p []byte) (int, error) {
+	r.reads++
+	return r.Reader.Read(p)
 }
 
 func TestPlanAndRefusalsNeverReadCredentialsOrEchoInputs(t *testing.T) {
@@ -85,5 +99,108 @@ func TestPreparationCommandNeverReadsCredentialsOrRunsRemotePhase(t *testing.T) 
 				t.Fatal("private path disclosed")
 			}
 		})
+	}
+}
+
+func TestPairedTerminalModeReadsControllerInputAfterAllGates(t *testing.T) {
+	a := livecanary.Approval{AppID: 11, InstallationID: 12, Organization: "fixture-org", Repository: "canary", RepositoryID: 42, RunnerGroupID: 3, OwnerNonce: strings.Repeat("a", 32), HarnessSHA: strings.Repeat("b", 40), WorkflowSHA: strings.Repeat("c", 40), WorkflowPath: ".github/workflows/canary.yml", WorkflowRunID: 5, Controller: "fixture-controller", ExpiresAt: time.Now().Add(time.Hour), ActionsHosts: []string{"fixture.actions.githubusercontent.com"}, Phases: []string{"create", "before-ack", "after-ack", "before-acquire", "acquire-loss", "inspect", "cleanup", "jit-loss"}}
+	worker := liveworker.Approval{RunnerUpdatesDisabled: true, HarnessSHA: a.HarnessSHA, WorkflowSHA: a.WorkflowSHA, OwnerNonce: a.OwnerNonce, Controller: a.Controller, Endpoint: "/tmp/g01-paired-docker.sock", DaemonID: "fixture-daemon", ImageID: "sha256:" + strings.Repeat("d", 64), Image: liveworker.ImageReference, ExpiresAt: a.ExpiresAt, Phases: []string{"create", "start", "inspect", "cleanup"}}
+	root := t.TempDir()
+	controllerState := filepath.Join(root, "controller-state")
+	workerState := filepath.Join(root, "worker-state")
+	if err := os.Mkdir(controllerState, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(workerState, 0700); err != nil {
+		t.Fatal(err)
+	}
+	controllerPath := filepath.Join(root, "controller.json")
+	workerPath := filepath.Join(root, "worker.json")
+	controllerData, err := json.Marshal(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerData, err := json.Marshal(worker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(controllerPath, controllerData, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(workerPath, workerData, 0600); err != nil {
+		t.Fatal(err)
+	}
+	input := &countedInput{Reader: strings.NewReader(`{}`)}
+	var out bytes.Buffer
+	code := runWithPreparation([]string{"--execute-approved-paired-terminal", "--approval", controllerPath, "--state-dir", controllerState, "--worker-approval", workerPath, "--worker-state-dir", workerState}, input, &out, func() (string, bool) { return a.HarnessSHA, true }, func(string, livecanary.Approval, string) (livecanary.PreparationReceipt, error) {
+		t.Fatal("paired mode entered controller-only preparation")
+		return livecanary.PreparationReceipt{}, nil
+	})
+	if code == 0 || input.reads == 0 {
+		t.Fatalf("paired mode did not reach its bounded controller input gate: code=%d reads=%d output=%q", code, input.reads, out.String())
+	}
+}
+
+func TestPairedTerminalModeRejectsUnusedPhaseAndControllerFlagsBeforeInput(t *testing.T) {
+	a := livecanary.Approval{AppID: 11, InstallationID: 12, Organization: "fixture-org", Repository: "canary", RepositoryID: 42, RunnerGroupID: 3, OwnerNonce: strings.Repeat("a", 32), HarnessSHA: strings.Repeat("b", 40), WorkflowSHA: strings.Repeat("c", 40), WorkflowPath: ".github/workflows/canary.yml", WorkflowRunID: 5, Controller: "fixture-controller", ExpiresAt: time.Now().Add(time.Hour), ActionsHosts: []string{"fixture.actions.githubusercontent.com"}, Phases: []string{"create", "before-ack", "after-ack", "before-acquire", "acquire-loss", "inspect", "cleanup", "jit-loss"}}
+	worker := liveworker.Approval{RunnerUpdatesDisabled: true, HarnessSHA: a.HarnessSHA, WorkflowSHA: a.WorkflowSHA, OwnerNonce: a.OwnerNonce, Controller: a.Controller, Endpoint: "/tmp/g01-paired-docker.sock", DaemonID: "fixture-daemon", ImageID: "sha256:" + strings.Repeat("d", 64), Image: liveworker.ImageReference, ExpiresAt: a.ExpiresAt, Phases: []string{"create", "start", "inspect", "cleanup"}}
+	root := t.TempDir()
+	controllerState := filepath.Join(root, "controller-state")
+	workerState := filepath.Join(root, "worker-state")
+	if err := os.Mkdir(controllerState, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(workerState, 0700); err != nil {
+		t.Fatal(err)
+	}
+	controllerPath := filepath.Join(root, "controller.json")
+	workerPath := filepath.Join(root, "worker.json")
+	controllerData, _ := json.Marshal(a)
+	workerData, _ := json.Marshal(worker)
+	if err := os.WriteFile(controllerPath, controllerData, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(workerPath, workerData, 0600); err != nil {
+		t.Fatal(err)
+	}
+	base := []string{"--execute-approved-paired-terminal", "--approval", controllerPath, "--state-dir", controllerState, "--worker-approval", workerPath, "--worker-state-dir", workerState}
+	for _, extra := range [][]string{{"--phase", "cleanup"}, {"--execute-approved-canary"}} {
+		input := &countedInput{Reader: strings.NewReader(`{}`)}
+		args := append(append([]string(nil), base...), extra...)
+		var out bytes.Buffer
+		if code := runWithPreparation(args, input, &out, func() (string, bool) { return a.HarnessSHA, true }, nil); code == 0 || input.reads != 0 {
+			t.Fatalf("incompatible paired flags reached input: extra=%v code=%d reads=%d", extra, code, input.reads)
+		}
+	}
+}
+
+func TestPairedTerminalModeRequiresWorkflowVerificationAuthorityBeforeInput(t *testing.T) {
+	a := livecanary.Approval{AppID: 11, InstallationID: 12, Organization: "fixture-org", Repository: "canary", RepositoryID: 42, RunnerGroupID: 3, OwnerNonce: strings.Repeat("a", 32), HarnessSHA: strings.Repeat("b", 40), WorkflowSHA: strings.Repeat("c", 40), WorkflowPath: ".github/workflows/canary.yml", WorkflowRunID: 5, Controller: "fixture-controller", ExpiresAt: time.Now().Add(time.Hour), ActionsHosts: []string{"fixture.actions.githubusercontent.com"}, Phases: []string{"create", "inspect", "cleanup"}}
+	worker := liveworker.Approval{RunnerUpdatesDisabled: true, HarnessSHA: a.HarnessSHA, WorkflowSHA: a.WorkflowSHA, OwnerNonce: a.OwnerNonce, Controller: a.Controller, Endpoint: "/tmp/g01-paired-docker.sock", DaemonID: "fixture-daemon", ImageID: "sha256:" + strings.Repeat("d", 64), Image: liveworker.ImageReference, ExpiresAt: a.ExpiresAt, Phases: []string{"create", "start", "inspect", "cleanup"}}
+	root := t.TempDir()
+	controllerState := filepath.Join(root, "controller-state")
+	workerState := filepath.Join(root, "worker-state")
+	if err := os.Mkdir(controllerState, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(workerState, 0700); err != nil {
+		t.Fatal(err)
+	}
+	controllerPath := filepath.Join(root, "controller.json")
+	workerPath := filepath.Join(root, "worker.json")
+	controllerData, _ := json.Marshal(a)
+	workerData, _ := json.Marshal(worker)
+	if err := os.WriteFile(controllerPath, controllerData, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(workerPath, workerData, 0600); err != nil {
+		t.Fatal(err)
+	}
+	input := &countedInput{Reader: strings.NewReader(`{}`)}
+	var out bytes.Buffer
+	args := []string{"--execute-approved-paired-terminal", "--approval", controllerPath, "--state-dir", controllerState, "--worker-approval", workerPath, "--worker-state-dir", workerState}
+	code := runWithPreparation(args, input, &out, func() (string, bool) { return a.HarnessSHA, true }, nil)
+	if code == 0 || input.reads != 0 {
+		t.Fatalf("paired mode accepted missing verification authority or read input: code=%d reads=%d output=%q", code, input.reads, out.String())
 	}
 }
