@@ -207,6 +207,14 @@ GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture 
 GOTOOLCHAIN=go1.26.8 go vet -C experiments/g01-scaleset -tags=g01_pair_fixture ./livecanary
 ```
 
+`terminal_storage_tests` is the exact `storage_regex` used by
+`scripts/check-offline-experiments.sh` and is the `STORAGE` alias in issue #54.
+The generated tooling sentinel is named `TestPairedTerminalFixtureStorageFailure`,
+so its top-level regex term is `FixtureStorageFailure`; it must remain in the
+storage-only group. The three groups are exhaustive and disjoint: every other
+top-level `TestPairedTerminal` test stays in terminal behavior, while tests
+outside that prefix stay in collection/listener.
+
 The fixture tag remains excluded with either live command tag. The earlier
 two-part tooling red
 `78a8b3e` and fixes `5f419c9`/`ff70853` were independently verified by the

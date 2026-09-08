@@ -41,7 +41,11 @@ refusal paths. The `g01_pair_fixture` livecanary checks use private synthetic
 fixtures: one collection run excludes `^TestPairedTerminal`, one terminal run
 selects that prefix while skipping the reviewed persistence set, and a third run
 selects the exact persistence set
-`^TestPairedTerminal(Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure)$`.
+`^TestPairedTerminal(Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$`.
+`FixtureStorageFailure` is the unique generated sentinel from
+`scripts/tooling_test.go`; it is intentionally distinct from the real
+`TestPairedTerminalClosedReplayActualFile` test. This exact expression is the
+script's `storage_regex` value and is also the `STORAGE` alias in issue #54.
 One tagged vet follows those three race-tested runs. None of these tagged checks
 executes approved live controller/worker operations or exposes a public terminal
 phase/API. The implementation and evidence boundaries are recorded in the

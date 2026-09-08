@@ -163,21 +163,81 @@ collection entry's partition.
 
 ### Current correction checkpoint
 
-The current review correction first reproduced the persisted-reference schema
-finding with the existing storage witness. Before adding tags, this exact
-command exited 1 in 5.119 seconds because `terminalEvidence` encoded `Pair`,
-`Acquire`, `JIT`, `Handoff`, `Start`, `Source`, `Started`, `Completed` and
-`Round8` instead of their snake_case keys:
+The parent `8a848ad5b373866e1a6a01ce2a462ecfe37655df` is intentionally not
+described as a schema red: its named `TestPairedTerminalClosedReplayActualFile`
+test passes because the schema witness was added only in `03c1b649`. Running that
+parent test alone therefore cannot reproduce the finding. The reproducible red
+uses the uncommitted, test-only patch
+[`g01-terminal-reference-witness.patch`](g01-terminal-reference-witness.patch)
+in a detached temporary snapshot; it adds a separate assertion and does not
+alter the parent ref, branch, published commits or production files.
+
+From the repository root, this exact recipe checks the parent red and the frozen
+03c1 green:
+
+```sh
+set -eu
+repo="$(git rev-parse --show-toplevel)"
+tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/g01-terminal-schema.XXXXXX")"
+old_wt="$tmp_root/old"
+new_wt="$tmp_root/new"
+cleanup() {
+	git worktree remove --force "$old_wt" >/dev/null 2>&1 || true
+	git worktree remove --force "$new_wt" >/dev/null 2>&1 || true
+	rmdir "$tmp_root" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+git worktree add --detach "$old_wt" 8a848ad5b373866e1a6a01ce2a462ecfe37655df
+test "$(git -C "$old_wt" rev-parse HEAD)" = 8a848ad5b373866e1a6a01ce2a462ecfe37655df
+git -C "$old_wt" apply --check "$repo/docs/evidence/g01-terminal-reference-witness.patch"
+git -C "$old_wt" apply "$repo/docs/evidence/g01-terminal-reference-witness.patch"
+set +e
+GOTOOLCHAIN=go1.26.8 go test -C "$old_wt/experiments/g01-scaleset" -race -count=1 -timeout=120s -tags=g01_pair_fixture ./livecanary -run '^TestPairedTerminalPersistedReferenceSchema$' -v
+old_schema_status=$?
+set -e
+test "$old_schema_status" -eq 1
+
+git worktree add --detach "$new_wt" 03c1b649b6081b7ac868bb830f02a6d07319dc95
+test "$(git -C "$new_wt" rev-parse HEAD)" = 03c1b649b6081b7ac868bb830f02a6d07319dc95
+git -C "$new_wt" apply --check "$repo/docs/evidence/g01-terminal-reference-witness.patch"
+git -C "$new_wt" apply "$repo/docs/evidence/g01-terminal-reference-witness.patch"
+GOTOOLCHAIN=go1.26.8 go test -C "$new_wt/experiments/g01-scaleset" -race -count=1 -timeout=120s -tags=g01_pair_fixture ./livecanary -run '^TestPairedTerminalPersistedReferenceSchema$' -v
+
+G01_TERMINAL_JOURNAL_OUT="$tmp_root/old-journal.jsonl" G01_TERMINAL_REFS_OUT="$tmp_root/old-refs.txt" GOTOOLCHAIN=go1.26.8 go test -C "$old_wt/experiments/g01-scaleset" -race -count=1 -timeout=120s -tags=g01_pair_fixture ./livecanary -run '^TestPairedTerminalReferenceJournalBytes$'
+G01_TERMINAL_JOURNAL_OUT="$tmp_root/new-journal.jsonl" G01_TERMINAL_REFS_OUT="$tmp_root/new-refs.txt" GOTOOLCHAIN=go1.26.8 go test -C "$new_wt/experiments/g01-scaleset" -race -count=1 -timeout=120s -tags=g01_pair_fixture ./livecanary -run '^TestPairedTerminalReferenceJournalBytes$'
+if cmp -s "$tmp_root/old-journal.jsonl" "$tmp_root/new-journal.jsonl"; then
+	echo 'unexpected identical old/new terminal journal bytes' >&2
+	exit 1
+fi
+printf 'old refs: '; sed -n 's/^.*ref=//p' "$tmp_root/old-refs.txt"
+printf 'new refs: '; sed -n 's/^.*ref=//p' "$tmp_root/new-refs.txt"
+```
+
+The parent run of the old named test is green (race, 5.992 seconds), which is
+why it is not used as red evidence. With the temporary witness patch, the old
+snapshot fails (race, 0.502 seconds) with CamelCase `Pair`/`Acquire`/`JIT` and
+the other untagged keys; the same witness passes on 03c1 (race, 1.431 seconds).
+The fixture's deterministic terminal and collection-summary JSONL events also
+produce different `controllerEventRef` values: old
+`23:3afde60c183b38bffd4035e7d71f3f05bc91f1cece0f9c844dfe3406eafaf9c5`,
+`24:1c0efa1b52eae355be78bc02e43f5068e3e4c6a33aab28e4065ea021ad48393c`;
+new `23:242dbb81ea3443a21e9c111d9f0e224c872212cb36686436c537c3816bedc71f`,
+`24:88cef33e2f0f772e200e2aefecdbc8560c7315fe868861b5022b78eddef0c6b4`.
+The recipe compares the complete bytes, not only the displayed hashes, and
+observes `cmp` status 1.
+
+The unchanged correction witness on the frozen head is:
 
 ```text
-GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=120s -tags=g01_pair_fixture ./livecanary -run '^TestPairedTerminalClosedReplayActualFile$' -v
+GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=120s -tags=g01_pair_fixture ./livecanary -run '^TestPairedTerminalClosedReplayActualFile$' -v
 ```
 
 After explicit tags were added to both persisted terminal-reference structs,
-the same command passed in 5.867 seconds. The complete terminal persistence,
-authority-boundary, replay and worker-receipt group passed in 42.087 seconds,
-and tagged vet, shell syntax and `git diff --check` passed. The full offline
-gate also passed with the unchanged pins and bounds:
+the unchanged focused correction command passed in 5.867 seconds. The complete
+terminal persistence, authority-boundary, replay and worker-receipt group passed
+in 42.087 seconds, and tagged vet, shell syntax and `git diff --check` passed.
+The full offline gate also passed with the unchanged pins and bounds:
 
 ```text
 GOTOOLCHAIN=go1.26.8 GO=go bash scripts/check-offline-experiments.sh
@@ -201,8 +261,19 @@ P2 findings are locally reproduced and corrected; external exact-head Codex
 re-review and hosted CI remain separate gates, while earlier findings remain
 historically stale/outdated per the review reader.
 
-Rollback is file-scoped: revert only the terminal-reference tags, their focused
-storage-schema witness and the paired-evidence documentation edits; the
+Rollback is source-file-scoped and journal-state-offline-only. `controllerEventRef`
+hashes the domain prefix, serialized journal identity, a NUL separator and the
+`json.Marshal(Event)` bytes; changing the terminal-reference tags therefore
+changes both the persisted JSONL and every affected event hash. The old/new
+fixture witness above proves that the old and new formats have different
+serialized bytes and hashes, so cross-version replay compatibility cannot be
+assumed in either direction. This slice supplies no migration, translation,
+reset or online rollback path: use a fresh offline fixture/journal for the
+selected source revision and quarantine any existing cross-version journal for
+reviewed inspection. Never rewrite, truncate, reset or delete a journal/claim as
+rollback. If a future live resource or authority is unknown, retain its
+journal, claim and session/worker/set references and the resource itself for a
+separately reviewed reconciliation; no live resource was touched here. The
 published implementation history, test partitions, limits and prior evidence
 remain unchanged.
 
