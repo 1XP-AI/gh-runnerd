@@ -140,33 +140,23 @@ func (p *brokerWorkerPlan) workerClaimPath() (string, error) {
 	if p == nil || p.preparationReceipt.Claim == (brokerInode{}) {
 		return "", errBroker
 	}
-	match := func(path string) bool {
-		if path == "" {
-			return false
-		}
-		info, err := os.Lstat(path)
-		return err == nil && info.Mode().IsRegular() && brokerFileIdentity(info) == p.preparationReceipt.Claim
-	}
-	var candidates []string
-	if p.claimDirectory != "" {
-		candidates = append(candidates, filepath.Join(p.claimDirectory, "admission.json"))
-	}
-	candidates = append(candidates, filepath.Join(filepath.Dir(p.statePath), "worker-admission", "admission.json"))
-	seen := map[string]bool{}
-	for _, path := range candidates {
-		if seen[path] {
-			continue
-		}
-		seen[path] = true
-		if match(path) {
-			return path, nil
+	directory := p.claimDirectory
+	if directory == "" {
+		var err error
+		directory, err = resolveWorkerClaimDirectory()
+		if err != nil {
+			return "", errBroker
 		}
 	}
-	directory, err := workerAdmissionDirectory()
-	if err == nil && match(filepath.Join(directory, "admission.json")) {
-		return filepath.Join(directory, "admission.json"), nil
+	if !filepath.IsAbs(directory) || filepath.Clean(directory) != directory {
+		return "", errBroker
 	}
-	return "", errBroker
+	path := filepath.Join(directory, "admission.json")
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || brokerFileIdentity(info) != p.preparationReceipt.Claim {
+		return "", errBroker
+	}
+	return path, nil
 }
 
 func flockBrokerHandle(file *os.File) error {

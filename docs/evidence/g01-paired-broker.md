@@ -116,6 +116,26 @@ canonical preparation reached mint and launch. That is
 Committed reviewer-local report/overlay paths are
 [discussion r3957639908](https://github.com/1XP-AI/gh-runnerd/pull/62#discussion_r3957639908).
 
+A later coordinator reproduction at `92632dde67a98c31146386ce2ce144326b0bdff9`
+showed the same-inode fence was incomplete: `workerClaimPath` searched a
+sibling `worker-admission` directory and the account pin for any matching
+inode. Moving the prepared claim inode into that sibling and writing `{}` at
+the original pathname made `checkPrepared` return nil
+([comment 5586268545](https://github.com/1XP-AI/gh-runnerd/pull/62#issuecomment-5586268545)):
+
+```text
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=60s \
+  -run '^TestPairedWorkerPreparationReceiptFencesClaimRelocation$' .
+FAIL: relocated receipt inode bypassed changed canonical claim path
+  (relocated-inode and relocated-directory)
+
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=60s \
+  -run '^TestPairedBrokerRejectsWorkerClaimChangeBeforeMint$' .
+FAIL: worker admission claim relocated-inode crossed pre-mint fence:
+  err=<nil> mints=1 launches=1
+  (same for relocated-directory)
+```
+
 ## Implemented boundaries
 
 Production `validBrokerBuild` now requires the exact reviewed tag set
@@ -144,11 +164,17 @@ worker authority/admission lease, rejects prior effects/uncertainty/reservation
 histories, and returns only a credential-free receipt. The broker binds the
 receipt's approval digest, state/journal/claim identities, and journal/claim
 digests. Every later `checkPrepared` reopens the worker journal and the
-canonical admission claim (the receipt inode/digest, never a newly invented
-root), compares both to the stored receipt, and checks the claim's version-1
-ownership/state/journal schema under a short exclusive file lease. Same-inode
-mutation, replacement, missing, malformed, and locked claims fail at the
-pre-auth, mint, and launch fences with zero remote/mint/launch as appropriate.
+admission claim bound by the trusted preparation contract: the explicit
+prepared directory in tests, otherwise the native-account worker pin. It
+compares the named path's inode and digest to the stored receipt and checks
+the claim's version-1 ownership/state/journal schema under a short exclusive
+file lease. It does not search fixture siblings or other candidate paths for a
+matching inode. Same-inode mutation, replacement, missing, malformed, locked,
+relocated-inode, and relocated-directory claims fail at the pre-auth, mint,
+and launch fences with zero remote/mint/launch as appropriate. Offline
+executable fixtures bind the claim directory through the explicit
+`resolveWorkerClaimDirectory` / `bindWorkerClaimDirectory` seam, the same
+narrow pattern as `brokerBinaryOpener`.
 The child later reopens the worker journal and admission claim through the same
 canonical parser before worker effects, so those cases cannot mint/launch or
 authorize a retry. `TestPairedWorkerPreparationReceiptFencesJournalMutation`
@@ -272,12 +298,39 @@ GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s \
 PASS; g02-auth 24.639s; process wall time 25.48s
 ```
 
-Focused claim-fence and related tests:
+Focused claim-fence and related tests after the pathname-binding fix:
 
 ```text
 GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=90s \
-  -run '^(TestPairedWorkerPreparationReceiptFencesClaimMutation|TestPairedBrokerRejectsWorkerClaimChangeBeforeAuth|TestPairedBrokerRejectsWorkerClaimChangeBeforeMint|TestPairedWorkerPreparationReceiptFencesJournalMutation|TestPairedBrokerRejectsMalformedWorkerJournalBeforeMint|TestPairedBrokerRealEntrypointUsesPairedPreparationClosure|TestBrokerPreparedFilesChangeAfterCaptureStopsBeforeMint|TestBrokerAccountRootIgnoresEnvironmentAndFailsClosed)$' .
-PASS; g02-auth 2.317s
+  -run '^(TestPairedWorkerPreparationReceiptFencesClaimRelocation|TestPairedWorkerPreparationReceiptFencesClaimMutation|TestPairedWorkerPreparationReceiptFencesJournalMutation|TestPairedBrokerRejectsWorkerClaimChangeBeforeAuth|TestPairedBrokerRejectsWorkerClaimChangeBeforeMint|TestPairedBrokerRealEntrypointUsesPairedPreparationClosure|TestPairedBrokerRejectsMalformedWorkerJournalBeforeMint|TestBrokerAccountRootIgnoresEnvironmentAndFailsClosed)$' .
+PASS; g02-auth 2.514s
+```
+
+Current G02 45-second partitions after the pathname-binding fix:
+
+```text
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s \
+  -run '^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$' ./...
+PASS; g02-auth 40.625s
+
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s \
+  -run '^TestPaired' -skip '^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$' ./...
+PASS; g02-auth 11.823s
+
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s \
+  -skip '^TestPaired' ./...
+PASS; g02-auth 25.740s
+```
+
+Declared offline gate after the pathname-binding fix:
+
+```text
+/usr/bin/time -p env GOTOOLCHAIN=go1.26.8 bash scripts/check-offline-experiments.sh
+G02 named cadence: g02-auth 40.781s
+G02 remaining TestPaired family: g02-auth 11.511s
+G02 unfiltered complement: g02-auth 26.138s
+offline experiment checks passed: 2 module(s)
+exit 0; process wall time 353.67s
 ```
 
 The focused tooling matrix passed after the three-partition script correction:
@@ -345,4 +398,5 @@ including stale/outdated ones. Hosted CI, independent review of the new head,
 and a clean exact-head Codex verdict remain required before any merge decision.
 Live recovery remains unauthorized and unproven. The named cadence 45-second
 partition still has only a few seconds of local headroom; that is a remaining
-gap, not an approved timeout change.
+gap, not an approved timeout change. Rollback is a source-only revert of this
+pathname-binding follow-up.

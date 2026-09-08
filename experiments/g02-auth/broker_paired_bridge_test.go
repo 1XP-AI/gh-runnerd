@@ -820,6 +820,7 @@ func runPairedBrokerBridge(t *testing.T, tags string) time.Duration {
 		return &verifiedBrokerBinary{path: path, file: file, digest: a.ControllerBinarySHA256}, nil
 	}
 	defer func() { brokerBinaryOpener = oldOpener }()
+	bindWorkerClaimDirectory(t, filepath.Join(filepath.Dir(workerState), "worker-admission"))
 	input, err := os.Open(inputPath)
 	if err != nil {
 		t.Fatal("broker input")

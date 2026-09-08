@@ -165,6 +165,53 @@ func TestPairedWorkerPreparationReceiptFencesClaimMutation(t *testing.T) {
 	}
 }
 
+func TestPairedWorkerPreparationReceiptFencesClaimRelocation(t *testing.T) {
+	for _, kind := range []string{"relocated-inode", "relocated-directory"} {
+		t.Run(kind, func(t *testing.T) {
+			a, c, controllerState, workerState, workerPath := pairedPlanInputs(t)
+			plan, err := openBrokerWorkerPlan(workerPath, workerState, controllerState, a, c)
+			if err != nil {
+				t.Fatal("valid paired worker plan refused")
+			}
+			defer plan.close()
+			admission := filepath.Join(filepath.Dir(workerState), "canonical-worker-claim")
+			plan.prepare = func(context.Context) (brokerPreparationReceipt, error) {
+				return brokerSyntheticWorkerPreparation(t, plan, admission)
+			}
+			if err := plan.checkPrepared(context.Background()); err != nil {
+				t.Fatalf("fresh worker preparation refused: %v", err)
+			}
+			claimPath := filepath.Join(admission, "admission.json")
+			fallback := filepath.Join(filepath.Dir(workerState), "worker-admission")
+			switch kind {
+			case "relocated-inode":
+				if err := os.Mkdir(fallback, 0700); err != nil {
+					t.Fatal("fallback worker admission")
+				}
+				if err := os.Rename(claimPath, filepath.Join(fallback, "admission.json")); err != nil {
+					t.Fatal("relocate worker claim inode")
+				}
+				if err := os.WriteFile(claimPath, []byte("{}"), 0600); err != nil {
+					t.Fatal("replace canonical worker claim path")
+				}
+			case "relocated-directory":
+				if err := os.Rename(admission, fallback); err != nil {
+					t.Fatal("relocate worker claim directory")
+				}
+				if err := os.Mkdir(admission, 0700); err != nil {
+					t.Fatal("replacement worker claim directory")
+				}
+				if err := os.WriteFile(claimPath, []byte("{}"), 0600); err != nil {
+					t.Fatal("replace canonical worker claim path")
+				}
+			}
+			if err := plan.checkPrepared(context.Background()); err == nil {
+				t.Fatal("relocated receipt inode bypassed changed canonical claim path")
+			}
+		})
+	}
+}
+
 func TestPairedWorkerApprovalMismatchRefusesBeforeBinding(t *testing.T) {
 	a, c, controllerState, workerState, workerPath := pairedPlanInputs(t)
 	raw, err := os.ReadFile(workerPath)
@@ -233,6 +280,11 @@ func TestPairedApprovalRejectsInsufficientTerminalAuthority(t *testing.T) {
 
 func pairedWorkerExecutePlan(t *testing.T, a *BrokerApproval, parent string, launch func(context.Context, []byte, string) error) (*brokerControllerPlan, string) {
 	t.Helper()
+	return pairedWorkerExecutePlanAt(t, a, parent, filepath.Join(parent, "canonical-worker-claim"), launch)
+}
+
+func pairedWorkerExecutePlanAt(t *testing.T, a *BrokerApproval, parent, admission string, launch func(context.Context, []byte, string) error) (*brokerControllerPlan, string) {
+	t.Helper()
 	plan := brokerTestPlan(t, a, parent, launch)
 	plan.controller.Phases = []string{"create", "before-ack", "inspect", "cleanup"}
 	plan.controller.WorkflowRunID = 7
@@ -256,13 +308,12 @@ func pairedWorkerExecutePlan(t *testing.T, a *BrokerApproval, parent string, lau
 	if err != nil {
 		t.Fatal("valid paired worker plan refused")
 	}
-	admission := filepath.Join(parent, "worker-admission")
 	brokerAttachSyntheticWorkerPreparation(t, plan, admission)
 	return plan, admission
 }
 
 func TestPairedBrokerRejectsWorkerClaimChangeBeforeAuth(t *testing.T) {
-	for _, kind := range []string{"hash", "replacement"} {
+	for _, kind := range []string{"hash", "replacement", "relocated-inode", "relocated-directory"} {
 		t.Run(kind, func(t *testing.T) {
 			a, candidate, api, fixture, attempt := newBrokerFixture(t)
 			a.Mode, a.Phase, a.AllowVerificationAuthority = "paired-terminal", "paired-terminal", true
@@ -292,6 +343,16 @@ func TestPairedBrokerRejectsWorkerClaimChangeBeforeAuth(t *testing.T) {
 					if os.Rename(claimPath, claimPath+".retained") != nil || os.WriteFile(claimPath, data, 0600) != nil {
 						t.Fatal("replace worker claim")
 					}
+				case "relocated-inode":
+					fallback := filepath.Join(filepath.Dir(admission), "worker-admission")
+					if os.Mkdir(fallback, 0700) != nil || os.Rename(claimPath, filepath.Join(fallback, "admission.json")) != nil || os.WriteFile(claimPath, []byte("{}"), 0600) != nil {
+						t.Fatal("relocate worker claim inode")
+					}
+				case "relocated-directory":
+					fallback := filepath.Join(filepath.Dir(admission), "worker-admission")
+					if os.Rename(admission, fallback) != nil || os.Mkdir(admission, 0700) != nil || os.WriteFile(claimPath, []byte("{}"), 0600) != nil {
+						t.Fatal("relocate worker claim directory")
+					}
 				}
 				return receipt, nil
 			}
@@ -304,7 +365,7 @@ func TestPairedBrokerRejectsWorkerClaimChangeBeforeAuth(t *testing.T) {
 }
 
 func TestPairedBrokerRejectsWorkerClaimChangeBeforeMint(t *testing.T) {
-	for _, kind := range []string{"hash", "replacement", "missing", "malformed", "locked"} {
+	for _, kind := range []string{"hash", "replacement", "missing", "malformed", "locked", "relocated-inode", "relocated-directory"} {
 		t.Run(kind, func(t *testing.T) {
 			a, candidate, _, fixture, attempt := newBrokerFixture(t)
 			a.Mode, a.Phase, a.AllowVerificationAuthority = "paired-terminal", "paired-terminal", true
@@ -344,6 +405,16 @@ func TestPairedBrokerRejectsWorkerClaimChangeBeforeMint(t *testing.T) {
 						held, err = os.OpenFile(claimPath, os.O_RDWR, 0)
 						if err != nil || syscall.Flock(int(held.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
 							t.Fatal("lock worker claim")
+						}
+					case "relocated-inode":
+						fallback := filepath.Join(filepath.Dir(admission), "worker-admission")
+						if os.Mkdir(fallback, 0700) != nil || os.Rename(claimPath, filepath.Join(fallback, "admission.json")) != nil || os.WriteFile(claimPath, []byte("{}"), 0600) != nil {
+							t.Fatal("relocate worker claim inode")
+						}
+					case "relocated-directory":
+						fallback := filepath.Join(filepath.Dir(admission), "worker-admission")
+						if os.Rename(admission, fallback) != nil || os.Mkdir(admission, 0700) != nil || os.WriteFile(claimPath, []byte("{}"), 0600) != nil {
+							t.Fatal("relocate worker claim directory")
 						}
 					}
 				}
@@ -613,6 +684,7 @@ func TestPairedBrokerRealEntrypointUsesPairedPreparationClosure(t *testing.T) {
 	oldOpener := brokerBinaryOpener
 	brokerBinaryOpener = func(string, BrokerApproval) (*verifiedBrokerBinary, error) { return binary, nil }
 	defer func() { brokerBinaryOpener = oldOpener }()
+	bindWorkerClaimDirectory(t, filepath.Join(parent, "worker-admission"))
 	result, err := runBrokerWithAPI(context.Background(), BrokerFiles{ApprovalPath: approvalPath, StateDirectory: attempt, ControllerBinary: binary.path, ControllerApproval: controllerPath, ControllerStateDirectory: controllerState, WorkerApproval: workerPath, WorkerStateDirectory: workerState}, input, api)
 	if err != nil || result.Status != "paired_terminal_completed" || fixture.tokenCalls != 1 {
 		t.Fatalf("real paired entrypoint did not complete one handoff: result=%+v err=%v mints=%d calls=%v", result, err, fixture.tokenCalls, fixture.calls)
@@ -695,6 +767,7 @@ func TestPairedBrokerRejectsMalformedWorkerJournalBeforeMint(t *testing.T) {
 	oldOpener := brokerBinaryOpener
 	brokerBinaryOpener = func(string, BrokerApproval) (*verifiedBrokerBinary, error) { return binary, nil }
 	defer func() { brokerBinaryOpener = oldOpener }()
+	bindWorkerClaimDirectory(t, filepath.Join(parent, "worker-admission"))
 	_, err = runBrokerWithAPI(context.Background(), BrokerFiles{ApprovalPath: approvalPath, StateDirectory: attempt, ControllerBinary: binary.path, ControllerApproval: controllerPath, ControllerStateDirectory: controllerState, WorkerApproval: workerPath, WorkerStateDirectory: workerState}, input, api)
 	if err == nil || fixture.tokenCalls != 0 {
 		t.Fatalf("malformed worker journal crossed pre-mint boundary: err=%v mints=%d calls=%v", err, fixture.tokenCalls, fixture.calls)

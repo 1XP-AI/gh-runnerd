@@ -30,6 +30,11 @@ func workerAdmissionDirectory() (string, error) {
 	return workerDirectoryForAccount(user.LookupId)
 }
 
+// resolveWorkerClaimDirectory is the trusted worker admission root. Production
+// uses the native-account pin. Offline tests may replace it; production never
+// searches fixture siblings or other candidate paths for a matching inode.
+var resolveWorkerClaimDirectory = workerAdmissionDirectory
+
 func brokerHomeDir(lookup func(string) (*user.User, error)) (string, error) {
 	if lookup == nil {
 		return "", errBroker

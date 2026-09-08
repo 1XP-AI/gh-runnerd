@@ -116,6 +116,16 @@ func brokerAttachSyntheticWorkerPreparation(t *testing.T, p *brokerControllerPla
 		return brokerSyntheticWorkerPreparation(t, p.worker, directory)
 	}
 }
+
+func bindWorkerClaimDirectory(t *testing.T, directory string) {
+	t.Helper()
+	if directory == "" || !filepath.IsAbs(directory) || filepath.Clean(directory) != directory {
+		t.Fatal("worker claim fixture directory")
+	}
+	previous := resolveWorkerClaimDirectory
+	resolveWorkerClaimDirectory = func() (string, error) { return directory, nil }
+	t.Cleanup(func() { resolveWorkerClaimDirectory = previous })
+}
 func TestBrokerPreparedReceiptBindsValidatedBytesBeforeMint(t *testing.T) {
 	for _, kind := range []string{"journal changed before capture", "claim changed before capture", "wrong phase", "wrong approval", "missing identity", "wrong version", "wrong status"} {
 		t.Run(kind, func(t *testing.T) {
