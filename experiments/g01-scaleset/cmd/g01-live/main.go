@@ -59,11 +59,13 @@ func runWithPreparation(args []string, in io.Reader, out io.Writer, revisionForB
 	execute := flags.Bool("execute-approved-canary", false, "")
 	pairedExecute := flags.Bool("execute-approved-paired-terminal", false, "")
 	prepare := flags.Bool("prepare-approved-journal", false, "")
+	pairedPrepare := flags.Bool("prepare-approved-paired-journal", false, "")
 	approvalPath := flags.String("approval", "", "")
 	statePath := flags.String("state-dir", "", "")
 	phase := flags.String("phase", "", "")
 	workerApprovalPath := flags.String("worker-approval", "", "")
 	workerStatePath := flags.String("worker-state-dir", "", "")
+	pairedBinding := flags.String("paired-binding", "", "")
 	reject := func() int {
 		fmt.Fprintln(out, "canary refused; approval, authority or private state requires review")
 		return 1
@@ -72,8 +74,8 @@ func runWithPreparation(args []string, in io.Reader, out io.Writer, revisionForB
 		return reject()
 	}
 	workerInputs := *workerApprovalPath != "" || *workerStatePath != ""
-	if *plan && !*execute && !*pairedExecute && !*prepare {
-		if *approvalPath != "" || *statePath != "" || *phase != "" || workerInputs {
+	if *plan && !*execute && !*pairedExecute && !*prepare && !*pairedPrepare {
+		if *approvalPath != "" || *statePath != "" || *phase != "" || workerInputs || *pairedBinding != "" {
 			return reject()
 		}
 		fmt.Fprintln(out, "Controller-only phases: create, before-ack, after-ack, before-acquire, acquire-loss, jit-loss, inspect, cleanup. Paired terminal mode uses one same-process executable with explicit worker approval/state inputs and fixed terminal sequencing; no worker launch or workflow dispatch. Live execution requires an immutable reviewed build, exact private approval and controller-side broker input.")
@@ -89,18 +91,25 @@ func runWithPreparation(args []string, in io.Reader, out io.Writer, revisionForB
 	if *prepare {
 		modeCount++
 	}
+	if *pairedPrepare {
+		modeCount++
+	}
 	if modeCount != 1 || *plan || *approvalPath == "" || *statePath == "" {
 		return reject()
 	}
 	if *pairedExecute {
-		if *phase != "" || *workerApprovalPath == "" || *workerStatePath == "" {
+		if *phase != "" || *workerApprovalPath == "" || *workerStatePath == "" || *pairedBinding == "" {
 			return reject()
 		}
-	} else if *phase == "" || workerInputs {
+	} else if *pairedPrepare {
+		if *phase != "" || workerInputs || *pairedBinding != "" {
+			return reject()
+		}
+	} else if *phase == "" || workerInputs || *pairedBinding != "" {
 		return reject()
 	}
 	a, err := livecanary.ReadApproval(*approvalPath)
-	if err != nil || a.Validate(time.Now()) != nil || (!*pairedExecute && !slices.Contains(a.Phases, *phase)) {
+	if err != nil || a.Validate(time.Now()) != nil || (!*pairedExecute && !*pairedPrepare && !slices.Contains(a.Phases, *phase)) {
 		return reject()
 	}
 	revision, ok := revisionForBuild()
@@ -108,12 +117,23 @@ func runWithPreparation(args []string, in io.Reader, out io.Writer, revisionForB
 		return reject()
 	}
 	var worker liveworker.Approval
+	var binding livecanary.PairedTerminalBinding
 	if *pairedExecute {
 		var workerErr error
 		worker, workerErr = liveworker.ReadApproval(*workerApprovalPath)
 		if workerErr != nil || livecanary.ValidatePairedApprovals(a, worker) != nil || livecanary.ValidatePairedStatePaths(*statePath, *workerStatePath) != nil {
 			return reject()
 		}
+		if livecanary.DecodeStrict([]byte(*pairedBinding), &binding) != nil || livecanary.ValidatePairedTerminalBinding(livecanary.PairedTerminalFiles{ControllerApprovalPath: *approvalPath, ControllerStateDirectory: *statePath, WorkerApprovalPath: *workerApprovalPath, WorkerStateDirectory: *workerStatePath}, binding) != nil {
+			return reject()
+		}
+	}
+	if *pairedPrepare {
+		receipt, e := livecanary.PreparePairedJournal(*statePath, a)
+		if e != nil || json.NewEncoder(out).Encode(receipt) != nil {
+			return reject()
+		}
+		return 0
 	}
 	if *prepare {
 		if prepareJournal == nil {
@@ -156,6 +176,9 @@ func runWithPreparation(args []string, in io.Reader, out io.Writer, revisionForB
 		return reject()
 	}
 	if *pairedExecute {
+		if credentials.PairedBinding == nil || *credentials.PairedBinding != binding {
+			return reject()
+		}
 		if livecanary.RunPairedTerminal(context.Background(), livecanary.PairedTerminalFiles{ControllerApprovalPath: *approvalPath, ControllerStateDirectory: *statePath, WorkerApprovalPath: *workerApprovalPath, WorkerStateDirectory: *workerStatePath}, credentials) != nil {
 			fmt.Fprintln(out, "paired terminal stopped; retain private state and all uncertain resources; no automatic retry")
 			return 1

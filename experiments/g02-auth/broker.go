@@ -63,7 +63,7 @@ func (a BrokerApproval) validate(now time.Time) error {
 			return errBroker
 		}
 	} else if a.Mode == "paired-terminal" {
-		if a.Phase != "" && a.Phase != "paired-terminal" {
+		if a.Phase != "paired-terminal" {
 			return errBroker
 		}
 	} else {
@@ -118,16 +118,18 @@ func brokerExecute(parent context.Context, a BrokerApproval, input brokerInput, 
 		return BrokerResult{}, errBroker
 	}
 	defer claim.close()
-	guard := func() error {
+	guard := func(checkPrepared bool) error {
 		if claim.check() != nil || j.check() != nil {
 			return errBroker
 		}
-		if plan != nil && (plan.check() != nil || plan.compatibleControllerClaim(claim.root) != nil || (plan.prepared != nil && plan.preparedState(claim.root, false) != nil)) {
+		if plan != nil && (plan.check() != nil || plan.compatibleControllerClaim(claim.root) != nil || (checkPrepared && plan.prepared != nil && plan.preparedState(claim.root, false) != nil)) {
 			return errBroker
 		}
 		return nil
 	}
-	if guard() != nil {
+	guardLive := func() error { return guard(true) }
+	guardPostChild := func() error { return guard(false) }
+	if guardLive() != nil {
 		return BrokerResult{}, errBroker
 	}
 
@@ -140,16 +142,16 @@ func brokerExecute(parent context.Context, a BrokerApproval, input brokerInput, 
 			return BrokerResult{}, errBroker
 		}
 		plan.preparationReceipt = receipt
-		if guard() != nil || plan.preparedState(claim.root, true) != nil {
+		if guardLive() != nil || plan.preparedState(claim.root, true) != nil {
 			return BrokerResult{}, errBroker
 		}
-		if j.append("controller_state_prepared", map[string]any{"receipt": receipt}) != nil || guard() != nil {
+		if j.append("controller_state_prepared", map[string]any{"receipt": receipt}) != nil || guardLive() != nil {
 			return BrokerResult{}, errBroker
 		}
 	}
 
 	// Every authenticated call revalidates the still-held durable claim.
-	scoped := newBrokerAPI(api.now, brokerGuardTransport{api.client.Transport, guard})
+	scoped := newBrokerAPI(api.now, brokerGuardTransport{api.client.Transport, guardLive})
 	api = scoped
 	// JWT identity verification precedes the one token mint. Private repository
 	// and runner-group APIs require that installation token, so scope preflight
@@ -202,7 +204,10 @@ func brokerExecute(parent context.Context, a BrokerApproval, input brokerInput, 
 	if len(data) > 16384 || j.append("controller_handoff_started", nil) != nil {
 		return BrokerResult{}, errBroker
 	}
-	if ((a.Mode == "paired-terminal" || plan.controller.needsVerification()) && api.verifyWorkflow(ctx, a, plan.controller, input.VerificationToken) != nil) || guard() != nil || plan.launch(ctx, data, filepath.Join(path, "controller-approval.json")) != nil || j.append("controller_completed", nil) != nil || claim.complete() != nil {
+	if (a.Mode == "paired-terminal" || plan.controller.needsVerification()) && api.verifyWorkflow(ctx, a, plan.controller, input.VerificationToken) != nil {
+		return BrokerResult{}, errBroker
+	}
+	if guardLive() != nil || plan.launch(ctx, data, filepath.Join(path, "controller-approval.json")) != nil || guardPostChild() != nil || j.append("controller_completed", nil) != nil || claim.complete() != nil || guardPostChild() != nil {
 		return BrokerResult{}, errBroker
 	}
 	if a.Mode == "paired-terminal" {

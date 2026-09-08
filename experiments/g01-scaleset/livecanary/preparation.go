@@ -53,6 +53,8 @@ type PreparationReceipt struct {
 	ClaimDigest    string           `json:"claim_digest"`
 }
 
+const pairedPreparationPhase = "paired-terminal"
+
 func preparedIdentity(i os.FileInfo) PreparedIdentity {
 	s := i.Sys().(*syscall.Stat_t)
 	return PreparedIdentity{uint64(s.Dev), s.Ino}
@@ -78,6 +80,75 @@ func preparedDigest(f *os.File, limit int64) (string, error) {
 func PrepareJournal(directory string, a Approval, phase string) (PreparationReceipt, error) {
 	return prepareJournal(directory, a, phase, OpenJournal)
 }
+
+// PreparePairedJournal is the paired terminal's explicit local preparation
+// contract. It proves a fresh controller journal and its admission claim under
+// the controller authority; it does not borrow cleanup authority and never
+// reads credentials, worker input or contacts a remote service.
+func PreparePairedJournal(directory string, a Approval) (PreparationReceipt, error) {
+	return preparePairedJournal(directory, a, OpenJournal)
+}
+
+func pairedPreparationReady(a Approval, now time.Time) bool {
+	if a.Validate(now) != nil || a.WorkflowRunID <= 0 {
+		return false
+	}
+	want := map[string]bool{"create": false, "inspect": false, "cleanup": false}
+	verification := false
+	for _, phase := range a.Phases {
+		if _, ok := want[phase]; ok {
+			want[phase] = true
+		}
+		if phase == "before-ack" || phase == "after-ack" || phase == "before-acquire" || phase == "acquire-loss" {
+			verification = true
+		}
+	}
+	return verification && want["create"] && want["inspect"] && want["cleanup"]
+}
+
+func preparePairedJournal(directory string, a Approval, open func(string, Approval) (*FileJournal, error)) (receipt PreparationReceipt, err error) {
+	if !pairedPreparationReady(a, time.Now()) || open == nil {
+		return receipt, ErrApproval
+	}
+	j, e := open(directory, a)
+	if e != nil {
+		return receipt, ErrJournal
+	}
+	defer func() {
+		if j.Close() != nil {
+			receipt = PreparationReceipt{}
+			err = ErrJournal
+		}
+	}()
+	release, e := j.authorize(a)
+	if e != nil {
+		return receipt, ErrJournal
+	}
+	defer release()
+	s := replay(j.Events())
+	if s.uncertain || s.deleted || s.setID != 0 || s.reserved || s.workObserved || len(j.Events()) != 0 {
+		return receipt, ErrQuarantine
+	}
+	jd, e := preparedDigest(j.file, 1<<20)
+	if e != nil {
+		return receipt, e
+	}
+	cd, e := preparedDigest(j.claim.file, 4096)
+	if e != nil {
+		return receipt, e
+	}
+	ji, e := j.file.Stat()
+	if e != nil {
+		return receipt, ErrJournal
+	}
+	ci, e := j.claim.file.Stat()
+	if e != nil || !j.ownsCurrentJournal() || !j.claim.matches(j) {
+		return receipt, ErrJournal
+	}
+	receipt = PreparationReceipt{1, "controller_journal_prepared", pairedPreparationPhase, approvalDigest(a), preparedIdentity(j.directoryInfo), preparedIdentity(ji), preparedIdentity(ci), jd, cd}
+	return receipt, nil
+}
+
 func prepareJournal(directory string, a Approval, phase string, open func(string, Approval) (*FileJournal, error)) (receipt PreparationReceipt, err error) {
 	if a.Validate(time.Now()) != nil || !slices.Contains(a.Phases, phase) || open == nil {
 		return receipt, ErrApproval

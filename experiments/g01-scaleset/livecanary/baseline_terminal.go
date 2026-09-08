@@ -24,7 +24,10 @@ func runPairedTerminal(ctx context.Context, d *Driver, w *liveworker.Driver) (pa
 	return runPairedTerminalWithCadence(ctx, d, w, realBaselineCadence())
 }
 func runPairedTerminalWithCadence(ctx context.Context, d *Driver, w *liveworker.Driver, cadence pairedBaselineCadence) (pairedBaselineTerminalResult, error) {
-	out, err := runPairedBaselineMode(ctx, d, w, cadence, true)
+	return runPairedTerminalWithBinding(ctx, d, w, cadence, nil)
+}
+func runPairedTerminalWithBinding(ctx context.Context, d *Driver, w *liveworker.Driver, cadence pairedBaselineCadence, bindingCheck func() error) (pairedBaselineTerminalResult, error) {
+	out, err := runPairedBaselineModeWithBinding(ctx, d, w, cadence, true, bindingCheck)
 	result := pairedBaselineTerminalResult{Collection: out, Terminal: terminalUnresolved}
 	if out.Terminal != nil && err == nil {
 		result.Terminal = out.Terminal.Outcome

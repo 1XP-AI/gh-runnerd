@@ -145,7 +145,7 @@ func runBrokerWithAPI(ctx context.Context, files BrokerFiles, input *os.File, ap
 		if err != nil || hex.EncodeToString(digest[:]) != approval.ControllerApprovalSHA256 || controller.validate(approval, api.now()) != nil {
 			return BrokerResult{}, errBroker
 		}
-		binary, err = openBrokerBinary(files.ControllerBinary, approval)
+		binary, err = brokerBinaryOpener(files.ControllerBinary, approval)
 		if err != nil {
 			return BrokerResult{}, errBroker
 		}
@@ -177,7 +177,11 @@ func runBrokerWithAPI(ctx context.Context, files BrokerFiles, input *os.File, ap
 				return errBroker
 			}
 			if approval.Mode == "paired-terminal" {
-				return invokeBrokerPairedTerminal(ctx, binary, files.StateDirectory, snapshotPath, files.ControllerStateDirectory, files.WorkerApproval, files.WorkerStateDirectory, data)
+				binding, err := plan.pairedBinding()
+				if err != nil {
+					return errBroker
+				}
+				return invokeBrokerPairedTerminal(ctx, binary, files.StateDirectory, snapshotPath, files.ControllerStateDirectory, files.WorkerApproval, files.WorkerStateDirectory, binding, data)
 			}
 			return invokeBrokerController(ctx, binary, files.StateDirectory, snapshotPath, files.ControllerStateDirectory, approval.Phase, data)
 		})
@@ -185,11 +189,10 @@ func runBrokerWithAPI(ctx context.Context, files BrokerFiles, input *os.File, ap
 			return BrokerResult{}, errBroker
 		}
 		plan.localPrepare = func(ctx context.Context, snapshotPath string) (brokerPreparationReceipt, error) {
-			phase := approval.Phase
 			if approval.Mode == "paired-terminal" {
-				phase = "cleanup"
+				return invokeBrokerPairedPreparation(ctx, binary, files.StateDirectory, snapshotPath, files.ControllerStateDirectory)
 			}
-			return invokeBrokerPreparation(ctx, binary, files.StateDirectory, snapshotPath, files.ControllerStateDirectory, phase)
+			return invokeBrokerPreparation(ctx, binary, files.StateDirectory, snapshotPath, files.ControllerStateDirectory, approval.Phase)
 		}
 		plan.worker = workerPlan
 	}

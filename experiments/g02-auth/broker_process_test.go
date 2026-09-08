@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -20,6 +22,74 @@ import (
 // production entry point must separately verify G01 build metadata before it
 // can construct verifiedBrokerBinary; these pipe tests isolate that handoff.
 func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == "--prepare-approved-paired-journal" {
+		if len(os.Args) != 6 || os.Args[2] != "--approval" || os.Args[4] != "--state-dir" {
+			os.Exit(3)
+		}
+		for _, entry := range os.Environ() {
+			if entry != "LANG=C" && entry != "LC_ALL=C" {
+				os.Exit(4)
+			}
+		}
+		data, e := io.ReadAll(io.LimitReader(os.Stdin, 1))
+		if e != nil || len(data) != 0 {
+			os.Exit(5)
+		}
+		var controller controllerApproval
+		_, e = readBrokerPrivateJSON(os.Args[3], &controller)
+		if e != nil {
+			os.Exit(6)
+		}
+		statePath := os.Args[5]
+		admissionPath := filepath.Join(filepath.Dir(statePath), "admission")
+		if e = os.Mkdir(admissionPath, 0700); e != nil && !os.IsExist(e) {
+			os.Exit(7)
+		}
+		journalPath := filepath.Join(statePath, "journal.jsonl")
+		if _, e = os.Stat(journalPath); os.IsNotExist(e) {
+			if e = os.WriteFile(journalPath, []byte("synthetic prepared journal\n"), 0600); e != nil {
+				os.Exit(8)
+			}
+		}
+		journalInfo, e := os.Stat(journalPath)
+		if e != nil {
+			os.Exit(9)
+		}
+		stateInfo, e := os.Stat(statePath)
+		if e != nil {
+			os.Exit(10)
+		}
+		claimPath := filepath.Join(admissionPath, "admission.json")
+		if _, e = os.Stat(claimPath); os.IsNotExist(e) {
+			stateID := brokerFileIdentity(stateInfo)
+			journalID := brokerFileIdentity(journalInfo)
+			ownership := controller
+			ownership.ExpiresAt = time.Time{}
+			ownership.Phases = nil
+			claim := map[string]any{"version": 1, "ownership": brokerDigest(ownership), "state_device": stateID.Device, "state_inode": stateID.Inode, "journal_device": journalID.Device, "journal_inode": journalID.Inode}
+			claimData, _ := json.Marshal(claim)
+			if e = os.WriteFile(claimPath, append(claimData, '\n'), 0600); e != nil {
+				os.Exit(11)
+			}
+		}
+		claimInfo, e := os.Stat(claimPath)
+		if e != nil {
+			os.Exit(12)
+		}
+		journalData, e := os.ReadFile(journalPath)
+		if e != nil {
+			os.Exit(13)
+		}
+		claimData, e := os.ReadFile(claimPath)
+		if e != nil {
+			os.Exit(14)
+		}
+		receipt := brokerPreparationReceipt{Version: 1, Status: "controller_journal_prepared", Phase: "paired-terminal", ApprovalDigest: brokerDigest(controller), State: brokerFileIdentity(stateInfo), Journal: brokerFileIdentity(journalInfo), Claim: brokerFileIdentity(claimInfo), JournalDigest: brokerBytesDigest(journalData), ClaimDigest: brokerBytesDigest(claimData)}
+		if json.NewEncoder(os.Stdout).Encode(receipt) != nil {
+			os.Exit(13)
+		}
+		os.Exit(0)
+	}
 	if len(os.Args) > 1 && os.Args[1] == "--prepare-approved-journal" {
 		if len(os.Args) != 8 || os.Args[2] != "--approval" || os.Args[4] != "--state-dir" || os.Args[6] != "--phase" {
 			os.Exit(3)
@@ -72,7 +142,7 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 	if len(os.Args) > 1 && os.Args[1] == "--execute-approved-paired-terminal" {
-		if len(os.Args) != 10 || os.Args[2] != "--approval" || os.Args[4] != "--state-dir" || os.Args[6] != "--worker-approval" || os.Args[8] != "--worker-state-dir" {
+		if len(os.Args) != 12 || os.Args[2] != "--approval" || os.Args[4] != "--state-dir" || os.Args[6] != "--worker-approval" || os.Args[8] != "--worker-state-dir" || os.Args[10] != "--paired-binding" {
 			os.Exit(3)
 		}
 		for _, entry := range os.Environ() {
@@ -83,6 +153,28 @@ func TestMain(m *testing.M) {
 		data, err := io.ReadAll(io.LimitReader(os.Stdin, 16385))
 		if err != nil || !bytes.Contains(data, []byte("synthetic-private-installation-token")) || bytes.Contains(data, []byte("PRIVATE KEY")) {
 			os.Exit(5)
+		}
+		var payload map[string]json.RawMessage
+		if json.Unmarshal(data, &payload) != nil {
+			os.Exit(6)
+		}
+		var argvBinding brokerPairedBinding
+		var payloadBinding brokerPairedBinding
+		bindingData, ok := payload["paired_binding"]
+		if !ok || decodeBrokerJSON(bindingData, &payloadBinding, true) != nil || !payloadBinding.valid() || decodeBrokerJSON([]byte(os.Args[11]), &argvBinding, true) != nil || payloadBinding != argvBinding {
+			os.Exit(7)
+		}
+		if journal, e := os.OpenFile(filepath.Join(os.Args[5], "journal.jsonl"), os.O_APPEND|os.O_WRONLY|syscall.O_NOFOLLOW, 0); e == nil {
+			_, _ = journal.WriteString("{\"paired_child\":true}\n")
+			_ = journal.Sync()
+			_ = journal.Close()
+		}
+		if strings.HasPrefix(argvBinding.ControllerApprovalSHA256, "e") {
+			fmt.Fprint(os.Stdout, strings.Repeat("synthetic-private-paired-overflow", 1000))
+			os.Exit(0)
+		}
+		if strings.HasPrefix(argvBinding.ControllerApprovalSHA256, "f") {
+			time.Sleep(time.Minute)
 		}
 		fmt.Fprintln(os.Stdout, "synthetic-private-paired-output")
 		os.Exit(0)
@@ -124,8 +216,44 @@ func TestBrokerPairedTerminalPipeUsesFixedArgsAndOneControllerInput(t *testing.T
 		t.Fatal(err)
 	}
 	data := []byte(`{"installation_token":"synthetic-private-installation-token"}`)
-	if err := invokeBrokerPairedTerminal(context.Background(), binary, root, filepath.Join(root, "approval.json"), root, filepath.Join(root, "worker.json"), workerState, data); err != nil {
+	binding := brokerPairedBinding{ControllerApprovalSHA256: strings.Repeat("a", 64), ControllerApprovalDevice: 1, ControllerApprovalInode: 2, ControllerStateDevice: 1, ControllerStateInode: 3, WorkerApprovalSHA256: strings.Repeat("b", 64), WorkerApprovalDevice: 1, WorkerApprovalInode: 4, WorkerStateDevice: 1, WorkerStateInode: 5}
+	if err := invokeBrokerPairedTerminal(context.Background(), binary, root, filepath.Join(root, "approval.json"), root, filepath.Join(root, "worker.json"), workerState, binding, data); err != nil {
 		t.Fatal("private fixed paired terminal handoff failed")
+	}
+}
+
+func TestBrokerPairedChildBoundsTimeoutOverflowAndCancel(t *testing.T) {
+	binary := testBrokerBinary(t)
+	root := t.TempDir()
+	data := []byte(`{"installation_token":"synthetic-private-installation-token"}`)
+	base := brokerPairedBinding{ControllerApprovalDevice: 1, ControllerApprovalInode: 2, ControllerStateDevice: 1, ControllerStateInode: 3, WorkerApprovalDevice: 1, WorkerApprovalInode: 4, WorkerStateDevice: 1, WorkerStateInode: 5}
+	for _, tc := range []struct {
+		name   string
+		prefix string
+		ctx    func() (context.Context, context.CancelFunc)
+	}{
+		{name: "overflow", prefix: "e", ctx: func() (context.Context, context.CancelFunc) {
+			return context.WithTimeout(context.Background(), time.Second)
+		}},
+		{name: "timeout", prefix: "f", ctx: func() (context.Context, context.CancelFunc) {
+			return context.WithTimeout(context.Background(), 100*time.Millisecond)
+		}},
+		{name: "cancel", prefix: "a", ctx: func() (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			return ctx, func() {}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			binding := base
+			binding.ControllerApprovalSHA256 = tc.prefix + strings.Repeat("a", 63)
+			binding.WorkerApprovalSHA256 = strings.Repeat("b", 64)
+			ctx, cancel := tc.ctx()
+			defer cancel()
+			if err := invokeBrokerPairedTerminal(ctx, binary, root, filepath.Join(root, "approval.json"), root, filepath.Join(root, "worker.json"), filepath.Join(root, "worker-state"), binding, data); err == nil {
+				t.Fatal("paired child bound failure accepted")
+			}
+		})
 	}
 }
 func TestBrokerChildBoundsAndReplacedBinaryRefuse(t *testing.T) {

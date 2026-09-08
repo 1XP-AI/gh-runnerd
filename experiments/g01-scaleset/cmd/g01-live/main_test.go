@@ -4,11 +4,14 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -25,14 +28,76 @@ func (r unreadable) Read([]byte) (int, error) {
 
 type countedInput struct {
 	io.Reader
-	reads int
+	reads       int
+	eofs        int
+	readsAfterEOF int
+}
+
+func pairedBindingFixture(t *testing.T, controllerPath, controllerState, workerPath, workerState string) livecanary.PairedTerminalBinding {
+	t.Helper()
+	identity := func(path string) (uint64, uint64) {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			t.Fatal("fixture identity")
+		}
+		return uint64(stat.Dev), stat.Ino
+	}
+	digest := func(path string) string {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sum := sha256.Sum256(data)
+		return hex.EncodeToString(sum[:])
+	}
+	controllerDevice, controllerInode := identity(controllerPath)
+	controllerStateDevice, controllerStateInode := identity(controllerState)
+	workerDevice, workerInode := identity(workerPath)
+	workerStateDevice, workerStateInode := identity(workerState)
+	return livecanary.PairedTerminalBinding{ControllerApprovalSHA256: digest(controllerPath), ControllerApprovalDevice: controllerDevice, ControllerApprovalInode: controllerInode, ControllerStateDevice: controllerStateDevice, ControllerStateInode: controllerStateInode, WorkerApprovalSHA256: digest(workerPath), WorkerApprovalDevice: workerDevice, WorkerApprovalInode: workerInode, WorkerStateDevice: workerStateDevice, WorkerStateInode: workerStateInode}
 }
 
 func (r *countedInput) Close() error { return nil }
 func (r *countedInput) Read(p []byte) (int, error) {
 	r.reads++
-	return r.Reader.Read(p)
+	if r.eofs != 0 {
+		r.readsAfterEOF++
+	}
+	n, err := r.Reader.Read(p)
+	if err == io.EOF {
+		r.eofs++
+	}
+	return n, err
 }
+
+type chunkedControllerInput struct {
+	chunks        [][]byte
+	index         int
+	reads         int
+	eofs          int
+	readsAfterEOF int
+}
+
+func (r *chunkedControllerInput) Read(p []byte) (int, error) {
+	r.reads++
+	if r.eofs != 0 {
+		r.readsAfterEOF++
+		return 0, io.EOF
+	}
+	if r.index == len(r.chunks) {
+		r.eofs++
+		return 0, io.EOF
+	}
+	n := copy(p, r.chunks[r.index])
+	r.index++
+	return n, nil
+}
+
+func (r *chunkedControllerInput) Close() error { return nil }
 
 func TestPlanAndRefusalsNeverReadCredentialsOrEchoInputs(t *testing.T) {
 	for _, args := range [][]string{{"--plan"}, {}, {"--synthetic-secret=do-not-print"}, {"--execute-approved-canary", "--approval=synthetic-secret", "--state-dir=synthetic-secret", "--phase=create"}} {
@@ -130,14 +195,16 @@ func TestPairedTerminalModeReadsControllerInputAfterAllGates(t *testing.T) {
 	if err := os.WriteFile(workerPath, workerData, 0600); err != nil {
 		t.Fatal(err)
 	}
-	input := &countedInput{Reader: strings.NewReader(`{}`)}
+	binding := pairedBindingFixture(t, controllerPath, controllerState, workerPath, workerState)
+	input := &chunkedControllerInput{chunks: [][]byte{[]byte(`{`), []byte(`}`)}}
 	var out bytes.Buffer
-	code := runWithPreparation([]string{"--execute-approved-paired-terminal", "--approval", controllerPath, "--state-dir", controllerState, "--worker-approval", workerPath, "--worker-state-dir", workerState}, input, &out, func() (string, bool) { return a.HarnessSHA, true }, func(string, livecanary.Approval, string) (livecanary.PreparationReceipt, error) {
+	bindingData, _ := json.Marshal(binding)
+	code := runWithPreparation([]string{"--execute-approved-paired-terminal", "--approval", controllerPath, "--state-dir", controllerState, "--worker-approval", workerPath, "--worker-state-dir", workerState, "--paired-binding", string(bindingData)}, input, &out, func() (string, bool) { return a.HarnessSHA, true }, func(string, livecanary.Approval, string) (livecanary.PreparationReceipt, error) {
 		t.Fatal("paired mode entered controller-only preparation")
 		return livecanary.PreparationReceipt{}, nil
 	})
-	if code == 0 || input.reads == 0 {
-		t.Fatalf("paired mode did not reach its bounded controller input gate: code=%d reads=%d output=%q", code, input.reads, out.String())
+	if code == 0 || input.reads != 3 || input.eofs != 1 || input.readsAfterEOF != 0 {
+		t.Fatalf("paired mode did not consume one logical controller input: code=%d reads=%d eofs=%d rereads=%d output=%q", code, input.reads, input.eofs, input.readsAfterEOF, out.String())
 	}
 }
 
@@ -163,7 +230,8 @@ func TestPairedTerminalModeRejectsUnusedPhaseAndControllerFlagsBeforeInput(t *te
 	if err := os.WriteFile(workerPath, workerData, 0600); err != nil {
 		t.Fatal(err)
 	}
-	base := []string{"--execute-approved-paired-terminal", "--approval", controllerPath, "--state-dir", controllerState, "--worker-approval", workerPath, "--worker-state-dir", workerState}
+	bindingData, _ := json.Marshal(pairedBindingFixture(t, controllerPath, controllerState, workerPath, workerState))
+	base := []string{"--execute-approved-paired-terminal", "--approval", controllerPath, "--state-dir", controllerState, "--worker-approval", workerPath, "--worker-state-dir", workerState, "--paired-binding", string(bindingData)}
 	for _, extra := range [][]string{{"--phase", "cleanup"}, {"--execute-approved-canary"}} {
 		input := &countedInput{Reader: strings.NewReader(`{}`)}
 		args := append(append([]string(nil), base...), extra...)
@@ -196,9 +264,10 @@ func TestPairedTerminalModeRequiresWorkflowVerificationAuthorityBeforeInput(t *t
 	if err := os.WriteFile(workerPath, workerData, 0600); err != nil {
 		t.Fatal(err)
 	}
+	bindingData, _ := json.Marshal(pairedBindingFixture(t, controllerPath, controllerState, workerPath, workerState))
 	input := &countedInput{Reader: strings.NewReader(`{}`)}
 	var out bytes.Buffer
-	args := []string{"--execute-approved-paired-terminal", "--approval", controllerPath, "--state-dir", controllerState, "--worker-approval", workerPath, "--worker-state-dir", workerState}
+	args := []string{"--execute-approved-paired-terminal", "--approval", controllerPath, "--state-dir", controllerState, "--worker-approval", workerPath, "--worker-state-dir", workerState, "--paired-binding", string(bindingData)}
 	code := runWithPreparation(args, input, &out, func() (string, bool) { return a.HarnessSHA, true }, nil)
 	if code == 0 || input.reads != 0 {
 		t.Fatalf("paired mode accepted missing verification authority or read input: code=%d reads=%d output=%q", code, input.reads, out.String())

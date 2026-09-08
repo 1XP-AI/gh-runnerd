@@ -51,6 +51,26 @@ type brokerWorkerPlan struct {
 	stateInfo    os.FileInfo
 }
 
+// brokerPairedBinding is immutable identity evidence carried to the child.
+// It does not describe or authorize pairing; the controller approval and the
+// journal-derived PairInput remain the canonical authority in G01.
+type brokerPairedBinding struct {
+	ControllerApprovalSHA256 string `json:"controller_approval_sha256"`
+	ControllerApprovalDevice uint64 `json:"controller_approval_device"`
+	ControllerApprovalInode  uint64 `json:"controller_approval_inode"`
+	ControllerStateDevice    uint64 `json:"controller_state_device"`
+	ControllerStateInode     uint64 `json:"controller_state_inode"`
+	WorkerApprovalSHA256     string `json:"worker_approval_sha256"`
+	WorkerApprovalDevice     uint64 `json:"worker_approval_device"`
+	WorkerApprovalInode      uint64 `json:"worker_approval_inode"`
+	WorkerStateDevice        uint64 `json:"worker_state_device"`
+	WorkerStateInode         uint64 `json:"worker_state_inode"`
+}
+
+func (b brokerPairedBinding) valid() bool {
+	return brokerSHA256.MatchString(b.ControllerApprovalSHA256) && b.ControllerApprovalDevice != 0 && b.ControllerApprovalInode != 0 && b.ControllerStateDevice != 0 && b.ControllerStateInode != 0 && brokerSHA256.MatchString(b.WorkerApprovalSHA256) && b.WorkerApprovalDevice != 0 && b.WorkerApprovalInode != 0 && b.WorkerStateDevice != 0 && b.WorkerStateInode != 0
+}
+
 func (p *brokerWorkerPlan) close() {
 	if p == nil {
 		return
@@ -183,6 +203,23 @@ func (p *brokerControllerPlan) binding() (brokerControllerBinding, error) {
 	c.ExpiresAt = time.Time{}
 	c.Phases = nil
 	return brokerControllerBinding{brokerDigest(c), p.approval.ControllerBinarySHA256, p.approval.ControllerHarnessSHA, brokerFileIdentity(i)}, nil
+}
+
+func (p *brokerControllerPlan) pairedBinding() (brokerPairedBinding, error) {
+	if p == nil || p.approval.Mode != "paired-terminal" || p.snapshotInfo == nil || p.worker == nil || p.check() != nil {
+		return brokerPairedBinding{}, errBroker
+	}
+	worker, err := p.worker.binding()
+	if err != nil {
+		return brokerPairedBinding{}, errBroker
+	}
+	controllerApproval := brokerFileIdentity(p.snapshotInfo)
+	controllerState := brokerFileIdentity(p.stateInfo)
+	binding := brokerPairedBinding{ControllerApprovalSHA256: p.approval.ControllerApprovalSHA256, ControllerApprovalDevice: controllerApproval.Device, ControllerApprovalInode: controllerApproval.Inode, ControllerStateDevice: controllerState.Device, ControllerStateInode: controllerState.Inode, WorkerApprovalSHA256: worker.Approval, WorkerApprovalDevice: worker.ApprovalFile.Device, WorkerApprovalInode: worker.ApprovalFile.Inode, WorkerStateDevice: worker.State.Device, WorkerStateInode: worker.State.Inode}
+	if !binding.valid() {
+		return brokerPairedBinding{}, errBroker
+	}
+	return binding, nil
 }
 func (p *brokerControllerPlan) prepare(a BrokerApproval, j *brokerJournal, now time.Time) error {
 	if p == nil || p.binaryCheck == nil || p.launch == nil || p.localPrepare == nil || brokerDigest(p.approval) != brokerDigest(a) || p.controller.validate(a, now) != nil || brokerBytesDigest(p.raw) != a.ControllerApprovalSHA256 || p.binaryCheck() != nil || (a.Mode == "paired-terminal" && p.worker == nil) {

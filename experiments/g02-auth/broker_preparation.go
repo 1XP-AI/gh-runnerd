@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -24,7 +25,16 @@ type brokerPreparationReceipt struct {
 }
 
 func (r brokerPreparationReceipt) valid(p *brokerControllerPlan) bool {
-	return r.Version == 1 && r.Status == "controller_journal_prepared" && r.Phase == p.approval.Phase && r.ApprovalDigest == brokerDigest(p.controller) && r.State.Inode != 0 && r.Journal.Inode != 0 && r.Claim.Inode != 0 && brokerSHA256.MatchString(r.JournalDigest) && brokerSHA256.MatchString(r.ClaimDigest)
+	if p == nil {
+		return false
+	}
+	phase := p.approval.Phase
+	if p.approval.Mode == "paired-terminal" {
+		// Paired preparation is its own local authority contract. It is not a
+		// cleanup receipt lending cleanup authority to the full pair.
+		phase = "paired-terminal"
+	}
+	return r.Version == 1 && r.Status == "controller_journal_prepared" && r.Phase == phase && r.ApprovalDigest == brokerDigest(p.controller) && r.State.Device != 0 && r.State.Inode != 0 && r.Journal.Device != 0 && r.Journal.Inode != 0 && r.Claim.Device != 0 && r.Claim.Inode != 0 && brokerSHA256.MatchString(r.JournalDigest) && brokerSHA256.MatchString(r.ClaimDigest)
 }
 
 type brokerPreparationOutput struct {
@@ -52,6 +62,35 @@ func invokeBrokerPreparation(parent context.Context, binary *verifiedBrokerBinar
 	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, binary.path, "--prepare-approved-journal", "--approval", approvalPath, "--state-dir", stateDirectory, "--phase", phase)
+	command.Dir = workingDirectory
+	command.Env = []string{"LANG=C", "LC_ALL=C"}
+	command.Stdin = bytes.NewReader(nil)
+	command.WaitDelay = time.Second
+	output := &brokerPreparationOutput{cancel: cancel}
+	errors := &brokerOutputBudget{cancel: cancel}
+	command.Stdout = output
+	command.Stderr = errors
+	e := command.Run()
+	output.mu.Lock()
+	defer output.mu.Unlock()
+	errors.mu.Lock()
+	defer errors.mu.Unlock()
+	if e != nil || ctx.Err() != nil || output.overflow || errors.overflow || decodeBrokerJSON(output.data, &receipt, true) != nil {
+		return receipt, errBroker
+	}
+	return receipt, nil
+}
+
+// invokeBrokerPairedPreparation uses a distinct executable contract. The
+// paired preparation receipt is not a cleanup receipt and carries no child
+// credentials or worker authority.
+func invokeBrokerPairedPreparation(parent context.Context, binary *verifiedBrokerBinary, workingDirectory, approvalPath, stateDirectory string) (receipt brokerPreparationReceipt, err error) {
+	if binary == nil || binary.check() != nil || !filepath.IsAbs(approvalPath) || !filepath.IsAbs(stateDirectory) || filepath.Clean(approvalPath) != approvalPath || filepath.Clean(stateDirectory) != stateDirectory {
+		return receipt, errBroker
+	}
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, binary.path, "--prepare-approved-paired-journal", "--approval", approvalPath, "--state-dir", stateDirectory)
 	command.Dir = workingDirectory
 	command.Env = []string{"LANG=C", "LC_ALL=C"}
 	command.Stdin = bytes.NewReader(nil)

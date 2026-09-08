@@ -164,3 +164,85 @@ func TestPairedBrokerBindsWorkerBeforeWorkflowVerifiedHandoff(t *testing.T) {
 		t.Fatal("paired admission did not retain bounded worker binding")
 	}
 }
+
+// This is intentionally an entrypoint-level fixture. It uses the real
+// BrokerFiles loader, paired preparation process and brokerExecute closure, so
+// the canonical preparation receipt and fixed child handoff are both exercised.
+func TestPairedBrokerRealEntrypointUsesPairedPreparationClosure(t *testing.T) {
+	a, candidate, api, fixture, attempt := newBrokerFixture(t)
+	parent := filepath.Dir(attempt)
+	controllerState := filepath.Join(parent, "paired-controller-state")
+	workerState := filepath.Join(parent, "paired-worker-state")
+	if err := os.Mkdir(controllerState, 0700); err != nil {
+		t.Fatal("controller state")
+	}
+	if err := os.Mkdir(workerState, 0700); err != nil {
+		t.Fatal("worker state")
+	}
+	now := time.Now().Add(time.Hour)
+	harness := strings.Repeat("c", 40)
+	workflow := strings.Repeat("b", 40)
+	a.Mode, a.Phase, a.AllowVerificationAuthority, a.ExpiresAt, a.ControllerHarnessSHA = "paired-terminal", "paired-terminal", true, now, harness
+	controller := controllerApproval{AppID: a.AppID, InstallationID: a.InstallationID, Organization: a.Organization, Repository: a.Repository, RepositoryID: a.RepositoryID, RunnerGroupID: a.RunnerGroupID, OwnerNonce: a.OwnerNonce, HarnessSHA: harness, WorkflowSHA: workflow, WorkflowPath: ".github/workflows/canary.yml", WorkflowRunID: 7, Controller: "trusted-controller", ExpiresAt: now, ActionsHosts: []string{"fixture.actions.githubusercontent.com"}, Phases: []string{"create", "before-ack", "after-ack", "before-acquire", "inspect", "cleanup"}}
+	controllerData, err := json.Marshal(controller)
+	if err != nil {
+		t.Fatal("controller approval")
+	}
+	controllerPath := filepath.Join(parent, "controller-approval.json")
+	if err := os.WriteFile(controllerPath, controllerData, 0600); err != nil {
+		t.Fatal("controller approval file")
+	}
+	worker := pairedWorkerApproval{RunnerUpdatesDisabled: true, HarnessSHA: harness, WorkflowSHA: workflow, OwnerNonce: a.OwnerNonce, Controller: controller.Controller, Endpoint: "/tmp/g01-paired-entry.sock", DaemonID: "fixture-daemon", ImageID: "sha256:" + strings.Repeat("d", 64), Image: pairedWorkerImage, ExpiresAt: now, Phases: []string{"create", "start", "inspect", "cleanup"}}
+	workerData, err := json.Marshal(worker)
+	if err != nil {
+		t.Fatal("worker approval")
+	}
+	workerPath := filepath.Join(parent, "worker-approval.json")
+	if err := os.WriteFile(workerPath, workerData, 0600); err != nil {
+		t.Fatal("worker approval file")
+	}
+	binary := testBrokerBinary(t)
+	a.ControllerBinarySHA256 = binary.digest
+	a.ControllerApprovalSHA256 = brokerBytesDigest(controllerData)
+	approvalPath := filepath.Join(parent, "broker-approval.json")
+	approvalData, err := json.Marshal(a)
+	if err != nil {
+		t.Fatal("broker approval")
+	}
+	if err := os.WriteFile(approvalPath, approvalData, 0600); err != nil {
+		t.Fatal("broker approval file")
+	}
+	inputPath := filepath.Join(parent, "broker-input.json")
+	inputData, err := json.Marshal(brokerInput{PEM: string(candidate.PEM), VerificationToken: "synthetic-private-verification-token"})
+	if err != nil {
+		t.Fatal("broker input")
+	}
+	if err := os.WriteFile(inputPath, inputData, 0600); err != nil {
+		t.Fatal("broker input file")
+	}
+	input, err := os.Open(inputPath)
+	if err != nil {
+		t.Fatal("broker input open")
+	}
+	defer input.Close()
+	oldOpener := brokerBinaryOpener
+	brokerBinaryOpener = func(string, BrokerApproval) (*verifiedBrokerBinary, error) { return binary, nil }
+	defer func() { brokerBinaryOpener = oldOpener }()
+	result, err := runBrokerWithAPI(context.Background(), BrokerFiles{ApprovalPath: approvalPath, StateDirectory: attempt, ControllerBinary: binary.path, ControllerApproval: controllerPath, ControllerStateDirectory: controllerState, WorkerApproval: workerPath, WorkerStateDirectory: workerState}, input, api)
+	if err != nil || result.Status != "paired_terminal_completed" || fixture.tokenCalls != 1 {
+		t.Fatalf("real paired entrypoint did not complete one handoff: result=%+v err=%v mints=%d calls=%v", result, err, fixture.tokenCalls, fixture.calls)
+	}
+	retryPath := filepath.Join(parent, "broker-input-retry.json")
+	if err := os.WriteFile(retryPath, inputData, 0600); err != nil {
+		t.Fatal("retry input file")
+	}
+	retryInput, err := os.Open(retryPath)
+	if err != nil {
+		t.Fatal("retry input open")
+	}
+	defer retryInput.Close()
+	_, retryErr := runBrokerWithAPI(context.Background(), BrokerFiles{ApprovalPath: approvalPath, StateDirectory: attempt, ControllerBinary: binary.path, ControllerApproval: controllerPath, ControllerStateDirectory: controllerState, WorkerApproval: workerPath, WorkerStateDirectory: workerState}, retryInput, api)
+	if retryErr == nil || fixture.tokenCalls != 1 {
+		t.Fatalf("paired handoff replayed after a completed attempt: err=%v mints=%d", retryErr, fixture.tokenCalls)
+	}
+}

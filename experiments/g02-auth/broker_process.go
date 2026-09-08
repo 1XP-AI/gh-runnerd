@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"debug/buildinfo"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"os"
 	"os/exec"
@@ -22,6 +23,11 @@ type verifiedBrokerBinary struct {
 	file   *os.File
 	digest string
 }
+
+// brokerBinaryOpener is kept narrow so offline tests can exercise the real
+// BrokerFiles entrypoint with the test executable without weakening the
+// production build metadata gate.
+var brokerBinaryOpener = openBrokerBinary
 
 func validBrokerBuild(info *debug.BuildInfo, expected string) bool {
 	if info == nil || info.GoVersion != "go1.26.8" || info.Path != "github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/cmd/g01-live" || !brokerSHA40.MatchString(expected) {
@@ -149,13 +155,26 @@ func invokeBrokerController(parent context.Context, binary *verifiedBrokerBinary
 // invokeBrokerPairedTerminal has one fixed argv shape. The worker is supplied
 // as approval/state input to the same g01-live process; it is never started as
 // a separate child and no arbitrary phase/command reaches exec.
-func invokeBrokerPairedTerminal(parent context.Context, binary *verifiedBrokerBinary, workingDirectory, approvalPath, stateDirectory, workerApprovalPath, workerStateDirectory string, data []byte) error {
-	if len(data) > 16384 || binary == nil || binary.check() != nil || !filepath.IsAbs(approvalPath) || !filepath.IsAbs(stateDirectory) || !filepath.IsAbs(workerApprovalPath) || !filepath.IsAbs(workerStateDirectory) || filepath.Clean(approvalPath) != approvalPath || filepath.Clean(stateDirectory) != stateDirectory || filepath.Clean(workerApprovalPath) != workerApprovalPath || filepath.Clean(workerStateDirectory) != workerStateDirectory {
+func invokeBrokerPairedTerminal(parent context.Context, binary *verifiedBrokerBinary, workingDirectory, approvalPath, stateDirectory, workerApprovalPath, workerStateDirectory string, binding brokerPairedBinding, data []byte) error {
+	if len(data) > 16384 || binary == nil || binary.check() != nil || !binding.valid() || !filepath.IsAbs(approvalPath) || !filepath.IsAbs(stateDirectory) || !filepath.IsAbs(workerApprovalPath) || !filepath.IsAbs(workerStateDirectory) || filepath.Clean(approvalPath) != approvalPath || filepath.Clean(stateDirectory) != stateDirectory || filepath.Clean(workerApprovalPath) != workerApprovalPath || filepath.Clean(workerStateDirectory) != workerStateDirectory {
 		return errBroker
 	}
-	ctx, cancel := context.WithCancel(parent)
+	var payload map[string]json.RawMessage
+	if json.Unmarshal(data, &payload) != nil {
+		return errBroker
+	}
+	bindingData, err := json.Marshal(binding)
+	if err != nil {
+		return errBroker
+	}
+	payload["paired_binding"] = bindingData
+	data, err = json.Marshal(payload)
+	if err != nil || len(data) > 16384 {
+		return errBroker
+	}
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
-	command := exec.CommandContext(ctx, binary.path, "--execute-approved-paired-terminal", "--approval", approvalPath, "--state-dir", stateDirectory, "--worker-approval", workerApprovalPath, "--worker-state-dir", workerStateDirectory)
+	command := exec.CommandContext(ctx, binary.path, "--execute-approved-paired-terminal", "--approval", approvalPath, "--state-dir", stateDirectory, "--worker-approval", workerApprovalPath, "--worker-state-dir", workerStateDirectory, "--paired-binding", string(bindingData))
 	command.Dir = workingDirectory
 	command.Env = []string{"LANG=C", "LC_ALL=C"}
 	command.WaitDelay = time.Second

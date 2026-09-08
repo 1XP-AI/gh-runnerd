@@ -44,6 +44,35 @@ func TestCanonicalPreparationRecordsNoPhaseOrRemoteIntent(t *testing.T) {
 		t.Fatal("preparation recorded phase or remote intent")
 	}
 }
+
+func TestPairedPreparationUsesDedicatedPhaseWithoutCleanupAuthority(t *testing.T) {
+	parent := privateDir(t)
+	directory := admissionState(t, parent, "paired-state")
+	capRoot := testAdmissionDirectory(t, directory)
+	a := approval()
+	open := func(path string, a Approval) (*FileJournal, error) {
+		return openJournalAtAdmission(path, a, capRoot, func(f *os.File) error { return f.Sync() })
+	}
+	receipt, err := preparePairedJournal(directory, a, open)
+	if err != nil || receipt.Phase != pairedPreparationPhase || receipt.Status != "controller_journal_prepared" {
+		t.Fatalf("paired preparation did not produce its own receipt: receipt=%+v err=%v", receipt, err)
+	}
+	j, err := open(directory, a)
+	if err != nil {
+		t.Fatal("paired journal reopen")
+	}
+	defer j.Close()
+	if len(j.Events()) != 0 {
+		t.Fatal("paired preparation borrowed cleanup authority or recorded an effect")
+	}
+	withoutVerification := a
+	withoutVerification.Phases = []string{"create", "inspect", "cleanup"}
+	withoutDirectory := admissionState(t, parent, "without-verification")
+	if _, err := preparePairedJournal(withoutDirectory, withoutVerification, open); err == nil {
+		t.Fatal("paired preparation accepted missing verification authority")
+	}
+}
+
 func TestCanonicalPreparationRefusesInvalidJournalAndPhase(t *testing.T) {
 	for _, kind := range []string{"locked", "malformed", "oversized", "permission", "authority", "seen phase", "unknown", "deleted", "unapproved"} {
 		t.Run(kind, func(t *testing.T) {
