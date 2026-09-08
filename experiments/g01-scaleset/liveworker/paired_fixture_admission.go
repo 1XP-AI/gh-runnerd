@@ -36,7 +36,10 @@ func OpenJournalForPairedFixture(directory string, a Approval, admissionDirector
 	}
 	j, err := openJournalAtAdmission(directory, a, admissionDirectory, func(file *os.File) error { return file.Sync() })
 	if err != nil {
-		fixtureWorkerStage(directory, "underlying")
+		stage, readErr := os.ReadFile(filepath.Join(directory, "paired-fixture-worker-stage"))
+		if readErr != nil || string(stage) == "start" {
+			fixtureWorkerStage(directory, "underlying")
+		}
 	} else {
 		fixtureWorkerStage(directory, "ok")
 	}
