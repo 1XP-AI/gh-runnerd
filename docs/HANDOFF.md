@@ -198,8 +198,11 @@ second native Goal on #1 while this planning work runs.
 
 For every new issue, after checking for an explicit current user override:
 
-- set the Project Agent field to `Luna max` when no override exists, otherwise set
-  it to the explicitly requested routing when that option exists;
+- set the Project Agent field to `Luna max` when no override exists;
+- when an override exists and the Project Agent field has that option, set it to
+  that option; when the override has **no** Project option (today: Grok 4.6 xhigh
+  on #66/#67/#68/#69), **skip the Agent edit** and leave the field unset — do not
+  write Luna as a substitute implementer. Independent review remains Luna max;
 - use one active goal whose objective is exactly the issue's `Goal` statement;
 - do not invent a token budget;
 - use an independent contract review with the current selected review model/effort
@@ -248,7 +251,7 @@ invariants. If a blocker is open, stop and report that state for the authorized
 issue. Select another issue only when a separate user task explicitly authorizes
 that new scope.
 
-### 2. Resolve the Project item and route it to Luna
+### 2. Resolve the Project item and route the Agent field
 
 ```sh
 PROJECT_ID=PVT_kwDOD2M2gs4Bismw
@@ -256,8 +259,16 @@ STATUS_FIELD_ID=PVTSSF_lADOD2M2gs4BismwzhhjoZA
 AGENT_FIELD_ID=PVTSSF_lADOD2M2gs4Bismwzhhjobs
 STATUS_IN_PROGRESS_ID=7a569f61
 AGENT_LUNA_MAX_ID=9317c27f
-# Use the explicit current user-selected Project option when one exists.
+# Default implementer is Luna max. Issue-body-only overrides with no Project
+# Agent option must not be rewritten to Luna; leave Agent unset.
+SKIP_AGENT_EDIT=0
 AGENT_OPTION_ID="$AGENT_LUNA_MAX_ID"
+case "$ISSUE" in
+  66|67|68|69)
+    SKIP_AGENT_EDIT=1
+    AGENT_OPTION_ID=""
+    ;;
+esac
 
 ITEM_JSON="$(gh project item-list "$PROJECT_NUMBER" --owner "$OWNER" \
   --limit 1000 --format json)"
@@ -280,8 +291,13 @@ if [ "$ITEM_STATUS" != "Ready" ]; then
   exit 1
 fi
 
-gh project item-edit --id "$ITEM_ID" --project-id "$PROJECT_ID" \
-  --field-id "$AGENT_FIELD_ID" --single-select-option-id "$AGENT_OPTION_ID"
+if [ "$SKIP_AGENT_EDIT" = 1 ]; then
+  printf 'issue %s has a Grok 4.6 xhigh override with no Project Agent option; leaving Agent unset (was %s)\n' \
+    "$ISSUE" "$ITEM_AGENT"
+else
+  gh project item-edit --id "$ITEM_ID" --project-id "$PROJECT_ID" \
+    --field-id "$AGENT_FIELD_ID" --single-select-option-id "$AGENT_OPTION_ID"
+fi
 ```
 
 If the item is already In progress for another active agent, the guard above stops
@@ -290,7 +306,8 @@ the issue's durable Goal/Dependencies fields and `docs/backlog.json` aligned onl
 when the contract actually changes. If
 the current user selected another supported model/effort, resolve its Project Agent
 option ID with `gh project field-list` and replace `AGENT_OPTION_ID`; never overwrite
-an explicit current selection with the default.
+an explicit current selection with the default, and never write Luna over an
+issue-body-only override that has no Agent option. Independent review stays Luna max.
 
 ### 3. Start one active goal and an isolated worktree
 

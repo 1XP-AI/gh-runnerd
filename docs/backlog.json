@@ -813,6 +813,34 @@
       "release": "Future research"
     },
     {
+      "key": "G01g",
+      "title": "Wire paired terminal execution through a bounded broker handoff",
+      "stage": "M0 - Evidence gates",
+      "agent": "Luna max",
+      "dependencies": [],
+      "release": "R1 - Internal MVP",
+      "goal": "Connect the reviewed paired terminal path to one same-process experimental executable and a narrowly bound broker handoff, with offline evidence that authority, credential separation and fail-stop recovery boundaries are preserved.",
+      "scope": "Tracked on issue #60 and PR #62 in a separate worktree. This keyed record exists so R1 dependencies resolve. It is not G01 completion and does not duplicate runtime or CI evidence.",
+      "tdd": [
+        "See issue #60. Do not edit #60/#62 from the #66 documentation branch."
+      ],
+      "acceptance": [
+        "Issue #60 remains the source of acceptance.",
+        "Completing G01g does not complete G01 #1."
+      ],
+      "risk": "High",
+      "kind": "gate",
+      "priority": "P0",
+      "status": "In progress",
+      "test_profile": [
+        "offline"
+      ],
+      "github_issue": {
+        "number": 60,
+        "url": "https://github.com/1XP-AI/gh-runnerd/issues/60"
+      }
+    },
+    {
       "key": "P66",
       "title": "Reframe delivery into MVP, operations and distribution releases",
       "stage": "M0 - Evidence gates",
@@ -888,7 +916,7 @@
       "agent": "Grok 4.6 xhigh",
       "review_agent": "Luna max",
       "dependencies": [
-        "#60",
+        "G01g",
         "P66",
         "G02-R1"
       ],
@@ -896,7 +924,7 @@
       "goal": "Provide a foreground MVP command that connects the reviewed broker and paired worker lifecycle for one organization, one private repository and one worker, with durable fail-stop state and safe owned cleanup.",
       "scope": "Vertical R1 slice of #4/#5/#6/#7/#9/#10/#13/#14 with primary parent #13. Reuse the reviewed paired Linux-container execution path. No second backend, native macOS jobs, daemon/install or context switch. Freeze the minimal contract before implementation.",
       "tdd": [
-        "Contract review precedes implementation; do not start while blocked by #60/#66/#67.",
+        "Contract review precedes implementation; do not start while blocked by G01g/#60, P66/#66 and G02-R1/#67.",
         "Negative tests for authority mutation, partial state, timeout, cancellation and non-owned cleanup.",
         "No claim that the existing empty product entry point already implements the command."
       ],

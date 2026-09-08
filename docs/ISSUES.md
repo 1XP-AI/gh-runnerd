@@ -37,7 +37,7 @@ Each original issue has one Goal statement, scope, TDD cases, acceptance criteri
 
 ## Live 36-item release map
 
-Verified 2026-09-08 against Project #2 (`36` items) and native GitHub parent/`blockedBy` relations. **Release** is the stage that needs the complete original scope. **R1 subset** is an explicit child when the parent mixes MVP and later acceptance. Children do not close parents. Native edges below were not added by this documentation change.
+Verified 2026-09-08 against Project #2 (`36` items) and native GitHub parent/`blockedBy` relations. **Release** is the stage that needs the complete original scope; it is not a closed DAG that can ship before natively blocking issues on later releases. **R1 subset** is an explicit child when the parent mixes MVP and later acceptance. Children do not close parents. Native edges below were not added by this documentation change.
 
 | Issue | Live status | Release (full original) | R1 subset / notes | Live Agent |
 |---|---|---|---|---|
@@ -75,7 +75,7 @@ Verified 2026-09-08 against Project #2 (`36` items) and native GitHub parent/`bl
 | [#64](https://github.com/1XP-AI/gh-runnerd/issues/64) | Done | R1 | CI default G01 deadline coverage | Luna max |
 | [#66](https://github.com/1XP-AI/gh-runnerd/issues/66) | In progress | R1 | Planning only. Main author Grok 4.6 xhigh; independent Luna max review | unset |
 | [#67](https://github.com/1XP-AI/gh-runnerd/issues/67) | Ready | R1 | Child of #2. Manual single-org credentials. No native blockers | unset |
-| [#68](https://github.com/1XP-AI/gh-runnerd/issues/68) | Blocked | R1 | Child of #13. `blockedBy` #60/#66/#67 | unset |
+| [#68](https://github.com/1XP-AI/gh-runnerd/issues/68) | Blocked | R1 | Child of #13. `blockedBy` #60/#66/#67. Contract review before implementation; not a G01/G02/G04 bypass. Live recovery is #69←#1 | unset |
 | [#69](https://github.com/1XP-AI/gh-runnerd/issues/69) | Blocked | R1 | Child of #16. `blockedBy` #1/#68 | unset |
 
 ### Verified native relations (do not duplicate)

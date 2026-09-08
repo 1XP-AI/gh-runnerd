@@ -71,7 +71,7 @@ CPU/memory reservations must include Docker service daemons and services, creati
 
 ## Delivery stages
 
-M0 settles compatibility and contracts; M1 establishes durable control/authentication; M2 adds execution/scaling; M3 validates security and recovery; M4 packages and migrates through a canary; M5 contains optional VM/fleet research. Historical Stage/milestone values stay on the issues. **Release classification is authoritative for user-visible sequencing**; M0–M5 remain the capability taxonomy. A blocked gate still blocks dependent implementation of that issue's full original scope. Relabeling does not bypass native GitHub `blockedBy` edges.
+M0 settles compatibility and contracts; M1 establishes durable control/authentication; M2 adds execution/scaling; M3 validates security and recovery; M4 packages and migrates through a canary; M5 contains optional VM/fleet research. Historical Stage/milestone values stay on the issues. **Release placement names which user-visible release needs the complete original scope**; M0–M5 remain the capability taxonomy. Native `blockedBy` edges remain the implementation start gate. Relabeling does not reorder those edges or make a full-scope issue Ready.
 
 Public PR checks run in GitHub-hosted standard environments without credentials. Trusted Mac hardware checks are explicit maintainer runs against reviewed commits. Building gh-runnerd must not depend on gh-runnerd already operating, or rollout failures would block its repair.
 
@@ -93,14 +93,16 @@ Foreground only. `cmd/gh-runnerd` is still an empty entry point; unattended daem
 | [#67](https://github.com/1XP-AI/gh-runnerd/issues/67) | R1 subset of [#2](https://github.com/1XP-AI/gh-runnerd/issues/2): manual single-organization credentials. Ready; no live App/Keychain/launchd authorization. Parent #2 stays In progress on R3. |
 | [#60](https://github.com/1XP-AI/gh-runnerd/issues/60) G01g | Bounded broker handoff for the paired Linux-container path. In progress in a separate worktree. |
 | [#66](https://github.com/1XP-AI/gh-runnerd/issues/66) | Planning and documentation synchronization. |
-| [#68](https://github.com/1XP-AI/gh-runnerd/issues/68) | R1 subset of [#13](https://github.com/1XP-AI/gh-runnerd/issues/13), coordinated slice of #4–#15: one foreground command, capacity one. Blocked by #60, #66 and #67. Freeze the minimal contract before implementation. Completing #68 does not complete #4–#15. |
-| [#69](https://github.com/1XP-AI/gh-runnerd/issues/69) | R1 subset of [#16](https://github.com/1XP-AI/gh-runnerd/issues/16): authorized real private job plus required ACK/acquisition/JIT recovery. Blocked by #1 and #68. A passing happy-path job is not sufficient. |
+| [#68](https://github.com/1XP-AI/gh-runnerd/issues/68) | R1 subset of [#13](https://github.com/1XP-AI/gh-runnerd/issues/13), coordinated slice of #4–#15. Native blockers remain #60, #66 and #67; do not add #1/#2 without an explicit ask. **First authorized work is a reviewed minimal contract**, not `cmd/gh-runnerd` production behavior and not a G04/G13 bypass. Implementation after that contract still reuses the reviewed G01 paired Linux-container path (#54/#60) and R1 credentials (#67). It must not claim G01 or G02 complete. Completing #68 does not complete #4–#15. |
+| [#69](https://github.com/1XP-AI/gh-runnerd/issues/69) | R1 subset of [#16](https://github.com/1XP-AI/gh-runnerd/issues/16): authorized real private job plus required ACK/acquisition/JIT recovery. Blocked by **full** [#1](https://github.com/1XP-AI/gh-runnerd/issues/1) and #68. A passing happy-path job is not sufficient. This is the G01 recovery gate for the R1 operator exit. |
 
-Completed R1-placed records (#3, #30, #44, #46, #47, #50, #52, #54, #61, #64) are historical evidence slices. They do not close #1.
+Completed R1-placed records (#3, #30, #44, #46, #47, #50, #52, #54, #61, #64) are historical evidence slices. They do not close #1. G01/G02 full-scope gates still bind G04 and later parents.
 
 ### R2 — Everyday operations
 
-Practical install/start/stop/status, restart recovery, bounded scaling and repeated operational use. Full original acceptance of #4, #5, #6, #7, #9, #10, #12, #13, #14, #15, #20 and completed #40. Original G04 blockers (#1/#2/#3) and G13 blockers, including native-macOS #11, remain in force.
+Operator-visible target: install/start/stop/status, restart recovery, bounded scaling and repeated use of the R1 foreground path as a supervised service.
+
+**Complete original acceptance** of #4, #5, #6, #7, #9, #10, #12, #13, #14, #15, #20 and completed #40 is still placed on R2. That set is **not independently shippable before R3-placed blockers**: #4 waits on #2, #13 waits on #11, #20 waits on #17/#18. Everyday-operations work may start only when its own native dependencies are Done (for example completed #40). Further R2 children would be required to split those mixed issues; do not create them without an explicit ask.
 
 ### R3 — General distribution
 

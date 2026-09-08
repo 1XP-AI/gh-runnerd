@@ -2,7 +2,7 @@
 
 Every original row is a full-scope goal. G01/G02 remain evidence gates; G03 is done. See [execution policy](EXECUTION.md), [approved delivery releases](PLAN.md#approved-delivery-releases) and each GitHub issue for acceptance and TDD details.
 
-**Release classification is authoritative for user-visible sequencing.** Historical M0–M5 stages, original Goal text, Agent history and native `blockedBy` edges are retained. Relabeling does not make a blocked full-scope issue Ready and does not close a parent when a child lands.
+**Release placement names which user-visible release needs the complete original scope.** Historical M0–M5 stages, original Goal text, Agent history and native `blockedBy` edges are retained. Relabeling does not make a blocked full-scope issue Ready, does not close a parent when a child lands, and does not make an R2 original-acceptance set independently shippable while it is natively blocked by R3-placed issues.
 
 The live 36-item map is in [ISSUES.md](ISSUES.md). Default implementer is Luna max unless the issue records an explicit current user override; #66 and R1 children #67/#68/#69 are Grok 4.6 xhigh with independent Luna max review.
 
@@ -16,7 +16,7 @@ Foreground MVP on this Mac: one org, one private repository, existing Linux-cont
 | G02-R1 | [#67](https://github.com/1XP-AI/gh-runnerd/issues/67) | R1 subset of G02 #2 (manual single-org credentials). Parent #2 stays R3 In progress | none | Ready |
 | G01g | [#60](https://github.com/1XP-AI/gh-runnerd/issues/60) | Bounded broker handoff for the paired Linux-container path | #54 (Done) | In progress |
 | P66 | [#66](https://github.com/1XP-AI/gh-runnerd/issues/66) | Delivery-plan documentation | none | In progress |
-| G13-R1 | [#68](https://github.com/1XP-AI/gh-runnerd/issues/68) | R1 subset of G13 #13: one foreground command. Freeze the minimal contract before implementation | #60, #66, #67 | Blocked |
+| G13-R1 | [#68](https://github.com/1XP-AI/gh-runnerd/issues/68) | R1 subset of G13 #13. First authorized work is a reviewed minimal contract, not production daemon/CLI and not a G01/G02/G04 bypass. Live recovery stays on #1→#69 | #60, #66, #67 | Blocked |
 | G16-R1 | [#69](https://github.com/1XP-AI/gh-runnerd/issues/69) | R1 subset of G16 #16: authorized real job plus required recovery | #1, #68 | Blocked |
 
 #68 must not start implementation while blocked. Completing a child does not complete G02, G04–G15 or G16.
@@ -45,7 +45,7 @@ Foreground MVP on this Mac: one org, one private repository, existing Linux-cont
 | G17 | Qualify crash recovery, soak and resource budgets | M3 - Reliability qualification | R3 | Luna max | G16, G19 |
 | G18 | Package signed releases and reproducible distribution | M4 - Pilot and release | R3 | Luna max | G03, G15, G17 |
 | G19 | Audit trust admission and cross-worker secret boundaries | M3 - Reliability qualification | R3 | Luna max | G08, G10, G11, G13 |
-| G20 | Pilot migration with reversible legacy runner handoff | M4 - Pilot and release | R2 | Luna max | G17, G18 (R3). Historical edge preserved; no bypass |
+| G20 | Pilot migration with reversible legacy runner handoff | M4 - Pilot and release | R2 | Luna max | G17, G18 (R3). Full original R2 placement cannot close until those R3 blockers finish; no bypass |
 | G21 | Evaluate optional macOS VM and multi-host providers | M5 - Future | Future | Luna max | G17 |
 
 The machine-readable source is [backlog.json](backlog.json). Published issue numbers and links are in [ISSUES.md](ISSUES.md); all original dependencies remain native GitHub blocking relationships. Full-scope first-release implementation goals except G03/G12a remain open.
@@ -54,7 +54,7 @@ The machine-readable source is [backlog.json](backlog.json). Published issue num
 
 - Continue G01 (full recovery Goal) and G02 (full Manifest/multi-org/launchd Goal) independently; they are not replaced by #67.
 - #67 may proceed as isolated R1 credential evidence without waiting on G02's remaining R3 criteria; it does not authorize live App/Keychain/launchd mutation.
-- G04 still integrates the full gates before shared full-scope implementation. #68 is not a G04 bypass.
+- G04 still integrates the full gates before shared full-scope implementation. #68 is not a G04 bypass: its first authorized work is a reviewed R1 contract, and live G01 recovery remains #69 blocked by #1.
 - After G05, IPC, auth, and pure scheduling can proceed with separate file ownership for R2/R3 work.
 - Linux and native macOS providers can proceed independently once shared contracts/credentials exist; native macOS is R3.
 - Integration, security verdict, soak and rollout remain sequential evidence gates.
