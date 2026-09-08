@@ -571,7 +571,7 @@ func bridgeRepoRoot(t *testing.T) string {
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "../.."))
 }
 
-func buildPairedG01Binary(t *testing.T) (string, string, string) {
+func buildPairedG01BinaryWithTags(t *testing.T, tags string) (string, string, string) {
 	t.Helper()
 	repo := bridgeRepoRoot(t)
 	command := exec.Command("git", "rev-parse", "HEAD")
@@ -594,8 +594,12 @@ func buildPairedG01Binary(t *testing.T) (string, string, string) {
 		_ = output
 		t.Fatal("clone reviewed g01 bridge source")
 	}
-	out := filepath.Join(t.TempDir(), "g01-live")
-	command = exec.Command("go", "build", "-buildvcs=true", "-tags", "g01_live,g01_pair_fixture", "-o", out, "./cmd/g01-live")
+	outRoot := t.TempDir()
+	if err := os.Chmod(outRoot, 0700); err != nil {
+		t.Fatal("pin reviewed bridge binary parent mode")
+	}
+	out := filepath.Join(outRoot, "g01-live")
+	command = exec.Command("go", "build", "-buildvcs=true", "-tags", tags, "-o", out, "./cmd/g01-live")
 	command.Dir = filepath.Join(cloneRoot, "experiments", "g01-scaleset")
 	command.Env = append(os.Environ(), "GOTOOLCHAIN=go1.26.8")
 	if output, err := command.CombinedOutput(); err != nil {
@@ -605,12 +609,83 @@ func buildPairedG01Binary(t *testing.T) (string, string, string) {
 	if err := os.Chmod(out, 0500); err != nil {
 		t.Fatal("pin reviewed bridge binary mode")
 	}
+	canonicalOut, err := filepath.EvalSymlinks(out)
+	if err != nil || !filepath.IsAbs(canonicalOut) || filepath.Clean(canonicalOut) != canonicalOut {
+		t.Fatal("canonical reviewed bridge binary path")
+	}
 	data, err := os.ReadFile(out)
 	if err != nil {
 		t.Fatal("read reviewed bridge binary")
 	}
 	digest := sha256.Sum256(data)
-	return out, harness, hexDigest(digest[:])
+	return canonicalOut, harness, hexDigest(digest[:])
+}
+
+func buildPairedG01Binary(t *testing.T) (string, string, string) {
+	return buildPairedG01BinaryWithTags(t, "g01_live,g01_pair_fixture")
+}
+
+func TestBrokerRejectsCleanFixtureBinaryBeforeMint(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("private Unix fixture requires a Unix host")
+	}
+	binaryPath, harness, binaryDigest := buildPairedG01BinaryWithTags(t, "g01_live,g01_pair_fixture")
+	a, candidate, api, fixture, attempt := newBrokerFixture(t)
+	parent := filepath.Dir(attempt)
+	now := time.Now()
+	a.Mode, a.Phase, a.ExpiresAt = "controller", "create", now.Add(time.Hour)
+	a.ControllerHarnessSHA, a.ControllerBinarySHA256 = harness, binaryDigest
+	controller := controllerApproval{AppID: a.AppID, InstallationID: a.InstallationID, Organization: a.Organization, Repository: a.Repository, RepositoryID: a.RepositoryID, RunnerGroupID: a.RunnerGroupID, OwnerNonce: a.OwnerNonce, HarnessSHA: harness, WorkflowSHA: strings.Repeat("b", 40), WorkflowPath: ".github/workflows/canary.yml", Controller: "trusted-controller", ExpiresAt: a.ExpiresAt, ActionsHosts: []string{"fixture.actions.githubusercontent.com"}, Phases: []string{"create"}}
+	controllerData, err := json.Marshal(controller)
+	if err != nil {
+		t.Fatal("controller approval")
+	}
+	a.ControllerApprovalSHA256 = brokerBytesDigest(controllerData)
+	controllerPath := filepath.Join(parent, "fixture-controller-approval.json")
+	writePrivateBridgeJSON(t, controllerPath, controller)
+	approvalPath := filepath.Join(parent, "fixture-broker-approval.json")
+	writePrivateBridgeJSON(t, approvalPath, a)
+	controllerState := filepath.Join(parent, "fixture-controller-state")
+	if err := os.Mkdir(controllerState, 0700); err != nil {
+		t.Fatal("controller state")
+	}
+	inputPath := filepath.Join(parent, "fixture-broker-input.json")
+	inputData, _ := json.Marshal(brokerInput{PEM: string(candidate.PEM)})
+	if err := os.WriteFile(inputPath, inputData, 0600); err != nil {
+		t.Fatal("broker input")
+	}
+	input, err := os.Open(inputPath)
+	if err != nil {
+		t.Fatal("broker input open")
+	}
+	defer input.Close()
+	_, err = runBrokerWithAPI(context.Background(), BrokerFiles{ApprovalPath: approvalPath, StateDirectory: attempt, ControllerBinary: binaryPath, ControllerApproval: controllerPath, ControllerStateDirectory: controllerState}, input, api)
+	if err == nil || fixture.tokenCalls != 0 || len(fixture.calls) != 0 {
+		t.Fatalf("fixture-enabled binary crossed production gate: err=%v mints=%d calls=%v", err, fixture.tokenCalls, fixture.calls)
+	}
+}
+
+func TestBrokerAllowsCleanProductionBinaryArtifact(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("private Unix fixture requires a Unix host")
+	}
+	binaryPath, harness, binaryDigest := buildPairedG01BinaryWithTags(t, "g01_live")
+	a := brokerApprovalFixture()
+	a.Mode, a.Phase = "controller", "create"
+	a.ControllerHarnessSHA, a.ControllerBinarySHA256 = harness, binaryDigest
+	binary, err := openBrokerBinary(binaryPath, a)
+	if err != nil {
+		t.Fatalf("clean production binary rejected: %v", err)
+	}
+	if binary == nil || binary.check() != nil {
+		if binary != nil {
+			_ = binary.file.Close()
+		}
+		t.Fatal("clean production binary failed retained identity check")
+	}
+	if err := binary.file.Close(); err != nil {
+		t.Fatal("production binary close")
+	}
 }
 
 func hexDigest(data []byte) string {
@@ -646,11 +721,11 @@ func writePrivateBridgeJSON(t *testing.T, path string, value any) []byte {
 	return data
 }
 
-func TestPairedBrokerChainsRealControllerCreatePreparationAndTerminal(t *testing.T) {
+func runPairedBrokerBridge(t *testing.T, tags string) time.Duration {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skip("private Unix fixture requires a Unix host")
 	}
-	binaryPath, harness, binaryDigest := buildPairedG01Binary(t)
+	binaryPath, harness, binaryDigest := buildPairedG01BinaryWithTags(t, tags)
 	bridge := newPairedBrokerBridge(t)
 	parent := t.TempDir()
 	if err := os.Chmod(parent, 0700); err != nil {
@@ -749,6 +824,7 @@ func TestPairedBrokerChainsRealControllerCreatePreparationAndTerminal(t *testing
 	if err != nil {
 		t.Fatal("broker input")
 	}
+	started := time.Now()
 	brokerCtx, brokerCancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	result, err := runBrokerWithAPI(brokerCtx, BrokerFiles{ApprovalPath: approvalPath, StateDirectory: attempt, ControllerBinary: binaryPath, ControllerApproval: controllerPath, ControllerStateDirectory: controllerState, WorkerApproval: workerPath, WorkerStateDirectory: workerState}, input, api)
 	brokerCancel()
@@ -797,4 +873,17 @@ func TestPairedBrokerChainsRealControllerCreatePreparationAndTerminal(t *testing
 	if retryErr == nil || brokerFixture.tokenCalls != 1 {
 		t.Fatal("completed paired claim replayed effects")
 	}
+	return time.Since(started)
+}
+
+func TestPairedBrokerChainsRealControllerCreatePreparationAndTerminal(t *testing.T) {
+	runPairedBrokerBridge(t, "g01_live,g01_pair_fixture")
+}
+
+func TestPairedBrokerRealCadenceChildExceedsThirtySeconds(t *testing.T) {
+	elapsed := runPairedBrokerBridge(t, "g01_live,g01_pair_fixture,g01_pair_real_cadence")
+	if elapsed <= 30*time.Second {
+		t.Fatalf("real cadence bridge completed too quickly: %s", elapsed)
+	}
+	t.Logf("real cadence bridge wall time: %s", elapsed)
 }

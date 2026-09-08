@@ -21,6 +21,11 @@ import (
 	"github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/liveworker"
 )
 
+// The default offline fixture uses a deterministic fast clock. A separate
+// explicitly tagged regression selects the production wall clock below; the
+// broker's production metadata gate rejects both fixture tags.
+var pairedFixtureUseRealCadence bool
+
 // These constructors are only present in the explicitly tagged offline
 // bridge fixture. The ordinary binary cannot select a caller-provided API
 // endpoint or journal admission root.
@@ -159,7 +164,11 @@ func RunPairedTerminalForFixture(ctx context.Context, files PairedTerminalFiles,
 			return liveworker.NewDocker(a)
 		},
 	}
-	pairedTerminalFixtureCadence = fixtureFastPairCadence
+	if pairedFixtureUseRealCadence {
+		pairedTerminalFixtureCadence = realBaselineCadence
+	} else {
+		pairedTerminalFixtureCadence = fixtureFastPairCadence
+	}
 	defer func() {
 		pairedTerminalFixtureAdapters, pairedTerminalFixtureCadence = oldAdapters, oldCadence
 	}()
