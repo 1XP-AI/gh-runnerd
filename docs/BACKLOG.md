@@ -16,10 +16,10 @@ Foreground MVP on this Mac: one org, one private repository, existing Linux-cont
 | G02-R1 | [#67](https://github.com/1XP-AI/gh-runnerd/issues/67) | R1 subset of G02 #2 (manual single-org credentials). Parent #2 stays R3 In progress | none | Ready |
 | G01g | [#60](https://github.com/1XP-AI/gh-runnerd/issues/60) | Bounded broker handoff for the paired Linux-container path | #54 (Done) | In progress |
 | P66 | [#66](https://github.com/1XP-AI/gh-runnerd/issues/66) | Delivery-plan documentation | none | In progress |
-| G13-R1 | [#68](https://github.com/1XP-AI/gh-runnerd/issues/68) | R1 subset of G13 #13. First authorized work is a reviewed minimal contract, not production daemon/CLI and not a G01/G02/G04 bypass. Live recovery stays on #1→#69 | #60, #66, #67 | Blocked |
+| G13-R1 | [#68](https://github.com/1XP-AI/gh-runnerd/issues/68) | R1 subset of G13 #13. Native blockers #60, #66, #67. Until full G01 #1 and G02 #2 pass, authorized work is a reviewed minimal contract and offline evidence only; production implementation starts only then. Not a G01/G02/G04 bypass. Completing #67 does not complete G02. Live recovery stays on #1→#69 | #60, #66, #67 | Blocked |
 | G16-R1 | [#69](https://github.com/1XP-AI/gh-runnerd/issues/69) | R1 subset of G16 #16: authorized real job plus required recovery | #1, #68 | Blocked |
 
-#68 must not start implementation while blocked. Completing a child does not complete G02, G04–G15 or G16.
+#68 must not start production implementation while natively blocked or while full G01 #1 or G02 #2 remain open. Native `blockedBy` stays #60/#66/#67; do not add #1/#2 without an explicit ask. Completing a child does not complete G02, G04–G15 or G16.
 
 ## Original full-scope backlog (M0–M5 preserved)
 
@@ -54,7 +54,7 @@ The machine-readable source is [backlog.json](backlog.json). Published issue num
 
 - Continue G01 (full recovery Goal) and G02 (full Manifest/multi-org/launchd Goal) independently; they are not replaced by #67.
 - #67 may proceed as isolated R1 credential evidence without waiting on G02's remaining R3 criteria; it does not authorize live App/Keychain/launchd mutation.
-- G04 still integrates the full gates before shared full-scope implementation. #68 is not a G04 bypass: its first authorized work is a reviewed R1 contract, and live G01 recovery remains #69 blocked by #1.
+- G04 still integrates the full gates before shared full-scope implementation. #68 is not a G04 bypass: until full G01 #1 and G02 #2 pass, authorized work is a reviewed R1 contract and offline evidence only; production implementation starts only then. Completing #67 does not complete G02. Live G01 recovery remains #69 blocked by #1.
 - After G05, IPC, auth, and pure scheduling can proceed with separate file ownership for R2/R3 work.
 - Linux and native macOS providers can proceed independently once shared contracts/credentials exist; native macOS is R3.
 - Integration, security verdict, soak and rollout remain sequential evidence gates.

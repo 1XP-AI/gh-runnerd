@@ -153,7 +153,7 @@ dispatch. The last verified snapshot is 36 items. The full map is in
 | #67 | Ready | R1 | Grok 4.6 xhigh / Luna review; child of #2; no native blockers |
 | #60 G01g | In progress | R1 | Luna max; separate worktree/PR #62; do not edit from #66 |
 | #66 | In progress | R1 | Grok 4.6 xhigh / Luna review; this documentation change |
-| #68 | Blocked | R1 | child of #13; blocked by #60/#66/#67; contract-before-implementation |
+| #68 | Blocked | R1 | child of #13; native blockedBy #60/#66/#67; contract/offline evidence only until full #1/#2; production implementation only then |
 | #69 | Blocked | R1 | child of #16; blocked by #1/#68 |
 | #3 G03, #30, #40 G12a, #44, #46, #47, #50, #52, #54 G01f, #61, #64 | Done | R1 except #40 R2 | historical records preserved; #54 Done does not close #1 |
 | #4–#7, #9, #10, #12–#15, #20 | Backlog | R2 | Luna max; original dependencies unchanged |
@@ -479,14 +479,16 @@ Use this compact map to orient a new agent; the live Project decides what is Rea
 | G20 | #20 | Reversible pilot/migration with legacy fallback |
 | G21 | #21 | Optional macOS VM and multi-host provider research (Future) |
 | G02-R1 | #67 | R1 manual single-organization credentials (child of #2; parent remains R3) |
-| G13-R1 | #68 | R1 foreground command, capacity one (child of #13; blocked by #60/#66/#67) |
+| G13-R1 | #68 | R1 foreground command, capacity one (child of #13; native blockedBy #60/#66/#67; production waits on full G01/G02) |
 | G16-R1 | #69 | R1 authorized real job plus required recovery (child of #16; blocked by #1/#68) |
 | P66 | #66 | Delivery-plan documentation; not a runtime Goal |
 
 G01 and G02 are evidence gates. G01's exact Goal and full ACK/acquisition/JIT
 recovery remain required; child merges are not completion. G04 and all dependent
 full-scope implementation remain behind their acceptance evidence. #68 is not a
-G04/G13 bypass. G10/G16 require real ARM64 Docker and private test repositories.
+G04/G13 bypass: until full G01 #1 and G02 #2 pass, its authorized work is
+contract and offline evidence only; production implementation starts only then.
+Completing #67 does not complete G02. G10/G16 require real ARM64 Docker and private test repositories.
 G11/G19 require trusted native-process evidence and are R3. G17 is the reliability
 release gate. G20 is the reversible pilot, not a license to remove the fallback
 runners early. G20 remains natively blocked by #17/#18.
@@ -513,9 +515,11 @@ modify runtime, CI or evidence docs belonging to those PRs.
 
 Issue [#66](https://github.com/1XP-AI/gh-runnerd/issues/66) on `orca/release-reframe`.
 Main author Grok 4.6 xhigh; independent Luna max review; exact-head Codex+CI before
-merge. #68 stays Blocked until #60, #66 and #67 are complete and the minimal
-foreground contract is reviewed. No live authorization and no merge of blocked
-implementation are implied.
+merge. #68 stays natively Blocked until #60, #66 and #67 are complete. After that,
+authorized work is the reviewed minimal contract and offline evidence only until
+full G01 #1 and G02 #2 pass; production implementation starts only then.
+Completing #67 does not complete G02. No live authorization and no merge of
+blocked implementation are implied.
 
 ## Live-operation gate
 

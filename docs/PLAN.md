@@ -71,7 +71,7 @@ CPU/memory reservations must include Docker service daemons and services, creati
 
 ## Delivery stages
 
-M0 settles compatibility and contracts; M1 establishes durable control/authentication; M2 adds execution/scaling; M3 validates security and recovery; M4 packages and migrates through a canary; M5 contains optional VM/fleet research. Historical Stage/milestone values stay on the issues. **Release placement names which user-visible release needs the complete original scope**; M0–M5 remain the capability taxonomy. Native `blockedBy` edges remain the implementation start gate. Relabeling does not reorder those edges or make a full-scope issue Ready.
+M0 settles compatibility and contracts; M1 establishes durable control/authentication; M2 adds execution/scaling; M3 validates security and recovery; M4 packages and migrates through a canary; M5 contains optional VM/fleet research. Historical Stage/milestone values stay on the issues. **Release placement names which user-visible release needs the complete original scope**; M0–M5 remain the capability taxonomy. Native `blockedBy` edges remain the GitHub start gate. Relabeling does not reorder those edges or make a full-scope issue Ready. Release placement is not production-implementation authorization: G01/G02 evidence gates still bind dependent production work even when a child's native blockers differ.
 
 Public PR checks run in GitHub-hosted standard environments without credentials. Trusted Mac hardware checks are explicit maintainer runs against reviewed commits. Building gh-runnerd must not depend on gh-runnerd already operating, or rollout failures would block its repair.
 
@@ -79,7 +79,7 @@ Public PR checks run in GitHub-hosted standard environments without credentials.
 
 Issue [#66](https://github.com/1XP-AI/gh-runnerd/issues/66) records the maintainer-accepted split. Placement on a release means that release needs the **complete original scope**. It is not a claim that no safe subset is required earlier, and it is not permission to mark a parent Done. Where an original issue mixed internal-MVP and later acceptance, explicit children hold the R1 subset; parents stay open until their own criteria pass.
 
-The live 36-item map is in [ISSUES.md](ISSUES.md). Production implementation of dependency-blocked full-scope issues is not authorized by this planning change.
+The live 36-item map is in [ISSUES.md](ISSUES.md). Production implementation of dependency-blocked full-scope issues is not authorized by this planning change. R1 placement of #68 is release scope, not a waiver of the full G01/G02 production gates.
 
 ### R1 — Internal MVP
 
@@ -93,10 +93,10 @@ Foreground only. `cmd/gh-runnerd` is still an empty entry point; unattended daem
 | [#67](https://github.com/1XP-AI/gh-runnerd/issues/67) | R1 subset of [#2](https://github.com/1XP-AI/gh-runnerd/issues/2): manual single-organization credentials. Ready; no live App/Keychain/launchd authorization. Parent #2 stays In progress on R3. |
 | [#60](https://github.com/1XP-AI/gh-runnerd/issues/60) G01g | Bounded broker handoff for the paired Linux-container path. In progress in a separate worktree. |
 | [#66](https://github.com/1XP-AI/gh-runnerd/issues/66) | Planning and documentation synchronization. |
-| [#68](https://github.com/1XP-AI/gh-runnerd/issues/68) | R1 subset of [#13](https://github.com/1XP-AI/gh-runnerd/issues/13), coordinated slice of #4–#15. Native blockers remain #60, #66 and #67; do not add #1/#2 without an explicit ask. **First authorized work is a reviewed minimal contract**, not `cmd/gh-runnerd` production behavior and not a G04/G13 bypass. Implementation after that contract still reuses the reviewed G01 paired Linux-container path (#54/#60) and R1 credentials (#67). It must not claim G01 or G02 complete. Completing #68 does not complete #4–#15. |
+| [#68](https://github.com/1XP-AI/gh-runnerd/issues/68) | R1 subset of [#13](https://github.com/1XP-AI/gh-runnerd/issues/13), coordinated slice of #4–#15. Native blockers remain #60, #66 and #67; do not add #1/#2 without an explicit ask. **Until full G01 [#1](https://github.com/1XP-AI/gh-runnerd/issues/1) and G02 [#2](https://github.com/1XP-AI/gh-runnerd/issues/2) pass, authorized work is a reviewed minimal contract and offline evidence only**, not `cmd/gh-runnerd` production behavior and not a G04/G13 bypass. Production implementation starts only after those full gates pass; it may then reuse the reviewed G01 paired Linux-container path (#54/#60) and R1 credentials (#67). Completing #67 does not complete G02. Completing #68 does not complete #4–#15 or claim G01 or G02 complete. |
 | [#69](https://github.com/1XP-AI/gh-runnerd/issues/69) | R1 subset of [#16](https://github.com/1XP-AI/gh-runnerd/issues/16): authorized real private job plus required ACK/acquisition/JIT recovery. Blocked by **full** [#1](https://github.com/1XP-AI/gh-runnerd/issues/1) and #68. A passing happy-path job is not sufficient. This is the G01 recovery gate for the R1 operator exit. |
 
-Completed R1-placed records (#3, #30, #44, #46, #47, #50, #52, #54, #61, #64) are historical evidence slices. They do not close #1. G01/G02 full-scope gates still bind G04 and later parents.
+Completed R1-placed records (#3, #30, #44, #46, #47, #50, #52, #54, #61, #64) are historical evidence slices. They do not close #1. G01/G02 full-scope gates still bind G04 and later parents, and they bind #68 production implementation. Completing #67 does not satisfy G02.
 
 ### R2 — Everyday operations
 

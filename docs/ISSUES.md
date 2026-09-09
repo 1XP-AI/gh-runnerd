@@ -75,7 +75,7 @@ Verified 2026-09-08 against Project #2 (`36` items) and native GitHub parent/`bl
 | [#64](https://github.com/1XP-AI/gh-runnerd/issues/64) | Done | R1 | CI default G01 deadline coverage | Luna max |
 | [#66](https://github.com/1XP-AI/gh-runnerd/issues/66) | In progress | R1 | Planning only. Main author Grok 4.6 xhigh; independent Luna max review | unset |
 | [#67](https://github.com/1XP-AI/gh-runnerd/issues/67) | Ready | R1 | Child of #2. Manual single-org credentials. No native blockers | unset |
-| [#68](https://github.com/1XP-AI/gh-runnerd/issues/68) | Blocked | R1 | Child of #13. `blockedBy` #60/#66/#67. Contract review before implementation; not a G01/G02/G04 bypass. Live recovery is #69←#1 | unset |
+| [#68](https://github.com/1XP-AI/gh-runnerd/issues/68) | Blocked | R1 | Child of #13. Native `blockedBy` #60/#66/#67. Contract/offline evidence only until full G01 #1 and G02 #2 pass; production implementation only then. Not a G01/G02/G04 bypass. Completing #67 does not complete G02. Live recovery is #69←#1 | unset |
 | [#69](https://github.com/1XP-AI/gh-runnerd/issues/69) | Blocked | R1 | Child of #16. `blockedBy` #1/#68 | unset |
 
 ### Verified native relations (do not duplicate)

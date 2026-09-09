@@ -953,9 +953,10 @@
       ],
       "release": "R1 - Internal MVP",
       "goal": "Provide a foreground MVP command that connects the reviewed broker and paired worker lifecycle for one organization, one private repository and one worker, with durable fail-stop state and safe owned cleanup.",
-      "scope": "Vertical R1 slice of #4/#5/#6/#7/#9/#10/#13/#14 with primary parent #13. Reuse the reviewed paired Linux-container execution path. No second backend, native macOS jobs, daemon/install or context switch. Freeze the minimal contract before implementation.",
+      "scope": "Vertical R1 slice of #4/#5/#6/#7/#9/#10/#13/#14 with primary parent #13. Reuse the reviewed paired Linux-container execution path. No second backend, native macOS jobs, daemon/install or context switch. Native dependencies remain G01g/#60, P66/#66 and G02-R1/#67. Until full G01 #1 and G02 #2 evidence gates pass, authorized work is a reviewed minimal contract and offline evidence only; production implementation starts only then. Completing G02-R1/#67 does not complete G02.",
       "tdd": [
-        "Contract review precedes implementation; do not start while blocked by G01g/#60, P66/#66 and G02-R1/#67.",
+        "Native blockers G01g/#60, P66/#66 and G02-R1/#67 remain the GitHub blockedBy set; do not add #1/#2 as native edges from this docs change.",
+        "Until full G01 #1 and G02 #2 pass, work is contract/offline evidence only; production implementation is unauthorized.",
         "Negative tests for authority mutation, partial state, timeout, cancellation and non-owned cleanup.",
         "No claim that the existing empty product entry point already implements the command."
       ],
@@ -963,7 +964,8 @@
         "One documented user-facing entry point, explicit configuration and safe status output.",
         "Bound org/repository/installation and one owned worker, shared capacity hard-limit one.",
         "Foreground interruption stops new admission and preserves busy/unknown work.",
-        "Completing this child does not complete #4\u2013#15."
+        "Completing this child does not complete #4\u2013#15.",
+        "Completing G02-R1/#67 does not complete G02. Production implementation waits for full G01 #1 and G02 #2."
       ],
       "risk": "High",
       "kind": "implementation",

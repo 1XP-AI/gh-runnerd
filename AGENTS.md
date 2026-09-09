@@ -8,7 +8,7 @@ This is a plan-first repository. Do not treat example CLI commands as implemente
 - Preserve live manually installed runners during development. No global Docker prune/context change, broad process kill, unreviewed destructive cleanup or automatic workflow replay.
 - Credentials, raw SDK response errors, JIT configs, personal machine paths and private test logs must not enter commits/issues/diagnostic bundles.
 - Native macOS runners are for explicitly trusted code. Do not claim same-user workdirs or Keychain provide hostile-code isolation.
-- Keep GitHub SDK behavior behind an adapter and pin versions. Resolve G01/G02 evidence gates before dependent implementation.
+- Keep GitHub SDK behavior behind an adapter and pin versions. Resolve G01/G02 evidence gates before dependent production implementation. Completing the G02 R1 subset does not complete G02.
 - Limit concurrency and resources globally across pools; ordinary scale-down drains busy work.
 - Public PR tests use hosted environments without secrets. Real Mac/self-hosted tests require reviewed commits and explicit maintainer dispatch under runner-group policy.
 - Use Go unless an ADR supported by evidence changes the decision. Keep dependency count small and review licenses. No restricted virtualization binary or macOS image bundled by default.
