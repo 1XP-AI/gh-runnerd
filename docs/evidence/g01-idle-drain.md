@@ -788,6 +788,81 @@ performed. Rollback is a focused normal `git revert --no-edit
 documentation append if needed; retain any journal, reservation and
 uncertainty for inspection, and never reset, erase, replay or run live cleanup.
 
+### Exact-head follow-up: runner metadata and withdrawal completion
+
+The current-head Codex detail was read against the immutable source baseline
+`88d37abea8ba4d6b793c849b38bcf797f2dbb503` with the installed review wrapper
+using the separated repository argument:
+
+```text
+bash /path/to/codex-review.sh detail 72 --repo 1XP-AI/gh-runnerd
+```
+
+The actionable findings were [P1 unrelated runner metadata](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3973755454)
+and [P1 withdrawal completion race](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3973755448).
+
+The new regressions were added before the source correction and run against
+that exact baseline at `2026-09-09T23:08:11Z` UTC:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run 'TestPinnedSDKDrainAcceptsUnrelatedRunnerMetadata|TestDrainListenerDoesNotReleaseBeforeWithdrawalCompletes|TestDrainListenerCancellationWhileWithdrawalBlockedDoesNotDeadlock' -count=1 -v -timeout=30s
+```
+
+The command exited 1 with sanitized outcomes: the runner metadata response was
+quarantined; the deterministic blocked-callback response race observed `ack`
+before withdrawal completion; and the cancellation case completed without a
+deadlock. No response body, token, URL or raw SDK error was recorded.
+
+The follow-up source/test correction was then appended as
+`64c6fce0f9f86ece48a7b28ee51b1aef9774f2cb`, with no reset, rebase, amend or
+force operation. `decodeBaselineRunner` now retains the recursive
+case-folded duplicate-key guard while using ordinary `json.Unmarshal` for
+bounded `count`/`value` facts, so unrelated status/version metadata is
+tolerated without relaxing required-field or count/value identity bounds.
+The drain hook records `withdrawalCompleted` only after the capacity callback
+returns, closes a separate first-callback completion signal, requires that
+fact for a proven boundary, and waits for it before releasing a response that
+arrived first; cancellation still force-releases and joins the listener so an
+in-progress callback cannot deadlock cleanup. ACK-before-acquisition,
+non-EOF/duplicate/retry guards, unknown-state retention and the unproven
+server-receipt category remain unchanged.
+
+Post-correction focused verification on that exact SHA was:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^(TestPinnedSDKDrain.*|TestDriverDrainThroughPinnedSDKAndPollHook|TestDrainListenerDoesNotReleaseBeforeWithdrawalCompletes|TestDrainListenerCancellationWhileWithdrawalBlockedDoesNotDeadlock|TestDrainPollHookRejectsDuplicatePhysicalWrites|TestDrainPollHookRequiresOneSuccessfulWritePerPoll)$' -count=1 -timeout=180s
+```
+
+At `2026-09-09T23:13:11Z` UTC this passed in 0.509s, covering the new
+metadata-positive and blocked-race paths plus existing pinned-SDK positive and
+negative runner/session/ACK/non-EOF and capacity/retry checks.
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -run '^(TestPinnedSDKDrain.*|TestDriverDrainThroughPinnedSDKAndPollHook|TestDrainListenerDoesNotReleaseBeforeWithdrawalCompletes|TestDrainListenerCancellationWhileWithdrawalBlockedDoesNotDeadlock|TestDrainPollHookRejectsDuplicatePhysicalWrites|TestDrainPollHookRequiresOneSuccessfulWritePerPoll)$' -count=1 -timeout=180s
+```
+
+At `2026-09-09T23:13:12Z` UTC this passed in 1.614s with no race report.
+The relevant package gate then passed at `2026-09-09T23:13:20Z` UTC:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -count=1 -timeout=180s
+GOTOOLCHAIN=go1.26.8 go vet ./livecanary
+bash ../../scripts/gofmt.sh check
+git -C ../.. diff --check
+```
+
+The full `livecanary` package passed in 28.409s; vet, formatting and diff
+checks emitted no diagnostics. These remain offline loopback tests only: no
+live workflow, runner, credential, App, Keychain, launchd, Docker/Lima or
+cleanup operation was performed. Rollback is a focused normal
+`git revert --no-edit 64c6fce0f9f86ece48a7b28ee51b1aef9774f2cb` (and a
+separate documentation revert if desired), retaining journal, reservation and
+uncertainty for inspection.
+
 ## Remaining gate and rollback
 
 The live G01 gate remains unresolved until a separately authorized run uses an
