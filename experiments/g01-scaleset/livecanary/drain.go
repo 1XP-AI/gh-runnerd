@@ -1,8 +1,11 @@
 package livecanary
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
@@ -81,6 +84,58 @@ type drainPollObservation struct {
 	StatsKnown  bool            `json:"statistics_known"`
 	ACK         string          `json:"ack"`
 	Acquisition string          `json:"acquisition"`
+}
+
+var drainStatisticsFields = [...]string{
+	"totalAvailableJobs",
+	"totalAcquiredJobs",
+	"totalAssignedJobs",
+	"totalRunningJobs",
+	"totalRegisteredRunners",
+	"totalBusyRunners",
+	"totalIdleRunners",
+}
+
+// drainStatisticsFromBody preserves only field presence and bounded scalar
+// values at the SDK adapter boundary. The pinned SDK decodes an empty JSON
+// object into a non-nil all-zero struct, so a pointer alone is not evidence
+// that the service supplied a complete statistics sample.
+func drainStatisticsFromBody(body []byte) (drainStatistics, bool) {
+	var envelope map[string]json.RawMessage
+	if json.Unmarshal(body, &envelope) != nil {
+		return drainStatistics{}, false
+	}
+	raw, ok := envelope["statistics"]
+	if !ok || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return drainStatistics{}, false
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil {
+		return drainStatistics{}, false
+	}
+	if len(fields) < len(drainStatisticsFields) {
+		return drainStatistics{}, false
+	}
+	values := make([]int, len(drainStatisticsFields))
+	for i, field := range drainStatisticsFields {
+		rawValue, ok := fields[field]
+		if !ok || bytes.Equal(bytes.TrimSpace(rawValue), []byte("null")) || json.Unmarshal(rawValue, &values[i]) != nil {
+			return drainStatistics{}, false
+		}
+	}
+	stats := drainStatistics{
+		Available:  values[0],
+		Acquired:   values[1],
+		Assigned:   values[2],
+		Running:    values[3],
+		Registered: values[4],
+		Busy:       values[5],
+		Idle:       values[6],
+	}
+	if !validKnownDrainStatistics(stats) {
+		return drainStatistics{}, false
+	}
+	return stats, true
 }
 
 type drainSetIdentity struct {
@@ -174,7 +229,7 @@ func validDrainObservation(o *drainObservation) bool {
 		seen[item] = true
 	}
 	if o.Outcome == drainOutcomeObserved {
-		if o.Poll.Message != drainMessagePresent || !o.Poll.StatsKnown || o.NextPoll.Message != drainMessageAbsent || o.NextPoll.ACK != drainResponseNotAttempted || o.NextPoll.Acquisition != drainResponseNotAttempted {
+		if o.Poll.Message != drainMessagePresent || !o.Poll.StatsKnown || o.Poll.Statistics == (drainStatistics{}) || o.NextPoll.Message != drainMessageAbsent || !o.NextPoll.StatsKnown || o.NextPoll.ACK != drainResponseNotAttempted || o.NextPoll.Acquisition != drainResponseNotAttempted {
 			return false
 		}
 		if o.Poll.ACK != drainResponseSucceeded || o.Poll.Acquisition != drainResponseSucceeded {
@@ -214,6 +269,8 @@ type drainPollHook struct {
 	responseHeld        bool
 	invalid             bool
 	pollAttempts        int
+	statistics          [3]drainStatistics
+	statisticsKnown     [3]bool
 	onRequestWritten    func()
 	wroteOnce           sync.Once
 	responseOnce        sync.Once
@@ -249,6 +306,7 @@ func (h *drainPollHook) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	h.mu.Lock()
 	h.pollAttempts++
+	attempt := h.pollAttempts
 	first := h.pollAttempts == 1
 	h.mu.Unlock()
 	if !first {
@@ -261,7 +319,27 @@ func (h *drainPollHook) RoundTrip(req *http.Request) (*http.Response, error) {
 		if !second {
 			return nil, ErrQuarantine
 		}
-		return h.inner.RoundTrip(req)
+		response, err := h.inner.RoundTrip(req)
+		if err != nil {
+			return nil, err
+		}
+		if response == nil {
+			return nil, ErrQuarantine
+		}
+		if response.Body == nil {
+			response.Body = http.NoBody
+		}
+		response.Body = &drainObservedBody{
+			source: response.Body,
+			status: response.StatusCode,
+			onComplete: func(stats drainStatistics, known bool) {
+				h.mu.Lock()
+				h.statistics[attempt] = stats
+				h.statisticsKnown[attempt] = known
+				h.mu.Unlock()
+			},
+		}
+		return response, nil
 	}
 
 	trace := &httptrace.ClientTrace{WroteRequest: func(info httptrace.WroteRequestInfo) {
@@ -306,9 +384,124 @@ func (h *drainPollHook) RoundTrip(req *http.Request) (*http.Response, error) {
 	if response.Body == nil {
 		response.Body = http.NoBody
 	}
-	response.Body = &drainHeldBody{source: response.Body, release: h.release}
+	observedBody := &drainObservedBody{
+		source: response.Body,
+		status: response.StatusCode,
+		onComplete: func(stats drainStatistics, known bool) {
+			h.mu.Lock()
+			if attempt >= 1 && attempt < len(h.statistics) {
+				h.statistics[attempt] = stats
+				h.statisticsKnown[attempt] = known
+			}
+			h.mu.Unlock()
+		},
+	}
+	response.Body = &drainHeldBody{source: observedBody, release: h.release}
 	h.responseOnce.Do(func() { close(h.response) })
 	return response, nil
+}
+
+func (h *drainPollHook) pollStatistics(index int) (drainStatistics, bool) {
+	if h == nil || index < 1 || index >= len(h.statistics) {
+		return drainStatistics{}, false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.statistics[index], h.statisticsKnown[index]
+}
+
+// drainObservedBody forwards response bytes unchanged while retaining a
+// bounded, ephemeral copy solely to establish statistics field presence. It
+// never persists, logs or rewrites the response payload.
+type drainObservedBody struct {
+	source     io.ReadCloser
+	status     int
+	data       []byte
+	over       bool
+	mu         sync.Mutex
+	finished   bool
+	onComplete func(drainStatistics, bool)
+}
+
+func (b *drainObservedBody) capture(data []byte) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	remaining := int(responseBodyLimit) - len(b.data)
+	if remaining <= 0 {
+		b.over = true
+		return
+	}
+	if len(data) > remaining {
+		b.data = append(b.data, data[:remaining]...)
+		b.over = true
+		return
+	}
+	b.data = append(b.data, data...)
+}
+
+func (b *drainObservedBody) finish() {
+	b.mu.Lock()
+	if b.finished {
+		b.mu.Unlock()
+		return
+	}
+	b.finished = true
+	data := append([]byte(nil), b.data...)
+	over := b.over
+	b.data = nil
+	b.mu.Unlock()
+
+	stats, known := drainStatisticsFromBody(data)
+	if b.status != http.StatusOK && b.status != http.StatusAccepted {
+		known = false
+		stats = drainStatistics{}
+	}
+	if over {
+		known = false
+		stats = drainStatistics{}
+	}
+	if b.onComplete != nil {
+		b.onComplete(stats, known)
+	}
+}
+
+func (b *drainObservedBody) Read(p []byte) (int, error) {
+	n, err := b.source.Read(p)
+	if n > 0 {
+		b.capture(p[:n])
+	}
+	if err != nil {
+		b.finish()
+	}
+	return n, err
+}
+
+func (b *drainObservedBody) Close() error {
+	b.mu.Lock()
+	finished := b.finished
+	remaining := int(responseBodyLimit) - len(b.data)
+	b.mu.Unlock()
+	if !finished {
+		if remaining < 0 {
+			remaining = 0
+		}
+		data, err := io.ReadAll(io.LimitReader(b.source, int64(remaining)+1))
+		if len(data) > remaining {
+			b.mu.Lock()
+			b.over = true
+			b.mu.Unlock()
+		}
+		if len(data) > 0 {
+			b.capture(data)
+		}
+		if err != nil {
+			b.mu.Lock()
+			b.over = true
+			b.mu.Unlock()
+		}
+		b.finish()
+	}
+	return b.source.Close()
 }
 
 func (h *drainPollHook) releaseResponse() {
@@ -356,6 +549,7 @@ type drainClient struct {
 	inner     listener.Client
 	validate  func(context.Context, *scaleset.RunnerScaleSetMessage) error
 	obs       *drainObservation
+	hook      *drainPollHook
 	phaseCtx  context.Context
 	reject    func(string) error
 	mu        sync.Mutex
@@ -415,20 +609,42 @@ func (c *drainClient) GetMessage(ctx context.Context, last, capacity int) (*scal
 	c.mu.Unlock()
 
 	message, err := c.inner.GetMessage(ctx, last, capacity)
+	stats, statsKnown := drainStatistics{}, false
+	if c.hook == nil {
+		if message != nil {
+			var statsErr error
+			stats, statsErr = newDrainStatistics(message.Statistics)
+			statsKnown = statsErr == nil
+		}
+	} else {
+		stats, statsKnown = c.hook.pollStatistics(index)
+	}
 	if err != nil {
 		c.mu.Lock()
 		c.obs.poll(index).Message = drainMessageUnknown
+		c.obs.poll(index).Statistics = drainStatistics{}
+		c.obs.poll(index).StatsKnown = false
 		c.mu.Unlock()
 		return nil, err
 	}
 	if message == nil {
 		c.mu.Lock()
 		c.obs.poll(index).Message = drainMessageAbsent
+		c.obs.poll(index).Statistics = stats
+		c.obs.poll(index).StatsKnown = statsKnown
 		c.mu.Unlock()
 		return nil, nil
 	}
-	stats, statsErr := newDrainStatistics(message.Statistics)
-	if statsErr != nil || message.MessageID <= 0 || len(message.JobAssignedMessages) != 0 || len(message.JobStartedMessages) != 0 || len(message.JobCompletedMessages) != 0 || len(message.JobAvailableMessages) != 1 || message.JobAvailableMessages[0] == nil || message.JobAvailableMessages[0].RunnerRequestID <= 0 {
+	if !statsKnown || message.Statistics == nil {
+		c.mu.Lock()
+		c.obs.poll(index).Message = drainMessageUnknown
+		c.obs.poll(index).Statistics = drainStatistics{}
+		c.obs.poll(index).StatsKnown = false
+		c.mu.Unlock()
+		return nil, ErrQuarantine
+	}
+	messageStats, statsErr := newDrainStatistics(message.Statistics)
+	if statsErr != nil || (c.hook != nil && stats != messageStats) || message.MessageID <= 0 || len(message.JobAssignedMessages) != 0 || len(message.JobStartedMessages) != 0 || len(message.JobCompletedMessages) != 0 || len(message.JobAvailableMessages) != 1 || message.JobAvailableMessages[0] == nil || message.JobAvailableMessages[0].RunnerRequestID <= 0 {
 		c.mu.Lock()
 		c.obs.poll(index).Message = drainMessageUnknown
 		c.mu.Unlock()
@@ -558,7 +774,7 @@ func runDrainListener(ctx context.Context, client listener.Client, setID int, ho
 		obs.Poll.Statistics = stats
 		obs.Poll.StatsKnown = true
 	}
-	c := &drainClient{inner: client, obs: &obs}
+	c := &drainClient{inner: client, obs: &obs, hook: hook}
 	if rejecter, ok := client.(interface{ reject(string) error }); ok {
 		c.reject = rejecter.reject
 	}
@@ -646,7 +862,7 @@ func runDrainListener(ctx context.Context, client listener.Client, setID int, ho
 		if obs.Boundary == "" {
 			obs.Boundary, obs.ResponseHeld, _ = hook.boundary()
 		}
-		if obs.Boundary == drainBoundaryRequestWritten && obs.ResponseHeld && obs.Poll.Message == drainMessagePresent && obs.Poll.StatsKnown && obs.Poll.ACK == drainResponseSucceeded && obs.Poll.Acquisition == drainResponseSucceeded && obs.NextPoll.Message == drainMessageAbsent {
+		if obs.Boundary == drainBoundaryRequestWritten && obs.ResponseHeld && obs.Poll.Message == drainMessagePresent && obs.Poll.StatsKnown && obs.Poll.Statistics != (drainStatistics{}) && obs.Poll.ACK == drainResponseSucceeded && obs.Poll.Acquisition == drainResponseSucceeded && obs.NextPoll.Message == drainMessageAbsent && obs.NextPoll.StatsKnown {
 			obs.Outcome = drainOutcomeObserved
 			return obs, nil
 		}

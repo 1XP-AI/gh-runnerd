@@ -215,7 +215,7 @@ func TestDriverDrainThroughPinnedSDKAndPollHook(t *testing.T) {
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(map[string]any{
 					"messageId": 17, "messageType": "RunnerScaleSetJobMessages", "body": string(jobs),
-					"statistics": map[string]int{"totalAvailableJobs": 1, "totalAssignedJobs": 1, "totalRegisteredRunners": 1, "totalIdleRunners": 1},
+					"statistics": map[string]int{"totalAvailableJobs": 1, "totalAcquiredJobs": 0, "totalAssignedJobs": 1, "totalRunningJobs": 0, "totalRegisteredRunners": 1, "totalBusyRunners": 0, "totalIdleRunners": 1},
 				})
 				return
 			}
@@ -223,7 +223,11 @@ func TestDriverDrainThroughPinnedSDKAndPollHook(t *testing.T) {
 				t.Errorf("next poll capacity = %q, want 0", r.Header.Get(scaleset.HeaderScaleSetMaxCapacity))
 			}
 			polls++
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"statistics": map[string]int{"totalAvailableJobs": 0, "totalAcquiredJobs": 0, "totalAssignedJobs": 0, "totalRunningJobs": 0, "totalRegisteredRunners": 1, "totalBusyRunners": 0, "totalIdleRunners": 1},
+			})
 		case r.URL.Path == "/queue/17" && r.Method == http.MethodDelete:
 			acks++
 			w.WriteHeader(http.StatusNoContent)

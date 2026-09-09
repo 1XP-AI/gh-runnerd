@@ -50,7 +50,9 @@ func TestDrainListenerWithdrawsWhilePollResponseIsHeld(t *testing.T) {
 				mu.Unlock()
 				return
 			}
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusAccepted)
+			_, _ = io.WriteString(w, `{"statistics":{"totalAvailableJobs":0,"totalAcquiredJobs":0,"totalAssignedJobs":0,"totalRunningJobs":0,"totalRegisteredRunners":1,"totalBusyRunners":0,"totalIdleRunners":1}}`)
 			mu.Unlock()
 			return
 		}
@@ -154,7 +156,7 @@ func TestDrainListenerNoMessageIsInconclusive(t *testing.T) {
 	client.Transport = hook
 	session.client = &client
 	observation, err := runDrainListener(context.Background(), session, 7, hook)
-	if !errors.Is(err, ErrNoMessage) || observation.Outcome != drainOutcomeInconclusive || observation.Poll.Message != drainMessageAbsent {
+	if !errors.Is(err, ErrNoMessage) || observation.Outcome != drainOutcomeInconclusive || observation.Poll.Message != drainMessageAbsent || observation.Poll.StatsKnown || observation.NextPoll.StatsKnown {
 		t.Fatalf("no-message drain = %+v err=%v, want inconclusive", observation, err)
 	}
 }
@@ -456,6 +458,123 @@ func TestDrainRequiresKnownConsistentStatisticsAndControlledMessage(t *testing.T
 	if validDrainObservation(&noMessage) {
 		t.Fatal("observed drain with no controlled old message accepted")
 	}
+	unknownNext := observation
+	unknownNext.NextPoll.StatsKnown = false
+	unknownNext.NextPoll.Statistics = drainStatistics{}
+	if validDrainObservation(&unknownNext) {
+		t.Fatal("observed drain with unknown next-poll statistics accepted")
+	}
+	emptyStatistics := observation
+	emptyStatistics.Poll.Statistics = drainStatistics{}
+	if validDrainObservation(&emptyStatistics) {
+		t.Fatal("observed drain with empty controlled-poll statistics accepted")
+	}
+}
+
+type drainCancelOnIntentJournal struct {
+	*memoryJournal
+	cancel context.CancelFunc
+}
+
+func (j *drainCancelOnIntentJournal) Append(event Event) error {
+	if event.Kind == "intent" && event.Operation == "ack" {
+		j.cancel()
+	}
+	return j.memoryJournal.Append(event)
+}
+
+func TestDrainCancellationAfterIntentRejectsEffect(t *testing.T) {
+	a := approval()
+	ctx, cancel := context.WithCancel(context.Background())
+	j := &drainCancelOnIntentJournal{memoryJournal: &memoryJournal{}, cancel: cancel}
+	f := &fakeAPI{session: &fakeSession{session: scaleset.RunnerScaleSetSession{SessionID: uuid.New(), Statistics: &scaleset.RunnerScaleSetStatistic{}}}}
+	d := &Driver{Approval: a, Journal: j, API: f}
+	c := &journaledDrainClient{d: d, inner: f.session, sessionID: "session"}
+	c.bindDrainContext(ctx)
+	err := c.DeleteMessage(context.WithoutCancel(ctx), 7)
+	if !errors.Is(err, ErrQuarantine) || f.session.ack != 0 {
+		t.Fatalf("cancellation race effect = err %v ack %d; want quarantine and zero calls", err, f.session.ack)
+	}
+}
+
+type drainCancelBeforeSnapshotAPI struct {
+	*drainDriverAPI
+	cancel context.CancelFunc
+}
+
+func (a *drainCancelBeforeSnapshotAPI) Preflight(context.Context, Approval) error {
+	a.cancel()
+	return nil
+}
+
+func (*drainCancelBeforeSnapshotAPI) GetScaleSet(context.Context, int) (*scaleset.RunnerScaleSet, error) {
+	return nil, context.Canceled
+}
+
+func TestDrainCancellationBeforeSnapshotRecordsMarker(t *testing.T) {
+	a := approval()
+	a.Phases = append(a.Phases, "drain")
+	j := &memoryJournal{events: []Event{
+		{Kind: "phase", Operation: "create"},
+		{Kind: "intent", Operation: "create"},
+		{Kind: "result", Operation: "create", ID: 7},
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	api := &drainCancelBeforeSnapshotAPI{
+		drainDriverAPI: &drainDriverAPI{fakeAPI: &fakeAPI{}, approval: a},
+		cancel:         cancel,
+	}
+	d := &Driver{Approval: a, Journal: j, API: api}
+	if err := d.Run(ctx, "drain"); !errors.Is(err, ErrQuarantine) {
+		t.Fatalf("before-snapshot cancellation = %v, want quarantine", err)
+	}
+	for _, event := range j.Events() {
+		if event.Kind == "observation" && event.Operation == "drain-marker" && event.DrainMarker == drainMarkerCancelled {
+			return
+		}
+	}
+	t.Fatal("before-snapshot cancellation did not persist a cancellation marker")
+}
+
+func TestDrainPollHookPreservesStatisticsFieldPresence(t *testing.T) {
+	full := `{"messageId":7,"messageType":"RunnerScaleSetJobMessages","statistics":{"totalAvailableJobs":1,"totalAcquiredJobs":0,"totalAssignedJobs":1,"totalRunningJobs":0,"totalRegisteredRunners":1,"totalBusyRunners":0,"totalIdleRunners":1},"body":"[]"}`
+	empty := `{"messageId":7,"messageType":"RunnerScaleSetJobMessages","statistics":{},"body":"[]"}`
+	missing := `{"messageId":7,"messageType":"RunnerScaleSetJobMessages","body":"[]"}`
+	for _, test := range []struct {
+		name string
+		body string
+		want bool
+	}{
+		{name: "all fields", body: full, want: true},
+		{name: "empty object", body: empty, want: false},
+		{name: "missing object", body: missing, want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			hook := newDrainPollHook("http://fixture.invalid/queue")
+			hook.inner = drainRoundTripper(func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(test.body))}, nil
+			})
+			req, err := http.NewRequest(http.MethodGet, "http://fixture.invalid/queue", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := hook.RoundTrip(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			hook.releaseResponse()
+			if _, err := io.ReadAll(response.Body); err != nil {
+				t.Fatal(err)
+			}
+			if err := response.Body.Close(); err != nil {
+				t.Fatal(err)
+			}
+			_, got := hook.pollStatistics(1)
+			if got != test.want {
+				t.Fatalf("statistics field presence = %v, want %v", got, test.want)
+			}
+		})
+	}
 }
 
 func TestDriverRoutesDrainBeforeNoWorkerStatisticsQuarantine(t *testing.T) {
@@ -529,6 +648,12 @@ type drainDriverAPI struct {
 	opened           chan struct{}
 	closeCalls       int
 	sessionStats     *scaleset.RunnerScaleSetStatistic
+}
+
+type drainRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f drainRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
 }
 
 func (a *drainDriverAPI) GetScaleSet(context.Context, int) (*scaleset.RunnerScaleSet, error) {

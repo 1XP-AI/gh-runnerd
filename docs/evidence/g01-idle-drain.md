@@ -54,18 +54,35 @@ go test ./livecanary -run 'TestDrainListener' -count=1
 It failed to compile because the drain hook, listener runner,
 boundary/category constants and experiment seam were undefined. This is
 retained as chronology only and is not claimed as meaningful behavioral TDD.
-The meaningful behavioral red was reproduced against the immutable base
-`cf67d4a`: `TestIssue71DrainAuthorityIsBehaviorallyAvailable` failed because
-the base rejected the new `drain` phase with `approval rejected`. The equivalent
-green test is `TestDrainPhaseAuthorityIsAccepted` on fix commit
+A meaningful behavioral counterexample was later reproduced retrospectively
+against immutable base `cf67d4a`: `TestIssue71DrainAuthorityIsBehaviorallyAvailable`
+failed because the base rejected the new `drain` phase with `approval rejected`.
+That is independently inspectable base behavior, not a pre-implementation
+run; the original pre-implementation meaningful-red chronology is unavailable.
+The equivalent green test is `TestDrainPhaseAuthorityIsAccepted` on fix commit
 `82d0d7d`.
 
-Before the correction commit, a temporary test-only checkout pinned to
-`6e954cf` reproduced all five independent findings with executable assertions:
-poll reservation omitted, rejected idle state not fencing replay, wrong ACK
-reaching the inner effect, no-message accepted as observed, and cancellation
-missing an explicit marker. All five assertions failed on that pre-correction
-head; the focused tests below pass on `82d0d7d`.
+Retrospectively, after the correction commit, a temporary test-only checkout
+pinned to `6e954cf` reproduced all five independent findings with executable
+assertions: poll reservation omitted, rejected idle state not fencing replay,
+wrong ACK reaching the inner effect, no-message accepted as observed, and
+cancellation missing an explicit marker. Those failures are defect evidence,
+not a claim that the tests preceded implementation; the focused regressions
+below pass on the current correction head.
+
+The newly queued f482 defects were first reproduced behaviorally on the
+current f482 worktree with the added regressions:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run 'TestDrain(RequiresKnownConsistentStatisticsAndControlledMessage|CancellationAfterIntentRejectsEffect|CancellationBeforeSnapshotRecordsMarker)$' -count=1 -v
+FAIL: unknown next-poll statistics were accepted; cancellation after ACK intent reached the inner ACK; before-snapshot cancellation had no marker.
+```
+
+The minimal correction then made those assertions pass, along with the
+bounded adapter field-presence test; the cancellation fence is deliberately
+not described as atomic against a remote call that was already issued or
+accepted.
 
 ## Independent correction matrix
 
@@ -82,10 +99,12 @@ head; the focused tests below pass on `82d0d7d`.
 | Security F1 / Protocol F1 poll reservation | `observe-poll` result journals one verified request ID plus fixed work before ACK; replay sets reservation/work fences. `TestDrainPollJournalsReservationBeforeACK` passes (`82d0d7d`). |
 | Security F2 rejected idle prerequisite | complete bounded `DrainSnapshot` plus `prerequisite-failed` marker is retained; replay remains uncertain. `TestDrainRejectedIdlePrerequisiteRetainsFence` passes (`82d0d7d`). |
 | Security F3 / Protocol F2 runner and nested set identity | observed requires exact runner continuity; session-open validates nested set ID/name/group/label/update fence. Pinned SDK drain integration and mutation tests pass (`6e954cf`, `82d0d7d`). |
-| Security F4 / Protocol F1 no-message | observed requires a present old controlled message, known counters, successful ACK and acquisition; 202/no-message is inconclusive. `TestDrainListenerNoMessageIsInconclusive` passes (`82d0d7d`). |
+| Security F4 / Protocol F1 no-message and field presence | observed requires a present old controlled message, complete known counters on both polls, successful ACK and acquisition; bodyless 202/no-message and empty/missing statistics objects remain inconclusive. The bounded adapter retains only field presence/scalars ephemerally; `TestDrainListenerNoMessageIsInconclusive`, `TestDrainRequiresKnownConsistentStatisticsAndControlledMessage`, and `TestDrainPollHookPreservesStatisticsFieldPresence` pass on the correction head. |
 | Security F5 / Protocol F5 counters and integration | known counters require nonnegative internally consistent busy/idle partition; unknown values cannot masquerade as zero. `TestDrainRequiresKnownConsistentStatisticsAndControlledMessage` and `TestDriverDrainThroughPinnedSDKAndPollHook` pass (`82d0d7d`). |
-| Protocol F3 cancellation/WithoutCancel | phase context is bound through the wrapper, checked before every ACK/acquisition/poll effect, and cancellation/deadline/quarantine writes a fixed marker even when close/after inspect fails. Focused race test passes (`82d0d7d`). |
+| Protocol F3 cancellation/WithoutCancel | phase context is bound through the wrapper, checked before every ACK/acquisition/poll effect, and cancellation/deadline/quarantine writes a fixed marker even when close/after inspect fails. `TestDrainRejectsEffectsAfterCancellationAndRecordsMarker` passes (`82d0d7d`). |
 | Protocol F4 duplicate/wrong callbacks | exact phase, identity, ACK-before-acquire and one-shot state are validated before inner effects; wrong/duplicate callbacks make zero additional inner calls. `TestDrainRejectsDuplicateOrWrongEffectsBeforeInnerCall` passes (`82d0d7d`). |
+| Protocol F6 cancellation race and early snapshot | durable intent is followed by a cancellation fence immediately before the bounded SDK call; a canceled before-snapshot path records its fixed marker. The fence does not claim to revoke bytes already accepted by a remote service. `TestDrainCancellationAfterIntentRejectsEffect` and `TestDrainCancellationBeforeSnapshotRecordsMarker` pass on the correction head. |
+| Protocol F9 TDD chronology | the compile-only red and retrospective base/repro executions are now labeled candidly; no later archive reproduction is represented as pre-implementation evidence. |
 
 The independent design review remains respected: the transport marker is
 client-side only, `server_receipt` is `unproven`, the real high-level pinned
@@ -96,13 +115,20 @@ Verified locally with the pinned `github.com/actions/scaleset v0.4.0` module:
 
 ```text
 cd experiments/g01-scaleset
-go test ./livecanary -run 'TestDrain|TestCredentialAttestationMismatchAndExpiredTokenRejected' -count=1
-go test -race ./livecanary -run 'TestDrain|TestDriverDrainThroughPinnedSDK' -count=1
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run 'TestDrain|TestCredentialAttestationMismatchAndExpiredTokenRejected' -count=1
+GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -run 'TestDrain|TestDriverDrainThroughPinnedSDK' -count=1
+GOTOOLCHAIN=go1.26.8 go vet ./livecanary
 cd ../g02-auth
-go test ./... -run 'TestBrokerFinitePhases|TestBrokerControllerApproval' -count=1
+GOTOOLCHAIN=go1.26.8 go test ./... -run 'TestBrokerFinitePhases|TestBrokerControllerApproval' -count=1
+cd ../..
+git diff --check
+bash scripts/gofmt.sh check
+bash scripts/check-offline-experiments.sh
 ```
 
-All commands above passed, as did `go test ./...` in both experiment modules.
+All commands above passed, as did `GOTOOLCHAIN=go1.26.8 go test ./...` in both
+experiment modules and the focused/race drain suites. The offline script
+reported `offline experiment checks passed: 2 module(s)`.
 The listener tests use `httptest` synthetic transports and the real released
 listener; the pinned-SDK test composes `OpenDrainSession` with the actual
 `MessageSessionClient` offline. These are offline protocol evidence, not live

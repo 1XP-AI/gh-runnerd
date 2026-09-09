@@ -198,6 +198,9 @@ func (d *Driver) drain(ctx context.Context, setID int) error {
 	}
 	before, err := d.drainSnapshot(ctx, setID, "before")
 	if err != nil {
+		if markerErr := d.recordDrainMarker(drainMarkerFor(ctx, err)); markerErr != nil {
+			return markerErr
+		}
 		return err
 	}
 	if !validDrainIdlePrerequisite(before) {

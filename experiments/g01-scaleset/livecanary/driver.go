@@ -192,15 +192,39 @@ func (d *Driver) record(e Event) error {
 	return nil
 }
 
+// cancellationFence prevents a phase effect after cancellation is visible at
+// the durable-intent boundary. It cannot revoke bytes already accepted by a
+// remote service; the final check immediately before the call only narrows
+// the local race and keeps context-insensitive SDK fakes from running after a
+// cancellation observed by this process.
+func (d *Driver) cancellationFence(ctx context.Context, operation string) error {
+	if ctx != nil && ctx.Err() == nil {
+		return nil
+	}
+	if d.record(Event{Kind: "unknown", Operation: operation}) != nil {
+		return ErrJournal
+	}
+	return ErrQuarantine
+}
+
 // effect persists intent before an effect or work-bearing observation. A read
 // result can reveal work that must survive restart, so it has the same ordering.
 // A valid create/session identity and its work category share one result record.
 func (d *Driver) effect(ctx context.Context, op string, ids []int64, call func(context.Context) (Event, error)) error {
+	if err := d.cancellationFence(ctx, op); err != nil {
+		return err
+	}
 	if err := d.record(Event{Kind: "intent", Operation: op, RequestIDs: ids}); err != nil {
+		return err
+	}
+	if err := d.cancellationFence(ctx, op); err != nil {
 		return err
 	}
 	bounded, cancel := context.WithTimeout(ctx, operationTimeout)
 	defer cancel()
+	if err := d.cancellationFence(bounded, op); err != nil {
+		return err
+	}
 	e, err := call(bounded)
 	if err != nil {
 		if d.record(Event{Kind: "unknown", Operation: op}) != nil {
