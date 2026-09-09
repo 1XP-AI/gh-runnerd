@@ -216,11 +216,12 @@ func (d *Driver) drain(ctx context.Context, setID int) error {
 			return Event{}, ErrRemote
 		}
 		current := session.Session()
-		if current.SessionID == [16]byte{} || current.OwnerName != d.Approval.setName() || current.RunnerScaleSet == nil || current.RunnerScaleSet.ID != setID || current.RunnerScaleSet.Name != d.Approval.setName() || current.RunnerScaleSet.RunnerGroupID != d.Approval.RunnerGroupID || !current.RunnerScaleSet.RunnerSetting.DisableUpdate || !slices.ContainsFunc(current.RunnerScaleSet.Labels, func(label scaleset.Label) bool { return label.Name == d.Approval.setName() }) || current.Statistics == nil {
+		if current.SessionID == [16]byte{} || current.OwnerName != d.Approval.setName() || current.RunnerScaleSet == nil || current.RunnerScaleSet.ID != setID || current.RunnerScaleSet.Name != d.Approval.setName() || current.RunnerScaleSet.RunnerGroupID != d.Approval.RunnerGroupID || !current.RunnerScaleSet.RunnerSetting.DisableUpdate || !slices.ContainsFunc(current.RunnerScaleSet.Labels, func(label scaleset.Label) bool { return label.Name == d.Approval.setName() }) || current.Statistics == nil || current.RunnerScaleSet.Statistics == nil {
 			return Event{}, ErrQuarantine
 		}
 		stats, err := newDrainStatistics(current.Statistics)
-		if err != nil || stats != before.Statistics {
+		embeddedStats, embeddedErr := newDrainStatistics(current.RunnerScaleSet.Statistics)
+		if err != nil || embeddedErr != nil || stats != before.Statistics || embeddedStats != before.Statistics {
 			return Event{}, ErrQuarantine
 		}
 		sessionID = current.SessionID.String()
@@ -234,12 +235,6 @@ func (d *Driver) drain(ctx context.Context, setID int) error {
 	}
 	journaled := &journaledDrainClient{d: d, inner: session, sessionID: sessionID}
 	obs, runErr := runDrainListener(ctx, journaled, setID, hook)
-	closeErr := d.effect(ctx, "session-close", nil, func(call context.Context) (Event, error) {
-		if err := session.Close(call); err != nil {
-			return Event{}, err
-		}
-		return Event{SessionID: sessionID}, nil
-	})
 	if ctx.Err() != nil {
 		if markerErr := d.recordDrainMarker(drainMarkerFor(ctx, runErr)); markerErr != nil {
 			return markerErr
@@ -249,6 +244,33 @@ func (d *Driver) drain(ctx context.Context, setID int) error {
 		}
 		return ErrQuarantine
 	}
+	if runErr != nil {
+		// An unknown ACK/acquisition or a timing-miss leaves the session as a
+		// live reservation. Closing it can requeue or otherwise change the
+		// remote state before an operator can inspect the journal.
+		if markerErr := d.recordDrainMarker(drainMarkerFor(ctx, runErr)); markerErr != nil {
+			return markerErr
+		}
+		after, afterErr := d.drainSnapshot(ctx, setID, "after")
+		if afterErr != nil {
+			if markerErr := d.recordDrainMarker(drainMarkerFor(ctx, afterErr)); markerErr != nil {
+				return markerErr
+			}
+			return afterErr
+		}
+		obs.Before, obs.After = before, after
+		obs.Outcome = drainOutcomeInconclusive
+		if recordErr := d.record(Event{Kind: "observation", Operation: "drain", Drain: &obs}); recordErr != nil {
+			return recordErr
+		}
+		return runErr
+	}
+	closeErr := d.effect(ctx, "session-close", nil, func(call context.Context) (Event, error) {
+		if err := session.Close(call); err != nil {
+			return Event{}, err
+		}
+		return Event{SessionID: sessionID}, nil
+	})
 	if closeErr != nil {
 		if markerErr := d.recordDrainMarker(drainMarkerFor(ctx, closeErr)); markerErr != nil {
 			return markerErr

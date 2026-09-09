@@ -277,6 +277,13 @@ func TestDrainPhaseAuthorityIsAccepted(t *testing.T) {
 	}
 }
 
+func TestDrainPhaseStartRetainsCrashUncertainty(t *testing.T) {
+	state := replay([]Event{{Kind: "phase", Operation: "drain"}})
+	if !state.uncertain {
+		t.Fatal("drain phase without final observation did not retain uncertainty")
+	}
+}
+
 func TestDrainPollJournalsReservationBeforeACK(t *testing.T) {
 	a := approval()
 	j := &memoryJournal{}
@@ -331,6 +338,24 @@ func TestDrainRejectedIdlePrerequisiteRetainsFence(t *testing.T) {
 		}
 	}
 	t.Fatal("rejected prerequisite did not persist a bounded marker")
+}
+
+func TestDrainRejectsEmbeddedSessionStatisticsMismatch(t *testing.T) {
+	a := approval()
+	a.Phases = append(a.Phases, "drain")
+	j := &memoryJournal{events: []Event{
+		{Kind: "phase", Operation: "create"},
+		{Kind: "intent", Operation: "create"},
+		{Kind: "result", Operation: "create", ID: 7},
+	}}
+	api := &drainDriverAPI{fakeAPI: &fakeAPI{}, approval: a, sessionStats: &scaleset.RunnerScaleSetStatistic{TotalRegisteredRunners: 1, TotalIdleRunners: 1, TotalAssignedJobs: 1}}
+	d := Driver{Approval: a, Journal: j, API: api}
+	if err := d.Run(context.Background(), "drain"); !errors.Is(err, ErrQuarantine) {
+		t.Fatalf("embedded session mismatch = %v, want quarantine", err)
+	}
+	if replay(j.Events()).uncertain == false {
+		t.Fatal("embedded session mismatch did not retain uncertainty")
+	}
 }
 
 func TestDrainRejectsEffectsAfterCancellationAndRecordsMarker(t *testing.T) {
@@ -450,6 +475,9 @@ func TestDriverRoutesDrainBeforeNoWorkerStatisticsQuarantine(t *testing.T) {
 	if api.getScaleSetCalls != 2 {
 		t.Fatalf("owned set reads = %d, want before/after drain reads", api.getScaleSetCalls)
 	}
+	if api.closeCalls != 0 {
+		t.Fatalf("ambiguous drain closed session %d times", api.closeCalls)
+	}
 	var observed bool
 	for _, event := range j.events {
 		if event.Kind == "observation" && event.Operation == "drain" {
@@ -499,6 +527,8 @@ type drainDriverAPI struct {
 	snapshotStats    *scaleset.RunnerScaleSetStatistic
 	blocking         bool
 	opened           chan struct{}
+	closeCalls       int
+	sessionStats     *scaleset.RunnerScaleSetStatistic
 }
 
 func (a *drainDriverAPI) GetScaleSet(context.Context, int) (*scaleset.RunnerScaleSet, error) {
@@ -527,12 +557,16 @@ func (a *drainDriverAPI) OpenDrainSession(_ context.Context, _ int, _ string, ho
 		hook.mu.Lock()
 		hook.target = "http://fixture.invalid/queue"
 		hook.mu.Unlock()
-		return &drainBlockingSession{initial: scaleset.RunnerScaleSetSession{SessionID: uuid.New(), OwnerName: a.approval.setName(), MessageQueueURL: hook.target, RunnerScaleSet: &scaleset.RunnerScaleSet{ID: 7, Name: a.approval.setName(), RunnerGroupID: a.approval.RunnerGroupID, Labels: []scaleset.Label{{Name: a.approval.setName()}}, RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true}}, Statistics: &scaleset.RunnerScaleSetStatistic{TotalRegisteredRunners: 1, TotalIdleRunners: 1}}}, nil
+		return &drainBlockingSession{initial: scaleset.RunnerScaleSetSession{SessionID: uuid.New(), OwnerName: a.approval.setName(), MessageQueueURL: hook.target, RunnerScaleSet: &scaleset.RunnerScaleSet{ID: 7, Name: a.approval.setName(), RunnerGroupID: a.approval.RunnerGroupID, Labels: []scaleset.Label{{Name: a.approval.setName()}}, RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true}, Statistics: &scaleset.RunnerScaleSetStatistic{TotalRegisteredRunners: 1, TotalIdleRunners: 1}}, Statistics: &scaleset.RunnerScaleSetStatistic{TotalRegisteredRunners: 1, TotalIdleRunners: 1}}}, nil
 	}
 	hook.mu.Lock()
 	hook.target = "http://fixture.invalid/queue"
 	hook.mu.Unlock()
-	return &drainSyntheticSession{initial: scaleset.RunnerScaleSetSession{SessionID: uuid.New(), OwnerName: a.approval.setName(), MessageQueueURL: "http://fixture.invalid/queue", RunnerScaleSet: &scaleset.RunnerScaleSet{ID: 7, Name: a.approval.setName(), RunnerGroupID: a.approval.RunnerGroupID, Labels: []scaleset.Label{{Name: a.approval.setName()}}, RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true}}, Statistics: &scaleset.RunnerScaleSetStatistic{TotalRegisteredRunners: 1, TotalIdleRunners: 1}}}, nil
+	stats := a.sessionStats
+	if stats == nil {
+		stats = &scaleset.RunnerScaleSetStatistic{TotalRegisteredRunners: 1, TotalIdleRunners: 1}
+	}
+	return &drainSyntheticSession{initial: scaleset.RunnerScaleSetSession{SessionID: uuid.New(), OwnerName: a.approval.setName(), MessageQueueURL: "http://fixture.invalid/queue", RunnerScaleSet: &scaleset.RunnerScaleSet{ID: 7, Name: a.approval.setName(), RunnerGroupID: a.approval.RunnerGroupID, Labels: []scaleset.Label{{Name: a.approval.setName()}}, RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true}, Statistics: stats}, Statistics: &scaleset.RunnerScaleSetStatistic{TotalRegisteredRunners: 1, TotalIdleRunners: 1}}, closeCalls: &a.closeCalls}, nil
 }
 
 type drainGuardSession struct {
@@ -608,13 +642,19 @@ func (t *drainNoTraceTransport) RoundTrip(req *http.Request) (*http.Response, er
 }
 
 type drainSyntheticSession struct {
-	client  *http.Client
-	initial scaleset.RunnerScaleSetSession
-	order   *[]string
+	client     *http.Client
+	initial    scaleset.RunnerScaleSetSession
+	order      *[]string
+	closeCalls *int
 }
 
 func (s *drainSyntheticSession) Session() scaleset.RunnerScaleSetSession { return s.initial }
-func (s *drainSyntheticSession) Close(context.Context) error             { return nil }
+func (s *drainSyntheticSession) Close(context.Context) error {
+	if s.closeCalls != nil {
+		(*s.closeCalls)++
+	}
+	return nil
+}
 func (s *drainSyntheticSession) GetMessage(ctx context.Context, _, capacity int) (*scaleset.RunnerScaleSetMessage, error) {
 	if s.client == nil {
 		return nil, errors.New("synthetic transport unavailable")

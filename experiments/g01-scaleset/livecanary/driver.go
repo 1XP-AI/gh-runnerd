@@ -110,6 +110,11 @@ func replay(events []Event) state {
 			s.reserved, s.uncertain, s.workObserved = true, true, true
 		case "phase":
 			s.phaseSeen[e.Operation] = true
+			if e.Operation == "drain" {
+				// The phase record is durable intent to observe a live session.
+				// A crash before its final observation must not reopen cleanup.
+				s.uncertain = true
+			}
 		case "inventory":
 			s.inventory = e.Digest
 		case "observation":
