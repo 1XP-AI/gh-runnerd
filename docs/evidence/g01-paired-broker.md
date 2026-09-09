@@ -390,6 +390,84 @@ runner/group/workflow, Docker/Lima context, Keychain, launchd service, or
 manually installed runner was touched. Same-UID ownership and short released
 checks are not hostile-code isolation.
 
+## Hosted remaining-TestPaired timeout at 773cccc
+
+Hosted Public CI run 34238428090 job 102102074844 failed on exact head
+`773cccc592a8e1f6cd168d80a1e38b384c6668af`. The named cadence partition
+passed (`ok g02-auth 38.287s`). The remaining `^TestPaired` 45-second
+partition panicked with `TestPairedBrokerRealEntrypointUsesPairedPreparationClosure`
+active for 42s. The dump waited in `invokeBrokerPairedTerminal` at
+`broker_process.go:224` (`Wait` / Linux `pidfdWait`) with `CommandContext`
+`watchCtx` still armed.
+
+This was not an aggregate-timeout miss and was not a Linux-only wait
+primitive bug. The remaining-partition entrypoint uses `testBrokerBinary`
+(the Go test executable) as the paired child. `TestMain` treated any
+`ControllerApprovalSHA256` prefix `e` as overflow output and prefix `f` as
+`time.Sleep(time.Minute)`. The real entrypoint hashes live controller
+approval bytes, including `ExpiresAt: time.Now().Add(time.Hour)`, so the
+digest is wall-clock and timezone dependent. `runBrokerWithAPI` uses
+`context.Background()`, so `pairedChildDeadline` grants the 10-minute
+maximum child budget and does not kill the sleeper before the 45-second
+process deadline. A digest starting with `f` therefore occupied the
+remaining partition until timeout. The named cadence partition builds a
+real tagged `g01-live` child and does not enter this `TestMain` trap.
+
+The overflow/timeout child sentinels used by
+`TestBrokerPairedChildBoundsTimeoutOverflowAndCancel` remain
+`e`/`f` plus 63 `a` bytes. Prefix matching was replaced with equality on
+those exact sentinel strings only. Cadence, race, count=1, and the
+unfiltered complement contract were not widened.
+
+TDD red against the prefix trap, with the new regression test present:
+
+```text
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=15s \
+  -run '^TestBrokerPairedTerminalRealDigestPrefixDoesNotTriggerFixtureSleep$/e$' .
+FAIL: ordinary digest prefix "e" refused: broker stopped; retain private intent
+and review; no automatic retry
+
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=8s \
+  -run '^TestBrokerPairedTerminalRealDigestPrefixDoesNotTriggerFixtureSleep$/f$' .
+panic: test timed out after 8s
+running tests:
+TestBrokerPairedTerminalRealDigestPrefixDoesNotTriggerFixtureSleep/f (8s)
+invokeBrokerPairedTerminal broker_process.go:224 waiting child
+```
+
+Green after matching only the dedicated sentinels:
+
+```text
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=30s \
+  -run '^(TestBrokerPairedTerminalRealDigestPrefixDoesNotTriggerFixtureSleep|TestBrokerPairedChildBoundsTimeoutOverflowAndCancel|TestBrokerPairedChildDeadlineIsBoundedAndLeavesCadenceMargin|TestBrokerPairedTerminalPipeUsesFixedArgsAndOneControllerInput|TestPairedBrokerRealEntrypointUsesPairedPreparationClosure)$' .
+PASS; g02-auth 1.827s
+  TestPairedBrokerRealEntrypointUsesPairedPreparationClosure 0.87s
+  TestBrokerPairedTerminalRealDigestPrefixDoesNotTriggerFixtureSleep 0.25s
+  TestBrokerPairedChildBoundsTimeoutOverflowAndCancel 0.03s
+
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s \
+  -run '^TestPaired' -skip '^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$' ./...
+PASS; g02-auth 15.197s
+
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=90s -skip '^TestPaired' .
+PASS; g02-auth 43.161s
+  TestBrokerPairedTerminalRealDigestPrefixDoesNotTriggerFixtureSleep 2.35s
+  /e 1.30s; /f 1.03s
+
+GOTOOLCHAIN=go1.26.8 go vet ./...
+PASS
+git diff --check
+PASS
+GOTOOLCHAIN=go1.26.8 bash scripts/gofmt.sh check
+PASS
+```
+
+The official 45-second unfiltered complement was not claimed as a local
+pass on this loaded host: later tests were still starting when the
+process deadline fired, including a 1-second `/f` child start, which is
+not the one-minute prefix sleep. Hosted CI remains the complement
+measurement. The named 7x5s cadence path was not changed.
+
 ## Remaining gates
 
 This worker does not merge PR 62. After push, request `@codex review` on the
@@ -399,4 +477,4 @@ and a clean exact-head Codex verdict remain required before any merge decision.
 Live recovery remains unauthorized and unproven. The named cadence 45-second
 partition still has only a few seconds of local headroom; that is a remaining
 gap, not an approved timeout change. Rollback is a source-only revert of this
-pathname-binding follow-up.
+fixture-sentinel follow-up.

@@ -236,11 +236,11 @@ func TestMain(m *testing.M) {
 			_ = journal.Sync()
 			_ = journal.Close()
 		}
-		if strings.HasPrefix(argvBinding.ControllerApprovalSHA256, "e") {
+		if argvBinding.ControllerApprovalSHA256 == "e"+strings.Repeat("a", 63) {
 			fmt.Fprint(os.Stdout, strings.Repeat("synthetic-private-paired-overflow", 1000))
 			os.Exit(0)
 		}
-		if strings.HasPrefix(argvBinding.ControllerApprovalSHA256, "f") {
+		if argvBinding.ControllerApprovalSHA256 == "f"+strings.Repeat("a", 63) {
 			time.Sleep(time.Minute)
 		}
 		fmt.Fprintln(os.Stdout, "synthetic-private-paired-output")
@@ -286,6 +286,28 @@ func TestBrokerPairedTerminalPipeUsesFixedArgsAndOneControllerInput(t *testing.T
 	binding := brokerPairedBinding{ControllerApprovalSHA256: strings.Repeat("a", 64), ControllerApprovalDevice: 1, ControllerApprovalInode: 2, ControllerStateDevice: 1, ControllerStateInode: 3, WorkerApprovalSHA256: strings.Repeat("b", 64), WorkerApprovalDevice: 1, WorkerApprovalInode: 4, WorkerStateDevice: 1, WorkerStateInode: 5}
 	if err := invokeBrokerPairedTerminal(context.Background(), binary, root, filepath.Join(root, "approval.json"), root, filepath.Join(root, "worker.json"), workerState, binding, data); err != nil {
 		t.Fatal("private fixed paired terminal handoff failed")
+	}
+}
+
+func TestBrokerPairedTerminalRealDigestPrefixDoesNotTriggerFixtureSleep(t *testing.T) {
+	binary := testBrokerBinary(t)
+	root := t.TempDir()
+	workerState := filepath.Join(root, "worker-state")
+	if err := os.Mkdir(workerState, 0700); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte(`{"installation_token":"synthetic-private-installation-token"}`)
+	for _, digest := range []string{"e" + strings.Repeat("b", 63), "f" + strings.Repeat("c", 63)} {
+		t.Run(digest[:1], func(t *testing.T) {
+			started := time.Now()
+			binding := brokerPairedBinding{ControllerApprovalSHA256: digest, ControllerApprovalDevice: 1, ControllerApprovalInode: 2, ControllerStateDevice: 1, ControllerStateInode: 3, WorkerApprovalSHA256: strings.Repeat("b", 64), WorkerApprovalDevice: 1, WorkerApprovalInode: 4, WorkerStateDevice: 1, WorkerStateInode: 5}
+			if err := invokeBrokerPairedTerminal(context.Background(), binary, root, filepath.Join(root, "approval.json"), root, filepath.Join(root, "worker.json"), workerState, binding, data); err != nil {
+				t.Fatalf("ordinary digest prefix %q refused: %v", digest[:1], err)
+			}
+			if elapsed := time.Since(started); elapsed > 5*time.Second {
+				t.Fatalf("ordinary digest prefix %q held the child for %s", digest[:1], elapsed)
+			}
+		})
 	}
 }
 
