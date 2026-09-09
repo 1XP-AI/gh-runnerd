@@ -68,10 +68,11 @@ assertions: poll reservation omitted, rejected idle state not fencing replay,
 wrong ACK reaching the inner effect, no-message accepted as observed, and
 cancellation missing an explicit marker. Those failures are defect evidence,
 not a claim that the tests preceded implementation; the focused regressions
-below pass on the current correction head.
+below pass on the published correction snapshots.
 
 The newly queued f482 defects were first reproduced behaviorally on the
-current f482 worktree with the added regressions:
+historical f482 snapshot `f482d249e6e5eca7bd03ce55cdaf3b6cde7a671d` with the
+added regressions:
 
 ```text
 cd experiments/g01-scaleset
@@ -216,7 +217,23 @@ qualification. No credentials, runner/session/JIT operation,
 workflow operation, app/keychain/launchd/Docker/Lima mutation or cleanup was
 performed.
 
-### Exact-head blocker corrections (local uncommitted tree)
+### Historical exact-head blocker corrections (snapshot `1eb48afb...`; published correction `5d715c486...`)
+
+The following entries preserve the historical chronology of the blocker
+corrections. The independent probes targeted source snapshot
+`1eb48afb50ffbb10b42d07181f16153df1c494eb`; the corresponding correction was
+published at full commit
+`5d715c486c959ae67ca615c4eaea3e7e89ede556`, with subsequent replay and
+capacity snapshots `f5020e8de32f8641e3aa80dfbc3e74e108277197`,
+`1769da60bfbfb261f6e08d862465975e733cc176` and
+`3a18028efec69eccfc40879a6f845c37d399e65f`. These entries identify historical
+snapshots and do not describe the present branch.
+
+The approved TDD exception remains explicit: when chronological
+pre-implementation execution cannot be recovered, independent test-only
+probes may be added to an immutable archive snapshot to reproduce the old
+behavior. Those retrospective reds remain evidence of that snapshot and are
+not relabeled as pre-implementation tests.
 
 Before edits, the independent review probes were re-run against the immutable
 `1eb48afb50ffbb10b42d07181f16153df1c494eb` source extraction with:
@@ -234,7 +251,7 @@ poll partition of `registered=0,busy=0,idle=0` to `observed`. The probes also
 confirmed the existing runner continuity, byte/body budget, retry trace and
 ACK-before-acquisition controls remained intact before this correction.
 
-The local red-first correction adds phase-local replay binding and the
+The historical red-first correction adds phase-local replay binding and the
 withdrawn-poll runner-partition fence. A drain phase records its created
 scale-set ID, and its journal-assigned event sequence becomes the only valid
 `Drain.Sequence`; replay requires exactly one active phase, the created set ID
@@ -242,7 +259,7 @@ in both snapshots, and a later matching observation. Both polls and the final
 snapshot compare only `registered`, `busy` and `idle` runner counters, so job
 counters remain free to change.
 
-The focused correction and positive controls were run from the experiment
+The focused historical correction and positive controls were run from the experiment
 module:
 
 ```text
@@ -259,10 +276,10 @@ bash scripts/check-offline-experiments.sh
 All commands passed. The first includes the real FileJournal close/reopen
 checks and the real pinned `github.com/actions/scaleset v0.4.0` listener path;
 the full package, focused race, vet, formatting and offline experiment checks
-also passed. These remain offline tests only, and the local correction is
-intentionally uncommitted and unpublished for coordinator exact-head review.
+also passed. These remain offline tests only; that correction is published in
+`5d715c486c959ae67ca615c4eaea3e7e89ede556`.
 
-### Missing drain-phase SetID correction (current local uncommitted tree)
+### Missing drain-phase SetID correction (historical snapshot; published in `5d715c486...`)
 
 The red-first regression was added before the implementation change and run
 with:
@@ -299,7 +316,7 @@ no output. No broad multi-module gate was rerun for this narrow correction.
 These are offline tests only; no live runner, workflow, credential, journal
 cleanup, or external operation was performed.
 
-### Security F2 owned-idle prerequisite correction (current local uncommitted tree)
+### Security F2 owned-idle prerequisite correction (historical snapshot; published in `5d715c486...`)
 
 The prior F1 phase-ID correction remains in place; its separate red/green
 evidence above is unchanged and was included in the focused verification below.
@@ -346,7 +363,7 @@ The fresh exact-head finding is [Codex r3969825423](https://github.com/1XP-AI/gh
 `TotalAcquiredJobs=1` after snapshot permanently set uncertainty even though the
 observed drain contract permits job-counter changes. The historical original
 TDD exception and prior clean-history consolidation remain unchanged; this is a
-new meaningful red-first regression for the current correction.
+new meaningful red-first regression for the then-reviewed correction snapshot.
 
 Before the implementation change, the real pinned-SDK Driver/FileJournal
 regression was run from `experiments/g01-scaleset`:
@@ -491,6 +508,84 @@ runner, workflow, credential, cleanup, or external operation was performed.
 Rollback is a focused revert of this correction's source/test/evidence commit,
 retaining the current journal and owned resources for inspection; do not reset,
 erase, replay, or run live cleanup.
+
+### Exact-head follow-up: poll cursor and embedded wire identity
+
+Three new exact-head Codex findings were addressed from reviewed head
+`3a18028efec69eccfc40879a6f845c37d399e65f`:
+
+* [P2 durable chronology](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3972526860)
+  — the historical evidence text incorrectly described an obsolete local
+  tree. The historical section above now names the old source
+  snapshot and the published correction
+  `5d715c486c959ae67ca615c4eaea3e7e89ede556`, preserves the approved
+  retrospective test-only TDD exception, and contains no personal machine
+  path.
+* [P1 poll cursor binding](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3972526869)
+  — the first `GetMessage` must use `last=0`; the second must use the first
+  acknowledged message ID, and both checks occur before the inner SDK call.
+  A no-message first poll cannot create a fake future-cursor empty observation.
+* [P1 embedded-body identity](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3972526881)
+  — outer-envelope and JSON-encoded body fields are now decoded strictly,
+  including case-folded duplicate-key rejection, and bounded decoded job
+  facts must match the SDK message before `VerifyRun`, ACK or acquisition.
+
+The meaningful red was run first against the actual pinned
+`github.com/actions/scaleset v0.4.0` loopback HTTP fixture:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run 'TestPinnedSDKDrain(RejectsAmbiguousEmbeddedJobIdentityBeforeEffects|BindsPollCursorBeforeInnerCall)' -count=1 -v
+```
+
+It exited 1 before the correction. The case-folded owner duplicate was
+accepted as an observed message and reached ACK/acquisition; the wrong first
+cursor and wrong second cursor both reached the inner SDK poll instead of
+being quarantined. This red used atomic poll/ACK/acquisition counters in the
+fixture, so it exercised the effect boundary rather than only a pure parser.
+
+The minimal correction uses the existing strict adapter parser at the
+transport boundary. It retains only bounded structured `baselineBatch` facts
+in the poll hook, clears the ephemeral body bytes, and journals no raw body or
+SDK error. The journaled client compares those facts with the decoded SDK
+message immediately after the inner poll returns and before `VerifyRun`; the
+listener wrapper validates cursor/capacity/ACK state before invoking that inner
+poll. Malformed, exact-duplicate, case-folded-duplicate and wrong-cursor
+controls quarantine with zero forbidden effects, while the legitimate exact
+SDK path still performs exactly one old poll, ACK, acquisition and withdrawn
+poll.
+
+The read-only security archive also reported a same-name foreign numeric
+runner ID that cannot be rejected without a trusted approved runtime ID. No
+static ID was invented in this correction. The feasible persisted-evidence
+gap was separately closed by requiring `Event.ID` to equal
+`DrainSnapshot.Runner.ID`; the mismatch is covered by
+`TestSecurityReviewDrainSnapshotEventIDMustMatchRunner` through a real
+FileJournal append/rejection check.
+
+The source/test correction is commit
+`668c361578c7cec749a650e452b85fd0ecf8e5ae`. Green verification completed as
+follows:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^(TestPinnedSDKDrainRejectsAmbiguousEmbeddedJobIdentityBeforeEffects|TestPinnedSDKDrainBindsPollCursorBeforeInnerCall|TestPinnedSDKDrainMatchesWireBeforeVerifyRun|TestDriverDrainThroughPinnedSDKAndPollHook|TestDrainListenerWithdrawsWhilePollResponseIsHeld|TestDrainListenerRejectsWithdrawnPollPhysicalRetry|TestDrainListenerRejectsContradictoryWithdrawnPollRunnerPartition|TestDrainListenerNoMessageIsInconclusive|TestDrainRejectsCapacityOrdinalBeforeInnerEffects)$' -count=1 -v -timeout=180s
+GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -run '^(TestPinnedSDKDrainRejectsAmbiguousEmbeddedJobIdentityBeforeEffects|TestPinnedSDKDrainBindsPollCursorBeforeInnerCall|TestPinnedSDKDrainMatchesWireBeforeVerifyRun|TestDriverDrainThroughPinnedSDKAndPollHook|TestDrainListenerWithdrawsWhilePollResponseIsHeld|TestDrainListenerRejectsWithdrawnPollPhysicalRetry|TestDrainListenerRejectsContradictoryWithdrawnPollRunnerPartition|TestDrainListenerNoMessageIsInconclusive|TestDrainRejectsCapacityOrdinalBeforeInnerEffects|TestSecurityReviewDrainSnapshotEventIDMustMatchRunner)$' -count=1 -v -timeout=180s
+GOTOOLCHAIN=go1.26.8 go vet ./livecanary
+gofmt -l livecanary/drain.go livecanary/drain_driver.go livecanary/drain_followup_test.go livecanary/drain_test.go livecanary/driver.go livecanary/journal.go livecanary/sdk_integration_test.go livecanary/security_review_extra_test.go
+git diff --check
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -count=1
+```
+
+All listed commands passed; the race run emitted no report and formatting and
+diff checks emitted no diagnostics. The full package run was the single broad
+`livecanary` verification for this follow-up; all HTTP traffic stayed inside
+the bounded loopback fixture and no live runner, workflow, credential, cleanup
+or other external operation was performed. To roll back the source/test
+correction, use `git revert --no-edit
+668c361578c7cec749a650e452b85fd0ecf8e5ae` on the exact branch, retaining any
+current journal and owned resources for inspection; do not reset, erase,
+replay or run live cleanup.
 
 ## Remaining gate and rollback
 
