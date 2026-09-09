@@ -13,15 +13,16 @@ import (
 )
 
 type brokerPreparationReceipt struct {
-	Version        int         `json:"version"`
-	Status         string      `json:"status"`
-	Phase          string      `json:"phase"`
-	ApprovalDigest string      `json:"approval_digest"`
-	State          brokerInode `json:"state"`
-	Journal        brokerInode `json:"journal"`
-	Claim          brokerInode `json:"claim"`
-	JournalDigest  string      `json:"journal_digest"`
-	ClaimDigest    string      `json:"claim_digest"`
+	Version            int         `json:"version"`
+	Status             string      `json:"status"`
+	Phase              string      `json:"phase"`
+	ApprovalDigest     string      `json:"approval_digest"`
+	State              brokerInode `json:"state"`
+	Journal            brokerInode `json:"journal"`
+	Claim              brokerInode `json:"claim"`
+	AdmissionDirectory brokerInode `json:"admission_directory"`
+	JournalDigest      string      `json:"journal_digest"`
+	ClaimDigest        string      `json:"claim_digest"`
 }
 
 func (r brokerPreparationReceipt) valid(p *brokerControllerPlan) bool {
@@ -41,7 +42,7 @@ func (r brokerPreparationReceipt) validWorker(p *brokerWorkerPlan) bool {
 	if p == nil || p.stateInfo == nil {
 		return false
 	}
-	return r.Version == 1 && r.Status == "worker_journal_prepared" && r.Phase == "paired-worker" && r.ApprovalDigest == brokerDigest(p.approval) && r.State == brokerFileIdentity(p.stateInfo) && r.Journal.Device != 0 && r.Journal.Inode != 0 && r.Claim.Device != 0 && r.Claim.Inode != 0 && brokerSHA256.MatchString(r.JournalDigest) && brokerSHA256.MatchString(r.ClaimDigest)
+	return r.Version == 1 && r.Status == "worker_journal_prepared" && r.Phase == "paired-worker" && r.ApprovalDigest == brokerDigest(p.approval) && r.State == brokerFileIdentity(p.stateInfo) && r.Journal.Device != 0 && r.Journal.Inode != 0 && r.Claim.Device != 0 && r.Claim.Inode != 0 && r.AdmissionDirectory.Device != 0 && r.AdmissionDirectory.Inode != 0 && brokerSHA256.MatchString(r.JournalDigest) && brokerSHA256.MatchString(r.ClaimDigest)
 }
 
 type brokerPreparationOutput struct {

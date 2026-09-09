@@ -50,7 +50,11 @@ func brokerSyntheticPreparation(t *testing.T, p *brokerControllerPlan, directory
 	if e != nil {
 		return brokerPreparationReceipt{}, errBroker
 	}
-	return brokerPreparationReceipt{1, "controller_journal_prepared", p.approval.Phase, brokerDigest(p.controller), binding.State, id, brokerFileIdentity(ci), brokerBytesDigest(jb), brokerBytesDigest(cb)}, nil
+	di, e := os.Lstat(directory)
+	if e != nil {
+		return brokerPreparationReceipt{}, errBroker
+	}
+	return brokerPreparationReceipt{1, "controller_journal_prepared", p.approval.Phase, brokerDigest(p.controller), binding.State, id, brokerFileIdentity(ci), brokerFileIdentity(di), brokerBytesDigest(jb), brokerBytesDigest(cb)}, nil
 }
 
 // This models the explicit nonproduction worker-preparer seam used by direct
@@ -109,7 +113,7 @@ func brokerSyntheticWorkerPreparation(t *testing.T, p *brokerWorkerPlan, directo
 	if e != nil {
 		return brokerPreparationReceipt{}, errBroker
 	}
-	return brokerPreparationReceipt{Version: 1, Status: "worker_journal_prepared", Phase: "paired-worker", ApprovalDigest: brokerDigest(p.approval), State: brokerFileIdentity(stateInfo), Journal: brokerFileIdentity(journalInfo), Claim: brokerFileIdentity(claimInfo), JournalDigest: brokerBytesDigest(journalData), ClaimDigest: brokerBytesDigest(claimData)}, nil
+	return brokerPreparationReceipt{Version: 1, Status: "worker_journal_prepared", Phase: "paired-worker", ApprovalDigest: brokerDigest(p.approval), State: brokerFileIdentity(stateInfo), Journal: brokerFileIdentity(journalInfo), Claim: brokerFileIdentity(claimInfo), AdmissionDirectory: brokerFileIdentity(directoryInfo), JournalDigest: brokerBytesDigest(journalData), ClaimDigest: brokerBytesDigest(claimData)}, nil
 }
 
 func brokerAttachSyntheticWorkerPreparation(t *testing.T, p *brokerControllerPlan, directory string) {

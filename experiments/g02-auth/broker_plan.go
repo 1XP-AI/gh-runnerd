@@ -117,7 +117,7 @@ func (p *brokerWorkerPlan) prepareJournal(ctx context.Context) error {
 		return errBroker
 	}
 	p.preparationReceipt = receipt
-	if p.claimDirectoryInfo == nil && p.bindClaimDirectory() != nil {
+	if p.bindClaimDirectory() != nil {
 		return errBroker
 	}
 	return p.check()
@@ -141,7 +141,7 @@ func (p *brokerWorkerPlan) checkPrepared(ctx context.Context) error {
 }
 
 func (p *brokerWorkerPlan) bindClaimDirectory() error {
-	if p == nil {
+	if p == nil || p.preparationReceipt.AdmissionDirectory == (brokerInode{}) {
 		return errBroker
 	}
 	directory := p.claimDirectory
@@ -156,7 +156,7 @@ func (p *brokerWorkerPlan) bindClaimDirectory() error {
 		return errBroker
 	}
 	info, err := os.Lstat(directory)
-	if err != nil || !brokerOwnedDirectory(info, true) {
+	if err != nil || !brokerOwnedDirectory(info, true) || brokerFileIdentity(info) != p.preparationReceipt.AdmissionDirectory {
 		return errBroker
 	}
 	if p.claimDirectoryInfo == nil {

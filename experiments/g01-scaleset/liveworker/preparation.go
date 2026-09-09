@@ -12,15 +12,16 @@ import (
 // journal/admission boundary. It is returned only after OpenJournal has replayed
 // the complete history and held the worker authority lease.
 type PreparationReceipt struct {
-	Version        int          `json:"version"`
-	Status         string       `json:"status"`
-	Phase          string       `json:"phase"`
-	ApprovalDigest string       `json:"approval_digest"`
-	State          FileIdentity `json:"state"`
-	Journal        FileIdentity `json:"journal"`
-	Claim          FileIdentity `json:"claim"`
-	JournalDigest  string       `json:"journal_digest"`
-	ClaimDigest    string       `json:"claim_digest"`
+	Version            int          `json:"version"`
+	Status             string       `json:"status"`
+	Phase              string       `json:"phase"`
+	ApprovalDigest     string       `json:"approval_digest"`
+	State              FileIdentity `json:"state"`
+	Journal            FileIdentity `json:"journal"`
+	Claim              FileIdentity `json:"claim"`
+	AdmissionDirectory FileIdentity `json:"admission_directory"`
+	JournalDigest      string       `json:"journal_digest"`
+	ClaimDigest        string       `json:"claim_digest"`
 }
 
 func preparationDigest(file *os.File, limit int64) (string, error) {
@@ -86,15 +87,16 @@ func prepareJournal(directory string, a Approval, open func(string, Approval) (*
 		return receipt, ErrState
 	}
 	return PreparationReceipt{
-		Version:        1,
-		Status:         "worker_journal_prepared",
-		Phase:          "paired-worker",
-		ApprovalDigest: approvalDigest(a),
-		State:          identityOf(j.directoryInfo),
-		Journal:        identityOf(journalInfo),
-		Claim:          identityOf(claimInfo),
-		JournalDigest:  journalDigest,
-		ClaimDigest:    claimDigest,
+		Version:            1,
+		Status:             "worker_journal_prepared",
+		Phase:              "paired-worker",
+		ApprovalDigest:     approvalDigest(a),
+		State:              identityOf(j.directoryInfo),
+		Journal:            identityOf(journalInfo),
+		Claim:              identityOf(claimInfo),
+		AdmissionDirectory: identityOf(j.claim.rootInfo),
+		JournalDigest:      journalDigest,
+		ClaimDigest:        claimDigest,
 	}, nil
 }
 

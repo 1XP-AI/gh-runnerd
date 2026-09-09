@@ -64,7 +64,7 @@ func TestWorkerPreparationReturnsCanonicalSnapshotAndRejectsPriorEffect(t *testi
 	if err != nil {
 		t.Fatal("fresh worker preparation refused", err)
 	}
-	if receipt.Version != 1 || receipt.Status != "worker_journal_prepared" || receipt.Phase != "paired-worker" || receipt.ApprovalDigest != approvalDigest(a) || receipt.State.Inode == 0 || receipt.Journal.Inode == 0 || receipt.Claim.Inode == 0 || !id.MatchString(receipt.JournalDigest) || !id.MatchString(receipt.ClaimDigest) {
+	if receipt.Version != 1 || receipt.Status != "worker_journal_prepared" || receipt.Phase != "paired-worker" || receipt.ApprovalDigest != approvalDigest(a) || receipt.State.Inode == 0 || receipt.Journal.Inode == 0 || receipt.Claim.Inode == 0 || receipt.AdmissionDirectory.Inode == 0 || !id.MatchString(receipt.JournalDigest) || !id.MatchString(receipt.ClaimDigest) {
 		t.Fatalf("incomplete worker preparation receipt: %+v", receipt)
 	}
 	j, err := openTestJournal(t, dir, a)

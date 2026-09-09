@@ -519,11 +519,78 @@ PASS
 Cadence, fixture sentinels, worker-claim path pinning, and native-account
 rooting were not changed. The named 7x5s cadence test was not re-run.
 
+## Worker admission root receipt boundary
+
+An independent P1 on `e48f813` showed `prepareJournal` still sampled the
+current admission-root inode after the child returned. Modeling the real
+child (no in-process `claimDirectoryInfo`) by creating a valid journal and
+claim, then replacing the 0700 root while restoring the original claim inode
+before returning the receipt, allowed `brokerExecute` to authenticate,
+mint once, and launch once. Exact-head Codex clean did not clear that P1.
+
+The trusted root identity is now part of the canonical preparation receipt
+(`admission_directory`) produced by G01 liveworker/livecanary and consumed
+by G02. Absent, zero, or mismatched root identities are rejected before
+auth, mint, or launch. Post-return Lstat is only a comparison against that
+receipt, not a source of trust.
+
+Independent overlay red against `e48f813` (overlay not committed):
+
+```text
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=60s \
+  -run '^TestReviewWorkerRootReplacementBetweenReceiptAndRootBind$' .
+FAIL: err=<nil> mints=1 launches=1 authenticated GET /app and installation mint
+
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=90s \
+  -run '^TestReviewWorkerRootReplacementBetweenReceiptAndRootBind$' .
+FAIL: mints=1 launches=1
+```
+
+Green after the receipt protocol (checked-in tests; overlay rechecked then
+removed):
+
+```text
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=60s \
+  -run '^(TestPairedBrokerRejectsWorkerAdmissionRootReplacementBetweenReceiptAndBind|TestPairedWorkerPrepareJournalRejectsReplacedRootBetweenReceiptAndBind|TestPairedWorkerPreparationReceiptRejectsAbsentOrMismatchedAdmissionRoot|TestPairedWorkerPreparationReceiptFencesAdmissionRootReplacement|TestPairedBrokerRejectsWorkerAdmissionRootReplacementBeforeAuth|TestPairedBrokerRejectsWorkerAdmissionRootReplacementBeforeMint)$' .
+PASS; g02-auth 1.209s
+
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=60s \
+  -run '^TestReviewWorkerRootReplacementBetweenReceiptAndRootBind$' .
+PASS; mints=0 calls=[] launches=0
+
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s \
+  -run '^TestPaired' \
+  -skip '^(TestPairedBrokerRealCadenceChildExceedsThirtySeconds|TestPairedBrokerChainsRealControllerCreatePreparationAndTerminal)$' ./...
+PASS; g02-auth 10.192s
+
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=30s \
+  -run '^TestWorkerPreparationReturnsCanonicalSnapshotAndRejectsPriorEffect$' ./liveworker
+PASS
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=30s \
+  -run '^TestCanonicalPreparationRecordsNoPhaseOrRemoteIntent$|^TestPairedPreparationUsesDedicatedPhaseWithoutCleanupAuthority$' ./livecanary
+PASS
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=30s \
+  -run '^TestPairedBrokerRealEntrypointUsesPairedPreparationClosure$' .
+PASS; g02-auth 0.793s
+
+GOTOOLCHAIN=go1.26.8 go vet ./...
+PASS
+git diff --check
+PASS
+GOTOOLCHAIN=go1.26.8 bash scripts/gofmt.sh check
+PASS
+```
+
+The real g01-live bridge clones committed HEAD, so its producer/consumer
+round-trip is recorded after this commit. Timeouts, cadence, race, count=1,
+and complement contracts were not widened. Prior fixture-sentinel and
+after-bind root checks remain.
+
 ## Remaining gates
 
 This worker does not merge PR 62. After push, request `@codex review` on the
 exact new head. Hosted CI, independent review of the new head, and a clean
 exact-head Codex verdict remain required before any merge decision. Live
 recovery remains unauthorized and unproven. Rollback is a source-only revert
-of this admission-root identity follow-up; the prior fixture-sentinel commit
-remains independently revertable.
+of this receipt-boundary follow-up; earlier fixture-sentinel and after-bind
+commits remain independently revertable.

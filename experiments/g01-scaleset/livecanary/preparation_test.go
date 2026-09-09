@@ -32,7 +32,8 @@ func TestCanonicalPreparationRecordsNoPhaseOrRemoteIntent(t *testing.T) {
 	si, _ := os.Stat(directory)
 	ji, _ := os.Stat(filepath.Join(directory, "journal.jsonl"))
 	ci, _ := os.Stat(filepath.Join(capRoot, "admission.json"))
-	if receipt.Version != 1 || receipt.Status != "controller_journal_prepared" || receipt.Phase != "create" || receipt.ApprovalDigest != approvalDigest(a) || receipt.JournalDigest != hex.EncodeToString(jd[:]) || receipt.ClaimDigest != hex.EncodeToString(cd[:]) || receipt.State != preparedIdentity(si) || receipt.Journal != preparedIdentity(ji) || receipt.Claim != preparedIdentity(ci) {
+	ai, _ := os.Lstat(capRoot)
+	if receipt.Version != 1 || receipt.Status != "controller_journal_prepared" || receipt.Phase != "create" || receipt.ApprovalDigest != approvalDigest(a) || receipt.JournalDigest != hex.EncodeToString(jd[:]) || receipt.ClaimDigest != hex.EncodeToString(cd[:]) || receipt.State != preparedIdentity(si) || receipt.Journal != preparedIdentity(ji) || receipt.Claim != preparedIdentity(ci) || receipt.AdmissionDirectory != preparedIdentity(ai) {
 		t.Fatal("receipt does not describe actual files after close")
 	}
 	j, e := open(directory, a)

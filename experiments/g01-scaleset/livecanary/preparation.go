@@ -42,15 +42,16 @@ type PreparedIdentity struct {
 	Inode  uint64 `json:"inode"`
 }
 type PreparationReceipt struct {
-	Version        int              `json:"version"`
-	Status         string           `json:"status"`
-	Phase          string           `json:"phase"`
-	ApprovalDigest string           `json:"approval_digest"`
-	State          PreparedIdentity `json:"state"`
-	Journal        PreparedIdentity `json:"journal"`
-	Claim          PreparedIdentity `json:"claim"`
-	JournalDigest  string           `json:"journal_digest"`
-	ClaimDigest    string           `json:"claim_digest"`
+	Version            int              `json:"version"`
+	Status             string           `json:"status"`
+	Phase              string           `json:"phase"`
+	ApprovalDigest     string           `json:"approval_digest"`
+	State              PreparedIdentity `json:"state"`
+	Journal            PreparedIdentity `json:"journal"`
+	Claim              PreparedIdentity `json:"claim"`
+	AdmissionDirectory PreparedIdentity `json:"admission_directory"`
+	JournalDigest      string           `json:"journal_digest"`
+	ClaimDigest        string           `json:"claim_digest"`
 }
 
 const pairedPreparationPhase = "paired-terminal"
@@ -193,7 +194,7 @@ func preparePairedJournal(directory string, a Approval, open func(string, Approv
 	if e != nil || !j.ownsCurrentJournal() || !j.claim.matches(j) {
 		return receipt, ErrJournal
 	}
-	receipt = PreparationReceipt{1, "controller_journal_prepared", pairedPreparationPhase, approvalDigest(a), preparedIdentity(j.directoryInfo), preparedIdentity(ji), preparedIdentity(ci), jd, cd}
+	receipt = PreparationReceipt{Version: 1, Status: "controller_journal_prepared", Phase: pairedPreparationPhase, ApprovalDigest: approvalDigest(a), State: preparedIdentity(j.directoryInfo), Journal: preparedIdentity(ji), Claim: preparedIdentity(ci), AdmissionDirectory: preparedIdentity(j.claim.rootInfo), JournalDigest: jd, ClaimDigest: cd}
 	return receipt, nil
 }
 
@@ -232,6 +233,6 @@ func prepareJournal(directory string, a Approval, phase string, open func(string
 	if e != nil || !j.ownsCurrentJournal() || !j.claim.matches(j) {
 		return receipt, ErrJournal
 	}
-	receipt = PreparationReceipt{1, "controller_journal_prepared", phase, approvalDigest(a), preparedIdentity(j.directoryInfo), preparedIdentity(ji), preparedIdentity(ci), jd, cd}
+	receipt = PreparationReceipt{Version: 1, Status: "controller_journal_prepared", Phase: phase, ApprovalDigest: approvalDigest(a), State: preparedIdentity(j.directoryInfo), Journal: preparedIdentity(ji), Claim: preparedIdentity(ci), AdmissionDirectory: preparedIdentity(j.claim.rootInfo), JournalDigest: jd, ClaimDigest: cd}
 	return receipt, nil
 }

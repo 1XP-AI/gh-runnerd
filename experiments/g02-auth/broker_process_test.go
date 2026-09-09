@@ -84,7 +84,11 @@ func TestMain(m *testing.M) {
 		if e != nil {
 			os.Exit(14)
 		}
-		receipt := brokerPreparationReceipt{Version: 1, Status: "controller_journal_prepared", Phase: "paired-terminal", ApprovalDigest: brokerDigest(controller), State: brokerFileIdentity(stateInfo), Journal: brokerFileIdentity(journalInfo), Claim: brokerFileIdentity(claimInfo), JournalDigest: brokerBytesDigest(journalData), ClaimDigest: brokerBytesDigest(claimData)}
+		admissionInfo, e := os.Lstat(admissionPath)
+		if e != nil {
+			os.Exit(15)
+		}
+		receipt := brokerPreparationReceipt{Version: 1, Status: "controller_journal_prepared", Phase: "paired-terminal", ApprovalDigest: brokerDigest(controller), State: brokerFileIdentity(stateInfo), Journal: brokerFileIdentity(journalInfo), Claim: brokerFileIdentity(claimInfo), AdmissionDirectory: brokerFileIdentity(admissionInfo), JournalDigest: brokerBytesDigest(journalData), ClaimDigest: brokerBytesDigest(claimData)}
 		if json.NewEncoder(os.Stdout).Encode(receipt) != nil {
 			os.Exit(13)
 		}
@@ -148,7 +152,11 @@ func TestMain(m *testing.M) {
 		if e != nil {
 			os.Exit(14)
 		}
-		receipt := brokerPreparationReceipt{Version: 1, Status: "worker_journal_prepared", Phase: "paired-worker", ApprovalDigest: brokerDigest(worker), State: brokerFileIdentity(stateInfo), Journal: brokerFileIdentity(journalInfo), Claim: brokerFileIdentity(claimInfo), JournalDigest: brokerBytesDigest(journalData), ClaimDigest: brokerBytesDigest(claimData)}
+		admissionInfo, e := os.Lstat(admissionPath)
+		if e != nil {
+			os.Exit(16)
+		}
+		receipt := brokerPreparationReceipt{Version: 1, Status: "worker_journal_prepared", Phase: "paired-worker", ApprovalDigest: brokerDigest(worker), State: brokerFileIdentity(stateInfo), Journal: brokerFileIdentity(journalInfo), Claim: brokerFileIdentity(claimInfo), AdmissionDirectory: brokerFileIdentity(admissionInfo), JournalDigest: brokerBytesDigest(journalData), ClaimDigest: brokerBytesDigest(claimData)}
 		if json.NewEncoder(os.Stdout).Encode(receipt) != nil {
 			os.Exit(15)
 		}

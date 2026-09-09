@@ -281,6 +281,96 @@ func TestPairedWorkerPreparationReceiptFencesAdmissionRootReplacement(t *testing
 	}
 }
 
+func workerReceiptThenReplaceAdmissionRoot(t *testing.T, plan *brokerWorkerPlan, admission string) (brokerPreparationReceipt, error) {
+	t.Helper()
+	receipt, err := brokerSyntheticWorkerPreparation(t, plan, admission)
+	if err != nil {
+		return brokerPreparationReceipt{}, err
+	}
+	plan.claimDirectory = ""
+	plan.claimDirectoryInfo = nil
+	replaceWorkerAdmissionRoot(t, admission, "replaced-root")
+	return receipt, nil
+}
+
+func TestPairedBrokerRejectsWorkerAdmissionRootReplacementBetweenReceiptAndBind(t *testing.T) {
+	a, candidate, api, fixture, attempt := newBrokerFixture(t)
+	a.Mode, a.Phase, a.AllowVerificationAuthority = "paired-terminal", "paired-terminal", true
+	parent := filepath.Dir(attempt)
+	launches := 0
+	plan, admission := pairedWorkerExecutePlan(t, &a, parent, func(context.Context, []byte, string) error {
+		launches++
+		return nil
+	})
+	bindWorkerClaimDirectory(t, admission)
+	plan.worker.claimDirectory = ""
+	plan.worker.claimDirectoryInfo = nil
+	plan.worker.prepare = func(context.Context) (brokerPreparationReceipt, error) {
+		return workerReceiptThenReplaceAdmissionRoot(t, plan.worker, admission)
+	}
+	_, err := brokerExecute(context.Background(), a, brokerInput{PEM: string(candidate.PEM), VerificationToken: "synthetic-private-verification-token"}, attempt, api, plan)
+	if err == nil || fixture.tokenCalls != 0 || len(fixture.calls) != 0 || launches != 0 {
+		t.Fatalf("worker root replacement crossed receipt-sampling fence: err=%v mints=%d calls=%v launches=%d", err, fixture.tokenCalls, fixture.calls, launches)
+	}
+}
+
+func TestPairedWorkerPrepareJournalRejectsReplacedRootBetweenReceiptAndBind(t *testing.T) {
+	a, _, _, _, attempt := newBrokerFixture(t)
+	a.Mode, a.Phase = "paired-terminal", "paired-terminal"
+	parent := filepath.Dir(attempt)
+	plan, admission := pairedWorkerExecutePlan(t, &a, parent, func(context.Context, []byte, string) error { return nil })
+	bindWorkerClaimDirectory(t, admission)
+	plan.worker.claimDirectory = ""
+	plan.worker.claimDirectoryInfo = nil
+	plan.worker.prepare = func(context.Context) (brokerPreparationReceipt, error) {
+		return workerReceiptThenReplaceAdmissionRoot(t, plan.worker, admission)
+	}
+	if err := plan.worker.prepareJournal(context.Background()); err == nil {
+		t.Fatal("root replaced after receipt sampling was rebound as trusted")
+	}
+}
+
+func TestPairedWorkerPreparationReceiptRejectsAbsentOrMismatchedAdmissionRoot(t *testing.T) {
+	for _, kind := range []string{"absent", "zero-device", "zero-inode", "mismatched"} {
+		t.Run(kind, func(t *testing.T) {
+			a, candidate, api, fixture, attempt := newBrokerFixture(t)
+			a.Mode, a.Phase, a.AllowVerificationAuthority = "paired-terminal", "paired-terminal", true
+			parent := filepath.Dir(attempt)
+			launches := 0
+			plan, admission := pairedWorkerExecutePlan(t, &a, parent, func(context.Context, []byte, string) error {
+				launches++
+				return nil
+			})
+			bindWorkerClaimDirectory(t, admission)
+			plan.worker.prepare = func(context.Context) (brokerPreparationReceipt, error) {
+				receipt, err := brokerSyntheticWorkerPreparation(t, plan.worker, admission)
+				if err != nil {
+					return receipt, err
+				}
+				plan.worker.claimDirectory = ""
+				plan.worker.claimDirectoryInfo = nil
+				switch kind {
+				case "absent", "zero-device", "zero-inode":
+					receipt.AdmissionDirectory = brokerInode{}
+					if kind == "zero-device" {
+						receipt.AdmissionDirectory.Inode = 1
+					}
+					if kind == "zero-inode" {
+						receipt.AdmissionDirectory.Device = 1
+					}
+				case "mismatched":
+					receipt.AdmissionDirectory.Inode++
+				}
+				return receipt, nil
+			}
+			_, err := brokerExecute(context.Background(), a, brokerInput{PEM: string(candidate.PEM), VerificationToken: "synthetic-private-verification-token"}, attempt, api, plan)
+			if err == nil || fixture.tokenCalls != 0 || len(fixture.calls) != 0 || launches != 0 {
+				t.Fatalf("worker admission root receipt %s reached effects: err=%v mints=%d calls=%v launches=%d", kind, err, fixture.tokenCalls, fixture.calls, launches)
+			}
+		})
+	}
+}
+
 func TestPairedWorkerApprovalMismatchRefusesBeforeBinding(t *testing.T) {
 	a, c, controllerState, workerState, workerPath := pairedPlanInputs(t)
 	raw, err := os.ReadFile(workerPath)
