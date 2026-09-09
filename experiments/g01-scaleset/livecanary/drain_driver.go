@@ -177,6 +177,10 @@ func (d *Driver) drain(ctx context.Context, setID int) error {
 		return afterErr
 	}
 	obs.Before, obs.After = before, after
+	if runErr == nil && !sameDrainRunner(before.Runner, after.Runner) {
+		obs.Outcome = drainOutcomeInconclusive
+		runErr = ErrNoMessage
+	}
 	if err := d.record(Event{Kind: "observation", Operation: "drain", Drain: &obs}); err != nil {
 		return err
 	}

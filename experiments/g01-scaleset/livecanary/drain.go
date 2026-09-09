@@ -129,6 +129,10 @@ func validDrainSnapshot(s drainSnapshot, expected drainSetIdentity) bool {
 	return true
 }
 
+func sameDrainRunner(before, after *drainRunnerIdentity) bool {
+	return before != nil && after != nil && *before == *after
+}
+
 func validDrainObservation(o *drainObservation) bool {
 	if o == nil || o.Version != drainObservationVersion || (o.Outcome != drainOutcomeObserved && o.Outcome != drainOutcomeInconclusive) || o.InitialCapacity != drainInitialCapacity || o.WithdrawnCapacity != drainWithdrawnCapacity || o.ServerReceipt != drainServerReceiptUnproven || o.Sequence <= 0 || o.ObservedAt.IsZero() || len(o.Ordering) > 8 {
 		return false
@@ -137,6 +141,9 @@ func validDrainObservation(o *drainObservation) bool {
 		return false
 	}
 	if o.Outcome == drainOutcomeObserved && (o.Boundary != drainBoundaryRequestWritten || !o.ResponseHeld) {
+		return false
+	}
+	if o.Outcome == drainOutcomeObserved && !sameDrainRunner(o.Before.Runner, o.After.Runner) {
 		return false
 	}
 	seen := map[string]bool{}

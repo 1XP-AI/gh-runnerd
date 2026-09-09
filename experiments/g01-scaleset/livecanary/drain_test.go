@@ -164,7 +164,12 @@ func TestDrainObservationIsBoundedAndFailClosed(t *testing.T) {
 		"negative-counter":         func(o *drainObservation) { o.Poll.Statistics.Available = -1 },
 		"negative-unknown-counter": func(o *drainObservation) { o.NextPoll.Statistics.Idle = -1; o.NextPoll.StatsKnown = false },
 		"identity-change":          func(o *drainObservation) { o.After.Set.ID++ },
-		"duplicate-order":          func(o *drainObservation) { o.Ordering = append(o.Ordering, "ack") },
+		"runner-change": func(o *drainObservation) {
+			runner := *o.After.Runner
+			runner.ID++
+			o.After.Runner = &runner
+		},
+		"duplicate-order": func(o *drainObservation) { o.Ordering = append(o.Ordering, "ack") },
 		"response-before-write-observed": func(o *drainObservation) {
 			o.Boundary = drainBoundaryResponseBeforeWrite
 		},
