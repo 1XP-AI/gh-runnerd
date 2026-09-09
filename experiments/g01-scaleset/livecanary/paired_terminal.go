@@ -183,7 +183,7 @@ func ValidatePairedApprovals(controller Approval, worker liveworker.Approval) er
 	}
 	verificationPhase := false
 	for _, phase := range controller.Phases {
-		if phase == "before-ack" || phase == "after-ack" || phase == "before-acquire" || phase == "acquire-loss" {
+		if phase == "before-ack" || phase == "after-ack" || phase == "before-acquire" || phase == "acquire-loss" || phase == "drain" {
 			verificationPhase = true
 			break
 		}

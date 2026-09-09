@@ -91,6 +91,11 @@ func TestPairedPreparationUsesDedicatedPhaseWithoutCleanupAuthority(t *testing.T
 	if _, err := preparePairedJournal(withoutDirectory, withoutVerification, open); err == nil {
 		t.Fatal("paired preparation accepted missing verification authority")
 	}
+	withDrain := a
+	withDrain.Phases = []string{"create", "drain", "inspect", "cleanup"}
+	if !pairedPreparationReady(withDrain, time.Now()) {
+		t.Fatal("paired preparation rejected drain verification authority")
+	}
 }
 
 func TestPairedPreparationPreservesCanonicalControllerHistory(t *testing.T) {

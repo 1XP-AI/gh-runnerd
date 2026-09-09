@@ -101,7 +101,7 @@ func pairedPreparationReady(a Approval, now time.Time) bool {
 		if _, ok := want[phase]; ok {
 			want[phase] = true
 		}
-		if phase == "before-ack" || phase == "after-ack" || phase == "before-acquire" || phase == "acquire-loss" {
+		if phase == "before-ack" || phase == "after-ack" || phase == "before-acquire" || phase == "acquire-loss" || phase == "drain" {
 			verification = true
 		}
 	}

@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/liveworker"
 	"github.com/actions/scaleset"
 	"github.com/google/uuid"
 )
@@ -262,6 +263,20 @@ func TestDriverRoutesDrainBeforeNoWorkerStatisticsQuarantine(t *testing.T) {
 	}
 	if !observed {
 		t.Fatal("drain did not retain its bounded observation")
+	}
+}
+
+func TestValidatePairedApprovalsAcceptsDrainVerification(t *testing.T) {
+	a := approval()
+	a.Phases = []string{"create", "drain", "inspect", "cleanup"}
+	worker := liveworker.Approval{
+		RunnerUpdatesDisabled: true, HarnessSHA: a.HarnessSHA, WorkflowSHA: a.WorkflowSHA,
+		OwnerNonce: a.OwnerNonce, Controller: a.Controller, Endpoint: "/fixture/docker.sock",
+		DaemonID: "fixture-daemon", ImageID: "sha256:" + strings.Repeat("a", 64), Image: liveworker.ImageReference,
+		ExpiresAt: a.ExpiresAt, Phases: []string{"create", "start", "inspect", "cleanup"},
+	}
+	if err := ValidatePairedApprovals(a, worker); err != nil {
+		t.Fatalf("paired approval with drain verification rejected: %v", err)
 	}
 }
 
