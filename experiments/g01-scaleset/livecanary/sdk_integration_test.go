@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,6 +25,16 @@ type fixtureSDK struct{ *SDKAPI }
 func (f fixtureSDK) Preflight(context.Context, Approval) error        { return nil } // Authority HTTP tested separately.
 func (f fixtureSDK) Inventory(context.Context) (string, error)        { return strings.Repeat("0", 64), nil }
 func (f fixtureSDK) VerifyRun(context.Context, Approval, int64) error { return nil }
+
+type countingFixtureSDK struct {
+	fixtureSDK
+	verifyCalls atomic.Int32
+}
+
+func (f *countingFixtureSDK) VerifyRun(context.Context, Approval, int64) error {
+	f.verifyCalls.Add(1)
+	return nil
+}
 
 // Exercise the new live driver through the actual pinned SDK. This synthetic
 // transport is permanently fenced to its own loopback server, like the original
@@ -346,4 +358,261 @@ func TestDriverDrainThroughPinnedSDKAndPollHook(t *testing.T) {
 	if state := replayWithApproval(reopened.Events(), &a); state.uncertain {
 		t.Fatalf("legitimate after job-counter change retained replay uncertainty: %+v", state)
 	}
+}
+
+func TestPinnedSDKDrainRejectsAmbiguousEmbeddedJobIdentityBeforeEffects(t *testing.T) {
+	a := approval()
+	for _, test := range []struct {
+		name       string
+		body       string
+		wantReject bool
+	}{
+		// The pinned SDK's ordinary decoder accepts the case-folded duplicate
+		// and keeps the later value. The adapter must reject that ambiguous wire
+		// before the listener can ACK or acquire the message.
+		{name: "casefolded identity", body: `[{"messageType":"JobAvailable","runnerRequestId":41,"workflowRunId":5,"ownerName":"foreign-owner","OwnerName":"fixture-org","repositoryName":"canary"}]`, wantReject: true},
+		{name: "duplicate identity", body: `[{"messageType":"JobAvailable","runnerRequestId":41,"workflowRunId":5,"ownerName":"fixture-org","ownerName":"fixture-org","repositoryName":"canary"}]`, wantReject: true},
+		{name: "malformed body", body: `[{"messageType":"JobAvailable","runnerRequestId":41`, wantReject: true},
+		{name: "legitimate SDK body", body: pinnedDrainJobBody(a)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture, _, session, hook := newPinnedDrainSession(t, a, test.body)
+			observation, err := runDrainListener(context.Background(), session, 7, hook)
+			if test.wantReject {
+				if !errors.Is(err, ErrQuarantine) || observation.Outcome == drainOutcomeObserved {
+					t.Fatalf("ambiguous embedded job identity was accepted: observation=%+v err=%v", observation, err)
+				}
+				if fixture.acks.Load() != 0 || fixture.acquires.Load() != 0 {
+					t.Fatalf("ambiguous embedded job identity reached effects: polls=%d acks=%d acquires=%d", fixture.polls.Load(), fixture.acks.Load(), fixture.acquires.Load())
+				}
+				return
+			}
+			if err != nil || observation.Outcome != drainOutcomeObserved || fixture.acks.Load() != 1 || fixture.acquires.Load() != 1 {
+				t.Fatalf("legitimate embedded job path failed: observation=%+v err=%v polls=%d acks=%d acquires=%d", observation, err, fixture.polls.Load(), fixture.acks.Load(), fixture.acquires.Load())
+			}
+		})
+	}
+}
+
+func TestPinnedSDKDrainBindsPollCursorBeforeInnerCall(t *testing.T) {
+	t.Run("first poll requires zero cursor", func(t *testing.T) {
+		a := approval()
+		fixture, _, session, hook := newPinnedDrainSession(t, a, pinnedDrainJobBody(a))
+		c := newPinnedDrainClient(session, hook)
+		hook.releaseResponse()
+
+		if _, err := c.GetMessage(context.Background(), 9, drainInitialCapacity); !errors.Is(err, ErrQuarantine) {
+			t.Fatalf("wrong first cursor = %v, want quarantine", err)
+		}
+		if fixture.polls.Load() != 0 {
+			t.Fatalf("wrong first cursor reached inner SDK: polls=%d", fixture.polls.Load())
+		}
+	})
+
+	t.Run("second poll requires acknowledged message cursor", func(t *testing.T) {
+		a := approval()
+		fixture, _, session, hook := newPinnedDrainSession(t, a, pinnedDrainJobBody(a))
+		c := newPinnedDrainClient(session, hook)
+		hook.releaseResponse()
+
+		if _, err := c.GetMessage(context.Background(), 0, drainInitialCapacity); err != nil {
+			t.Fatalf("valid first poll: %v", err)
+		}
+		if _, err := c.GetMessage(context.Background(), 0, drainWithdrawnCapacity); !errors.Is(err, ErrQuarantine) {
+			t.Fatalf("wrong second cursor = %v, want quarantine", err)
+		}
+		if fixture.polls.Load() != 1 {
+			t.Fatalf("wrong second cursor reached inner SDK: polls=%d cursors=%v", fixture.polls.Load(), fixture.cursorsSnapshot())
+		}
+	})
+
+	t.Run("legitimate SDK cursor path remains bounded", func(t *testing.T) {
+		a := approval()
+		fixture, _, session, hook := newPinnedDrainSession(t, a, pinnedDrainJobBody(a))
+		c := newPinnedDrainClient(session, hook)
+		hook.releaseResponse()
+
+		message, err := c.GetMessage(context.Background(), 0, drainInitialCapacity)
+		if err != nil || message == nil {
+			t.Fatalf("valid first poll = message %v err %v", message, err)
+		}
+		if err := c.DeleteMessage(context.Background(), message.MessageID); err != nil {
+			t.Fatalf("valid ACK: %v", err)
+		}
+		if _, err := c.AcquireJobs(context.Background(), []int64{41}); err != nil {
+			t.Fatalf("valid acquisition: %v", err)
+		}
+		if message, err = c.GetMessage(context.Background(), 17, drainWithdrawnCapacity); err != nil || message != nil {
+			t.Fatalf("valid second poll = message %v err %v", message, err)
+		}
+		if fixture.polls.Load() != 2 || fixture.acks.Load() != 1 || fixture.acquires.Load() != 1 {
+			t.Fatalf("legitimate SDK effects polls=%d acks=%d acquires=%d cursors=%v capacities=%v", fixture.polls.Load(), fixture.acks.Load(), fixture.acquires.Load(), fixture.cursorsSnapshot(), fixture.capacitiesSnapshot())
+		}
+	})
+}
+
+func TestPinnedSDKDrainMatchesWireBeforeVerifyRun(t *testing.T) {
+	a := approval()
+	body := `[{"messageType":"JobAvailable","runnerRequestId":41,"workflowRunId":5,"ownerName":"foreign-owner","OwnerName":"fixture-org","repositoryName":"canary"}]`
+	fixture, base, session, hook := newPinnedDrainSession(t, a, body)
+	api := &countingFixtureSDK{fixtureSDK: fixtureSDK{base}}
+	d := &Driver{Approval: a, Journal: &memoryJournal{}, API: api}
+	c := &journaledDrainClient{d: d, inner: session, sessionID: session.Session().SessionID.String(), hook: hook}
+	hook.releaseResponse()
+
+	if _, err := c.GetMessage(context.Background(), 0, drainInitialCapacity); !errors.Is(err, ErrQuarantine) {
+		t.Fatalf("ambiguous embedded job identity = %v, want quarantine", err)
+	}
+	if api.verifyCalls.Load() != 0 {
+		t.Fatalf("wire mismatch reached VerifyRun: calls=%d", api.verifyCalls.Load())
+	}
+	if fixture.acks.Load() != 0 || fixture.acquires.Load() != 0 {
+		t.Fatalf("wire mismatch reached effects: acks=%d acquires=%d", fixture.acks.Load(), fixture.acquires.Load())
+	}
+}
+
+func pinnedDrainJobBody(a Approval) string {
+	data, _ := json.Marshal([]map[string]any{{
+		"messageType":     "JobAvailable",
+		"runnerRequestId": int64(41),
+		"workflowRunId":   a.WorkflowRunID,
+		"ownerName":       a.Organization,
+		"repositoryName":  a.Repository,
+	}})
+	return string(data)
+}
+
+type pinnedDrainFixture struct {
+	server   *httptest.Server
+	body     string
+	polls    atomic.Int32
+	acks     atomic.Int32
+	acquires atomic.Int32
+	mu       sync.Mutex
+	cursors  []string
+	capacity []string
+}
+
+func newPinnedDrainSession(t *testing.T, a Approval, body string) (*pinnedDrainFixture, *SDKAPI, Session, *drainPollHook) {
+	t.Helper()
+	fixture := &pinnedDrainFixture{body: body}
+	fixture.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/actions/runners/registration-token") && r.Method == http.MethodPost:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]string{"token": "fixture-registration"})
+		case strings.HasSuffix(r.URL.Path, "/actions/runner-registration") && r.Method == http.MethodPost:
+			claims, _ := json.Marshal(map[string]int64{"exp": time.Now().Add(time.Hour).Unix()})
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"url":   fixture.server.URL,
+				"token": "eyJhbGciOiJub25lIn0." + base64.RawURLEncoding.EncodeToString(claims) + ".",
+			})
+		case strings.HasSuffix(r.URL.Path, "/sessions") && r.Method == http.MethodPost:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(scaleset.RunnerScaleSetSession{
+				SessionID: uuid.MustParse("00000000-0000-4000-8000-000000000021"), OwnerName: a.setName(),
+				MessageQueueURL: fixture.server.URL + "/queue", MessageQueueAccessToken: "fixture-queue",
+				Statistics: &scaleset.RunnerScaleSetStatistic{TotalRegisteredRunners: 1, TotalIdleRunners: 1},
+			})
+		case r.URL.Path == "/queue" && r.Method == http.MethodGet:
+			fixture.polls.Add(1)
+			fixture.mu.Lock()
+			fixture.cursors = append(fixture.cursors, r.URL.Query().Get("lastMessageId"))
+			fixture.capacity = append(fixture.capacity, r.Header.Get(scaleset.HeaderScaleSetMaxCapacity))
+			fixture.mu.Unlock()
+			if fixture.polls.Load() == 1 {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"messageId": 17, "messageType": "RunnerScaleSetJobMessages", "body": fixture.body,
+					"statistics": pinnedDrainStatistics(1, 1),
+				})
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]any{"statistics": pinnedDrainStatistics(0, 0)})
+		case r.URL.Path == "/queue/17" && r.Method == http.MethodDelete:
+			fixture.acks.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		case strings.HasSuffix(r.URL.Path, "/acquirejobs") && r.Method == http.MethodPost:
+			fixture.acquires.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"count": 1, "value": []int64{41}})
+		case strings.Contains(r.URL.Path, "/sessions/") && r.Method == http.MethodDelete:
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(fixture.server.Close)
+
+	buildAPI := func(hook *drainPollHook) (*SDKAPI, error) {
+		retry := retryablehttp.NewClient()
+		retry.RetryMax = 0
+		retry.Logger = nil
+		retry.HTTPClient.Timeout = time.Second
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.Proxy = nil
+		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			if address != fixture.server.Listener.Addr().String() {
+				return nil, errors.New("non-fixture address denied")
+			}
+			return (&net.Dialer{}).DialContext(ctx, network, address)
+		}
+		wrappers := []func(http.RoundTripper) http.RoundTripper(nil)
+		if hook != nil {
+			wrappers = append(wrappers, func(inner http.RoundTripper) http.RoundTripper {
+				hook.inner = inner
+				return hook
+			})
+		}
+		retry.HTTPClient.Transport = withResponseBudget(transport, wrappers...)
+		options := []scaleset.HTTPOption{scaleset.WithRetryableHTTPClint(retry), scaleset.WithLogger(slog.New(slog.DiscardHandler))}
+		client, err := scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{GitHubConfigURL: fixture.server.URL + "/fixture-org", PersonalAccessToken: "synthetic-installation"}, options...)
+		if err != nil {
+			return nil, err
+		}
+		return &SDKAPI{client: client, rest: retry.HTTPClient, baseURL: fixture.server.URL + "/api/v3", approval: a, options: options}, nil
+	}
+	base, err := buildAPI(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.drainClientFactory = buildAPI
+	hook := newDrainPollHook("")
+	session, err := base.OpenDrainSession(context.Background(), 7, a.setName(), hook)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fixture, base, session, hook
+}
+
+func newPinnedDrainClient(session Session, hook *drainPollHook) *drainClient {
+	initial := session.Session()
+	stats, _ := newDrainStatistics(initial.Statistics)
+	return &drainClient{
+		inner: session, hook: hook, phaseCtx: context.Background(),
+		obs: &drainObservation{Poll: drainPollObservation{Message: drainMessageUnknown}, NextPoll: drainPollObservation{Message: drainMessageUnknown}}, ownedRunnerStats: stats, ownedRunnerStatsKnown: true,
+	}
+}
+
+func pinnedDrainStatistics(available, assigned int) map[string]int {
+	return map[string]int{
+		"totalAvailableJobs": available, "totalAcquiredJobs": 0, "totalAssignedJobs": assigned,
+		"totalRunningJobs": 0, "totalRegisteredRunners": 1, "totalBusyRunners": 0, "totalIdleRunners": 1,
+	}
+}
+
+func (f *pinnedDrainFixture) cursorsSnapshot() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.cursors...)
+}
+
+func (f *pinnedDrainFixture) capacitiesSnapshot() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.capacity...)
 }

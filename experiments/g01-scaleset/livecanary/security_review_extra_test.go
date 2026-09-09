@@ -169,3 +169,42 @@ func TestSecurityReviewObservedDrainAllowsLegitimateJobCounterChanges(t *testing
 		t.Fatal("legitimate job-counter changes were rejected despite stable owned idle prerequisite")
 	}
 }
+
+func TestSecurityReviewDrainSnapshotEventIDMustMatchRunner(t *testing.T) {
+	observation := validDrainTestObservation()
+	event := Event{
+		Kind:               "result",
+		Operation:          "observe-runner",
+		ID:                 observation.Before.Runner.ID + 1,
+		DrainSnapshot:      &observation.Before,
+		DrainSnapshotStage: "before",
+	}
+	if validEvent(event) {
+		t.Fatal("mismatched snapshot event ID was accepted")
+	}
+
+	a := approval()
+	a.Phases = append(a.Phases, "drain")
+	j, err := openTestJournal(t, privateDir(t), a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer j.Close()
+	for _, prefix := range drainReplayPrefix() {
+		if err := j.Append(prefix); err != nil {
+			t.Fatalf("append drain prefix: %v", err)
+		}
+	}
+	for _, prefix := range []Event{
+		{Kind: "intent", Operation: "observe-owned"},
+		{Kind: "result", Operation: "observe-owned", ID: observation.Before.Set.ID},
+		{Kind: "intent", Operation: "observe-runner"},
+	} {
+		if err := j.Append(prefix); err != nil {
+			t.Fatalf("append snapshot prefix: %v", err)
+		}
+	}
+	if err := j.Append(event); !errors.Is(err, ErrJournal) {
+		t.Fatalf("mismatched snapshot event ID append = %v, want ErrJournal", err)
+	}
+}

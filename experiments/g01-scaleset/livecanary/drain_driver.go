@@ -16,6 +16,7 @@ type journaledDrainClient struct {
 	d         *Driver
 	inner     Session
 	sessionID string
+	hook      *drainPollHook
 	phaseCtx  context.Context
 }
 
@@ -57,6 +58,16 @@ func (c *journaledDrainClient) GetMessage(ctx context.Context, last, capacity in
 		}
 		if message == nil {
 			return Event{SessionID: c.sessionID}, nil
+		}
+		if c.hook != nil {
+			pollIndex := 1
+			if capacity == drainWithdrawnCapacity {
+				pollIndex = 2
+			}
+			batch, batchKnown := c.hook.pollBatch(pollIndex)
+			if !batchKnown || !batch.matches(message) {
+				return Event{}, ErrRemote
+			}
 		}
 		if message.MessageID <= 0 || len(message.JobAvailableMessages) != 1 || len(message.JobAssignedMessages) != 0 || len(message.JobStartedMessages) != 0 || len(message.JobCompletedMessages) != 0 || message.Statistics == nil {
 			return Event{}, ErrRemote
@@ -241,7 +252,7 @@ func (d *Driver) drain(ctx context.Context, setID int) error {
 		}
 		return err
 	}
-	journaled := &journaledDrainClient{d: d, inner: session, sessionID: sessionID}
+	journaled := &journaledDrainClient{d: d, inner: session, sessionID: sessionID, hook: hook}
 	obs, runErr := runDrainListener(ctx, journaled, setID, hook)
 	// The bounded observation sequence is phase-local: it must identify the
 	// exact durable drain phase that was active when the listener ran.

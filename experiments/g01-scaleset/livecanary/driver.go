@@ -147,6 +147,16 @@ func validDrainSnapshotForPhase(snapshot drainSnapshot, phase drainPhaseIdentity
 	return before.Set == snapshot.Set && sameDrainRunner(before.Runner, snapshot.Runner) && sameDrainRunnerPartition(before.Statistics, snapshot.Statistics)
 }
 
+func validDrainSnapshotEventIdentity(e Event) bool {
+	if e.DrainSnapshot == nil {
+		return true
+	}
+	if e.DrainSnapshot.Runner == nil {
+		return e.ID == 0
+	}
+	return e.ID > 0 && e.ID == e.DrainSnapshot.Runner.ID
+}
+
 func validDrainSnapshotIdentity(snapshot drainSnapshot, phase drainPhaseIdentity) bool {
 	return validDrainPhaseIdentity(phase) && validDrainSnapshot(snapshot, phase.Set) && snapshot.Runner != nil && snapshot.Runner.Name == phase.RunnerName && snapshot.Runner.ScaleSetID == phase.Set.ID
 }
@@ -169,7 +179,7 @@ func replayDrainSnapshot(e Event, index int, s *state) {
 	if e.DrainSnapshot == nil {
 		return
 	}
-	if e.Kind != "result" || e.Operation != "observe-runner" || !s.drainPhasePending || !s.drainPhaseIdentityValid {
+	if !validDrainSnapshotEventIdentity(e) || e.Kind != "result" || e.Operation != "observe-runner" || !s.drainPhasePending || !s.drainPhaseIdentityValid {
 		// Drain snapshots are phase-local evidence. A snapshot before the
 		// phase, after its final observation, or after an interrupted phase
 		// must not be silently reused by a later replay.

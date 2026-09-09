@@ -307,6 +307,8 @@ type drainPollHook struct {
 	pollAttempts        int
 	statistics          [3]drainStatistics
 	statisticsKnown     [3]bool
+	batches             [3]*baselineBatch
+	batchesKnown        [3]bool
 	wroteCallbacks      [3]int
 	onRequestWritten    func()
 	wroteOnce           sync.Once
@@ -372,10 +374,12 @@ func (h *drainPollHook) RoundTrip(req *http.Request) (*http.Response, error) {
 		response.Body = &drainObservedBody{
 			source: response.Body,
 			status: response.StatusCode,
-			onComplete: func(stats drainStatistics, known bool) {
+			onComplete: func(stats drainStatistics, known bool, batch *baselineBatch, batchKnown bool) {
 				h.mu.Lock()
 				h.statistics[attempt] = stats
 				h.statisticsKnown[attempt] = known
+				h.batches[attempt] = batch
+				h.batchesKnown[attempt] = batchKnown
 				h.mu.Unlock()
 			},
 		}
@@ -408,11 +412,13 @@ func (h *drainPollHook) RoundTrip(req *http.Request) (*http.Response, error) {
 	observedBody := &drainObservedBody{
 		source: response.Body,
 		status: response.StatusCode,
-		onComplete: func(stats drainStatistics, known bool) {
+		onComplete: func(stats drainStatistics, known bool, batch *baselineBatch, batchKnown bool) {
 			h.mu.Lock()
 			if attempt >= 1 && attempt < len(h.statistics) {
 				h.statistics[attempt] = stats
 				h.statisticsKnown[attempt] = known
+				h.batches[attempt] = batch
+				h.batchesKnown[attempt] = batchKnown
 			}
 			h.mu.Unlock()
 		},
@@ -467,9 +473,19 @@ func (h *drainPollHook) pollStatistics(index int) (drainStatistics, bool) {
 	return h.statistics[index], h.statisticsKnown[index]
 }
 
+func (h *drainPollHook) pollBatch(index int) (*baselineBatch, bool) {
+	if h == nil || index < 1 || index >= len(h.batches) {
+		return nil, false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.batches[index], h.batchesKnown[index]
+}
+
 // drainObservedBody forwards response bytes unchanged while retaining a
-// bounded, ephemeral copy solely to establish statistics field presence. It
-// never persists, logs or rewrites the response payload.
+// bounded, ephemeral copy solely to establish statistics field presence and
+// strict embedded job facts. It never persists, logs or rewrites the response
+// payload.
 type drainObservedBody struct {
 	source     io.ReadCloser
 	status     int
@@ -477,7 +493,7 @@ type drainObservedBody struct {
 	over       bool
 	mu         sync.Mutex
 	finished   bool
-	onComplete func(drainStatistics, bool)
+	onComplete func(drainStatistics, bool, *baselineBatch, bool)
 }
 
 func (b *drainObservedBody) capture(data []byte) {
@@ -509,16 +525,22 @@ func (b *drainObservedBody) finish() {
 	b.mu.Unlock()
 
 	stats, known := drainStatisticsFromBody(data)
+	batch, batchErr := decodeBaselineBatch(data)
+	batchKnown := batchErr == nil
 	if b.status != http.StatusOK && b.status != http.StatusAccepted {
 		known = false
 		stats = drainStatistics{}
+		batch = nil
+		batchKnown = false
 	}
 	if over {
 		known = false
 		stats = drainStatistics{}
+		batch = nil
+		batchKnown = false
 	}
 	if b.onComplete != nil {
-		b.onComplete(stats, known)
+		b.onComplete(stats, known, batch, batchKnown)
 	}
 }
 
@@ -654,10 +676,12 @@ func (c *drainClient) GetMessage(ctx context.Context, last, capacity int) (*scal
 	}
 	c.mu.Lock()
 	wantCapacity := drainInitialCapacity
+	wantLast := 0
 	if c.polls == 1 {
 		wantCapacity = drainWithdrawnCapacity
+		wantLast = c.messageID
 	}
-	if c.polls >= 2 || capacity != wantCapacity {
+	if c.polls >= 2 || capacity != wantCapacity || last != wantLast || c.polls == 1 && (c.messageID <= 0 || c.obs.poll(c.polls).ACK != drainResponseSucceeded) {
 		c.mu.Unlock()
 		return nil, ErrQuarantine
 	}
@@ -712,6 +736,15 @@ func (c *drainClient) GetMessage(ctx context.Context, last, capacity int) (*scal
 		c.obs.poll(index).StatsKnown = false
 		c.mu.Unlock()
 		return nil, ErrQuarantine
+	}
+	if c.hook != nil {
+		batch, batchKnown := c.hook.pollBatch(index)
+		if !batchKnown || !batch.matches(message) {
+			c.mu.Lock()
+			c.obs.poll(index).Message = drainMessageUnknown
+			c.mu.Unlock()
+			return nil, ErrQuarantine
+		}
 	}
 	messageStats, statsErr := newDrainStatistics(message.Statistics)
 	if statsErr != nil || (c.hook != nil && stats != messageStats) || (index <= 2 && c.ownedRunnerStatsKnown && !sameDrainRunnerPartition(stats, c.ownedRunnerStats)) || message.MessageID <= 0 || len(message.JobAssignedMessages) != 0 || len(message.JobStartedMessages) != 0 || len(message.JobCompletedMessages) != 0 || len(message.JobAvailableMessages) != 1 || message.JobAvailableMessages[0] == nil || message.JobAvailableMessages[0].RunnerRequestID <= 0 {
@@ -805,11 +838,12 @@ func (s drainScaler) HandleDesiredRunnerCount(_ context.Context, count int) (int
 	}
 	s.client.mu.Lock()
 	polls := s.client.polls
+	messageID := s.client.messageID
 	s.client.mu.Unlock()
 	if !s.client.active() {
 		return 0, s.client.rejectCall("observe-poll")
 	}
-	if polls >= 2 {
+	if polls >= 2 || polls >= 1 && messageID == 0 {
 		return 0, errDrainCollected
 	}
 	return min(count, drainInitialCapacity), nil

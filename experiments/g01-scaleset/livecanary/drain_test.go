@@ -37,7 +37,7 @@ func TestDrainListenerWithdrawsWhilePollResponseIsHeld(t *testing.T) {
 			"totalBusyRunners":       0,
 			"totalIdleRunners":       1,
 		},
-		"body": "[]",
+		"body": `[{"messageType":"JobAvailable","runnerRequestId":11}]`,
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
@@ -492,14 +492,17 @@ func TestDrainRejectsCapacityOrdinalBeforeInnerEffects(t *testing.T) {
 	if _, err := client.GetMessage(context.Background(), 0, drainInitialCapacity); err != nil {
 		t.Fatalf("third-call setup first poll: %v", err)
 	}
+	if err := client.DeleteMessage(context.Background(), 7); err != nil {
+		t.Fatalf("third-call setup ACK: %v", err)
+	}
 	inner.message = nil
-	if _, err := client.GetMessage(context.Background(), 0, drainWithdrawnCapacity); err != nil {
+	if _, err := client.GetMessage(context.Background(), 7, drainWithdrawnCapacity); err != nil {
 		t.Fatalf("valid second poll: %v", err)
 	}
 	if _, err := client.GetMessage(context.Background(), 0, drainWithdrawnCapacity); !errors.Is(err, ErrQuarantine) {
 		t.Fatalf("third poll error = %v, want quarantine", err)
 	}
-	if inner.pollCalls != 2 || inner.ackCalls != 0 || inner.acquireCalls != 0 {
+	if inner.pollCalls != 2 || inner.ackCalls != 1 || inner.acquireCalls != 0 {
 		t.Fatalf("rejected third poll performed effects: polls=%d ack=%d acquire=%d", inner.pollCalls, inner.ackCalls, inner.acquireCalls)
 	}
 }
@@ -798,7 +801,7 @@ func (t *secondPollRetryTransport) RoundTrip(req *http.Request) (*http.Response,
 		trace.WroteRequest(httptrace.WroteRequestInfo{})
 		return &http.Response{
 			StatusCode: http.StatusOK,
-			Body:       io.NopCloser(strings.NewReader(`{"messageId":7,"messageType":"RunnerScaleSetJobMessages","statistics":{"totalAvailableJobs":1,"totalAcquiredJobs":0,"totalAssignedJobs":1,"totalRunningJobs":0,"totalRegisteredRunners":1,"totalBusyRunners":0,"totalIdleRunners":1},"body":"[]"}`)),
+			Body:       io.NopCloser(strings.NewReader(`{"messageId":7,"messageType":"RunnerScaleSetJobMessages","statistics":{"totalAvailableJobs":1,"totalAcquiredJobs":0,"totalAssignedJobs":1,"totalRunningJobs":0,"totalRegisteredRunners":1,"totalBusyRunners":0,"totalIdleRunners":1},"body":"[{\"messageType\":\"JobAvailable\",\"runnerRequestId\":11}]"}`)),
 		}, nil
 	}
 	if t.polls != 2 {
@@ -1110,7 +1113,7 @@ func (t *drainNoTraceTransport) RoundTrip(req *http.Request) (*http.Response, er
 		if t.gets == 1 {
 			response.StatusCode = http.StatusOK
 			response.Status = http.StatusText(http.StatusOK)
-			response.Body = io.NopCloser(strings.NewReader(`{"messageId":7,"messageType":"RunnerScaleSetJobMessages","statistics":{"totalRegisteredRunners":1,"totalIdleRunners":1},"body":"[]"}`))
+			response.Body = io.NopCloser(strings.NewReader(`{"messageId":7,"messageType":"RunnerScaleSetJobMessages","statistics":{"totalRegisteredRunners":1,"totalIdleRunners":1},"body":"[{\"messageType\":\"JobAvailable\",\"runnerRequestId\":11}]"}`))
 		} else {
 			response.StatusCode = http.StatusAccepted
 			response.Status = http.StatusText(http.StatusAccepted)
@@ -1172,7 +1175,7 @@ func (s *drainSyntheticSession) GetMessage(ctx context.Context, _, capacity int)
 	return &scaleset.RunnerScaleSetMessage{
 		MessageID:            7,
 		Statistics:           &scaleset.RunnerScaleSetStatistic{TotalAvailableJobs: 1, TotalAssignedJobs: 1, TotalRegisteredRunners: 1, TotalIdleRunners: 1},
-		JobAvailableMessages: []*scaleset.JobAvailable{{JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: 11}}},
+		JobAvailableMessages: []*scaleset.JobAvailable{{JobMessageBase: scaleset.JobMessageBase{JobMessageType: scaleset.JobMessageType{MessageType: scaleset.MessageTypeJobAvailable}, RunnerRequestID: 11}}},
 	}, nil
 }
 func (s *drainSyntheticSession) DeleteMessage(ctx context.Context, id int) error {

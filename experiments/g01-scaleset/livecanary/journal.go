@@ -281,7 +281,7 @@ func validEvent(e Event) bool {
 		}
 	}
 	if e.DrainSnapshot != nil {
-		if e.Kind != "result" || e.Operation != "observe-runner" || !validDrainSnapshot(*e.DrainSnapshot, e.DrainSnapshot.Set) {
+		if !validDrainSnapshotEventIdentity(e) || e.Kind != "result" || e.Operation != "observe-runner" || !validDrainSnapshot(*e.DrainSnapshot, e.DrainSnapshot.Set) {
 			return false
 		}
 	}
