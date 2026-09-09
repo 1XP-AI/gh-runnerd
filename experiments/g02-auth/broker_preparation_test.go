@@ -50,7 +50,90 @@ func brokerSyntheticPreparation(t *testing.T, p *brokerControllerPlan, directory
 	if e != nil {
 		return brokerPreparationReceipt{}, errBroker
 	}
-	return brokerPreparationReceipt{1, "controller_journal_prepared", p.approval.Phase, brokerDigest(p.controller), binding.State, id, brokerFileIdentity(ci), brokerBytesDigest(jb), brokerBytesDigest(cb)}, nil
+	di, e := os.Lstat(directory)
+	if e != nil {
+		return brokerPreparationReceipt{}, errBroker
+	}
+	return brokerPreparationReceipt{1, "controller_journal_prepared", p.approval.Phase, brokerDigest(p.controller), binding.State, id, brokerFileIdentity(ci), brokerFileIdentity(di), brokerBytesDigest(jb), brokerBytesDigest(cb)}, nil
+}
+
+// This models the explicit nonproduction worker-preparer seam used by direct
+// broker unit tests. The real entrypoint invokes G01's canonical worker parser;
+// this helper only supplies bounded receipt bytes for tests that do not spawn
+// the reviewed executable.
+func brokerSyntheticWorkerPreparation(t *testing.T, p *brokerWorkerPlan, directory string) (brokerPreparationReceipt, error) {
+	t.Helper()
+	if p == nil || p.check() != nil {
+		return brokerPreparationReceipt{}, errBroker
+	}
+	if err := os.Mkdir(directory, 0700); err != nil && !os.IsExist(err) {
+		return brokerPreparationReceipt{}, errBroker
+	}
+	p.claimDirectory = directory
+	directoryInfo, err := os.Lstat(directory)
+	if err != nil || !brokerOwnedDirectory(directoryInfo, true) {
+		return brokerPreparationReceipt{}, errBroker
+	}
+	p.claimDirectoryInfo = directoryInfo
+	path := filepath.Join(p.statePath, "journal.jsonl")
+	if _, e := os.Stat(path); os.IsNotExist(e) {
+		if os.WriteFile(path, []byte("synthetic prepared worker journal\n"), 0600) != nil {
+			return brokerPreparationReceipt{}, errBroker
+		}
+	}
+	journalData, e := os.ReadFile(path)
+	if e != nil {
+		return brokerPreparationReceipt{}, errBroker
+	}
+	journalInfo, e := os.Stat(path)
+	if e != nil {
+		return brokerPreparationReceipt{}, errBroker
+	}
+	stateInfo, e := os.Stat(p.statePath)
+	if e != nil {
+		return brokerPreparationReceipt{}, errBroker
+	}
+	worker, e := p.binding()
+	if e != nil {
+		return brokerPreparationReceipt{}, errBroker
+	}
+	claimPath := filepath.Join(directory, "admission.json")
+	if _, e = os.Stat(claimPath); os.IsNotExist(e) {
+		claim := map[string]any{"version": 1, "ownership": brokerBytesDigest(p.raw), "state_device": worker.State.Device, "state_inode": worker.State.Inode, "journal_device": brokerFileIdentity(journalInfo).Device, "journal_inode": brokerFileIdentity(journalInfo).Inode}
+		claimData, _ := json.Marshal(claim)
+		if os.WriteFile(claimPath, append(claimData, '\n'), 0600) != nil {
+			return brokerPreparationReceipt{}, errBroker
+		}
+	}
+	claimData, e := os.ReadFile(claimPath)
+	if e != nil {
+		return brokerPreparationReceipt{}, errBroker
+	}
+	claimInfo, e := os.Stat(claimPath)
+	if e != nil {
+		return brokerPreparationReceipt{}, errBroker
+	}
+	return brokerPreparationReceipt{Version: 1, Status: "worker_journal_prepared", Phase: "paired-worker", ApprovalDigest: brokerDigest(p.approval), State: brokerFileIdentity(stateInfo), Journal: brokerFileIdentity(journalInfo), Claim: brokerFileIdentity(claimInfo), AdmissionDirectory: brokerFileIdentity(directoryInfo), JournalDigest: brokerBytesDigest(journalData), ClaimDigest: brokerBytesDigest(claimData)}, nil
+}
+
+func brokerAttachSyntheticWorkerPreparation(t *testing.T, p *brokerControllerPlan, directory string) {
+	t.Helper()
+	if p == nil || p.worker == nil {
+		t.Fatal("missing paired worker plan")
+	}
+	p.worker.prepare = func(context.Context) (brokerPreparationReceipt, error) {
+		return brokerSyntheticWorkerPreparation(t, p.worker, directory)
+	}
+}
+
+func bindWorkerClaimDirectory(t *testing.T, directory string) {
+	t.Helper()
+	if directory == "" || !filepath.IsAbs(directory) || filepath.Clean(directory) != directory {
+		t.Fatal("worker claim fixture directory")
+	}
+	previous := resolveWorkerClaimDirectory
+	resolveWorkerClaimDirectory = func() (string, error) { return directory, nil }
+	t.Cleanup(func() { resolveWorkerClaimDirectory = previous })
 }
 func TestBrokerPreparedReceiptBindsValidatedBytesBeforeMint(t *testing.T) {
 	for _, kind := range []string{"journal changed before capture", "claim changed before capture", "wrong phase", "wrong approval", "missing identity", "wrong version", "wrong status"} {

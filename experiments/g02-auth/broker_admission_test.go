@@ -105,6 +105,85 @@ func TestBrokerFinitePhasesAndUnknownRetention(t *testing.T) {
 		})
 	}
 }
+
+func TestBrokerLedgerCapacityDerivesFromFiniteSlotSchema(t *testing.T) {
+	want := 1 + 2*(len(brokerPhases)+len(brokerSpecialSlots)) + 1
+	if got := brokerLedgerMaxLines(); got != want || got != 22 {
+		t.Fatalf("ledger line bound=%d want schema-derived %d", got, want)
+	}
+	if brokerSlotAllowed("unreviewed-slot") || !brokerSlotAllowed("paired-terminal") || !brokerSlotAllowed("discover-actions-host") {
+		t.Fatal("ledger schema widened beyond the finite reviewed slots")
+	}
+}
+
+func TestBrokerPairedAdmissionAcceptsHistoricalControllerClaim(t *testing.T) {
+	a, c, api, f, root := newBrokerFixture(t)
+	parent := filepath.Dir(root)
+	a.Mode, a.Phase, a.AllowVerificationAuthority = "controller", "create", true
+	controllerPlan := brokerTestPlan(t, &a, parent, func(context.Context, []byte, string) error { return nil })
+	controllerPlan.controller.Phases = []string{"create", "before-ack", "after-ack", "before-acquire", "acquire-loss", "inspect", "cleanup"}
+	controllerPlan.controller.WorkflowRunID = 7
+	controllerPlan.raw, _ = json.Marshal(controllerPlan.controller)
+	a.ControllerApprovalSHA256 = brokerBytesDigest(controllerPlan.raw)
+	controllerPlan.approval = a
+	if _, err := brokerExecute(context.Background(), a, brokerInput{PEM: string(c.PEM), VerificationToken: "synthetic-private-workflow-token"}, root, api, controllerPlan); err != nil {
+		t.Fatalf("controller prerequisite claim: %v", err)
+	}
+
+	// The paired attempt reuses the same controller identity and durable ledger,
+	// as the real controller-create -> paired-terminal sequence does.
+	a.Mode, a.Phase = "paired-terminal", "paired-terminal"
+	pairedRoot := filepath.Join(parent, "paired-attempt")
+	pairedPlan := brokerTestPlan(t, &a, parent, func(context.Context, []byte, string) error { return nil })
+	pairedPlan.controller.Phases = append([]string(nil), controllerPlan.controller.Phases...)
+	pairedPlan.controller.WorkflowRunID = controllerPlan.controller.WorkflowRunID
+	pairedPlan.raw, _ = json.Marshal(pairedPlan.controller)
+	a.ControllerApprovalSHA256 = brokerBytesDigest(pairedPlan.raw)
+	pairedPlan.approval = a
+	workerState := filepath.Join(parent, "paired-worker-state")
+	if err := os.Mkdir(workerState, 0700); err != nil {
+		t.Fatal("worker state")
+	}
+	worker := pairedWorkerApproval{RunnerUpdatesDisabled: true, HarnessSHA: pairedPlan.controller.HarnessSHA, WorkflowSHA: pairedPlan.controller.WorkflowSHA, OwnerNonce: pairedPlan.controller.OwnerNonce, Controller: pairedPlan.controller.Controller, Endpoint: "/tmp/g01-paired-admission.sock", DaemonID: "fixture-daemon", ImageID: "sha256:" + strings.Repeat("d", 64), Image: pairedWorkerImage, ExpiresAt: pairedPlan.controller.ExpiresAt, Phases: []string{"create", "start", "inspect", "cleanup"}}
+	workerData, err := json.Marshal(worker)
+	if err != nil {
+		t.Fatal("worker approval")
+	}
+	workerPath := filepath.Join(parent, "paired-worker-approval.json")
+	if err := os.WriteFile(workerPath, workerData, 0600); err != nil {
+		t.Fatal("worker approval file")
+	}
+	pairedPlan.worker, err = openBrokerWorkerPlan(workerPath, workerState, pairedPlan.statePath, a, pairedPlan.controller)
+	if err != nil {
+		t.Fatalf("paired worker plan: %v", err)
+	}
+	brokerAttachSyntheticWorkerPreparation(t, pairedPlan, filepath.Join(parent, "paired-worker-admission"))
+	defer pairedPlan.worker.close()
+	if _, err := brokerExecute(context.Background(), a, brokerInput{PEM: string(c.PEM), VerificationToken: "synthetic-private-workflow-token"}, pairedRoot, api, pairedPlan); err != nil {
+		t.Fatalf("paired attempt rejected historical controller claim: %v", err)
+	}
+	if f.tokenCalls != 2 {
+		t.Fatalf("historical controller claim blocked current paired issuance: mints=%d", f.tokenCalls)
+	}
+	ledger, err := os.ReadFile(filepath.Join(f.admissionRoot, "broker-admission.jsonl"))
+	if err != nil {
+		t.Fatal("paired ledger")
+	}
+	lines := strings.Split(strings.TrimSpace(string(ledger)), "\n")
+	var pairedEvent brokerClaimEvent
+	for _, line := range lines {
+		var candidate brokerClaimEvent
+		if json.Unmarshal([]byte(line), &candidate) == nil && candidate.Slot == "paired-terminal" && candidate.Kind == "claim" {
+			pairedEvent = candidate
+			break
+		}
+	}
+	controllerView := a
+	controllerView.Mode, controllerView.Phase = "controller", "inspect"
+	if pairedEvent.Slot == "" || !validBrokerClaimEvent(controllerView, pairedEvent) {
+		t.Fatal("historical paired claim was rejected under the reciprocal controller mode")
+	}
+}
 func TestBrokerAdmissionFailureBeforeAPIAndResync(t *testing.T) {
 	for _, kind := range []string{"missing", "symlink", "sync", "existing-sync"} {
 		t.Run(kind, func(t *testing.T) {

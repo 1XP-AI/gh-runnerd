@@ -48,17 +48,51 @@ type BrokerResult struct {
 
 var errBroker = errors.New("broker stopped; retain private intent and review; no automatic retry")
 var brokerComponent = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$`)
+var brokerWorkerComponent = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`)
 var brokerPhases = map[string]bool{"create": true, "before-ack": true, "after-ack": true, "before-acquire": true, "acquire-loss": true, "jit-loss": true, "inspect": true, "cleanup": true}
+var brokerSpecialSlots = map[string]bool{"discover-actions-host": true, "paired-terminal": true}
+
+func brokerSlotAllowed(slot string) bool { return brokerPhases[slot] || brokerSpecialSlots[slot] }
+
+// One header, one claim and one completion for every finite schema slot, and
+// the final empty split element from the required trailing newline. This is a
+// structural bound derived from the actual slot schema, not an unbounded log.
+func brokerLedgerMaxLines() int { return 1 + 2*(len(brokerPhases)+len(brokerSpecialSlots)) + 1 }
+
+const (
+	// Terminal collection has seven five-second cadence gaps in production.
+	// Keep a complete cadence plus a separate execution margin available to the
+	// child, and reserve one more minute for the short-lived installation token
+	// context that precedes it.
+	pairedTerminalCadenceBudget      = 35 * time.Second
+	pairedTerminalChildMargin        = 25 * time.Second
+	pairedTerminalMinimumChildBudget = pairedTerminalCadenceBudget + pairedTerminalChildMargin
+	pairedTerminalCredentialMargin   = time.Minute
+	pairedTerminalMinimumAuthority   = pairedTerminalMinimumChildBudget + pairedTerminalCredentialMargin
+	pairedTerminalMaximumChildBudget = 10 * time.Minute
+)
 
 func (a BrokerApproval) validate(now time.Time) error {
-	if !brokerNonce.MatchString(a.OwnerNonce) || a.AppID < 1 || a.AppOwnerID < 1 || a.InstallationID < 1 || a.OrganizationID < 1 || a.RepositoryID < 1 || a.RunnerGroupID < 1 || !appSlug.MatchString(a.AppName) || !organizationLogin.MatchString(a.AppOwner) || !organizationLogin.MatchString(a.Organization) || !brokerComponent.MatchString(a.Repository) || !brokerComponent.MatchString(a.RunnerGroupName) || !a.ExpiresAt.After(now.Add(time.Minute)) || a.ExpiresAt.After(now.Add(24*time.Hour)) {
+	minimumLifetime := time.Minute
+	if a.Mode == "paired-terminal" {
+		minimumLifetime = pairedTerminalMinimumAuthority
+	}
+	if !brokerNonce.MatchString(a.OwnerNonce) || a.AppID < 1 || a.AppOwnerID < 1 || a.InstallationID < 1 || a.OrganizationID < 1 || a.RepositoryID < 1 || a.RunnerGroupID < 1 || !appSlug.MatchString(a.AppName) || !organizationLogin.MatchString(a.AppOwner) || !organizationLogin.MatchString(a.Organization) || !brokerComponent.MatchString(a.Repository) || !brokerComponent.MatchString(a.RunnerGroupName) || !a.ExpiresAt.After(now.Add(minimumLifetime)) || a.ExpiresAt.After(now.Add(24*time.Hour)) {
 		return errBroker
 	}
 	if a.Mode == "discover-actions-host" {
 		if a.Phase != "" || a.AllowVerificationAuthority {
 			return errBroker
 		}
-	} else if a.Mode != "controller" || !brokerPhases[a.Phase] {
+	} else if a.Mode == "controller" {
+		if !brokerPhases[a.Phase] {
+			return errBroker
+		}
+	} else if a.Mode == "paired-terminal" {
+		if a.Phase != "paired-terminal" {
+			return errBroker
+		}
+	} else {
 		return errBroker
 	}
 	return nil
@@ -74,11 +108,48 @@ func validBrokerToken(token string) bool {
 	}
 	return true
 }
+
+func brokerPairedAuthorityDeadline(parent context.Context, a BrokerApproval, plan *brokerControllerPlan, now time.Time) (time.Time, error) {
+	if parent == nil || parent.Err() != nil {
+		return time.Time{}, errBroker
+	}
+	deadline := a.ExpiresAt
+	if plan != nil {
+		if plan.controller.ExpiresAt.IsZero() {
+			return time.Time{}, errBroker
+		}
+		deadline = minTime(deadline, plan.controller.ExpiresAt)
+		if plan.worker != nil {
+			if plan.worker.approval.ExpiresAt.IsZero() {
+				return time.Time{}, errBroker
+			}
+			deadline = minTime(deadline, plan.worker.approval.ExpiresAt)
+		}
+	}
+	if parentDeadline, ok := parent.Deadline(); ok {
+		deadline = minTime(deadline, parentDeadline)
+	}
+	if !deadline.After(now.Add(pairedTerminalMinimumAuthority)) {
+		return time.Time{}, errBroker
+	}
+	return deadline, nil
+}
+
 func brokerExecute(parent context.Context, a BrokerApproval, input brokerInput, path string, api *brokerAPI, plan *brokerControllerPlan) (BrokerResult, error) {
-	if parent == nil || api == nil || a.validate(api.now()) != nil || (a.AllowVerificationAuthority && input.VerificationToken == "") || (input.VerificationToken != "" && (!a.AllowVerificationAuthority || !validBrokerToken(input.VerificationToken))) || (a.Mode == "controller" && plan == nil) || (a.Mode != "controller" && plan != nil) {
+	if parent == nil || api == nil || a.validate(api.now()) != nil || (a.AllowVerificationAuthority && input.VerificationToken == "") || (input.VerificationToken != "" && (!a.AllowVerificationAuthority || !validBrokerToken(input.VerificationToken))) || ((a.Mode == "controller" || a.Mode == "paired-terminal") && plan == nil) || (a.Mode != "controller" && a.Mode != "paired-terminal" && plan != nil) {
 		return BrokerResult{}, errBroker
 	}
-	ctx, cancel := context.WithDeadline(parent, minTime(a.ExpiresAt, api.now().Add(10*time.Minute)))
+	now := api.now()
+	deadline := minTime(a.ExpiresAt, now.Add(10*time.Minute))
+	if a.Mode == "paired-terminal" {
+		var err error
+		deadline, err = brokerPairedAuthorityDeadline(parent, a, plan, now)
+		if err != nil {
+			return BrokerResult{}, errBroker
+		}
+		deadline = minTime(deadline, now.Add(10*time.Minute))
+	}
+	ctx, cancel := context.WithDeadline(parent, deadline)
 	defer cancel()
 	candidate := Candidate{AppID: a.AppID, PEM: []byte(input.PEM)}
 	defer clear(candidate.PEM)
@@ -110,16 +181,18 @@ func brokerExecute(parent context.Context, a BrokerApproval, input brokerInput, 
 		return BrokerResult{}, errBroker
 	}
 	defer claim.close()
-	guard := func() error {
+	guard := func(checkPrepared bool) error {
 		if claim.check() != nil || j.check() != nil {
 			return errBroker
 		}
-		if plan != nil && (plan.check() != nil || plan.compatibleControllerClaim(claim.root) != nil || (plan.prepared != nil && plan.preparedState(claim.root, false) != nil)) {
+		if plan != nil && (plan.check() != nil || plan.compatibleControllerClaim(claim.root) != nil || (checkPrepared && plan.prepared != nil && plan.preparedState(claim.root, false) != nil) || (checkPrepared && plan.prepared != nil && a.Mode == "paired-terminal" && (plan.worker == nil || plan.worker.checkPrepared(ctx) != nil))) {
 			return errBroker
 		}
 		return nil
 	}
-	if guard() != nil {
+	guardLive := func() error { return guard(true) }
+	guardPostChild := func() error { return guard(false) }
+	if guardLive() != nil {
 		return BrokerResult{}, errBroker
 	}
 
@@ -132,16 +205,16 @@ func brokerExecute(parent context.Context, a BrokerApproval, input brokerInput, 
 			return BrokerResult{}, errBroker
 		}
 		plan.preparationReceipt = receipt
-		if guard() != nil || plan.preparedState(claim.root, true) != nil {
+		if guardLive() != nil || plan.preparedState(claim.root, true) != nil {
 			return BrokerResult{}, errBroker
 		}
-		if j.append("controller_state_prepared", map[string]any{"receipt": receipt}) != nil || guard() != nil {
+		if j.append("controller_state_prepared", map[string]any{"receipt": receipt}) != nil || guardLive() != nil {
 			return BrokerResult{}, errBroker
 		}
 	}
 
 	// Every authenticated call revalidates the still-held durable claim.
-	scoped := newBrokerAPI(api.now, brokerGuardTransport{api.client.Transport, guard})
+	scoped := newBrokerAPI(api.now, brokerGuardTransport{api.client.Transport, guardLive})
 	api = scoped
 	// JWT identity verification precedes the one token mint. Private repository
 	// and runner-group APIs require that installation token, so scope preflight
@@ -159,6 +232,9 @@ func brokerExecute(parent context.Context, a BrokerApproval, input brokerInput, 
 	}
 	issued, err := api.mint(ctx, a, cred)
 	if err != nil {
+		return BrokerResult{}, errBroker
+	}
+	if a.Mode == "paired-terminal" && !issued.ExpiresAt.After(api.now().Add(pairedTerminalMinimumAuthority)) {
 		return BrokerResult{}, errBroker
 	}
 	tokenCtx, stopToken := context.WithDeadline(ctx, issued.ExpiresAt.Add(-time.Minute))
@@ -194,8 +270,14 @@ func brokerExecute(parent context.Context, a BrokerApproval, input brokerInput, 
 	if len(data) > 16384 || j.append("controller_handoff_started", nil) != nil {
 		return BrokerResult{}, errBroker
 	}
-	if (plan.controller.needsVerification() && api.verifyWorkflow(ctx, a, plan.controller, input.VerificationToken) != nil) || guard() != nil || plan.launch(ctx, data, filepath.Join(path, "controller-approval.json")) != nil || j.append("controller_completed", nil) != nil || claim.complete() != nil {
+	if (a.Mode == "paired-terminal" || plan.controller.needsVerification()) && api.verifyWorkflow(ctx, a, plan.controller, input.VerificationToken) != nil {
 		return BrokerResult{}, errBroker
+	}
+	if guardLive() != nil || plan.launch(ctx, data, filepath.Join(path, "controller-approval.json")) != nil || guardPostChild() != nil || j.append("controller_completed", nil) != nil || claim.complete() != nil || guardPostChild() != nil {
+		return BrokerResult{}, errBroker
+	}
+	if a.Mode == "paired-terminal" {
+		return BrokerResult{Status: "paired_terminal_completed"}, nil
 	}
 	return BrokerResult{Status: "controller_completed"}, nil
 }

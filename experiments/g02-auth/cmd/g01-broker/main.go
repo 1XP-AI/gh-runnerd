@@ -35,11 +35,13 @@ func run(ctx context.Context, args []string, input *os.File, out io.Writer) (cod
 	flags.StringVar(&files.ControllerBinary, "controller-binary", "", "")
 	flags.StringVar(&files.ControllerApproval, "controller-approval", "", "")
 	flags.StringVar(&files.ControllerStateDirectory, "controller-state-dir", "", "")
+	flags.StringVar(&files.WorkerApproval, "worker-approval", "", "")
+	flags.StringVar(&files.WorkerStateDirectory, "worker-state-dir", "", "")
 	if flags.Parse(args) != nil || flags.NArg() != 0 {
 		return reject()
 	}
 	if *plan && !*execute {
-		fmt.Fprintln(out, "Modes in the exact private approval: discover-actions-host or controller. Required fixed private native-account admission root and owner nonce; one permanently consumed issuance slot per approved phase, including one inspect and cleanup; temporary registration/admin authentication only in approved discovery; one hash-verified controller phase only in controller mode. No worker, App creation, workflow dispatch or persistent credentials. Live execution requires separate explicit authorization.")
+		fmt.Fprintln(out, "Modes in the exact private approval: discover-actions-host, controller, or paired-terminal. Paired-terminal uses one fixed g01-live executable invocation with explicit worker approval/state inputs and one bounded controller credential stdin; no worker subprocess, App creation, workflow dispatch or persistent credentials. Required fixed private native-account admission root and owner nonce; one permanently consumed issuance slot per approved mode/phase. Live execution requires separate explicit authorization.")
 		return 0
 	}
 	if !*execute || *plan || files.ApprovalPath == "" || files.StateDirectory == "" {

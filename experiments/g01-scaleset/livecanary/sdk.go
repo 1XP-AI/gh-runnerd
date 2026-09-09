@@ -26,14 +26,15 @@ import (
 // Preflight independently proves installation-token use, repository scope and
 // current target policy. It cannot independently prove broker provenance.
 type Credentials struct {
-	InstallationToken string    `json:"installation_token"`
-	VerificationToken string    `json:"verification_token"`
-	AppID             int64     `json:"app_id"`
-	InstallationID    int64     `json:"installation_id"`
-	Organization      string    `json:"organization"`
-	ExpiresAt         time.Time `json:"expires_at"`
-	SelfHostedRunners string    `json:"organization_self_hosted_runners"`
-	Metadata          string    `json:"metadata"`
+	InstallationToken string                 `json:"installation_token"`
+	VerificationToken string                 `json:"verification_token"`
+	AppID             int64                  `json:"app_id"`
+	InstallationID    int64                  `json:"installation_id"`
+	Organization      string                 `json:"organization"`
+	ExpiresAt         time.Time              `json:"expires_at"`
+	SelfHostedRunners string                 `json:"organization_self_hosted_runners"`
+	Metadata          string                 `json:"metadata"`
+	PairedBinding     *PairedTerminalBinding `json:"paired_binding,omitempty"`
 }
 
 func (c Credentials) validate(a Approval, now time.Time) error {

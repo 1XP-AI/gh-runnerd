@@ -22,7 +22,20 @@ func brokerAdmissionDirectory() (string, error) {
 	}
 	return brokerDirectoryForAccount(user.LookupId)
 }
-func brokerDirectoryForAccount(lookup func(string) (*user.User, error)) (string, error) {
+
+func workerAdmissionDirectory() (string, error) {
+	if !brokerNativeAccountLookup {
+		return "", errBroker
+	}
+	return workerDirectoryForAccount(user.LookupId)
+}
+
+// resolveWorkerClaimDirectory is the trusted worker admission root. Production
+// uses the native-account pin. Offline tests may replace it; production never
+// searches fixture siblings or other candidate paths for a matching inode.
+var resolveWorkerClaimDirectory = workerAdmissionDirectory
+
+func brokerHomeDir(lookup func(string) (*user.User, error)) (string, error) {
 	if lookup == nil {
 		return "", errBroker
 	}
@@ -36,7 +49,23 @@ func brokerDirectoryForAccount(lookup func(string) (*user.User, error)) (string,
 	if e != nil || ie != nil || real != u.HomeDir || !brokerOwnedDirectory(info, false) {
 		return "", errBroker
 	}
-	return filepath.Join(u.HomeDir, ".gh-runnerd-g01-experiment"), nil
+	return u.HomeDir, nil
+}
+
+func brokerDirectoryForAccount(lookup func(string) (*user.User, error)) (string, error) {
+	home, err := brokerHomeDir(lookup)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".gh-runnerd-g01-experiment"), nil
+}
+
+func workerDirectoryForAccount(lookup func(string) (*user.User, error)) (string, error) {
+	home, err := brokerHomeDir(lookup)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".gh-runnerd-g01-worker-experiment"), nil
 }
 func brokerOwnedDirectory(i os.FileInfo, private bool) bool {
 	if i == nil || !i.IsDir() || i.Mode().Perm()&0022 != 0 || (private && i.Mode().Perm() != 0700) {
@@ -46,8 +75,9 @@ func brokerOwnedDirectory(i os.FileInfo, private bool) bool {
 	return ok && int(s.Uid) == os.Geteuid()
 }
 
-// Nine slots, at most one claim and completion each. Each stored controller
-// authority is bounded by the 16 KiB input contract; allow all finite slots.
+// The finite slot schema has eight controller phases plus discovery and paired
+// terminal. Each stored controller authority is bounded by the 16 KiB input
+// contract; allow one claim and completion for every schema slot.
 const maxBrokerLedgerBytes = 512 << 10
 
 type brokerInode struct {
@@ -80,6 +110,11 @@ type brokerControllerBinding struct {
 	Harness   string      `json:"harness"`
 	State     brokerInode `json:"state"`
 }
+type brokerWorkerBinding struct {
+	Approval     string      `json:"approval"`
+	ApprovalFile brokerInode `json:"approval_file"`
+	State        brokerInode `json:"state"`
+}
 type brokerControllerAuthority struct {
 	Digest   string             `json:"digest"`
 	Approval controllerApproval `json:"approval"`
@@ -91,6 +126,7 @@ type brokerClaimEvent struct {
 	Attempt        brokerInode                `json:"attempt"`
 	Journal        brokerInode                `json:"journal"`
 	Controller     *brokerControllerBinding   `json:"controller,omitempty"`
+	Worker         *brokerWorkerBinding       `json:"worker,omitempty"`
 	Authority      *brokerControllerAuthority `json:"authority,omitempty"`
 	Snapshot       brokerInode                `json:"snapshot"`
 	SnapshotDigest string                     `json:"snapshot_digest,omitempty"`
@@ -248,7 +284,7 @@ func openBrokerAdmission(directory string, a BrokerApproval, j *brokerJournal, p
 		return nil, errBroker
 	}
 	lines := bytes.Split(c.data, []byte{'\n'})
-	if len(lines) < 2 || len(lines) > 20 || len(lines[len(lines)-1]) != 0 {
+	if len(lines) < 2 || len(lines) > brokerLedgerMaxLines() || len(lines[len(lines)-1]) != 0 {
 		return nil, errBroker
 	}
 	var header brokerLedgerHeader
@@ -258,6 +294,7 @@ func openBrokerAdmission(directory string, a BrokerApproval, j *brokerJournal, p
 	slots := map[string]brokerClaimEvent{}
 	done := map[string]bool{}
 	var binding *brokerControllerBinding
+	var workerBinding *brokerWorkerBinding
 	var authority *brokerControllerAuthority
 	latestSlot := ""
 	for _, line := range lines[1 : len(lines)-1] {
@@ -268,7 +305,7 @@ func openBrokerAdmission(directory string, a BrokerApproval, j *brokerJournal, p
 		switch event.Kind {
 		case "claim":
 			for previous, receipt := range slots {
-				if (!done[previous] && event.Slot != "inspect" && event.Slot != "cleanup") || receipt.Attempt == event.Attempt || receipt.Journal == event.Journal || (event.Controller != nil && receipt.Controller != nil && receipt.Snapshot == event.Snapshot) {
+				if (!done[previous] && event.Slot != "inspect" && event.Slot != "cleanup") || receipt.Attempt == event.Attempt || receipt.Journal == event.Journal || (event.Controller != nil && receipt.Controller != nil && receipt.Snapshot == event.Snapshot) || (event.Worker != nil && receipt.Worker != nil && receipt.Worker.State == event.Worker.State) {
 					return nil, errBroker
 				}
 			}
@@ -287,6 +324,12 @@ func openBrokerAdmission(directory string, a BrokerApproval, j *brokerJournal, p
 					return nil, errBroker
 				}
 				binding = event.Controller
+				if event.Worker != nil {
+					if workerBinding != nil && *workerBinding != *event.Worker {
+						return nil, errBroker
+					}
+					workerBinding = event.Worker
+				}
 				authority = event.Authority
 			}
 			slots[event.Slot] = event
@@ -304,6 +347,8 @@ func openBrokerAdmission(directory string, a BrokerApproval, j *brokerJournal, p
 	slot := a.Phase
 	if a.Mode == "discover-actions-host" {
 		slot = a.Mode
+	} else if a.Mode == "paired-terminal" {
+		slot = "paired-terminal"
 	}
 	if _, ok := slots[slot]; ok {
 		return nil, errBroker
@@ -332,6 +377,15 @@ func openBrokerAdmission(directory string, a BrokerApproval, j *brokerJournal, p
 		c.event.Authority = &next
 		c.event.Snapshot = brokerFileIdentity(p.snapshotInfo)
 		c.event.SnapshotDigest = a.ControllerApprovalSHA256
+		if p.worker != nil {
+			worker, e := p.worker.binding()
+			if e != nil || (workerBinding != nil && *workerBinding != worker) {
+				return nil, errBroker
+			}
+			c.event.Worker = &worker
+		} else if a.Mode == "paired-terminal" {
+			return nil, errBroker
+		}
 	} else if a.Mode == "controller" {
 		return nil, errBroker
 	}
@@ -366,21 +420,46 @@ func validBrokerClaimEvent(a BrokerApproval, e brokerClaimEvent) bool {
 		return false
 	}
 	if e.Slot == "discover-actions-host" {
-		return e.Controller == nil && e.Authority == nil && e.Snapshot == (brokerInode{}) && e.SnapshotDigest == ""
+		return e.Controller == nil && e.Worker == nil && e.Authority == nil && e.Snapshot == (brokerInode{}) && e.SnapshotDigest == ""
 	}
-	if !brokerPhases[e.Slot] || e.Controller == nil || e.Authority == nil || e.Controller.State.Inode == 0 || e.Snapshot.Inode == 0 || !brokerSHA256.MatchString(e.SnapshotDigest) || !brokerSHA256.MatchString(e.Controller.Ownership) || !brokerSHA256.MatchString(e.Controller.Binary) || !brokerSHA40.MatchString(e.Controller.Harness) {
+	paired := e.Slot == "paired-terminal"
+	if !brokerSlotAllowed(e.Slot) || e.Slot == "discover-actions-host" || (paired && e.Slot != "paired-terminal") || e.Controller == nil || e.Authority == nil || e.Controller.State.Inode == 0 || e.Snapshot.Inode == 0 || !brokerSHA256.MatchString(e.SnapshotDigest) || !brokerSHA256.MatchString(e.Controller.Ownership) || !brokerSHA256.MatchString(e.Controller.Binary) || !brokerSHA40.MatchString(e.Controller.Harness) {
+		return false
+	}
+	if paired {
+		if e.Worker == nil || !brokerSHA256.MatchString(e.Worker.Approval) || e.Worker.ApprovalFile.Device == 0 || e.Worker.ApprovalFile.Inode == 0 || e.Worker.State.Device == 0 || e.Worker.State.Inode == 0 {
+			return false
+		}
+	} else if e.Worker != nil {
 		return false
 	}
 	c := e.Authority.Approval
 	if c.ExpiresAt.IsZero() || e.Authority.Digest != brokerDigest(c) {
 		return false
 	}
-	a.Mode = "controller"
-	a.Phase = e.Slot
-	a.ExpiresAt = c.ExpiresAt
-	a.ControllerHarnessSHA = e.Controller.Harness
-	a.AllowVerificationAuthority = c.needsVerification()
-	if c.validate(a, c.ExpiresAt.Add(-2*time.Minute)) != nil {
+	// Validate a historical event against the mode and slot it records. The
+	// current request may be reciprocal (for example, a paired retry after a
+	// controller create, or an inspect/cleanup after a failed paired claim), so
+	// using its mode here would incorrectly turn current authority into a
+	// prerequisite for replaying old ledger records.
+	eventApproval := a
+	if paired {
+		eventApproval.Mode = "paired-terminal"
+	} else {
+		eventApproval.Mode = "controller"
+	}
+	eventApproval.Phase = e.Slot
+	eventApproval.ExpiresAt = c.ExpiresAt
+	eventApproval.ControllerHarnessSHA = e.Controller.Harness
+	eventApproval.AllowVerificationAuthority = c.needsVerification()
+	validationNow := c.ExpiresAt.Add(-2 * time.Minute)
+	if paired {
+		// Paired approvals reserve a two-minute completion budget. Validate the
+		// historical authority at a point before that budget, rather than at the
+		// exact expiry boundary where the current-mode minimum would fail.
+		validationNow = c.ExpiresAt.Add(-pairedTerminalMinimumAuthority - time.Second)
+	}
+	if c.validate(eventApproval, validationNow) != nil {
 		return false
 	}
 	c.ExpiresAt = time.Time{}

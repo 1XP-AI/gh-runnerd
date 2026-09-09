@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/livecanary"
+	"github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/liveworker"
 )
 
 func buildRevision() (string, bool) {
@@ -40,6 +41,16 @@ func buildRevision() (string, bool) {
 	return version, clean && sdk && len(version) == 40
 }
 
+var openJournalForCommand = livecanary.OpenJournal
+var pairedPrepareJournalForCommand = livecanary.PreparePairedJournal
+var prepareWorkerJournalForCommand = liveworker.PrepareJournal
+var newSDKAPIForCommand = func(a livecanary.Approval, c livecanary.Credentials, _ string) (*livecanary.SDKAPI, error) {
+	return livecanary.NewSDKAPI(a, c)
+}
+var runPairedTerminalForCommand = func(ctx context.Context, files livecanary.PairedTerminalFiles, c livecanary.Credentials) error {
+	return livecanary.RunPairedTerminal(ctx, files, c)
+}
+
 func run(args []string, in io.Reader, out io.Writer) int {
 	return runWithPreparation(args, in, out, buildRevision, livecanary.PrepareJournal)
 }
@@ -56,10 +67,16 @@ func runWithPreparation(args []string, in io.Reader, out io.Writer, revisionForB
 	flags.SetOutput(io.Discard)
 	plan := flags.Bool("plan", false, "")
 	execute := flags.Bool("execute-approved-canary", false, "")
+	pairedExecute := flags.Bool("execute-approved-paired-terminal", false, "")
 	prepare := flags.Bool("prepare-approved-journal", false, "")
+	pairedPrepare := flags.Bool("prepare-approved-paired-journal", false, "")
+	prepareWorker := flags.Bool("prepare-approved-paired-worker-journal", false, "")
 	approvalPath := flags.String("approval", "", "")
 	statePath := flags.String("state-dir", "", "")
 	phase := flags.String("phase", "", "")
+	workerApprovalPath := flags.String("worker-approval", "", "")
+	workerStatePath := flags.String("worker-state-dir", "", "")
+	pairedBinding := flags.String("paired-binding", "", "")
 	reject := func() int {
 		fmt.Fprintln(out, "canary refused; approval, authority or private state requires review")
 		return 1
@@ -67,20 +84,89 @@ func runWithPreparation(args []string, in io.Reader, out io.Writer, revisionForB
 	if flags.Parse(args) != nil || flags.NArg() != 0 {
 		return reject()
 	}
-	if *plan && !*execute && !*prepare {
-		fmt.Fprintln(out, "Controller-only phases: create, before-ack, after-ack, before-acquire, acquire-loss, jit-loss, inspect, cleanup. No worker launch or workflow dispatch. Live execution requires an immutable reviewed build, exact private approval and controller-side broker input.")
+	workerInputs := *workerApprovalPath != "" || *workerStatePath != ""
+	if *plan && !*execute && !*pairedExecute && !*prepare && !*pairedPrepare && !*prepareWorker {
+		if *approvalPath != "" || *statePath != "" || *phase != "" || workerInputs || *pairedBinding != "" {
+			return reject()
+		}
+		fmt.Fprintln(out, "Controller-only phases: create, before-ack, after-ack, before-acquire, acquire-loss, jit-loss, inspect, cleanup. Paired terminal mode uses one same-process executable with explicit worker approval/state inputs and fixed terminal sequencing; no worker launch or workflow dispatch. Live execution requires an immutable reviewed build, exact private approval and controller-side broker input.")
 		return 0
 	}
-	if (*execute == *prepare) || *plan || *approvalPath == "" || *statePath == "" || *phase == "" {
+	modeCount := 0
+	if *execute {
+		modeCount++
+	}
+	if *pairedExecute {
+		modeCount++
+	}
+	if *prepare {
+		modeCount++
+	}
+	if *pairedPrepare {
+		modeCount++
+	}
+	if *prepareWorker {
+		modeCount++
+	}
+	if modeCount != 1 || *plan || *approvalPath == "" || *statePath == "" {
 		return reject()
 	}
+	if *prepareWorker {
+		if *phase != "" || workerInputs || *pairedBinding != "" || prepareWorkerJournalForCommand == nil {
+			return reject()
+		}
+	} else if *pairedExecute {
+		if *phase != "" || *workerApprovalPath == "" || *workerStatePath == "" || *pairedBinding == "" {
+			return reject()
+		}
+	} else if *pairedPrepare {
+		if *phase != "" || workerInputs || *pairedBinding != "" {
+			return reject()
+		}
+	} else if *phase == "" || workerInputs || *pairedBinding != "" {
+		return reject()
+	}
+	if *prepareWorker {
+		worker, workerErr := liveworker.ReadApproval(*approvalPath)
+		if workerErr != nil || worker.Validate(time.Now()) != nil {
+			return reject()
+		}
+		revision, ok := revisionForBuild()
+		if !ok || revision != worker.HarnessSHA {
+			return reject()
+		}
+		receipt, preparationErr := prepareWorkerJournalForCommand(*statePath, worker)
+		if preparationErr != nil || json.NewEncoder(out).Encode(receipt) != nil {
+			return reject()
+		}
+		return 0
+	}
 	a, err := livecanary.ReadApproval(*approvalPath)
-	if err != nil || a.Validate(time.Now()) != nil || !slices.Contains(a.Phases, *phase) {
+	if err != nil || a.Validate(time.Now()) != nil || (!*pairedExecute && !*pairedPrepare && !slices.Contains(a.Phases, *phase)) {
 		return reject()
 	}
 	revision, ok := revisionForBuild()
 	if !ok || revision != a.HarnessSHA {
 		return reject()
+	}
+	var worker liveworker.Approval
+	var binding livecanary.PairedTerminalBinding
+	if *pairedExecute {
+		var workerErr error
+		worker, workerErr = liveworker.ReadApproval(*workerApprovalPath)
+		if workerErr != nil || livecanary.ValidatePairedApprovals(a, worker) != nil || livecanary.ValidatePairedStatePaths(*statePath, *workerStatePath) != nil {
+			return reject()
+		}
+		if livecanary.DecodeStrict([]byte(*pairedBinding), &binding) != nil || livecanary.ValidatePairedTerminalBinding(livecanary.PairedTerminalFiles{ControllerApprovalPath: *approvalPath, ControllerStateDirectory: *statePath, WorkerApprovalPath: *workerApprovalPath, WorkerStateDirectory: *workerStatePath}, binding) != nil {
+			return reject()
+		}
+	}
+	if *pairedPrepare {
+		receipt, e := pairedPrepareJournalForCommand(*statePath, a)
+		if e != nil || json.NewEncoder(out).Encode(receipt) != nil {
+			return reject()
+		}
+		return 0
 	}
 	if *prepare {
 		if prepareJournal == nil {
@@ -95,11 +181,14 @@ func runWithPreparation(args []string, in io.Reader, out io.Writer, revisionForB
 		}
 		return 0
 	}
-	j, err := livecanary.OpenJournal(*statePath, a)
-	if err != nil {
-		return reject()
+	var j *livecanary.FileJournal
+	if !*pairedExecute {
+		j, err = openJournalForCommand(*statePath, a)
+		if err != nil {
+			return reject()
+		}
+		defer j.Close()
 	}
-	defer j.Close()
 	closable, ok := in.(io.ReadCloser)
 	if !ok {
 		return reject()
@@ -119,7 +208,18 @@ func runWithPreparation(args []string, in io.Reader, out io.Writer, revisionForB
 	if livecanary.DecodeStrict(data, &credentials) != nil {
 		return reject()
 	}
-	api, err := livecanary.NewSDKAPI(a, credentials)
+	if *pairedExecute {
+		if credentials.PairedBinding == nil || *credentials.PairedBinding != binding {
+			return reject()
+		}
+		if runPairedTerminalForCommand(context.Background(), livecanary.PairedTerminalFiles{ControllerApprovalPath: *approvalPath, ControllerStateDirectory: *statePath, WorkerApprovalPath: *workerApprovalPath, WorkerStateDirectory: *workerStatePath}, credentials) != nil {
+			fmt.Fprintln(out, "paired terminal stopped; retain private state and all uncertain resources; no automatic retry")
+			return 1
+		}
+		fmt.Fprintln(out, "paired terminal completed; inspect private evidence")
+		return 0
+	}
+	api, err := newSDKAPIForCommand(a, credentials, *statePath)
 	if err != nil {
 		return reject()
 	}

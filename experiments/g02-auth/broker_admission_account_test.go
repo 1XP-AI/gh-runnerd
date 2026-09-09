@@ -36,6 +36,10 @@ func TestBrokerAccountRootIgnoresEnvironmentAndFailsClosed(t *testing.T) {
 	if e != nil || got != filepath.Join(home, ".gh-runnerd-g01-experiment") {
 		t.Fatal("account root changed with environment")
 	}
+	worker, workerErr := workerDirectoryForAccount(lookup)
+	if workerErr != nil || worker != filepath.Join(home, ".gh-runnerd-g01-worker-experiment") {
+		t.Fatal("worker account root changed with environment")
+	}
 	for _, kind := range []string{"missing", "relative", "wrong uid", "symlink"} {
 		t.Run(kind, func(t *testing.T) {
 			_, e := brokerDirectoryForAccount(func(string) (*user.User, error) {

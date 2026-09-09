@@ -54,6 +54,34 @@ func TestPrivateJournalLocksAndRetainsReservationAcrossRestart(t *testing.T) {
 	}
 }
 
+func TestWorkerPreparationReturnsCanonicalSnapshotAndRejectsPriorEffect(t *testing.T) {
+	dir := privateDir(t)
+	a := approval()
+	open := func(path string, approval Approval) (*FileJournal, error) {
+		return openTestJournal(t, path, approval)
+	}
+	receipt, err := prepareJournal(dir, a, open)
+	if err != nil {
+		t.Fatal("fresh worker preparation refused", err)
+	}
+	if receipt.Version != 1 || receipt.Status != "worker_journal_prepared" || receipt.Phase != "paired-worker" || receipt.ApprovalDigest != approvalDigest(a) || receipt.State.Inode == 0 || receipt.Journal.Inode == 0 || receipt.Claim.Inode == 0 || receipt.AdmissionDirectory.Inode == 0 || !id.MatchString(receipt.JournalDigest) || !id.MatchString(receipt.ClaimDigest) {
+		t.Fatalf("incomplete worker preparation receipt: %+v", receipt)
+	}
+	j, err := openTestJournal(t, dir, a)
+	if err != nil {
+		t.Fatal("reopen prepared worker journal", err)
+	}
+	if err := j.Append(Event{Kind: "intent", Operation: "create"}); err != nil {
+		t.Fatal("persist prior worker intent", err)
+	}
+	if err := j.Close(); err != nil {
+		t.Fatal("close prior worker journal", err)
+	}
+	if _, err := prepareJournal(dir, a, open); err == nil {
+		t.Fatal("worker preparation adopted prior effect")
+	}
+}
+
 func TestJournalRejectsChangedApprovalTornTailAndUnsafeFiles(t *testing.T) {
 	for _, fault := range []string{"endpoint", "daemon", "image", "workflow", "tail", "symlink", "hardlink", "mode"} {
 		t.Run(fault, func(t *testing.T) {

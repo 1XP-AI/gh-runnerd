@@ -12,6 +12,16 @@ through Go's environment, rather than placed before its subcommand.
 
 The public workflow runs on a GitHub-hosted `ubuntu-24.04` environment for `pull_request` and pushes to `main`. It grants only `contents: read`, disables checkout credential persistence, and pins every external action to a reviewed commit. It does not use `pull_request_target`, self-hosted runners, secrets, Docker, the local runner manager or any privileged hardware. A fork can therefore run the same checks without access to organization credentials or local runners.
 
+The hosted workflow keeps the required public check name `Go checks` as a
+status aggregator over three bounded jobs: `Root and tooling checks` runs the
+root Make checks through `make licenses`, `Offline experiment checks` runs
+`make experiments`, and `Vulnerability check` runs `make vuln`. Every
+test-bearing job has its own 15-minute cap, the same pinned checkout/setup-go
+actions, an explicit immutable pull-request head ref, and setup-go caching
+disabled. The aggregator uses `always()` so a failed, cancelled, or skipped
+required job is observed, then fails unless all three dependency results are
+exactly `success`; it does not check out source or run a test itself.
+
 Run the same checks locally with:
 
 ```console
@@ -31,26 +41,57 @@ Individual commands are available when iterating:
 | `make fuzz-smoke` | Run each discovered fuzz target for a fixed one-second smoke window, or print an explicit `SKIPPED` result when no target exists. |
 | `make deps` | Require a clean `go mod tidy -diff`, verified module sums and a read-only dependency load. |
 | `make licenses` | Compare the exact runtime module/version/replacement graph with its inventory and require a top-level license file. |
-| `make experiments` | Require both established G01/G02 modules, run their default race/vet suites, then exercise the two explicitly reviewed G01 CLI packages with `g01_live,g01_worker` tags and the reviewed `g01_pair_fixture` livecanary collection/listener and terminal partitions with tagged vet. |
+| `make experiments` | Require both established G01/G02 modules, run their static-partitioned default race/vet suites, then exercise the two explicitly reviewed G01 CLI packages with `g01_live,g01_worker` tags and the reviewed `g01_pair_fixture` livecanary collection/listener and terminal partitions with tagged vet. |
 | `make vuln` | Run the exact `golang.org/x/vuln/cmd/govulncheck@v1.7.0` tool. |
 
 No hardware, live GitHub, Docker or daemon suite is part of this public check. Those profiles remain explicit future or maintainer-controlled runs; they are not silently converted into passing tests here. G04 introduces the first application behavior contracts and should add meaningful unit and fuzz targets before claiming those forms of coverage.
 
-The default untagged G01 race suite keeps its existing 45-second per-process
-deadline while using two sequential, static partitions. The first runs the exact
-`TestBaselineStatisticsPresenceAndEligibility` name through `./...`; the second
-runs an unfiltered `./...` with only that exact name skipped. Keeping package
-discovery in both commands means a same-named test in another package is run in
-the first partition rather than silently dropped by a global skip, while the
-unfiltered remainder still executes every ordinary test, Example Output and fuzz
-seed. G02 retains its single default race invocation.
+The default untagged G01 and G02 race suites keep their existing 45-second
+per-process deadline. G01 uses two sequential static partitions: the exact
+`TestBaselineStatisticsPresenceAndEligibility` name through `./...`, then an
+unfiltered `./...` with only that exact name skipped. G02 uses four sequential
+static partitions, all with `-race -count=1 -timeout=45s` and `./...` package
+discovery: the exact `TestPairedBrokerPrepareReviewedG01LiveBinary` fixture
+clone/build of the distinct `g01_live,g01_pair_fixture` and
+`g01_live,g01_pair_fixture,g01_pair_real_cadence` tagged variants; the exact
+`TestPairedBrokerRealCadenceChildExceedsThirtySeconds` name; the remaining
+`^TestPaired` family with those exact prep and cadence names skipped; and an
+unfiltered complement that skips `^TestPaired`. The default gate exports an
+owned `G01_PAIR_BRIDGE_PREP_DIR` and refuses missing or invalid prepared
+receipts instead of rebuilding inside the cadence process. Standalone
+clone/build remains only when that variable is unset. Cleanup of that owned
+mktemp path is registered immediately after `mktemp` and before `chmod`. An
+EXIT trap removes only that path and does not exit from the handler, so
+success and command-failure status are preserved. Explicit INT, TERM, and
+HUP traps remove the same owned path, disarm EXIT, and exit 130, 143, or
+129. Keeping package discovery in every command means
+a same-named test in another package is run in the matching named partition
+rather than silently dropped by a global skip, while the unfiltered G02
+complement still executes every ordinary non-paired test, Example Output and
+fuzz seed. No widened named-test timeout is part of the public contract. The
+production seven-times-five-second wait stays inside the cadence partition;
+clone/build is a separate bounded process.
+
+The tooling regression matrix generates positive and independent failing
+witnesses for each G02 partition boundary: the named fixture-prep test, the
+named cadence test, the remaining `TestPaired` family, remainder, another
+package, a same-name prep test in another package, a same-name cadence test in
+another package, a same-name remaining `TestPaired` test in another package, an
+Example Output and a fuzz seed. Each witness must execute exactly once, and
+each failing witness must propagate a nonzero offline-gate result. Owned G02
+prep cleanup is covered by success, `exit 91`, ordinary prep failure, and
+generated-fixture SIGTERM/SIGINT/SIGHUP cases that assert status 0, 91, 143,
+130, or 129 and remove only that mktemp directory.
 
 The tagged CLI tests use synthetic input/subprocess fixtures and static plan or
 refusal paths. The `g01_pair_fixture` livecanary checks use private synthetic
 fixtures: one paired-collection run selects `^TestPaired` while excluding
-`^TestPairedTerminal`, one remaining collection/listener run has no `-run`
-filter while excluding `^TestPaired`, one terminal run selects that prefix while
-skipping the reviewed persistence set, and a fourth run selects the exact
+`^TestPairedTerminal`; one remaining collection/listener run has no `-run`
+filter while excluding `^TestPaired`; one heavy terminal run selects the exact
+five names
+`^TestPairedTerminal(FinalResultCapacity|PendingChildCapacity|EligibilityUsesFreshExactFacts|CapturedAcknowledgementCancellation|MissingAcknowledgementsAndPostchecks)$`;
+one complementary remainder selects `^TestPairedTerminal` while skipping those
+five names and the persistence set; and a fifth run selects the exact
 persistence set
 `^TestPairedTerminal(Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$`.
 `FixtureStorageFailure` is the unique generated sentinel from
@@ -59,9 +100,11 @@ persistence set
 script's `storage_regex` value and is also the `STORAGE` alias in issue #54.
 The two collection/listener partitions are explicit and disjoint: every
 non-terminal `TestPaired*` test is in the first, and every other test, example or
-fuzz seed is in the second. The unfiltered second command preserves Go's normal
-execution of tagged examples and fuzz seeds. One tagged vet follows those four
-race-tested runs. None of these tagged checks
+fuzz seed is in the second. The three terminal partitions are likewise
+exhaustive and disjoint for current `TestPairedTerminal` names, and a future
+top-level terminal name lands in the remainder. The unfiltered second command
+preserves Go's normal execution of tagged examples and fuzz seeds. One tagged
+vet follows those five race-tested runs. None of these tagged checks
 executes approved live controller/worker operations or exposes a public terminal
 phase/API. The implementation and evidence boundaries are recorded in the
 [G01 paired terminal guide](evidence/g01-paired-terminal.md). The script permits
