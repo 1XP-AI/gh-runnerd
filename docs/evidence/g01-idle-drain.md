@@ -697,6 +697,97 @@ reset, erase, replay or run live cleanup. Historical
 evidence section contains no personal machine paths or raw secret-bearing
 payloads.
 
+### Exact-head follow-up: SDK drain response and transport boundary closure
+
+The four latest exact-head Codex P1 findings were read from the PR review
+record with `gh` against the immutable baseline
+`9904048a8250f2445f5fee4c2141b3f9f1642e3a` (the local review wrapper was not
+present, so the equivalent `gh api` detail/all reads were used):
+
+```text
+gh api --paginate repos/1XP-AI/gh-runnerd/pulls/72/comments --jq '.[] | [.id,.path,.line,.html_url] | @tsv'
+gh api repos/1XP-AI/gh-runnerd/pulls/comments/3973406578 --jq '{html_url,path,line,body}'
+gh api repos/1XP-AI/gh-runnerd/pulls/comments/3973406571 --jq '{html_url,path,line,body}'
+gh api repos/1XP-AI/gh-runnerd/pulls/comments/3973406564 --jq '{html_url,path,line,body}'
+gh api repos/1XP-AI/gh-runnerd/pulls/comments/3973406553 --jq '{html_url,path,line,body}'
+gh api --paginate repos/1XP-AI/gh-runnerd/issues/72/comments --jq '.[] | [.id,.html_url] | @tsv'
+```
+
+The findings are [non-EOF poll read error](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3973406578), [ACK physical DELETE binding](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3973406571), [runner snapshot decoding](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3973406564), and [session-open decoding](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3973406553). The historical TDD exception remains only the original [Issue #71 authorization](https://github.com/1XP-AI/gh-runnerd/issues/71#issuecomment-5603758575); it does not waive this follow-up or any future correction.
+
+Meaningful red regressions were added and run before implementation against
+the real pinned `github.com/actions/scaleset v0.4.0` loopback fixture:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run 'TestPinnedSDKDrainRejectsNonEOFPollReadError|TestPinnedSDKDrainBindsACKToPhysicalDelete|TestPinnedSDKDrainRejectsAmbiguousRunnerSnapshot|TestPinnedSDKDrainRejectsAmbiguousSessionResponse' -count=1 -v
+```
+
+The command exited 1 as intended. The old code reported known poll facts after
+a complete JSON body followed by a non-EOF read error; accepted a mutated ACK
+DELETE; accepted duplicate runner-set identity; and accepted duplicate session
+identity/queue fields. The red assertions exercised the pinned SDK and loopback
+wire path, used effect counters where applicable, and did not disclose private
+response values.
+
+The minimal source/test correction is commit
+`19f53d4e7af9578c7719c7897aa032124df6df6b`. `drainObservedBody` now records a
+non-EOF read failure and clears all derived facts, so a lossy SDK success cannot
+promote the response to known. The existing bounded `baselineWireCapture`
+adapter is reused for session-open and ACK; session-open validates canonical
+session identity, owner, nested set, complete statistics, and exact ephemeral
+queue URL before assigning the poll hook, while ACK requires one exact physical
+`DELETE` for the captured queue and message ID with status 204. A runner
+equivalent uses the same strict duplicate-key decoder and compares the bounded
+count/value identity to the pinned SDK result; an ambiguous runner or session
+response is rejected before downstream effects, and a failed session-open
+leaves the created remote session unclosed for quarantine inspection.
+
+The complete evidence-bearing drain inventory is now:
+
+| Boundary | Bounded evidence and gate |
+| --- | --- |
+| Before/after scale-set snapshot | `set-observe` strict bounded identity, labels, update fence, statistics, status 200, and SDK comparison. |
+| Before/after runner lookup | `runner-observe` strict count/value (`nil` only for an exact empty list) and exact ID/name/scale-set comparison. |
+| Session creation | `session-open` strict identity, nested set/statistics and queue URL comparison; queue URL and token are ephemeral and never journaled. |
+| Old and withdrawn polls | Exact queue target, cursor, capacity and physical-write ordinal; bounded body/statistics/job facts; non-EOF body errors remain unknown. |
+| VerifyRun | Existing strict bounded REST reader rejects read errors, duplicate keys and mismatched approved run fields before effects. |
+| ACK | Exact captured queue plus message ID, one physical DELETE and status 204 before recording success. |
+| Acquisition | Existing strict bounded `acquire` reader compares the one-shot request, status 200, count and IDs. |
+| Session close | SDK close remains a status-only 204 effect; the response-budget transport blocks refresh PATCH, and no response body is decoded or persisted. |
+
+No remaining SDK lossy JSON decode or transport read-error bypass was found in
+the evidence-bearing set, runner, session, poll, VerifyRun or acquisition
+boundaries. The session-close response carries no evidence-bearing body and is
+not used to infer drain state; production persistence/reconciliation remains
+out of scope. Unknown poll/session/ACK states retain the existing journal
+reservation and quarantine markers, including when a remote session was
+created before the uncertainty was discovered; ACK-before-acquisition remains
+unchanged. Prior six P1 corrections and replay/ordinal fixes remain in place.
+
+Green verification was:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run 'TestPinnedSDKDrainRejectsNonEOFPollReadError|TestPinnedSDKDrainBindsACKToPhysicalDelete|TestPinnedSDKDrainRejectsAmbiguousRunnerSnapshot|TestPinnedSDKDrainRejectsAmbiguousSessionResponse' -count=1 -v
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^(TestPinnedSDKDrain|TestDriverDrainThroughPinnedSDKAndPollHook|TestDrain|TestSecurityReview.*Drain|TestReplay.*Drain|TestFileJournal.*Drain)' -count=1 -v -timeout=180s
+GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -run '^(TestPinnedSDKDrain|TestDriverDrainThroughPinnedSDKAndPollHook|TestDrain|TestSecurityReview.*Drain|TestReplay.*Drain|TestFileJournal.*Drain)' -count=1 -timeout=180s
+GOTOOLCHAIN=go1.26.8 go vet ./livecanary
+cd ../..
+bash scripts/gofmt.sh check
+git diff --check
+bash scripts/check-offline-experiments.sh
+```
+
+All commands passed: the four pinned-SDK regressions, wider normal suite,
+wider race suite, vet, formatting, diff check, and both-module offline gate.
+The tests used only bounded loopback fixtures; no live GitHub workflow,
+runner, App credential, Keychain, launchd, Docker/Lima or cleanup operation was
+performed. Rollback is a focused normal `git revert --no-edit
+19f53d4e7af9578c7719c7897aa032124df6df6b` plus a separate revert of this
+documentation append if needed; retain any journal, reservation and
+uncertainty for inspection, and never reset, erase, replay or run live cleanup.
+
 ## Remaining gate and rollback
 
 The live G01 gate remains unresolved until a separately authorized run uses an
