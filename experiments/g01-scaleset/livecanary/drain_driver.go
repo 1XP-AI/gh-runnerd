@@ -151,13 +151,13 @@ func (d *Driver) drainSnapshot(ctx context.Context, setID int, stage string) (dr
 			return Event{}, err
 		}
 		if runner == nil {
-			return Event{DrainSnapshot: &snapshot}, nil
+			return Event{DrainSnapshot: &snapshot, DrainSnapshotStage: stage}, nil
 		}
 		if runner.ID <= 0 || runner.Name != d.Approval.workerName() || runner.RunnerScaleSetID != setID {
-			return Event{DrainSnapshot: &snapshot, Work: workUnresolved}, nil
+			return Event{DrainSnapshot: &snapshot, DrainSnapshotStage: stage, Work: workUnresolved}, nil
 		}
 		snapshot.Runner = &drainRunnerIdentity{ID: runner.ID, Name: runner.Name, ScaleSetID: runner.RunnerScaleSetID}
-		return Event{ID: runner.ID, DrainSnapshot: &snapshot}, nil
+		return Event{ID: runner.ID, DrainSnapshot: &snapshot, DrainSnapshotStage: stage}, nil
 	}); err != nil {
 		return drainSnapshot{}, err
 	}
@@ -196,7 +196,7 @@ func (d *Driver) drain(ctx context.Context, setID int) error {
 	if !ok {
 		return ErrApproval
 	}
-	phaseState := replay(d.Journal.Events())
+	phaseState := replayWithApproval(d.Journal.Events(), &d.Approval)
 	if !phaseState.drainPhasePending || phaseState.drainPhaseSequence <= 0 || phaseState.drainPhaseSetID != setID {
 		return ErrQuarantine
 	}

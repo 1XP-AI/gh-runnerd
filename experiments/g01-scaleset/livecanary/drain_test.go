@@ -288,15 +288,19 @@ func TestDrainPhaseStartRetainsCrashUncertainty(t *testing.T) {
 }
 
 func TestReplayDischargesCompletedDrainPhaseFence(t *testing.T) {
-	observation := validDrainTestObservation()
+	a := approval()
+	observation := drainObservationForApproval(a)
 	observation.Sequence = 4
-	state := replay([]Event{
+	events := []Event{
 		{Kind: "phase", Operation: "create", Sequence: 1},
 		{Kind: "intent", Operation: "create", Sequence: 2},
 		{Kind: "result", Operation: "create", Sequence: 3, ID: 7},
-		{Kind: "phase", Operation: "drain", Sequence: 4, ID: 7},
-		{Kind: "observation", Operation: "drain", Sequence: 5, Drain: &observation},
-	})
+	}
+	events = append(events, drainReplayPrefix()[3])
+	events = appendDrainSnapshotReplayEvents(events, observation.Before, "before")
+	events = appendDrainSnapshotReplayEvents(events, observation.After, "after")
+	events = append(events, Event{Kind: "observation", Operation: "drain", Sequence: 13, Drain: &observation})
+	state := replayWithApproval(events, &a)
 	if state.uncertain {
 		t.Fatalf("valid drain observation retained its completed phase fence: %+v", state)
 	}
@@ -931,6 +935,16 @@ func validDrainTestObservation() drainObservation {
 		After:        drainSnapshot{Set: set, Statistics: beforeStats, StatsKnown: true, Runner: runner},
 		Ordering:     []string{"poll-old", "ack", "acquire", "poll-zero"}, Sequence: 1, ObservedAt: time.Unix(1, 0).UTC(),
 	}
+}
+
+func drainObservationForApproval(a Approval) drainObservation {
+	observation := validDrainTestObservation()
+	phase := approvedDrainPhaseIdentity(a, 7)
+	observation.Before.Set = phase.Set
+	observation.After.Set = phase.Set
+	observation.Before.Runner = &drainRunnerIdentity{ID: 19, Name: phase.RunnerName, ScaleSetID: phase.Set.ID}
+	observation.After.Runner = &drainRunnerIdentity{ID: 19, Name: phase.RunnerName, ScaleSetID: phase.Set.ID}
+	return observation
 }
 
 type drainDriverAPI struct {

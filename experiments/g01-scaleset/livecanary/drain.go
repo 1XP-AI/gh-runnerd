@@ -151,6 +151,14 @@ type drainSetIdentity struct {
 	Label         string `json:"label"`
 }
 
+// drainPhaseIdentity is the approved owner boundary derived from the current
+// approval. Replay must compare durable snapshots to this identity instead of
+// treating a candidate snapshot's own metadata as its expected authority.
+type drainPhaseIdentity struct {
+	Set        drainSetIdentity `json:"set"`
+	RunnerName string           `json:"runner_name"`
+}
+
 type drainRunnerIdentity struct {
 	ID         int    `json:"id"`
 	Name       string `json:"name"`
@@ -181,6 +189,15 @@ type drainObservation struct {
 	Ordering          []string             `json:"ordering"`
 	Sequence          int                  `json:"sequence"`
 	ObservedAt        time.Time            `json:"observed_at"`
+}
+
+func approvedDrainPhaseIdentity(a Approval, setID int) drainPhaseIdentity {
+	name := a.setName()
+	return drainPhaseIdentity{Set: drainSetIdentity{ID: setID, Name: name, RunnerGroupID: a.RunnerGroupID, Label: name}, RunnerName: a.workerName()}
+}
+
+func validDrainPhaseIdentity(p drainPhaseIdentity) bool {
+	return p.Set.ID > 0 && p.Set.RunnerGroupID > 0 && p.Set.Name != "" && p.Set.Label != "" && baselineText(p.Set.Name, 128) && baselineText(p.Set.Label, 128) && p.RunnerName != "" && baselineText(p.RunnerName, 256)
 }
 
 func validDrainResponse(value string) bool {

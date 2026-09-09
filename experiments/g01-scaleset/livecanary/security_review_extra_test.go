@@ -65,7 +65,7 @@ func TestSecurityReviewDrainRequiresOwnedIdleBeforeProof(t *testing.T) {
 			t.Fatalf("append drain prefix: %v", err)
 		}
 	}
-	observation := validDrainTestObservation()
+	observation := drainObservationForApproval(a)
 	setObservedRunnerPartition(&observation, 2, 0, 2)
 	phase := j.Events()[len(j.Events())-1]
 	observation.Sequence = phase.Sequence
@@ -79,7 +79,7 @@ func TestSecurityReviewDrainRequiresOwnedIdleBeforeProof(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer reopened.Close()
-		if state := replay(reopened.Events()); !state.uncertain {
+		if state := replayWithApproval(reopened.Events(), &a); !state.uncertain {
 			t.Fatalf("real FileJournal accepted non-owned idle proof and discharged fence: %+v", state)
 		}
 		return
@@ -116,7 +116,9 @@ func TestSecurityReviewMatchingDrainPhaseDischargesAfterFileJournalReopen(t *tes
 		}
 	}
 	phase := j.Events()[len(j.Events())-1]
-	observation := validDrainTestObservation()
+	observation := drainObservationForApproval(a)
+	appendDrainSnapshotResults(t, j, observation.Before, "before")
+	appendDrainSnapshotResults(t, j, observation.After, "after")
 	observation.Sequence = phase.Sequence
 	if err := j.Append(Event{Kind: "observation", Operation: "drain", Drain: &observation}); err != nil {
 		j.Close()
@@ -130,7 +132,7 @@ func TestSecurityReviewMatchingDrainPhaseDischargesAfterFileJournalReopen(t *tes
 		t.Fatal(err)
 	}
 	defer reopened.Close()
-	if state := replay(reopened.Events()); state.uncertain {
+	if state := replayWithApproval(reopened.Events(), &a); state.uncertain {
 		t.Fatalf("matching one-idle drain phase remained fenced after reopen: %+v", state)
 	}
 }

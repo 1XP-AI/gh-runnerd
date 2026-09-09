@@ -285,6 +285,12 @@ func validEvent(e Event) bool {
 			return false
 		}
 	}
+	if e.DrainSnapshotStage != "" && e.DrainSnapshotStage != "before" && e.DrainSnapshotStage != "after" {
+		return false
+	}
+	if e.DrainSnapshotStage != "" && e.DrainSnapshot == nil {
+		return false
+	}
 	if e.DrainMarker != "" {
 		if e.Kind != "observation" || e.Operation != "drain-marker" {
 			return false

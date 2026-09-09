@@ -309,10 +309,14 @@ func TestDriverDrainThroughPinnedSDKAndPollHook(t *testing.T) {
 	}
 	var observed bool
 	var drainPhaseSequence, drainPhaseSetID, observationSequence int
+	var snapshotStages []string
 	for _, event := range j.Events() {
 		if event.Kind == "phase" && event.Operation == "drain" {
 			drainPhaseSequence = event.Sequence
 			drainPhaseSetID = event.ID
+		}
+		if event.DrainSnapshot != nil {
+			snapshotStages = append(snapshotStages, event.DrainSnapshotStage)
 		}
 		if event.Kind == "observation" && event.Operation == "drain" && event.Drain != nil && event.Drain.Outcome == drainOutcomeObserved {
 			observed = true
@@ -328,6 +332,9 @@ func TestDriverDrainThroughPinnedSDKAndPollHook(t *testing.T) {
 	if drainPhaseSequence <= 0 || drainPhaseSetID != set.ID || observationSequence != drainPhaseSequence {
 		t.Fatalf("pinned SDK drain binding = phase sequence %d SetID %d, observation %d; want exact phase sequence and SetID %d", drainPhaseSequence, drainPhaseSetID, observationSequence, set.ID)
 	}
+	if len(snapshotStages) != 2 || snapshotStages[0] != "before" || snapshotStages[1] != "after" {
+		t.Fatalf("pinned SDK drain snapshot stages = %v, want before/after", snapshotStages)
+	}
 	if err := j.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -336,7 +343,7 @@ func TestDriverDrainThroughPinnedSDKAndPollHook(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reopened.Close()
-	if state := replay(reopened.Events()); state.uncertain {
+	if state := replayWithApproval(reopened.Events(), &a); state.uncertain {
 		t.Fatalf("legitimate after job-counter change retained replay uncertainty: %+v", state)
 	}
 }

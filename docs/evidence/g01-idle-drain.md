@@ -391,6 +391,72 @@ identity change; each remains fenced. These are offline tests only; no live
 runner, credential, workflow, session/JIT, cleanup or external operation was
 performed.
 
+### PR72 residual replay-contract correction (security F1–F3 / protocol P1–P2)
+
+The exact-head security and protocol reviews of
+`f5020e8de32f8641e3aa80dfbc3e74e108277197` identified residual
+replay gaps: missing, single, out-of-order, or post-completion snapshot stages
+could discharge a drain phase; the final observation was not correlated to the
+durable before/after records; and same-ID foreign set/runner metadata was
+accepted. The existing harness set `workObserved=true` for a drain observation,
+so the demonstrated histories remained blocked from destructive cleanup, but
+they incorrectly removed the phase-local uncertainty fence and could affect
+later non-cleanup authorization.
+
+Meaningful red probes were added before the implementation change and run
+against the current exact head with real `FileJournal` close/reopen boundaries:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^TestReplayContract' -count=1 -v
+```
+
+The run failed for missing before/after stages, an extra post-completion
+snapshot, a final runner mismatch, and foreign metadata sharing the phase SetID.
+The red assertions required uncertainty after reopen; the old implementation
+returned `uncertain:false` for those malformed histories.
+
+The minimal correction records explicit `before`/`after` roles on the two
+`observe-runner` results, requires exactly one valid ordered pair, and requires
+the final observation to follow the after result and match both durable records
+for set identity, runner tuple, and registered/busy/idle partition. Job
+counters remain excluded from that equality, so legitimate after-snapshot
+counter changes remain accepted. A completed or interrupted phase rejects any
+later drain snapshot, and production replay derives the expected set/runner
+identity from the current approval rather than trusting candidate metadata.
+
+The correction coverage includes complete histories and every crash prefix,
+missing/extra/outside-phase stages, swapped/substituted runners, stable-set
+ownership, malformed phase identity/sequence, unrelated reservations and
+unknown/work fences, the real pinned-SDK/FileJournal path, and cleanup fencing.
+The focused green and bounded race results are recorded below with the final
+verification commands. Rollback is a focused revert of this correction's
+source/test/evidence commit, retaining the current journal and owned resources
+for inspection; do not reset, erase, replay, or run live cleanup.
+
+The bounded verification commands completed successfully after the correction:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run 'TestReplayContract|TestReplayDrain|TestFileJournal.*Drain|TestSecurityReview.*Drain|TestDrainObservedAllowsNextPollJobCounterChanges|TestDrainListenerRejectsContradictoryWithdrawnPollRunner|TestDriverDrainThroughPinnedSDKAndPollHook' -count=1 -v
+GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -run 'TestReplayContract|TestReplayDrain|TestFileJournal.*Drain|TestSecurityReview.*Drain|TestDrainObservedAllowsNextPollJobCounterChanges|TestDrainListenerRejectsContradictoryWithdrawnPollRunner|TestDriverDrainThroughPinnedSDKAndPollHook' -count=1
+GOTOOLCHAIN=go1.26.8 go vet ./livecanary
+gofmt -l livecanary/baseline_journal.go livecanary/drain.go livecanary/drain_driver.go livecanary/drain_followup_test.go livecanary/drain_test.go livecanary/driver.go livecanary/journal.go livecanary/preparation.go livecanary/replay_contract_red_test.go livecanary/security_review_extra_test.go livecanary/sdk_integration_test.go
+cd ../..
+git diff --check
+bash scripts/gofmt.sh check
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -count=1
+cd ../..
+bash scripts/check-offline-experiments.sh
+```
+
+The focused normal suite, focused race suite, vet, formatting, diff, and final
+full `livecanary` package run passed; race emitted no report and formatting/diff
+checks emitted no diagnostics. The offline experiment check also passed for the
+scaleset, livecanary, and liveworker modules. These remain offline fixture
+checks only.
+
 ## Remaining gate and rollback
 
 The live G01 gate remains unresolved until a separately authorized run uses an

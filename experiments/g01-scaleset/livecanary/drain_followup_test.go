@@ -24,8 +24,18 @@ func drainReplayPrefix() []Event {
 	}
 }
 
+func appendDrainSnapshotReplayEvents(events []Event, snapshot drainSnapshot, stage string) []Event {
+	return append(events,
+		Event{Kind: "intent", Operation: "observe-owned"},
+		Event{Kind: "result", Operation: "observe-owned", ID: snapshot.Set.ID},
+		Event{Kind: "intent", Operation: "observe-runner"},
+		Event{Kind: "result", Operation: "observe-runner", ID: snapshot.Runner.ID, DrainSnapshot: &snapshot, DrainSnapshotStage: stage},
+	)
+}
+
 func TestReplayDrainRequiresOneMatchingPhaseIdentityAndSequence(t *testing.T) {
-	base := validDrainTestObservation()
+	a := approval()
+	base := drainObservationForApproval(a)
 	base.Sequence = 4
 	foreign := base
 	foreign.Before.Set.ID = 99
@@ -42,7 +52,9 @@ func TestReplayDrainRequiresOneMatchingPhaseIdentityAndSequence(t *testing.T) {
 			name: "one matching phase",
 			events: func(observation drainObservation) []Event {
 				events := drainReplayPrefix()
-				events = append(events, Event{Kind: "observation", Operation: "drain", Sequence: 5, Drain: &observation})
+				events = appendDrainSnapshotReplayEvents(events, observation.Before, "before")
+				events = appendDrainSnapshotReplayEvents(events, observation.After, "after")
+				events = append(events, Event{Kind: "observation", Operation: "drain", Sequence: 13, Drain: &observation})
 				return events
 			},
 			uncertain: false,
@@ -115,8 +127,8 @@ func TestReplayDrainRequiresOneMatchingPhaseIdentityAndSequence(t *testing.T) {
 			if tc.name == "mismatched created identity" {
 				observation = foreign
 			}
-			if got := replay(tc.events(observation)).uncertain; got != tc.uncertain {
-				t.Fatalf("uncertain=%v, want %v; state=%+v", got, tc.uncertain, replay(tc.events(observation)))
+			if got := replayWithApproval(tc.events(observation), &a).uncertain; got != tc.uncertain {
+				t.Fatalf("uncertain=%v, want %v; state=%+v", got, tc.uncertain, replayWithApproval(tc.events(observation), &a))
 			}
 		})
 	}
@@ -152,7 +164,7 @@ func TestFileJournalDrainReplayRetainsMismatchedSequenceAndIdentity(t *testing.T
 					t.Fatalf("append prefix: %v", err)
 				}
 			}
-			observation := validDrainTestObservation()
+			observation := drainObservationForApproval(a)
 			if tc.name == "sequence" {
 				observation.Sequence = 999
 			} else {
@@ -172,20 +184,20 @@ func TestFileJournalDrainReplayRetainsMismatchedSequenceAndIdentity(t *testing.T
 				t.Fatal(err)
 			}
 			defer reopened.Close()
-			if state := replay(reopened.Events()); !state.uncertain {
+			if state := replayWithApproval(reopened.Events(), &a); !state.uncertain {
 				t.Fatalf("reopened mismatched drain history discharged fence: %+v", state)
 			}
 		})
 	}
 }
 
-func appendDrainSnapshotResults(t *testing.T, j *FileJournal, snapshot drainSnapshot) {
+func appendDrainSnapshotResults(t *testing.T, j *FileJournal, snapshot drainSnapshot, stage string) {
 	t.Helper()
 	for _, event := range []Event{
 		{Kind: "intent", Operation: "observe-owned"},
 		{Kind: "result", Operation: "observe-owned", ID: snapshot.Set.ID},
 		{Kind: "intent", Operation: "observe-runner"},
-		{Kind: "result", Operation: "observe-runner", ID: snapshot.Runner.ID, DrainSnapshot: &snapshot},
+		{Kind: "result", Operation: "observe-runner", ID: snapshot.Runner.ID, DrainSnapshot: &snapshot, DrainSnapshotStage: stage},
 	} {
 		if err := j.Append(event); err != nil {
 			t.Fatalf("append drain snapshot result: %v", err)
@@ -251,8 +263,9 @@ func TestFileJournalReplayFencesMalformedDrainSnapshotStages(t *testing.T) {
 				}
 			}
 			phase := j.Events()[len(j.Events())-1]
-			before := validDrainTestObservation().Before
-			after := validDrainTestObservation().After
+			observation := drainObservationForApproval(a)
+			before := observation.Before
+			after := observation.After
 			if tc.before != nil {
 				tc.before(&before)
 			}
@@ -260,10 +273,10 @@ func TestFileJournalReplayFencesMalformedDrainSnapshotStages(t *testing.T) {
 				tc.after(&after)
 			}
 			if !tc.omitBefore {
-				appendDrainSnapshotResults(t, j, before)
+				appendDrainSnapshotResults(t, j, before, "before")
 			}
-			appendDrainSnapshotResults(t, j, after)
-			observation := validDrainTestObservation()
+			appendDrainSnapshotResults(t, j, after, "after")
+			observation = drainObservationForApproval(a)
 			observation.Sequence = phase.Sequence
 			if err := j.Append(Event{Kind: "observation", Operation: "drain", Drain: &observation}); err != nil {
 				_ = j.Close()
@@ -277,7 +290,7 @@ func TestFileJournalReplayFencesMalformedDrainSnapshotStages(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer reopened.Close()
-			if state := replay(reopened.Events()); !state.uncertain {
+			if state := replayWithApproval(reopened.Events(), &a); !state.uncertain {
 				t.Fatalf("malformed %s drain snapshots discharged replay fence: %+v", tc.name, state)
 			}
 		})
@@ -285,7 +298,8 @@ func TestFileJournalReplayFencesMalformedDrainSnapshotStages(t *testing.T) {
 }
 
 func TestReplayDrainPhaseRequiresPositiveSetID(t *testing.T) {
-	base := validDrainTestObservation()
+	a := approval()
+	base := drainObservationForApproval(a)
 	base.Sequence = 4
 	for _, tc := range []struct {
 		name string
@@ -300,7 +314,7 @@ func TestReplayDrainPhaseRequiresPositiveSetID(t *testing.T) {
 			events := drainReplayPrefix()
 			events[3].ID = tc.id
 			events = append(events, Event{Kind: "observation", Operation: "drain", Sequence: 5, Drain: &base})
-			if state := replay(events); !state.uncertain {
+			if state := replayWithApproval(events, &a); !state.uncertain {
 				t.Fatalf("drain phase with %d SetID discharged its fence: %+v", tc.id, state)
 			}
 		})
@@ -371,7 +385,7 @@ func TestFileJournalForeignDrainPhaseSetIDRetainsFenceAfterReopen(t *testing.T) 
 		j.Close()
 		t.Fatalf("append foreign drain phase: %v", err)
 	}
-	observation := validDrainTestObservation()
+	observation := drainObservationForApproval(a)
 	observation.Sequence = phase.Sequence
 	if err := j.Append(Event{Kind: "observation", Operation: "drain", Drain: &observation}); err != nil {
 		j.Close()
@@ -385,7 +399,7 @@ func TestFileJournalForeignDrainPhaseSetIDRetainsFenceAfterReopen(t *testing.T) 
 		t.Fatal(err)
 	}
 	defer reopened.Close()
-	if state := replay(reopened.Events()); !state.uncertain {
+	if state := replayWithApproval(reopened.Events(), &a); !state.uncertain {
 		t.Fatalf("reopened foreign drain phase discharged its fence: %+v", state)
 	}
 }

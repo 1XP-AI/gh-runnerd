@@ -41,21 +41,22 @@ type Approval struct {
 }
 
 type Event struct {
-	Baseline      *baselineRecord   `json:"baseline,omitempty"`
-	Drain         *drainObservation `json:"drain,omitempty"`
-	DrainSnapshot *drainSnapshot    `json:"drain_snapshot,omitempty"`
-	DrainMarker   string            `json:"drain_marker,omitempty"`
-	Authority     *phaseAuthority   `json:"authority,omitempty"`
-	Sequence      int               `json:"sequence"`
-	Kind          string            `json:"kind"`
-	Operation     string            `json:"operation,omitempty"`
-	ID            int               `json:"id,omitempty"`
-	SessionID     string            `json:"session_id,omitempty"`
-	RequestIDs    []int64           `json:"request_ids,omitempty"`
-	Count         int               `json:"count,omitempty"`
-	Digest        string            `json:"digest,omitempty"`
-	Succeeded     bool              `json:"succeeded,omitempty"`
-	Work          string            `json:"work,omitempty"`
+	Baseline           *baselineRecord   `json:"baseline,omitempty"`
+	Drain              *drainObservation `json:"drain,omitempty"`
+	DrainSnapshot      *drainSnapshot    `json:"drain_snapshot,omitempty"`
+	DrainMarker        string            `json:"drain_marker,omitempty"`
+	DrainSnapshotStage string            `json:"drain_snapshot_stage,omitempty"`
+	Authority          *phaseAuthority   `json:"authority,omitempty"`
+	Sequence           int               `json:"sequence"`
+	Kind               string            `json:"kind"`
+	Operation          string            `json:"operation,omitempty"`
+	ID                 int               `json:"id,omitempty"`
+	SessionID          string            `json:"session_id,omitempty"`
+	RequestIDs         []int64           `json:"request_ids,omitempty"`
+	Count              int               `json:"count,omitempty"`
+	Digest             string            `json:"digest,omitempty"`
+	Succeeded          bool              `json:"succeeded,omitempty"`
+	Work               string            `json:"work,omitempty"`
 }
 
 type Journal interface {
@@ -98,9 +99,15 @@ type state struct {
 	drainPhasePending            bool
 	drainPhaseSequence           int
 	drainPhaseSetID              int
+	drainPhase                   drainPhaseIdentity
+	drainPhaseIdentityValid      bool
+	drainPhaseCompleted          bool
 	drainSnapshotCount           int
 	drainBeforeSnapshot          drainSnapshot
 	drainBeforeSnapshotValid     bool
+	drainAfterSnapshot           drainSnapshot
+	drainAfterSnapshotValid      bool
+	drainAfterSnapshotSequence   int
 	observedJobs                 map[int64]bool
 	workObserved                 bool
 	inventory                    string
@@ -113,15 +120,25 @@ func replayEventSequence(e Event, index int) int {
 	return index + 1
 }
 
-func validDrainObservationForPhase(e Event, sequence int, s state) bool {
-	if !s.drainPhasePending || e.Drain == nil || !validDrainObservation(e.Drain) || e.Drain.Outcome != drainOutcomeObserved {
-		return false
-	}
-	return sequence > s.drainPhaseSequence && e.Drain.Sequence == s.drainPhaseSequence && s.setID > 0 && s.drainPhaseSetID == s.setID && e.Drain.Before.Set.ID == s.setID && e.Drain.After.Set.ID == s.setID
+func sameDrainSnapshotStable(left, right drainSnapshot) bool {
+	return left.Set == right.Set && sameDrainRunner(left.Runner, right.Runner) && sameDrainRunnerPartition(left.Statistics, right.Statistics)
 }
 
-func validDrainSnapshotForPhase(snapshot drainSnapshot, setID int, before *drainSnapshot) bool {
-	if setID <= 0 || !validDrainSnapshot(snapshot, snapshot.Set) || snapshot.Set.ID != setID {
+func validDrainObservationForPhase(e Event, sequence int, s state) bool {
+	if !s.drainPhasePending || !s.drainPhaseIdentityValid || e.Drain == nil || !validDrainObservation(e.Drain) || e.Drain.Outcome != drainOutcomeObserved {
+		return false
+	}
+	if s.drainSnapshotCount != 2 || !s.drainBeforeSnapshotValid || !s.drainAfterSnapshotValid || sequence <= s.drainAfterSnapshotSequence {
+		return false
+	}
+	if e.Drain.Sequence != s.drainPhaseSequence || s.setID <= 0 || s.drainPhaseSetID != s.setID {
+		return false
+	}
+	return validDrainSnapshotForPhase(e.Drain.Before, s.drainPhase, nil) && validDrainSnapshotForPhase(e.Drain.After, s.drainPhase, &s.drainBeforeSnapshot) && sameDrainSnapshotStable(e.Drain.Before, s.drainBeforeSnapshot) && sameDrainSnapshotStable(e.Drain.After, s.drainAfterSnapshot)
+}
+
+func validDrainSnapshotForPhase(snapshot drainSnapshot, phase drainPhaseIdentity, before *drainSnapshot) bool {
+	if !validDrainSnapshotIdentity(snapshot, phase) {
 		return false
 	}
 	if before == nil {
@@ -130,36 +147,71 @@ func validDrainSnapshotForPhase(snapshot drainSnapshot, setID int, before *drain
 	return before.Set == snapshot.Set && sameDrainRunner(before.Runner, snapshot.Runner) && sameDrainRunnerPartition(before.Statistics, snapshot.Statistics)
 }
 
+func validDrainSnapshotIdentity(snapshot drainSnapshot, phase drainPhaseIdentity) bool {
+	return validDrainPhaseIdentity(phase) && validDrainSnapshot(snapshot, phase.Set) && snapshot.Runner != nil && snapshot.Runner.Name == phase.RunnerName && snapshot.Runner.ScaleSetID == phase.Set.ID
+}
+
+func resetDrainPhase(s *state) {
+	s.drainPhasePending = false
+	s.drainPhaseSequence = 0
+	s.drainPhaseSetID = 0
+	s.drainPhase = drainPhaseIdentity{}
+	s.drainPhaseIdentityValid = false
+	s.drainSnapshotCount = 0
+	s.drainBeforeSnapshot = drainSnapshot{}
+	s.drainBeforeSnapshotValid = false
+	s.drainAfterSnapshot = drainSnapshot{}
+	s.drainAfterSnapshotValid = false
+	s.drainAfterSnapshotSequence = 0
+}
+
 func replayDrainSnapshot(e Event, index int, s *state) {
 	if e.DrainSnapshot == nil {
 		return
 	}
-	if e.Kind == "result" && e.Operation == "observe-runner" && s.drainPhasePending {
-		sequence := replayEventSequence(e, index)
-		switch s.drainSnapshotCount {
-		case 0:
-			s.drainSnapshotCount = 1
-			s.drainBeforeSnapshot = *e.DrainSnapshot
-			s.drainBeforeSnapshotValid = sequence > s.drainPhaseSequence && validDrainSnapshotForPhase(*e.DrainSnapshot, s.drainPhaseSetID, nil)
-			if !s.drainBeforeSnapshotValid {
-				s.uncertain = true
-			}
-		case 1:
-			s.drainSnapshotCount = 2
-			if !s.drainBeforeSnapshotValid || !validDrainSnapshotForPhase(*e.DrainSnapshot, s.drainPhaseSetID, &s.drainBeforeSnapshot) {
-				s.uncertain = true
-			}
-		default:
-			s.uncertain = true
-		}
+	if e.Kind != "result" || e.Operation != "observe-runner" || !s.drainPhasePending || !s.drainPhaseIdentityValid {
+		// Drain snapshots are phase-local evidence. A snapshot before the
+		// phase, after its final observation, or after an interrupted phase
+		// must not be silently reused by a later replay.
+		s.uncertain = true
 		return
 	}
-	if s.drainPhasePending || !validDrainIdlePrerequisite(*e.DrainSnapshot) {
+	sequence := replayEventSequence(e, index)
+	if sequence <= s.drainPhaseSequence || !validDrainSnapshotIdentity(*e.DrainSnapshot, s.drainPhase) {
+		s.uncertain = true
+		return
+	}
+	switch e.DrainSnapshotStage {
+	case "before":
+		if s.drainSnapshotCount != 0 {
+			s.uncertain = true
+			return
+		}
+		s.drainSnapshotCount = 1
+		s.drainBeforeSnapshot = *e.DrainSnapshot
+		s.drainBeforeSnapshotValid = validDrainSnapshotForPhase(*e.DrainSnapshot, s.drainPhase, nil)
+		if !s.drainBeforeSnapshotValid {
+			s.uncertain = true
+		}
+	case "after":
+		if s.drainSnapshotCount != 1 || !s.drainBeforeSnapshotValid || !validDrainSnapshotForPhase(*e.DrainSnapshot, s.drainPhase, &s.drainBeforeSnapshot) {
+			s.uncertain = true
+			return
+		}
+		s.drainSnapshotCount = 2
+		s.drainAfterSnapshot = *e.DrainSnapshot
+		s.drainAfterSnapshotValid = true
+		s.drainAfterSnapshotSequence = sequence
+	default:
 		s.uncertain = true
 	}
 }
 
 func replay(events []Event) state {
+	return replayWithApproval(events, nil)
+}
+
+func replayWithApproval(events []Event, approval *Approval) state {
 	s := state{phaseSeen: make(map[string]bool), observedJobs: make(map[int64]bool)}
 	pending := ""
 	for index, e := range events {
@@ -169,44 +221,48 @@ func replay(events []Event) state {
 			s.reserved, s.uncertain, s.workObserved = true, true, true
 		case "phase":
 			if e.Operation == "drain" {
-				if s.phaseSeen[e.Operation] || s.drainPhasePending {
+				if s.phaseSeen[e.Operation] || s.drainPhasePending || s.drainPhaseCompleted {
 					// A drain observation may discharge exactly one phase. A
 					// repeated phase is not collapsed into the same boolean fence.
 					s.uncertain = true
-					s.drainPhasePending = false
-					s.drainPhaseSequence = 0
-					s.drainPhaseSetID = 0
-					s.drainSnapshotCount = 0
-					s.drainBeforeSnapshot = drainSnapshot{}
-					s.drainBeforeSnapshotValid = false
+					s.drainPhaseCompleted = true
+					resetDrainPhase(&s)
 					continue
 				}
 				s.drainPhasePending = true
+				s.drainPhaseCompleted = false
 				s.drainPhaseSequence = replayEventSequence(e, index)
 				s.drainPhaseSetID = 0
+				s.drainPhase = drainPhaseIdentity{}
+				s.drainPhaseIdentityValid = false
 				s.drainSnapshotCount = 0
 				s.drainBeforeSnapshot = drainSnapshot{}
 				s.drainBeforeSnapshotValid = false
-				if e.ID > 0 {
+				s.drainAfterSnapshot = drainSnapshot{}
+				s.drainAfterSnapshotValid = false
+				s.drainAfterSnapshotSequence = 0
+				if e.ID > 0 && approval != nil {
+					phaseIdentity := approvedDrainPhaseIdentity(*approval, e.ID)
+					if !validDrainPhaseIdentity(phaseIdentity) {
+						s.uncertain = true
+					}
 					if s.setID <= 0 || e.ID != s.setID {
 						s.uncertain = true
 					}
 					s.drainPhaseSetID = e.ID
+					s.drainPhase = phaseIdentity
+					s.drainPhaseIdentityValid = validDrainPhaseIdentity(phaseIdentity)
 				} else {
-					// A drain phase must carry its created SetID. Never infer a
-					// missing, zero, or negative identity from prior state.
+					// A drain phase must have an approved owner context and carry
+					// its created SetID. Never infer either from later records.
 					s.uncertain = true
 				}
 			} else if s.drainPhasePending {
 				// A different phase interrupts the active drain phase. Keep
 				// that history fenced even if a later record looks complete.
 				s.uncertain = true
-				s.drainPhasePending = false
-				s.drainPhaseSequence = 0
-				s.drainPhaseSetID = 0
-				s.drainSnapshotCount = 0
-				s.drainBeforeSnapshot = drainSnapshot{}
-				s.drainBeforeSnapshotValid = false
+				s.drainPhaseCompleted = true
+				resetDrainPhase(&s)
 			}
 			s.phaseSeen[e.Operation] = true
 		case "inventory":
@@ -231,12 +287,8 @@ func replay(events []Event) state {
 					// A malformed or inconclusive record consumes the active
 					// phase without discharging it; a later duplicate cannot
 					// turn the same phase into an observed result.
-					s.drainPhasePending = false
-					s.drainPhaseSequence = 0
-					s.drainPhaseSetID = 0
-					s.drainSnapshotCount = 0
-					s.drainBeforeSnapshot = drainSnapshot{}
-					s.drainBeforeSnapshotValid = false
+					s.drainPhaseCompleted = true
+					resetDrainPhase(&s)
 				}
 			}
 			if e.Operation == "drain-marker" {
@@ -282,12 +334,8 @@ func replay(events []Event) state {
 			s.uncertain = true
 			pending = ""
 			if s.drainPhasePending {
-				s.drainPhasePending = false
-				s.drainPhaseSequence = 0
-				s.drainPhaseSetID = 0
-				s.drainSnapshotCount = 0
-				s.drainBeforeSnapshot = drainSnapshot{}
-				s.drainBeforeSnapshotValid = false
+				s.drainPhaseCompleted = true
+				resetDrainPhase(&s)
 			}
 		}
 	}
@@ -457,7 +505,7 @@ func (d *Driver) Run(ctx context.Context, phase string) error {
 		return err
 	}
 	if phase == "cleanup" {
-		s = replay(d.Journal.Events()) // Includes the just-completed owned read.
+		s = replayWithApproval(d.Journal.Events(), &d.Approval) // Includes the just-completed owned read.
 		// Aggregate zero alone never authorizes deletion. This scope has never
 		// issued JIT/acquired a job, has no unresolved session, and must match
 		// its original runner inventory as well as its immutable create receipt.
