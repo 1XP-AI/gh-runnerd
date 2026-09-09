@@ -994,3 +994,184 @@ func TestPairedBrokerRejectsMalformedWorkerJournalBeforeMint(t *testing.T) {
 		t.Fatalf("malformed worker journal crossed pre-mint boundary: err=%v mints=%d calls=%v", err, fixture.tokenCalls, fixture.calls)
 	}
 }
+
+type pairedBrokerEntryFixture struct {
+	files   BrokerFiles
+	api     *brokerAPI
+	fixture *brokerHTTPFixture
+	parent  string
+	input   []byte
+	runs    int
+}
+
+func newPairedBrokerEntryFixture(t *testing.T) pairedBrokerEntryFixture {
+	t.Helper()
+	a, candidate, api, fixture, attempt := newBrokerFixture(t)
+	parent := filepath.Dir(attempt)
+	controllerState := filepath.Join(parent, "paired-controller-state")
+	workerState := filepath.Join(parent, "paired-worker-state")
+	if err := os.Mkdir(controllerState, 0700); err != nil {
+		t.Fatal("controller state")
+	}
+	if err := os.Mkdir(workerState, 0700); err != nil {
+		t.Fatal("worker state")
+	}
+	now := time.Now().Add(time.Hour)
+	harness := strings.Repeat("c", 40)
+	workflow := strings.Repeat("b", 40)
+	a.Mode, a.Phase, a.AllowVerificationAuthority, a.ExpiresAt, a.ControllerHarnessSHA = "paired-terminal", "paired-terminal", true, now, harness
+	controller := controllerApproval{AppID: a.AppID, InstallationID: a.InstallationID, Organization: a.Organization, Repository: a.Repository, RepositoryID: a.RepositoryID, RunnerGroupID: a.RunnerGroupID, OwnerNonce: a.OwnerNonce, HarnessSHA: harness, WorkflowSHA: workflow, WorkflowPath: ".github/workflows/canary.yml", WorkflowRunID: 7, Controller: "trusted-controller", ExpiresAt: now, ActionsHosts: []string{"fixture.actions.githubusercontent.com"}, Phases: []string{"create", "before-ack", "after-ack", "before-acquire", "inspect", "cleanup"}}
+	controllerData, err := json.Marshal(controller)
+	if err != nil {
+		t.Fatal("controller approval")
+	}
+	controllerPath := filepath.Join(parent, "controller-approval.json")
+	if err := os.WriteFile(controllerPath, controllerData, 0600); err != nil {
+		t.Fatal("controller approval file")
+	}
+	worker := pairedWorkerApproval{RunnerUpdatesDisabled: true, HarnessSHA: harness, WorkflowSHA: workflow, OwnerNonce: a.OwnerNonce, Controller: controller.Controller, Endpoint: "/tmp/g01-paired-entry.sock", DaemonID: "fixture-daemon", ImageID: "sha256:" + strings.Repeat("d", 64), Image: pairedWorkerImage, ExpiresAt: now, Phases: []string{"create", "start", "inspect", "cleanup"}}
+	workerData, err := json.Marshal(worker)
+	if err != nil {
+		t.Fatal("worker approval")
+	}
+	workerPath := filepath.Join(parent, "worker-approval.json")
+	if err := os.WriteFile(workerPath, workerData, 0600); err != nil {
+		t.Fatal("worker approval file")
+	}
+	binary := testBrokerBinary(t)
+	a.ControllerBinarySHA256 = binary.digest
+	a.ControllerApprovalSHA256 = brokerBytesDigest(controllerData)
+	approvalPath := filepath.Join(parent, "broker-approval.json")
+	approvalData, err := json.Marshal(a)
+	if err != nil {
+		t.Fatal("broker approval")
+	}
+	if err := os.WriteFile(approvalPath, approvalData, 0600); err != nil {
+		t.Fatal("broker approval file")
+	}
+	inputData, err := json.Marshal(brokerInput{PEM: string(candidate.PEM), VerificationToken: "synthetic-private-verification-token"})
+	if err != nil {
+		t.Fatal("broker input")
+	}
+	oldOpener := brokerBinaryOpener
+	brokerBinaryOpener = func(string, BrokerApproval) (*verifiedBrokerBinary, error) {
+		f, err := os.Open(binary.path)
+		if err != nil {
+			return nil, errBroker
+		}
+		return &verifiedBrokerBinary{path: binary.path, file: f, digest: binary.digest}, nil
+	}
+	t.Cleanup(func() { brokerBinaryOpener = oldOpener })
+	bindWorkerClaimDirectory(t, filepath.Join(parent, "worker-admission"))
+	return pairedBrokerEntryFixture{
+		files: BrokerFiles{
+			ApprovalPath:             approvalPath,
+			StateDirectory:           attempt,
+			ControllerBinary:         binary.path,
+			ControllerApproval:       controllerPath,
+			ControllerStateDirectory: controllerState,
+			WorkerApproval:           workerPath,
+			WorkerStateDirectory:     workerState,
+		},
+		api:     api,
+		fixture: fixture,
+		parent:  parent,
+		input:   inputData,
+	}
+}
+
+func (e *pairedBrokerEntryFixture) run(t *testing.T, controllerState, workerState string) (BrokerResult, error) {
+	t.Helper()
+	e.runs++
+	inputPath := filepath.Join(e.parent, "broker-input-"+strings.Repeat("x", e.runs)+".json")
+	if err := os.WriteFile(inputPath, e.input, 0600); err != nil {
+		t.Fatal("broker input file")
+	}
+	input, err := os.Open(inputPath)
+	if err != nil {
+		t.Fatal("broker input open")
+	}
+	defer input.Close()
+	files := e.files
+	files.ControllerStateDirectory = controllerState
+	files.WorkerStateDirectory = workerState
+	return runBrokerWithAPI(context.Background(), files, input, e.api)
+}
+
+func pairedAdmissionHasClaim(t *testing.T, fixture *brokerHTTPFixture) bool {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(fixture.admissionRoot, "broker-admission.jsonl"))
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(data), `"slot":"paired-terminal"`)
+}
+
+func TestPairedBrokerRejectsNoncanonicalControllerStateBeforeClaim(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		controller func(string) string
+		worker     func(string) string
+	}{
+		{name: "trailing slash", controller: func(p string) string { return p + string(filepath.Separator) }},
+		{name: "dot", controller: func(p string) string { return p + string(filepath.Separator) + "." }},
+		{name: "dot-dot", controller: func(p string) string { return p + string(filepath.Separator) + ".." }},
+		{name: "relative", controller: func(p string) string { return filepath.Base(p) }},
+		{name: "worker trailing slash", worker: func(p string) string { return p + string(filepath.Separator) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newPairedBrokerEntryFixture(t)
+			controllerState := e.files.ControllerStateDirectory
+			workerState := e.files.WorkerStateDirectory
+			if tc.controller != nil {
+				controllerState = tc.controller(controllerState)
+			}
+			if tc.worker != nil {
+				workerState = tc.worker(workerState)
+			}
+			_, err := e.run(t, controllerState, workerState)
+			if err == nil {
+				t.Fatal("noncanonical private path was accepted")
+			}
+			if e.fixture.tokenCalls != 0 || len(e.fixture.calls) != 0 {
+				t.Fatalf("noncanonical path reached API/mint: mints=%d calls=%v", e.fixture.tokenCalls, e.fixture.calls)
+			}
+			if pairedAdmissionHasClaim(t, e.fixture) {
+				t.Fatal("noncanonical path appended a permanent paired claim")
+			}
+			result, err := e.run(t, e.files.ControllerStateDirectory, e.files.WorkerStateDirectory)
+			if err != nil || result.Status != "paired_terminal_completed" || e.fixture.tokenCalls != 1 {
+				t.Fatalf("canonical path could not start after lexical refusal: result=%+v err=%v mints=%d", result, err, e.fixture.tokenCalls)
+			}
+		})
+	}
+}
+
+func TestPairedBrokerAcceptsCanonicalControllerStateDirectory(t *testing.T) {
+	e := newPairedBrokerEntryFixture(t)
+	result, err := e.run(t, e.files.ControllerStateDirectory, e.files.WorkerStateDirectory)
+	if err != nil || result.Status != "paired_terminal_completed" || e.fixture.tokenCalls != 1 || len(e.fixture.calls) == 0 {
+		t.Fatalf("canonical paired entry failed: result=%+v err=%v mints=%d calls=%v", result, err, e.fixture.tokenCalls, e.fixture.calls)
+	}
+	if !pairedAdmissionHasClaim(t, e.fixture) {
+		t.Fatal("canonical paired entry left no admission claim")
+	}
+}
+
+func TestBrokerControllerModeKeepsCanonicalStateDirectory(t *testing.T) {
+	a, candidate, api, fixture, root := newBrokerFixture(t)
+	a.Mode = "controller"
+	a.Phase = "create"
+	calls := 0
+	plan := brokerTestPlan(t, &a, filepath.Dir(root), func(context.Context, []byte, string) error {
+		calls++
+		return nil
+	})
+	if filepath.Clean(plan.statePath) != plan.statePath || !filepath.IsAbs(plan.statePath) {
+		t.Fatalf("controller plan rewrote state path to %q", plan.statePath)
+	}
+	result, err := brokerExecute(context.Background(), a, brokerInput{PEM: string(candidate.PEM)}, root, api, plan)
+	if err != nil || result.Status != "controller_completed" || calls != 1 || fixture.tokenCalls != 1 {
+		t.Fatalf("controller-only canonical path lost compatibility: result=%+v err=%v launches=%d mints=%d", result, err, calls, fixture.tokenCalls)
+	}
+}

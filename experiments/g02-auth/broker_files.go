@@ -35,8 +35,12 @@ func openBrokerPrivateFile(path string, mode os.FileMode, limit int64) (*os.File
 	}
 	return f, nil
 }
+func brokerCanonicalPath(path string) bool {
+	return filepath.IsAbs(path) && filepath.Clean(path) == path
+}
+
 func openBrokerPrivateDirectory(path string) (*os.Root, error) {
-	if !filepath.IsAbs(path) {
+	if !brokerCanonicalPath(path) {
 		return nil, errBroker
 	}
 	info, err := os.Lstat(path)

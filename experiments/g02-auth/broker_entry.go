@@ -130,6 +130,9 @@ func runBrokerWithAPI(ctx context.Context, files BrokerFiles, input *os.File, ap
 	if approval.Mode == "paired-terminal" && (files.WorkerApproval == "" || files.WorkerStateDirectory == "") {
 		return BrokerResult{}, errBroker
 	}
+	if approval.Mode == "paired-terminal" && (!brokerCanonicalPath(files.ControllerStateDirectory) || !brokerCanonicalPath(files.WorkerApproval) || !brokerCanonicalPath(files.WorkerStateDirectory)) {
+		return BrokerResult{}, errBroker
+	}
 	var binary *verifiedBrokerBinary
 	var controller controllerApproval
 	var controllerData []byte

@@ -840,6 +840,49 @@ revert of this terminal-partition follow-up; the signal-cleanup,
 prepared-receipt, cadence-prep isolation, receipt-boundary, fixture-sentinel
 and after-bind commits remain independently revertable.
 
+## Paired controller state lexical validation before claim
+
+Codex P2 [r3964610622](https://github.com/1XP-AI/gh-runnerd/pull/62#discussion_r3964610622)
+on `7ff0e96`: an absolute non-clean `ControllerStateDirectory` (trailing slash)
+was accepted by `openBrokerPrivateDirectory`, then `openBrokerAdmission`
+appended the permanent `paired-terminal` claim, then
+`invokeBrokerPairedPreparation` refused `filepath.Clean(path) != path`. No
+child, mint, or authenticated call ran, but the corrected canonical path could
+not retry. The existing command contract already refuses non-clean paths; this
+follow-up applies that refusal before admission instead of rewriting signed
+authority. Claims are not cleared. Worker trailing-slash and relative paths
+were already refused before claim; f1b receipt/root identity is unchanged.
+
+TDD red at `7ff0e96` before this correction (Go 1.26.8, darwin/arm64), using
+real disposable 0700 directories:
+
+```text
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=90s \
+  -run '^TestPairedBrokerRejectsNoncanonicalControllerStateBeforeClaim$' .
+FAIL; g02-auth 1.28s
+trailing slash: permanent paired claim appended
+dot: permanent paired claim appended
+dot-dot: permanent paired claim appended
+relative PASS; worker trailing slash PASS
+```
+
+Green after this correction:
+
+```text
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=90s \
+  -run '^TestPairedBrokerRejectsNoncanonicalControllerStateBeforeClaim$|^TestPairedBrokerAcceptsCanonicalControllerStateDirectory$|^TestBrokerControllerModeKeepsCanonicalStateDirectory$|^TestPairedBrokerRealEntrypointUsesPairedPreparationClosure$|^TestBrokerPrivateFileFrontDoorDiscoveryAndSecretFreeState$|^TestBrokerControllerPayloadUsesActualIssuanceAndPrivateHandoff$' .
+PASS; g02-auth 4.100s
+
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=90s \
+  -run '^TestPairedBrokerRejectsNoncanonicalControllerStateBeforeClaim$|^TestPairedBrokerAcceptsCanonicalControllerStateDirectory$|^TestBrokerControllerModeKeepsCanonicalStateDirectory$|^TestPairedBrokerRealEntrypointUsesPairedPreparationClosure$' .
+PASS; g02-auth 27.773s
+```
+
+Invalid lexical controller paths now return `errBroker` with no paired claim,
+API call, mint, or child; a following canonical attempt on the same admission
+root completes once. Controller-only canonical handoff remains compatible.
+Rollback is a source-only revert of this entry/path validation follow-up.
+
 ## Remaining gates
 
 This worker does not merge PR 62. After push, request `@codex review` on the
@@ -848,3 +891,5 @@ exact-head Codex verdict remain required before any merge decision. Live
 recovery remains unauthorized and unproven. Historical headroom finding
 r3957835501 stays open until Codex re-reviews this head; CI green does not
 clear it. Hosted 34306339973 is not treated as a proven target deadlock.
+Codex P2 r3964610622 is addressed in source on this head and needs an
+exact-head re-review.
