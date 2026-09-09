@@ -123,6 +123,16 @@ func cloneEvent(e Event) Event {
 		x.Ordering = slices.Clone(e.Drain.Ordering)
 		e.Drain = &x
 	}
+	if e.DrainSnapshot != nil {
+		data, _ := json.Marshal(e.DrainSnapshot)
+		var x drainSnapshot
+		_ = json.Unmarshal(data, &x)
+		if e.DrainSnapshot.Runner != nil {
+			runner := *e.DrainSnapshot.Runner
+			x.Runner = &runner
+		}
+		e.DrainSnapshot = &x
+	}
 	if e.Baseline != nil {
 		data, _ := json.Marshal(e.Baseline)
 		var x baselineRecord

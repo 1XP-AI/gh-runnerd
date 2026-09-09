@@ -41,19 +41,21 @@ type Approval struct {
 }
 
 type Event struct {
-	Baseline   *baselineRecord   `json:"baseline,omitempty"`
-	Drain      *drainObservation `json:"drain,omitempty"`
-	Authority  *phaseAuthority   `json:"authority,omitempty"`
-	Sequence   int               `json:"sequence"`
-	Kind       string            `json:"kind"`
-	Operation  string            `json:"operation,omitempty"`
-	ID         int               `json:"id,omitempty"`
-	SessionID  string            `json:"session_id,omitempty"`
-	RequestIDs []int64           `json:"request_ids,omitempty"`
-	Count      int               `json:"count,omitempty"`
-	Digest     string            `json:"digest,omitempty"`
-	Succeeded  bool              `json:"succeeded,omitempty"`
-	Work       string            `json:"work,omitempty"`
+	Baseline      *baselineRecord   `json:"baseline,omitempty"`
+	Drain         *drainObservation `json:"drain,omitempty"`
+	DrainSnapshot *drainSnapshot    `json:"drain_snapshot,omitempty"`
+	DrainMarker   string            `json:"drain_marker,omitempty"`
+	Authority     *phaseAuthority   `json:"authority,omitempty"`
+	Sequence      int               `json:"sequence"`
+	Kind          string            `json:"kind"`
+	Operation     string            `json:"operation,omitempty"`
+	ID            int               `json:"id,omitempty"`
+	SessionID     string            `json:"session_id,omitempty"`
+	RequestIDs    []int64           `json:"request_ids,omitempty"`
+	Count         int               `json:"count,omitempty"`
+	Digest        string            `json:"digest,omitempty"`
+	Succeeded     bool              `json:"succeeded,omitempty"`
+	Work          string            `json:"work,omitempty"`
 }
 
 type Journal interface {
@@ -111,16 +113,26 @@ func replay(events []Event) state {
 		case "inventory":
 			s.inventory = e.Digest
 		case "observation":
-			if e.Operation == "poll" {
+			if e.Operation == "poll" || e.Operation == "drain" {
 				for _, id := range e.RequestIDs {
 					s.observedJobs[id] = true
 				}
+			}
+			if len(e.RequestIDs) > 0 {
+				s.reserved = true
+				s.workObserved = true
 			}
 			if e.Operation == "drain" {
 				s.workObserved = true
 				if e.Drain == nil || e.Drain.Outcome != drainOutcomeObserved {
 					s.uncertain = true
 				}
+			}
+			if e.Operation == "drain-marker" {
+				s.uncertain = true
+			}
+			if e.DrainSnapshot != nil && !validDrainIdlePrerequisite(*e.DrainSnapshot) {
+				s.uncertain = true
 			}
 		case "intent":
 			if pending != "" {
@@ -138,6 +150,16 @@ func replay(events []Event) state {
 			if e.Work != "" {
 				s.workObserved = true
 				s.uncertain = s.uncertain || e.Work == workUnresolved
+			}
+			if len(e.RequestIDs) > 0 {
+				s.reserved = true
+				s.workObserved = true
+				for _, id := range e.RequestIDs {
+					s.observedJobs[id] = true
+				}
+			}
+			if e.DrainSnapshot != nil && !validDrainIdlePrerequisite(*e.DrainSnapshot) {
+				s.uncertain = true
 			}
 			switch e.Operation {
 			case "create":

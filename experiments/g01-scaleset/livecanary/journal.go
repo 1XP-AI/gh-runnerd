@@ -259,6 +259,14 @@ func openJournalAtAdmission(directory string, a Approval, admissionDirectory str
 }
 
 func validEvent(e Event) bool {
+	if e.Operation == "observe-poll" && len(e.RequestIDs) > 1 {
+		return false
+	}
+	for _, id := range e.RequestIDs {
+		if id <= 0 {
+			return false
+		}
+	}
 	if e.Baseline != nil || e.Kind == "baseline" {
 		return validBaselineShape(e)
 	}
@@ -268,6 +276,21 @@ func validEvent(e Event) bool {
 		}
 		switch e.Operation {
 		case "create", "session-open", "observe-owned", "observe-poll", "observe-discovery", "observe-runner":
+		default:
+			return false
+		}
+	}
+	if e.DrainSnapshot != nil {
+		if e.Kind != "result" || e.Operation != "observe-runner" || !validDrainSnapshot(*e.DrainSnapshot, e.DrainSnapshot.Set) {
+			return false
+		}
+	}
+	if e.DrainMarker != "" {
+		if e.Kind != "observation" || e.Operation != "drain-marker" {
+			return false
+		}
+		switch e.DrainMarker {
+		case drainMarkerPrerequisiteFailed, drainMarkerCancelled, drainMarkerDeadline, drainMarkerQuarantine:
 		default:
 			return false
 		}
@@ -282,6 +305,9 @@ func validEvent(e Event) bool {
 	case "observation":
 		if e.Operation == "drain" {
 			return validDrainObservation(e.Drain)
+		}
+		if e.Operation == "drain-marker" {
+			return e.DrainMarker != ""
 		}
 		return e.Operation == "poll" || e.Operation == "inspect" || e.Operation == "inventory"
 	case "response":

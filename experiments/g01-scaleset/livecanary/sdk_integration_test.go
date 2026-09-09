@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -173,5 +174,125 @@ func TestDriverBarriersThroughPinnedSDK(t *testing.T) {
 				t.Fatal("SDK response secret persisted")
 			}
 		})
+	}
+}
+
+func TestDriverDrainThroughPinnedSDKAndPollHook(t *testing.T) {
+	a := approval()
+	a.Phases = append(a.Phases, "drain")
+	set := &scaleset.RunnerScaleSet{
+		ID: 7, Name: a.setName(), RunnerGroupID: a.RunnerGroupID,
+		Labels:        []scaleset.Label{{Name: a.setName()}},
+		RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true},
+		Statistics:    &scaleset.RunnerScaleSetStatistic{TotalRegisteredRunners: 1, TotalIdleRunners: 1},
+	}
+	var polls, acks, acquires, closes int
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/actions/runners/registration-token") && r.Method == http.MethodPost:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]string{"token": "fixture-admin"})
+		case strings.HasSuffix(r.URL.Path, "/actions/runner-registration") && r.Method == http.MethodPost:
+			claims, _ := json.Marshal(map[string]int64{"exp": time.Now().Add(time.Hour).Unix()})
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{"url": server.URL, "token": "eyJhbGciOiJub25lIn0." + base64.RawURLEncoding.EncodeToString(claims) + "."})
+		case strings.HasSuffix(r.URL.Path, "/sessions") && r.Method == http.MethodPost:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(scaleset.RunnerScaleSetSession{
+				SessionID: uuid.MustParse("00000000-0000-4000-8000-000000000011"), OwnerName: a.setName(),
+				MessageQueueURL: server.URL + "/queue", MessageQueueAccessToken: "fixture-queue",
+				RunnerScaleSet: set, Statistics: set.Statistics,
+			})
+		case r.URL.Path == "/queue" && r.Method == http.MethodGet:
+			if polls == 0 {
+				if r.Header.Get(scaleset.HeaderScaleSetMaxCapacity) != "1" {
+					t.Errorf("first poll capacity = %q, want 1", r.Header.Get(scaleset.HeaderScaleSetMaxCapacity))
+				}
+				polls++
+				jobs, _ := json.Marshal([]any{map[string]any{"messageType": "JobAvailable", "runnerRequestId": 41, "workflowRunId": a.WorkflowRunID, "ownerName": a.Organization, "repositoryName": a.Repository}})
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"messageId": 17, "messageType": "RunnerScaleSetJobMessages", "body": string(jobs),
+					"statistics": map[string]int{"totalAvailableJobs": 1, "totalAssignedJobs": 1, "totalRegisteredRunners": 1, "totalIdleRunners": 1},
+				})
+				return
+			}
+			if r.Header.Get(scaleset.HeaderScaleSetMaxCapacity) != "0" {
+				t.Errorf("next poll capacity = %q, want 0", r.Header.Get(scaleset.HeaderScaleSetMaxCapacity))
+			}
+			polls++
+			w.WriteHeader(http.StatusAccepted)
+		case r.URL.Path == "/queue/17" && r.Method == http.MethodDelete:
+			acks++
+			w.WriteHeader(http.StatusNoContent)
+		case strings.HasSuffix(r.URL.Path, "/acquirejobs") && r.Method == http.MethodPost:
+			acquires++
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"count": 1, "value": []int64{41}})
+		case strings.Contains(r.URL.Path, "/sessions/") && r.Method == http.MethodDelete:
+			closes++
+			w.WriteHeader(http.StatusNoContent)
+		case strings.HasSuffix(r.URL.Path, "/runnerscalesets/7") && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(set)
+		case strings.HasSuffix(r.URL.Path, "/agents") && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]any{"count": 1, "value": []any{map[string]any{"id": 19, "name": a.workerName(), "runnerScaleSetId": 7}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	buildAPI := func(hook *drainPollHook) (*SDKAPI, error) {
+		retry := retryablehttp.NewClient()
+		retry.RetryMax = 0
+		retry.Logger = nil
+		retry.HTTPClient.Timeout = time.Second
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.Proxy = nil
+		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			if address != server.Listener.Addr().String() {
+				return nil, errors.New("non-fixture address denied")
+			}
+			return (&net.Dialer{}).DialContext(ctx, network, address)
+		}
+		wrappers := []func(http.RoundTripper) http.RoundTripper(nil)
+		if hook != nil {
+			wrappers = append(wrappers, func(inner http.RoundTripper) http.RoundTripper {
+				hook.inner = inner
+				return hook
+			})
+		}
+		retry.HTTPClient.Transport = withResponseBudget(transport, wrappers...)
+		options := []scaleset.HTTPOption{scaleset.WithRetryableHTTPClint(retry), scaleset.WithLogger(slog.New(slog.DiscardHandler))}
+		client, err := scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{GitHubConfigURL: server.URL + "/fixture-org", PersonalAccessToken: "synthetic-installation"}, options...)
+		if err != nil {
+			return nil, err
+		}
+		return &SDKAPI{client: client, rest: retry.HTTPClient, baseURL: server.URL + "/api/v3", approval: a, options: options}, nil
+	}
+	base, err := buildAPI(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.drainClientFactory = buildAPI
+	api := fixtureSDK{base}
+	j := &memoryJournal{events: []Event{{Kind: "phase", Operation: "create"}, {Kind: "intent", Operation: "create"}, {Kind: "result", Operation: "create", ID: 7}}}
+	d := Driver{Approval: a, Journal: j, API: api}
+	if err := d.Run(context.Background(), "drain"); err != nil {
+		t.Fatalf("pinned SDK drain: %v", err)
+	}
+	if polls != 2 || acks != 1 || acquires != 1 || closes != 1 {
+		t.Fatalf("pinned SDK effects polls=%d ack=%d acquire=%d close=%d", polls, acks, acquires, closes)
+	}
+	var observed bool
+	for _, event := range j.Events() {
+		if event.Kind == "observation" && event.Operation == "drain" && event.Drain != nil && event.Drain.Outcome == drainOutcomeObserved {
+			observed = true
+		}
+	}
+	if !observed {
+		t.Fatal("pinned SDK drain did not retain observed outcome")
 	}
 }

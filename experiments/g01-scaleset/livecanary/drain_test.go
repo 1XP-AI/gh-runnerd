@@ -133,6 +133,32 @@ func TestDrainListenerMarksResponseBeforeWriteInconclusive(t *testing.T) {
 	}
 }
 
+func TestDrainListenerNoMessageIsInconclusive(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	hook := newDrainPollHook(server.URL)
+	session := &drainSyntheticSession{
+		client: http.DefaultClient,
+		initial: scaleset.RunnerScaleSetSession{
+			SessionID: uuid.New(), OwnerName: "fixture-owner", MessageQueueURL: server.URL,
+			Statistics: &scaleset.RunnerScaleSetStatistic{TotalRegisteredRunners: 1, TotalIdleRunners: 1},
+		},
+	}
+	client := *http.DefaultClient
+	client.Transport = hook
+	session.client = &client
+	observation, err := runDrainListener(context.Background(), session, 7, hook)
+	if !errors.Is(err, ErrNoMessage) || observation.Outcome != drainOutcomeInconclusive || observation.Poll.Message != drainMessageAbsent {
+		t.Fatalf("no-message drain = %+v err=%v, want inconclusive", observation, err)
+	}
+}
+
 func TestDrainHeldBodyHoldsCloseUntilRelease(t *testing.T) {
 	hook := newDrainPollHook("http://fixture.invalid/queue")
 	body := &drainHeldBody{source: http.NoBody, release: hook.release}
@@ -243,6 +269,170 @@ func TestDrainRequiresVerificationAuthority(t *testing.T) {
 	}
 }
 
+func TestDrainPhaseAuthorityIsAccepted(t *testing.T) {
+	a := approval()
+	a.Phases = []string{"create", "drain", "inspect", "cleanup"}
+	if err := a.Validate(time.Now()); err != nil {
+		t.Fatalf("issue-71 drain authority rejected: %v", err)
+	}
+}
+
+func TestDrainPollJournalsReservationBeforeACK(t *testing.T) {
+	a := approval()
+	j := &memoryJournal{}
+	d := Driver{Approval: a, Journal: j, API: &fakeAPI{}}
+	inner := &drainGuardSession{
+		initial: scaleset.RunnerScaleSetSession{SessionID: uuid.New(), OwnerName: a.setName(), Statistics: &scaleset.RunnerScaleSetStatistic{TotalRegisteredRunners: 1, TotalIdleRunners: 1}},
+		message: &scaleset.RunnerScaleSetMessage{
+			MessageID:            17,
+			Statistics:           &scaleset.RunnerScaleSetStatistic{TotalAvailableJobs: 1, TotalAssignedJobs: 1, TotalRegisteredRunners: 1, TotalIdleRunners: 1},
+			JobAvailableMessages: []*scaleset.JobAvailable{{JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: 41, WorkflowRunID: a.WorkflowRunID, OwnerName: a.Organization, RepositoryName: a.Repository}}},
+		},
+	}
+	client := &journaledDrainClient{d: &d, inner: inner, sessionID: inner.initial.SessionID.String()}
+	if _, err := client.GetMessage(context.Background(), 0, drainInitialCapacity); err != nil {
+		t.Fatalf("journaled poll: %v", err)
+	}
+	var poll Event
+	for _, event := range j.Events() {
+		if event.Kind == "result" && event.Operation == "observe-poll" {
+			poll = event
+		}
+	}
+	if len(poll.RequestIDs) != 1 || poll.RequestIDs[0] != 41 || poll.Work != workDemand {
+		t.Fatalf("poll reservation = %+v, want request 41/demand", poll)
+	}
+	state := replay(j.Events())
+	if !state.reserved || !state.workObserved || !state.observedJobs[41] {
+		t.Fatalf("poll reservation replay = %+v, want durable quarantine fence", state)
+	}
+}
+
+func TestDrainRejectedIdlePrerequisiteRetainsFence(t *testing.T) {
+	a := approval()
+	a.Phases = append(a.Phases, "drain")
+	j := &memoryJournal{events: []Event{
+		{Kind: "phase", Operation: "create"},
+		{Kind: "intent", Operation: "create"},
+		{Kind: "result", Operation: "create", ID: 7},
+	}}
+	api := &drainDriverAPI{fakeAPI: &fakeAPI{}, approval: a, snapshotStats: &scaleset.RunnerScaleSetStatistic{TotalRegisteredRunners: 1, TotalBusyRunners: 1}}
+	d := Driver{Approval: a, Journal: j, API: api}
+	if err := d.Run(context.Background(), "drain"); !errors.Is(err, ErrQuarantine) {
+		t.Fatalf("busy idle prerequisite = %v, want quarantine", err)
+	}
+	state := replay(j.Events())
+	if !state.uncertain {
+		t.Fatalf("rejected prerequisite replay = %+v, want durable uncertainty", state)
+	}
+	for _, event := range j.Events() {
+		if event.Kind == "observation" && event.Operation == "drain-marker" && event.DrainMarker == drainMarkerPrerequisiteFailed {
+			return
+		}
+	}
+	t.Fatal("rejected prerequisite did not persist a bounded marker")
+}
+
+func TestDrainRejectsEffectsAfterCancellationAndRecordsMarker(t *testing.T) {
+	a := approval()
+	a.Phases = append(a.Phases, "drain")
+	j := &memoryJournal{events: []Event{
+		{Kind: "phase", Operation: "create"},
+		{Kind: "intent", Operation: "create"},
+		{Kind: "result", Operation: "create", ID: 7},
+	}}
+	api := &drainDriverAPI{fakeAPI: &fakeAPI{}, approval: a, blocking: true, opened: make(chan struct{})}
+	d := Driver{Approval: a, Journal: j, API: api}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- d.Run(ctx, "drain") }()
+	select {
+	case <-api.opened:
+		cancel()
+	case <-time.After(time.Second):
+		t.Fatal("drain session did not open")
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrQuarantine) {
+			t.Fatalf("canceled drain = %v, want quarantine", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("canceled drain did not join listener")
+	}
+	for _, event := range j.Events() {
+		if event.Kind == "observation" && event.Operation == "drain-marker" && event.DrainMarker == drainMarkerCancelled {
+			return
+		}
+	}
+	t.Fatal("canceled drain did not persist cancellation marker")
+}
+
+func TestDrainRejectsDuplicateOrWrongEffectsBeforeInnerCall(t *testing.T) {
+	inner := &drainGuardSession{
+		initial: scaleset.RunnerScaleSetSession{SessionID: uuid.New(), OwnerName: "fixture", Statistics: &scaleset.RunnerScaleSetStatistic{TotalRegisteredRunners: 1, TotalIdleRunners: 1}},
+		message: &scaleset.RunnerScaleSetMessage{
+			MessageID:            7,
+			Statistics:           &scaleset.RunnerScaleSetStatistic{TotalAvailableJobs: 1, TotalAssignedJobs: 1, TotalRegisteredRunners: 1, TotalIdleRunners: 1},
+			JobAvailableMessages: []*scaleset.JobAvailable{{JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: 11}}},
+		},
+	}
+	obs := drainObservation{Poll: drainPollObservation{Message: drainMessageUnknown}, NextPoll: drainPollObservation{Message: drainMessageUnknown}}
+	client := &drainClient{inner: inner, obs: &obs, phaseCtx: context.Background()}
+	if _, err := client.GetMessage(context.Background(), 0, drainInitialCapacity); err != nil {
+		t.Fatalf("guard poll: %v", err)
+	}
+	if err := client.DeleteMessage(context.Background(), 8); !errors.Is(err, ErrQuarantine) || inner.ackCalls != 0 {
+		t.Fatalf("wrong ACK = %v calls=%d, want pre-effect quarantine", err, inner.ackCalls)
+	}
+	if err := client.DeleteMessage(context.Background(), 7); err != nil || inner.ackCalls != 1 {
+		t.Fatalf("valid ACK = %v calls=%d", err, inner.ackCalls)
+	}
+	if err := client.DeleteMessage(context.Background(), 7); !errors.Is(err, ErrQuarantine) || inner.ackCalls != 1 {
+		t.Fatalf("duplicate ACK = %v calls=%d, want no second call", err, inner.ackCalls)
+	}
+	if _, err := client.AcquireJobs(context.Background(), []int64{12}); !errors.Is(err, ErrQuarantine) || inner.acquireCalls != 0 {
+		t.Fatalf("wrong acquire = %v calls=%d, want pre-effect quarantine", err, inner.acquireCalls)
+	}
+	if _, err := client.AcquireJobs(context.Background(), []int64{11}); err != nil || inner.acquireCalls != 1 {
+		t.Fatalf("valid acquire = %v calls=%d", err, inner.acquireCalls)
+	}
+	if _, err := client.AcquireJobs(context.Background(), []int64{11}); !errors.Is(err, ErrQuarantine) || inner.acquireCalls != 1 {
+		t.Fatalf("duplicate acquire = %v calls=%d, want no second call", err, inner.acquireCalls)
+	}
+}
+
+func TestDrainRequiresKnownConsistentStatisticsAndControlledMessage(t *testing.T) {
+	observation := validDrainTestObservation()
+	unknown := observation
+	unknown.Poll.StatsKnown = false
+	unknown.Poll.Statistics = drainStatistics{}
+	if validDrainObservation(&unknown) {
+		t.Fatal("observed drain with unknown poll statistics accepted")
+	}
+	contradictory := observation
+	contradictory.Poll.Statistics.Registered = 1
+	contradictory.Poll.Statistics.Busy = 1
+	contradictory.Poll.Statistics.Idle = 1
+	if validDrainObservation(&contradictory) {
+		t.Fatal("contradictory runner partition accepted")
+	}
+	if _, err := newDrainStatistics(&scaleset.RunnerScaleSetStatistic{TotalRegisteredRunners: 1, TotalBusyRunners: 1, TotalIdleRunners: 1}); !errors.Is(err, ErrQuarantine) {
+		t.Fatalf("contradictory source statistics = %v, want quarantine", err)
+	}
+	noMessage := observation
+	noMessage.Poll.Message = drainMessageAbsent
+	noMessage.Poll.Statistics = drainStatistics{}
+	noMessage.Poll.StatsKnown = false
+	noMessage.Poll.ACK = drainResponseNotAttempted
+	noMessage.Poll.Acquisition = drainResponseNotAttempted
+	noMessage.Ordering = []string{"poll-old", "poll-zero"}
+	if validDrainObservation(&noMessage) {
+		t.Fatal("observed drain with no controlled old message accepted")
+	}
+}
+
 func TestDriverRoutesDrainBeforeNoWorkerStatisticsQuarantine(t *testing.T) {
 	a := approval()
 	a.Phases = append(a.Phases, "drain")
@@ -296,8 +486,8 @@ func validDrainTestObservation() drainObservation {
 		ResponseHeld: true,
 		Poll:         drainPollObservation{Capacity: drainInitialCapacity, Message: drainMessagePresent, Statistics: drainStatistics{Available: 1, Assigned: 1, Registered: 1, Idle: 1}, StatsKnown: true, ACK: drainResponseSucceeded, Acquisition: drainResponseSucceeded},
 		NextPoll:     drainPollObservation{Capacity: drainWithdrawnCapacity, Message: drainMessageAbsent, Statistics: beforeStats, StatsKnown: true, ACK: drainResponseNotAttempted, Acquisition: drainResponseNotAttempted},
-		Before:       drainSnapshot{Set: set, Statistics: beforeStats, Runner: runner},
-		After:        drainSnapshot{Set: set, Statistics: beforeStats, Runner: runner},
+		Before:       drainSnapshot{Set: set, Statistics: beforeStats, StatsKnown: true, Runner: runner},
+		After:        drainSnapshot{Set: set, Statistics: beforeStats, StatsKnown: true, Runner: runner},
 		Ordering:     []string{"poll-old", "ack", "acquire", "poll-zero"}, Sequence: 1, ObservedAt: time.Unix(1, 0).UTC(),
 	}
 }
@@ -306,15 +496,22 @@ type drainDriverAPI struct {
 	*fakeAPI
 	approval         Approval
 	getScaleSetCalls int
+	snapshotStats    *scaleset.RunnerScaleSetStatistic
+	blocking         bool
+	opened           chan struct{}
 }
 
 func (a *drainDriverAPI) GetScaleSet(context.Context, int) (*scaleset.RunnerScaleSet, error) {
 	a.getScaleSetCalls++
+	stats := a.snapshotStats
+	if stats == nil {
+		stats = &scaleset.RunnerScaleSetStatistic{TotalRegisteredRunners: 1, TotalIdleRunners: 1}
+	}
 	return &scaleset.RunnerScaleSet{
 		ID: 7, Name: a.approval.setName(), RunnerGroupID: a.approval.RunnerGroupID,
 		Labels:        []scaleset.Label{{Name: a.approval.setName()}},
 		RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true},
-		Statistics:    &scaleset.RunnerScaleSetStatistic{TotalRegisteredRunners: 1, TotalIdleRunners: 1},
+		Statistics:    stats,
 	}, nil
 }
 
@@ -325,10 +522,55 @@ func (a *drainDriverAPI) FindRunner(context.Context, string) (*scaleset.RunnerRe
 func (*drainDriverAPI) VerifyRun(context.Context, Approval, int64) error { return nil }
 
 func (a *drainDriverAPI) OpenDrainSession(_ context.Context, _ int, _ string, hook *drainPollHook) (Session, error) {
+	if a.blocking {
+		close(a.opened)
+		hook.mu.Lock()
+		hook.target = "http://fixture.invalid/queue"
+		hook.mu.Unlock()
+		return &drainBlockingSession{initial: scaleset.RunnerScaleSetSession{SessionID: uuid.New(), OwnerName: a.approval.setName(), MessageQueueURL: hook.target, RunnerScaleSet: &scaleset.RunnerScaleSet{ID: 7, Name: a.approval.setName(), RunnerGroupID: a.approval.RunnerGroupID, Labels: []scaleset.Label{{Name: a.approval.setName()}}, RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true}}, Statistics: &scaleset.RunnerScaleSetStatistic{TotalRegisteredRunners: 1, TotalIdleRunners: 1}}}, nil
+	}
 	hook.mu.Lock()
 	hook.target = "http://fixture.invalid/queue"
 	hook.mu.Unlock()
-	return &drainSyntheticSession{initial: scaleset.RunnerScaleSetSession{SessionID: uuid.New(), OwnerName: a.approval.setName(), MessageQueueURL: "http://fixture.invalid/queue", Statistics: &scaleset.RunnerScaleSetStatistic{TotalRegisteredRunners: 1, TotalIdleRunners: 1}}}, nil
+	return &drainSyntheticSession{initial: scaleset.RunnerScaleSetSession{SessionID: uuid.New(), OwnerName: a.approval.setName(), MessageQueueURL: "http://fixture.invalid/queue", RunnerScaleSet: &scaleset.RunnerScaleSet{ID: 7, Name: a.approval.setName(), RunnerGroupID: a.approval.RunnerGroupID, Labels: []scaleset.Label{{Name: a.approval.setName()}}, RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true}}, Statistics: &scaleset.RunnerScaleSetStatistic{TotalRegisteredRunners: 1, TotalIdleRunners: 1}}}, nil
+}
+
+type drainGuardSession struct {
+	initial      scaleset.RunnerScaleSetSession
+	message      *scaleset.RunnerScaleSetMessage
+	ackCalls     int
+	acquireCalls int
+}
+
+func (s *drainGuardSession) Session() scaleset.RunnerScaleSetSession { return s.initial }
+func (s *drainGuardSession) Close(context.Context) error             { return nil }
+func (s *drainGuardSession) GetMessage(context.Context, int, int) (*scaleset.RunnerScaleSetMessage, error) {
+	return s.message, nil
+}
+func (s *drainGuardSession) DeleteMessage(context.Context, int) error {
+	s.ackCalls++
+	return nil
+}
+func (s *drainGuardSession) AcquireJobs(_ context.Context, ids []int64) ([]int64, error) {
+	s.acquireCalls++
+	return append([]int64(nil), ids...), nil
+}
+
+type drainBlockingSession struct {
+	initial scaleset.RunnerScaleSetSession
+}
+
+func (s *drainBlockingSession) Session() scaleset.RunnerScaleSetSession { return s.initial }
+func (s *drainBlockingSession) Close(ctx context.Context) error         { return ctx.Err() }
+func (s *drainBlockingSession) GetMessage(ctx context.Context, _, _ int) (*scaleset.RunnerScaleSetMessage, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+func (s *drainBlockingSession) DeleteMessage(context.Context, int) error {
+	return errors.New("unexpected ACK")
+}
+func (s *drainBlockingSession) AcquireJobs(context.Context, []int64) ([]int64, error) {
+	return nil, errors.New("unexpected acquisition")
 }
 
 type drainNoTraceTransport struct {

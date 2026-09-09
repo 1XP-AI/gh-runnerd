@@ -51,12 +51,16 @@ func (c Credentials) validate(a Approval, now time.Time) error {
 }
 
 type SDKAPI struct {
-	client      *scaleset.Client
-	rest        *http.Client
-	baseURL     string
-	approval    Approval
-	credentials Credentials
-	options     []scaleset.HTTPOption
+	client          *scaleset.Client
+	rest            *http.Client
+	baseURL         string
+	approval        Approval
+	credentials     Credentials
+	options         []scaleset.HTTPOption
+	// drainClientFactory is nil in production. Tests use it only to bind the
+	// pinned SDK client to an offline loopback transport while still exercising
+	// OpenDrainSession and MessageSessionClient together.
+	drainClientFactory func(*drainPollHook) (*SDKAPI, error)
 }
 
 // NewSDKAPI is network-lazy. It permits only api.github.com and exact approved
@@ -295,7 +299,13 @@ func (a *SDKAPI) OpenDrainSession(c context.Context, id int, owner string, hook 
 	if a == nil || hook == nil {
 		return nil, ErrApproval
 	}
-	configured, err := newSDKAPIWithPollHook(a.approval, a.credentials, hook)
+	var configured *SDKAPI
+	var err error
+	if a.drainClientFactory != nil {
+		configured, err = a.drainClientFactory(hook)
+	} else {
+		configured, err = newSDKAPIWithPollHook(a.approval, a.credentials, hook)
+	}
 	if err != nil {
 		return nil, err
 	}

@@ -31,6 +31,10 @@ const (
 	drainResponseUnknown             = "unknown"
 	drainOutcomeObserved             = "observed"
 	drainOutcomeInconclusive         = "inconclusive"
+	drainMarkerPrerequisiteFailed    = "prerequisite-failed"
+	drainMarkerCancelled             = "cancelled"
+	drainMarkerDeadline              = "deadline"
+	drainMarkerQuarantine            = "quarantine"
 )
 
 var errDrainCollected = errors.New("drain observation collected")
@@ -52,7 +56,22 @@ func newDrainStatistics(s *scaleset.RunnerScaleSetStatistic) (drainStatistics, e
 	if s == nil || s.TotalAvailableJobs < 0 || s.TotalAcquiredJobs < 0 || s.TotalAssignedJobs < 0 || s.TotalRunningJobs < 0 || s.TotalRegisteredRunners < 0 || s.TotalBusyRunners < 0 || s.TotalIdleRunners < 0 {
 		return drainStatistics{}, ErrQuarantine
 	}
-	return drainStatistics{Available: s.TotalAvailableJobs, Acquired: s.TotalAcquiredJobs, Assigned: s.TotalAssignedJobs, Running: s.TotalRunningJobs, Registered: s.TotalRegisteredRunners, Busy: s.TotalBusyRunners, Idle: s.TotalIdleRunners}, nil
+	result := drainStatistics{Available: s.TotalAvailableJobs, Acquired: s.TotalAcquiredJobs, Assigned: s.TotalAssignedJobs, Running: s.TotalRunningJobs, Registered: s.TotalRegisteredRunners, Busy: s.TotalBusyRunners, Idle: s.TotalIdleRunners}
+	if !validKnownDrainStatistics(result) {
+		return drainStatistics{}, ErrQuarantine
+	}
+	return result, nil
+}
+
+func validKnownDrainStatistics(s drainStatistics) bool {
+	if s.Available < 0 || s.Acquired < 0 || s.Assigned < 0 || s.Running < 0 || s.Registered < 0 || s.Busy < 0 || s.Idle < 0 {
+		return false
+	}
+	// The service does not expose a separate runner state. A known snapshot is
+	// only useful when its bounded runner partition is internally consistent.
+	// Avoid Busy+Idle integer overflow by comparing one operand to the
+	// subtraction result.
+	return s.Busy <= s.Registered && s.Idle <= s.Registered-s.Busy && s.Busy+s.Idle == s.Registered
 }
 
 type drainPollObservation struct {
@@ -80,6 +99,7 @@ type drainRunnerIdentity struct {
 type drainSnapshot struct {
 	Set        drainSetIdentity     `json:"set"`
 	Statistics drainStatistics      `json:"statistics"`
+	StatsKnown bool                 `json:"statistics_known"`
 	Runner     *drainRunnerIdentity `json:"runner,omitempty"`
 }
 
@@ -110,17 +130,17 @@ func validDrainPoll(p drainPollObservation, wantCapacity int) bool {
 	if p.Capacity != wantCapacity || p.Message != drainMessagePresent && p.Message != drainMessageAbsent && p.Message != drainMessageUnknown || !validDrainResponse(p.ACK) || !validDrainResponse(p.Acquisition) {
 		return false
 	}
-	if p.Statistics.Available < 0 || p.Statistics.Acquired < 0 || p.Statistics.Assigned < 0 || p.Statistics.Running < 0 || p.Statistics.Registered < 0 || p.Statistics.Busy < 0 || p.Statistics.Idle < 0 {
+	if !p.StatsKnown && p.Statistics != (drainStatistics{}) {
 		return false
 	}
-	return true
+	return !p.StatsKnown || validKnownDrainStatistics(p.Statistics)
 }
 
 func validDrainSnapshot(s drainSnapshot, expected drainSetIdentity) bool {
 	if s.Set != expected || s.Set.ID <= 0 || s.Set.RunnerGroupID <= 0 || s.Set.Name == "" || s.Set.Label == "" || !baselineText(s.Set.Name, 128) || !baselineText(s.Set.Label, 128) {
 		return false
 	}
-	if s.Statistics.Available < 0 || s.Statistics.Acquired < 0 || s.Statistics.Assigned < 0 || s.Statistics.Running < 0 || s.Statistics.Registered < 0 || s.Statistics.Busy < 0 || s.Statistics.Idle < 0 {
+	if !s.StatsKnown || !validKnownDrainStatistics(s.Statistics) {
 		return false
 	}
 	if s.Runner != nil && (s.Runner.ID <= 0 || s.Runner.ScaleSetID != s.Set.ID || s.Runner.Name == "" || !baselineText(s.Runner.Name, 256)) {
@@ -154,25 +174,14 @@ func validDrainObservation(o *drainObservation) bool {
 		seen[item] = true
 	}
 	if o.Outcome == drainOutcomeObserved {
-		if o.NextPoll.Message != drainMessageAbsent || o.NextPoll.ACK != drainResponseNotAttempted || o.NextPoll.Acquisition != drainResponseNotAttempted {
+		if o.Poll.Message != drainMessagePresent || !o.Poll.StatsKnown || o.NextPoll.Message != drainMessageAbsent || o.NextPoll.ACK != drainResponseNotAttempted || o.NextPoll.Acquisition != drainResponseNotAttempted {
 			return false
 		}
-		if o.Poll.Message == drainMessagePresent {
-			if o.Poll.ACK != drainResponseSucceeded || (o.Poll.Acquisition != drainResponseNotAttempted && o.Poll.Acquisition != drainResponseSucceeded) {
-				return false
-			}
-		} else if o.Poll.Message == drainMessageAbsent && (o.Poll.ACK != drainResponseNotAttempted || o.Poll.Acquisition != drainResponseNotAttempted) {
-			return false
-		} else if o.Poll.Message != drainMessageAbsent {
+		if o.Poll.ACK != drainResponseSucceeded || o.Poll.Acquisition != drainResponseSucceeded {
 			return false
 		}
 		want := []string{"poll-old"}
-		if o.Poll.Message == drainMessagePresent {
-			want = append(want, "ack")
-			if o.Poll.Acquisition == drainResponseSucceeded {
-				want = append(want, "acquire")
-			}
-		}
+		want = append(want, "ack", "acquire")
 		want = append(want, "poll-zero")
 		if !slices.Equal(o.Ordering, want) {
 			return false
@@ -243,6 +252,15 @@ func (h *drainPollHook) RoundTrip(req *http.Request) (*http.Response, error) {
 	first := h.pollAttempts == 1
 	h.mu.Unlock()
 	if !first {
+		h.mu.Lock()
+		second := h.pollAttempts == 2
+		if !second {
+			h.invalid = true
+		}
+		h.mu.Unlock()
+		if !second {
+			return nil, ErrQuarantine
+		}
 		return h.inner.RoundTrip(req)
 	}
 
@@ -338,15 +356,49 @@ type drainClient struct {
 	inner     listener.Client
 	validate  func(context.Context, *scaleset.RunnerScaleSetMessage) error
 	obs       *drainObservation
+	phaseCtx  context.Context
+	reject    func(string) error
 	mu        sync.Mutex
 	polls     int
 	messageID int
 	requestID int64
 }
 
+type drainContextBinder interface {
+	bindDrainContext(context.Context)
+}
+
+func (c *drainClient) bindDrainContext(ctx context.Context) {
+	c.mu.Lock()
+	c.phaseCtx = ctx
+	c.mu.Unlock()
+	if binder, ok := c.inner.(drainContextBinder); ok {
+		binder.bindDrainContext(ctx)
+	}
+}
+
+func (c *drainClient) active() bool {
+	c.mu.Lock()
+	phaseCtx := c.phaseCtx
+	c.mu.Unlock()
+	return phaseCtx == nil || phaseCtx.Err() == nil
+}
+
+func (c *drainClient) rejectCall(operation string) error {
+	if c.reject != nil {
+		if err := c.reject(operation); err != nil {
+			return err
+		}
+	}
+	return ErrQuarantine
+}
+
 func (c *drainClient) Session() scaleset.RunnerScaleSetSession { return c.inner.Session() }
 
 func (c *drainClient) GetMessage(ctx context.Context, last, capacity int) (*scaleset.RunnerScaleSetMessage, error) {
+	if !c.active() {
+		return nil, c.rejectCall("observe-poll")
+	}
 	c.mu.Lock()
 	if capacity != drainInitialCapacity && capacity != drainWithdrawnCapacity || c.polls >= 2 {
 		c.mu.Unlock()
@@ -355,6 +407,8 @@ func (c *drainClient) GetMessage(ctx context.Context, last, capacity int) (*scal
 	c.polls++
 	index := c.polls
 	c.obs.poll(index).Capacity = capacity
+	c.obs.poll(index).Statistics = drainStatistics{}
+	c.obs.poll(index).StatsKnown = false
 	c.obs.poll(index).ACK = drainResponseNotAttempted
 	c.obs.poll(index).Acquisition = drainResponseNotAttempted
 	c.obs.Ordering = append(c.obs.Ordering, map[int]string{1: "poll-old", 2: "poll-zero"}[index])
@@ -374,7 +428,7 @@ func (c *drainClient) GetMessage(ctx context.Context, last, capacity int) (*scal
 		return nil, nil
 	}
 	stats, statsErr := newDrainStatistics(message.Statistics)
-	if statsErr != nil || message.MessageID <= 0 || len(message.JobAssignedMessages) != 0 || len(message.JobStartedMessages) != 0 || len(message.JobCompletedMessages) != 0 || len(message.JobAvailableMessages) > 1 || len(message.JobAvailableMessages) == 1 && (message.JobAvailableMessages[0] == nil || message.JobAvailableMessages[0].RunnerRequestID <= 0) {
+	if statsErr != nil || message.MessageID <= 0 || len(message.JobAssignedMessages) != 0 || len(message.JobStartedMessages) != 0 || len(message.JobCompletedMessages) != 0 || len(message.JobAvailableMessages) != 1 || message.JobAvailableMessages[0] == nil || message.JobAvailableMessages[0].RunnerRequestID <= 0 {
 		c.mu.Lock()
 		c.obs.poll(index).Message = drainMessageUnknown
 		c.mu.Unlock()
@@ -409,13 +463,19 @@ func (c *drainClient) GetMessage(ctx context.Context, last, capacity int) (*scal
 }
 
 func (c *drainClient) DeleteMessage(ctx context.Context, id int) error {
+	if !c.active() {
+		return c.rejectCall("ack")
+	}
+	c.mu.Lock()
+	index := c.polls
+	valid := index == 1 && c.messageID > 0 && id == c.messageID && c.obs.poll(index).ACK == drainResponseNotAttempted
+	c.mu.Unlock()
+	if !valid {
+		return c.rejectCall("ack")
+	}
 	err := c.inner.DeleteMessage(ctx, id)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	index := c.polls
-	if index < 1 || index > 2 || c.messageID <= 0 || id != c.messageID {
-		return ErrQuarantine
-	}
 	c.obs.poll(index).ACK = drainResponseSucceeded
 	c.obs.Ordering = append(c.obs.Ordering, "ack")
 	if err != nil {
@@ -425,16 +485,19 @@ func (c *drainClient) DeleteMessage(ctx context.Context, id int) error {
 }
 
 func (c *drainClient) AcquireJobs(ctx context.Context, ids []int64) ([]int64, error) {
-	if len(ids) != 1 {
-		return nil, ErrQuarantine
+	if !c.active() {
+		return nil, c.rejectCall("acquire")
+	}
+	c.mu.Lock()
+	index := c.polls
+	valid := index == 1 && len(ids) == 1 && c.requestID > 0 && ids[0] == c.requestID && c.obs.poll(index).ACK == drainResponseSucceeded && c.obs.poll(index).Acquisition == drainResponseNotAttempted
+	c.mu.Unlock()
+	if !valid {
+		return nil, c.rejectCall("acquire")
 	}
 	got, err := c.inner.AcquireJobs(ctx, slices.Clone(ids))
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	index := c.polls
-	if index < 1 || index > 2 || c.requestID <= 0 || ids[0] != c.requestID {
-		return nil, ErrQuarantine
-	}
 	c.obs.poll(index).Acquisition = drainResponseSucceeded
 	c.obs.Ordering = append(c.obs.Ordering, "acquire")
 	if err != nil {
@@ -457,6 +520,9 @@ func (s drainScaler) HandleDesiredRunnerCount(_ context.Context, count int) (int
 	s.client.mu.Lock()
 	polls := s.client.polls
 	s.client.mu.Unlock()
+	if !s.client.active() {
+		return 0, s.client.rejectCall("observe-poll")
+	}
 	if polls >= 2 {
 		return 0, errDrainCollected
 	}
@@ -493,6 +559,9 @@ func runDrainListener(ctx context.Context, client listener.Client, setID int, ho
 		obs.Poll.StatsKnown = true
 	}
 	c := &drainClient{inner: client, obs: &obs}
+	if rejecter, ok := client.(interface{ reject(string) error }); ok {
+		c.reject = rejecter.reject
+	}
 	l, err := listener.New(c, listener.Config{ScaleSetID: setID, MaxRunners: drainInitialCapacity})
 	if err != nil {
 		return obs, ErrQuarantine
@@ -500,6 +569,7 @@ func runDrainListener(ctx context.Context, client listener.Client, setID int, ho
 	hook.onRequestWritten = func() { l.SetMaxRunners(drainWithdrawnCapacity) }
 	runCtx, stop := context.WithCancel(ctx)
 	defer stop()
+	c.bindDrainContext(runCtx)
 	runResult := make(chan error, 1)
 	go func() { runResult <- l.Run(runCtx, drainScaler{client: c}) }()
 	cancelAndJoin := func() {
@@ -576,7 +646,7 @@ func runDrainListener(ctx context.Context, client listener.Client, setID int, ho
 		if obs.Boundary == "" {
 			obs.Boundary, obs.ResponseHeld, _ = hook.boundary()
 		}
-		if obs.Boundary == drainBoundaryRequestWritten && obs.ResponseHeld {
+		if obs.Boundary == drainBoundaryRequestWritten && obs.ResponseHeld && obs.Poll.Message == drainMessagePresent && obs.Poll.StatsKnown && obs.Poll.ACK == drainResponseSucceeded && obs.Poll.Acquisition == drainResponseSucceeded && obs.NextPoll.Message == drainMessageAbsent {
 			obs.Outcome = drainOutcomeObserved
 			return obs, nil
 		}
@@ -596,7 +666,7 @@ func drainBoundaryError(obs *drainObservation, hook *drainPollHook, err error) e
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return ErrQuarantine
 	}
-	if obs != nil && obs.Boundary == drainBoundaryUnresolved {
+	if obs != nil && (obs.Boundary == drainBoundaryUnresolved || obs.Boundary == drainBoundaryResponseBeforeWrite) {
 		return ErrNoMessage
 	}
 	return ErrQuarantine
