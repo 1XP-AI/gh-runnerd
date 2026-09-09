@@ -1,10 +1,13 @@
 package tooling
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1092,6 +1095,324 @@ func TestPairedBrokerRealCadenceChildExceedsThirtySeconds(t *testing.T) {
 	}
 	if len(leftover) != 0 {
 		t.Fatalf("owned prep dir leaked after prep failure: %q", leftover)
+	}
+}
+
+func TestG02OwnedPrepCleanupContract(t *testing.T) {
+	script, err := os.ReadFile("check-offline-experiments.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(script)
+	mktempAt := strings.Index(body, "g02_prep_dir=$(mktemp -d)")
+	exitTrapAt := strings.Index(body, `trap 'rm -rf -- "${g02_prep_dir}"' EXIT`)
+	intTrapAt := strings.Index(body, `trap 'trap - EXIT; rm -rf -- "${g02_prep_dir}"; exit 130' INT`)
+	termTrapAt := strings.Index(body, `trap 'trap - EXIT; rm -rf -- "${g02_prep_dir}"; exit 143' TERM`)
+	hupTrapAt := strings.Index(body, `trap 'trap - EXIT; rm -rf -- "${g02_prep_dir}"; exit 129' HUP`)
+	chmodAt := strings.Index(body, `chmod 0700 "${g02_prep_dir}"`)
+	if mktempAt < 0 || exitTrapAt < 0 || intTrapAt < 0 || termTrapAt < 0 || hupTrapAt < 0 || chmodAt < 0 {
+		t.Fatal("G02 prep dir is missing owned EXIT/INT/TERM/HUP cleanup traps")
+	}
+	if !(mktempAt < exitTrapAt && exitTrapAt < intTrapAt && intTrapAt < termTrapAt && termTrapAt < hupTrapAt && hupTrapAt < chmodAt) {
+		t.Fatal("cleanup traps must be registered immediately after mktemp and before chmod")
+	}
+	for _, line := range strings.Split(body, "\n") {
+		if strings.Contains(line, "timeout=120s") && strings.Contains(line, "real_pair_cadence_regex") {
+			t.Fatal("cadence partition timeout was widened instead of isolating fixture preparation")
+		}
+	}
+}
+
+func TestG02OwnedPrepDirRemovedAfterSuccess(t *testing.T) {
+	root, tmp, env := toolingG02CleanupEnv(t, "")
+	out, err := toolingRun(t, root, env, "bash", "scripts/check-offline-experiments.sh")
+	if err != nil {
+		t.Fatalf("success cleanup failed: %s", out)
+	}
+	if leftover := toolingLeftoverDirs(t, tmp); len(leftover) != 0 {
+		t.Fatalf("owned prep dir leaked after success: %q", leftover)
+	}
+}
+
+func TestG02OwnedPrepDirRemovedAfterExit91(t *testing.T) {
+	root, tmp, env := toolingG02CleanupEnv(t, `#!/bin/sh
+set -eu
+printf '%s\t%s\n' "${GOTOOLCHAIN:-}" "$*" >> "$TOOLING_GO_LOG"
+if [ -n "${G01_PAIR_BRIDGE_PREP_DIR:-}" ]; then
+	case "$*" in
+	*" -run ^TestPairedBrokerPrepareReviewedG01LiveBinary$ "*)
+		printf '%s\n' "${G01_PAIR_BRIDGE_PREP_DIR}" > "$TOOLING_PREP_DIR_FILE"
+		exit 91
+		;;
+	esac
+fi
+exec "$TOOLING_REAL_GO" "$@"
+`)
+	out, err := toolingRun(t, root, env, "bash", "scripts/check-offline-experiments.sh")
+	if toolingExitCode(err) != 91 {
+		t.Fatalf("exit 91 status=%d err=%v out=%s", toolingExitCode(err), err, out)
+	}
+	toolingMustRemoveOwnedPrep(t, env, tmp)
+	toolingMustNotInvokeCadence(t, env)
+}
+
+func TestG02OwnedPrepDirRemovedAfterSignal(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		signal string
+		status int
+	}{
+		{name: "TERM", signal: "TERM", status: 143},
+		{name: "INT", signal: "INT", status: 130},
+		{name: "HUP", signal: "HUP", status: 129},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, tmp, env := toolingG02CleanupEnv(t, `#!/bin/sh
+set -eu
+printf '%s\t%s\n' "${GOTOOLCHAIN:-}" "$*" >> "$TOOLING_GO_LOG"
+if [ -n "${G01_PAIR_BRIDGE_PREP_DIR:-}" ]; then
+	case "$*" in
+	*" -run ^TestPairedBrokerPrepareReviewedG01LiveBinary$ "*)
+		printf '%s\n' "${G01_PAIR_BRIDGE_PREP_DIR}" > "$TOOLING_PREP_DIR_FILE"
+		printf '%s\n' "$PPID" > "$TOOLING_G02_SHELL_PID_FILE"
+		printf '%s\n' "$$" > "$TOOLING_WRAPPER_PID_FILE"
+		while [ ! -f "$TOOLING_HOLD_RELEASE" ]; do
+			sleep 1
+		done
+		exit 0
+		;;
+	esac
+fi
+exec "$TOOLING_REAL_GO" "$@"
+`)
+			holdRelease := toolingEnvValue(env, "TOOLING_HOLD_RELEASE")
+			if holdRelease == "" {
+				t.Fatal("hold release path is missing")
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "bash", "scripts/check-offline-experiments.sh")
+			cmd.Dir = root
+			cmd.Env = append(os.Environ(), "GOTOOLCHAIN=go1.26.8", "GOFLAGS=", "GOWORK=off")
+			cmd.Env = append(cmd.Env, env...)
+			var out bytes.Buffer
+			cmd.Stdout = &out
+			cmd.Stderr = &out
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			reaped := false
+			t.Cleanup(func() {
+				_ = os.WriteFile(holdRelease, []byte("1\n"), 0600)
+				if !reaped && cmd.Process != nil {
+					_ = cmd.Process.Kill()
+					_, _ = cmd.Process.Wait()
+				}
+			})
+			g02PID := toolingWaitPIDFile(t, toolingEnvValue(env, "TOOLING_G02_SHELL_PID_FILE"), 40*time.Second)
+			toolingRequireOwnedG02Shell(t, cmd.Process.Pid, g02PID)
+			toolingSignalExactPID(t, g02PID, tc.signal)
+			if err := os.WriteFile(holdRelease, []byte("1\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			waitErr := cmd.Wait()
+			reaped = true
+			if toolingExitCode(waitErr) != tc.status {
+				t.Fatalf("%s status=%d err=%v out=%s", tc.name, toolingExitCode(waitErr), waitErr, out.String())
+			}
+			toolingMustRemoveOwnedPrep(t, env, tmp)
+			toolingMustNotInvokeCadence(t, env)
+		})
+	}
+}
+
+func toolingG02CleanupEnv(t *testing.T, wrapperBody string) (root, tmp string, env []string) {
+	t.Helper()
+	root = toolingFixture(t)
+	tmp = filepath.Join(root, "owned-tmp")
+	if err := os.Mkdir(tmp, 0700); err != nil {
+		t.Fatal(err)
+	}
+	realGo, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(root, "go-wrapper.log")
+	prepDirFile := filepath.Join(root, "g02-prep-dir")
+	g02PIDFile := filepath.Join(root, "g02-shell.pid")
+	wrapperPIDFile := filepath.Join(root, "g02-wrapper.pid")
+	holdRelease := filepath.Join(root, "g02-hold-release")
+	if wrapperBody == "" {
+		wrapper, _, _ := toolingGoWrapper(t, root)
+		env = []string{
+			"GO=" + wrapper,
+			"TOOLING_REAL_GO=" + realGo,
+			"TOOLING_GO_LOG=" + logPath,
+			"TOOLING_PREP_DIR_FILE=" + prepDirFile,
+			"TOOLING_G02_SHELL_PID_FILE=" + g02PIDFile,
+			"TOOLING_WRAPPER_PID_FILE=" + wrapperPIDFile,
+			"TOOLING_HOLD_RELEASE=" + holdRelease,
+			"TMPDIR=" + tmp,
+		}
+		return root, tmp, env
+	}
+	toolingFile(t, root, "logging-go", wrapperBody, 0700)
+	env = []string{
+		"GO=" + filepath.Join(root, "logging-go"),
+		"TOOLING_REAL_GO=" + realGo,
+		"TOOLING_GO_LOG=" + logPath,
+		"TOOLING_PREP_DIR_FILE=" + prepDirFile,
+		"TOOLING_G02_SHELL_PID_FILE=" + g02PIDFile,
+		"TOOLING_WRAPPER_PID_FILE=" + wrapperPIDFile,
+		"TOOLING_HOLD_RELEASE=" + holdRelease,
+		"TMPDIR=" + tmp,
+	}
+	return root, tmp, env
+}
+
+func toolingEnvValue(env []string, key string) string {
+	prefix := key + "="
+	for _, kv := range env {
+		if strings.HasPrefix(kv, prefix) {
+			return strings.TrimPrefix(kv, prefix)
+		}
+	}
+	return ""
+}
+
+func toolingExitCode(err error) int {
+	if err == nil {
+		return 0
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return ee.ExitCode()
+	}
+	return -1
+}
+
+func toolingLeftoverDirs(t *testing.T, tmp string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var leftover []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			leftover = append(leftover, entry.Name())
+		}
+	}
+	return leftover
+}
+
+func toolingMustRemoveOwnedPrep(t *testing.T, env []string, tmp string) {
+	t.Helper()
+	prepDir := strings.TrimSpace(toolingReadFile(t, toolingEnvValue(env, "TOOLING_PREP_DIR_FILE")))
+	if prepDir == "" {
+		t.Fatal("owned prep dir path was not recorded")
+	}
+	if _, err := os.Stat(prepDir); !os.IsNotExist(err) {
+		t.Fatalf("owned prep dir leaked: %s err=%v", prepDir, err)
+	}
+	if leftover := toolingLeftoverDirs(t, tmp); len(leftover) != 0 {
+		t.Fatalf("owned prep dir leaked under TMPDIR: %q", leftover)
+	}
+}
+
+func toolingMustNotInvokeCadence(t *testing.T, env []string) {
+	t.Helper()
+	logPath := toolingEnvValue(env, "TOOLING_GO_LOG")
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cadence := "go1.26.8\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./..."
+	for _, line := range strings.Split(string(data), "\n") {
+		if line == cadence {
+			t.Fatalf("cadence ran after G02 prep cleanup path; wrapper log:\n%s", data)
+		}
+	}
+}
+
+func toolingReadFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+func toolingWaitPIDFile(t *testing.T, path string, d time.Duration) int {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			text := strings.TrimSpace(string(data))
+			if text != "" {
+				pid, convErr := strconv.Atoi(text)
+				if convErr != nil {
+					t.Fatal(convErr)
+				}
+				return pid
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for pid file %s", path)
+	return 0
+}
+
+func toolingRequireOwnedG02Shell(t *testing.T, scriptPID, g02PID int) {
+	t.Helper()
+	if scriptPID <= 1 || g02PID <= 1 {
+		t.Fatalf("refusing to signal pid script=%d g02=%d", scriptPID, g02PID)
+	}
+	self := os.Getpid()
+	if g02PID == self || scriptPID == self {
+		t.Fatal("refusing to signal the test process")
+	}
+	out, err := exec.Command("ps", "-o", "pid=,ppid=,command=", "-p", strconv.Itoa(g02PID)).CombinedOutput()
+	if err != nil {
+		t.Fatalf("ps g02 pid %d: %s", g02PID, out)
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) < 3 {
+		t.Fatalf("unexpected ps output for %d: %q", g02PID, out)
+	}
+	ppid, err := strconv.Atoi(fields[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ppid != scriptPID {
+		t.Fatalf("g02 pid %d parent=%d, want script pid %d; ps=%q", g02PID, ppid, scriptPID, out)
+	}
+	cmd := strings.ToLower(strings.Join(fields[2:], " "))
+	for _, forbidden := range []string{"runner.listener", "actions-runner", "launchd", "docker", "lima", "colima", "keychain"} {
+		if strings.Contains(cmd, forbidden) {
+			t.Fatalf("refusing to signal non-owned process %d command=%q", g02PID, cmd)
+		}
+	}
+	if !strings.Contains(cmd, "check-offline-experiments.sh") {
+		t.Fatalf("g02 pid %d is not the offline-experiment subshell: %q", g02PID, cmd)
+	}
+}
+
+func toolingSignalExactPID(t *testing.T, pid int, spec string) {
+	t.Helper()
+	if pid <= 1 {
+		t.Fatalf("refusing to signal pid %d", pid)
+	}
+	switch spec {
+	case "TERM", "INT", "HUP":
+	default:
+		t.Fatalf("unsupported signal spec %q", spec)
+	}
+	out, err := exec.Command("kill", "-s", spec, strconv.Itoa(pid)).CombinedOutput()
+	if err != nil {
+		t.Fatalf("kill -s %s %d: %s", spec, pid, out)
 	}
 }
 

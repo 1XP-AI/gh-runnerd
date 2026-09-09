@@ -50,10 +50,14 @@ for module_dir in "${offline_modules[@]}"; do
 			# unfiltered complement so Example Output and fuzz seeds still run.
 			# Package discovery stays on ./... in every command.
 			g02_prep_dir=$(mktemp -d)
-			chmod 0700 "${g02_prep_dir}"
-			# Remove only this owned mktemp path. EXIT runs on success, set -e
-			# failure, and signal-induced shell exit; the handler must not exit.
+			# Remove only this owned mktemp path. EXIT covers success and set -e
+			# failure without changing status. INT/TERM/HUP are not EXIT on
+			# Bash 5, so trap them explicitly, disarm EXIT, and keep 130/143/129.
 			trap 'rm -rf -- "${g02_prep_dir}"' EXIT
+			trap 'trap - EXIT; rm -rf -- "${g02_prep_dir}"; exit 130' INT
+			trap 'trap - EXIT; rm -rf -- "${g02_prep_dir}"; exit 143' TERM
+			trap 'trap - EXIT; rm -rf -- "${g02_prep_dir}"; exit 129' HUP
+			chmod 0700 "${g02_prep_dir}"
 			export G01_PAIR_BRIDGE_PREP_DIR="${g02_prep_dir}"
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -run "${paired_prep_regex}" ./...
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -run "${real_pair_cadence_regex}" ./...

@@ -636,7 +636,10 @@ owned 0700 directories, pins a receipt to current HEAD, clean VCS, exact
 tags/target/Go SDK and the SHA-256 of the opened bytes, and uses the existing
 private-file helpers. A set `G01_PAIR_BRIDGE_PREP_DIR` is fail-closed and does
 not clone/build. Unset remains the standalone compile path. The tag-only
-process cache is removed. An EXIT trap removes only the owned mktemp path.
+process cache is removed. An EXIT trap removes only the owned mktemp path on
+success and command failure. Independent review of `e25a682e` found that
+EXIT-only cleanup does not run on default SIGTERM/SIGINT on Bash 5; the
+follow-up below adds explicit INT/TERM/HUP handling.
 
 Green after this correction:
 
@@ -685,6 +688,75 @@ revert of this prepared-receipt follow-up; the earlier cadence-prep isolation,
 receipt-boundary, fixture-sentinel and after-bind commits remain independently
 revertable.
 
+## G02 owned prep cleanup on INT/TERM/HUP
+
+Independent contract review of `e25a682e` found that
+`scripts/check-offline-experiments.sh` installed only an EXIT trap while the
+script comment and `docs/CI.md` claimed signal-induced cleanup. On Bash 5, EXIT
+does not run for default SIGTERM/SIGINT, so a hosted cancellation can leak the
+owned mktemp tree. Ordinary success, `exit 91`, and prep-failure cleanup were
+already green. Cleanup is now registered immediately after `mktemp` and before
+`chmod`. EXIT still removes only that owned path without changing success or
+command-failure status. Explicit INT, TERM, and HUP traps remove the same path,
+disarm EXIT, and exit 130, 143, or 129. Tests signal only the exact G02
+subshell PID of the generated fixture; they do not kill process groups or
+existing runners.
+
+TDD red at `e25a682e` before this correction (Go 1.26.8, darwin/arm64,
+`/bin/bash` 3.2.57):
+
+```text
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=180s \
+  -run '^TestG02OwnedPrep(CleanupContract|DirRemovedAfter(Success|Exit91|Signal|PrepFailure))$' ./scripts
+FAIL; scripts 59.530s
+TestG02OwnedPrepCleanupContract: missing owned EXIT/INT/TERM/HUP cleanup traps
+TestG02OwnedPrepDirRemovedAfterSignal/INT: INT status=0
+TestG02OwnedPrepDirRemovedAfterSuccess PASS
+TestG02OwnedPrepDirRemovedAfterExit91 PASS
+TestG02OwnedPrepDirRemovedAfterPrepFailure PASS
+TestG02OwnedPrepDirRemovedAfterSignal/TERM PASS
+TestG02OwnedPrepDirRemovedAfterSignal/HUP PASS
+```
+
+Local Bash 3.2 runs EXIT on TERM/HUP, so the local behavioral red is INT
+status 0 plus the missing explicit traps. The independent review's smallest
+EXIT-only SIGTERM check was `rc=143 cleanup_marker=no`.
+
+Green after this correction:
+
+```text
+bash -n scripts/check-offline-experiments.sh
+PASS
+
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=180s \
+  -run '^TestG02OwnedPrep(CleanupContract|DirRemovedAfter(Success|Exit91|Signal|PrepFailure))$' ./scripts
+PASS; scripts 58.693s
+
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=180s \
+  -run '^TestG02OwnedPrep(CleanupContract|DirRemovedAfter(Success|Exit91|Signal|PrepFailure))$' ./scripts
+PASS; scripts 60.054s
+```
+
+G02 partition witness plus the cleanup family, run once after the focused
+green:
+
+```text
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=300s \
+  -run '^(TestToolingDefaultG02PartitionsRun|TestG02OwnedPrep)' ./scripts
+PASS; scripts 223.351s
+```
+
+This follow-up does not rerun G01 partitions or the real G02 experiment
+harness. Hosted CI run 34306339973 failed on a separate G01 terminal
+partition (120s); that investigation is owned by an independent Luna
+diagnostic on immutable `e25a682e` and is not addressed here.
+
+Limits: public hosted CI still has no secrets or live
+GitHub/App/runner/Docker/Keychain/launchd coverage. Rollback is a source-only
+revert of this signal-cleanup follow-up; the prepared-receipt, cadence-prep
+isolation, receipt-boundary, fixture-sentinel and after-bind commits remain
+independently revertable.
+
 ## Remaining gates
 
 This worker does not merge PR 62. After push, request `@codex review` on the
@@ -692,4 +764,5 @@ exact new head. Hosted CI, independent review of the new head, and a clean
 exact-head Codex verdict remain required before any merge decision. Live
 recovery remains unauthorized and unproven. Historical headroom finding
 r3957835501 stays open until Codex re-reviews this head; CI green does not
-clear it.
+clear it. Hosted failure 34306339973 is a separate G01 terminal-partition
+investigation and is not part of this cleanup follow-up.

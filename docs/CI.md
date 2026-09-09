@@ -49,9 +49,12 @@ clone/build of the distinct `g01_live,g01_pair_fixture` and
 unfiltered complement that skips `^TestPaired`. The default gate exports an
 owned `G01_PAIR_BRIDGE_PREP_DIR` and refuses missing or invalid prepared
 receipts instead of rebuilding inside the cadence process. Standalone
-clone/build remains only when that variable is unset. An EXIT trap removes
-only that owned mktemp path and does not exit from the handler, so the
-original status is preserved. Keeping package discovery in every command means
+clone/build remains only when that variable is unset. Cleanup of that owned
+mktemp path is registered immediately after `mktemp` and before `chmod`. An
+EXIT trap removes only that path and does not exit from the handler, so
+success and command-failure status are preserved. Explicit INT, TERM, and
+HUP traps remove the same owned path, disarm EXIT, and exit 130, 143, or
+129. Keeping package discovery in every command means
 a same-named test in another package is run in the matching named partition
 rather than silently dropped by a global skip, while the unfiltered G02
 complement still executes every ordinary non-paired test, Example Output and
@@ -65,7 +68,10 @@ named cadence test, the remaining `TestPaired` family, remainder, another
 package, a same-name prep test in another package, a same-name cadence test in
 another package, a same-name remaining `TestPaired` test in another package, an
 Example Output and a fuzz seed. Each witness must execute exactly once, and
-each failing witness must propagate a nonzero offline-gate result.
+each failing witness must propagate a nonzero offline-gate result. Owned G02
+prep cleanup is covered by success, `exit 91`, ordinary prep failure, and
+generated-fixture SIGTERM/SIGINT/SIGHUP cases that assert status 0, 91, 143,
+130, or 129 and remove only that mktemp directory.
 
 The tagged CLI tests use synthetic input/subprocess fixtures and static plan or
 refusal paths. The `g01_pair_fixture` livecanary checks use private synthetic
