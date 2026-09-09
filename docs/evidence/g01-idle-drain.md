@@ -863,6 +863,92 @@ cleanup operation was performed. Rollback is a focused normal
 separate documentation revert if desired), retaining journal, reservation and
 uncertainty for inspection.
 
+### Exact-head follow-up: queue destination host boundary
+
+The additional security P1 sent at `2026-09-09T23:06:52Z` UTC identified that
+`validDrainQueueURL` accepted the control-plane `api.github.com` origin as a
+session `MessageQueueURL`. Because the pinned SDK uses that URL for queue GET
+and ACK DELETE requests with the session bearer, accepting the API origin could
+send queue credentials outside the exact approved Actions destination. The
+required policy is HTTPS plus an exact approved `Approval.ActionsHosts`
+host/port pair; the control-plane API host remains permitted only by the
+general control-plane transport path and is not reused for queue validation.
+
+The new pinned `OpenDrainSession` regression was added and run before the
+production correction at `2026-09-09T23:21:25Z` UTC, with source baseline
+`cb2c1ba7c58fb5faeab6eeaa42b4564686a9c61c`:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^TestPinnedSDKDrainRequiresApprovedHTTPSQueueHost$' -count=1 -v -timeout=180s
+```
+
+The command exited 1 as required. The approved HTTPS fixture case passed, while
+the API control-plane host, an unapproved Actions-like host and a plain HTTP
+host were each accepted by the old production code; the failure also showed
+that the old path would return a session instead of rejecting before assigning
+the poll target. No raw response body, bearer, private path or SDK error was
+recorded in this evidence.
+
+The minimal source/test correction was then appended and pushed as
+`b3d45cb648965913090dcb08c3674341f76f483a`. `validDrainQueueURL` now requires
+HTTPS, a valid bounded port, and exact host/port membership in the supplied
+`Approval.ActionsHosts`; a bare approved hostname means the default HTTPS port,
+while an explicit fixture host/port is accepted only when that exact pair is
+listed. `validDrainSessionWire` performs this check before `OpenDrainSession`
+assigns `hook.target`, so rejected queue URLs cannot become poll or ACK
+destinations. The pinned loopback fixture now uses a test-only TLS server and
+explicitly lists its listener host/port in its fixture approval; production
+`Approval.Validate` and the general API-host transport allowlist were not
+weakened or reused for queue identity.
+
+Focused post-fix normal verification at `2026-09-09T23:24:36Z` UTC was:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^(TestPinnedSDKDrain.*|TestValidDrainQueueURLRequiresExactApprovedHostPort|TestDriverDrainThroughPinnedSDKAndPollHook|TestDrainListenerDoesNotReleaseBeforeWithdrawalCompletes|TestDrainListenerCancellationWhileWithdrawalBlockedDoesNotDeadlock|TestDrainPollHookRejectsDuplicatePhysicalWrites|TestDrainPollHookRequiresOneSuccessfulWritePerPoll)$' -count=1 -timeout=180s
+```
+
+The command passed in 0.594s. It covered the approved/rejected queue-host
+matrix, unrelated runner metadata acceptance, duplicate/case-folded session
+and runner identity rejection, non-EOF poll failure, physical ACK binding,
+withdrawn-poll/capacity/cursor/retry fences, and the blocked withdrawal
+response race plus cancellation join.
+
+The corresponding race verification at `2026-09-09T23:24:45Z` UTC was:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -run '^(TestPinnedSDKDrain.*|TestValidDrainQueueURLRequiresExactApprovedHostPort|TestDriverDrainThroughPinnedSDKAndPollHook|TestDrainListenerDoesNotReleaseBeforeWithdrawalCompletes|TestDrainListenerCancellationWhileWithdrawalBlockedDoesNotDeadlock|TestDrainPollHookRejectsDuplicatePhysicalWrites|TestDrainPollHookRequiresOneSuccessfulWritePerPoll)$' -count=1 -timeout=180s
+```
+
+The race command passed in 2.097s with no race report. The full relevant package
+run passed at `2026-09-09T23:24:55Z` UTC in 27.336s:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -count=1 -timeout=180s
+```
+
+At `2026-09-09T23:25:31Z` UTC, `GOTOOLCHAIN=go1.26.8 go vet ./livecanary`,
+`bash ../../scripts/gofmt.sh check` and `git diff --check` all exited 0 with no
+diagnostics. These remain offline loopback tests only; no live workflow,
+runner, credential, App, Keychain, launchd, Docker, Lima or cleanup operation
+was performed, and no repeated full-repository gate was run.
+
+This correction does not change the unknown-session contract: an ambiguous
+session-open remains `uncertain=true`, `sessionID=""`, `reserved=false`, and
+`authorizePhase` refuses every subsequent non-inspect phase. No known
+reservation or session ID is invented, no production persistence/recovery
+redesign is introduced, and ACK-before-acquisition, unknown-state retention,
+duplicate/casefold guards and the unproven server-receipt category remain
+unchanged.
+
+Rollback is a focused normal `git revert --no-edit
+b3d45cb648965913090dcb08c3674341f76f483a` followed by a separate revert of
+this documentation append if needed; retain the current journal and any
+uncertainty for inspection, and never reset, erase, replay or run live cleanup.
+
 ## Remaining gate and rollback
 
 The live G01 gate remains unresolved until a separately authorized run uses an
@@ -876,9 +962,8 @@ earlier correction must be isolated, revert only the reviewed source slice for
 [r3966770569](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3966770569),
 [r3966770561](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3966770561),
 or the [duplicate-key regression](https://github.com/1XP-AI/gh-runnerd/commit/6e1b2144cb92a1a53db3926dd0e924c646643dfa)
-after checking dependent corrections. To roll back only the current
-[r3969825423](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3969825423)
-correction, revert its focused source/test/evidence commit while retaining the
-current journal and owned resources for inspection; do not reset, erase or
-replay the journal. No live cleanup, workflow replay, runner mutation or
-rollback operation was performed.
+after checking dependent corrections. To roll back only the current queue-host
+correction, revert the focused `b3d45cb648965913090dcb08c3674341f76f483a`
+source/test/evidence commits while retaining the current journal and owned
+resources for inspection; do not reset, erase or replay the journal. No live
+cleanup, workflow replay, runner mutation or rollback operation was performed.
