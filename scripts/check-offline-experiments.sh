@@ -50,12 +50,15 @@ for module_dir in "${offline_modules[@]}"; do
 			# unfiltered complement so Example Output and fuzz seeds still run.
 			# Package discovery stays on ./... in every command.
 			g02_prep_dir=$(mktemp -d)
+			chmod 0700 "${g02_prep_dir}"
+			# Remove only this owned mktemp path. EXIT runs on success, set -e
+			# failure, and signal-induced shell exit; the handler must not exit.
+			trap 'rm -rf -- "${g02_prep_dir}"' EXIT
 			export G01_PAIR_BRIDGE_PREP_DIR="${g02_prep_dir}"
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -run "${paired_prep_regex}" ./...
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -run "${real_pair_cadence_regex}" ./...
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -run "${paired_broker_regex}" -skip "${paired_prep_or_cadence_regex}" ./...
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -skip "${paired_broker_regex}" ./...
-			rm -rf "${g02_prep_dir}"
 			unset G01_PAIR_BRIDGE_PREP_DIR
 		fi
 		GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" vet ./...

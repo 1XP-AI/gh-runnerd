@@ -42,15 +42,22 @@ per-process deadline. G01 uses two sequential static partitions: the exact
 unfiltered `./...` with only that exact name skipped. G02 uses four sequential
 static partitions, all with `-race -count=1 -timeout=45s` and `./...` package
 discovery: the exact `TestPairedBrokerPrepareReviewedG01LiveBinary` fixture
-clone/build; the exact `TestPairedBrokerRealCadenceChildExceedsThirtySeconds`
-name; the remaining `^TestPaired` family with those exact prep and cadence
-names skipped; and an unfiltered complement that skips `^TestPaired`. Keeping
-package discovery in every command means a same-named test in another package
-is run in the matching named partition rather than silently dropped by a
-global skip, while the unfiltered G02 complement still executes every ordinary
-non-paired test, Example Output and fuzz seed. No widened named-test timeout is
-part of the public contract. The production seven-times-five-second wait stays
-inside the cadence partition; clone/build is a separate bounded process.
+clone/build of the distinct `g01_live,g01_pair_fixture` and
+`g01_live,g01_pair_fixture,g01_pair_real_cadence` tagged variants; the exact
+`TestPairedBrokerRealCadenceChildExceedsThirtySeconds` name; the remaining
+`^TestPaired` family with those exact prep and cadence names skipped; and an
+unfiltered complement that skips `^TestPaired`. The default gate exports an
+owned `G01_PAIR_BRIDGE_PREP_DIR` and refuses missing or invalid prepared
+receipts instead of rebuilding inside the cadence process. Standalone
+clone/build remains only when that variable is unset. An EXIT trap removes
+only that owned mktemp path and does not exit from the handler, so the
+original status is preserved. Keeping package discovery in every command means
+a same-named test in another package is run in the matching named partition
+rather than silently dropped by a global skip, while the unfiltered G02
+complement still executes every ordinary non-paired test, Example Output and
+fuzz seed. No widened named-test timeout is part of the public contract. The
+production seven-times-five-second wait stays inside the cadence partition;
+clone/build is a separate bounded process.
 
 The tooling regression matrix generates positive and independent failing
 witnesses for each G02 partition boundary: the named fixture-prep test, the

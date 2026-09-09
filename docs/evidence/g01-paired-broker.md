@@ -594,70 +594,102 @@ is a headroom finding, not a coverage finding. Applying a 12% slowdown to the
 whole 40s wall incorrectly scales the fixed 35-second production wait. The
 clone/build/compile overhead is the CPU-bound part. Recorded in-process cadence
 wall 40.151s minus 35s wait leaves 5.151s overhead; twice that overhead plus
-the fixed wait is 45.302s, which exceeds the 45-second process budget.
+the fixed wait is a 45.302s model. That arithmetic is not an executed timeout
+and is not treated as proof that a 45-second process failed.
 
-TDD red before isolating fixture preparation:
+The first isolation follow-up at `c628b0b` moved clone/build into
+`TestPairedBrokerPrepareReviewedG01LiveBinary` but still prepared only
+`g01_live,g01_pair_fixture`. Cadence requests
+`g01_live,g01_pair_fixture,g01_pair_real_cadence`, so the cadence process kept
+its own clone/build. A process-global tag-only cache also returned a deleted
+`t.TempDir` path. Actual red at `c628b0b`, including independent contract and
+security reviews, is recorded in
+[PR 62 comment 5594788650](https://github.com/1XP-AI/gh-runnerd/pull/62#issuecomment-5594788650).
+Current Codex [r3964054895](https://github.com/1XP-AI/gh-runnerd/pull/62#discussion_r3964054895)
+is the tag mismatch; historical [r3957835501](https://github.com/1XP-AI/gh-runnerd/pull/62#discussion_r3957835501)
+remains open headroom. Public CI green on `c628b0b` does not clear those
+findings.
+
+TDD red on `c628b0b` before this correction:
 
 ```text
-GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=30s \
-  -run '^TestG02CadenceHeadroomSeparatesFixturePrepFromFixedWait$' ./scripts
-FAIL: cadence partition still absorbs fixture clone/build instead of a bounded
-preparation stage
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=90s \
+  -run '^(TestPairedBrokerPrepareReviewedG01LiveBinary|TestPairedBrokerChainsRealControllerCreatePreparationAndTerminal)$' .
+FAIL; TestPairedBrokerChainsRealControllerCreatePreparationAndTerminal
+      reviewed g01 bridge command failed: ""; package ~2.156s
+
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=90s \
+  -run '^(TestPairedBrokerPrepareReviewedG01LiveBinary|TestPairedBrokerChainsRealControllerCreatePreparationAndTerminal)$' .
+FAIL; same chain failure; package ~1.779s
 ```
 
-The G02 offline script now runs a bounded 45-second
-`TestPairedBrokerPrepareReviewedG01LiveBinary` process, then the unchanged
-45-second cadence name, then remaining `^TestPaired` skipping prep and cadence,
-then the unfiltered `^TestPaired` complement. The 45-second default, race,
-count=1, `./...` discovery, and seven real five-second gaps are unchanged. No
-120-second cadence timeout was added.
+Missing or invalid `G01_PAIR_BRIDGE_PREP_DIR` still compiled inside cadence
+(standalone fallback). A prior-commit fixture with matching two-line metadata
+was accepted as current-head evidence. Parent-directory symlink plus 0777 root
+and 0644 metadata still loaded. Prep failure leaked the owned mktemp directory
+because the G02 subshell had no EXIT trap.
 
-Green:
+The G02 offline script still runs the same four 45-second partitions, race,
+count=1, `./...` discovery, and seven real five-second gaps. No 120-second
+cadence timeout was added. Preparation now stores both tagged variants under
+owned 0700 directories, pins a receipt to current HEAD, clean VCS, exact
+tags/target/Go SDK and the SHA-256 of the opened bytes, and uses the existing
+private-file helpers. A set `G01_PAIR_BRIDGE_PREP_DIR` is fail-closed and does
+not clone/build. Unset remains the standalone compile path. The tag-only
+process cache is removed. An EXIT trap removes only the owned mktemp path.
+
+Green after this correction:
 
 ```text
-GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=30s \
-  -run '^TestG02CadenceHeadroomSeparatesFixturePrepFromFixedWait$' ./scripts
-PASS
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=90s \
+  -run '^(TestPairedBrokerPrepareReviewedG01LiveBinary|TestPairedBrokerChainsRealControllerCreatePreparationAndTerminal)$' .
+PASS; g02-auth 5.680s
+
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=90s \
+  -run '^(TestPairedBrokerPrepareReviewedG01LiveBinary|TestPairedBrokerChainsRealControllerCreatePreparationAndTerminal)$' .
+PASS; g02-auth 6.622s
 
 GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=180s \
+  -run 'TestPairedBrokerPrepared|TestPreparedBridgeStandaloneUnsetPrepCompilesDistinctVariant' .
+PASS; g02-auth 9.164s
+
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=60s \
+  -run '^TestG02OwnedPrepDirRemovedAfterPrepFailure$' ./scripts
+PASS; scripts 10.448s
+
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=240s \
   -run '^TestToolingDefaultG02PartitionsRun$' ./scripts
-PASS; scripts 164.882s
+PASS; scripts 179.226s
 
-GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=180s \
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=60s \
   -run '^TestToolingDefaultG01PartitionsRun$' ./scripts
-PASS; scripts 25.775s
-
-GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s \
-  -run '^TestPairedBrokerPrepareReviewedG01LiveBinary$' .
-PASS; g02-auth 2.957s
-
-GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s \
-  -run '^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$' .
-PASS; g02-auth 39.054s
-
-GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s \
-  -run '^TestPaired' \
-  -skip '^TestPairedBroker(PrepareReviewedG01LiveBinary|RealCadenceChildExceedsThirtySeconds)$' ./...
-PASS; g02-auth 12.055s
-
-git diff --check
-PASS
-GOTOOLCHAIN=go1.26.8 bash scripts/gofmt.sh check
-PASS
+PASS; scripts 27.427s
 ```
 
-Stressed model after the split: fixture clone/build occupies its own 45-second
-process (measured 2.957s). Cadence retains the 35-second wait plus module race
-compile/bridge (measured 39.054s). Twice the remaining non-wait overhead still
-fits the 45-second cadence budget; twice the combined in-process overhead did
-not. Residual cadence headroom is the race compile of the test binary, not
-hidden unbounded work.
+Exact four-command G02 partition harness, all `-race -count=1 -timeout=45s`
+`./...`, with an owned prep directory and a compile probe that prep writes and
+cadence/remaining must not rewrite:
+
+```text
+prep exact name:       PASS; g02-auth 4.470s; process 5.78s; compile probe written
+real cadence exact:    PASS; g02-auth 38.115s; process 38.45s; compile probe absent
+remaining TestPaired:  PASS; g02-auth 13.122s; process 13.58s; compile probe absent
+unfiltered complement: PASS; g02-auth 30.720s; process 31.19s
+```
+
+Cadence wall remains the production seven-times-five-second wait plus the
+race-compiled test binary and bridge. It no longer clones or rebuilds the
+cadence-tagged fixture. Limits: public hosted CI still has no secrets or live
+GitHub/App/runner/Docker/Keychain/launchd coverage. Rollback is a source-only
+revert of this prepared-receipt follow-up; the earlier cadence-prep isolation,
+receipt-boundary, fixture-sentinel and after-bind commits remain independently
+revertable.
 
 ## Remaining gates
 
 This worker does not merge PR 62. After push, request `@codex review` on the
 exact new head. Hosted CI, independent review of the new head, and a clean
 exact-head Codex verdict remain required before any merge decision. Live
-recovery remains unauthorized and unproven. Rollback is a source-only revert
-of this cadence-prep isolation follow-up; earlier receipt-boundary,
-fixture-sentinel and after-bind commits remain independently revertable.
+recovery remains unauthorized and unproven. Historical headroom finding
+r3957835501 stays open until Codex re-reviews this head; CI green does not
+clear it.

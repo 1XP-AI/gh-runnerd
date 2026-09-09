@@ -987,30 +987,111 @@ func FuzzG02Fixture(f *testing.F) {
 	}
 }
 
-func TestG02CadenceHeadroomSeparatesFixturePrepFromFixedWait(t *testing.T) {
-	const budget = 45 * time.Second
-	const fixedWait = 35 * time.Second
-	const recordedInProcess = 40151 * time.Millisecond
-	overhead := recordedInProcess - fixedWait
-	if overhead <= 0 {
-		t.Fatal("recorded cadence wall must exceed the fixed production wait")
-	}
-	stressed := fixedWait + 2*overhead
-	if stressed <= budget {
-		t.Fatalf("stressed in-process model %s does not exceed the %s partition budget", stressed, budget)
-	}
+func TestG02OwnedPrepDirRemovedAfterPrepFailure(t *testing.T) {
+	root := toolingFixture(t)
 	script, err := os.ReadFile("check-offline-experiments.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
 	body := string(script)
-	if !strings.Contains(body, "TestPairedBrokerPrepareReviewedG01LiveBinary") {
-		t.Fatal("cadence partition still absorbs fixture clone/build instead of a bounded preparation stage")
+	if !strings.Contains(body, `trap 'rm -rf -- "${g02_prep_dir}"' EXIT`) {
+		t.Fatal("G02 prep dir has no exact owned EXIT trap")
 	}
 	for _, line := range strings.Split(body, "\n") {
 		if strings.Contains(line, "timeout=120s") && strings.Contains(line, "real_pair_cadence_regex") {
 			t.Fatal("cadence partition timeout was widened instead of isolating fixture preparation")
 		}
+	}
+	tmp := filepath.Join(root, "owned-tmp")
+	if err := os.Mkdir(tmp, 0700); err != nil {
+		t.Fatal(err)
+	}
+	const prepSentinel = "default-g02-prep-failure-cleanup"
+	const cadenceSentinel = "default-g02-cadence-should-not-run"
+	toolingFile(t, root, "experiments/g02-auth/default_prep_regression_test.go", `package fixture
+
+import (
+	"os"
+	"testing"
+)
+
+func TestPairedBrokerPrepareReviewedG01LiveBinary(t *testing.T) {
+	path := os.Getenv("TOOLING_SENTINEL_LOG")
+	if path == "" {
+		t.Fatal("TOOLING_SENTINEL_LOG is not set")
+	}
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if _, err := file.WriteString("`+prepSentinel+`\n"); err != nil {
+		t.Fatal(err)
+	}
+	t.Fatal("`+prepSentinel+`")
+}
+`, 0600)
+	toolingFile(t, root, "experiments/g02-auth/default_heavy_regression_test.go", `package fixture
+
+import (
+	"os"
+	"testing"
+)
+
+func TestPairedBrokerRealCadenceChildExceedsThirtySeconds(t *testing.T) {
+	path := os.Getenv("TOOLING_SENTINEL_LOG")
+	if path == "" {
+		t.Fatal("TOOLING_SENTINEL_LOG is not set")
+	}
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if _, err := file.WriteString("`+cadenceSentinel+`\n"); err != nil {
+		t.Fatal(err)
+	}
+}
+`, 0600)
+	wrapper, logPath, realGo := toolingGoWrapper(t, root)
+	sentinelLogPath := filepath.Join(root, "prep-failure-sentinel.log")
+	env := []string{
+		"GO=" + wrapper,
+		"TOOLING_REAL_GO=" + realGo,
+		"TOOLING_GO_LOG=" + logPath,
+		"TOOLING_SENTINEL_LOG=" + sentinelLogPath,
+		"TMPDIR=" + tmp,
+	}
+	out, runErr := toolingRun(t, root, env, "bash", "scripts/check-offline-experiments.sh")
+	if runErr == nil {
+		t.Fatalf("prep failure passed: %s", out)
+	}
+	if !strings.Contains(out, prepSentinel) {
+		t.Fatalf("prep failure did not propagate: %s", out)
+	}
+	sentinelData, readErr := os.ReadFile(sentinelLogPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	sentinels := string(sentinelData)
+	if strings.Count(sentinels, prepSentinel+"\n") != 1 {
+		t.Fatalf("prep sentinel ran %d times; sentinel log:\n%s", strings.Count(sentinels, prepSentinel+"\n"), sentinelData)
+	}
+	if strings.Contains(sentinels, cadenceSentinel) {
+		t.Fatalf("cadence ran after prep failure; sentinel log:\n%s", sentinelData)
+	}
+	entries, err := os.ReadDir(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var leftover []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			leftover = append(leftover, entry.Name())
+		}
+	}
+	if len(leftover) != 0 {
+		t.Fatalf("owned prep dir leaked after prep failure: %q", leftover)
 	}
 }
 
