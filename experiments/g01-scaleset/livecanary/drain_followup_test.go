@@ -179,6 +179,111 @@ func TestFileJournalDrainReplayRetainsMismatchedSequenceAndIdentity(t *testing.T
 	}
 }
 
+func appendDrainSnapshotResults(t *testing.T, j *FileJournal, snapshot drainSnapshot) {
+	t.Helper()
+	for _, event := range []Event{
+		{Kind: "intent", Operation: "observe-owned"},
+		{Kind: "result", Operation: "observe-owned", ID: snapshot.Set.ID},
+		{Kind: "intent", Operation: "observe-runner"},
+		{Kind: "result", Operation: "observe-runner", ID: snapshot.Runner.ID, DrainSnapshot: &snapshot},
+	} {
+		if err := j.Append(event); err != nil {
+			t.Fatalf("append drain snapshot result: %v", err)
+		}
+	}
+}
+
+func TestFileJournalReplayFencesMalformedDrainSnapshotStages(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		omitBefore    bool
+		before, after func(*drainSnapshot)
+	}{
+		{
+			name:       "missing before does not infer after",
+			omitBefore: true,
+			after: func(snapshot *drainSnapshot) {
+				snapshot.Statistics.Acquired = 1
+			},
+		},
+		{
+			name: "busy before",
+			before: func(snapshot *drainSnapshot) {
+				snapshot.Statistics.Busy = 1
+				snapshot.Statistics.Idle = 0
+			},
+		},
+		{
+			name: "after partition change",
+			after: func(snapshot *drainSnapshot) {
+				snapshot.Statistics.Registered = 2
+				snapshot.Statistics.Idle = 2
+			},
+		},
+		{
+			name: "after scale-set identity change",
+			after: func(snapshot *drainSnapshot) {
+				snapshot.Set.ID = 99
+				snapshot.Runner.ScaleSetID = 99
+			},
+		},
+		{
+			name: "after runner identity change",
+			after: func(snapshot *drainSnapshot) {
+				runner := *snapshot.Runner
+				runner.ID++
+				snapshot.Runner = &runner
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := approval()
+			a.Phases = append(a.Phases, "drain")
+			directory := privateDir(t)
+			j, err := openTestJournal(t, directory, a)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, event := range drainReplayPrefix() {
+				if err := j.Append(event); err != nil {
+					_ = j.Close()
+					t.Fatalf("append drain prefix: %v", err)
+				}
+			}
+			phase := j.Events()[len(j.Events())-1]
+			before := validDrainTestObservation().Before
+			after := validDrainTestObservation().After
+			if tc.before != nil {
+				tc.before(&before)
+			}
+			if tc.after != nil {
+				tc.after(&after)
+			}
+			if !tc.omitBefore {
+				appendDrainSnapshotResults(t, j, before)
+			}
+			appendDrainSnapshotResults(t, j, after)
+			observation := validDrainTestObservation()
+			observation.Sequence = phase.Sequence
+			if err := j.Append(Event{Kind: "observation", Operation: "drain", Drain: &observation}); err != nil {
+				_ = j.Close()
+				t.Fatalf("append final drain observation: %v", err)
+			}
+			if err := j.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := openTestJournal(t, directory, a)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.Close()
+			if state := replay(reopened.Events()); !state.uncertain {
+				t.Fatalf("malformed %s drain snapshots discharged replay fence: %+v", tc.name, state)
+			}
+		})
+	}
+}
+
 func TestReplayDrainPhaseRequiresPositiveSetID(t *testing.T) {
 	base := validDrainTestObservation()
 	base.Sequence = 4

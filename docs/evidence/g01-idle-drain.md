@@ -174,6 +174,7 @@ run above is the new TDD regression, followed by the listed green runs.
 | Codex P1 [contradictory poll counters](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3966770561) | poll runner partitions must match the owned idle prerequisite before ACK/acquisition; `TestDrainObservationRejectsPollCountersContradictingOwnedRunner` and `TestDrainClientRejectsPollRunnerPartitionMismatchBeforeEffects` pass. |
 | Codex P1 [withdrawn-poll retry](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3967496285) | both bounded polls are traced; any second-poll error/duplicate/retry prevents `observed`, and the actual listener fixture remains inconclusive. `TestDrainListenerRejectsWithdrawnPollPhysicalRetry` passes. |
 | Codex P2 [drain-phase fence discharge](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3967496296) | replay discharges only a valid matching observed drain record's phase-local fence; unrelated uncertainty, work, reservations, and failed/inconclusive/crashed fences survive. `TestReplayDischargesCompletedDrainPhaseFence`, `TestReplayDrainFencePreservesUnrelatedUncertaintyAndReservations`, and `TestReplayDrainFenceRetainsInconclusiveOutcome` pass. |
+| Codex P2 [after-snapshot prerequisite scope](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3969825423) | replay requires the first ordered drain snapshot to prove the owned idle prerequisite, then checks only after-snapshot identity and runner partition while allowing job-counter changes. The real pinned-SDK/FileJournal regression and malformed-stage matrix pass. |
 | Codex P1 [durable finding evidence](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3967496305) | this section and the matrix record full finding URLs, exact red/green commands, actual outcomes and rollback scope for the current and prior corrections. |
 | Security F1 / Protocol F1 poll reservation | `observe-poll` result journals one verified request ID plus fixed work before ACK; replay sets reservation/work fences. `TestDrainPollJournalsReservationBeforeACK` passes (`82d0d7d`). |
 | Security F2 rejected idle prerequisite | complete bounded `DrainSnapshot` plus `prerequisite-failed` marker is retained; replay remains uncertain. `TestDrainRejectedIdlePrerequisiteRetainsFence` passes (`82d0d7d`). |
@@ -338,6 +339,58 @@ diff checks emitted no output. The pinned `github.com/actions/scaleset v0.4.0`
 Driver path remains offline-only, no broad multi-module gate was repeated, and
 no live operation or personal path was added.
 
+### Codex r3969825423 phase-aware replay correction
+
+The fresh exact-head finding is [Codex r3969825423](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3969825423): replay was applying the before-only
+`validDrainIdlePrerequisite` to the after `DrainSnapshot`, so a legitimate
+`TotalAcquiredJobs=1` after snapshot permanently set uncertainty even though the
+observed drain contract permits job-counter changes. The historical original
+TDD exception and prior clean-history consolidation remain unchanged; this is a
+new meaningful red-first regression for the current correction.
+
+Before the implementation change, the real pinned-SDK Driver/FileJournal
+regression was run from `experiments/g01-scaleset`:
+
+```text
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^TestDriverDrainThroughPinnedSDKAndPollHook$' -count=1 -v
+```
+
+It failed after the listener completed and the FileJournal was closed/reopened:
+`legitimate after job-counter change retained replay uncertainty` with
+`uncertain:true`. The fixture recorded matching drain phase SetID/sequence,
+before and after `DrainSnapshot` result records through the real Driver, and
+kept the after runner partition/identity unchanged while changing only the
+acquired-job counter.
+
+The minimal correction makes replay treat only the first ordered
+`result/observe-runner` snapshot in a pending drain phase as the prerequisite;
+the second must retain the created set identity, exact runner identity and
+registered/busy/idle partition, while its job counters may change. Missing or
+invalid before proof, a malformed after snapshot, or a snapshot outside that
+phase-local ordering remains uncertain; unrelated reservations, work and
+uncertainty are never cleared.
+
+The focused green, race, pinned-SDK, vet, formatting and diff checks were:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run 'TestDriverDrainThroughPinnedSDKAndPollHook|TestFileJournalReplayFencesMalformedDrainSnapshotStages|TestReplayDrainRequiresOneMatchingPhaseIdentityAndSequence|TestFileJournalDrainReplayRetainsMismatchedSequenceAndIdentity|TestDrainObservedAllowsNextPollJobCounterChanges|TestDrainListenerRejectsContradictoryWithdrawnPollRunnerPartition' -count=1 -v
+GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -run 'TestDriverDrainThroughPinnedSDKAndPollHook|TestFileJournalReplayFencesMalformedDrainSnapshotStages|TestReplayDrainRequiresOneMatchingPhaseIdentityAndSequence|TestFileJournalDrainReplayRetainsMismatchedSequenceAndIdentity|TestDrainObservedAllowsNextPollJobCounterChanges|TestDrainListenerRejectsContradictoryWithdrawnPollRunnerPartition' -count=1
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -count=1
+GOTOOLCHAIN=go1.26.8 go vet ./livecanary
+cd ../..
+bash scripts/gofmt.sh check
+git diff --check
+```
+
+All listed checks passed: focused green, focused race, full `livecanary`
+package, pinned SDK drain replay, vet, formatting and diff checks. The malformed
+FileJournal matrix covers missing-before/no unsafe after inference, busy before,
+after partition change, after scale-set identity change and after runner
+identity change; each remains fenced. These are offline tests only; no live
+runner, credential, workflow, session/JIT, cleanup or external operation was
+performed.
+
 ## Remaining gate and rollback
 
 The live G01 gate remains unresolved until a separately authorized run uses an
@@ -351,6 +404,9 @@ earlier correction must be isolated, revert only the reviewed source slice for
 [r3966770569](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3966770569),
 [r3966770561](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3966770561),
 or the [duplicate-key regression](https://github.com/1XP-AI/gh-runnerd/commit/6e1b2144cb92a1a53db3926dd0e924c646643dfa)
-after checking dependent corrections; do not reset, erase or replay the
-journal. No live cleanup, workflow replay, runner mutation or rollback
-operation was performed.
+after checking dependent corrections. To roll back only the current
+[r3969825423](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3969825423)
+correction, revert its focused source/test/evidence commit while retaining the
+current journal and owned resources for inspection; do not reset, erase or
+replay the journal. No live cleanup, workflow replay, runner mutation or
+rollback operation was performed.

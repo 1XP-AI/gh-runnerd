@@ -98,6 +98,9 @@ type state struct {
 	drainPhasePending            bool
 	drainPhaseSequence           int
 	drainPhaseSetID              int
+	drainSnapshotCount           int
+	drainBeforeSnapshot          drainSnapshot
+	drainBeforeSnapshotValid     bool
 	observedJobs                 map[int64]bool
 	workObserved                 bool
 	inventory                    string
@@ -117,6 +120,45 @@ func validDrainObservationForPhase(e Event, sequence int, s state) bool {
 	return sequence > s.drainPhaseSequence && e.Drain.Sequence == s.drainPhaseSequence && s.setID > 0 && s.drainPhaseSetID == s.setID && e.Drain.Before.Set.ID == s.setID && e.Drain.After.Set.ID == s.setID
 }
 
+func validDrainSnapshotForPhase(snapshot drainSnapshot, setID int, before *drainSnapshot) bool {
+	if setID <= 0 || !validDrainSnapshot(snapshot, snapshot.Set) || snapshot.Set.ID != setID {
+		return false
+	}
+	if before == nil {
+		return validDrainIdlePrerequisite(snapshot)
+	}
+	return before.Set == snapshot.Set && sameDrainRunner(before.Runner, snapshot.Runner) && sameDrainRunnerPartition(before.Statistics, snapshot.Statistics)
+}
+
+func replayDrainSnapshot(e Event, index int, s *state) {
+	if e.DrainSnapshot == nil {
+		return
+	}
+	if e.Kind == "result" && e.Operation == "observe-runner" && s.drainPhasePending {
+		sequence := replayEventSequence(e, index)
+		switch s.drainSnapshotCount {
+		case 0:
+			s.drainSnapshotCount = 1
+			s.drainBeforeSnapshot = *e.DrainSnapshot
+			s.drainBeforeSnapshotValid = sequence > s.drainPhaseSequence && validDrainSnapshotForPhase(*e.DrainSnapshot, s.drainPhaseSetID, nil)
+			if !s.drainBeforeSnapshotValid {
+				s.uncertain = true
+			}
+		case 1:
+			s.drainSnapshotCount = 2
+			if !s.drainBeforeSnapshotValid || !validDrainSnapshotForPhase(*e.DrainSnapshot, s.drainPhaseSetID, &s.drainBeforeSnapshot) {
+				s.uncertain = true
+			}
+		default:
+			s.uncertain = true
+		}
+		return
+	}
+	if s.drainPhasePending || !validDrainIdlePrerequisite(*e.DrainSnapshot) {
+		s.uncertain = true
+	}
+}
+
 func replay(events []Event) state {
 	s := state{phaseSeen: make(map[string]bool), observedJobs: make(map[int64]bool)}
 	pending := ""
@@ -134,11 +176,17 @@ func replay(events []Event) state {
 					s.drainPhasePending = false
 					s.drainPhaseSequence = 0
 					s.drainPhaseSetID = 0
+					s.drainSnapshotCount = 0
+					s.drainBeforeSnapshot = drainSnapshot{}
+					s.drainBeforeSnapshotValid = false
 					continue
 				}
 				s.drainPhasePending = true
 				s.drainPhaseSequence = replayEventSequence(e, index)
 				s.drainPhaseSetID = 0
+				s.drainSnapshotCount = 0
+				s.drainBeforeSnapshot = drainSnapshot{}
+				s.drainBeforeSnapshotValid = false
 				if e.ID > 0 {
 					if s.setID <= 0 || e.ID != s.setID {
 						s.uncertain = true
@@ -156,6 +204,9 @@ func replay(events []Event) state {
 				s.drainPhasePending = false
 				s.drainPhaseSequence = 0
 				s.drainPhaseSetID = 0
+				s.drainSnapshotCount = 0
+				s.drainBeforeSnapshot = drainSnapshot{}
+				s.drainBeforeSnapshotValid = false
 			}
 			s.phaseSeen[e.Operation] = true
 		case "inventory":
@@ -183,14 +234,15 @@ func replay(events []Event) state {
 					s.drainPhasePending = false
 					s.drainPhaseSequence = 0
 					s.drainPhaseSetID = 0
+					s.drainSnapshotCount = 0
+					s.drainBeforeSnapshot = drainSnapshot{}
+					s.drainBeforeSnapshotValid = false
 				}
 			}
 			if e.Operation == "drain-marker" {
 				s.uncertain = true
 			}
-			if e.DrainSnapshot != nil && !validDrainIdlePrerequisite(*e.DrainSnapshot) {
-				s.uncertain = true
-			}
+			replayDrainSnapshot(e, index, &s)
 		case "intent":
 			if pending != "" {
 				s.uncertain = true
@@ -215,9 +267,7 @@ func replay(events []Event) state {
 					s.observedJobs[id] = true
 				}
 			}
-			if e.DrainSnapshot != nil && !validDrainIdlePrerequisite(*e.DrainSnapshot) {
-				s.uncertain = true
-			}
+			replayDrainSnapshot(e, index, &s)
 			switch e.Operation {
 			case "create":
 				s.setID = e.ID
@@ -235,6 +285,9 @@ func replay(events []Event) state {
 				s.drainPhasePending = false
 				s.drainPhaseSequence = 0
 				s.drainPhaseSetID = 0
+				s.drainSnapshotCount = 0
+				s.drainBeforeSnapshot = drainSnapshot{}
+				s.drainBeforeSnapshotValid = false
 			}
 		}
 	}

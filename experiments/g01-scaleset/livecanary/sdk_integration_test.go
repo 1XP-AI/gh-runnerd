@@ -186,7 +186,7 @@ func TestDriverDrainThroughPinnedSDKAndPollHook(t *testing.T) {
 		RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true},
 		Statistics:    &scaleset.RunnerScaleSetStatistic{TotalRegisteredRunners: 1, TotalIdleRunners: 1},
 	}
-	var polls, acks, acquires, closes int
+	var polls, acks, acquires, closes, snapshotReads int
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -239,7 +239,14 @@ func TestDriverDrainThroughPinnedSDKAndPollHook(t *testing.T) {
 			closes++
 			w.WriteHeader(http.StatusNoContent)
 		case strings.HasSuffix(r.URL.Path, "/runnerscalesets/7") && r.Method == http.MethodGet:
-			_ = json.NewEncoder(w).Encode(set)
+			snapshotReads++
+			snapshot := *set
+			if snapshotReads == 2 {
+				stats := *set.Statistics
+				stats.TotalAcquiredJobs = 1
+				snapshot.Statistics = &stats
+			}
+			_ = json.NewEncoder(w).Encode(&snapshot)
 		case strings.HasSuffix(r.URL.Path, "/agents") && r.Method == http.MethodGet:
 			_ = json.NewEncoder(w).Encode(map[string]any{"count": 1, "value": []any{map[string]any{"id": 19, "name": a.workerName(), "runnerScaleSetId": 7}}})
 		default:
@@ -282,13 +289,23 @@ func TestDriverDrainThroughPinnedSDKAndPollHook(t *testing.T) {
 	}
 	base.drainClientFactory = buildAPI
 	api := fixtureSDK{base}
-	j := &memoryJournal{events: []Event{{Kind: "phase", Operation: "create"}, {Kind: "intent", Operation: "create"}, {Kind: "result", Operation: "create", ID: 7}}}
+	directory := privateDir(t)
+	j, err := openTestJournal(t, directory, a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range drainReplayPrefix()[:3] {
+		if err := j.Append(event); err != nil {
+			_ = j.Close()
+			t.Fatalf("append create prefix: %v", err)
+		}
+	}
 	d := Driver{Approval: a, Journal: j, API: api}
 	if err := d.Run(context.Background(), "drain"); err != nil {
 		t.Fatalf("pinned SDK drain: %v", err)
 	}
-	if polls != 2 || acks != 1 || acquires != 1 || closes != 1 {
-		t.Fatalf("pinned SDK effects polls=%d ack=%d acquire=%d close=%d", polls, acks, acquires, closes)
+	if polls != 2 || acks != 1 || acquires != 1 || closes != 1 || snapshotReads != 2 {
+		t.Fatalf("pinned SDK effects polls=%d ack=%d acquire=%d close=%d snapshots=%d", polls, acks, acquires, closes, snapshotReads)
 	}
 	var observed bool
 	var drainPhaseSequence, drainPhaseSetID, observationSequence int
@@ -310,5 +327,16 @@ func TestDriverDrainThroughPinnedSDKAndPollHook(t *testing.T) {
 	}
 	if drainPhaseSequence <= 0 || drainPhaseSetID != set.ID || observationSequence != drainPhaseSequence {
 		t.Fatalf("pinned SDK drain binding = phase sequence %d SetID %d, observation %d; want exact phase sequence and SetID %d", drainPhaseSequence, drainPhaseSetID, observationSequence, set.ID)
+	}
+	if err := j.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := openTestJournal(t, directory, a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if state := replay(reopened.Events()); state.uncertain {
+		t.Fatalf("legitimate after job-counter change retained replay uncertainty: %+v", state)
 	}
 }
