@@ -653,7 +653,11 @@ func (c *drainClient) GetMessage(ctx context.Context, last, capacity int) (*scal
 		return nil, c.rejectCall("observe-poll")
 	}
 	c.mu.Lock()
-	if capacity != drainInitialCapacity && capacity != drainWithdrawnCapacity || c.polls >= 2 {
+	wantCapacity := drainInitialCapacity
+	if c.polls == 1 {
+		wantCapacity = drainWithdrawnCapacity
+	}
+	if c.polls >= 2 || capacity != wantCapacity {
 		c.mu.Unlock()
 		return nil, ErrQuarantine
 	}

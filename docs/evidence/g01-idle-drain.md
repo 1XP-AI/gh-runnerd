@@ -457,6 +457,41 @@ checks emitted no diagnostics. The offline experiment check also passed for the
 scaleset, livecanary, and liveworker modules. These remain offline fixture
 checks only.
 
+### Codex r3972112659 capacity-ordinal correction
+
+The exact-head P1 finding is [Codex r3972112659](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3972112659): `drainClient.GetMessage` accepted either capacity `0` or `1` for either of its two bounded calls. A malformed first poll could therefore reach the SDK with withdrawn capacity, and a malformed second poll could reach the SDK with capacity still set to `1`; the existing two-poll fence did not establish the required `1 -> 0` transition.
+
+The meaningful red regression was added before the implementation and run against the current exact head:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^TestDrainRejectsCapacityOrdinalBeforeInnerEffects$' -count=1
+```
+
+It failed as expected: the first capacity-`0` call returned `<nil>` after reaching the inner session, and the rejected second capacity-`1` call left the inner poll count at `2` (with ACK/acquisition still at zero only because the later message fence stopped those effects). The regression controls also cover first capacity `-1` and `2`, a valid `1 -> 0` sequence, and a third call; rejected calls assert unchanged inner poll, ACK, and acquisition counts.
+
+The minimal green correction validates the ordinal under the existing client mutex before the inner SDK call: poll one must use capacity `1`, poll two must use capacity `0`, and any third poll or wrong capacity returns `ErrQuarantine` without advancing the ordinal or invoking the inner session. The existing pinned SDK/FileJournal test continues to exercise the legitimate `1 -> 0` HTTP header sequence, and no replay, persistence, cleanup, ownership, reservation, or unrelated fence behavior changed.
+
+Bounded verification completed successfully:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run 'TestDrainRejectsCapacityOrdinalBeforeInnerEffects|TestDrainListenerWithdrawsWhilePollResponseIsHeld|TestDriverDrainThroughPinnedSDKAndPollHook' -count=1 -v
+GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -run 'TestDrainRejectsCapacityOrdinalBeforeInnerEffects|TestDrainListenerWithdrawsWhilePollResponseIsHeld|TestDriverDrainThroughPinnedSDKAndPollHook' -count=1
+GOTOOLCHAIN=go1.26.8 go vet ./livecanary
+gofmt -l livecanary/drain.go livecanary/drain_test.go
+git diff --check
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -count=1
+```
+
+The focused normal suite, focused race suite, pinned SDK path, vet, formatting,
+diff, and one full `livecanary` package run passed; the formatting and diff
+commands emitted no diagnostics. All checks were offline fixture tests; no live
+runner, workflow, credential, cleanup, or external operation was performed.
+Rollback is a focused revert of this correction's source/test/evidence commit,
+retaining the current journal and owned resources for inspection; do not reset,
+erase, replay, or run live cleanup.
+
 ## Remaining gate and rollback
 
 The live G01 gate remains unresolved until a separately authorized run uses an

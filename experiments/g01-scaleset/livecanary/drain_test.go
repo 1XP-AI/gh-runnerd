@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -447,6 +448,60 @@ func TestDrainRejectsEffectsAfterCancellationAndRecordsMarker(t *testing.T) {
 		}
 	}
 	t.Fatal("canceled drain did not persist cancellation marker")
+}
+
+func TestDrainRejectsCapacityOrdinalBeforeInnerEffects(t *testing.T) {
+	newClient := func(message *scaleset.RunnerScaleSetMessage) (*drainClient, *drainGuardSession) {
+		inner := &drainGuardSession{
+			initial: scaleset.RunnerScaleSetSession{SessionID: uuid.New(), OwnerName: "fixture", Statistics: &scaleset.RunnerScaleSetStatistic{TotalRegisteredRunners: 1, TotalIdleRunners: 1}},
+			message: message,
+		}
+		obs := drainObservation{Poll: drainPollObservation{Message: drainMessageUnknown}, NextPoll: drainPollObservation{Message: drainMessageUnknown}}
+		return &drainClient{inner: inner, obs: &obs, phaseCtx: context.Background()}, inner
+	}
+	message := &scaleset.RunnerScaleSetMessage{
+		MessageID:            7,
+		Statistics:           &scaleset.RunnerScaleSetStatistic{TotalAvailableJobs: 1, TotalAssignedJobs: 1, TotalRegisteredRunners: 1, TotalIdleRunners: 1},
+		JobAvailableMessages: []*scaleset.JobAvailable{{JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: 11}}},
+	}
+
+	for _, capacity := range []int{drainWithdrawnCapacity, -1, 2} {
+		t.Run(fmt.Sprintf("first-capacity-%d", capacity), func(t *testing.T) {
+			client, inner := newClient(message)
+			if _, err := client.GetMessage(context.Background(), 0, capacity); !errors.Is(err, ErrQuarantine) {
+				t.Fatalf("first capacity %d error = %v, want quarantine", capacity, err)
+			}
+			if inner.pollCalls != 0 || inner.ackCalls != 0 || inner.acquireCalls != 0 {
+				t.Fatalf("first capacity %d performed effects: polls=%d ack=%d acquire=%d", capacity, inner.pollCalls, inner.ackCalls, inner.acquireCalls)
+			}
+		})
+	}
+
+	client, inner := newClient(message)
+	if _, err := client.GetMessage(context.Background(), 0, drainInitialCapacity); err != nil {
+		t.Fatalf("valid first poll: %v", err)
+	}
+	if _, err := client.GetMessage(context.Background(), 0, drainInitialCapacity); !errors.Is(err, ErrQuarantine) {
+		t.Fatalf("second capacity %d error = %v, want quarantine", drainInitialCapacity, err)
+	}
+	if inner.pollCalls != 1 || inner.ackCalls != 0 || inner.acquireCalls != 0 {
+		t.Fatalf("rejected second capacity performed effects: polls=%d ack=%d acquire=%d", inner.pollCalls, inner.ackCalls, inner.acquireCalls)
+	}
+
+	client, inner = newClient(message)
+	if _, err := client.GetMessage(context.Background(), 0, drainInitialCapacity); err != nil {
+		t.Fatalf("third-call setup first poll: %v", err)
+	}
+	inner.message = nil
+	if _, err := client.GetMessage(context.Background(), 0, drainWithdrawnCapacity); err != nil {
+		t.Fatalf("valid second poll: %v", err)
+	}
+	if _, err := client.GetMessage(context.Background(), 0, drainWithdrawnCapacity); !errors.Is(err, ErrQuarantine) {
+		t.Fatalf("third poll error = %v, want quarantine", err)
+	}
+	if inner.pollCalls != 2 || inner.ackCalls != 0 || inner.acquireCalls != 0 {
+		t.Fatalf("rejected third poll performed effects: polls=%d ack=%d acquire=%d", inner.pollCalls, inner.ackCalls, inner.acquireCalls)
+	}
 }
 
 func TestDrainRejectsDuplicateOrWrongEffectsBeforeInnerCall(t *testing.T) {
@@ -1005,13 +1060,16 @@ func (a *drainDriverAPI) OpenDrainSession(_ context.Context, _ int, _ string, ho
 type drainGuardSession struct {
 	initial      scaleset.RunnerScaleSetSession
 	message      *scaleset.RunnerScaleSetMessage
+	pollCalls    int
 	ackCalls     int
 	acquireCalls int
 }
 
 func (s *drainGuardSession) Session() scaleset.RunnerScaleSetSession { return s.initial }
 func (s *drainGuardSession) Close(context.Context) error             { return nil }
+
 func (s *drainGuardSession) GetMessage(context.Context, int, int) (*scaleset.RunnerScaleSetMessage, error) {
+	s.pollCalls++
 	return s.message, nil
 }
 func (s *drainGuardSession) DeleteMessage(context.Context, int) error {
