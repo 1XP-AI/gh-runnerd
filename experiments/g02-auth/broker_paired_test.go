@@ -212,6 +212,75 @@ func TestPairedWorkerPreparationReceiptFencesClaimRelocation(t *testing.T) {
 	}
 }
 
+func replaceWorkerAdmissionRoot(t *testing.T, admission, kind string) {
+	t.Helper()
+	claimPath := filepath.Join(admission, "admission.json")
+	retained := admission + ".retained"
+	switch kind {
+	case "replaced-root":
+		claim, err := os.Lstat(claimPath)
+		if err != nil {
+			t.Fatal("worker admission claim")
+		}
+		root, err := os.Lstat(admission)
+		if err != nil {
+			t.Fatal("worker admission root")
+		}
+		if os.Rename(admission, retained) != nil {
+			t.Fatal("retain worker admission root")
+		}
+		if os.Mkdir(admission, 0700) != nil {
+			t.Fatal("replacement worker admission root")
+		}
+		if os.Rename(filepath.Join(retained, "admission.json"), claimPath) != nil {
+			t.Fatal("restore worker claim inode")
+		}
+		restored, err := os.Lstat(claimPath)
+		replaced, replErr := os.Lstat(admission)
+		if err != nil || replErr != nil || !os.SameFile(claim, restored) || os.SameFile(root, replaced) {
+			t.Fatal("worker admission root replacement did not keep the claim inode")
+		}
+	case "symlink":
+		if os.Rename(admission, retained) != nil || os.Symlink(retained, admission) != nil {
+			t.Fatal("symlink worker admission root")
+		}
+	case "mode":
+		if os.Chmod(admission, 0755) != nil {
+			t.Fatal("relax worker admission root")
+		}
+	case "missing":
+		if os.Rename(admission, retained) != nil {
+			t.Fatal("remove worker admission root")
+		}
+	default:
+		t.Fatalf("unknown worker admission root kind %s", kind)
+	}
+}
+
+func TestPairedWorkerPreparationReceiptFencesAdmissionRootReplacement(t *testing.T) {
+	for _, kind := range []string{"replaced-root", "symlink", "mode", "missing"} {
+		t.Run(kind, func(t *testing.T) {
+			a, c, controllerState, workerState, workerPath := pairedPlanInputs(t)
+			plan, err := openBrokerWorkerPlan(workerPath, workerState, controllerState, a, c)
+			if err != nil {
+				t.Fatal("valid paired worker plan refused")
+			}
+			defer plan.close()
+			admission := filepath.Join(filepath.Dir(workerState), "canonical-worker-claim")
+			plan.prepare = func(context.Context) (brokerPreparationReceipt, error) {
+				return brokerSyntheticWorkerPreparation(t, plan, admission)
+			}
+			if err := plan.checkPrepared(context.Background()); err != nil {
+				t.Fatalf("fresh worker preparation refused: %v", err)
+			}
+			replaceWorkerAdmissionRoot(t, admission, kind)
+			if err := plan.checkPrepared(context.Background()); err == nil {
+				t.Fatal("replaced worker admission root crossed receipt fence")
+			}
+		})
+	}
+}
+
 func TestPairedWorkerApprovalMismatchRefusesBeforeBinding(t *testing.T) {
 	a, c, controllerState, workerState, workerPath := pairedPlanInputs(t)
 	raw, err := os.ReadFile(workerPath)
@@ -432,6 +501,68 @@ func TestPairedBrokerRejectsWorkerClaimChangeBeforeMint(t *testing.T) {
 			for _, call := range fixture.calls {
 				if strings.Contains(call, "access_tokens") {
 					t.Fatal("worker admission claim change reached token mint")
+				}
+			}
+		})
+	}
+}
+
+func TestPairedBrokerRejectsWorkerAdmissionRootReplacementBeforeAuth(t *testing.T) {
+	for _, kind := range []string{"replaced-root", "symlink", "mode", "missing"} {
+		t.Run(kind, func(t *testing.T) {
+			a, candidate, api, fixture, attempt := newBrokerFixture(t)
+			a.Mode, a.Phase, a.AllowVerificationAuthority = "paired-terminal", "paired-terminal", true
+			parent := filepath.Dir(attempt)
+			launches := 0
+			plan, admission := pairedWorkerExecutePlan(t, &a, parent, func(context.Context, []byte, string) error {
+				launches++
+				return nil
+			})
+			prepare := plan.worker.prepare
+			plan.worker.prepare = func(ctx context.Context) (brokerPreparationReceipt, error) {
+				receipt, err := prepare(ctx)
+				if err != nil {
+					return receipt, err
+				}
+				replaceWorkerAdmissionRoot(t, admission, kind)
+				return receipt, nil
+			}
+			_, err := brokerExecute(context.Background(), a, brokerInput{PEM: string(candidate.PEM), VerificationToken: "synthetic-private-verification-token"}, attempt, api, plan)
+			if err == nil || fixture.tokenCalls != 0 || len(fixture.calls) != 0 || launches != 0 {
+				t.Fatalf("worker admission root %s crossed pre-auth fence: err=%v mints=%d calls=%v launches=%d", kind, err, fixture.tokenCalls, fixture.calls, launches)
+			}
+		})
+	}
+}
+
+func TestPairedBrokerRejectsWorkerAdmissionRootReplacementBeforeMint(t *testing.T) {
+	for _, kind := range []string{"replaced-root", "symlink", "mode", "missing"} {
+		t.Run(kind, func(t *testing.T) {
+			a, candidate, _, fixture, attempt := newBrokerFixture(t)
+			a.Mode, a.Phase, a.AllowVerificationAuthority = "paired-terminal", "paired-terminal", true
+			parent := filepath.Dir(attempt)
+			launches := 0
+			plan, admission := pairedWorkerExecutePlan(t, &a, parent, func(context.Context, []byte, string) error {
+				launches++
+				return nil
+			})
+			replaced := false
+			api := newBrokerAPI(time.Now, transportFunc(func(r *http.Request) (*http.Response, error) {
+				response, err := fixture.RoundTrip(r)
+				if r.URL.Path == "/app" && !replaced {
+					replaceWorkerAdmissionRoot(t, admission, kind)
+					replaced = true
+				}
+				return response, err
+			}))
+			api.admissionDirectory = func() (string, error) { return fixture.admissionRoot, nil }
+			_, err := brokerExecute(context.Background(), a, brokerInput{PEM: string(candidate.PEM), VerificationToken: "synthetic-private-verification-token"}, attempt, api, plan)
+			if err == nil || fixture.tokenCalls != 0 || launches != 0 {
+				t.Fatalf("worker admission root %s crossed pre-mint fence: err=%v mints=%d calls=%v launches=%d", kind, err, fixture.tokenCalls, fixture.calls, launches)
+			}
+			for _, call := range fixture.calls {
+				if strings.Contains(call, "access_tokens") {
+					t.Fatal("worker admission root change reached token mint")
 				}
 			}
 		})

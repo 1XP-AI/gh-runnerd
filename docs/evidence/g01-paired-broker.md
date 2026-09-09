@@ -468,13 +468,62 @@ process deadline fired, including a 1-second `/f` child start, which is
 not the one-minute prefix sleep. Hosted CI remains the complement
 measurement. The named 7x5s cadence path was not changed.
 
+## Worker admission root identity
+
+An independent review of `773cccc` reproduced a remaining fence hole:
+replace the worker admission directory, restore the original
+`admission.json` inode at the same canonical pathname, and
+`checkPrepared` returned nil; `brokerExecute` then returned nil with
+mints=1 launches=1. File inode/digest/path checks survived because they
+did not retain the prepared directory identity. Scope is that proven
+same-process replacement, not a broader search or native-account change.
+
+TDD red against current head `6f94ced` before the identity bind:
+
+```text
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=60s \
+  -run '^(TestPairedWorkerPreparationReceiptFencesAdmissionRootReplacement|TestPairedBrokerRejectsWorkerAdmissionRootReplacementBeforeAuth|TestPairedBrokerRejectsWorkerAdmissionRootReplacementBeforeMint)$' .
+FAIL: TestPairedWorkerPreparationReceiptFencesAdmissionRootReplacement/replaced-root
+  replaced worker admission root crossed receipt fence
+FAIL: TestPairedBrokerRejectsWorkerAdmissionRootReplacementBeforeAuth/replaced-root
+  err=<nil> mints=1 launches=1
+FAIL: TestPairedBrokerRejectsWorkerAdmissionRootReplacementBeforeMint/replaced-root
+  err=<nil> mints=1 launches=1
+PASS: symlink, mode, and missing roots already refused
+```
+
+Green after binding the trusted preparation directory identity and
+revalidating it on every claim-path check:
+
+```text
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=60s \
+  -run '^(TestPairedWorkerPreparationReceiptFencesAdmissionRootReplacement|TestPairedBrokerRejectsWorkerAdmissionRootReplacementBeforeAuth|TestPairedBrokerRejectsWorkerAdmissionRootReplacementBeforeMint|TestPairedWorkerPreparationReceiptFencesClaimRelocation|TestPairedWorkerPreparationReceiptFencesClaimMutation|TestPairedWorkerPreparationReceiptFencesJournalMutation|TestPairedBrokerRejectsWorkerClaimChangeBeforeAuth|TestPairedBrokerRejectsWorkerClaimChangeBeforeMint|TestPairedBrokerRealEntrypointUsesPairedPreparationClosure|TestBrokerPairedTerminalRealDigestPrefixDoesNotTriggerFixtureSleep)$' .
+PASS; g02-auth 4.501s
+
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s \
+  -run '^TestPaired' -skip '^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$' ./...
+PASS; g02-auth 14.169s
+
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=30s \
+  -run '^TestBrokerAccountRootIgnoresEnvironmentAndFailsClosed$' .
+PASS; g02-auth 0.253s
+
+GOTOOLCHAIN=go1.26.8 go vet ./...
+PASS
+git diff --check
+PASS
+GOTOOLCHAIN=go1.26.8 bash scripts/gofmt.sh check
+PASS
+```
+
+Cadence, fixture sentinels, worker-claim path pinning, and native-account
+rooting were not changed. The named 7x5s cadence test was not re-run.
+
 ## Remaining gates
 
 This worker does not merge PR 62. After push, request `@codex review` on the
-exact new head, wait for completion, and read inline and issue-comment findings
-including stale/outdated ones. Hosted CI, independent review of the new head,
-and a clean exact-head Codex verdict remain required before any merge decision.
-Live recovery remains unauthorized and unproven. The named cadence 45-second
-partition still has only a few seconds of local headroom; that is a remaining
-gap, not an approved timeout change. Rollback is a source-only revert of this
-fixture-sentinel follow-up.
+exact new head. Hosted CI, independent review of the new head, and a clean
+exact-head Codex verdict remain required before any merge decision. Live
+recovery remains unauthorized and unproven. Rollback is a source-only revert
+of this admission-root identity follow-up; the prior fixture-sentinel commit
+remains independently revertable.

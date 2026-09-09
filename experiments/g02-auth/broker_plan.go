@@ -50,6 +50,7 @@ type brokerWorkerPlan struct {
 	state              *os.Root
 	stateInfo          os.FileInfo
 	claimDirectory     string
+	claimDirectoryInfo os.FileInfo
 	prepare            func(context.Context) (brokerPreparationReceipt, error)
 	preparationReceipt brokerPreparationReceipt
 }
@@ -116,6 +117,9 @@ func (p *brokerWorkerPlan) prepareJournal(ctx context.Context) error {
 		return errBroker
 	}
 	p.preparationReceipt = receipt
+	if p.claimDirectoryInfo == nil && p.bindClaimDirectory() != nil {
+		return errBroker
+	}
 	return p.check()
 }
 
@@ -136,22 +140,41 @@ func (p *brokerWorkerPlan) checkPrepared(ctx context.Context) error {
 	return p.checkJournalSnapshot()
 }
 
-func (p *brokerWorkerPlan) workerClaimPath() (string, error) {
-	if p == nil || p.preparationReceipt.Claim == (brokerInode{}) {
-		return "", errBroker
+func (p *brokerWorkerPlan) bindClaimDirectory() error {
+	if p == nil {
+		return errBroker
 	}
 	directory := p.claimDirectory
 	if directory == "" {
 		var err error
 		directory, err = resolveWorkerClaimDirectory()
 		if err != nil {
-			return "", errBroker
+			return errBroker
 		}
 	}
 	if !filepath.IsAbs(directory) || filepath.Clean(directory) != directory {
+		return errBroker
+	}
+	info, err := os.Lstat(directory)
+	if err != nil || !brokerOwnedDirectory(info, true) {
+		return errBroker
+	}
+	if p.claimDirectoryInfo == nil {
+		p.claimDirectory = directory
+		p.claimDirectoryInfo = info
+		return nil
+	}
+	if directory != p.claimDirectory || !os.SameFile(info, p.claimDirectoryInfo) {
+		return errBroker
+	}
+	return nil
+}
+
+func (p *brokerWorkerPlan) workerClaimPath() (string, error) {
+	if p == nil || p.preparationReceipt.Claim == (brokerInode{}) || p.bindClaimDirectory() != nil {
 		return "", errBroker
 	}
-	path := filepath.Join(directory, "admission.json")
+	path := filepath.Join(p.claimDirectory, "admission.json")
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || brokerFileIdentity(info) != p.preparationReceipt.Claim {
 		return "", errBroker
