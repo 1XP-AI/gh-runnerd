@@ -132,6 +132,27 @@ func TestDrainListenerMarksResponseBeforeWriteInconclusive(t *testing.T) {
 	}
 }
 
+func TestDrainHeldBodyHoldsCloseUntilRelease(t *testing.T) {
+	hook := newDrainPollHook("http://fixture.invalid/queue")
+	body := &drainHeldBody{source: http.NoBody, release: hook.release}
+	done := make(chan error, 1)
+	go func() { done <- body.Close() }()
+	select {
+	case <-done:
+		t.Fatal("status-only response close was not held")
+	case <-time.After(20 * time.Millisecond):
+	}
+	hook.releaseResponse()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("held body close: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("held body close did not release")
+	}
+}
+
 func TestDrainObservationIsBoundedAndFailClosed(t *testing.T) {
 	observation := validDrainTestObservation()
 	if !validDrainObservation(&observation) {
@@ -216,6 +237,34 @@ func TestDrainRequiresVerificationAuthority(t *testing.T) {
 	}
 }
 
+func TestDriverRoutesDrainBeforeNoWorkerStatisticsQuarantine(t *testing.T) {
+	a := approval()
+	a.Phases = append(a.Phases, "drain")
+	j := &memoryJournal{events: []Event{
+		{Kind: "phase", Operation: "create"},
+		{Kind: "intent", Operation: "create"},
+		{Kind: "result", Operation: "create", ID: 7},
+	}}
+	api := &drainDriverAPI{fakeAPI: &fakeAPI{}, approval: a}
+	d := Driver{Approval: a, Journal: j, API: api}
+	err := d.Run(context.Background(), "drain")
+	if !errors.Is(err, ErrNoMessage) {
+		t.Fatalf("drain result = %v, want bounded unresolved result", err)
+	}
+	if api.getScaleSetCalls != 2 {
+		t.Fatalf("owned set reads = %d, want before/after drain reads", api.getScaleSetCalls)
+	}
+	var observed bool
+	for _, event := range j.events {
+		if event.Kind == "observation" && event.Operation == "drain" {
+			observed = true
+		}
+	}
+	if !observed {
+		t.Fatal("drain did not retain its bounded observation")
+	}
+}
+
 func validDrainTestObservation() drainObservation {
 	set := drainSetIdentity{ID: 7, Name: "g01-test-set", RunnerGroupID: 3, Label: "g01-test-set"}
 	runner := &drainRunnerIdentity{ID: 19, Name: "g01-test-worker-1", ScaleSetID: 7}
@@ -231,6 +280,35 @@ func validDrainTestObservation() drainObservation {
 		After:        drainSnapshot{Set: set, Statistics: beforeStats, Runner: runner},
 		Ordering:     []string{"poll-old", "ack", "acquire", "poll-zero"}, Sequence: 1, ObservedAt: time.Unix(1, 0).UTC(),
 	}
+}
+
+type drainDriverAPI struct {
+	*fakeAPI
+	approval         Approval
+	getScaleSetCalls int
+}
+
+func (a *drainDriverAPI) GetScaleSet(context.Context, int) (*scaleset.RunnerScaleSet, error) {
+	a.getScaleSetCalls++
+	return &scaleset.RunnerScaleSet{
+		ID: 7, Name: a.approval.setName(), RunnerGroupID: a.approval.RunnerGroupID,
+		Labels:        []scaleset.Label{{Name: a.approval.setName()}},
+		RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true},
+		Statistics:    &scaleset.RunnerScaleSetStatistic{TotalRegisteredRunners: 1, TotalIdleRunners: 1},
+	}, nil
+}
+
+func (a *drainDriverAPI) FindRunner(context.Context, string) (*scaleset.RunnerReference, error) {
+	return &scaleset.RunnerReference{ID: 19, Name: a.approval.workerName(), RunnerScaleSetID: 7}, nil
+}
+
+func (*drainDriverAPI) VerifyRun(context.Context, Approval, int64) error { return nil }
+
+func (a *drainDriverAPI) OpenDrainSession(_ context.Context, _ int, _ string, hook *drainPollHook) (Session, error) {
+	hook.mu.Lock()
+	hook.target = "http://fixture.invalid/queue"
+	hook.mu.Unlock()
+	return &drainSyntheticSession{initial: scaleset.RunnerScaleSetSession{SessionID: uuid.New(), OwnerName: a.approval.setName(), MessageQueueURL: "http://fixture.invalid/queue", Statistics: &scaleset.RunnerScaleSetStatistic{TotalRegisteredRunners: 1, TotalIdleRunners: 1}}}, nil
 }
 
 type drainNoTraceTransport struct {

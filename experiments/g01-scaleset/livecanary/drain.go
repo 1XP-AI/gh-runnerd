@@ -320,7 +320,10 @@ func (b *drainHeldBody) Read(p []byte) (int, error) {
 	<-b.release
 	return b.source.Read(p)
 }
-func (b *drainHeldBody) Close() error { return b.source.Close() }
+func (b *drainHeldBody) Close() error {
+	<-b.release
+	return b.source.Close()
+}
 
 // drainClient records only high-level listener effects and the two bounded
 // polls. It never changes ACK or acquisition order.
@@ -488,8 +491,15 @@ func runDrainListener(ctx context.Context, client listener.Client, setID int, ho
 		return obs, ErrQuarantine
 	}
 	hook.onRequestWritten = func() { l.SetMaxRunners(drainWithdrawnCapacity) }
+	runCtx, stop := context.WithCancel(ctx)
+	defer stop()
 	runResult := make(chan error, 1)
-	go func() { runResult <- l.Run(ctx, drainScaler{client: c}) }()
+	go func() { runResult <- l.Run(runCtx, drainScaler{client: c}) }()
+	cancelAndJoin := func() {
+		hook.releaseResponse()
+		stop()
+		<-runResult
+	}
 
 	release := false
 	defer func() {
@@ -521,6 +531,7 @@ func runDrainListener(ctx context.Context, client listener.Client, setID int, ho
 				}
 				return obs, drainBoundaryError(&obs, hook, err)
 			case <-ctx.Done():
+				cancelAndJoin()
 				return obs, ErrQuarantine
 			}
 		}
@@ -528,6 +539,7 @@ func runDrainListener(ctx context.Context, client listener.Client, setID int, ho
 	case err := <-runResult:
 		return obs, drainBoundaryError(&obs, hook, err)
 	case <-ctx.Done():
+		cancelAndJoin()
 		return obs, ErrQuarantine
 	}
 	if !responseCaptured {
@@ -543,10 +555,16 @@ func runDrainListener(ctx context.Context, client listener.Client, setID int, ho
 		case err := <-runResult:
 			return obs, drainBoundaryError(&obs, hook, err)
 		case <-ctx.Done():
+			cancelAndJoin()
 			return obs, ErrQuarantine
 		}
 	}
-	err = <-runResult
+	select {
+	case err = <-runResult:
+	case <-ctx.Done():
+		cancelAndJoin()
+		return obs, ErrQuarantine
+	}
 	if errors.Is(err, errDrainCollected) {
 		if obs.Boundary == "" {
 			obs.Boundary, obs.ResponseHeld, _ = hook.boundary()

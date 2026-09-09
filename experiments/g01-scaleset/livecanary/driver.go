@@ -278,6 +278,12 @@ func (d *Driver) Run(ctx context.Context, phase string) error {
 	if s.setID <= 0 || s.reserved {
 		return ErrQuarantine
 	}
+	if phase == "drain" {
+		if s.workObserved || len(s.observedJobs) != 0 {
+			return ErrQuarantine
+		}
+		return d.drain(ctx, s.setID)
+	}
 	set, err := d.owned(ctx, s.setID)
 	if err != nil {
 		return err
@@ -337,9 +343,6 @@ func (d *Driver) Run(ctx context.Context, phase string) error {
 			}
 			return Event{}, ErrBarrier
 		})
-	}
-	if phase == "drain" {
-		return d.drain(ctx, s.setID)
 	}
 	return d.probe(ctx, phase, s.setID)
 }
