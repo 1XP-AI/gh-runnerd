@@ -3,6 +3,7 @@ package livecanary
 import (
 	"context"
 	"errors"
+	"net/http"
 	"slices"
 
 	"github.com/actions/scaleset"
@@ -14,6 +15,10 @@ type drainSessionOpener interface {
 
 type drainScaleSetWireReader interface {
 	drainGetScaleSet(context.Context, int, *baselineWireCapture) (*scaleset.RunnerScaleSet, error)
+}
+
+type drainRunnerWireReader interface {
+	drainFindRunner(context.Context, string, *baselineWireCapture) (*scaleset.RunnerReference, error)
 }
 
 type drainEndpointHostReader interface {
@@ -120,8 +125,22 @@ func (c *journaledDrainClient) DeleteMessage(ctx context.Context, id int) error 
 		return err
 	}
 	return c.d.effect(callCtx, "ack", nil, func(call context.Context) (Event, error) {
+		var wire *baselineWireCapture
+		if c.hook != nil {
+			c.hook.mu.Lock()
+			queue := c.hook.target
+			c.hook.mu.Unlock()
+			wire = &baselineWireCapture{stage: "ack", queue: queue, cursor: id}
+			call = wire.context(call)
+		}
 		if err := c.inner.DeleteMessage(call, id); err != nil {
 			return Event{}, err
+		}
+		if wire != nil {
+			_, _, _, status := wire.facts()
+			if !wire.observed() || status != http.StatusNoContent {
+				return Event{}, errors.New("ack response did not match the one-shot request")
+			}
 		}
 		return Event{ID: id, SessionID: c.sessionID}, nil
 	})
@@ -213,7 +232,16 @@ func (d *Driver) drainSnapshot(ctx context.Context, setID int, stage string) (dr
 	var runner *scaleset.RunnerReference
 	if err := d.effect(ctx, "observe-runner", nil, func(call context.Context) (Event, error) {
 		var err error
-		runner, err = d.API.FindRunner(call, d.Approval.workerName())
+		if reader, ok := d.API.(drainRunnerWireReader); ok {
+			wire := &baselineWireCapture{stage: "runner-observe", runnerName: d.Approval.workerName()}
+			runner, err = reader.drainFindRunner(call, d.Approval.workerName(), wire)
+			wireRunner, status := wire.runnerFacts()
+			if err != nil || !wire.observed() || status != http.StatusOK || !wireRunner.matches(runner) {
+				return Event{}, ErrQuarantine
+			}
+		} else {
+			runner, err = d.API.FindRunner(call, d.Approval.workerName())
+		}
 		if err != nil {
 			return Event{}, err
 		}

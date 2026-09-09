@@ -619,6 +619,7 @@ type drainObservedBody struct {
 	over       bool
 	mu         sync.Mutex
 	finished   bool
+	readFailed bool
 	onComplete func(drainStatistics, bool, *baselineBatch, bool, bool, bool)
 }
 
@@ -647,6 +648,7 @@ func (b *drainObservedBody) finish() {
 	b.finished = true
 	data := append([]byte(nil), b.data...)
 	over := b.over
+	readFailed := b.readFailed
 	b.data = nil
 	b.mu.Unlock()
 
@@ -662,7 +664,7 @@ func (b *drainObservedBody) finish() {
 		present = false
 		absent = false
 	}
-	if over {
+	if over || readFailed {
 		known = false
 		stats = drainStatistics{}
 		batch = nil
@@ -681,6 +683,11 @@ func (b *drainObservedBody) Read(p []byte) (int, error) {
 		b.capture(p[:n])
 	}
 	if err != nil {
+		if !errors.Is(err, io.EOF) {
+			b.mu.Lock()
+			b.readFailed = true
+			b.mu.Unlock()
+		}
 		b.finish()
 	}
 	return n, err
@@ -706,6 +713,9 @@ func (b *drainObservedBody) Close() error {
 		}
 		if err != nil {
 			b.mu.Lock()
+			if !errors.Is(err, io.EOF) {
+				b.readFailed = true
+			}
 			b.over = true
 			b.mu.Unlock()
 		}

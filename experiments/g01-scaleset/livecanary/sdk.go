@@ -300,6 +300,34 @@ func (a *SDKAPI) drainGetScaleSet(c context.Context, id int, wire *baselineWireC
 	}
 	return a.GetScaleSet(wire.context(c), id)
 }
+
+func (a *SDKAPI) drainFindRunner(c context.Context, name string, wire *baselineWireCapture) (*scaleset.RunnerReference, error) {
+	if a == nil || a.client == nil || wire == nil || name == "" {
+		return nil, ErrQuarantine
+	}
+	wire.runnerName = name
+	return a.client.GetRunnerByName(wire.context(c), name)
+}
+
+func validDrainQueueURL(value string) bool {
+	if value == "" || !baselineText(value, 4096) {
+		return false
+	}
+	u, err := url.Parse(value)
+	return err == nil && u.Scheme != "" && u.Host != "" && u.User == nil && u.Fragment == "" && u.EscapedPath() == u.Path
+}
+
+func validDrainSessionWire(a Approval, id int, owner string, wire *baselineSessionFacts, session scaleset.RunnerScaleSetSession) bool {
+	if wire == nil || session.SessionID == [16]byte{} || wire.SessionID != session.SessionID.String() || wire.Owner != owner || session.OwnerName != owner || !validDrainQueueURL(wire.queueURL) || wire.queueURL != session.MessageQueueURL || session.MessageQueueAccessToken == "" || !wire.Statistics.completeDrain() || !wire.NestedSet || wire.SetID != id || wire.SetName != owner || wire.GroupID != a.RunnerGroupID || !wire.NestedStatistics.completeDrain() || !wire.Statistics.matches(session.Statistics) {
+		return false
+	}
+	set := session.RunnerScaleSet
+	if set == nil || set.ID != id || set.Name != owner || set.RunnerGroupID != a.RunnerGroupID || !set.RunnerSetting.DisableUpdate || !slices.ContainsFunc(set.Labels, func(label scaleset.Label) bool { return label.Name == owner }) || set.Statistics == nil || !wire.NestedStatistics.matches(set.Statistics) {
+		return false
+	}
+	return true
+}
+
 func (a *SDKAPI) CreateScaleSet(c context.Context, s *scaleset.RunnerScaleSet) (*scaleset.RunnerScaleSet, error) {
 	return a.client.CreateRunnerScaleSet(c, s)
 }
@@ -324,12 +352,20 @@ func (a *SDKAPI) OpenDrainSession(c context.Context, id int, owner string, hook 
 	if err != nil {
 		return nil, err
 	}
-	session, err := configured.client.MessageSessionClient(c, id, owner, configured.options...)
+	if configured == nil || configured.client == nil {
+		return nil, ErrRemote
+	}
+	wire := &baselineWireCapture{stage: "session-open", setID: id}
+	session, err := configured.client.MessageSessionClient(wire.context(c), id, owner, configured.options...)
 	if err != nil {
 		return nil, ErrRemote
 	}
+	sessionFacts, _, _, status := wire.facts()
+	if session == nil || !wire.observed() || status != http.StatusOK || !validDrainSessionWire(configured.approval, id, owner, sessionFacts, session.Session()) {
+		return nil, ErrQuarantine
+	}
 	hook.mu.Lock()
-	hook.target = session.Session().MessageQueueURL
+	hook.target = sessionFacts.queueURL
 	hook.mu.Unlock()
 	return session, nil
 }

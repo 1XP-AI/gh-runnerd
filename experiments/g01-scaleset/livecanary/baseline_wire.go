@@ -19,6 +19,7 @@ type baselineWireCapture struct {
 	mu            sync.Mutex
 	stage         string
 	setID         int
+	runnerName    string
 	sessionID     string
 	queue         string // private, captured from the exact session; never journaled
 	allowedHosts  []string
@@ -29,6 +30,7 @@ type baselineWireCapture struct {
 	batch         *baselineBatch
 	accepted      *baselineAccepted
 	set           *baselineSetFacts
+	runner        *baselineRunnerFacts
 	jit           *scaleset.RunnerScaleSetJitRunnerConfig
 }
 
@@ -70,6 +72,9 @@ func (c *baselineWireCapture) target(r *http.Request) bool {
 	}
 	if c.stage == "session-open" {
 		suffix += "sessions"
+	} else if c.stage == "runner-observe" {
+		q := r.URL.Query()
+		return r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/_apis/distributedtask/pools/0/agents") && len(q) == 2 && len(q["agentName"]) == 1 && q.Get("agentName") == c.runnerName && len(q["api-version"]) == 1 && q.Get("api-version") == "6.0-preview"
 	} else if c.stage == "acquire" {
 		if len(c.allowedHosts) == 0 || !slices.Contains(c.allowedHosts, r.URL.Host) {
 			return false
@@ -124,6 +129,8 @@ func guardBaselineResponse(req *http.Request, response *http.Response) (*http.Re
 		c.set, err = decodeBaselineSet(data)
 	case "session-open":
 		c.session, err = decodeBaselineSession(data)
+	case "runner-observe":
+		c.runner, err = decodeBaselineRunner(data)
 	case "poll":
 		c.batch, err = decodeBaselineBatch(data)
 	case "jit":
@@ -179,6 +186,12 @@ func (c *baselineWireCapture) setFacts() (*baselineSetFacts, int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.set, c.status
+}
+
+func (c *baselineWireCapture) runnerFacts() (*baselineRunnerFacts, int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.runner, c.status
 }
 
 func validJITSecret(secret string) bool {

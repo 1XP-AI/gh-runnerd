@@ -472,6 +472,70 @@ func TestPinnedSDKDrainMatchesWireBeforeVerifyRun(t *testing.T) {
 	}
 }
 
+func TestPinnedSDKDrainRejectsNonEOFPollReadError(t *testing.T) {
+	a := approval()
+	fixture, _, session, hook := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{pollReadError: io.ErrUnexpectedEOF})
+	hook.releaseResponse()
+	if _, err := session.GetMessage(context.Background(), 0, drainInitialCapacity); err == nil {
+		t.Fatal("non-EOF poll read error was accepted by the pinned SDK")
+	}
+	if _, known := hook.pollStatistics(1); known {
+		t.Fatalf("non-EOF poll read error became known wire facts: fixture polls=%d", fixture.polls.Load())
+	}
+	if fixture.acks.Load() != 0 || fixture.acquires.Load() != 0 {
+		t.Fatalf("non-EOF poll read error reached effects: ack=%d acquire=%d", fixture.acks.Load(), fixture.acquires.Load())
+	}
+}
+
+func TestPinnedSDKDrainBindsACKToPhysicalDelete(t *testing.T) {
+	a := approval()
+	fixture, base, session, hook := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{
+		acceptAnyACK: true,
+		mutateRequest: func(req *http.Request) {
+			if req.Method == http.MethodDelete && strings.HasPrefix(req.URL.Path, "/queue/") {
+				req.URL.Path = "/queue/999"
+				req.URL.RawPath = ""
+			}
+		},
+	})
+	hook.releaseResponse()
+	j := &memoryJournal{}
+	api := &countingFixtureSDK{fixtureSDK: fixtureSDK{base}}
+	d := &Driver{Approval: a, Journal: j, API: api}
+	client := &journaledDrainClient{d: d, inner: session, sessionID: session.Session().SessionID.String(), setID: 7, hook: hook}
+	message, err := client.GetMessage(context.Background(), 0, drainInitialCapacity)
+	if err != nil || message == nil {
+		t.Fatalf("pinned SDK setup poll = message %v err %v", message, err)
+	}
+	if err := client.DeleteMessage(context.Background(), message.MessageID); !errors.Is(err, ErrQuarantine) {
+		t.Fatalf("wrong physical ACK = %v, want quarantine", err)
+	}
+	if fixture.acks.Load() != 1 {
+		t.Fatalf("wrong physical ACK did not reach successful fixture endpoint: ack=%d", fixture.acks.Load())
+	}
+}
+
+func TestPinnedSDKDrainRejectsAmbiguousRunnerSnapshot(t *testing.T) {
+	a := approval()
+	runnerBody := `{"count":1,"value":[{"id":19,"name":"` + a.workerName() + `","runnerScaleSetId":7,"RunnerScaleSetId":7}]}`
+	fixture, base, _, _ := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{runnerBody: runnerBody})
+	j := &memoryJournal{}
+	d := &Driver{Approval: a, Journal: j, API: fixtureSDK{base}}
+	if _, err := d.drainSnapshot(context.Background(), 7, "before"); !errors.Is(err, ErrQuarantine) {
+		t.Fatalf("ambiguous runner snapshot = %v, want quarantine (fixture polls=%d)", err, fixture.polls.Load())
+	}
+}
+
+func TestPinnedSDKDrainRejectsAmbiguousSessionResponse(t *testing.T) {
+	a := approval()
+	name := a.setName()
+	sessionBody := `{"sessionId":"00000000-0000-4000-8000-000000000021","SessionID":"00000000-0000-4000-8000-000000000021","ownerName":"` + name + `","runnerScaleSet":{"id":7,"name":"` + name + `","runnerGroupId":3,"labels":[{"name":"` + name + `","type":"System"}],"RunnerSetting":{"disableUpdate":true},"statistics":{"totalAvailableJobs":0,"totalAcquiredJobs":0,"totalAssignedJobs":0,"totalRunningJobs":0,"totalRegisteredRunners":1,"totalBusyRunners":0,"totalIdleRunners":1}},"messageQueueUrl":"QUEUE_URL","MessageQueueURL":"QUEUE_URL","messageQueueAccessToken":"fixture-queue","statistics":{"totalAvailableJobs":0,"totalAcquiredJobs":0,"totalAssignedJobs":0,"totalRunningJobs":0,"totalRegisteredRunners":1,"totalBusyRunners":0,"totalIdleRunners":1}}`
+	fixture, _, session, _ := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{sessionBody: sessionBody, allowOpenError: true})
+	if fixture.openErr == nil || session != nil {
+		t.Fatalf("ambiguous session response accepted: err=%v session=%v", fixture.openErr, session)
+	}
+}
+
 func pinnedDrainJobBody(a Approval) string {
 	data, _ := json.Marshal([]map[string]any{{
 		"messageType":     "JobAvailable",
@@ -488,6 +552,11 @@ type pinnedDrainOptions struct {
 	withdrawnBody  string
 	acquireBody    string
 	verifyBody     string
+	sessionBody    string
+	runnerBody     string
+	allowOpenError bool
+	acceptAnyACK   bool
+	pollReadError  error
 	snapshotBodies []string
 	mutateRequest  func(*http.Request)
 }
@@ -499,6 +568,8 @@ type pinnedDrainFixture struct {
 	withdrawnBody  string
 	acquireBody    string
 	verifyBody     string
+	runnerBody     string
+	openErr        error
 	snapshotBodies []string
 	polls          atomic.Int32
 	acks           atomic.Int32
@@ -519,6 +590,7 @@ func newPinnedDrainSessionOptions(t *testing.T, a Approval, body string, options
 	fixture := &pinnedDrainFixture{
 		body: body, firstPollBody: options.firstPollBody, withdrawnBody: options.withdrawnBody,
 		acquireBody: options.acquireBody, verifyBody: options.verifyBody,
+		runnerBody:     options.runnerBody,
 		snapshotBodies: append([]string(nil), options.snapshotBodies...),
 	}
 	fixture.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -536,6 +608,10 @@ func newPinnedDrainSessionOptions(t *testing.T, a Approval, body string, options
 			})
 		case strings.HasSuffix(r.URL.Path, "/sessions") && r.Method == http.MethodPost:
 			w.Header().Set("Content-Type", "application/json")
+			if options.sessionBody != "" {
+				_, _ = io.WriteString(w, strings.ReplaceAll(options.sessionBody, "QUEUE_URL", fixture.server.URL+"/queue"))
+				return
+			}
 			_ = json.NewEncoder(w).Encode(scaleset.RunnerScaleSetSession{
 				SessionID: uuid.MustParse("00000000-0000-4000-8000-000000000021"), OwnerName: a.setName(),
 				MessageQueueURL: fixture.server.URL + "/queue", MessageQueueAccessToken: "fixture-queue",
@@ -576,6 +652,9 @@ func newPinnedDrainSessionOptions(t *testing.T, a Approval, body string, options
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"statistics": pinnedDrainStatistics(0, 0)})
+		case options.acceptAnyACK && strings.HasPrefix(r.URL.Path, "/queue/") && r.Method == http.MethodDelete:
+			fixture.acks.Add(1)
+			w.WriteHeader(http.StatusNoContent)
 		case r.URL.Path == "/queue/17" && r.Method == http.MethodDelete:
 			fixture.acks.Add(1)
 			w.WriteHeader(http.StatusNoContent)
@@ -600,6 +679,10 @@ func newPinnedDrainSessionOptions(t *testing.T, a Approval, body string, options
 			_ = json.NewEncoder(w).Encode(pinnedDrainSnapshot(a))
 		case strings.HasSuffix(r.URL.Path, "/agents") && r.Method == http.MethodGet:
 			w.Header().Set("Content-Type", "application/json")
+			if fixture.runnerBody != "" {
+				_, _ = io.WriteString(w, fixture.runnerBody)
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"count": 1, "value": []any{map[string]any{"id": 19, "name": a.workerName(), "runnerScaleSetId": 7}}})
 		default:
 			http.NotFound(w, r)
@@ -622,6 +705,11 @@ func newPinnedDrainSessionOptions(t *testing.T, a Approval, body string, options
 		}
 		wrappers := []func(http.RoundTripper) http.RoundTripper(nil)
 		if hook != nil {
+			if options.pollReadError != nil {
+				wrappers = append(wrappers, func(inner http.RoundTripper) http.RoundTripper {
+					return sdkResponseBodyFaultRoundTripper{inner: inner, path: "/queue", err: options.pollReadError}
+				})
+			}
 			wrappers = append(wrappers, func(inner http.RoundTripper) http.RoundTripper {
 				hook.inner = inner
 				return hook
@@ -648,10 +736,55 @@ func newPinnedDrainSessionOptions(t *testing.T, a Approval, body string, options
 	hook := newDrainPollHook("")
 	session, err := base.OpenDrainSession(context.Background(), 7, a.setName(), hook)
 	if err != nil {
-		t.Fatal(err)
+		fixture.openErr = err
+		if !options.allowOpenError {
+			t.Fatal(err)
+		}
+		return fixture, base, nil, hook
 	}
 	return fixture, base, session, hook
 }
+
+type sdkResponseBodyFaultRoundTripper struct {
+	inner http.RoundTripper
+	path  string
+	err   error
+}
+
+func (t sdkResponseBodyFaultRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	response, err := t.inner.RoundTrip(req)
+	if err != nil || response == nil || req.URL == nil || req.URL.Path != t.path || response.Body == nil {
+		return response, err
+	}
+	response.Body = &sdkResponseBodyFault{source: response.Body, err: t.err}
+	return response, nil
+}
+
+type sdkResponseBodyFault struct {
+	source   io.ReadCloser
+	err      error
+	injected bool
+	pending  bool
+}
+
+func (b *sdkResponseBodyFault) Read(p []byte) (int, error) {
+	if b.pending {
+		b.pending = false
+		return 0, b.err
+	}
+	n, err := b.source.Read(p)
+	if err == io.EOF && !b.injected {
+		b.injected = true
+		if n > 0 {
+			b.pending = true
+			return n, nil
+		}
+		return 0, b.err
+	}
+	return n, err
+}
+
+func (b *sdkResponseBodyFault) Close() error { return b.source.Close() }
 
 type sdkRequestMutationRoundTripper struct {
 	inner  http.RoundTripper
