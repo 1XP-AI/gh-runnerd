@@ -323,14 +323,16 @@ func (o *drainObservation) poll(index int) *drainPollObservation {
 // request. The first response body is held before it reaches the SDK parser so
 // the listener's capacity transition and ACK/acquisition order remain visible.
 type drainPollHook struct {
-	inner    http.RoundTripper
-	target   string
-	wrote    chan struct{}
-	response chan struct{}
-	release  chan struct{}
+	inner          http.RoundTripper
+	target         string
+	wrote          chan struct{}
+	withdrawalDone chan struct{}
+	response       chan struct{}
+	release        chan struct{}
 
 	mu                  sync.Mutex
 	wroteRequest        bool
+	withdrawalCompleted bool
 	responseBeforeWrite bool
 	responseHeld        bool
 	invalid             bool
@@ -344,12 +346,13 @@ type drainPollHook struct {
 	wroteCallbacks      [3]int
 	onRequestWritten    func()
 	wroteOnce           sync.Once
+	withdrawalOnce      sync.Once
 	responseOnce        sync.Once
 	releaseOnce         sync.Once
 }
 
 func newDrainPollHook(target string) *drainPollHook {
-	return &drainPollHook{inner: http.DefaultTransport, target: target, wrote: make(chan struct{}), response: make(chan struct{}), release: make(chan struct{})}
+	return &drainPollHook{inner: http.DefaultTransport, target: target, wrote: make(chan struct{}), withdrawalDone: make(chan struct{}), response: make(chan struct{}), release: make(chan struct{})}
 }
 
 func (h *drainPollHook) matches(req *http.Request) bool {
@@ -548,6 +551,7 @@ func (h *drainPollHook) RoundTrip(req *http.Request) (*http.Response, error) {
 func (h *drainPollHook) tracedRequest(req *http.Request, attempt int) *http.Request {
 	trace := &httptrace.ClientTrace{WroteRequest: func(info httptrace.WroteRequestInfo) {
 		notify := false
+		var onRequestWritten func()
 		h.mu.Lock()
 		if attempt < 1 || attempt >= len(h.wroteCallbacks) {
 			h.invalid = true
@@ -562,12 +566,23 @@ func (h *drainPollHook) tracedRequest(req *http.Request, attempt int) *http.Requ
 			h.invalid = true
 		} else if attempt == 1 {
 			h.wroteRequest = true
+			if notify {
+				onRequestWritten = h.onRequestWritten
+			}
 		}
 		h.mu.Unlock()
-		if notify && info.Err == nil && h.onRequestWritten != nil {
-			h.onRequestWritten()
+		if notify {
+			if info.Err == nil && onRequestWritten != nil {
+				onRequestWritten()
+				h.mu.Lock()
+				h.withdrawalCompleted = true
+				h.mu.Unlock()
+			}
+			if info.Err == nil {
+				h.withdrawalOnce.Do(func() { close(h.withdrawalDone) })
+			}
+			h.wroteOnce.Do(func() { close(h.wrote) })
 		}
-		h.wroteOnce.Do(func() { close(h.wrote) })
 	}}
 	return req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
 }
@@ -731,11 +746,29 @@ func (h *drainPollHook) releaseResponse() {
 	h.releaseOnce.Do(func() { close(h.release) })
 }
 
+func (h *drainPollHook) waitForWithdrawal(ctx context.Context) bool {
+	if h == nil {
+		return false
+	}
+	h.mu.Lock()
+	pending := h.wroteRequest && !h.withdrawalCompleted && !h.responseBeforeWrite
+	h.mu.Unlock()
+	if !pending {
+		return true
+	}
+	select {
+	case <-h.withdrawalDone:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
 func (h *drainPollHook) boundary() (string, bool, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	switch {
-	case h.wroteRequest && h.responseHeld && !h.responseBeforeWrite:
+	case h.wroteRequest && h.withdrawalCompleted && h.responseHeld && !h.responseBeforeWrite:
 		return drainBoundaryRequestWritten, true, !h.invalid && h.wroteCallbacks[1] == 1
 	case h.responseBeforeWrite:
 		return drainBoundaryResponseBeforeWrite, h.responseHeld, false
@@ -1049,7 +1082,9 @@ func runDrainListener(ctx context.Context, client listener.Client, setID int, ho
 	if err != nil {
 		return obs, ErrQuarantine
 	}
+	hook.mu.Lock()
 	hook.onRequestWritten = func() { l.SetMaxRunners(drainWithdrawnCapacity) }
+	hook.mu.Unlock()
 	runCtx, stop := context.WithCancel(ctx)
 	defer stop()
 	c.bindDrainContext(runCtx)
@@ -1078,6 +1113,12 @@ func runDrainListener(ctx context.Context, client listener.Client, setID int, ho
 		// letting select's choice turn a valid run into a flaky skip.
 		boundary, held, proven := hook.boundary()
 		obs.Boundary, obs.ResponseHeld = boundary, held
+		if !proven && !hook.waitForWithdrawal(ctx) {
+			cancelAndJoin()
+			return obs, ErrQuarantine
+		}
+		boundary, held, proven = hook.boundary()
+		obs.Boundary, obs.ResponseHeld = boundary, held
 		hook.releaseResponse()
 		release = true
 		if !proven {
@@ -1104,6 +1145,12 @@ func runDrainListener(ctx context.Context, client listener.Client, setID int, ho
 		select {
 		case <-hook.response:
 			boundary, held, proven := hook.boundary()
+			obs.Boundary, obs.ResponseHeld = boundary, held
+			if !proven && !hook.waitForWithdrawal(ctx) {
+				cancelAndJoin()
+				return obs, ErrQuarantine
+			}
+			boundary, held, proven = hook.boundary()
 			obs.Boundary, obs.ResponseHeld = boundary, held
 			if !proven {
 				obs.Outcome = drainOutcomeInconclusive

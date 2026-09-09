@@ -79,7 +79,7 @@ func decodeBaselineRunner(data []byte) (*baselineRunnerFacts, error) {
 			ScaleSetID *int    `json:"runnerScaleSetId"`
 		} `json:"value"`
 	}
-	if DecodeStrict(data, &w) != nil || w.Count == nil || w.Value == nil || *w.Count < 0 || *w.Count > 1 || *w.Count != len(*w.Value) {
+	if !uniqueKeys(json.NewDecoder(strings.NewReader(string(data)))) || json.Unmarshal(data, &w) != nil || w.Count == nil || w.Value == nil || *w.Count < 0 || *w.Count > 1 || *w.Count != len(*w.Value) {
 		return nil, ErrRemote
 	}
 	facts := &baselineRunnerFacts{Count: *w.Count}
