@@ -159,6 +159,58 @@ than being accepted as a complete statistics sample. The historical reds are
 not relabeled as pre-implementation tests for this follow-up; the actual red
 run above is the new TDD regression, followed by the listed green runs.
 
+### Acquire target correction (exact head `9b1f0c214022740d6276b6f9dd417f4f892d0bd5`)
+
+The follow-up review identified a production-boundary leak in the bounded
+acquisition capture: `baselineWireCapture.target` accepted a synthetic
+queue-URL `/acquirejobs` request, and its suffix-only Actions matcher accepted
+the same endpoint shape on an arbitrary host. The pinned SDK source confirms
+the real request is `POST /_apis/runtime/runnerscalesets/{setID}/acquirejobs`
+with exactly `api-version=6.0-preview`; the strict `count`/`value` decoder and
+the prior [acquisition P1 evidence](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3972911056)
+remain unchanged.
+
+The meaningful red was run before the correction from the exact head above:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^TestBaselineAcquireTargetIsActionsOnly$' -count=1 -v
+```
+
+It failed because `queue_endpoint` and `wrong_host` both returned `true`
+instead of `false`. The minimal source correction in
+`5ffaa604a17f16c5b77aebf088c7fcec47e816bd` removes the queue compatibility
+branch, requires the Actions runtime path and an approved/API host, and moves
+the synthetic fixture to the pinned endpoint; queue query material is not
+copied into that test-only request. The complete poll-statistics preflight
+before `VerifyRun`, strict bounded acquisition decoding, and all six prior P1
+fixes remain in place.
+
+The focused green and safety checks were:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^(TestBaselineAcquireTargetIsActionsOnly|TestDrainListenerWithdrawsWhilePollResponseIsHeld|TestPinnedSDKDrainAcquisitionRequiresStrictWireResponse)$' -count=1 -v -timeout=180s
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^(TestBaselineAcquireTargetIsActionsOnly|TestPinnedSDKDrain.*|TestDriverDrainThroughPinnedSDKAndPollHook|TestDrainListenerWithdrawsWhilePollResponseIsHeld|TestDrainCancellationStopsBeforeReleasingHeldResponse)$' -count=1 -v -timeout=180s
+GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -run '^(TestBaselineAcquireTargetIsActionsOnly|TestPinnedSDKDrain.*|TestDriverDrainThroughPinnedSDKAndPollHook|TestDrainListenerWithdrawsWhilePollResponseIsHeld|TestDrainCancellationStopsBeforeReleasingHeldResponse)$' -count=1 -timeout=180s
+GOTOOLCHAIN=go1.26.8 go vet ./livecanary
+cd ../..
+test -z "$(gofmt -l experiments/g01-scaleset/livecanary/baseline_wire.go experiments/g01-scaleset/livecanary/baseline_listener.go experiments/g01-scaleset/livecanary/drain_driver.go experiments/g01-scaleset/livecanary/sdk.go experiments/g01-scaleset/livecanary/drain_test.go experiments/g01-scaleset/livecanary/drain_p1_followup_test.go)"
+git diff --check
+```
+
+All focused normal/race tests passed, vet was silent and successful, and the
+format/diff checks were clean. The queue endpoint, wrong host, wrong set/path,
+and wrong method cases remain rejected while the actual pinned SDK endpoint and
+the synthetic fixture endpoint are accepted; these are offline checks only.
+No live operation, credential, runner, Docker, Keychain, launchd, workflow or
+personal-path mutation occurred, and historical snapshots remain unchanged.
+Rollback is recoverable with normal `git revert --no-edit
+5ffaa604a17f16c5b77aebf088c7fcec47e816bd`, which returns the source to the
+published `9b1f0c214022740d6276b6f9dd417f4f892d0bd5` correction head; the
+documentation-only commit that records this evidence can be reverted
+separately without rewriting history.
+
 ## Independent correction matrix
 
 | Finding | Correction and evidence |
