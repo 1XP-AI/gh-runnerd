@@ -225,8 +225,8 @@ func TestDrainObservationIsBoundedAndFailClosed(t *testing.T) {
 	}
 
 	state := replay([]Event{{Kind: "observation", Operation: "drain", Drain: &observation}})
-	if !state.workObserved || state.uncertain {
-		t.Fatalf("observed drain replay = %+v, want work retained without uncertainty", state)
+	if !state.workObserved || !state.uncertain {
+		t.Fatalf("unbound observed drain replay = %+v, want retained work and uncertainty", state)
 	}
 	observation.Outcome = drainOutcomeInconclusive
 	state = replay([]Event{{Kind: "observation", Operation: "drain", Drain: &observation}})
@@ -284,6 +284,54 @@ func TestDrainPhaseStartRetainsCrashUncertainty(t *testing.T) {
 	state := replay([]Event{{Kind: "phase", Operation: "drain"}})
 	if !state.uncertain {
 		t.Fatal("drain phase without final observation did not retain uncertainty")
+	}
+}
+
+func TestReplayDischargesCompletedDrainPhaseFence(t *testing.T) {
+	observation := validDrainTestObservation()
+	observation.Sequence = 4
+	state := replay([]Event{
+		{Kind: "phase", Operation: "create", Sequence: 1},
+		{Kind: "intent", Operation: "create", Sequence: 2},
+		{Kind: "result", Operation: "create", Sequence: 3, ID: 7},
+		{Kind: "phase", Operation: "drain", Sequence: 4, ID: 7},
+		{Kind: "observation", Operation: "drain", Sequence: 5, Drain: &observation},
+	})
+	if state.uncertain {
+		t.Fatalf("valid drain observation retained its completed phase fence: %+v", state)
+	}
+}
+
+func TestReplayDrainFencePreservesUnrelatedUncertaintyAndReservations(t *testing.T) {
+	observation := validDrainTestObservation()
+	state := replay([]Event{
+		{Kind: "phase", Operation: "drain"},
+		{Kind: "intent", Operation: "acquire", RequestIDs: []int64{41}},
+		{Kind: "observation", Operation: "drain", Drain: &observation},
+	})
+	if !state.uncertain || !state.reserved || !state.workObserved {
+		t.Fatalf("completed drain phase cleared unrelated fences: %+v", state)
+	}
+
+	state = replay([]Event{
+		{Kind: "phase", Operation: "drain"},
+		{Kind: "observation", Operation: "drain", Drain: &observation},
+		{Kind: "unknown", Operation: "acquire"},
+	})
+	if !state.uncertain {
+		t.Fatalf("completed drain phase cleared a later unknown fence: %+v", state)
+	}
+}
+
+func TestReplayDrainFenceRetainsInconclusiveOutcome(t *testing.T) {
+	observation := validDrainTestObservation()
+	observation.Outcome = drainOutcomeInconclusive
+	state := replay([]Event{
+		{Kind: "phase", Operation: "drain"},
+		{Kind: "observation", Operation: "drain", Drain: &observation},
+	})
+	if !state.uncertain {
+		t.Fatalf("inconclusive drain phase discharged its fence: %+v", state)
 	}
 }
 
@@ -612,6 +660,101 @@ func (duplicatePollWriteTransport) RoundTrip(req *http.Request) (*http.Response,
 	}, nil
 }
 
+type drainPhysicalWriteBehavior string
+
+const (
+	drainWriteSuccess   drainPhysicalWriteBehavior = "success"
+	drainWriteError     drainPhysicalWriteBehavior = "error"
+	drainWriteDuplicate drainPhysicalWriteBehavior = "duplicate"
+	drainWriteRetry     drainPhysicalWriteBehavior = "retry"
+)
+
+type drainPhysicalWriteTransport struct {
+	first  drainPhysicalWriteBehavior
+	second drainPhysicalWriteBehavior
+	polls  int
+}
+
+func (t *drainPhysicalWriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Method != http.MethodGet {
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+	}
+	t.polls++
+	trace := httptrace.ContextClientTrace(req.Context())
+	if trace == nil || trace.WroteRequest == nil {
+		return nil, errors.New("missing client trace")
+	}
+	behavior := t.first
+	if t.polls == 2 {
+		behavior = t.second
+	}
+	switch behavior {
+	case drainWriteSuccess:
+		trace.WroteRequest(httptrace.WroteRequestInfo{})
+	case drainWriteError:
+		trace.WroteRequest(httptrace.WroteRequestInfo{Err: errors.New("synthetic physical write error")})
+		return nil, errors.New("synthetic transport error")
+	case drainWriteDuplicate:
+		trace.WroteRequest(httptrace.WroteRequestInfo{})
+		trace.WroteRequest(httptrace.WroteRequestInfo{})
+	case drainWriteRetry:
+		trace.WroteRequest(httptrace.WroteRequestInfo{Err: errors.New("synthetic transparent retry")})
+		trace.WroteRequest(httptrace.WroteRequestInfo{})
+	default:
+		return nil, errors.New("unknown synthetic write behavior")
+	}
+	if t.polls == 1 {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"statistics":{"totalAvailableJobs":1,"totalAcquiredJobs":0,"totalAssignedJobs":1,"totalRunningJobs":0,"totalRegisteredRunners":1,"totalBusyRunners":0,"totalIdleRunners":1}}`)),
+		}, nil
+	}
+	return &http.Response{
+		StatusCode: http.StatusAccepted,
+		Body:       io.NopCloser(strings.NewReader(`{"statistics":{"totalAvailableJobs":0,"totalAcquiredJobs":0,"totalAssignedJobs":0,"totalRunningJobs":0,"totalRegisteredRunners":1,"totalBusyRunners":0,"totalIdleRunners":1}}`)),
+	}, nil
+}
+
+type secondPollRetryTransport struct {
+	polls int
+}
+
+func (t *secondPollRetryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Method != http.MethodGet {
+		status := http.StatusOK
+		body := io.ReadCloser(http.NoBody)
+		if req.Method == http.MethodDelete {
+			status = http.StatusNoContent
+		} else {
+			body = io.NopCloser(strings.NewReader(`{"count":1,"value":[11]}`))
+		}
+		return &http.Response{StatusCode: status, Status: http.StatusText(status), Body: body}, nil
+	}
+	t.polls++
+	trace := httptrace.ContextClientTrace(req.Context())
+	if t.polls == 1 {
+		if trace == nil || trace.WroteRequest == nil {
+			return nil, errors.New("missing first-poll client trace")
+		}
+		trace.WroteRequest(httptrace.WroteRequestInfo{})
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"messageId":7,"messageType":"RunnerScaleSetJobMessages","statistics":{"totalAvailableJobs":1,"totalAcquiredJobs":0,"totalAssignedJobs":1,"totalRunningJobs":0,"totalRegisteredRunners":1,"totalBusyRunners":0,"totalIdleRunners":1},"body":"[]"}`)),
+		}, nil
+	}
+	if t.polls != 2 {
+		return nil, errors.New("unexpected extra poll")
+	}
+	if trace != nil && trace.WroteRequest != nil {
+		trace.WroteRequest(httptrace.WroteRequestInfo{Err: errors.New("synthetic transparent retry")})
+		trace.WroteRequest(httptrace.WroteRequestInfo{})
+	}
+	return &http.Response{
+		StatusCode: http.StatusAccepted,
+		Body:       io.NopCloser(strings.NewReader(`{"statistics":{"totalAvailableJobs":0,"totalAcquiredJobs":0,"totalAssignedJobs":0,"totalRunningJobs":0,"totalRegisteredRunners":1,"totalBusyRunners":0,"totalIdleRunners":1}}`)),
+	}, nil
+}
+
 func TestDrainPollHookRejectsDuplicatePhysicalWrites(t *testing.T) {
 	target := "http://fixture.invalid/queue"
 	hook := newDrainPollHook(target)
@@ -630,6 +773,69 @@ func TestDrainPollHookRejectsDuplicatePhysicalWrites(t *testing.T) {
 	_, _, proven := hook.boundary()
 	if proven {
 		t.Fatal("duplicate physical poll write was promoted to a proven boundary")
+	}
+}
+
+func TestDrainListenerRejectsWithdrawnPollPhysicalRetry(t *testing.T) {
+	const target = "http://fixture.invalid/queue"
+	hook := newDrainPollHook(target)
+	transport := &secondPollRetryTransport{}
+	hook.inner = transport
+	session := &drainSyntheticSession{
+		client: &http.Client{Transport: hook},
+		initial: scaleset.RunnerScaleSetSession{
+			SessionID: uuid.New(), OwnerName: "fixture-owner", MessageQueueURL: target,
+			Statistics: &scaleset.RunnerScaleSetStatistic{TotalRegisteredRunners: 1, TotalIdleRunners: 1},
+		},
+		order: new([]string),
+	}
+	observation, err := runDrainListener(context.Background(), session, 7, hook)
+	if transport.polls != 2 {
+		t.Fatalf("polls = %d, want first and withdrawn polls", transport.polls)
+	}
+	if err == nil || observation.Outcome == drainOutcomeObserved {
+		t.Fatalf("withdrawn-poll physical retry was promoted to observed: observation=%+v err=%v", observation, err)
+	}
+}
+
+func TestDrainPollHookRequiresOneSuccessfulWritePerPoll(t *testing.T) {
+	behaviors := []drainPhysicalWriteBehavior{drainWriteSuccess, drainWriteError, drainWriteDuplicate, drainWriteRetry}
+	for _, first := range behaviors {
+		for _, second := range behaviors {
+			t.Run(string(first)+"/"+string(second), func(t *testing.T) {
+				target := "http://fixture.invalid/queue"
+				hook := newDrainPollHook(target)
+				hook.inner = &drainPhysicalWriteTransport{first: first, second: second}
+				request, err := http.NewRequest(http.MethodGet, target, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				firstResponse, _ := hook.RoundTrip(request)
+				if firstResponse != nil {
+					hook.releaseResponse()
+					_, _ = io.ReadAll(firstResponse.Body)
+					_ = firstResponse.Body.Close()
+				}
+				secondResponse, _ := hook.RoundTrip(request)
+				if secondResponse != nil {
+					_, _ = io.ReadAll(secondResponse.Body)
+					_ = secondResponse.Body.Close()
+				}
+				wantValid := first == drainWriteSuccess && second == drainWriteSuccess
+				if got := hook.pollWritesValid(); got != wantValid {
+					t.Fatalf("poll writes valid = %v, want %v; callbacks=%v invalid=%v", got, wantValid, hook.wroteCallbacks, hook.invalid)
+				}
+				for index, behavior := range []drainPhysicalWriteBehavior{first, second} {
+					want := 1
+					if behavior == drainWriteDuplicate || behavior == drainWriteRetry {
+						want = 2
+					}
+					if got := hook.wroteCallbacks[index+1]; got != want {
+						t.Fatalf("poll %d callbacks = %d, want %d", index+1, got, want)
+					}
+				}
+			})
+		}
 	}
 }
 

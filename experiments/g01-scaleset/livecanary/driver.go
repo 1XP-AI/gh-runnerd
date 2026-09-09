@@ -95,26 +95,69 @@ type state struct {
 	sessionID                    string
 	reserved, uncertain, deleted bool
 	phaseSeen                    map[string]bool
+	drainPhasePending            bool
+	drainPhaseSequence           int
+	drainPhaseSetID              int
 	observedJobs                 map[int64]bool
 	workObserved                 bool
 	inventory                    string
 }
 
+func replayEventSequence(e Event, index int) int {
+	if e.Sequence > 0 {
+		return e.Sequence
+	}
+	return index + 1
+}
+
+func validDrainObservationForPhase(e Event, sequence int, s state) bool {
+	if !s.drainPhasePending || e.Drain == nil || !validDrainObservation(e.Drain) || e.Drain.Outcome != drainOutcomeObserved {
+		return false
+	}
+	return sequence > s.drainPhaseSequence && e.Drain.Sequence == s.drainPhaseSequence && s.setID > 0 && s.drainPhaseSetID == s.setID && e.Drain.Before.Set.ID == s.setID && e.Drain.After.Set.ID == s.setID
+}
+
 func replay(events []Event) state {
 	s := state{phaseSeen: make(map[string]bool), observedJobs: make(map[int64]bool)}
 	pending := ""
-	for _, e := range events {
+	for index, e := range events {
 		switch e.Kind {
 		case "baseline":
 			// This library slice never grants a legacy fault/cleanup phase.
 			s.reserved, s.uncertain, s.workObserved = true, true, true
 		case "phase":
-			s.phaseSeen[e.Operation] = true
 			if e.Operation == "drain" {
-				// The phase record is durable intent to observe a live session.
-				// A crash before its final observation must not reopen cleanup.
+				if s.phaseSeen[e.Operation] || s.drainPhasePending {
+					// A drain observation may discharge exactly one phase. A
+					// repeated phase is not collapsed into the same boolean fence.
+					s.uncertain = true
+					s.drainPhasePending = false
+					s.drainPhaseSequence = 0
+					s.drainPhaseSetID = 0
+					continue
+				}
+				s.drainPhasePending = true
+				s.drainPhaseSequence = replayEventSequence(e, index)
+				s.drainPhaseSetID = 0
+				if e.ID > 0 {
+					if s.setID <= 0 || e.ID != s.setID {
+						s.uncertain = true
+					}
+					s.drainPhaseSetID = e.ID
+				} else {
+					// A drain phase must carry its created SetID. Never infer a
+					// missing, zero, or negative identity from prior state.
+					s.uncertain = true
+				}
+			} else if s.drainPhasePending {
+				// A different phase interrupts the active drain phase. Keep
+				// that history fenced even if a later record looks complete.
 				s.uncertain = true
+				s.drainPhasePending = false
+				s.drainPhaseSequence = 0
+				s.drainPhaseSetID = 0
 			}
+			s.phaseSeen[e.Operation] = true
 		case "inventory":
 			s.inventory = e.Digest
 		case "observation":
@@ -129,8 +172,17 @@ func replay(events []Event) state {
 			}
 			if e.Operation == "drain" {
 				s.workObserved = true
-				if e.Drain == nil || e.Drain.Outcome != drainOutcomeObserved {
+				sequence := replayEventSequence(e, index)
+				if !validDrainObservationForPhase(e, sequence, s) {
 					s.uncertain = true
+				}
+				if s.drainPhasePending {
+					// A malformed or inconclusive record consumes the active
+					// phase without discharging it; a later duplicate cannot
+					// turn the same phase into an observed result.
+					s.drainPhasePending = false
+					s.drainPhaseSequence = 0
+					s.drainPhaseSetID = 0
 				}
 			}
 			if e.Operation == "drain-marker" {
@@ -179,9 +231,14 @@ func replay(events []Event) state {
 		case "unknown":
 			s.uncertain = true
 			pending = ""
+			if s.drainPhasePending {
+				s.drainPhasePending = false
+				s.drainPhaseSequence = 0
+				s.drainPhaseSetID = 0
+			}
 		}
 	}
-	s.uncertain = s.uncertain || pending != "" || s.sessionID != ""
+	s.uncertain = s.uncertain || pending != "" || s.sessionID != "" || s.drainPhasePending
 	return s
 }
 
@@ -297,7 +354,14 @@ func (d *Driver) Run(ctx context.Context, phase string) error {
 	if phase == "inspect" {
 		return d.inspect(ctx, s)
 	}
-	if err := d.record(Event{Kind: "phase", Operation: phase}); err != nil {
+	phaseEvent := Event{Kind: "phase", Operation: phase}
+	if phase == "drain" {
+		// The phase carries the already-created set identity. The journal
+		// sequence assigned to this event is the only sequence a later drain
+		// observation may use to discharge its phase-local fence.
+		phaseEvent.ID = s.setID
+	}
+	if err := d.record(phaseEvent); err != nil {
 		return err
 	}
 	if phase == "create" {

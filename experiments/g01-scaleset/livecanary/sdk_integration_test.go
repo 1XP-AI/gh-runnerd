@@ -291,12 +291,24 @@ func TestDriverDrainThroughPinnedSDKAndPollHook(t *testing.T) {
 		t.Fatalf("pinned SDK effects polls=%d ack=%d acquire=%d close=%d", polls, acks, acquires, closes)
 	}
 	var observed bool
+	var drainPhaseSequence, drainPhaseSetID, observationSequence int
 	for _, event := range j.Events() {
+		if event.Kind == "phase" && event.Operation == "drain" {
+			drainPhaseSequence = event.Sequence
+			drainPhaseSetID = event.ID
+		}
 		if event.Kind == "observation" && event.Operation == "drain" && event.Drain != nil && event.Drain.Outcome == drainOutcomeObserved {
 			observed = true
+			observationSequence = event.Drain.Sequence
+			if !sameDrainRunnerPartition(event.Drain.NextPoll.Statistics, event.Drain.Before.Statistics) {
+				t.Fatal("pinned SDK drain accepted a withdrawn-poll runner partition mismatch")
+			}
 		}
 	}
 	if !observed {
 		t.Fatal("pinned SDK drain did not retain observed outcome")
+	}
+	if drainPhaseSequence <= 0 || drainPhaseSetID != set.ID || observationSequence != drainPhaseSequence {
+		t.Fatalf("pinned SDK drain binding = phase sequence %d SetID %d, observation %d; want exact phase sequence and SetID %d", drainPhaseSequence, drainPhaseSetID, observationSequence, set.ID)
 	}
 }

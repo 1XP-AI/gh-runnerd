@@ -231,7 +231,13 @@ func validDrainObservation(o *drainObservation) bool {
 	if o.Outcome == drainOutcomeObserved && !sameDrainRunner(o.Before.Runner, o.After.Runner) {
 		return false
 	}
+	if o.Outcome == drainOutcomeObserved && !validDrainIdlePrerequisite(o.Before) {
+		return false
+	}
 	if o.Outcome == drainOutcomeObserved && !sameDrainRunnerPartition(o.Poll.Statistics, o.Before.Statistics) {
+		return false
+	}
+	if o.Outcome == drainOutcomeObserved && (!sameDrainRunnerPartition(o.NextPoll.Statistics, o.Before.Statistics) || !sameDrainRunnerPartition(o.After.Statistics, o.Before.Statistics)) {
 		return false
 	}
 	seen := map[string]bool{}
@@ -333,11 +339,14 @@ func (h *drainPollHook) RoundTrip(req *http.Request) (*http.Response, error) {
 		if !second {
 			return nil, ErrQuarantine
 		}
-		response, err := h.inner.RoundTrip(req)
+		response, err := h.inner.RoundTrip(h.tracedRequest(req, attempt))
 		if err != nil {
 			return nil, err
 		}
 		if response == nil {
+			h.mu.Lock()
+			h.invalid = true
+			h.mu.Unlock()
 			return nil, ErrQuarantine
 		}
 		if response.Body == nil {
@@ -356,30 +365,7 @@ func (h *drainPollHook) RoundTrip(req *http.Request) (*http.Response, error) {
 		return response, nil
 	}
 
-	trace := &httptrace.ClientTrace{WroteRequest: func(info httptrace.WroteRequestInfo) {
-		notify := false
-		h.mu.Lock()
-		if attempt < 1 || attempt >= len(h.wroteCallbacks) {
-			h.invalid = true
-		} else {
-			h.wroteCallbacks[attempt]++
-			notify = h.wroteCallbacks[attempt] == 1
-			if h.wroteCallbacks[attempt] != 1 {
-				h.invalid = true
-			}
-		}
-		if info.Err != nil {
-			h.invalid = true
-		} else {
-			h.wroteRequest = true
-		}
-		h.mu.Unlock()
-		if notify && info.Err == nil && h.onRequestWritten != nil {
-			h.onRequestWritten()
-		}
-		h.wroteOnce.Do(func() { close(h.wrote) })
-	}}
-	response, err := h.inner.RoundTrip(req.WithContext(httptrace.WithClientTrace(req.Context(), trace)))
+	response, err := h.inner.RoundTrip(h.tracedRequest(req, attempt))
 	if err != nil {
 		h.wroteOnce.Do(func() { close(h.wrote) })
 		h.responseOnce.Do(func() { close(h.response) })
@@ -417,6 +403,42 @@ func (h *drainPollHook) RoundTrip(req *http.Request) (*http.Response, error) {
 	response.Body = &drainHeldBody{source: observedBody, release: h.release}
 	h.responseOnce.Do(func() { close(h.response) })
 	return response, nil
+}
+
+func (h *drainPollHook) tracedRequest(req *http.Request, attempt int) *http.Request {
+	trace := &httptrace.ClientTrace{WroteRequest: func(info httptrace.WroteRequestInfo) {
+		notify := false
+		h.mu.Lock()
+		if attempt < 1 || attempt >= len(h.wroteCallbacks) {
+			h.invalid = true
+		} else {
+			h.wroteCallbacks[attempt]++
+			notify = attempt == 1 && h.wroteCallbacks[attempt] == 1
+			if h.wroteCallbacks[attempt] != 1 {
+				h.invalid = true
+			}
+		}
+		if info.Err != nil {
+			h.invalid = true
+		} else if attempt == 1 {
+			h.wroteRequest = true
+		}
+		h.mu.Unlock()
+		if notify && info.Err == nil && h.onRequestWritten != nil {
+			h.onRequestWritten()
+		}
+		h.wroteOnce.Do(func() { close(h.wrote) })
+	}}
+	return req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
+}
+
+func (h *drainPollHook) pollWritesValid() bool {
+	if h == nil {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return !h.invalid && h.wroteCallbacks[1] == 1 && h.wroteCallbacks[2] == 1
 }
 
 func (h *drainPollHook) pollStatistics(index int) (drainStatistics, bool) {
@@ -649,6 +671,13 @@ func (c *drainClient) GetMessage(ctx context.Context, last, capacity int) (*scal
 	}
 	if message == nil {
 		c.mu.Lock()
+		if statsKnown && c.ownedRunnerStatsKnown && !sameDrainRunnerPartition(stats, c.ownedRunnerStats) {
+			c.obs.poll(index).Message = drainMessageUnknown
+			c.obs.poll(index).Statistics = drainStatistics{}
+			c.obs.poll(index).StatsKnown = false
+			c.mu.Unlock()
+			return nil, ErrQuarantine
+		}
 		c.obs.poll(index).Message = drainMessageAbsent
 		c.obs.poll(index).Statistics = stats
 		c.obs.poll(index).StatsKnown = statsKnown
@@ -664,7 +693,7 @@ func (c *drainClient) GetMessage(ctx context.Context, last, capacity int) (*scal
 		return nil, ErrQuarantine
 	}
 	messageStats, statsErr := newDrainStatistics(message.Statistics)
-	if statsErr != nil || (c.hook != nil && stats != messageStats) || (index == 1 && c.ownedRunnerStatsKnown && !sameDrainRunnerPartition(stats, c.ownedRunnerStats)) || message.MessageID <= 0 || len(message.JobAssignedMessages) != 0 || len(message.JobStartedMessages) != 0 || len(message.JobCompletedMessages) != 0 || len(message.JobAvailableMessages) != 1 || message.JobAvailableMessages[0] == nil || message.JobAvailableMessages[0].RunnerRequestID <= 0 {
+	if statsErr != nil || (c.hook != nil && stats != messageStats) || (index <= 2 && c.ownedRunnerStatsKnown && !sameDrainRunnerPartition(stats, c.ownedRunnerStats)) || message.MessageID <= 0 || len(message.JobAssignedMessages) != 0 || len(message.JobStartedMessages) != 0 || len(message.JobCompletedMessages) != 0 || len(message.JobAvailableMessages) != 1 || message.JobAvailableMessages[0] == nil || message.JobAvailableMessages[0].RunnerRequestID <= 0 {
 		c.mu.Lock()
 		c.obs.poll(index).Message = drainMessageUnknown
 		c.mu.Unlock()
@@ -882,7 +911,7 @@ func runDrainListener(ctx context.Context, client listener.Client, setID int, ho
 		if obs.Boundary == "" {
 			obs.Boundary, obs.ResponseHeld, _ = hook.boundary()
 		}
-		if obs.Boundary == drainBoundaryRequestWritten && obs.ResponseHeld && obs.Poll.Message == drainMessagePresent && obs.Poll.StatsKnown && obs.Poll.Statistics != (drainStatistics{}) && c.ownedRunnerStatsKnown && sameDrainRunnerPartition(obs.Poll.Statistics, c.ownedRunnerStats) && obs.Poll.ACK == drainResponseSucceeded && obs.Poll.Acquisition == drainResponseSucceeded && obs.NextPoll.Message == drainMessageAbsent && obs.NextPoll.StatsKnown {
+		if obs.Boundary == drainBoundaryRequestWritten && obs.ResponseHeld && hook.pollWritesValid() && obs.Poll.Message == drainMessagePresent && obs.Poll.StatsKnown && obs.Poll.Statistics != (drainStatistics{}) && c.ownedRunnerStatsKnown && sameDrainRunnerPartition(obs.Poll.Statistics, c.ownedRunnerStats) && obs.Poll.ACK == drainResponseSucceeded && obs.Poll.Acquisition == drainResponseSucceeded && obs.NextPoll.Message == drainMessageAbsent && obs.NextPoll.StatsKnown && sameDrainRunnerPartition(obs.NextPoll.Statistics, c.ownedRunnerStats) {
 			obs.Outcome = drainOutcomeObserved
 			return obs, nil
 		}

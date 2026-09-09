@@ -299,7 +299,7 @@ func validEvent(e Event) bool {
 	case "authority":
 		return e.Authority != nil
 	case "phase":
-		return e.Operation != "" && e.Digest == ""
+		return e.Operation != "" && e.Digest == "" && (e.Operation != "drain" || e.ID > 0)
 	case "inventory":
 		return len(e.Digest) == 64
 	case "observation":

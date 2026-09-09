@@ -196,6 +196,11 @@ func (d *Driver) drain(ctx context.Context, setID int) error {
 	if !ok {
 		return ErrApproval
 	}
+	phaseState := replay(d.Journal.Events())
+	if !phaseState.drainPhasePending || phaseState.drainPhaseSequence <= 0 || phaseState.drainPhaseSetID != setID {
+		return ErrQuarantine
+	}
+	phaseSequence := phaseState.drainPhaseSequence
 	before, err := d.drainSnapshot(ctx, setID, "before")
 	if err != nil {
 		if markerErr := d.recordDrainMarker(drainMarkerFor(ctx, err)); markerErr != nil {
@@ -238,6 +243,9 @@ func (d *Driver) drain(ctx context.Context, setID int) error {
 	}
 	journaled := &journaledDrainClient{d: d, inner: session, sessionID: sessionID}
 	obs, runErr := runDrainListener(ctx, journaled, setID, hook)
+	// The bounded observation sequence is phase-local: it must identify the
+	// exact durable drain phase that was active when the listener ran.
+	obs.Sequence = phaseSequence
 	if ctx.Err() != nil {
 		if markerErr := d.recordDrainMarker(drainMarkerFor(ctx, runErr)); markerErr != nil {
 			return markerErr

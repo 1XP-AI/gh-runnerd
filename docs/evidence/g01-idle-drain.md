@@ -14,13 +14,13 @@ contradictory counters, a duplicate/wrong callback, or a second poll that
 returns a message after withdrawal. Each is recorded as
 inconclusive/quarantined and never treated as proof of a drain barrier.
 
-The transport hook records `WroteRequest` and holds the first response body
-before the high-level listener parser receives it. `WroteRequest` is a
-client-side transport fact only: `server_receipt` remains `unproven`, so the
-synthetic test and any future live result cannot claim server acceptance or an
-atomic server-side drain. The implementation calls the released listener's
-public `SetMaxRunners(0)` callback and lets the listener perform its normal
-ACK-before-acquire sequence.
+The transport hook records `WroteRequest` for each physical attempt in both
+bounded polls and holds the first response body before the high-level listener
+parser receives it. `WroteRequest` is a client-side transport fact only:
+`server_receipt` remains `unproven`, so the synthetic test and any future live
+result cannot claim server acceptance or an atomic server-side drain. The
+implementation calls the released listener's public `SetMaxRunners(0)`
+callback and lets the listener perform its normal ACK-before-acquire sequence.
 
 ## Bounded observation
 
@@ -84,18 +84,97 @@ bounded adapter field-presence test; the cancellation fence is deliberately
 not described as atomic against a remote call that was already issued or
 accepted.
 
+### Exact-head follow-up corrections
+
+This bounded follow-up started from exact base
+`6e1b2144cb92a1a53db3926dd0e924c646643dfa` for PR #72. The current-head
+Codex inventory was read with the local review script using these exact
+invocations (the personal script path is intentionally omitted from committed
+evidence):
+
+```text
+bash /path/to/codex-review.sh all 72 --repo 1XP-AI/gh-runnerd
+bash /path/to/codex-review.sh detail-all 72 --repo 1XP-AI/gh-runnerd
+```
+
+The actionable findings were [P1 withdrawn-poll physical retries](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3967496285),
+[P2 drain-phase fence discharge](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3967496296),
+and [P1 missing durable resolution evidence](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3967496305).
+The first two were reproduced before the correction with this real failing
+regression run:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run 'TestReplayDischargesCompletedDrainPhaseFence|TestDrainListenerRejectsWithdrawnPollPhysicalRetry' -count=1 -v
+```
+
+It failed with the valid final observation still reporting `uncertain: true`
+and the synthetic listener promoting a transparent retry on the withdrawn
+poll to `Outcome: observed` (`WroteRequest` callbacks `[0 1 0]`, `err=<nil>`).
+The minimal correction stores the drain phase fence separately, clears only
+that fence after a valid matching observed record, and traces both polls;
+one successful physical write per poll is required, while error, duplicate and
+transparent-retry callbacks remain invalid. The first poll's SDK response and
+ACK-before-acquire path are unchanged.
+
+The focused green chronology was:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run 'TestReplayDischargesCompletedDrainPhaseFence|TestReplayDrainFence|TestDrainPollHookRequiresOneSuccessfulWritePerPoll|TestDrainListenerRejectsWithdrawnPollPhysicalRetry' -count=1 -v
+GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -run 'TestDrain|TestReplayDischargesCompletedDrainPhaseFence|TestReplayDrainFence' -count=1
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -count=1
+```
+
+All three commands passed after the correction; the first includes the 4x4
+first/second poll matrix (success, write error, duplicate callback and
+transparent retry), and the real listener fixture remained inconclusive for a
+withdrawn-poll retry. These are offline tests only.
+
+The prior [P1 transparent first-poll retry finding](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3966770569)
+and [P1 contradictory poll-counter finding](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3966770561)
+remain part of the durable chronology. Their historical red preceded the
+earlier correction; the current follow-up re-ran the regression guards with:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run 'TestDrainPollHookRejectsDuplicatePhysicalWrites|TestDrainPollHookRequiresOneSuccessfulWritePerPoll' -count=1 -v
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run 'TestDrainObservationRejectsPollCountersContradictingOwnedRunner|TestDrainClientRejectsPollRunnerPartitionMismatchBeforeEffects|TestDrainRequiresKnownConsistentStatisticsAndControlledMessage' -count=1 -v
+```
+
+Both commands passed on the corrected source. The first-poll guard counts
+every physical callback and rejects retries; the counter guards reject a
+valid-but-contradictory runner partition before ACK or acquisition. The
+[duplicate-key regression](https://github.com/1XP-AI/gh-runnerd/commit/6e1b2144cb92a1a53db3926dd0e924c646643dfa)
+is also retained and was re-run with:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run 'TestDrainStatisticsRejectsDuplicateJSONFields|TestDrainPollHookRejectsDuplicatePhysicalWrites' -count=1 -v
+```
+
+That command passed; duplicate or case-folded JSON keys remain unknown rather
+than being accepted as a complete statistics sample. The historical reds are
+not relabeled as pre-implementation tests for this follow-up; the actual red
+run above is the new TDD regression, followed by the listed green runs.
+
 ## Independent correction matrix
 
 | Finding | Correction and evidence |
 |---|---|
-| Codex P1 status-only response close (`r3965776832`) | `drainHeldBody.Close` remains release-gated; `TestDrainHeldBodyHoldsCloseUntilRelease` passes (fix `f44f5f9`). |
-| Codex P1 cancellation join (`r3965776826`) | all listener context exits release and join the run goroutine; `TestDrainRejectsEffectsAfterCancellationAndRecordsMarker` passes (fixes `f44f5f9`, `82d0d7d`). |
-| Codex P1 drain route unreachable (`r3965776815`) | `Run` routes `drain` before generic owned/statistics quarantine; `TestDriverRoutesDrainBeforeNoWorkerStatisticsQuarantine` passes (fix `f44f5f9`). |
-| Codex P2 paired verification (`r3965957331`) | drain is admitted as a verification phase in paired approval/preparation; paired tests pass (fix `945371e`). |
-| Codex P1 runner continuity (`r3966125441`) | observed requires exact before/after runner tuple; runner mutation is rejected (fix `6e954cf`). |
-| Codex P1 embedded session set (`r3966362999`) | session-open now requires exact nested set identity, update fence, labels, and statistics equal to the idle before snapshot. `TestDrainRejectsEmbeddedSessionStatisticsMismatch` passes (fix `82d0d7d`). |
-| Codex P1 ambiguous session retention (`r3966363009`) | non-successful listener outcomes retain the live session, write a quarantine marker, and never invoke session close; `TestDriverRoutesDrainBeforeNoWorkerStatisticsQuarantine` asserts zero close calls (fix `82d0d7d`). |
-| Codex P1 phase crash fence (`r3966362990`) | replay marks a durable `drain` phase uncertain before polling, so a crash before the final observation cannot authorize cleanup. `TestDrainPhaseStartRetainsCrashUncertainty` passes (fix `82d0d7d`). |
+| Codex P1 [status-only response close](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3965776832) | `drainHeldBody.Close` remains release-gated; `TestDrainHeldBodyHoldsCloseUntilRelease` passes (fix `f44f5f9`). |
+| Codex P1 [cancellation join](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3965776826) | all listener context exits release and join the run goroutine; `TestDrainRejectsEffectsAfterCancellationAndRecordsMarker` passes (fixes `f44f5f9`, `82d0d7d`). |
+| Codex P1 [drain route unreachable](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3965776815) | `Run` routes `drain` before generic owned/statistics quarantine; `TestDriverRoutesDrainBeforeNoWorkerStatisticsQuarantine` passes (fix `f44f5f9`). |
+| Codex P2 [paired verification](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3965957331) | drain is admitted as a verification phase in paired approval/preparation; paired tests pass (fix `945371e`). |
+| Codex P1 [runner continuity](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3966125441) | observed requires exact before/after runner tuple; runner mutation is rejected (fix `6e954cf`). |
+| Codex P1 [embedded session set](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3966362999) | session-open now requires exact nested set identity, update fence, labels, and statistics equal to the idle before snapshot. `TestDrainRejectsEmbeddedSessionStatisticsMismatch` passes (fix `82d0d7d`). |
+| Codex P1 [ambiguous session retention](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3966363009) | non-successful listener outcomes retain the live session, write a quarantine marker, and never invoke session close; `TestDriverRoutesDrainBeforeNoWorkerStatisticsQuarantine` asserts zero close calls (fix `82d0d7d`). |
+| Codex P1 [phase crash fence](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3966362990) | replay marks a durable `drain` phase uncertain before polling, so a crash before the final observation cannot authorize cleanup. `TestDrainPhaseStartRetainsCrashUncertainty` passes (fix `82d0d7d`). |
+| Codex P1 [transparent first-poll retry](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3966770569) | every first-poll physical `WroteRequest` callback is counted; duplicates/errors remain invalid. `TestDrainPollHookRejectsDuplicatePhysicalWrites` and the 4x4 two-poll matrix pass. |
+| Codex P1 [contradictory poll counters](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3966770561) | poll runner partitions must match the owned idle prerequisite before ACK/acquisition; `TestDrainObservationRejectsPollCountersContradictingOwnedRunner` and `TestDrainClientRejectsPollRunnerPartitionMismatchBeforeEffects` pass. |
+| Codex P1 [withdrawn-poll retry](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3967496285) | both bounded polls are traced; any second-poll error/duplicate/retry prevents `observed`, and the actual listener fixture remains inconclusive. `TestDrainListenerRejectsWithdrawnPollPhysicalRetry` passes. |
+| Codex P2 [drain-phase fence discharge](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3967496296) | replay discharges only a valid matching observed drain record's phase-local fence; unrelated uncertainty, work, reservations, and failed/inconclusive/crashed fences survive. `TestReplayDischargesCompletedDrainPhaseFence`, `TestReplayDrainFencePreservesUnrelatedUncertaintyAndReservations`, and `TestReplayDrainFenceRetainsInconclusiveOutcome` pass. |
+| Codex P1 [durable finding evidence](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3967496305) | this section and the matrix record full finding URLs, exact red/green commands, actual outcomes and rollback scope for the current and prior corrections. |
 | Security F1 / Protocol F1 poll reservation | `observe-poll` result journals one verified request ID plus fixed work before ACK; replay sets reservation/work fences. `TestDrainPollJournalsReservationBeforeACK` passes (`82d0d7d`). |
 | Security F2 rejected idle prerequisite | complete bounded `DrainSnapshot` plus `prerequisite-failed` marker is retained; replay remains uncertain. `TestDrainRejectedIdlePrerequisiteRetainsFence` passes (`82d0d7d`). |
 | Security F3 / Protocol F2 runner and nested set identity | observed requires exact runner continuity; session-open validates nested set ID/name/group/label/update fence. Pinned SDK drain integration and mutation tests pass (`6e954cf`, `82d0d7d`). |
@@ -136,12 +215,142 @@ qualification. No credentials, runner/session/JIT operation,
 workflow operation, app/keychain/launchd/Docker/Lima mutation or cleanup was
 performed.
 
+### Exact-head blocker corrections (local uncommitted tree)
+
+Before edits, the independent review probes were re-run against the immutable
+`1eb48afb50ffbb10b42d07181f16153df1c494eb` source extraction with:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run 'TestIndependentReplayPhaseBindingBoundaries|TestIndependentFileJournalStoresMismatchedDrainSequence|TestIndependentContradictoryNextPollStatsCannotPromoteDrain' -count=1 -v
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run 'TestSecurityReviewReplayIdentitySequencePhaseBoundaries|TestSecurityReviewValidObservationNeedsExactRequiredFields|TestSecurityReviewDrainObservationDoesNotAuthorizeLaterWorkOrCleanup' -count=1 -v
+```
+
+Both commands failed as expected. Replay accepted absent, repeated,
+interrupted, foreign-set and `Sequence=999` histories; the durable FileJournal
+reopen accepted `Sequence=999`; and the listener promoted a known withdrawn
+poll partition of `registered=0,busy=0,idle=0` to `observed`. The probes also
+confirmed the existing runner continuity, byte/body budget, retry trace and
+ACK-before-acquisition controls remained intact before this correction.
+
+The local red-first correction adds phase-local replay binding and the
+withdrawn-poll runner-partition fence. A drain phase records its created
+scale-set ID, and its journal-assigned event sequence becomes the only valid
+`Drain.Sequence`; replay requires exactly one active phase, the created set ID
+in both snapshots, and a later matching observation. Both polls and the final
+snapshot compare only `registered`, `busy` and `idle` runner counters, so job
+counters remain free to change.
+
+The focused correction and positive controls were run from the experiment
+module:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run 'TestReplayDrainRequiresOneMatchingPhaseIdentityAndSequence|TestFileJournalDrainReplayRetainsMismatchedSequenceAndIdentity|TestDrainObservedAllowsNextPollJobCounterChanges|TestDrainListenerRejectsContradictoryWithdrawnPollRunnerPartition|TestReplayDischargesCompletedDrainPhaseFence|TestDriverDrainThroughPinnedSDKAndPollHook' -count=1 -v
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -count=1
+GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -run 'TestDrain|TestReplayDrainRequiresOneMatchingPhaseIdentityAndSequence|TestFileJournalDrainReplayRetainsMismatchedSequenceAndIdentity|TestDriverDrainThroughPinnedSDKAndPollHook' -count=1
+GOTOOLCHAIN=go1.26.8 go vet ./livecanary
+cd ../..
+bash scripts/gofmt.sh check
+bash scripts/check-offline-experiments.sh
+```
+
+All commands passed. The first includes the real FileJournal close/reopen
+checks and the real pinned `github.com/actions/scaleset v0.4.0` listener path;
+the full package, focused race, vet, formatting and offline experiment checks
+also passed. These remain offline tests only, and the local correction is
+intentionally uncommitted and unpublished for coordinator exact-head review.
+
+### Missing drain-phase SetID correction (current local uncommitted tree)
+
+The red-first regression was added before the implementation change and run
+with:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run 'TestReplayDrainPhaseRequiresPositiveSetID|TestFileJournalRejectsNonPositiveDrainPhaseSetID|TestFileJournalForeignDrainPhaseSetIDRetainsFenceAfterReopen' -count=1 -v
+```
+
+It failed as expected: replay discharged matching observations for missing and
+zero phase IDs, and the real FileJournal accepted missing, zero and negative
+drain-phase IDs. Negative and foreign-positive direct replay histories already
+remained fenced.
+
+The minimal correction makes `validEvent` require `ID > 0` for
+`phase/drain`, prevents replay from inferring a missing, zero or negative ID
+from the prior create result, and retains uncertainty for foreign-positive
+phase IDs. The Driver's positive phase ID is now asserted through the pinned
+SDK journal path together with exact phase-sequence observation binding.
+
+The focused green and verification commands were:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run 'TestReplayDrainPhaseRequiresPositiveSetID|TestFileJournalRejectsNonPositiveDrainPhaseSetID|TestFileJournalForeignDrainPhaseSetIDRetainsFenceAfterReopen|TestReplayDrainRequiresOneMatchingPhaseIdentityAndSequence|TestFileJournalDrainReplayRetainsMismatchedSequenceAndIdentity|TestDrainObservedAllowsNextPollJobCounterChanges|TestDrainListenerRejectsContradictoryWithdrawnPollRunnerPartition|TestReplayDischargesCompletedDrainPhaseFence|TestReplayDrainFencePreservesUnrelatedUncertaintyAndReservations|TestDriverDrainThroughPinnedSDKAndPollHook' -count=1 -v
+GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -run 'TestReplayDrainPhaseRequiresPositiveSetID|TestFileJournalRejectsNonPositiveDrainPhaseSetID|TestFileJournalForeignDrainPhaseSetIDRetainsFenceAfterReopen|TestReplayDrainRequiresOneMatchingPhaseIdentityAndSequence|TestFileJournalDrainReplayRetainsMismatchedSequenceAndIdentity|TestDrainListenerRejectsContradictoryWithdrawnPollRunnerPartition|TestReplayDischargesCompletedDrainPhaseFence|TestReplayDrainFencePreservesUnrelatedUncertaintyAndReservations|TestDriverDrainThroughPinnedSDKAndPollHook' -count=1
+GOTOOLCHAIN=go1.26.8 go vet ./livecanary
+gofmt -l experiments/g01-scaleset/livecanary/journal.go experiments/g01-scaleset/livecanary/driver.go experiments/g01-scaleset/livecanary/drain_followup_test.go experiments/g01-scaleset/livecanary/sdk_integration_test.go
+git diff --check
+```
+
+All listed verification commands passed; the formatting and diff checks emitted
+no output. No broad multi-module gate was rerun for this narrow correction.
+These are offline tests only; no live runner, workflow, credential, journal
+cleanup, or external operation was performed.
+
+### Security F2 owned-idle prerequisite correction (current local uncommitted tree)
+
+The prior F1 phase-ID correction remains in place; its separate red/green
+evidence above is unchanged and was included in the focused verification below.
+The new F2 red-first regression was run before its implementation with:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run 'TestSecurityReviewDrainRequiresOwnedIdleBeforeProof|TestSecurityReviewMatchingDrainPhaseDischargesAfterFileJournalReopen|TestSecurityReviewValidOneIdleRunnerDrainObservation|TestSecurityReviewInconclusiveDrainMayHaveMissingOwnedIdentity|TestSecurityReviewObservedDrainAllowsLegitimateJobCounterChanges' -count=1 -v
+```
+
+It failed as expected: observed two-runner and busy snapshots were accepted,
+and the real FileJournal accepted a positive-ID, correctly sequenced
+non-owned-idle observation and discharged the replay fence. Missing owned
+identity already remained rejected, while the valid one-idle, inconclusive,
+and legitimate job-counter controls passed.
+
+The minimal F2 correction adds the existing `validDrainIdlePrerequisite` to
+the `drainOutcomeObserved` branch of `validDrainObservation`; the runner
+partition equality checks remain unchanged. Inconclusive observations may
+still carry missing runner identity, while observed evidence now requires the
+owned one-runner idle proof before journal append or replay can discharge a
+phase fence.
+
+The focused green, race, pinned-SDK, vet, formatting, and diff checks were:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run 'TestSecurityReviewDrainRequiresOwnedIdleBeforeProof|TestSecurityReviewMatchingDrainPhaseDischargesAfterFileJournalReopen|TestSecurityReviewValidOneIdleRunnerDrainObservation|TestSecurityReviewInconclusiveDrainMayHaveMissingOwnedIdentity|TestSecurityReviewObservedDrainAllowsLegitimateJobCounterChanges|TestReplayDrainPhaseRequiresPositiveSetID|TestFileJournalRejectsNonPositiveDrainPhaseSetID|TestFileJournalForeignDrainPhaseSetIDRetainsFenceAfterReopen|TestReplayDrainRequiresOneMatchingPhaseIdentityAndSequence|TestFileJournalDrainReplayRetainsMismatchedSequenceAndIdentity|TestDrainObservedAllowsNextPollJobCounterChanges|TestDrainListenerRejectsContradictoryWithdrawnPollRunnerPartition|TestReplayDischargesCompletedDrainPhaseFence|TestReplayDrainFencePreservesUnrelatedUncertaintyAndReservations|TestDriverDrainThroughPinnedSDKAndPollHook' -count=1 -v
+GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -run 'TestSecurityReviewDrainRequiresOwnedIdleBeforeProof|TestSecurityReviewMatchingDrainPhaseDischargesAfterFileJournalReopen|TestSecurityReviewValidOneIdleRunnerDrainObservation|TestSecurityReviewInconclusiveDrainMayHaveMissingOwnedIdentity|TestSecurityReviewObservedDrainAllowsLegitimateJobCounterChanges|TestReplayDrainPhaseRequiresPositiveSetID|TestFileJournalRejectsNonPositiveDrainPhaseSetID|TestFileJournalForeignDrainPhaseSetIDRetainsFenceAfterReopen|TestReplayDrainRequiresOneMatchingPhaseIdentityAndSequence|TestFileJournalDrainReplayRetainsMismatchedSequenceAndIdentity|TestDrainListenerRejectsContradictoryWithdrawnPollRunnerPartition|TestReplayDischargesCompletedDrainPhaseFence|TestReplayDrainFencePreservesUnrelatedUncertaintyAndReservations|TestDriverDrainThroughPinnedSDKAndPollHook' -count=1
+GOTOOLCHAIN=go1.26.8 go vet ./livecanary
+gofmt -l experiments/g01-scaleset/livecanary/drain.go experiments/g01-scaleset/livecanary/journal.go experiments/g01-scaleset/livecanary/driver.go experiments/g01-scaleset/livecanary/drain_followup_test.go experiments/g01-scaleset/livecanary/security_review_extra_test.go experiments/g01-scaleset/livecanary/sdk_integration_test.go
+git diff --check
+```
+
+All listed checks passed; the race run reported no race, and formatting and
+diff checks emitted no output. The pinned `github.com/actions/scaleset v0.4.0`
+Driver path remains offline-only, no broad multi-module gate was repeated, and
+no live operation or personal path was added.
+
 ## Remaining gate and rollback
 
 The live G01 gate remains unresolved until a separately authorized run uses an
 immutable reviewed head, the approved private repository/workflow/resources,
 one idle owned canary runner and independent review. A timing miss, missing
 runner, stale zero, identity/statistics mismatch, unknown response, or
-server-receipt ambiguity must remain inconclusive. Rollback is the focused
-revert of the issue-71 commit/PR; no live cleanup or workflow replay is part
-of rollback.
+server-receipt ambiguity must remain inconclusive. Rollback of the latest
+follow-up is a focused revert of its code/test/documentation commit(s), with
+the exact current journal and owned resources retained for inspection. If an
+earlier correction must be isolated, revert only the reviewed source slice for
+[r3966770569](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3966770569),
+[r3966770561](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3966770561),
+or the [duplicate-key regression](https://github.com/1XP-AI/gh-runnerd/commit/6e1b2144cb92a1a53db3926dd0e924c646643dfa)
+after checking dependent corrections; do not reset, erase or replay the
+journal. No live cleanup, workflow replay, runner mutation or rollback
+operation was performed.
