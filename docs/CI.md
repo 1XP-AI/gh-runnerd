@@ -76,9 +76,12 @@ generated-fixture SIGTERM/SIGINT/SIGHUP cases that assert status 0, 91, 143,
 The tagged CLI tests use synthetic input/subprocess fixtures and static plan or
 refusal paths. The `g01_pair_fixture` livecanary checks use private synthetic
 fixtures: one paired-collection run selects `^TestPaired` while excluding
-`^TestPairedTerminal`, one remaining collection/listener run has no `-run`
-filter while excluding `^TestPaired`, one terminal run selects that prefix while
-skipping the reviewed persistence set, and a fourth run selects the exact
+`^TestPairedTerminal`; one remaining collection/listener run has no `-run`
+filter while excluding `^TestPaired`; one heavy terminal run selects the exact
+five names
+`^TestPairedTerminal(FinalResultCapacity|PendingChildCapacity|EligibilityUsesFreshExactFacts|CapturedAcknowledgementCancellation|MissingAcknowledgementsAndPostchecks)$`;
+one complementary remainder selects `^TestPairedTerminal` while skipping those
+five names and the persistence set; and a fifth run selects the exact
 persistence set
 `^TestPairedTerminal(Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$`.
 `FixtureStorageFailure` is the unique generated sentinel from
@@ -87,9 +90,11 @@ persistence set
 script's `storage_regex` value and is also the `STORAGE` alias in issue #54.
 The two collection/listener partitions are explicit and disjoint: every
 non-terminal `TestPaired*` test is in the first, and every other test, example or
-fuzz seed is in the second. The unfiltered second command preserves Go's normal
-execution of tagged examples and fuzz seeds. One tagged vet follows those four
-race-tested runs. None of these tagged checks
+fuzz seed is in the second. The three terminal partitions are likewise
+exhaustive and disjoint for current `TestPairedTerminal` names, and a future
+top-level terminal name lands in the remainder. The unfiltered second command
+preserves Go's normal execution of tagged examples and fuzz seeds. One tagged
+vet follows those five race-tested runs. None of these tagged checks
 executes approved live controller/worker operations or exposes a public terminal
 phase/API. The implementation and evidence boundaries are recorded in the
 [G01 paired terminal guide](evidence/g01-paired-terminal.md). The script permits

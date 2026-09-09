@@ -757,12 +757,94 @@ revert of this signal-cleanup follow-up; the prepared-receipt, cadence-prep
 isolation, receipt-boundary, fixture-sentinel and after-bind commits remain
 independently revertable.
 
+## G01 terminal heavy partition for hosted 120s budget
+
+Hosted Public CI run 34306339973 timed out the previous terminal non-storage
+process at package `120.025s` with
+`TestPairedTerminalPreParentFailureRetainsReturnedOnlyTerminal` still active.
+Independent diagnosis on immutable `e25a682e` measured the same selected family
+at local `GOMAXPROCS=2` as `101.060s` package time while that target stayed
+about `2.2s` isolated. The evidence favored cumulative partition budget plus
+host parallelism/fsync cost, not a proven target deadlock. Residual
+host-filesystem uncertainty remains; this follow-up does not claim the hosted
+timeout is a proven fixed deadlock.
+
+The gate adds one deterministic heavy terminal partition of those five names
+and makes the previous non-storage command an explicit complementary remainder
+that also skips storage. Storage, unfiltered non-paired collection, default G01
+45s partitions, and G02 partitions are unchanged. Timeouts stay 120s; jobs are
+not parallelized.
+
+`go test -list` on current livecanary `TestPairedTerminal` names, classified
+with the script regexes, is 26 total: heavy 5, remainder 15, storage 6, each
+name once. `-list` does not apply `-skip`; remainder membership is the set
+difference, and `-run/-skip` was checked by refusing a heavy name and a storage
+name under the remainder skip (`[no tests to run]`).
+
+TDD red before the gate change (Go 1.26.8, darwin/arm64):
+
+```text
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=90s \
+  -run '^TestG01PairedTerminalPartitionRegistry$' ./scripts
+FAIL; scripts 0.415s
+script missing terminal_heavy_regex assignment
+
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=180s \
+  -run '^TestToolingTaggedPairFixturePartitionsRun$' ./scripts
+FAIL; scripts 53.26s
+heavy/remainder/future invocations 0 times; legacy unsplit terminal skip retained
+```
+
+Green after this correction:
+
+```text
+bash -n scripts/check-offline-experiments.sh
+PASS
+
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=90s \
+  -run '^TestG01PairedTerminalPartitionRegistry$' ./scripts
+PASS; scripts 3.325s
+
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=180s \
+  -run '^TestToolingTaggedPairFixturePartitionsRun$' ./scripts
+PASS; scripts 59.419s
+
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=180s \
+  -run '^(TestG01PairedTerminalPartitionRegistry|TestToolingTaggedPairFixturePartitionsRun)$' ./scripts
+PASS; scripts 63.425s
+
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=120s \
+  -run '^(TestToolingDefaultG01PartitionsRun|TestG02OwnedPrepCleanupContract)$' ./scripts
+PASS; scripts 27.376s
+```
+
+Actual new partitions once, `-race -count=1 -timeout=120s -tags=g01_pair_fixture`,
+`GOMAXPROCS=2`, `-json` top-level counts only:
+
+```text
+heavy:     PASS; 5 tests; package 68.852s; wall 69.47s; headroom ~51s
+remainder: PASS; 15 tests; package 30.84s; wall 31.70s; headroom ~89s
+           TestPairedTerminalPreParentFailureRetainsReturnedOnlyTerminal 2.16s
+storage:   PASS; 6 tests; package 87.205s; wall 87.71s; unchanged command
+```
+
+Local `GOMAXPROCS=2` therefore moves the previous 101.060s non-storage process
+into 68.852s + 30.84s without widening timeouts. Hosted Ubuntu x64 scheduling
+and `File.Sync` latency remain unmeasured; a one-off host fsync stall is still
+possible. G02 owned INT/TERM/HUP cleanup is unchanged. This worker does not
+rerun hosted CI.
+
+Limits: public hosted CI still has no secrets or live
+GitHub/App/runner/Docker/Keychain/launchd coverage. Rollback is a source-only
+revert of this terminal-partition follow-up; the signal-cleanup,
+prepared-receipt, cadence-prep isolation, receipt-boundary, fixture-sentinel
+and after-bind commits remain independently revertable.
+
 ## Remaining gates
 
 This worker does not merge PR 62. After push, request `@codex review` on the
-exact new head. Hosted CI, independent review of the new head, and a clean
+exact new head. Hosted CI, independent Luna review of the new head, and a clean
 exact-head Codex verdict remain required before any merge decision. Live
 recovery remains unauthorized and unproven. Historical headroom finding
 r3957835501 stays open until Codex re-reviews this head; CI green does not
-clear it. Hosted failure 34306339973 is a separate G01 terminal-partition
-investigation and is not part of this cleanup follow-up.
+clear it. Hosted 34306339973 is not treated as a proven target deadlock.
