@@ -51,12 +51,12 @@ func (c Credentials) validate(a Approval, now time.Time) error {
 }
 
 type SDKAPI struct {
-	client          *scaleset.Client
-	rest            *http.Client
-	baseURL         string
-	approval        Approval
-	credentials     Credentials
-	options         []scaleset.HTTPOption
+	client      *scaleset.Client
+	rest        *http.Client
+	baseURL     string
+	approval    Approval
+	credentials Credentials
+	options     []scaleset.HTTPOption
 	// drainClientFactory is nil in production. Tests use it only to bind the
 	// pinned SDK client to an offline loopback transport while still exercising
 	// OpenDrainSession and MessageSessionClient together.
