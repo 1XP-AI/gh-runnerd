@@ -8,6 +8,8 @@ default_heavy_test_regex='^TestBaselineStatisticsPresenceAndEligibility$'
 paired_collection_regex='^TestPaired'
 storage_regex='^TestPairedTerminal(Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$'
 real_pair_cadence_regex='^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$'
+paired_prep_regex='^TestPairedBrokerPrepareReviewedG01LiveBinary$'
+paired_prep_or_cadence_regex='^TestPairedBroker(PrepareReviewedG01LiveBinary|RealCadenceChildExceedsThirtySeconds)$'
 paired_broker_regex='^TestPaired'
 
 # These are the two established offline gate modules. Keep this list explicit so
@@ -41,12 +43,20 @@ for module_dir in "${offline_modules[@]}"; do
 			# the exact heavy name is the only member of the first partition.
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -skip "${default_heavy_test_regex}" ./...
 		else
-			# Keep the exact cadence name isolated, then the remaining TestPaired
-			# family, then an unfiltered complement so Example Output and fuzz
-			# seeds still run. Package discovery stays on ./... in every command.
+			# Bounded fixture clone/build is a separate 45-second process so the
+			# cadence partition keeps the production seven-times-five-second wait
+			# without hiding preparation in an unbounded helper. Then isolate the
+			# exact cadence name, the remaining TestPaired family, and an
+			# unfiltered complement so Example Output and fuzz seeds still run.
+			# Package discovery stays on ./... in every command.
+			g02_prep_dir=$(mktemp -d)
+			export G01_PAIR_BRIDGE_PREP_DIR="${g02_prep_dir}"
+			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -run "${paired_prep_regex}" ./...
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -run "${real_pair_cadence_regex}" ./...
-			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -run "${paired_broker_regex}" -skip "${real_pair_cadence_regex}" ./...
+			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -run "${paired_broker_regex}" -skip "${paired_prep_or_cadence_regex}" ./...
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -skip "${paired_broker_regex}" ./...
+			rm -rf "${g02_prep_dir}"
+			unset G01_PAIR_BRIDGE_PREP_DIR
 		fi
 		GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" vet ./...
 		if [[ "${module_dir}" == "experiments/g01-scaleset" ]]; then

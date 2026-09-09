@@ -571,8 +571,26 @@ func bridgeRepoRoot(t *testing.T) string {
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "../.."))
 }
 
+type preparedBridgeBinary struct {
+	path, harness, digest string
+}
+
+var preparedBridgeBinaries sync.Map
+
+const pairedFixtureBridgeTags = "g01_live,g01_pair_fixture"
+
 func buildPairedG01BinaryWithTags(t *testing.T, tags string) (string, string, string) {
 	t.Helper()
+	if cached, ok := preparedBridgeBinaries.Load(tags); ok {
+		binary := cached.(preparedBridgeBinary)
+		return binary.path, binary.harness, binary.digest
+	}
+	if tags == pairedFixtureBridgeTags {
+		if binary, ok := loadPreparedBridgeBinary(os.Getenv("G01_PAIR_BRIDGE_PREP_DIR")); ok {
+			preparedBridgeBinaries.Store(tags, binary)
+			return binary.path, binary.harness, binary.digest
+		}
+	}
 	repo := bridgeRepoRoot(t)
 	command := exec.Command("git", "rev-parse", "HEAD")
 	command.Dir = repo
@@ -618,7 +636,67 @@ func buildPairedG01BinaryWithTags(t *testing.T, tags string) (string, string, st
 		t.Fatal("read reviewed bridge binary")
 	}
 	digest := sha256.Sum256(data)
-	return canonicalOut, harness, hexDigest(digest[:])
+	binary := preparedBridgeBinary{path: canonicalOut, harness: harness, digest: hexDigest(digest[:])}
+	preparedBridgeBinaries.Store(tags, binary)
+	return binary.path, binary.harness, binary.digest
+}
+
+func loadPreparedBridgeBinary(directory string) (preparedBridgeBinary, bool) {
+	directory = filepath.Clean(directory)
+	if directory == "" || directory == "." || !filepath.IsAbs(directory) {
+		return preparedBridgeBinary{}, false
+	}
+	path := filepath.Join(directory, "g01-live")
+	metaPath := filepath.Join(directory, "g01-live.meta")
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0500 {
+		return preparedBridgeBinary{}, false
+	}
+	canonical, err := filepath.EvalSymlinks(path)
+	if err != nil || !filepath.IsAbs(canonical) || filepath.Clean(canonical) != canonical {
+		return preparedBridgeBinary{}, false
+	}
+	meta, err := os.ReadFile(metaPath)
+	if err != nil {
+		return preparedBridgeBinary{}, false
+	}
+	lines := strings.Split(strings.TrimSpace(string(meta)), "\n")
+	if len(lines) != 2 || len(lines[0]) != 40 || len(lines[1]) != 64 {
+		return preparedBridgeBinary{}, false
+	}
+	return preparedBridgeBinary{path: canonical, harness: lines[0], digest: lines[1]}, true
+}
+
+func storePreparedBridgeBinary(t *testing.T, directory, path, harness, digest string) {
+	t.Helper()
+	directory = filepath.Clean(directory)
+	if directory == "" || directory == "." || !filepath.IsAbs(directory) {
+		t.Fatal("bounded fixture preparation directory")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal("read reviewed bridge binary")
+	}
+	dest := filepath.Join(directory, "g01-live")
+	if os.WriteFile(dest, data, 0500) != nil {
+		t.Fatal("store reviewed bridge binary")
+	}
+	if os.Chmod(dest, 0500) != nil {
+		t.Fatal("pin stored bridge binary mode")
+	}
+	if os.WriteFile(filepath.Join(directory, "g01-live.meta"), []byte(harness+"\n"+digest+"\n"), 0600) != nil {
+		t.Fatal("store reviewed bridge metadata")
+	}
+}
+
+func TestPairedBrokerPrepareReviewedG01LiveBinary(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("private Unix fixture requires a Unix host")
+	}
+	path, harness, digest := buildPairedG01BinaryWithTags(t, pairedFixtureBridgeTags)
+	if dir := os.Getenv("G01_PAIR_BRIDGE_PREP_DIR"); dir != "" {
+		storePreparedBridgeBinary(t, dir, path, harness, digest)
+	}
 }
 
 func buildPairedG01Binary(t *testing.T) (string, string, string) {

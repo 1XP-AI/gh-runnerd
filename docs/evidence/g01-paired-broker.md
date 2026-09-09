@@ -586,11 +586,78 @@ round-trip is recorded after this commit. Timeouts, cadence, race, count=1,
 and complement contracts were not widened. Prior fixture-sentinel and
 after-bind root checks remain.
 
+## Timeout headroom for the real cadence partition
+
+Historical Codex finding
+[r3957835501](https://github.com/1XP-AI/gh-runnerd/pull/62#discussion_r3957835501)
+is a headroom finding, not a coverage finding. Applying a 12% slowdown to the
+whole 40s wall incorrectly scales the fixed 35-second production wait. The
+clone/build/compile overhead is the CPU-bound part. Recorded in-process cadence
+wall 40.151s minus 35s wait leaves 5.151s overhead; twice that overhead plus
+the fixed wait is 45.302s, which exceeds the 45-second process budget.
+
+TDD red before isolating fixture preparation:
+
+```text
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=30s \
+  -run '^TestG02CadenceHeadroomSeparatesFixturePrepFromFixedWait$' ./scripts
+FAIL: cadence partition still absorbs fixture clone/build instead of a bounded
+preparation stage
+```
+
+The G02 offline script now runs a bounded 45-second
+`TestPairedBrokerPrepareReviewedG01LiveBinary` process, then the unchanged
+45-second cadence name, then remaining `^TestPaired` skipping prep and cadence,
+then the unfiltered `^TestPaired` complement. The 45-second default, race,
+count=1, `./...` discovery, and seven real five-second gaps are unchanged. No
+120-second cadence timeout was added.
+
+Green:
+
+```text
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=30s \
+  -run '^TestG02CadenceHeadroomSeparatesFixturePrepFromFixedWait$' ./scripts
+PASS
+
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=180s \
+  -run '^TestToolingDefaultG02PartitionsRun$' ./scripts
+PASS; scripts 164.882s
+
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=180s \
+  -run '^TestToolingDefaultG01PartitionsRun$' ./scripts
+PASS; scripts 25.775s
+
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s \
+  -run '^TestPairedBrokerPrepareReviewedG01LiveBinary$' .
+PASS; g02-auth 2.957s
+
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s \
+  -run '^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$' .
+PASS; g02-auth 39.054s
+
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s \
+  -run '^TestPaired' \
+  -skip '^TestPairedBroker(PrepareReviewedG01LiveBinary|RealCadenceChildExceedsThirtySeconds)$' ./...
+PASS; g02-auth 12.055s
+
+git diff --check
+PASS
+GOTOOLCHAIN=go1.26.8 bash scripts/gofmt.sh check
+PASS
+```
+
+Stressed model after the split: fixture clone/build occupies its own 45-second
+process (measured 2.957s). Cadence retains the 35-second wait plus module race
+compile/bridge (measured 39.054s). Twice the remaining non-wait overhead still
+fits the 45-second cadence budget; twice the combined in-process overhead did
+not. Residual cadence headroom is the race compile of the test binary, not
+hidden unbounded work.
+
 ## Remaining gates
 
 This worker does not merge PR 62. After push, request `@codex review` on the
 exact new head. Hosted CI, independent review of the new head, and a clean
 exact-head Codex verdict remain required before any merge decision. Live
 recovery remains unauthorized and unproven. Rollback is a source-only revert
-of this receipt-boundary follow-up; earlier fixture-sentinel and after-bind
-commits remain independently revertable.
+of this cadence-prep isolation follow-up; earlier receipt-boundary,
+fixture-sentinel and after-bind commits remain independently revertable.

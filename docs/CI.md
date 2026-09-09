@@ -39,20 +39,23 @@ No hardware, live GitHub, Docker or daemon suite is part of this public check. T
 The default untagged G01 and G02 race suites keep their existing 45-second
 per-process deadline. G01 uses two sequential static partitions: the exact
 `TestBaselineStatisticsPresenceAndEligibility` name through `./...`, then an
-unfiltered `./...` with only that exact name skipped. G02 uses three sequential
+unfiltered `./...` with only that exact name skipped. G02 uses four sequential
 static partitions, all with `-race -count=1 -timeout=45s` and `./...` package
-discovery: the exact `TestPairedBrokerRealCadenceChildExceedsThirtySeconds`
-name; the remaining `^TestPaired` family with that exact cadence name skipped;
-and an unfiltered complement that skips `^TestPaired`. Keeping package
-discovery in every command means a same-named test in another package is run in
-the matching named partition rather than silently dropped by a global skip,
-while the unfiltered G02 complement still executes every ordinary non-paired
-test, Example Output and fuzz seed. No widened named-test timeout is part of
-the public contract.
+discovery: the exact `TestPairedBrokerPrepareReviewedG01LiveBinary` fixture
+clone/build; the exact `TestPairedBrokerRealCadenceChildExceedsThirtySeconds`
+name; the remaining `^TestPaired` family with those exact prep and cadence
+names skipped; and an unfiltered complement that skips `^TestPaired`. Keeping
+package discovery in every command means a same-named test in another package
+is run in the matching named partition rather than silently dropped by a
+global skip, while the unfiltered G02 complement still executes every ordinary
+non-paired test, Example Output and fuzz seed. No widened named-test timeout is
+part of the public contract. The production seven-times-five-second wait stays
+inside the cadence partition; clone/build is a separate bounded process.
 
 The tooling regression matrix generates positive and independent failing
-witnesses for each G02 partition boundary: the named cadence test, the remaining
-`TestPaired` family, remainder, another package, a same-name cadence test in
+witnesses for each G02 partition boundary: the named fixture-prep test, the
+named cadence test, the remaining `TestPaired` family, remainder, another
+package, a same-name prep test in another package, a same-name cadence test in
 another package, a same-name remaining `TestPaired` test in another package, an
 Example Output and a fuzz seed. Each witness must execute exactly once, and
 each failing witness must propagate a nonzero offline-gate result.
