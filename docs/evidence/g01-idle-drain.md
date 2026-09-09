@@ -229,11 +229,7 @@ capacity snapshots `f5020e8de32f8641e3aa80dfbc3e74e108277197`,
 `3a18028efec69eccfc40879a6f845c37d399e65f`. These entries identify historical
 snapshots and do not describe the present branch.
 
-The approved TDD exception remains explicit: when chronological
-pre-implementation execution cannot be recovered, independent test-only
-probes may be added to an immutable archive snapshot to reproduce the old
-behavior. Those retrospective reds remain evidence of that snapshot and are
-not relabeled as pre-implementation tests.
+The maintainer approval recorded at [Issue #71 comment](https://github.com/1XP-AI/gh-runnerd/issues/71#issuecomment-5603758575) is limited to the original Issue #71 chronology gap: because the original meaningful pre-implementation behavioral red could not be recovered, independent test-only probes may be run against immutable historical snapshots to diagnose that already-implemented behavior. This historical exception does not waive TDD for this follow-up or any future change: each new implementation correction still requires a meaningful failing test before the fix; retrospective archive reproductions are diagnostic evidence only and must not be presented as pre-implementation red or substituted for future TDD.
 
 Before edits, the independent review probes were re-run against the immutable
 `1eb48afb50ffbb10b42d07181f16153df1c494eb` source extraction with:
@@ -518,8 +514,8 @@ Three new exact-head Codex findings were addressed from reviewed head
   — the historical evidence text incorrectly described an obsolete local
   tree. The historical section above now names the old source
   snapshot and the published correction
-  `5d715c486c959ae67ca615c4eaea3e7e89ede556`, preserves the approved
-  retrospective test-only TDD exception, and contains no personal machine
+  `5d715c486c959ae67ca615c4eaea3e7e89ede556`, preserves the initial Issue #71
+  chronology exception described above, and contains no personal machine
   path.
 * [P1 poll cursor binding](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3972526869)
   — the first `GetMessage` must use `last=0`; the second must use the first
@@ -586,6 +582,68 @@ correction, use `git revert --no-edit
 668c361578c7cec749a650e452b85fd0ecf8e5ae` on the exact branch, retaining any
 current journal and owned resources for inspection; do not reset, erase,
 replay or run live cleanup.
+
+### Exact-head follow-up: physical poll and strict remote facts
+
+The six latest exact-head Codex findings were reproduced from
+`4d9043c456a957be2dd5db367f6d5d636483501a` before implementation and are
+tracked at [physical poll capacity/header/cursor](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3972911079), [withdrawn 202 body](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3972911049), [cancel-before-release ordering](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3972911070), [strict VerifyRun fields](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3972911082), [strict acquirejobs count/value](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3972911056), and [strict scale-set snapshot facts](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3972911063).
+
+The meaningful red ran against the real pinned `github.com/actions/scaleset v0.4.0` loopback fixture before the corresponding source corrections:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^TestPinnedSDKDrain(RejectsPhysicalPollMutationBeforeInner|RejectsWithdrawnPollBodyBeforeAbsent|RequiresCompletePollStatsBeforeVerifyRun|VerifyRunRejectsAmbiguousWireFieldsBeforeEffects|AcquisitionRequiresStrictWireResponse|SnapshotsRequireStrictWireFacts)$' -count=1 -v -timeout=180s
+```
+
+It exited 1 as intended. Physical header and cursor mutations were promoted
+and reached the second poll; a withdrawn 202 carrying a complete message body
+was classified as absent; incomplete outer statistics crossed `VerifyRun`; and
+lossy SDK decoding accepted ambiguous exact/case-fold duplicate fields in
+VerifyRun, acquisition, and snapshot responses (with the matrix also covering
+malformed, null, missing, and contradictory values, some of which already
+failed closed). The deterministic cancellation test was added red-first and
+then fixed to require cancel before response release and listener join; no
+remote effect is authorized by that helper.
+
+The correction inventories each evidence-bearing remote fact at its adapter
+boundary and reuses the existing strict readers. Poll requests now compare the
+SDK header and cursor against the callback ordinal and prior strict message ID,
+using token-bearing query values only ephemerally; poll bodies distinguish an
+unambiguous no-message wire shape from a lossy SDK nil; complete strict poll
+statistics are checked before `VerifyRun`; VerifyRun, acquisition, and
+scale-set snapshots compare strict bounded wire facts before any later effect.
+An ambiguous post-acquire response records the effect as unknown through the
+existing journal path, retains the owned reservation/uncertainty, and cannot
+produce an observed drain. ACK-before-acquisition order, pinned SDK behavior,
+and no raw credential/body/journal payload retention remain unchanged.
+
+Green verification for the source/test correction was:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^(TestPinnedSDKDrainRejectsPhysicalPollMutationBeforeInner|TestDrainCancellationStopsBeforeReleasingHeldResponse|TestPinnedSDKDrainRejectsWithdrawnPollBodyBeforeAbsent|TestPinnedSDKDrainRequiresCompletePollStatsBeforeVerifyRun|TestPinnedSDKDrainVerifyRunRejectsAmbiguousWireFieldsBeforeEffects|TestPinnedSDKDrainAcquisitionRequiresStrictWireResponse|TestPinnedSDKDrainSnapshotsRequireStrictWireFacts|TestDrainListenerWithdrawsWhilePollResponseIsHeld|TestDrainPollHookRequiresOneSuccessfulWritePerPoll|TestDriverDrainThroughPinnedSDKAndPollHook)$' -count=1 -v -timeout=180s
+GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -run '^(TestPinnedSDKDrainRejectsPhysicalPollMutationBeforeInner|TestDrainCancellationStopsBeforeReleasingHeldResponse|TestPinnedSDKDrainRejectsWithdrawnPollBodyBeforeAbsent|TestPinnedSDKDrainRequiresCompletePollStatsBeforeVerifyRun|TestPinnedSDKDrainVerifyRunRejectsAmbiguousWireFieldsBeforeEffects|TestPinnedSDKDrainAcquisitionRequiresStrictWireResponse|TestPinnedSDKDrainSnapshotsRequireStrictWireFacts|TestDrainListenerWithdrawsWhilePollResponseIsHeld|TestDrainPollHookRequiresOneSuccessfulWritePerPoll|TestDriverDrainThroughPinnedSDKAndPollHook)$' -count=1 -timeout=180s
+GOTOOLCHAIN=go1.26.8 go vet ./livecanary
+gofmt -l livecanary/drain.go livecanary/drain_driver.go livecanary/observer_http.go livecanary/sdk.go livecanary/baseline_message.go livecanary/baseline_wire.go livecanary/baseline_listener.go livecanary/drain_test.go livecanary/sdk_integration_test.go livecanary/drain_p1_followup_test.go
+git diff --check
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -count=1
+```
+
+The focused normal/race runs, vet, formatting, diff check, and one final full
+`livecanary` run passed; race emitted no report and formatting/diff emitted no
+diagnostics. The source/test correction is intentionally offline and makes no
+live runner, workflow, credential, Docker/Lima, Keychain, launchd, cleanup or
+GitHub write operation. Rollback is a focused `git revert --no-edit` of the
+source/test correction (and its documentation commit, if separate), retaining
+the current journal, owned reservation and uncertainty for inspection; never
+reset, erase, replay or run live cleanup. Historical
+`5d715c486c959ae67ca615c4eaea3e7e89ede556` and its later consolidated snapshots
+`f5020e8de32f8641e3aa80dfbc3e74e108277197`,
+`1769da60bfbfb261f6e08d862465975e733cc176`, and
+`3a18028efec69eccfc40879a6f845c37d399e65f` remain unchanged, and this
+evidence section contains no personal machine paths or raw secret-bearing
+payloads.
 
 ## Remaining gate and rollback
 

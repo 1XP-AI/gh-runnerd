@@ -217,11 +217,8 @@ func (a *SDKAPI) VerifyRun(ctx context.Context, approval Approval, id int64) err
 	if id <= 0 || id != approval.WorkflowRunID {
 		return ErrApproval
 	}
-	var run workflowRun
-	if a.get(ctx, "/repos/"+approval.Organization+"/"+approval.Repository+"/actions/runs/"+strconv.FormatInt(id, 10), a.credentials.VerificationToken, &run) != nil {
-		return ErrApproval
-	}
-	if !matchesApprovedRun(approval, id, run) {
+	out, err := a.observeApprovedRunFor(ctx, approval, id)
+	if err != nil || out.Outcome == observationNotFound {
 		return ErrApproval
 	}
 	return nil
@@ -284,6 +281,13 @@ func (a *SDKAPI) FindScaleSet(c context.Context, name string, group int) (*scale
 }
 func (a *SDKAPI) GetScaleSet(c context.Context, id int) (*scaleset.RunnerScaleSet, error) {
 	return a.client.GetRunnerScaleSetByID(c, id)
+}
+
+func (a *SDKAPI) drainGetScaleSet(c context.Context, id int, wire *baselineWireCapture) (*scaleset.RunnerScaleSet, error) {
+	if wire == nil {
+		return nil, ErrQuarantine
+	}
+	return a.GetScaleSet(wire.context(c), id)
 }
 func (a *SDKAPI) CreateScaleSet(c context.Context, s *scaleset.RunnerScaleSet) (*scaleset.RunnerScaleSet, error) {
 	return a.client.CreateRunnerScaleSet(c, s)

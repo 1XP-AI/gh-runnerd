@@ -69,6 +69,19 @@ func (c *baselineWireCapture) target(r *http.Request) bool {
 	if c.stage == "session-open" {
 		suffix += "sessions"
 	} else if c.stage == "acquire" {
+		// The synthetic drain transport uses the queue URL for its bounded
+		// acquisition request. The released SDK uses the Actions API endpoint
+		// below; accepting this exact queue form keeps the strict adapter useful
+		// for both without widening the target matcher.
+		if c.queue != "" {
+			u, e := url.Parse(c.queue)
+			if e == nil && u.Scheme != "" && u.Host != "" && u.User == nil && u.Fragment == "" {
+				u.Path = strings.TrimSuffix(u.Path, "/") + "/acquirejobs"
+				if r.Method == "POST" && r.URL.String() == u.String() {
+					return true
+				}
+			}
+		}
 		suffix += "acquirejobs"
 	} else if c.stage == "jit" {
 		suffix += "generatejitconfig"
@@ -160,6 +173,12 @@ func (c *baselineWireCapture) facts() (*baselineSessionFacts, *baselineBatch, *b
 	// Called only after the synchronous SDK request returns. Later transport
 	// use is forbidden; journal append performs a separate deep copy.
 	return c.session, c.batch, c.accepted, c.status
+}
+
+func (c *baselineWireCapture) setFacts() (*baselineSetFacts, int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.set, c.status
 }
 
 func validJITSecret(secret string) bool {

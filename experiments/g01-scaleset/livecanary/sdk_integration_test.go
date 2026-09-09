@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -482,20 +483,44 @@ func pinnedDrainJobBody(a Approval) string {
 	return string(data)
 }
 
+type pinnedDrainOptions struct {
+	firstPollBody  string
+	withdrawnBody  string
+	acquireBody    string
+	verifyBody     string
+	snapshotBodies []string
+	mutateRequest  func(*http.Request)
+}
+
 type pinnedDrainFixture struct {
-	server   *httptest.Server
-	body     string
-	polls    atomic.Int32
-	acks     atomic.Int32
-	acquires atomic.Int32
-	mu       sync.Mutex
-	cursors  []string
-	capacity []string
+	server         *httptest.Server
+	body           string
+	firstPollBody  string
+	withdrawnBody  string
+	acquireBody    string
+	verifyBody     string
+	snapshotBodies []string
+	polls          atomic.Int32
+	acks           atomic.Int32
+	acquires       atomic.Int32
+	verifyCalls    atomic.Int32
+	snapshotReads  atomic.Int32
+	mu             sync.Mutex
+	cursors        []string
+	capacity       []string
 }
 
 func newPinnedDrainSession(t *testing.T, a Approval, body string) (*pinnedDrainFixture, *SDKAPI, Session, *drainPollHook) {
+	return newPinnedDrainSessionOptions(t, a, body, pinnedDrainOptions{})
+}
+
+func newPinnedDrainSessionOptions(t *testing.T, a Approval, body string, options pinnedDrainOptions) (*pinnedDrainFixture, *SDKAPI, Session, *drainPollHook) {
 	t.Helper()
-	fixture := &pinnedDrainFixture{body: body}
+	fixture := &pinnedDrainFixture{
+		body: body, firstPollBody: options.firstPollBody, withdrawnBody: options.withdrawnBody,
+		acquireBody: options.acquireBody, verifyBody: options.verifyBody,
+		snapshotBodies: append([]string(nil), options.snapshotBodies...),
+	}
 	fixture.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/actions/runners/registration-token") && r.Method == http.MethodPost:
@@ -514,8 +539,17 @@ func newPinnedDrainSession(t *testing.T, a Approval, body string) (*pinnedDrainF
 			_ = json.NewEncoder(w).Encode(scaleset.RunnerScaleSetSession{
 				SessionID: uuid.MustParse("00000000-0000-4000-8000-000000000021"), OwnerName: a.setName(),
 				MessageQueueURL: fixture.server.URL + "/queue", MessageQueueAccessToken: "fixture-queue",
-				Statistics: &scaleset.RunnerScaleSetStatistic{TotalRegisteredRunners: 1, TotalIdleRunners: 1},
+				RunnerScaleSet: pinnedDrainScaleSet(a),
+				Statistics:     &scaleset.RunnerScaleSetStatistic{TotalRegisteredRunners: 1, TotalIdleRunners: 1},
 			})
+		case strings.HasSuffix(r.URL.Path, "/actions/runs/5") && r.Method == http.MethodGet:
+			fixture.verifyCalls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			if fixture.verifyBody != "" {
+				_, _ = io.WriteString(w, fixture.verifyBody)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(pinnedDrainRun(a))
 		case r.URL.Path == "/queue" && r.Method == http.MethodGet:
 			fixture.polls.Add(1)
 			fixture.mu.Lock()
@@ -523,6 +557,11 @@ func newPinnedDrainSession(t *testing.T, a Approval, body string) (*pinnedDrainF
 			fixture.capacity = append(fixture.capacity, r.Header.Get(scaleset.HeaderScaleSetMaxCapacity))
 			fixture.mu.Unlock()
 			if fixture.polls.Load() == 1 {
+				if fixture.firstPollBody != "" {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, fixture.firstPollBody)
+					return
+				}
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(map[string]any{
 					"messageId": 17, "messageType": "RunnerScaleSetJobMessages", "body": fixture.body,
@@ -532,6 +571,10 @@ func newPinnedDrainSession(t *testing.T, a Approval, body string) (*pinnedDrainF
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusAccepted)
+			if fixture.withdrawnBody != "" {
+				_, _ = io.WriteString(w, fixture.withdrawnBody)
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"statistics": pinnedDrainStatistics(0, 0)})
 		case r.URL.Path == "/queue/17" && r.Method == http.MethodDelete:
 			fixture.acks.Add(1)
@@ -539,9 +582,25 @@ func newPinnedDrainSession(t *testing.T, a Approval, body string) (*pinnedDrainF
 		case strings.HasSuffix(r.URL.Path, "/acquirejobs") && r.Method == http.MethodPost:
 			fixture.acquires.Add(1)
 			w.Header().Set("Content-Type", "application/json")
+			if fixture.acquireBody != "" {
+				_, _ = io.WriteString(w, fixture.acquireBody)
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"count": 1, "value": []int64{41}})
 		case strings.Contains(r.URL.Path, "/sessions/") && r.Method == http.MethodDelete:
 			w.WriteHeader(http.StatusNoContent)
+		case strings.HasSuffix(r.URL.Path, "/runnerscalesets/7") && r.Method == http.MethodGet:
+			read := int(fixture.snapshotReads.Add(1))
+			if read <= len(fixture.snapshotBodies) && fixture.snapshotBodies[read-1] != "" {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, fixture.snapshotBodies[read-1])
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(pinnedDrainSnapshot(a))
+		case strings.HasSuffix(r.URL.Path, "/agents") && r.Method == http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"count": 1, "value": []any{map[string]any{"id": 19, "name": a.workerName(), "runnerScaleSetId": 7}}})
 		default:
 			http.NotFound(w, r)
 		}
@@ -568,13 +627,18 @@ func newPinnedDrainSession(t *testing.T, a Approval, body string) (*pinnedDrainF
 				return hook
 			})
 		}
+		if options.mutateRequest != nil {
+			wrappers = append(wrappers, func(inner http.RoundTripper) http.RoundTripper {
+				return sdkRequestMutationRoundTripper{inner: inner, mutate: options.mutateRequest}
+			})
+		}
 		retry.HTTPClient.Transport = withResponseBudget(transport, wrappers...)
 		options := []scaleset.HTTPOption{scaleset.WithRetryableHTTPClint(retry), scaleset.WithLogger(slog.New(slog.DiscardHandler))}
 		client, err := scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{GitHubConfigURL: fixture.server.URL + "/fixture-org", PersonalAccessToken: "synthetic-installation"}, options...)
 		if err != nil {
 			return nil, err
 		}
-		return &SDKAPI{client: client, rest: retry.HTTPClient, baseURL: fixture.server.URL + "/api/v3", approval: a, options: options}, nil
+		return &SDKAPI{client: client, rest: retry.HTTPClient, baseURL: fixture.server.URL + "/api/v3", approval: a, credentials: credentials(a), options: options}, nil
 	}
 	base, err := buildAPI(nil)
 	if err != nil {
@@ -587,6 +651,27 @@ func newPinnedDrainSession(t *testing.T, a Approval, body string) (*pinnedDrainF
 		t.Fatal(err)
 	}
 	return fixture, base, session, hook
+}
+
+type sdkRequestMutationRoundTripper struct {
+	inner  http.RoundTripper
+	mutate func(*http.Request)
+}
+
+func (t sdkRequestMutationRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.mutate != nil {
+		t.mutate(req)
+	}
+	return t.inner.RoundTrip(req)
+}
+
+func pinnedDrainRun(a Approval) map[string]any {
+	repository := map[string]any{"id": a.RepositoryID, "private": true, "fork": false}
+	return map[string]any{
+		"id": a.WorkflowRunID, "head_sha": a.WorkflowSHA, "event": "workflow_dispatch",
+		"path": a.WorkflowPath, "run_attempt": 1, "repository": repository,
+		"head_repository": repository,
+	}
 }
 
 func newPinnedDrainClient(session Session, hook *drainPollHook) *drainClient {
@@ -602,6 +687,24 @@ func pinnedDrainStatistics(available, assigned int) map[string]int {
 	return map[string]int{
 		"totalAvailableJobs": available, "totalAcquiredJobs": 0, "totalAssignedJobs": assigned,
 		"totalRunningJobs": 0, "totalRegisteredRunners": 1, "totalBusyRunners": 0, "totalIdleRunners": 1,
+	}
+}
+
+func pinnedDrainScaleSet(a Approval) *scaleset.RunnerScaleSet {
+	return &scaleset.RunnerScaleSet{
+		ID: 7, Name: a.setName(), RunnerGroupID: a.RunnerGroupID,
+		Labels:        []scaleset.Label{{Name: a.setName(), Type: "System"}},
+		RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true},
+		Statistics:    &scaleset.RunnerScaleSetStatistic{TotalRegisteredRunners: 1, TotalIdleRunners: 1},
+	}
+}
+
+func pinnedDrainSnapshot(a Approval) map[string]any {
+	return map[string]any{
+		"id": 7, "name": a.setName(), "runnerGroupId": a.RunnerGroupID,
+		"labels":        []map[string]string{{"name": a.setName(), "type": "System"}},
+		"RunnerSetting": map[string]any{"disableUpdate": true},
+		"statistics":    pinnedDrainStatistics(0, 0),
 	}
 }
 

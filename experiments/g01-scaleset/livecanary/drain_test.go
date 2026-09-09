@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/http/httptrace"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -669,6 +670,7 @@ func TestDrainPollHookPreservesStatisticsFieldPresence(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			req.Header.Set(scaleset.HeaderScaleSetMaxCapacity, strconv.Itoa(drainInitialCapacity))
 			response, err := hook.RoundTrip(req)
 			if err != nil {
 				t.Fatal(err)
@@ -768,7 +770,7 @@ func (t *drainPhysicalWriteTransport) RoundTrip(req *http.Request) (*http.Respon
 	if t.polls == 1 {
 		return &http.Response{
 			StatusCode: http.StatusOK,
-			Body:       io.NopCloser(strings.NewReader(`{"statistics":{"totalAvailableJobs":1,"totalAcquiredJobs":0,"totalAssignedJobs":1,"totalRunningJobs":0,"totalRegisteredRunners":1,"totalBusyRunners":0,"totalIdleRunners":1}}`)),
+			Body:       io.NopCloser(strings.NewReader(`{"messageId":7,"messageType":"RunnerScaleSetJobMessages","statistics":{"totalAvailableJobs":1,"totalAcquiredJobs":0,"totalAssignedJobs":1,"totalRunningJobs":0,"totalRegisteredRunners":1,"totalBusyRunners":0,"totalIdleRunners":1},"body":"[]"}`)),
 		}, nil
 	}
 	return &http.Response{
@@ -825,6 +827,7 @@ func TestDrainPollHookRejectsDuplicatePhysicalWrites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	req.Header.Set(scaleset.HeaderScaleSetMaxCapacity, strconv.Itoa(drainInitialCapacity))
 	response, err := hook.RoundTrip(req)
 	if err != nil {
 		t.Fatal(err)
@@ -872,12 +875,17 @@ func TestDrainPollHookRequiresOneSuccessfulWritePerPoll(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				request.Header.Set(scaleset.HeaderScaleSetMaxCapacity, strconv.Itoa(drainInitialCapacity))
 				firstResponse, _ := hook.RoundTrip(request)
 				if firstResponse != nil {
 					hook.releaseResponse()
 					_, _ = io.ReadAll(firstResponse.Body)
 					_ = firstResponse.Body.Close()
+					query := request.URL.Query()
+					query.Set("lastMessageId", "7")
+					request.URL.RawQuery = query.Encode()
 				}
+				request.Header.Set(scaleset.HeaderScaleSetMaxCapacity, strconv.Itoa(drainWithdrawnCapacity))
 				secondResponse, _ := hook.RoundTrip(request)
 				if secondResponse != nil {
 					_, _ = io.ReadAll(secondResponse.Body)
@@ -891,6 +899,9 @@ func TestDrainPollHookRequiresOneSuccessfulWritePerPoll(t *testing.T) {
 					want := 1
 					if behavior == drainWriteDuplicate || behavior == drainWriteRetry {
 						want = 2
+					}
+					if index == 1 && first == drainWriteError {
+						want = 0
 					}
 					if got := hook.wroteCallbacks[index+1]; got != want {
 						t.Fatalf("poll %d callbacks = %d, want %d", index+1, got, want)
@@ -1149,11 +1160,20 @@ func (s *drainSyntheticSession) Close(context.Context) error {
 	}
 	return nil
 }
-func (s *drainSyntheticSession) GetMessage(ctx context.Context, _, capacity int) (*scaleset.RunnerScaleSetMessage, error) {
+func (s *drainSyntheticSession) GetMessage(ctx context.Context, last, capacity int) (*scaleset.RunnerScaleSetMessage, error) {
 	if s.client == nil {
 		return nil, errors.New("synthetic transport unavailable")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.initial.MessageQueueURL, nil)
+	target, err := url.Parse(s.initial.MessageQueueURL)
+	if err != nil {
+		return nil, err
+	}
+	if last > 0 {
+		query := target.Query()
+		query.Set("lastMessageId", strconv.Itoa(last))
+		target.RawQuery = query.Encode()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
 	if err != nil {
 		return nil, err
 	}

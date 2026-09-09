@@ -60,6 +60,11 @@ type baselineAccepted struct {
 	Count *int    `json:"count"`
 	IDs   []int64 `json:"ids"`
 }
+
+func (a *baselineAccepted) matches(ids []int64) bool {
+	return a != nil && a.Count != nil && *a.Count == len(ids) && slices.Equal(a.IDs, ids)
+}
+
 type baselineSetFacts struct {
 	ID            int                 `json:"id"`
 	Name          string              `json:"name"`
@@ -95,7 +100,27 @@ func decodeBaselineSet(data []byte) (*baselineSetFacts, error) {
 	return &baselineSetFacts{w.ID, w.Name, w.Group, w.Labels, w.Setting.Disabled, s}, nil
 }
 func (s *baselineSetFacts) eligible(a Approval, id int) bool {
-	if s == nil || s.ID != id || s.Name != a.setName() || s.GroupID != a.RunnerGroupID || s.DisableUpdate == nil || !*s.DisableUpdate || !s.Statistics.eligible(false) {
+	return s.eligibleWithStats(a, id, false)
+}
+
+func (s *baselineSetFacts) eligibleForDrain(a Approval, id int) bool {
+	if !s.matchesOwner(a, id) || s.Statistics == nil {
+		return false
+	}
+	for _, p := range []*int{s.Statistics.Available, s.Statistics.Acquired, s.Statistics.Assigned, s.Statistics.Running, s.Statistics.Registered, s.Statistics.Busy, s.Statistics.Idle} {
+		if p == nil || *p < 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *baselineSetFacts) eligibleWithStats(a Approval, id int, acquired bool) bool {
+	return s.matchesOwner(a, id) && s.Statistics.eligible(acquired)
+}
+
+func (s *baselineSetFacts) matchesOwner(a Approval, id int) bool {
+	if s == nil || s.ID != id || s.Name != a.setName() || s.GroupID != a.RunnerGroupID || s.DisableUpdate == nil || !*s.DisableUpdate {
 		return false
 	}
 	for _, l := range s.Labels {
@@ -104,6 +129,17 @@ func (s *baselineSetFacts) eligible(a Approval, id int) bool {
 		}
 	}
 	return false
+}
+
+// matches compares the bounded facts captured by the strict wire reader with
+// the SDK value returned from the same request. A caller may use eligible to
+// establish approved identity, but must also prove that the lossy SDK object
+// did not disagree with those wire facts.
+func (s *baselineSetFacts) matches(v *scaleset.RunnerScaleSet) bool {
+	if s == nil || v == nil || s.ID != v.ID || s.Name != v.Name || s.GroupID != v.RunnerGroupID || s.DisableUpdate == nil || *s.DisableUpdate != v.RunnerSetting.DisableUpdate || !slices.Equal(s.Labels, v.Labels) {
+		return false
+	}
+	return s.Statistics.matches(v.Statistics)
 }
 func baselineText(s string, limit int) bool {
 	if len(s) > limit || !utf8.ValidString(s) {

@@ -82,6 +82,10 @@ func (r observedRepository) policyValue() repository {
 	return repository{ID: r.ID, Private: r.Private != nil && *r.Private, Fork: r.Fork != nil && *r.Fork}
 }
 func (a *SDKAPI) observeApprovedRun(ctx context.Context) (observationResponse, error) {
+	return a.observeApprovedRunFor(ctx, a.approval, a.approval.WorkflowRunID)
+}
+
+func (a *SDKAPI) observeApprovedRunFor(ctx context.Context, approval Approval, id int64) (observationResponse, error) {
 	var wire struct {
 		ID             int64              `json:"id"`
 		HeadSHA        string             `json:"head_sha"`
@@ -91,12 +95,12 @@ func (a *SDKAPI) observeApprovedRun(ctx context.Context) (observationResponse, e
 		Repository     observedRepository `json:"repository"`
 		HeadRepository observedRepository `json:"head_repository"`
 	}
-	out, err := a.observationGET(ctx, "/repos/"+a.approval.Organization+"/"+a.approval.Repository+"/actions/runs/"+strconv.FormatInt(a.approval.WorkflowRunID, 10), a.credentials.VerificationToken, "rest_run", &wire)
+	out, err := a.observationGET(ctx, "/repos/"+approval.Organization+"/"+approval.Repository+"/actions/runs/"+strconv.FormatInt(id, 10), a.credentials.VerificationToken, "rest_run", &wire)
 	if err != nil || out.Outcome == observationNotFound {
 		return out, err
 	}
 	run := workflowRun{ID: wire.ID, HeadSHA: wire.HeadSHA, Event: wire.Event, Path: wire.Path, RunAttempt: wire.RunAttempt, Repository: wire.Repository.policyValue(), HeadRepository: wire.HeadRepository.policyValue()}
-	if wire.Repository.Private == nil || wire.Repository.Fork == nil || wire.HeadRepository.Private == nil || wire.HeadRepository.Fork == nil || !matchesApprovedRun(a.approval, a.approval.WorkflowRunID, run) {
+	if wire.Repository.Private == nil || wire.Repository.Fork == nil || wire.HeadRepository.Private == nil || wire.HeadRepository.Fork == nil || !matchesApprovedRun(approval, id, run) {
 		return out, ErrRemote
 	}
 	return out, nil

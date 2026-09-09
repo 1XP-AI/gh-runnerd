@@ -394,7 +394,7 @@ func (b *baselineListener) AcquireJobs(_ context.Context, ids []int64) ([]int64,
 	_, _, accepted, status := c.facts()
 	r.Accepted = accepted
 	r.HTTPStatus = status
-	known := c.observed() && status == 200 && accepted != nil && accepted.Count != nil && *accepted.Count == 1 && len(accepted.IDs) == 1 && accepted.IDs[0] == ids[0] && ((callErr == nil && slices.Equal(got, ids)) || (callErr != nil && b.ctx.Err() != nil)) && b.session.Session().SessionID.String() == b.sessionID
+	known := c.observed() && status == 200 && accepted.matches(ids) && ((callErr == nil && slices.Equal(got, ids)) || (callErr != nil && b.ctx.Err() != nil)) && b.session.Session().SessionID.String() == b.sessionID
 	resultRef, err := b.finish(r, known)
 	if err != nil {
 		return nil, err

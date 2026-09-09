@@ -12,10 +12,15 @@ type drainSessionOpener interface {
 	OpenDrainSession(context.Context, int, string, *drainPollHook) (Session, error)
 }
 
+type drainScaleSetWireReader interface {
+	drainGetScaleSet(context.Context, int, *baselineWireCapture) (*scaleset.RunnerScaleSet, error)
+}
+
 type journaledDrainClient struct {
 	d         *Driver
 	inner     Session
 	sessionID string
+	setID     int
 	hook      *drainPollHook
 	phaseCtx  context.Context
 }
@@ -59,6 +64,20 @@ func (c *journaledDrainClient) GetMessage(ctx context.Context, last, capacity in
 		if message == nil {
 			return Event{SessionID: c.sessionID}, nil
 		}
+		messageStats, statsErr := newDrainStatistics(message.Statistics)
+		if statsErr != nil {
+			return Event{}, ErrRemote
+		}
+		if c.hook != nil {
+			pollIndex := 1
+			if capacity == drainWithdrawnCapacity {
+				pollIndex = 2
+			}
+			wireStats, statsKnown := c.hook.pollStatistics(pollIndex)
+			if !statsKnown || wireStats != messageStats {
+				return Event{}, ErrRemote
+			}
+		}
 		if c.hook != nil {
 			pollIndex := 1
 			if capacity == drainWithdrawnCapacity {
@@ -70,9 +89,6 @@ func (c *journaledDrainClient) GetMessage(ctx context.Context, last, capacity in
 			}
 		}
 		if message.MessageID <= 0 || len(message.JobAvailableMessages) != 1 || len(message.JobAssignedMessages) != 0 || len(message.JobStartedMessages) != 0 || len(message.JobCompletedMessages) != 0 || message.Statistics == nil {
-			return Event{}, ErrRemote
-		}
-		if _, callErr = newDrainStatistics(message.Statistics); callErr != nil {
 			return Event{}, ErrRemote
 		}
 		for _, job := range message.JobAvailableMessages {
@@ -116,8 +132,31 @@ func (c *journaledDrainClient) AcquireJobs(ctx context.Context, ids []int64) ([]
 	var got []int64
 	err = c.d.effect(callCtx, "acquire", ids, func(call context.Context) (Event, error) {
 		var err error
+		var wire *baselineWireCapture
+		if c.hook != nil {
+			setID := c.setID
+			if setID <= 0 {
+				if session := c.inner.Session(); session.RunnerScaleSet != nil {
+					setID = session.RunnerScaleSet.ID
+				}
+			}
+			c.hook.mu.Lock()
+			queue := c.hook.target
+			c.hook.mu.Unlock()
+			wire = &baselineWireCapture{stage: "acquire", setID: setID, queue: queue}
+			call = wire.context(call)
+		}
 		got, err = c.inner.AcquireJobs(call, slices.Clone(ids))
-		if err != nil || !slices.Equal(got, ids) {
+		if err != nil {
+			return Event{}, errors.New("acquisition response did not match the one-shot request")
+		}
+		if wire != nil {
+			_, _, accepted, status := wire.facts()
+			if !wire.observed() || status != 200 || !accepted.matches(ids) {
+				return Event{}, errors.New("acquisition response did not match the one-shot request")
+			}
+		}
+		if !slices.Equal(got, ids) {
 			return Event{}, errors.New("acquisition response did not match the one-shot request")
 		}
 		return Event{RequestIDs: slices.Clone(ids), SessionID: c.sessionID}, nil
@@ -133,7 +172,16 @@ func (d *Driver) drainSnapshot(ctx context.Context, setID int, stage string) (dr
 	var set *scaleset.RunnerScaleSet
 	if err := d.effect(ctx, "observe-owned", nil, func(call context.Context) (Event, error) {
 		var err error
-		set, err = d.API.GetScaleSet(call, setID)
+		if reader, ok := d.API.(drainScaleSetWireReader); ok {
+			wire := &baselineWireCapture{stage: "set-observe", setID: setID}
+			set, err = reader.drainGetScaleSet(call, setID, wire)
+			wireSet, status := wire.setFacts()
+			if err != nil || !wire.observed() || status != 200 || !wireSet.eligibleForDrain(d.Approval, setID) || !wireSet.matches(set) {
+				return Event{}, ErrRemote
+			}
+		} else {
+			set, err = d.API.GetScaleSet(call, setID)
+		}
 		if err != nil || set == nil || set.ID != setID || set.Name != d.Approval.setName() || set.RunnerGroupID != d.Approval.RunnerGroupID || !set.RunnerSetting.DisableUpdate {
 			return Event{}, ErrRemote
 		}
@@ -252,7 +300,7 @@ func (d *Driver) drain(ctx context.Context, setID int) error {
 		}
 		return err
 	}
-	journaled := &journaledDrainClient{d: d, inner: session, sessionID: sessionID, hook: hook}
+	journaled := &journaledDrainClient{d: d, inner: session, sessionID: sessionID, setID: setID, hook: hook}
 	obs, runErr := runDrainListener(ctx, journaled, setID, hook)
 	// The bounded observation sequence is phase-local: it must identify the
 	// exact durable drain phase that was active when the listener ran.

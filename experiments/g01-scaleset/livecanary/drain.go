@@ -10,6 +10,8 @@ import (
 	"net/http/httptrace"
 	"net/url"
 	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -142,6 +144,34 @@ func drainStatisticsFromBody(body []byte) (drainStatistics, bool) {
 		return drainStatistics{}, false
 	}
 	return stats, true
+}
+
+// drainMessageWireState classifies only the bounded response shape. An empty
+// 202 body is the SDK's ordinary no-message response; a JSON object containing
+// only statistics is also an unambiguous no-message response. Any malformed,
+// unknown or message-bearing shape is retained only as a boolean present
+// marker, so a lossy SDK nil cannot promote it to drainMessageAbsent.
+func drainMessageWireState(body []byte) (present, absent bool) {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return false, true
+	}
+	if !uniqueKeys(json.NewDecoder(bytes.NewReader(trimmed))) {
+		return true, false
+	}
+	var envelope map[string]json.RawMessage
+	if json.Unmarshal(trimmed, &envelope) != nil || envelope == nil {
+		return true, false
+	}
+	if len(envelope) == 0 {
+		return false, false
+	}
+	for key := range envelope {
+		if key != "statistics" {
+			return true, false
+		}
+	}
+	return false, true
 }
 
 type drainSetIdentity struct {
@@ -309,6 +339,8 @@ type drainPollHook struct {
 	statisticsKnown     [3]bool
 	batches             [3]*baselineBatch
 	batchesKnown        [3]bool
+	messagePresent      [3]bool
+	messageAbsent       [3]bool
 	wroteCallbacks      [3]int
 	onRequestWritten    func()
 	wroteOnce           sync.Once
@@ -328,12 +360,90 @@ func (h *drainPollHook) matches(req *http.Request) bool {
 	target := h.target
 	h.mu.Unlock()
 	want, err := url.Parse(target)
-	if err != nil || want.Scheme == "" || want.Host == "" {
+	if err != nil || want.Scheme == "" || want.Host == "" || want.User != nil || want.Fragment != "" || want.EscapedPath() != want.Path {
 		return false
 	}
 	// Queue access tokens may be embedded in the URL. Compare only the
-	// transport destination/path; never copy the query into an observation.
-	return req.URL.Scheme == want.Scheme && req.URL.Host == want.Host && req.URL.Path == want.Path
+	// transport destination/path here; the exact query is checked ephemerally
+	// immediately before the inner transport call and never copied to evidence.
+	return req.URL.Scheme == want.Scheme && req.URL.Host == want.Host && req.URL.Path == want.Path && req.URL.User == nil && req.URL.Fragment == "" && req.URL.EscapedPath() == req.URL.Path
+}
+
+// sameDrainQuery compares parsed query values without retaining the token
+// bearing URL. It deliberately preserves duplicate values, since silently
+// normalizing them would turn an ambiguous cursor into an apparently valid one.
+func sameDrainQuery(left, right url.Values) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, values := range left {
+		if !slices.Equal(values, right[key]) {
+			return false
+		}
+	}
+	return true
+}
+
+func (h *drainPollHook) pollRequestValid(req *http.Request, attempt int) bool {
+	if h == nil || req == nil || req.URL == nil || (attempt != 1 && attempt != 2) {
+		return false
+	}
+	h.mu.Lock()
+	target := h.target
+	messageID := 0
+	if attempt == 2 && h.batches[1] != nil {
+		messageID = h.batches[1].MessageID
+	}
+	h.mu.Unlock()
+	want, err := url.Parse(target)
+	if err != nil || want.Scheme == "" || want.Host == "" || want.User != nil || want.Fragment != "" || want.EscapedPath() != want.Path || req.Method != http.MethodGet || req.URL.Scheme != want.Scheme || req.URL.Host != want.Host || req.URL.Path != want.Path || req.URL.User != nil || req.URL.Fragment != "" || req.URL.EscapedPath() != req.URL.Path {
+		return false
+	}
+	values := req.Header.Values(scaleset.HeaderScaleSetMaxCapacity)
+	wantCapacity := drainInitialCapacity
+	if attempt == 2 {
+		wantCapacity = drainWithdrawnCapacity
+	}
+	if len(values) != 1 || values[0] != strconv.Itoa(wantCapacity) {
+		return false
+	}
+	wantQuery, err := url.ParseQuery(want.RawQuery)
+	if err != nil {
+		return false
+	}
+	gotQuery, err := url.ParseQuery(req.URL.RawQuery)
+	if err != nil {
+		return false
+	}
+	for key := range wantQuery {
+		if strings.EqualFold(key, "lastMessageId") {
+			return false
+		}
+	}
+	for key := range gotQuery {
+		if strings.EqualFold(key, "lastMessageId") {
+			if attempt == 1 || key != "lastMessageId" {
+				return false
+			}
+		}
+	}
+	if attempt == 1 {
+		return sameDrainQuery(wantQuery, gotQuery)
+	}
+	if messageID <= 0 {
+		return false
+	}
+	wantQuery.Set("lastMessageId", strconv.Itoa(messageID))
+	return sameDrainQuery(wantQuery, gotQuery)
+}
+
+func (h *drainPollHook) rejectPoll() (*http.Response, error) {
+	h.mu.Lock()
+	h.invalid = true
+	h.mu.Unlock()
+	h.wroteOnce.Do(func() { close(h.wrote) })
+	h.responseOnce.Do(func() { close(h.response) })
+	return nil, ErrQuarantine
 }
 
 func (h *drainPollHook) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -348,6 +458,9 @@ func (h *drainPollHook) RoundTrip(req *http.Request) (*http.Response, error) {
 	attempt := h.pollAttempts
 	first := h.pollAttempts == 1
 	h.mu.Unlock()
+	if !h.pollRequestValid(req, attempt) {
+		return h.rejectPoll()
+	}
 	if !first {
 		h.mu.Lock()
 		second := h.pollAttempts == 2
@@ -374,12 +487,14 @@ func (h *drainPollHook) RoundTrip(req *http.Request) (*http.Response, error) {
 		response.Body = &drainObservedBody{
 			source: response.Body,
 			status: response.StatusCode,
-			onComplete: func(stats drainStatistics, known bool, batch *baselineBatch, batchKnown bool) {
+			onComplete: func(stats drainStatistics, known bool, batch *baselineBatch, batchKnown bool, present bool, absent bool) {
 				h.mu.Lock()
 				h.statistics[attempt] = stats
 				h.statisticsKnown[attempt] = known
 				h.batches[attempt] = batch
 				h.batchesKnown[attempt] = batchKnown
+				h.messagePresent[attempt] = present
+				h.messageAbsent[attempt] = absent
 				h.mu.Unlock()
 			},
 		}
@@ -412,13 +527,15 @@ func (h *drainPollHook) RoundTrip(req *http.Request) (*http.Response, error) {
 	observedBody := &drainObservedBody{
 		source: response.Body,
 		status: response.StatusCode,
-		onComplete: func(stats drainStatistics, known bool, batch *baselineBatch, batchKnown bool) {
+		onComplete: func(stats drainStatistics, known bool, batch *baselineBatch, batchKnown bool, present bool, absent bool) {
 			h.mu.Lock()
 			if attempt >= 1 && attempt < len(h.statistics) {
 				h.statistics[attempt] = stats
 				h.statisticsKnown[attempt] = known
 				h.batches[attempt] = batch
 				h.batchesKnown[attempt] = batchKnown
+				h.messagePresent[attempt] = present
+				h.messageAbsent[attempt] = absent
 			}
 			h.mu.Unlock()
 		},
@@ -482,6 +599,15 @@ func (h *drainPollHook) pollBatch(index int) (*baselineBatch, bool) {
 	return h.batches[index], h.batchesKnown[index]
 }
 
+func (h *drainPollHook) pollMessageState(index int) (present, absent bool) {
+	if h == nil || index < 1 || index >= len(h.messagePresent) {
+		return false, false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.messagePresent[index], h.messageAbsent[index]
+}
+
 // drainObservedBody forwards response bytes unchanged while retaining a
 // bounded, ephemeral copy solely to establish statistics field presence and
 // strict embedded job facts. It never persists, logs or rewrites the response
@@ -493,7 +619,7 @@ type drainObservedBody struct {
 	over       bool
 	mu         sync.Mutex
 	finished   bool
-	onComplete func(drainStatistics, bool, *baselineBatch, bool)
+	onComplete func(drainStatistics, bool, *baselineBatch, bool, bool, bool)
 }
 
 func (b *drainObservedBody) capture(data []byte) {
@@ -527,20 +653,25 @@ func (b *drainObservedBody) finish() {
 	stats, known := drainStatisticsFromBody(data)
 	batch, batchErr := decodeBaselineBatch(data)
 	batchKnown := batchErr == nil
+	present, absent := drainMessageWireState(data)
 	if b.status != http.StatusOK && b.status != http.StatusAccepted {
 		known = false
 		stats = drainStatistics{}
 		batch = nil
 		batchKnown = false
+		present = false
+		absent = false
 	}
 	if over {
 		known = false
 		stats = drainStatistics{}
 		batch = nil
 		batchKnown = false
+		present = false
+		absent = false
 	}
 	if b.onComplete != nil {
-		b.onComplete(stats, known, batch, batchKnown)
+		b.onComplete(stats, known, batch, batchKnown, present, absent)
 	}
 }
 
@@ -716,6 +847,16 @@ func (c *drainClient) GetMessage(ctx context.Context, last, capacity int) (*scal
 	}
 	if message == nil {
 		c.mu.Lock()
+		if c.hook != nil {
+			present, absent := c.hook.pollMessageState(index)
+			if present || !absent {
+				c.obs.poll(index).Message = drainMessageUnknown
+				c.obs.poll(index).Statistics = drainStatistics{}
+				c.obs.poll(index).StatsKnown = false
+				c.mu.Unlock()
+				return nil, ErrQuarantine
+			}
+		}
 		if statsKnown && c.ownedRunnerStatsKnown && !sameDrainRunnerPartition(stats, c.ownedRunnerStats) {
 			c.obs.poll(index).Message = drainMessageUnknown
 			c.obs.poll(index).Statistics = drainStatistics{}
@@ -855,6 +996,18 @@ func (drainScaler) HandleJobCompleted(context.Context, *scaleset.JobCompleted) e
 	return ErrQuarantine
 }
 
+func cancelAndJoinDrain(stop, release func(), join func()) {
+	if stop != nil {
+		stop()
+	}
+	if release != nil {
+		release()
+	}
+	if join != nil {
+		join()
+	}
+}
+
 func runDrainListener(ctx context.Context, client listener.Client, setID int, hook *drainPollHook) (drainObservation, error) {
 	obs := drainObservation{Version: drainObservationVersion, Outcome: drainOutcomeInconclusive, InitialCapacity: drainInitialCapacity, WithdrawnCapacity: drainWithdrawnCapacity, Boundary: drainBoundaryUnresolved, ServerReceipt: drainServerReceiptUnproven, Sequence: 1, ObservedAt: time.Now().UTC()}
 	obs.Poll = drainPollObservation{Capacity: drainInitialCapacity, Message: drainMessageUnknown, ACK: drainResponseNotAttempted, Acquisition: drainResponseNotAttempted}
@@ -893,9 +1046,7 @@ func runDrainListener(ctx context.Context, client listener.Client, setID int, ho
 	runResult := make(chan error, 1)
 	go func() { runResult <- l.Run(runCtx, drainScaler{client: c}) }()
 	cancelAndJoin := func() {
-		hook.releaseResponse()
-		stop()
-		<-runResult
+		cancelAndJoinDrain(stop, hook.releaseResponse, func() { <-runResult })
 	}
 
 	release := false
