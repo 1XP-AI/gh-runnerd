@@ -35,7 +35,7 @@ was complete at merge time.
 
 ## Reusable dispatch text
 
-> Work on ISSUE_URL using the issue's implementer (default Luna max; #66/#67/#68/#69 are Grok 4.6 xhigh) and one active goal equal to its Goal statement. Independent review is Luna max even when the implementer is overridden. Read AGENTS.md and linked design decisions. Verify dependencies first. Use a separate worktree, write the meaningful failing test before implementation, and preserve the no-secrets/no-busy-kill/owned-cleanup invariants. Do not change existing live runners or enroll new Apps unless the issue explicitly authorizes that operation. Open a reviewed PR with commands/results, red evidence, limitations and rollback notes. Update the Project accurately; do not mark the goal complete while required work remains.
+> Work on ISSUE_URL using the issue's implementer (default Luna max unless an explicit current user override is recorded) and one active goal equal to its Goal statement. Independent review is Luna max even when the implementer is overridden. Read AGENTS.md and linked design decisions. Verify dependencies first. Use a separate worktree, write the meaningful failing test before implementation, and preserve the no-secrets/no-busy-kill/owned-cleanup invariants. Do not change existing live runners or enroll new Apps unless the issue explicitly authorizes that operation. Open a reviewed PR with commands/results, red evidence, limitations and rollback notes. Update the Project accurately; do not mark the goal complete while required work remains. Do not write Luna over an inspected override that has no Project Agent option; preserve the existing Agent value.
 
 ## Board fields
 

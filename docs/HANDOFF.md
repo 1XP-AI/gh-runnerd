@@ -204,11 +204,16 @@ second native Goal on #1 while this planning work runs.
 
 For every new issue, after checking for an explicit current user override:
 
-- set the Project Agent field to `Luna max` when no override exists;
-- when an override exists and the Project Agent field has that option, set it to
-  that option; when the override has **no** Project option (today: Grok 4.6 xhigh
-  on #66/#67/#68/#69), **skip the Agent edit** and leave the field unset — do not
-  write Luna as a substitute implementer. Independent review remains Luna max;
+- set `IMPLEMENTER_OVERRIDE` to the inspected current implementer name, or to an
+  empty string when there is no override (repository default `Luna max`);
+- look up that name in live `gh project field-list` Agent options by exact match;
+- when the name matches one option, write that option unless the item is not Ready
+  or already has a conflicting Agent;
+- when an override exists and has **no** Project option (current example: Grok 4.6
+  xhigh on #66/#67/#68/#69), **skip the Agent edit** and preserve the existing
+  field — do not write Luna as a substitute implementer and do not clear Agent.
+  Independent review remains Luna max. Do not keep a permanent issue-number
+  whitelist;
 - use one active goal whose objective is exactly the issue's `Goal` statement;
 - do not invent a token budget;
 - use an independent contract review with the current selected review model/effort
@@ -220,7 +225,7 @@ For every new issue, after checking for an explicit current user override:
 
 Suggested handoff prompt to give the next agent:
 
-> Work on ISSUE_URL in `1XP-AI/gh-runnerd`. Use the issue's implementer (default `gpt-5.6-luna` with `max`; #66/#67/#68/#69 are Grok 4.6 xhigh) and one active goal exactly equal to the issue's Goal statement; do not invent a token budget. Independent review is Luna max even when the implementer is overridden. Read `AGENTS.md`, `docs/EXECUTION.md`, the plan, the linked ADRs and the current Project item. Verify dependencies first. Create the goal and isolated branch/worktree, then set the item to In progress. Follow meaningful red test -> minimal green implementation -> refactor -> boundary/failure tests. Preserve no-secrets, no-busy-kill, owned-cleanup, stable-idempotency and trusted-native invariants. Do not change live runners, Docker context, App/Keychain/launchd state or GitHub credentials without explicit maintainer authorization. Open one focused PR with exact commands/results, red evidence, gaps and rollback notes. Obtain independent Luna max review, then the exact-head GitHub Codex review before merge. Update the Project, issue and goal only when their actual state changes. Do not write Luna into the Project Agent field over an issue-body-only Grok override.
+> Work on ISSUE_URL in `1XP-AI/gh-runnerd`. Use the issue's implementer (default `gpt-5.6-luna` with `max` unless an explicit current user override is recorded) and one active goal exactly equal to the issue's Goal statement; do not invent a token budget. Independent review is Luna max even when the implementer is overridden. Read `AGENTS.md`, `docs/EXECUTION.md`, the plan, the linked ADRs and the current Project item. Verify dependencies first. Create the goal and isolated branch/worktree, then set the item to In progress. Follow meaningful red test -> minimal green implementation -> refactor -> boundary/failure tests. Preserve no-secrets, no-busy-kill, owned-cleanup, stable-idempotency and trusted-native invariants. Do not change live runners, Docker context, App/Keychain/launchd state or GitHub credentials without explicit maintainer authorization. Open one focused PR with exact commands/results, red evidence, gaps and rollback notes. Obtain independent Luna max review, then the exact-head GitHub Codex review before merge. Update the Project, issue and goal only when their actual state changes. Do not write Luna into the Project Agent field over an inspected override that has no Agent option; preserve the existing Agent value.
 
 ## Per-issue Project workflow
 
@@ -255,7 +260,9 @@ every blocker must be closed and its acceptance actually complete before dispatc
 Then read the exact Goal, TDD cases, acceptance checklist, test profile and safety
 invariants. If a blocker is open, stop and report that state for the authorized
 issue. Select another issue only when a separate user task explicitly authorizes
-that new scope.
+that new scope. Record the inspected current implementer override as
+`IMPLEMENTER_OVERRIDE` (empty string when there is none). Do not infer it from
+the issue number and do not scrape issue prose automatically into the Agent write.
 
 ### 2. Resolve the Project item and route the Agent field
 
@@ -264,17 +271,12 @@ PROJECT_ID=PVT_kwDOD2M2gs4Bismw
 STATUS_FIELD_ID=PVTSSF_lADOD2M2gs4BismwzhhjoZA
 AGENT_FIELD_ID=PVTSSF_lADOD2M2gs4Bismwzhhjobs
 STATUS_IN_PROGRESS_ID=7a569f61
-AGENT_LUNA_MAX_ID=9317c27f
-# Default implementer is Luna max. Issue-body-only overrides with no Project
-# Agent option must not be rewritten to Luna; leave Agent unset.
-SKIP_AGENT_EDIT=0
-AGENT_OPTION_ID="$AGENT_LUNA_MAX_ID"
-case "$ISSUE" in
-  66|67|68|69)
-    SKIP_AGENT_EDIT=1
-    AGENT_OPTION_ID=""
-    ;;
-esac
+DEFAULT_IMPLEMENTER="Luna max"
+
+# Operator-inspected current contract. Must be set: empty string means no
+# override (repository default Luna max). Unset is fail-closed. Exact Project
+# option names only; do not branch on issue numbers.
+: "${IMPLEMENTER_OVERRIDE?set IMPLEMENTER_OVERRIDE after inspecting the current issue override; empty string means no override}"
 
 ITEM_JSON="$(gh project item-list "$PROJECT_NUMBER" --owner "$OWNER" \
   --limit 1000 --format json)"
@@ -297,24 +299,60 @@ if [ "$ITEM_STATUS" != "Ready" ]; then
   exit 1
 fi
 
+if [ -n "$IMPLEMENTER_OVERRIDE" ]; then
+  INTENDED_IMPLEMENTER="$IMPLEMENTER_OVERRIDE"
+else
+  INTENDED_IMPLEMENTER="$DEFAULT_IMPLEMENTER"
+fi
+
+AGENT_OPTIONS_JSON="$(gh project field-list "$PROJECT_NUMBER" --owner "$OWNER" --format json)"
+if ! AGENT_OPTION_ID="$(printf '%s' "$AGENT_OPTIONS_JSON" | jq -r --arg name "$INTENDED_IMPLEMENTER" --arg fid "$AGENT_FIELD_ID" '
+  [.fields[] | select(.id == $fid) | .options[]? | select(.name == $name) | .id]
+  | if length == 1 then .[0]
+    elif length == 0 then empty
+    else error("ambiguous Agent option name")
+    end')"; then
+  printf 'Agent option lookup failed; fail closed\n' >&2
+  exit 1
+fi
+
+if [ -n "$IMPLEMENTER_OVERRIDE" ] && [ -z "$AGENT_OPTION_ID" ]; then
+  SKIP_AGENT_EDIT=1
+elif [ -z "$AGENT_OPTION_ID" ]; then
+  printf 'default implementer %s is not a Project Agent option; fail closed\n' \
+    "$INTENDED_IMPLEMENTER" >&2
+  exit 1
+else
+  SKIP_AGENT_EDIT=0
+fi
+
+if [ "$SKIP_AGENT_EDIT" = 0 ] && [ "$ITEM_AGENT" != "(unset)" ] && [ "$ITEM_AGENT" != "$INTENDED_IMPLEMENTER" ]; then
+  printf 'selected issue already has Agent %s; will not overwrite with %s\n' \
+    "$ITEM_AGENT" "$INTENDED_IMPLEMENTER" >&2
+  exit 1
+fi
+
 if [ "$SKIP_AGENT_EDIT" = 1 ]; then
-  printf 'issue %s has a Grok 4.6 xhigh override with no Project Agent option; leaving Agent unset (was %s)\n' \
-    "$ISSUE" "$ITEM_AGENT"
+  printf 'issue %s override %s has no Project Agent option; preserving Agent (was %s)\n' \
+    "$ISSUE" "$IMPLEMENTER_OVERRIDE" "$ITEM_AGENT"
 else
   gh project item-edit --id "$ITEM_ID" --project-id "$PROJECT_ID" \
     --field-id "$AGENT_FIELD_ID" --single-select-option-id "$AGENT_OPTION_ID"
 fi
 ```
 
-If the item is already In progress for another active agent, the guard above stops
-before any field edit; coordinate instead of starting a second implementation. Keep
-the issue's durable Goal/Dependencies fields and `docs/backlog.json` aligned only
-when the contract actually changes. Do not rewrite original JSON `status`/`agent`
-snapshots to look live; the Project is dispatch authority. If
-the current user selected another supported model/effort, resolve its Project Agent
-option ID with `gh project field-list` and replace `AGENT_OPTION_ID`; never overwrite
-an explicit current selection with the default, and never write Luna over an
-issue-body-only override that has no Agent option. Independent review stays Luna max.
+If the item is already In progress or otherwise not Ready, the guard above stops
+before any field edit; coordinate instead of starting a second implementation or
+overwriting a currently owned Agent. Keep the issue's durable Goal/Dependencies
+fields and `docs/backlog.json` aligned only when the contract actually changes.
+Do not rewrite original JSON `status`/`agent` snapshots to look live; the Project
+is dispatch authority. The script does not branch on issue numbers.
+`IMPLEMENTER_OVERRIDE` is the operator-inspected current contract, not an LLM
+scrape and not a permanent whitelist. Live Agent options come from
+`gh project field-list`. Exact match writes; a missing option preserves Agent
+and does not clear it; non-Ready and conflicting Agent fail closed. Independent
+review stays Luna max. Current #66/#67/#68/#69 still record Grok 4.6 xhigh with
+no Project option; that is today's inspected override, not a routing table.
 
 ### 3. Start one active goal and an isolated worktree
 
@@ -553,9 +591,10 @@ Before handing work onward, confirm:
 - [ ] `git status` is clean or the changes are on the declared issue branch.
 - [ ] The issue Goal was copied exactly into one active goal; no invented budget.
 - [ ] Dependencies and Project status were checked live.
-- [ ] Implementer matches the current user-selected model/effort (default:
-      `Luna max`; #66/#67/#68/#69 are Grok 4.6 xhigh with Agent left unset).
-      Historical records and #1/#2/#60 Agent values were not rewritten.
+- [ ] Implementer matches the inspected current user override (default
+      `Luna max` if none). If that override has no Project Agent option, the
+      Agent field was left unchanged. Historical records and #1/#2/#60 Agent
+      values were not rewritten.
 - [ ] A meaningful red case, minimal green fix and relevant boundary tests are
       recorded, with actual commands/results and remaining gaps.
 - [ ] No secrets, personal paths, raw SDK errors, live tokens or unreviewed runner
