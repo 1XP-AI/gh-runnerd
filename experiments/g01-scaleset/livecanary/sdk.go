@@ -309,16 +309,51 @@ func (a *SDKAPI) drainFindRunner(c context.Context, name string, wire *baselineW
 	return a.client.GetRunnerByName(wire.context(c), name)
 }
 
-func validDrainQueueURL(value string) bool {
+func validDrainQueueURL(value string, approvedHosts []string) bool {
 	if value == "" || !baselineText(value, 4096) {
 		return false
 	}
 	u, err := url.Parse(value)
-	return err == nil && u.Scheme != "" && u.Host != "" && u.User == nil && u.Fragment == "" && u.EscapedPath() == u.Path
+	if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil || u.Fragment != "" || u.EscapedPath() != u.Path || !strings.EqualFold(u.Scheme, "https") || u.Hostname() == "" {
+		return false
+	}
+	queuePort := u.Port()
+	if queuePort == "" {
+		queuePort = "443"
+	}
+	if port, err := strconv.Atoi(queuePort); err != nil || port <= 0 || port > 65535 {
+		return false
+	}
+	for _, approved := range approvedHosts {
+		approvedHost, approvedPort, ok := drainApprovedHostPort(approved)
+		if ok && strings.EqualFold(u.Hostname(), approvedHost) && queuePort == approvedPort {
+			return true
+		}
+	}
+	return false
+}
+
+func drainApprovedHostPort(value string) (string, string, bool) {
+	if value == "" || strings.ContainsAny(value, "/?#@") {
+		return "", "", false
+	}
+	host, port := value, "443"
+	if strings.Contains(value, ":") {
+		var err error
+		host, port, err = net.SplitHostPort(value)
+		if err != nil {
+			return "", "", false
+		}
+		parsed, err := strconv.Atoi(port)
+		if host == "" || err != nil || parsed <= 0 || parsed > 65535 {
+			return "", "", false
+		}
+	}
+	return host, port, true
 }
 
 func validDrainSessionWire(a Approval, id int, owner string, wire *baselineSessionFacts, session scaleset.RunnerScaleSetSession) bool {
-	if wire == nil || session.SessionID == [16]byte{} || wire.SessionID != session.SessionID.String() || wire.Owner != owner || session.OwnerName != owner || !validDrainQueueURL(wire.queueURL) || wire.queueURL != session.MessageQueueURL || session.MessageQueueAccessToken == "" || !wire.Statistics.completeDrain() || !wire.NestedSet || wire.SetID != id || wire.SetName != owner || wire.GroupID != a.RunnerGroupID || !wire.NestedStatistics.completeDrain() || !wire.Statistics.matches(session.Statistics) {
+	if wire == nil || session.SessionID == [16]byte{} || wire.SessionID != session.SessionID.String() || wire.Owner != owner || session.OwnerName != owner || !validDrainQueueURL(wire.queueURL, a.ActionsHosts) || wire.queueURL != session.MessageQueueURL || session.MessageQueueAccessToken == "" || !wire.Statistics.completeDrain() || !wire.NestedSet || wire.SetID != id || wire.SetName != owner || wire.GroupID != a.RunnerGroupID || !wire.NestedStatistics.completeDrain() || !wire.Statistics.matches(session.Statistics) {
 		return false
 	}
 	set := session.RunnerScaleSet

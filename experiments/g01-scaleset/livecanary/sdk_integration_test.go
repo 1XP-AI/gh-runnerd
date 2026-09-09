@@ -201,7 +201,7 @@ func TestDriverDrainThroughPinnedSDKAndPollHook(t *testing.T) {
 	}
 	var polls, acks, acquires, closes, snapshotReads int
 	var server *httptest.Server
-	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/actions/runners/registration-token") && r.Method == http.MethodPost:
 			w.Header().Set("Content-Type", "application/json")
@@ -267,13 +267,19 @@ func TestDriverDrainThroughPinnedSDKAndPollHook(t *testing.T) {
 		}
 	}))
 	defer server.Close()
+	fixtureApproval := a
+	fixtureApproval.ActionsHosts = []string{server.Listener.Addr().String()}
 
 	buildAPI := func(hook *drainPollHook) (*SDKAPI, error) {
 		retry := retryablehttp.NewClient()
 		retry.RetryMax = 0
 		retry.Logger = nil
 		retry.HTTPClient.Timeout = time.Second
-		transport := http.DefaultTransport.(*http.Transport).Clone()
+		fixtureTransport, ok := server.Client().Transport.(*http.Transport)
+		if !ok {
+			return nil, errors.New("TLS fixture transport is not an HTTP transport")
+		}
+		transport := fixtureTransport.Clone()
 		transport.Proxy = nil
 		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 			if address != server.Listener.Addr().String() {
@@ -294,7 +300,7 @@ func TestDriverDrainThroughPinnedSDKAndPollHook(t *testing.T) {
 		if err != nil {
 			return nil, err
 		}
-		return &SDKAPI{client: client, rest: retry.HTTPClient, baseURL: server.URL + "/api/v3", approval: a, options: options}, nil
+		return &SDKAPI{client: client, rest: retry.HTTPClient, baseURL: server.URL + "/api/v3", approval: fixtureApproval, credentials: credentials(fixtureApproval), options: options}, nil
 	}
 	base, err := buildAPI(nil)
 	if err != nil {
@@ -536,6 +542,81 @@ func TestPinnedSDKDrainRejectsAmbiguousSessionResponse(t *testing.T) {
 	}
 }
 
+func TestPinnedSDKDrainRequiresApprovedHTTPSQueueHost(t *testing.T) {
+	a := approval()
+	for _, tc := range []struct {
+		name     string
+		queueURL string
+		wantOpen bool
+	}{
+		{name: "approved fixture host", queueURL: "QUEUE_URL", wantOpen: true},
+		{name: "control plane API host", queueURL: "https://api.github.com/_apis/messages/queue", wantOpen: false},
+		{name: "unapproved Actions host", queueURL: "https://fixture.actions.githubusercontent.com/_apis/messages/queue", wantOpen: false},
+		{name: "plain HTTP", queueURL: "http://fixture.actions.githubusercontent.com/_apis/messages/queue", wantOpen: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture, _, session, hook := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{
+				sessionBody:    pinnedDrainSessionBody(a, tc.queueURL),
+				allowOpenError: !tc.wantOpen,
+			})
+			if tc.wantOpen {
+				if fixture.openErr != nil || session == nil {
+					t.Fatalf("approved HTTPS queue rejected: err=%v session=%v", fixture.openErr, session)
+				}
+				hook.mu.Lock()
+				target := hook.target
+				hook.mu.Unlock()
+				if target != fixture.server.URL+"/queue" {
+					t.Fatalf("approved queue target = %q, want fixture queue", target)
+				}
+				return
+			}
+			if fixture.openErr == nil || session != nil {
+				t.Fatalf("unapproved queue accepted: err=%v session=%v", fixture.openErr, session)
+			}
+			hook.mu.Lock()
+			target := hook.target
+			hook.mu.Unlock()
+			if target != "" {
+				t.Fatalf("rejected queue assigned poll target %q", target)
+			}
+		})
+	}
+}
+
+func TestValidDrainQueueURLRequiresExactApprovedHostPort(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		queueURL string
+		approved []string
+		want     bool
+	}{
+		{name: "implicit HTTPS port", queueURL: "https://fixture.actions.githubusercontent.com/queue", approved: []string{"fixture.actions.githubusercontent.com"}, want: true},
+		{name: "explicit default HTTPS port", queueURL: "https://fixture.actions.githubusercontent.com:443/queue", approved: []string{"fixture.actions.githubusercontent.com"}, want: true},
+		{name: "wrong approved port", queueURL: "https://fixture.actions.githubusercontent.com:8443/queue", approved: []string{"fixture.actions.githubusercontent.com:9443"}, want: false},
+		{name: "wrong queue port", queueURL: "https://fixture.actions.githubusercontent.com:8443/queue", approved: []string{"fixture.actions.githubusercontent.com:8443"}, want: true},
+		{name: "API control plane", queueURL: "https://api.github.com/queue", approved: []string{"fixture.actions.githubusercontent.com"}, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := validDrainQueueURL(tc.queueURL, tc.approved); got != tc.want {
+				t.Fatalf("queue URL validity = %v, want %v for %q and %v", got, tc.want, tc.queueURL, tc.approved)
+			}
+		})
+	}
+}
+
+func pinnedDrainSessionBody(a Approval, queueURL string) string {
+	data, _ := json.Marshal(map[string]any{
+		"sessionId":               "00000000-0000-4000-8000-000000000021",
+		"ownerName":               a.setName(),
+		"runnerScaleSet":          pinnedDrainScaleSet(a),
+		"messageQueueUrl":         queueURL,
+		"messageQueueAccessToken": "fixture-queue",
+		"statistics":              &scaleset.RunnerScaleSetStatistic{TotalRegisteredRunners: 1, TotalIdleRunners: 1},
+	})
+	return string(data)
+}
+
 func pinnedDrainJobBody(a Approval) string {
 	data, _ := json.Marshal([]map[string]any{{
 		"messageType":     "JobAvailable",
@@ -593,7 +674,7 @@ func newPinnedDrainSessionOptions(t *testing.T, a Approval, body string, options
 		runnerBody:     options.runnerBody,
 		snapshotBodies: append([]string(nil), options.snapshotBodies...),
 	}
-	fixture.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	fixture.server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/actions/runners/registration-token") && r.Method == http.MethodPost:
 			w.Header().Set("Content-Type", "application/json")
@@ -689,13 +770,22 @@ func newPinnedDrainSessionOptions(t *testing.T, a Approval, body string, options
 		}
 	}))
 	t.Cleanup(fixture.server.Close)
+	fixtureApproval := a
+	// The offline TLS fixture's loopback host is explicitly approved for this
+	// test-only SDK factory; production Approval validation still permits only
+	// the provider's Actions hostnames.
+	fixtureApproval.ActionsHosts = []string{fixture.server.Listener.Addr().String()}
 
 	buildAPI := func(hook *drainPollHook) (*SDKAPI, error) {
 		retry := retryablehttp.NewClient()
 		retry.RetryMax = 0
 		retry.Logger = nil
 		retry.HTTPClient.Timeout = time.Second
-		transport := http.DefaultTransport.(*http.Transport).Clone()
+		fixtureTransport, ok := fixture.server.Client().Transport.(*http.Transport)
+		if !ok {
+			return nil, errors.New("TLS fixture transport is not an HTTP transport")
+		}
+		transport := fixtureTransport.Clone()
 		transport.Proxy = nil
 		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 			if address != fixture.server.Listener.Addr().String() {
@@ -726,7 +816,7 @@ func newPinnedDrainSessionOptions(t *testing.T, a Approval, body string, options
 		if err != nil {
 			return nil, err
 		}
-		return &SDKAPI{client: client, rest: retry.HTTPClient, baseURL: fixture.server.URL + "/api/v3", approval: a, credentials: credentials(a), options: options}, nil
+		return &SDKAPI{client: client, rest: retry.HTTPClient, baseURL: fixture.server.URL + "/api/v3", approval: fixtureApproval, credentials: credentials(fixtureApproval), options: options}, nil
 	}
 	base, err := buildAPI(nil)
 	if err != nil {
