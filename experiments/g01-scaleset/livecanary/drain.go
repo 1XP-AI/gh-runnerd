@@ -101,12 +101,18 @@ var drainStatisticsFields = [...]string{
 // object into a non-nil all-zero struct, so a pointer alone is not evidence
 // that the service supplied a complete statistics sample.
 func drainStatisticsFromBody(body []byte) (drainStatistics, bool) {
+	if !uniqueKeys(json.NewDecoder(bytes.NewReader(body))) {
+		return drainStatistics{}, false
+	}
 	var envelope map[string]json.RawMessage
 	if json.Unmarshal(body, &envelope) != nil {
 		return drainStatistics{}, false
 	}
 	raw, ok := envelope["statistics"]
 	if !ok || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return drainStatistics{}, false
+	}
+	if !uniqueKeys(json.NewDecoder(bytes.NewReader(raw))) {
 		return drainStatistics{}, false
 	}
 	var fields map[string]json.RawMessage
@@ -208,6 +214,10 @@ func sameDrainRunner(before, after *drainRunnerIdentity) bool {
 	return before != nil && after != nil && *before == *after
 }
 
+func sameDrainRunnerPartition(left, right drainStatistics) bool {
+	return left.Registered == right.Registered && left.Busy == right.Busy && left.Idle == right.Idle
+}
+
 func validDrainObservation(o *drainObservation) bool {
 	if o == nil || o.Version != drainObservationVersion || (o.Outcome != drainOutcomeObserved && o.Outcome != drainOutcomeInconclusive) || o.InitialCapacity != drainInitialCapacity || o.WithdrawnCapacity != drainWithdrawnCapacity || o.ServerReceipt != drainServerReceiptUnproven || o.Sequence <= 0 || o.ObservedAt.IsZero() || len(o.Ordering) > 8 {
 		return false
@@ -219,6 +229,9 @@ func validDrainObservation(o *drainObservation) bool {
 		return false
 	}
 	if o.Outcome == drainOutcomeObserved && !sameDrainRunner(o.Before.Runner, o.After.Runner) {
+		return false
+	}
+	if o.Outcome == drainOutcomeObserved && !sameDrainRunnerPartition(o.Poll.Statistics, o.Before.Statistics) {
 		return false
 	}
 	seen := map[string]bool{}
@@ -271,6 +284,7 @@ type drainPollHook struct {
 	pollAttempts        int
 	statistics          [3]drainStatistics
 	statisticsKnown     [3]bool
+	wroteCallbacks      [3]int
 	onRequestWritten    func()
 	wroteOnce           sync.Once
 	responseOnce        sync.Once
@@ -343,23 +357,27 @@ func (h *drainPollHook) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 
 	trace := &httptrace.ClientTrace{WroteRequest: func(info httptrace.WroteRequestInfo) {
+		notify := false
 		h.mu.Lock()
+		if attempt < 1 || attempt >= len(h.wroteCallbacks) {
+			h.invalid = true
+		} else {
+			h.wroteCallbacks[attempt]++
+			notify = h.wroteCallbacks[attempt] == 1
+			if h.wroteCallbacks[attempt] != 1 {
+				h.invalid = true
+			}
+		}
 		if info.Err != nil {
 			h.invalid = true
 		} else {
 			h.wroteRequest = true
 		}
 		h.mu.Unlock()
-		if info.Err == nil {
-			h.wroteOnce.Do(func() {
-				if h.onRequestWritten != nil {
-					h.onRequestWritten()
-				}
-				close(h.wrote)
-			})
-		} else {
-			h.wroteOnce.Do(func() { close(h.wrote) })
+		if notify && info.Err == nil && h.onRequestWritten != nil {
+			h.onRequestWritten()
 		}
+		h.wroteOnce.Do(func() { close(h.wrote) })
 	}}
 	response, err := h.inner.RoundTrip(req.WithContext(httptrace.WithClientTrace(req.Context(), trace)))
 	if err != nil {
@@ -516,7 +534,7 @@ func (h *drainPollHook) boundary() (string, bool, bool) {
 	defer h.mu.Unlock()
 	switch {
 	case h.wroteRequest && h.responseHeld && !h.responseBeforeWrite:
-		return drainBoundaryRequestWritten, true, !h.invalid
+		return drainBoundaryRequestWritten, true, !h.invalid && h.wroteCallbacks[1] == 1
 	case h.responseBeforeWrite:
 		return drainBoundaryResponseBeforeWrite, h.responseHeld, false
 	default:
@@ -546,16 +564,18 @@ func (b *drainHeldBody) Close() error {
 // drainClient records only high-level listener effects and the two bounded
 // polls. It never changes ACK or acquisition order.
 type drainClient struct {
-	inner     listener.Client
-	validate  func(context.Context, *scaleset.RunnerScaleSetMessage) error
-	obs       *drainObservation
-	hook      *drainPollHook
-	phaseCtx  context.Context
-	reject    func(string) error
-	mu        sync.Mutex
-	polls     int
-	messageID int
-	requestID int64
+	inner                 listener.Client
+	validate              func(context.Context, *scaleset.RunnerScaleSetMessage) error
+	obs                   *drainObservation
+	hook                  *drainPollHook
+	phaseCtx              context.Context
+	reject                func(string) error
+	ownedRunnerStats      drainStatistics
+	ownedRunnerStatsKnown bool
+	mu                    sync.Mutex
+	polls                 int
+	messageID             int
+	requestID             int64
 }
 
 type drainContextBinder interface {
@@ -644,7 +664,7 @@ func (c *drainClient) GetMessage(ctx context.Context, last, capacity int) (*scal
 		return nil, ErrQuarantine
 	}
 	messageStats, statsErr := newDrainStatistics(message.Statistics)
-	if statsErr != nil || (c.hook != nil && stats != messageStats) || message.MessageID <= 0 || len(message.JobAssignedMessages) != 0 || len(message.JobStartedMessages) != 0 || len(message.JobCompletedMessages) != 0 || len(message.JobAvailableMessages) != 1 || message.JobAvailableMessages[0] == nil || message.JobAvailableMessages[0].RunnerRequestID <= 0 {
+	if statsErr != nil || (c.hook != nil && stats != messageStats) || (index == 1 && c.ownedRunnerStatsKnown && !sameDrainRunnerPartition(stats, c.ownedRunnerStats)) || message.MessageID <= 0 || len(message.JobAssignedMessages) != 0 || len(message.JobStartedMessages) != 0 || len(message.JobCompletedMessages) != 0 || len(message.JobAvailableMessages) != 1 || message.JobAvailableMessages[0] == nil || message.JobAvailableMessages[0].RunnerRequestID <= 0 {
 		c.mu.Lock()
 		c.obs.poll(index).Message = drainMessageUnknown
 		c.mu.Unlock()
@@ -768,13 +788,13 @@ func runDrainListener(ctx context.Context, client listener.Client, setID int, ho
 	if initial.SessionID == [16]byte{} || initial.Statistics == nil {
 		return obs, ErrQuarantine
 	}
-	if stats, err := newDrainStatistics(initial.Statistics); err != nil {
+	initialStats, err := newDrainStatistics(initial.Statistics)
+	if err != nil {
 		return obs, err
-	} else {
-		obs.Poll.Statistics = stats
-		obs.Poll.StatsKnown = true
 	}
-	c := &drainClient{inner: client, obs: &obs, hook: hook}
+	obs.Poll.Statistics = initialStats
+	obs.Poll.StatsKnown = true
+	c := &drainClient{inner: client, obs: &obs, hook: hook, ownedRunnerStats: initialStats, ownedRunnerStatsKnown: true}
 	if rejecter, ok := client.(interface{ reject(string) error }); ok {
 		c.reject = rejecter.reject
 	}
@@ -862,7 +882,7 @@ func runDrainListener(ctx context.Context, client listener.Client, setID int, ho
 		if obs.Boundary == "" {
 			obs.Boundary, obs.ResponseHeld, _ = hook.boundary()
 		}
-		if obs.Boundary == drainBoundaryRequestWritten && obs.ResponseHeld && obs.Poll.Message == drainMessagePresent && obs.Poll.StatsKnown && obs.Poll.Statistics != (drainStatistics{}) && obs.Poll.ACK == drainResponseSucceeded && obs.Poll.Acquisition == drainResponseSucceeded && obs.NextPoll.Message == drainMessageAbsent && obs.NextPoll.StatsKnown {
+		if obs.Boundary == drainBoundaryRequestWritten && obs.ResponseHeld && obs.Poll.Message == drainMessagePresent && obs.Poll.StatsKnown && obs.Poll.Statistics != (drainStatistics{}) && c.ownedRunnerStatsKnown && sameDrainRunnerPartition(obs.Poll.Statistics, c.ownedRunnerStats) && obs.Poll.ACK == drainResponseSucceeded && obs.Poll.Acquisition == drainResponseSucceeded && obs.NextPoll.Message == drainMessageAbsent && obs.NextPoll.StatsKnown {
 			obs.Outcome = drainOutcomeObserved
 			return obs, nil
 		}

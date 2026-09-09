@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"strconv"
 	"strings"
 	"sync"
@@ -574,6 +575,93 @@ func TestDrainPollHookPreservesStatisticsFieldPresence(t *testing.T) {
 				t.Fatalf("statistics field presence = %v, want %v", got, test.want)
 			}
 		})
+	}
+}
+
+func TestDrainStatisticsRejectsDuplicateJSONFields(t *testing.T) {
+	full := `{"statistics":{"totalAvailableJobs":1,"totalAcquiredJobs":0,"totalAssignedJobs":1,"totalRunningJobs":0,"totalRegisteredRunners":1,"totalBusyRunners":0,"totalIdleRunners":1}}`
+	for _, test := range []struct {
+		name string
+		body string
+	}{
+		{name: "duplicate-required", body: `{"statistics":{"totalAvailableJobs":1,"totalAcquiredJobs":0,"totalAssignedJobs":1,"totalRunningJobs":0,"totalRegisteredRunners":1,"totalBusyRunners":0,"totalIdleRunners":1,"totalIdleRunners":1}}`},
+		{name: "duplicate-casefolded-required", body: `{"statistics":{"totalAvailableJobs":1,"totalAcquiredJobs":0,"totalAssignedJobs":1,"totalRunningJobs":0,"totalRegisteredRunners":1,"totalBusyRunners":0,"totalIdleRunners":1,"TotalIdleRunners":1}}`},
+		{name: "duplicate-top-level", body: full[:len(full)-1] + `,"statistics":{"totalAvailableJobs":1,"totalAcquiredJobs":0,"totalAssignedJobs":1,"totalRunningJobs":0,"totalRegisteredRunners":1,"totalBusyRunners":0,"totalIdleRunners":1}}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			stats, known := drainStatisticsFromBody([]byte(test.body))
+			if known || stats != (drainStatistics{}) {
+				t.Fatalf("ambiguous statistics accepted: stats=%+v known=%v body=%s", stats, known, test.body)
+			}
+		})
+	}
+}
+
+type duplicatePollWriteTransport struct{}
+
+func (duplicatePollWriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	trace := httptrace.ContextClientTrace(req.Context())
+	if trace == nil || trace.WroteRequest == nil {
+		return nil, errors.New("missing client trace")
+	}
+	trace.WroteRequest(httptrace.WroteRequestInfo{})
+	trace.WroteRequest(httptrace.WroteRequestInfo{})
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(`{"statistics":{"totalAvailableJobs":1,"totalAcquiredJobs":0,"totalAssignedJobs":1,"totalRunningJobs":0,"totalRegisteredRunners":1,"totalBusyRunners":0,"totalIdleRunners":1}}`)),
+	}, nil
+}
+
+func TestDrainPollHookRejectsDuplicatePhysicalWrites(t *testing.T) {
+	target := "http://fixture.invalid/queue"
+	hook := newDrainPollHook(target)
+	hook.inner = duplicatePollWriteTransport{}
+	req, err := http.NewRequest(http.MethodGet, target, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := hook.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hook.releaseResponse()
+	_, _ = io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	_, _, proven := hook.boundary()
+	if proven {
+		t.Fatal("duplicate physical poll write was promoted to a proven boundary")
+	}
+}
+
+func TestDrainObservationRejectsPollCountersContradictingOwnedRunner(t *testing.T) {
+	observation := validDrainTestObservation()
+	// A valid internal partition with zero registered runners still contradicts
+	// the exact one-runner idle prerequisite captured before the poll.
+	observation.Poll.Statistics = drainStatistics{Available: 1, Assigned: 1}
+	if validDrainObservation(&observation) {
+		t.Fatal("poll counters contradicting the one owned runner were promoted to observed")
+	}
+}
+
+func TestDrainClientRejectsPollRunnerPartitionMismatchBeforeEffects(t *testing.T) {
+	inner := &drainGuardSession{
+		initial: scaleset.RunnerScaleSetSession{SessionID: uuid.New(), Statistics: &scaleset.RunnerScaleSetStatistic{}},
+		message: &scaleset.RunnerScaleSetMessage{
+			MessageID:            7,
+			Statistics:           &scaleset.RunnerScaleSetStatistic{TotalAvailableJobs: 1, TotalAssignedJobs: 1},
+			JobAvailableMessages: []*scaleset.JobAvailable{{JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: 11}}},
+		},
+	}
+	obs := drainObservation{Poll: drainPollObservation{Message: drainMessageUnknown}, NextPoll: drainPollObservation{Message: drainMessageUnknown}}
+	client := &drainClient{
+		inner: inner, obs: &obs, phaseCtx: context.Background(),
+		ownedRunnerStats: drainStatistics{Registered: 1, Idle: 1}, ownedRunnerStatsKnown: true,
+	}
+	if _, err := client.GetMessage(context.Background(), 0, drainInitialCapacity); !errors.Is(err, ErrQuarantine) {
+		t.Fatalf("runner partition mismatch = %v, want quarantine", err)
+	}
+	if inner.ackCalls != 0 || inner.acquireCalls != 0 {
+		t.Fatalf("runner partition mismatch triggered effects: ack=%d acquire=%d", inner.ackCalls, inner.acquireCalls)
 	}
 }
 
