@@ -89,7 +89,7 @@ func runWithPreparation(args []string, in io.Reader, out io.Writer, revisionForB
 		if *approvalPath != "" || *statePath != "" || *phase != "" || workerInputs || *pairedBinding != "" {
 			return reject()
 		}
-		fmt.Fprintln(out, "Controller-only phases: create, before-ack, after-ack, before-acquire, acquire-loss, jit-loss, inspect, cleanup. Paired terminal mode uses one same-process executable with explicit worker approval/state inputs and fixed terminal sequencing; no worker launch or workflow dispatch. Live execution requires an immutable reviewed build, exact private approval and controller-side broker input.")
+		fmt.Fprintln(out, "Controller-only phases: create, before-ack, after-ack, before-acquire, acquire-loss, jit-loss, drain, inspect, cleanup. Paired terminal mode uses one same-process executable with explicit worker approval/state inputs and fixed terminal sequencing; no worker launch or workflow dispatch. Live execution requires an immutable reviewed build, exact private approval and controller-side broker input.")
 		return 0
 	}
 	modeCount := 0

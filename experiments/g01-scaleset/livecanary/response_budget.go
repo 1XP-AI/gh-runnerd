@@ -14,8 +14,14 @@ var errResponseBudget = errors.New("response body budget exceeded")
 // when it constructs session clients. Standard RegisterProtocol permits a shared
 // response wrapper without replacing that required type or patching the SDK.
 // The inner clone preserves the already configured TLS/host/proxy restrictions.
-func withResponseBudget(transport *http.Transport) *http.Transport {
-	wrapped := responseBudgetTransport{inner: transport}
+func withResponseBudget(transport *http.Transport, wrappers ...func(http.RoundTripper) http.RoundTripper) *http.Transport {
+	var inner http.RoundTripper = transport
+	for _, wrap := range wrappers {
+		if wrap != nil {
+			inner = wrap(inner)
+		}
+	}
+	wrapped := responseBudgetTransport{inner: inner}
 	outer := transport.Clone()
 	// The outer transport only dispatches to the wrapper. Disable its own HTTP/2
 	// setup so it cannot register a competing HTTPS handler; the inner transport

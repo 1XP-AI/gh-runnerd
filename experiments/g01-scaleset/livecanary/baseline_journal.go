@@ -116,6 +116,13 @@ func cloneEvent(e Event) Event {
 		e.Authority = &x
 	}
 	e.RequestIDs = slices.Clone(e.RequestIDs)
+	if e.Drain != nil {
+		data, _ := json.Marshal(e.Drain)
+		var x drainObservation
+		_ = json.Unmarshal(data, &x)
+		x.Ordering = slices.Clone(e.Drain.Ordering)
+		e.Drain = &x
+	}
 	if e.Baseline != nil {
 		data, _ := json.Marshal(e.Baseline)
 		var x baselineRecord

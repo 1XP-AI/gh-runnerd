@@ -41,18 +41,19 @@ type Approval struct {
 }
 
 type Event struct {
-	Baseline   *baselineRecord `json:"baseline,omitempty"`
-	Authority  *phaseAuthority `json:"authority,omitempty"`
-	Sequence   int             `json:"sequence"`
-	Kind       string          `json:"kind"`
-	Operation  string          `json:"operation,omitempty"`
-	ID         int             `json:"id,omitempty"`
-	SessionID  string          `json:"session_id,omitempty"`
-	RequestIDs []int64         `json:"request_ids,omitempty"`
-	Count      int             `json:"count,omitempty"`
-	Digest     string          `json:"digest,omitempty"`
-	Succeeded  bool            `json:"succeeded,omitempty"`
-	Work       string          `json:"work,omitempty"`
+	Baseline   *baselineRecord   `json:"baseline,omitempty"`
+	Drain      *drainObservation `json:"drain,omitempty"`
+	Authority  *phaseAuthority   `json:"authority,omitempty"`
+	Sequence   int               `json:"sequence"`
+	Kind       string            `json:"kind"`
+	Operation  string            `json:"operation,omitempty"`
+	ID         int               `json:"id,omitempty"`
+	SessionID  string            `json:"session_id,omitempty"`
+	RequestIDs []int64           `json:"request_ids,omitempty"`
+	Count      int               `json:"count,omitempty"`
+	Digest     string            `json:"digest,omitempty"`
+	Succeeded  bool              `json:"succeeded,omitempty"`
+	Work       string            `json:"work,omitempty"`
 }
 
 type Journal interface {
@@ -113,6 +114,12 @@ func replay(events []Event) state {
 			if e.Operation == "poll" {
 				for _, id := range e.RequestIDs {
 					s.observedJobs[id] = true
+				}
+			}
+			if e.Operation == "drain" {
+				s.workObserved = true
+				if e.Drain == nil || e.Drain.Outcome != drainOutcomeObserved {
+					s.uncertain = true
 				}
 			}
 		case "intent":
@@ -330,6 +337,9 @@ func (d *Driver) Run(ctx context.Context, phase string) error {
 			}
 			return Event{}, ErrBarrier
 		})
+	}
+	if phase == "drain" {
+		return d.drain(ctx, s.setID)
 	}
 	return d.probe(ctx, phase, s.setID)
 }

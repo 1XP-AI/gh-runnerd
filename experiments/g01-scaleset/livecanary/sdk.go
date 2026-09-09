@@ -42,7 +42,7 @@ func (c Credentials) validate(a Approval, now time.Time) error {
 		return ErrApproval
 	}
 	needsVerification := slices.ContainsFunc(a.Phases, func(p string) bool {
-		return p == "before-ack" || p == "after-ack" || p == "before-acquire" || p == "acquire-loss"
+		return p == "before-ack" || p == "after-ack" || p == "before-acquire" || p == "acquire-loss" || p == "drain"
 	})
 	if needsVerification && (len(c.VerificationToken) < 20 || len(c.VerificationToken) > 1024 || c.VerificationToken == c.InstallationToken || strings.ContainsAny(c.VerificationToken, "\r\n\x00")) {
 		return ErrApproval
@@ -63,6 +63,10 @@ type SDKAPI struct {
 // Actions hosts over direct TLS. No proxy, redirect, retry logger, automatic HTTP
 // retry, credential environment read or worker process is configured here.
 func NewSDKAPI(a Approval, c Credentials) (*SDKAPI, error) {
+	return newSDKAPIWithPollHook(a, c, nil)
+}
+
+func newSDKAPIWithPollHook(a Approval, c Credentials, hook *drainPollHook) (*SDKAPI, error) {
 	if a.Validate(time.Now()) != nil || c.validate(a, time.Now()) != nil {
 		return nil, ErrApproval
 	}
@@ -70,7 +74,14 @@ func NewSDKAPI(a Approval, c Credentials) (*SDKAPI, error) {
 	retry := retryablehttp.NewClient()
 	retry.RetryMax = 0
 	retry.Logger = nil
-	retry.HTTPClient = &http.Client{Transport: withResponseBudget(transport), Timeout: operationTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	wrappers := []func(http.RoundTripper) http.RoundTripper(nil)
+	if hook != nil {
+		wrappers = append(wrappers, func(inner http.RoundTripper) http.RoundTripper {
+			hook.inner = inner
+			return hook
+		})
+	}
+	retry.HTTPClient = &http.Client{Transport: withResponseBudget(transport, wrappers...), Timeout: operationTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	options := []scaleset.HTTPOption{scaleset.WithRetryableHTTPClint(retry), scaleset.WithLogger(slog.New(slog.DiscardHandler))}
 	client, err := scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{GitHubConfigURL: "https://github.com/" + a.Organization, PersonalAccessToken: c.InstallationToken}, options...)
 	if err != nil {
@@ -278,6 +289,24 @@ func (a *SDKAPI) DeleteScaleSet(c context.Context, id int) error {
 }
 func (a *SDKAPI) OpenSession(c context.Context, id int, owner string) (Session, error) {
 	return a.client.MessageSessionClient(c, id, owner, a.options...)
+}
+
+func (a *SDKAPI) OpenDrainSession(c context.Context, id int, owner string, hook *drainPollHook) (Session, error) {
+	if a == nil || hook == nil {
+		return nil, ErrApproval
+	}
+	configured, err := newSDKAPIWithPollHook(a.approval, a.credentials, hook)
+	if err != nil {
+		return nil, err
+	}
+	session, err := configured.client.MessageSessionClient(c, id, owner, configured.options...)
+	if err != nil {
+		return nil, ErrRemote
+	}
+	hook.mu.Lock()
+	hook.target = session.Session().MessageQueueURL
+	hook.mu.Unlock()
+	return session, nil
 }
 func (a *SDKAPI) FindRunner(c context.Context, name string) (*scaleset.RunnerReference, error) {
 	return a.client.GetRunnerByName(c, name)

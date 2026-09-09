@@ -280,6 +280,9 @@ func validEvent(e Event) bool {
 	case "inventory":
 		return len(e.Digest) == 64
 	case "observation":
+		if e.Operation == "drain" {
+			return validDrainObservation(e.Drain)
+		}
 		return e.Operation == "poll" || e.Operation == "inspect" || e.Operation == "inventory"
 	case "response":
 		return e.Operation == "jit" || e.Operation == "acquire"
