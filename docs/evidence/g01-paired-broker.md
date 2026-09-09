@@ -40,7 +40,7 @@ worker daemon-ID boundaries
 and bounded child authority
 ([r3955590276](https://github.com/1XP-AI/gh-runnerd/pull/62#discussion_r3955590276)).
 
-This bounded CI-contract follow-up starts at frozen PR head
+The earlier bounded CI-contract follow-up started at frozen PR head
 `1ebf0b1e50ac200a26b69d0352a61e5a622bbeeb` and owns only the offline gate
 script, its tooling regression tests, this CI guide, and this evidence record.
 It does not change the G01 or G02 runtime.
@@ -882,6 +882,88 @@ Invalid lexical controller paths now return `errBroker` with no paired claim,
 API call, mint, or child; a following canonical attempt on the same admission
 root completes once. Controller-only canonical handoff remains compatible.
 Rollback is a source-only revert of this entry/path validation follow-up.
+
+## Issue 60 hosted job-cap decomposition
+
+This focused follow-up starts after the path-validation correction at
+`7b528a6fc3feca1612bfdc88c721f18147b24050` and owns only the hosted workflow,
+its focused tooling contract test, this CI guide, and this evidence record. It
+does not change the G01/G02 partition scripts or runtime code.
+
+The coordinator's REST annotation for Public CI run `34310027322`, job
+`102334625450`, records a cancellation because the job exceeded its 15-minute
+outer budget: it started at `04:12:11` and ended at `04:27:26`. Root/tooling
+checks consumed `10m52s`; offline experiments started at `04:23:03` and were
+cancelled after `4m21s`. The annotation identifies neither a test-case failure
+nor a manual cancellation. Increasing bounded exhaustive fixture coverage made
+the former single sequential job's aggregate budget too small.
+
+This outer job-cap finding is separate from hosted run `34306339973`, where a
+G01 terminal test package reached its own `120.025s` process deadline with
+`TestPairedTerminalPreParentFailureRetainsReturnedOnlyTerminal` active. The
+older result was a package-level G01 partition timeout and motivated the
+already-recorded terminal split; run `34310027322` is a workflow-level
+aggregate-cap cancellation. Neither result is evidence of a new test assertion
+failure, and this change does not widen either timeout.
+
+The workflow now runs root/tooling, offline experiments, and the pinned
+vulnerability scan in separate hosted `ubuntu-24.04` jobs, each capped at 15
+minutes. Every test-bearing job checks out
+`${{ github.event.pull_request.head.sha || github.sha }}` with
+`persist-credentials: false`, uses the existing reviewed checkout/setup-go
+commits, and disables setup-go caching. The required public `Go checks` name is
+an explicit `always()` aggregator over all three jobs; it checks every
+`needs.<job>.result` and exits nonzero for any result other than `success`,
+including `failure`, `cancelled`, and `skipped`. The aggregator has no source
+checkout because it only evaluates dependency status.
+
+## TDD and focused verification
+
+Before decomposition, the generated workflow contract test failed against the
+single `checks` job:
+
+```text
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=90s \
+  -run '^TestPublicWorkflowCapacityContract$' ./scripts
+FAIL; missing required job "root"; got jobs [checks]
+```
+
+After decomposition, the same contract test generated status fixtures for all
+success, root failure, offline cancellation, and vulnerability skipped cases;
+only the all-success fixture passed the extracted aggregator script:
+
+```text
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=90s \
+  -run '^TestPublicWorkflowCapacityContract$' ./scripts
+PASS; scripts 0.428s
+
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=90s \
+  -run '^TestPublicWorkflowCapacityContract$' ./scripts
+PASS; scripts 1.446s
+
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=420s ./scripts
+PASS; scripts 363.880s
+
+ruby -e 'require "yaml"; y=YAML.load_file(".github/workflows/ci.yml"); abort "missing jobs" unless y["jobs"] || y[true]; p(y["jobs"] || y[true]).keys'
+PASS; ["root", "offline", "vuln", "checks"]
+
+git diff --check
+PASS
+```
+
+The contract also requires every existing `make` command exactly once,
+including both `make test` and `make test-race`, every worker's 15-minute cap,
+the immutable ref and pinned actions, read-only permissions, disabled caches,
+no secrets/self-hosted/target workflow, and all required aggregator
+dependencies. No workflow manual rerun, self-hosted runner operation, runner
+cleanup, action-version warning cleanup, or unrelated code change was used.
+
+Rollback is the exact source-only command
+`git revert --no-edit <Issue-60-hosted-job-cap-decomposition-SHA>`; it removes
+the four-job workflow and contract/docs follow-up while leaving the pathfix,
+G01/G02 partition caps, runtime changes, and manually installed runners
+untouched. A rollback does not authorize workflow replay or live runner
+operations.
 
 ## Remaining gates
 

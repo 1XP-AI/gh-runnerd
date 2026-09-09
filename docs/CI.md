@@ -12,6 +12,16 @@ through Go's environment, rather than placed before its subcommand.
 
 The public workflow runs on a GitHub-hosted `ubuntu-24.04` environment for `pull_request` and pushes to `main`. It grants only `contents: read`, disables checkout credential persistence, and pins every external action to a reviewed commit. It does not use `pull_request_target`, self-hosted runners, secrets, Docker, the local runner manager or any privileged hardware. A fork can therefore run the same checks without access to organization credentials or local runners.
 
+The hosted workflow keeps the required public check name `Go checks` as a
+status aggregator over three bounded jobs: `Root and tooling checks` runs the
+root Make checks through `make licenses`, `Offline experiment checks` runs
+`make experiments`, and `Vulnerability check` runs `make vuln`. Every
+test-bearing job has its own 15-minute cap, the same pinned checkout/setup-go
+actions, an explicit immutable pull-request head ref, and setup-go caching
+disabled. The aggregator uses `always()` so a failed, cancelled, or skipped
+required job is observed, then fails unless all three dependency results are
+exactly `success`; it does not check out source or run a test itself.
+
 Run the same checks locally with:
 
 ```console

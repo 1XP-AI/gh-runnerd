@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -146,6 +147,214 @@ func TestToolingCheckRequiresExecutableLink(t *testing.T) {
 	if err != nil || !strings.Contains(string(workflow), "run: make build") {
 		t.Fatal("hosted workflow omits executable build")
 	}
+}
+
+func TestPublicWorkflowCapacityContract(t *testing.T) {
+	workflowData, err := os.ReadFile("../.github/workflows/ci.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow := string(workflowData)
+	jobs := toolingWorkflowJobs(t, workflow)
+	requiredJobs := []string{"root", "offline", "vuln", "checks"}
+	for _, job := range requiredJobs {
+		if _, ok := jobs[job]; !ok {
+			t.Fatalf("workflow is missing required job %q; got jobs %v", job, toolingWorkflowJobNames(jobs))
+		}
+	}
+	if len(jobs) != len(requiredJobs) {
+		t.Fatalf("workflow has unexpected jobs: %v", toolingWorkflowJobNames(jobs))
+	}
+
+	commands := []string{
+		"toolchain",
+		"build",
+		"fmt-check",
+		"vet",
+		"test",
+		"test-race",
+		"fuzz-smoke",
+		"deps",
+		"licenses",
+		"experiments",
+		"vuln",
+	}
+	for _, command := range commands {
+		pattern := regexp.MustCompile(`(?m)^\s*run: make ` + regexp.QuoteMeta(command) + `$`)
+		if got := len(pattern.FindAllString(workflow, -1)); got != 1 {
+			t.Errorf("make %s appears %d times in hosted workflow, want exactly once", command, got)
+		}
+	}
+	for _, command := range commands[:9] {
+		if !strings.Contains(jobs["root"], "run: make "+command) {
+			t.Errorf("root job omits make %s", command)
+		}
+	}
+	if !strings.Contains(jobs["offline"], "run: make experiments") {
+		t.Error("offline job omits make experiments")
+	}
+	if !strings.Contains(jobs["vuln"], "run: make vuln") {
+		t.Error("vulnerability job omits make vuln")
+	}
+
+	const (
+		checkout = "uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"
+		setupGo  = "uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5"
+		prHead   = "ref: ${{ github.event.pull_request.head.sha || github.sha }}"
+	)
+	for _, job := range []string{"root", "offline", "vuln"} {
+		block := jobs[job]
+		for _, required := range []string{checkout, setupGo, "timeout-minutes: 15", "persist-credentials: false", "cache: false", prHead} {
+			if !strings.Contains(block, required) {
+				t.Errorf("job %s is missing %q", job, required)
+			}
+		}
+	}
+	if !strings.Contains(workflow, "permissions:\n  contents: read") {
+		t.Error("hosted workflow must grant only read-only contents permission")
+	}
+	for _, forbidden := range []string{
+		"contents: write",
+		"pull_request_target:",
+		"self-hosted",
+		"secrets.",
+		"actions/cache@",
+	} {
+		if strings.Contains(workflow, forbidden) {
+			t.Errorf("hosted workflow contains forbidden %q", forbidden)
+		}
+	}
+
+	aggregator := jobs["checks"]
+	if !strings.Contains(aggregator, "name: Go checks") {
+		t.Error("required public check name Go checks is not preserved")
+	}
+	if !strings.Contains(aggregator, "needs: [root, offline, vuln]") {
+		t.Error("Go checks aggregator does not depend on every required job")
+	}
+	if !strings.Contains(aggregator, "if: ${{ always() }}") {
+		t.Error("Go checks aggregator must inspect dependencies after failure, cancellation, or skip")
+	}
+	for _, job := range []string{"root", "offline", "vuln"} {
+		if !strings.Contains(aggregator, "needs."+job+".result") {
+			t.Errorf("Go checks aggregator does not inspect %s result", job)
+		}
+	}
+	if !strings.Contains(aggregator, `[ "$result" != success ]`) || !strings.Contains(aggregator, "exit 1") {
+		t.Error("Go checks aggregator does not fail when a required job is not successful")
+	}
+	if strings.Contains(aggregator, "continue-on-error: true") {
+		t.Error("Go checks aggregator must not ignore a required-job failure")
+	}
+	if !strings.Contains(aggregator, "timeout-minutes: 15") {
+		t.Error("Go checks aggregator must remain bounded to 15 minutes")
+	}
+	aggregatorScript := toolingWorkflowRunScript(t, aggregator)
+	for _, tc := range []struct {
+		name                string
+		root, offline, vuln string
+		succeeds            bool
+	}{
+		{name: "all success", root: "success", offline: "success", vuln: "success", succeeds: true},
+		{name: "root failure", root: "failure", offline: "success", vuln: "success", succeeds: false},
+		{name: "offline cancellation", root: "success", offline: "cancelled", vuln: "success", succeeds: false},
+		{name: "vulnerability skipped", root: "success", offline: "success", vuln: "skipped", succeeds: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := toolingRun(t, t.TempDir(), []string{
+				"ROOT_RESULT=" + tc.root,
+				"OFFLINE_RESULT=" + tc.offline,
+				"VULN_RESULT=" + tc.vuln,
+			}, "bash", "-c", aggregatorScript)
+			if got := err == nil; got != tc.succeeds {
+				t.Fatalf("aggregator status with root=%s offline=%s vuln=%s: success=%t err=%v output=%s", tc.root, tc.offline, tc.vuln, got, err, out)
+			}
+		})
+	}
+}
+
+func toolingWorkflowJobs(t *testing.T, workflow string) map[string]string {
+	t.Helper()
+	lines := strings.Split(workflow, "\n")
+	jobsLine := -1
+	for index, line := range lines {
+		if line == "jobs:" {
+			jobsLine = index
+			break
+		}
+	}
+	if jobsLine < 0 {
+		t.Fatal("workflow is missing jobs mapping")
+	}
+	starts := make(map[string]int)
+	var names []string
+	for index := jobsLine + 1; index < len(lines); index++ {
+		line := lines[index]
+		if len(line) > 0 && line[0] != ' ' && strings.TrimSpace(line) != "" {
+			break
+		}
+		if len(line)-len(strings.TrimLeft(line, " ")) != 2 {
+			continue
+		}
+		name := strings.TrimSpace(line)
+		if !strings.HasSuffix(name, ":") || strings.ContainsAny(name, " \t") {
+			continue
+		}
+		name = strings.TrimSuffix(name, ":")
+		starts[name] = index
+		names = append(names, name)
+	}
+	if len(starts) == 0 {
+		t.Fatal("workflow has no jobs")
+	}
+	blocks := make(map[string]string, len(starts))
+	for index, name := range names {
+		start := starts[name]
+		end := len(lines)
+		if index+1 < len(names) {
+			end = starts[names[index+1]]
+		}
+		blocks[name] = strings.Join(lines[start:end], "\n")
+	}
+	return blocks
+}
+
+func toolingWorkflowJobNames(jobs map[string]string) []string {
+	names := make([]string, 0, len(jobs))
+	for name := range jobs {
+		names = append(names, name)
+	}
+	return names
+}
+
+func toolingWorkflowRunScript(t *testing.T, job string) string {
+	t.Helper()
+	lines := strings.Split(job, "\n")
+	for index, line := range lines {
+		if line != "        run: |" {
+			continue
+		}
+		var script []string
+		for _, bodyLine := range lines[index+1:] {
+			if bodyLine != "" && len(bodyLine)-len(strings.TrimLeft(bodyLine, " ")) <= 8 {
+				break
+			}
+			if bodyLine == "" {
+				script = append(script, "")
+				continue
+			}
+			if !strings.HasPrefix(bodyLine, "          ") {
+				t.Fatalf("workflow run body is not indented consistently: %q", bodyLine)
+			}
+			script = append(script, strings.TrimPrefix(bodyLine, "          "))
+		}
+		if len(script) == 0 {
+			t.Fatal("workflow run block is empty")
+		}
+		return strings.Join(script, "\n")
+	}
+	t.Fatal("workflow job is missing a literal run block")
+	return ""
 }
 
 func TestToolingEstablishedModulesAreRequired(t *testing.T) {
