@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +21,7 @@ type baselineWireCapture struct {
 	setID         int
 	sessionID     string
 	queue         string // private, captured from the exact session; never journaled
+	allowedHosts  []string
 	cursor        int
 	count, status int
 	invalid       bool
@@ -69,20 +71,10 @@ func (c *baselineWireCapture) target(r *http.Request) bool {
 	if c.stage == "session-open" {
 		suffix += "sessions"
 	} else if c.stage == "acquire" {
-		// The synthetic drain transport uses the queue URL for its bounded
-		// acquisition request. The released SDK uses the Actions API endpoint
-		// below; accepting this exact queue form keeps the strict adapter useful
-		// for both without widening the target matcher.
-		if c.queue != "" {
-			u, e := url.Parse(c.queue)
-			if e == nil && u.Scheme != "" && u.Host != "" && u.User == nil && u.Fragment == "" {
-				u.Path = strings.TrimSuffix(u.Path, "/") + "/acquirejobs"
-				if r.Method == "POST" && r.URL.String() == u.String() {
-					return true
-				}
-			}
+		if len(c.allowedHosts) == 0 || !slices.Contains(c.allowedHosts, r.URL.Host) {
+			return false
 		}
-		suffix += "acquirejobs"
+		suffix = "/_apis/runtime" + suffix + "acquirejobs"
 	} else if c.stage == "jit" {
 		suffix += "generatejitconfig"
 	} else {
@@ -90,6 +82,14 @@ func (c *baselineWireCapture) target(r *http.Request) bool {
 	}
 	q := r.URL.Query()
 	return r.Method == "POST" && strings.HasSuffix(r.URL.Path, suffix) && len(q) == 1 && len(q["api-version"]) == 1 && q.Get("api-version") == "6.0-preview"
+}
+
+func baselineWireAllowedHosts(a Approval, apiHost string) []string {
+	hosts := slices.Clone(a.ActionsHosts)
+	if apiHost != "" && !slices.Contains(hosts, apiHost) {
+		hosts = append(hosts, apiHost)
+	}
+	return hosts
 }
 
 // Run after the ordinary response budget has wrapped the body. Only this

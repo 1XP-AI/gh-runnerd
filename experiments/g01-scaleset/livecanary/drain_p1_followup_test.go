@@ -12,6 +12,38 @@ import (
 	"github.com/actions/scaleset"
 )
 
+func TestBaselineAcquireTargetIsActionsOnly(t *testing.T) {
+	capture := &baselineWireCapture{
+		stage:        "acquire",
+		setID:        7,
+		queue:        "https://queue.example/queue?access_token=fixture",
+		allowedHosts: []string{"api.example"},
+	}
+	for _, tc := range []struct {
+		name   string
+		method string
+		target string
+		want   bool
+	}{
+		{name: "actions endpoint", method: http.MethodPost, target: "https://api.example/_apis/runtime/runnerscalesets/7/acquirejobs?api-version=6.0-preview", want: true},
+		{name: "queue endpoint", method: http.MethodPost, target: "https://queue.example/queue/acquirejobs?access_token=fixture", want: false},
+		{name: "wrong host", method: http.MethodPost, target: "https://other.example/_apis/runtime/runnerscalesets/7/acquirejobs?api-version=6.0-preview", want: false},
+		{name: "wrong set path", method: http.MethodPost, target: "https://api.example/_apis/runtime/runnerscalesets/8/acquirejobs?api-version=6.0-preview", want: false},
+		{name: "wrong endpoint path", method: http.MethodPost, target: "https://api.example/runnerscalesets/7/acquirejobs?api-version=6.0-preview", want: false},
+		{name: "wrong method", method: http.MethodGet, target: "https://api.example/_apis/runtime/runnerscalesets/7/acquirejobs?api-version=6.0-preview", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := http.NewRequest(tc.method, tc.target, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := capture.target(req); got != tc.want {
+				t.Fatalf("acquisition target match = %v, want %v for %s", got, tc.want, tc.target)
+			}
+		})
+	}
+}
+
 func TestPinnedSDKDrainRejectsPhysicalPollMutationBeforeInner(t *testing.T) {
 	a := approval()
 	for _, tc := range []struct {

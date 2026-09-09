@@ -16,6 +16,10 @@ type drainScaleSetWireReader interface {
 	drainGetScaleSet(context.Context, int, *baselineWireCapture) (*scaleset.RunnerScaleSet, error)
 }
 
+type drainEndpointHostReader interface {
+	drainEndpointHost() string
+}
+
 type journaledDrainClient struct {
 	d         *Driver
 	inner     Session
@@ -143,7 +147,11 @@ func (c *journaledDrainClient) AcquireJobs(ctx context.Context, ids []int64) ([]
 			c.hook.mu.Lock()
 			queue := c.hook.target
 			c.hook.mu.Unlock()
-			wire = &baselineWireCapture{stage: "acquire", setID: setID, queue: queue}
+			apiHost := ""
+			if reader, ok := c.d.API.(drainEndpointHostReader); ok {
+				apiHost = reader.drainEndpointHost()
+			}
+			wire = &baselineWireCapture{stage: "acquire", setID: setID, queue: queue, allowedHosts: baselineWireAllowedHosts(c.d.Approval, apiHost)}
 			call = wire.context(call)
 		}
 		got, err = c.inner.AcquireJobs(call, slices.Clone(ids))

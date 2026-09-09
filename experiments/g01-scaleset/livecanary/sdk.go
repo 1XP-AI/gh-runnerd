@@ -283,6 +283,17 @@ func (a *SDKAPI) GetScaleSet(c context.Context, id int) (*scaleset.RunnerScaleSe
 	return a.client.GetRunnerScaleSetByID(c, id)
 }
 
+func (a *SDKAPI) drainEndpointHost() string {
+	if a == nil {
+		return ""
+	}
+	u, err := url.Parse(a.baseURL)
+	if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil || u.Fragment != "" {
+		return ""
+	}
+	return u.Host
+}
+
 func (a *SDKAPI) drainGetScaleSet(c context.Context, id int, wire *baselineWireCapture) (*scaleset.RunnerScaleSet, error) {
 	if wire == nil {
 		return nil, ErrQuarantine

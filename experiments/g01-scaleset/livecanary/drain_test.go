@@ -25,6 +25,7 @@ func TestDrainListenerWithdrawsWhilePollResponseIsHeld(t *testing.T) {
 	var mu sync.Mutex
 	var capacities []string
 	var order []string
+	var acquireRequests []string
 	polls := 0
 	message := map[string]any{
 		"messageId":   7,
@@ -67,6 +68,7 @@ func TestDrainListenerWithdrawsWhilePollResponseIsHeld(t *testing.T) {
 		}
 		if r.Method == http.MethodPost {
 			order = append(order, "acquire")
+			acquireRequests = append(acquireRequests, r.Method+" "+r.URL.RequestURI())
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			_, _ = io.WriteString(w, `{"count":1,"value":[11]}`)
@@ -96,12 +98,16 @@ func TestDrainListenerWithdrawsWhilePollResponseIsHeld(t *testing.T) {
 	mu.Lock()
 	gotCapacities := append([]string(nil), capacities...)
 	gotOrder := append([]string(nil), order...)
+	gotAcquireRequests := append([]string(nil), acquireRequests...)
 	mu.Unlock()
 	if len(gotCapacities) != 2 || gotCapacities[0] != "1" || gotCapacities[1] != "0" {
 		t.Fatalf("poll capacities = %v, want [1 0]", gotCapacities)
 	}
 	if len(gotOrder) != 2 || gotOrder[0] != "ack" || gotOrder[1] != "acquire" {
 		t.Fatalf("side-effect order = %v, want ACK then acquire", gotOrder)
+	}
+	if len(gotAcquireRequests) != 1 || gotAcquireRequests[0] != "POST /_apis/runtime/runnerscalesets/7/acquirejobs?api-version=6.0-preview" {
+		t.Fatalf("acquisition request = %v, want pinned Actions endpoint", gotAcquireRequests)
 	}
 	if observation.Boundary != drainBoundaryRequestWritten || !observation.ResponseHeld || observation.ServerReceipt != drainServerReceiptUnproven {
 		t.Fatalf("boundary = %+v, want request-written/held/server-unproven", observation)
@@ -1211,7 +1217,17 @@ func (s *drainSyntheticSession) AcquireJobs(ctx context.Context, ids []int64) ([
 	if len(ids) != 1 {
 		return nil, errors.New("unexpected request count")
 	}
-	if err := appendSyntheticMethod(ctx, s.client, http.MethodPost, s.initial.MessageQueueURL+"/acquirejobs", s.order); err != nil {
+	target, err := url.Parse(s.initial.MessageQueueURL)
+	if err != nil {
+		return nil, err
+	}
+	setID := 7
+	if s.initial.RunnerScaleSet != nil && s.initial.RunnerScaleSet.ID > 0 {
+		setID = s.initial.RunnerScaleSet.ID
+	}
+	target.Path = "/_apis/runtime/runnerscalesets/" + strconv.Itoa(setID) + "/acquirejobs"
+	target.RawQuery = url.Values{"api-version": {"6.0-preview"}}.Encode()
+	if err := appendSyntheticMethod(ctx, s.client, http.MethodPost, target.String(), s.order); err != nil {
 		return nil, err
 	}
 	return append([]int64(nil), ids...), nil

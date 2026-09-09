@@ -163,7 +163,7 @@ func (b *baselineListener) finish(r baselineRecord, known bool) (controllerRecor
 	return ref, nil
 }
 func (b *baselineListener) wire(stage string) *baselineWireCapture {
-	return &baselineWireCapture{stage: stage, setID: b.setID, queue: b.queue}
+	return &baselineWireCapture{stage: stage, setID: b.setID, queue: b.queue, allowedHosts: baselineWireAllowedHosts(b.approval, b.api.drainEndpointHost())}
 }
 func (b *baselineListener) run(after func(context.Context, baselineAcquisition) error) error {
 	if b == nil || b.ctx == nil || b.cancel == nil || !b.mu.TryLock() {
