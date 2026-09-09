@@ -1,5 +1,11 @@
 {
   "schema_version": 1,
+  "field_semantics": {
+    "status": "initial_historical_planning_snapshot",
+    "agent": "initial_historical_planning_snapshot",
+    "live_dispatch_authority": "GitHub Project #2 and current issue bodies",
+    "do_not_redispatch_from_snapshot": true
+  },
   "issues": [
     {
       "key": "G01",
@@ -31,7 +37,8 @@
       "github_issue": {
         "number": 1,
         "url": "https://github.com/1XP-AI/gh-runnerd/issues/1"
-      }
+      },
+      "release": "R1 - Internal MVP"
     },
     {
       "key": "G02",
@@ -64,7 +71,9 @@
       "github_issue": {
         "number": 2,
         "url": "https://github.com/1XP-AI/gh-runnerd/issues/2"
-      }
+      },
+      "release": "R3 - General distribution",
+      "r1_subset": "G02-R1"
     },
     {
       "key": "G03",
@@ -95,7 +104,8 @@
       "github_issue": {
         "number": 3,
         "url": "https://github.com/1XP-AI/gh-runnerd/issues/3"
-      }
+      },
+      "release": "R1 - Internal MVP"
     },
     {
       "key": "G04",
@@ -131,7 +141,8 @@
       "github_issue": {
         "number": 4,
         "url": "https://github.com/1XP-AI/gh-runnerd/issues/4"
-      }
+      },
+      "release": "R2 - Everyday operations"
     },
     {
       "key": "G05",
@@ -165,7 +176,8 @@
       "github_issue": {
         "number": 5,
         "url": "https://github.com/1XP-AI/gh-runnerd/issues/5"
-      }
+      },
+      "release": "R2 - Everyday operations"
     },
     {
       "key": "G06",
@@ -199,7 +211,8 @@
       "github_issue": {
         "number": 6,
         "url": "https://github.com/1XP-AI/gh-runnerd/issues/6"
-      }
+      },
+      "release": "R2 - Everyday operations"
     },
     {
       "key": "G07",
@@ -236,7 +249,8 @@
       "github_issue": {
         "number": 7,
         "url": "https://github.com/1XP-AI/gh-runnerd/issues/7"
-      }
+      },
+      "release": "R2 - Everyday operations"
     },
     {
       "key": "G08",
@@ -271,7 +285,8 @@
       "github_issue": {
         "number": 8,
         "url": "https://github.com/1XP-AI/gh-runnerd/issues/8"
-      }
+      },
+      "release": "R3 - General distribution"
     },
     {
       "key": "G09",
@@ -307,7 +322,8 @@
       "github_issue": {
         "number": 9,
         "url": "https://github.com/1XP-AI/gh-runnerd/issues/9"
-      }
+      },
+      "release": "R2 - Everyday operations"
     },
     {
       "key": "G10",
@@ -346,7 +362,8 @@
       "github_issue": {
         "number": 10,
         "url": "https://github.com/1XP-AI/gh-runnerd/issues/10"
-      }
+      },
+      "release": "R2 - Everyday operations"
     },
     {
       "key": "G11",
@@ -386,7 +403,8 @@
       "github_issue": {
         "number": 11,
         "url": "https://github.com/1XP-AI/gh-runnerd/issues/11"
-      }
+      },
+      "release": "R3 - General distribution"
     },
     {
       "key": "G12",
@@ -421,7 +439,8 @@
       "github_issue": {
         "number": 12,
         "url": "https://github.com/1XP-AI/gh-runnerd/issues/12"
-      }
+      },
+      "release": "R2 - Everyday operations"
     },
     {
       "key": "G12a",
@@ -455,7 +474,8 @@
       "github_issue": {
         "number": 40,
         "url": "https://github.com/1XP-AI/gh-runnerd/issues/40"
-      }
+      },
+      "release": "R2 - Everyday operations"
     },
     {
       "key": "G13",
@@ -494,7 +514,9 @@
       "github_issue": {
         "number": 13,
         "url": "https://github.com/1XP-AI/gh-runnerd/issues/13"
-      }
+      },
+      "release": "R2 - Everyday operations",
+      "r1_subset": "G13-R1"
     },
     {
       "key": "G14",
@@ -529,7 +551,8 @@
       "github_issue": {
         "number": 14,
         "url": "https://github.com/1XP-AI/gh-runnerd/issues/14"
-      }
+      },
+      "release": "R2 - Everyday operations"
     },
     {
       "key": "G15",
@@ -565,7 +588,8 @@
       "github_issue": {
         "number": 15,
         "url": "https://github.com/1XP-AI/gh-runnerd/issues/15"
-      }
+      },
+      "release": "R2 - Everyday operations"
     },
     {
       "key": "G16",
@@ -603,7 +627,9 @@
       "github_issue": {
         "number": 16,
         "url": "https://github.com/1XP-AI/gh-runnerd/issues/16"
-      }
+      },
+      "release": "R3 - General distribution",
+      "r1_subset": "G16-R1"
     },
     {
       "key": "G17",
@@ -641,7 +667,8 @@
       "github_issue": {
         "number": 17,
         "url": "https://github.com/1XP-AI/gh-runnerd/issues/17"
-      }
+      },
+      "release": "R3 - General distribution"
     },
     {
       "key": "G18",
@@ -677,7 +704,8 @@
       "github_issue": {
         "number": 18,
         "url": "https://github.com/1XP-AI/gh-runnerd/issues/18"
-      }
+      },
+      "release": "R3 - General distribution"
     },
     {
       "key": "G19",
@@ -716,7 +744,8 @@
       "github_issue": {
         "number": 19,
         "url": "https://github.com/1XP-AI/gh-runnerd/issues/19"
-      }
+      },
+      "release": "R3 - General distribution"
     },
     {
       "key": "G20",
@@ -752,7 +781,8 @@
       "github_issue": {
         "number": 20,
         "url": "https://github.com/1XP-AI/gh-runnerd/issues/20"
-      }
+      },
+      "release": "R2 - Everyday operations"
     },
     {
       "key": "G21",
@@ -785,6 +815,213 @@
       "github_issue": {
         "number": 21,
         "url": "https://github.com/1XP-AI/gh-runnerd/issues/21"
+      },
+      "release": "Future research"
+    },
+    {
+      "key": "G01f",
+      "parent": "G01",
+      "title": "Finalize paired execution with bounded owned cleanup",
+      "stage": "M0 - Evidence gates",
+      "agent": "Luna max",
+      "dependencies": [],
+      "release": "R1 - Internal MVP",
+      "goal": "Complete one private, same-invocation normal-success terminal path after issue #52's paired execution. Prove exact session closure, non-force worker deletion with its separate absence receipt, and owned scale-set deletion through real C/W journals and private SDK/TLS and Docker/Unix fixtures. This child does not authorize a live run, release admission claims or complete parent #1.",
+      "scope": "Tracked on issue #54 (Done). This keyed record exists so G01g's native blockedBy #54 is resolvable in backlog.json. Do not duplicate runtime evidence here.",
+      "tdd": [
+        "See issue #54. Do not edit G01f evidence from the #66 documentation branch."
+      ],
+      "acceptance": [
+        "Issue #54 remains the source of acceptance and is Done.",
+        "Completing G01f does not complete G01 #1."
+      ],
+      "risk": "High",
+      "kind": "gate",
+      "priority": "P0",
+      "status": "Done",
+      "test_profile": [
+        "offline"
+      ],
+      "github_issue": {
+        "number": 54,
+        "url": "https://github.com/1XP-AI/gh-runnerd/issues/54"
+      }
+    },
+    {
+      "key": "G01g",
+      "title": "Wire paired terminal execution through a bounded broker handoff",
+      "stage": "M0 - Evidence gates",
+      "agent": "Luna max",
+      "dependencies": [
+        "G01f"
+      ],
+      "release": "R1 - Internal MVP",
+      "goal": "Connect the reviewed paired terminal path to one same-process experimental executable and a narrowly bound broker handoff, with offline evidence that authority, credential separation and fail-stop recovery boundaries are preserved.",
+      "scope": "Tracked on issue #60 and PR #62 in a separate worktree. This keyed record exists so R1 dependencies resolve. It is not G01 completion and does not duplicate runtime or CI evidence.",
+      "tdd": [
+        "See issue #60. Do not edit #60/#62 from the #66 documentation branch."
+      ],
+      "acceptance": [
+        "Issue #60 remains the source of acceptance.",
+        "Completing G01g does not complete G01 #1."
+      ],
+      "risk": "High",
+      "kind": "gate",
+      "priority": "P0",
+      "status": "In progress",
+      "test_profile": [
+        "offline"
+      ],
+      "github_issue": {
+        "number": 60,
+        "url": "https://github.com/1XP-AI/gh-runnerd/issues/60"
+      }
+    },
+    {
+      "key": "P66",
+      "title": "Reframe delivery into MVP, operations and distribution releases",
+      "stage": "M0 - Evidence gates",
+      "agent": "Grok 4.6 xhigh",
+      "review_agent": "Luna max",
+      "dependencies": [],
+      "release": "R1 - Internal MVP",
+      "goal": "Reorganize delivery into an internal single-host MVP, an everyday operations release, and a general-distribution release without weakening the existing Scale Set recovery objective or safety/review gates.",
+      "scope": "Documentation and mapping only. Preserve G01 issue #1 exact Goal and acceptance evidence. Do not create another native goal. No live operations. No production implementation of dependency-blocked issues.",
+      "tdd": [
+        "Prose-only planning change: use link checks, diff review and issue/Project mapping verification. Do not invent application tests."
+      ],
+      "acceptance": [
+        "Three release stages and concrete user-visible exit criteria documented.",
+        "All current issues mapped, with native dependency updates only where justified and no false Done states.",
+        "Minimum executable MVP critical path identified, with unimplemented CLI/daemon/install work explicit.",
+        "Existing G01 full objective preserved; no live evidence represented as complete.",
+        "Focused independently reviewed PR, exact-head clean Codex verdict and CI before merge."
+      ],
+      "risk": "Medium",
+      "kind": "planning",
+      "priority": "P0",
+      "status": "In progress",
+      "test_profile": [
+        "offline"
+      ],
+      "github_issue": {
+        "number": 66,
+        "url": "https://github.com/1XP-AI/gh-runnerd/issues/66"
+      }
+    },
+    {
+      "key": "G02-R1",
+      "parent": "G02",
+      "title": "Prove manual single-organization credentials for the foreground MVP",
+      "stage": "M0 - Evidence gates",
+      "agent": "Grok 4.6 xhigh",
+      "review_agent": "Luna max",
+      "dependencies": [],
+      "release": "R1 - Internal MVP",
+      "goal": "Demonstrate a manually configured single-organization credential path for the foreground MVP that binds the intended installation and never exposes management credentials to workers.",
+      "scope": "Extract the R1 credential subset of #2 without closing or rewriting its broader Manifest, multi-organization or launchd qualification. Foreground-only; unattended login/logout/reboot service behavior is not supported in R1. No implicit live authorization.",
+      "tdd": [
+        "Red: missing/wrong/expired credentials, wrong installation and partial setup refuse safely without extra Apps or leaked values.",
+        "Management credentials never reach worker argv/environment/files; only per-worker JIT follows the reviewed G01 transport.",
+        "Live/runtime checks require reviewed commits and explicit concrete maintainer authorization."
+      ],
+      "acceptance": [
+        "Explicit minimal permission, org/repository/installation identity and credential source validation before remote effects.",
+        "Actual authorized manual configuration works; negative cases refuse safely.",
+        "Credentials are not persisted or imported to Keychain implicitly.",
+        "Broader #2 remains open until its own criteria pass."
+      ],
+      "risk": "High",
+      "kind": "gate",
+      "priority": "P0",
+      "status": "Ready",
+      "test_profile": [
+        "offline",
+        "trusted-runtime",
+        "trusted-live-github"
+      ],
+      "github_issue": {
+        "number": 67,
+        "url": "https://github.com/1XP-AI/gh-runnerd/issues/67"
+      }
+    },
+    {
+      "key": "G13-R1",
+      "parent": "G13",
+      "title": "Deliver one foreground command for a bounded single-worker lifecycle",
+      "stage": "M2 - Execution and scaling",
+      "agent": "Grok 4.6 xhigh",
+      "review_agent": "Luna max",
+      "dependencies": [
+        "G01g",
+        "P66",
+        "G02-R1"
+      ],
+      "release": "R1 - Internal MVP",
+      "goal": "Provide a foreground MVP command that connects the reviewed broker and paired worker lifecycle for one organization, one private repository and one worker, with durable fail-stop state and safe owned cleanup.",
+      "scope": "Vertical R1 slice of #4/#5/#6/#7/#9/#10/#13/#14 with primary parent #13. Reuse the reviewed paired Linux-container execution path. No second backend, native macOS jobs, daemon/install or context switch. Native dependencies remain G01g/#60, P66/#66 and G02-R1/#67. Until full G01 #1 and G02 #2 evidence gates pass, authorized work is a reviewed minimal contract and offline evidence only; production implementation starts only then. Completing G02-R1/#67 does not complete G02. Full G02 remains classified R3; user-visible R1 scope is not independently deliverable until that pre-release gate passes.",
+      "tdd": [
+        "Native blockers G01g/#60, P66/#66 and G02-R1/#67 remain the GitHub blockedBy set; do not add #1/#2 as native edges from this docs change.",
+        "Until full G01 #1 and G02 #2 pass, work is contract/offline evidence only; production implementation is unauthorized.",
+        "Negative tests for authority mutation, partial state, timeout, cancellation and non-owned cleanup.",
+        "No claim that the existing empty product entry point already implements the command."
+      ],
+      "acceptance": [
+        "One documented user-facing entry point, explicit configuration and safe status output.",
+        "Bound org/repository/installation and one owned worker, shared capacity hard-limit one.",
+        "Foreground interruption stops new admission and preserves busy/unknown work.",
+        "Completing this child does not complete #4\u2013#15.",
+        "Completing G02-R1/#67 does not complete G02. Production implementation waits for full G01 #1 and G02 #2."
+      ],
+      "risk": "High",
+      "kind": "implementation",
+      "priority": "P0",
+      "status": "Blocked",
+      "test_profile": [
+        "offline"
+      ],
+      "github_issue": {
+        "number": 68,
+        "url": "https://github.com/1XP-AI/gh-runnerd/issues/68"
+      }
+    },
+    {
+      "key": "G16-R1",
+      "parent": "G16",
+      "title": "Qualify the internal MVP with an authorized real job and recovery evidence",
+      "stage": "M3 - Reliability qualification",
+      "agent": "Grok 4.6 xhigh",
+      "review_agent": "Luna max",
+      "dependencies": [
+        "G01",
+        "G13-R1"
+      ],
+      "release": "R1 - Internal MVP",
+      "goal": "Qualify the single-host internal MVP with an explicitly authorized real private-repository job, safe cleanup and demonstrated ACK, acquisition and JIT recovery or quarantine behavior.",
+      "scope": "R1 qualification subset of #16. One Mac, one org/private repository, first reviewed execution backend and maximum one active worker. A passing happy-path job is not evidence for lost ACK/acquisition/JIT recovery.",
+      "tdd": [
+        "Cover #1 required ACK, acquisition and JIT loss boundaries and idle-assignment/drain race with real evidence.",
+        "Demonstrate no busy-job termination under normal scale-down, no duplicate execution, no non-owned cleanup.",
+        "List every skipped case as unresolved."
+      ],
+      "acceptance": [
+        "Exact reviewed commit, pinned identities, private runner-group/repository policy and bounded concrete maintainer authorization recorded before dispatch.",
+        "Real hosted control-plane/private canary workflow executes one owned worker with independently observed terminal/absence evidence.",
+        "Keep R1 qualification open until all required cases pass or reach the specified safe quarantine outcome.",
+        "Broader #16 remains open."
+      ],
+      "risk": "High",
+      "kind": "gate",
+      "priority": "P0",
+      "status": "Blocked",
+      "test_profile": [
+        "offline",
+        "trusted-runtime",
+        "trusted-live-github"
+      ],
+      "github_issue": {
+        "number": 69,
+        "url": "https://github.com/1XP-AI/gh-runnerd/issues/69"
       }
     }
   ]
