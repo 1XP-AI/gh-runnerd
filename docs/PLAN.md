@@ -79,11 +79,13 @@ Public PR checks run in GitHub-hosted standard environments without credentials.
 
 Issue [#66](https://github.com/1XP-AI/gh-runnerd/issues/66) records the maintainer-accepted split. Placement on a release means that release needs the **complete original scope**. It is not a claim that no safe subset is required earlier, and it is not permission to mark a parent Done. Where an original issue mixed internal-MVP and later acceptance, explicit children hold the R1 subset; parents stay open until their own criteria pass.
 
-The live 36-item map is in [ISSUES.md](ISSUES.md). Production implementation of dependency-blocked full-scope issues is not authorized by this planning change. R1 placement of #68 is release scope, not a waiver of the full G01/G02 production gates.
+The live 36-item map is in [ISSUES.md](ISSUES.md). Production implementation of dependency-blocked full-scope issues is not authorized by this planning change. R1 placement of #68 is user-visible release scope, not a waiver of the full G01/G02 production gates. Because full G02 remains classified R3, R1 is not independently deliverable until that pre-release evidence gate passes.
 
 ### R1 — Internal MVP
 
 Operator-visible exit: on this Mac, one organization, one private test repository, the existing reviewed Linux-container backend, concurrency one, and a manually configured App, run one owned job, clean up only owned resources, and demonstrate recovery or quarantine at ACK, acquisition and JIT boundaries.
+
+That exit is user-visible R1 **scope**, not an independently shippable stage. Full G02 [#2](https://github.com/1XP-AI/gh-runnerd/issues/2) remains a mandatory pre-release evidence gate for #68 production implementation and is classified R3 (Manifest, multi-organization, launchd). Completing #67 does not satisfy it. **R1 is not independently deliverable until that R3-placed full G02 gate passes.** Do not move full G02 onto R1 without an explicit ask.
 
 Foreground only. `cmd/gh-runnerd` is still an empty entry point; unattended daemon, install, launchd service, reboot persistence, native macOS jobs, Lima or Docker-context changes, a second backend, multi-organization operation, automated Manifest enrollment and general scheduling are not R1 and are not implemented.
 
@@ -107,6 +109,8 @@ Operator-visible target: install/start/stop/status, restart recovery, bounded sc
 ### R3 — General distribution
 
 Multi-organization support, additional execution modes including trusted native macOS, automated onboarding, signing/update/diagnostics and broad qualification. Full original acceptance of #2, #8, #11, #16, #17, #18, #19. Completing #67 or #69 does not complete #2 or #16.
+
+Full G02 #2 stays on R3 for original-scope placement. It is also a mandatory pre-release evidence gate for R1 #68 production. R3 placement does not mean R1 can ship first; this remaining planning limitation is a cross-release prerequisite, not stage independence. Do not move full G02 onto R1 without an explicit ask.
 
 ### Future research
 

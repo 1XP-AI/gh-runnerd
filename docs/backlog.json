@@ -1,5 +1,11 @@
 {
   "schema_version": 1,
+  "field_semantics": {
+    "status": "initial_historical_planning_snapshot",
+    "agent": "initial_historical_planning_snapshot",
+    "live_dispatch_authority": "GitHub Project #2 and current issue bodies",
+    "do_not_redispatch_from_snapshot": true
+  },
   "issues": [
     {
       "key": "G01",
@@ -953,7 +959,7 @@
       ],
       "release": "R1 - Internal MVP",
       "goal": "Provide a foreground MVP command that connects the reviewed broker and paired worker lifecycle for one organization, one private repository and one worker, with durable fail-stop state and safe owned cleanup.",
-      "scope": "Vertical R1 slice of #4/#5/#6/#7/#9/#10/#13/#14 with primary parent #13. Reuse the reviewed paired Linux-container execution path. No second backend, native macOS jobs, daemon/install or context switch. Native dependencies remain G01g/#60, P66/#66 and G02-R1/#67. Until full G01 #1 and G02 #2 evidence gates pass, authorized work is a reviewed minimal contract and offline evidence only; production implementation starts only then. Completing G02-R1/#67 does not complete G02.",
+      "scope": "Vertical R1 slice of #4/#5/#6/#7/#9/#10/#13/#14 with primary parent #13. Reuse the reviewed paired Linux-container execution path. No second backend, native macOS jobs, daemon/install or context switch. Native dependencies remain G01g/#60, P66/#66 and G02-R1/#67. Until full G01 #1 and G02 #2 evidence gates pass, authorized work is a reviewed minimal contract and offline evidence only; production implementation starts only then. Completing G02-R1/#67 does not complete G02. Full G02 remains classified R3; user-visible R1 scope is not independently deliverable until that pre-release gate passes.",
       "tdd": [
         "Native blockers G01g/#60, P66/#66 and G02-R1/#67 remain the GitHub blockedBy set; do not add #1/#2 as native edges from this docs change.",
         "Until full G01 #1 and G02 #2 pass, work is contract/offline evidence only; production implementation is unauthorized.",

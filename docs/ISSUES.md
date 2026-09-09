@@ -33,16 +33,16 @@ The original plan's 48 dependency edges are recorded as native GitHub blocking r
 
 This table intentionally preserves the initial planning inventory. Current dispatch is recorded in the live Project Agent field and the open issue execution contracts. The repository default is Luna max; #66 and R1 children #67/#68/#69 record main author Grok 4.6 xhigh with independent Luna max review. Do not rewrite historical Astra records.
 
-Each original issue has one Goal statement, scope, TDD cases, acceptance criteria, model/effort, risk and dependencies. See [backlog.json](backlog.json) for machine-readable specifications. Release placement is additive; see [approved delivery releases](PLAN.md#approved-delivery-releases).
+Each original issue has one Goal statement, scope, TDD cases, acceptance criteria, model/effort, risk and dependencies. See [backlog.json](backlog.json) for machine-readable specifications. Original JSON `status` and `agent` values are the initial/historical snapshot, not live dispatch authority; the live Project is authoritative after work begins. Do not redispatch from historical Ready values. Release placement is additive; see [approved delivery releases](PLAN.md#approved-delivery-releases).
 
 ## Live 36-item release map
 
-Verified 2026-09-08 against Project #2 (`36` items) and native GitHub parent/`blockedBy` relations. **Release** is the stage that needs the complete original scope; it is not a closed DAG that can ship before natively blocking issues on later releases. **R1 subset** is an explicit child when the parent mixes MVP and later acceptance. Children do not close parents. Native edges below were not added by this documentation change.
+Verified 2026-09-08 against Project #2 (`36` items) and native GitHub parent/`blockedBy` relations. **Release** is the stage that needs the complete original scope; it is not a closed DAG that can ship before natively blocking issues on later releases, and R1 is not independently deliverable until the R3-placed full G02 #2 evidence gate passes. **R1 subset** is an explicit child when the parent mixes MVP and later acceptance. Children do not close parents. Native edges below were not added by this documentation change.
 
 | Issue | Live status | Release (full original) | R1 subset / notes | Live Agent |
 |---|---|---|---|---|
 | [#1](https://github.com/1XP-AI/gh-runnerd/issues/1) G01 | In progress | R1 | Full original Goal retained; children #44/#46/#47/#50/#52/#54 are Done slices and do not complete G01 | Luna max |
-| [#2](https://github.com/1XP-AI/gh-runnerd/issues/2) G02 | In progress | R3 | Broad Manifest/multi-org/launchd remains here. R1 subset is #67 | Luna max |
+| [#2](https://github.com/1XP-AI/gh-runnerd/issues/2) G02 | In progress | R3 | Broad Manifest/multi-org/launchd remains here. R1 subset is #67. Full #2 is also a mandatory pre-release evidence gate for #68 production; R1 is not independently deliverable until it passes | Luna max |
 | [#3](https://github.com/1XP-AI/gh-runnerd/issues/3) G03 | Done | R1 | Full original bootstrap | Luna max |
 | [#4](https://github.com/1XP-AI/gh-runnerd/issues/4) G04 | Backlog | R2 | Full contracts. Still blocked by #1/#2/#3. Not bypassed by #68 | Luna max |
 | [#5](https://github.com/1XP-AI/gh-runnerd/issues/5) G05 | Backlog | R2 | Full durable journal | Luna max |

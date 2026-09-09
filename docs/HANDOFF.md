@@ -25,11 +25,15 @@ three maintainer-accepted releases ([PLAN.md](PLAN.md#approved-delivery-releases
 - **R1 Internal MVP:** this Mac, one organization, one private test repository,
   the existing reviewed Linux-container backend, concurrency one, manual App,
   foreground command. Full G01 ACK/acquisition/JIT recovery remains required.
-  Daemon/install/launchd service are not implemented.
+  Full G02 #2 remains a mandatory pre-release evidence gate for the R1 command
+  path and stays classified R3; R1 is not independently deliverable until that
+  gate passes. Completing #67 does not complete G02. Daemon/install/launchd
+  service are not implemented.
 - **R2 Everyday operations:** install/start/stop/status, restart recovery and
   bounded scaling.
 - **R3 General distribution:** multi-organization support, trusted native macOS
-  backend, automated onboarding, signing/update/diagnostics.
+  backend, automated onboarding, signing/update/diagnostics. Full G02 original
+  acceptance remains here and is also a pre-release gate for R1 #68 production.
 - **Future:** G21 optional macOS VM / multi-host research.
 
 Shared envelope limits that still apply:
@@ -149,7 +153,7 @@ dispatch. The last verified snapshot is 36 items. The full map is in
 | Issues | Project status | Release | Current routing |
 |---|---|---|---|
 | #1 G01 | In progress | R1 | Luna max; **full** ACK/acquisition/JIT Goal unresolved |
-| #2 G02 | In progress | R3 | Luna max; Manifest/multi-org/launchd remains here |
+| #2 G02 | In progress | R3 | Luna max; Manifest/multi-org/launchd remains here; also pre-release gate for R1 #68 production |
 | #67 | Ready | R1 | Grok 4.6 xhigh / Luna review; child of #2; no native blockers |
 | #60 G01g | In progress | R1 | Luna max; separate worktree/PR #62; do not edit from #66 |
 | #66 | In progress | R1 | Grok 4.6 xhigh / Luna review; this documentation change |
@@ -162,9 +166,11 @@ dispatch. The last verified snapshot is 36 items. The full map is in
 
 Issue labels and the initial planning inventory can retain historical Astra values.
 For current dispatch, use the Project `Agent` field and the issue's current
-execution contract. Do not rewrite historical records to make them look like new
-work. Do not add further child issues or native edges without an explicit ask;
-the R1 mapping is already applied.
+execution contract. Original `backlog.json` `status`/`agent` values are the same
+class of historical snapshot; do not redispatch from historical Ready. Do not
+rewrite historical records to make them look like new work. Do not add further
+child issues or native edges without an explicit ask; the R1 mapping is already
+applied.
 
 ### Status meanings
 
@@ -303,7 +309,8 @@ fi
 If the item is already In progress for another active agent, the guard above stops
 before any field edit; coordinate instead of starting a second implementation. Keep
 the issue's durable Goal/Dependencies fields and `docs/backlog.json` aligned only
-when the contract actually changes. If
+when the contract actually changes. Do not rewrite original JSON `status`/`agent`
+snapshots to look live; the Project is dispatch authority. If
 the current user selected another supported model/effort, resolve its Project Agent
 option ID with `gh project field-list` and replace `AGENT_OPTION_ID`; never overwrite
 an explicit current selection with the default, and never write Luna over an
@@ -488,7 +495,8 @@ recovery remain required; child merges are not completion. G04 and all dependent
 full-scope implementation remain behind their acceptance evidence. #68 is not a
 G04/G13 bypass: until full G01 #1 and G02 #2 pass, its authorized work is
 contract and offline evidence only; production implementation starts only then.
-Completing #67 does not complete G02. G10/G16 require real ARM64 Docker and private test repositories.
+Completing #67 does not complete G02. Because full G02 remains classified R3,
+R1 is not independently deliverable until that gate passes. G10/G16 require real ARM64 Docker and private test repositories.
 G11/G19 require trusted native-process evidence and are R3. G17 is the reliability
 release gate. G20 is the reversible pilot, not a license to remove the fallback
 runners early. G20 remains natively blocked by #17/#18.
@@ -518,8 +526,9 @@ Main author Grok 4.6 xhigh; independent Luna max review; exact-head Codex+CI bef
 merge. #68 stays natively Blocked until #60, #66 and #67 are complete. After that,
 authorized work is the reviewed minimal contract and offline evidence only until
 full G01 #1 and G02 #2 pass; production implementation starts only then.
-Completing #67 does not complete G02. No live authorization and no merge of
-blocked implementation are implied.
+Completing #67 does not complete G02. Because full G02 remains classified R3,
+R1 is not independently deliverable until that gate passes. No live authorization
+and no merge of blocked implementation are implied.
 
 ## Live-operation gate
 

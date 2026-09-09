@@ -10,6 +10,8 @@ The live 36-item map is in [ISSUES.md](ISSUES.md). Default implementer is Luna m
 
 Foreground MVP on this Mac: one org, one private repository, existing Linux-container backend, capacity one, manual App. Daemon/install/service are not implemented and are not R1.
 
+User-visible R1 scope is not independently deliverable: #68 production waits for full G02 #2, which remains classified R3. Completing #67 does not complete G02. Release placement names original-scope ownership; it is not a claim of stage independence.
+
 | Key | Issue | Role | Native blockers | Live status |
 |---|---|---|---|---|
 | G01 | [#1](https://github.com/1XP-AI/gh-runnerd/issues/1) | **Full original** ACK/acquisition/JIT recovery Goal; no subset and no false completion | none | In progress |
@@ -19,7 +21,7 @@ Foreground MVP on this Mac: one org, one private repository, existing Linux-cont
 | G13-R1 | [#68](https://github.com/1XP-AI/gh-runnerd/issues/68) | R1 subset of G13 #13. Native blockers #60, #66, #67. Until full G01 #1 and G02 #2 pass, authorized work is a reviewed minimal contract and offline evidence only; production implementation starts only then. Not a G01/G02/G04 bypass. Completing #67 does not complete G02. Live recovery stays on #1→#69 | #60, #66, #67 | Blocked |
 | G16-R1 | [#69](https://github.com/1XP-AI/gh-runnerd/issues/69) | R1 subset of G16 #16: authorized real job plus required recovery | #1, #68 | Blocked |
 
-#68 must not start production implementation while natively blocked or while full G01 #1 or G02 #2 remain open. Native `blockedBy` stays #60/#66/#67; do not add #1/#2 without an explicit ask. Completing a child does not complete G02, G04–G15 or G16.
+#68 must not start production implementation while natively blocked or while full G01 #1 or G02 #2 remain open. Native `blockedBy` stays #60/#66/#67; do not add #1/#2 without an explicit ask. Completing a child does not complete G02, G04–G15 or G16. Full G02 stays R3; that cross-release prerequisite is why R1 cannot ship independently.
 
 ## Original full-scope backlog (M0–M5 preserved)
 
@@ -48,7 +50,7 @@ Foreground MVP on this Mac: one org, one private repository, existing Linux-cont
 | G20 | Pilot migration with reversible legacy runner handoff | M4 - Pilot and release | R2 | Luna max | G17, G18 (R3). Full original R2 placement cannot close until those R3 blockers finish; no bypass |
 | G21 | Evaluate optional macOS VM and multi-host providers | M5 - Future | Future | Luna max | G17 |
 
-The machine-readable source is [backlog.json](backlog.json). Published issue numbers and links are in [ISSUES.md](ISSUES.md); all original dependencies remain native GitHub blocking relationships. Full-scope first-release implementation goals except G03/G12a remain open.
+The machine-readable source is [backlog.json](backlog.json). Original JSON `status` and `agent` fields are the initial/historical planning snapshot, not live dispatch authority; the live GitHub Project is authoritative after work begins. Do not redispatch from historical Ready values. Published issue numbers and links are in [ISSUES.md](ISSUES.md); all original dependencies remain native GitHub blocking relationships. Full-scope first-release implementation goals except G03/G12a remain open.
 
 ## Parallel work boundaries
 
