@@ -41,7 +41,14 @@ func toolingRun(t *testing.T, root string, extra []string, args ...string) (stri
 	defer cancel()
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Dir = root
-	cmd.Env = append(os.Environ(), "GOTOOLCHAIN=go1.26.8", "GOFLAGS=", "GOWORK=off")
+	env := make([]string, 0, len(os.Environ())+3+len(extra))
+	for _, entry := range os.Environ() {
+		if strings.HasPrefix(entry, "FAST_MODULE=") || strings.HasPrefix(entry, "FAST_PACKAGE=") || strings.HasPrefix(entry, "FAST_TEST=") {
+			continue
+		}
+		env = append(env, entry)
+	}
+	cmd.Env = append(env, "GOTOOLCHAIN=go1.26.8", "GOFLAGS=", "GOWORK=off")
 	cmd.Env = append(cmd.Env, extra...)
 	data, err := cmd.CombinedOutput()
 	return string(data), err
@@ -133,12 +140,8 @@ func TestToolingPinsNewerSystemGo(t *testing.T) {
 	}
 }
 
-func TestFastCheckRequiresExplicitSelectors(t *testing.T) {
-	root := toolingFixture(t)
-	fastCheck, err := filepath.Abs("fast-check.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
+func assertFastCheckRequiresExplicitSelectors(t *testing.T, root, fastCheck string) {
+	t.Helper()
 	for _, tc := range []struct {
 		name string
 		env  []string
@@ -154,6 +157,75 @@ func TestFastCheckRequiresExplicitSelectors(t *testing.T) {
 				t.Fatalf("fast check accepted %s: err=%v output=%s", tc.name, err, out)
 			}
 		})
+	}
+}
+
+func TestFastCheckHandlesJSONGOFLAGS(t *testing.T) {
+	root := toolingFixture(t)
+	toolingFile(t, root, "cmd/gh-runnerd/fast_check_test.go", `package main
+
+import "testing"
+
+func TestFastSelected(t *testing.T) {}
+`, 0600)
+	out, err := toolingRun(t, root, []string{"GOFLAGS=-json -race"}, "make",
+		"FAST_MODULE=.",
+		"FAST_PACKAGE=./cmd/gh-runnerd",
+		"FAST_TEST=^TestFastSelected$$",
+		"fast",
+	)
+	if err != nil {
+		t.Fatalf("make fast did not normalize JSON output while preserving other GOFLAGS: %s", out)
+	}
+}
+
+func TestFastCheckResolvesPackageSymlinks(t *testing.T) {
+	root := toolingFixture(t)
+	toolingFile(t, root, "linked/selected/fast_check_test.go", `package selected
+
+import "testing"
+
+func TestFastSymlinkSelected(t *testing.T) {}
+`, 0600)
+	toolingFile(t, root, "linked/other/fast_check_test.go", `package other
+
+import "testing"
+
+func TestFastSymlinkNotSelected(t *testing.T) {
+	t.Fatal("wrong test ran")
+}
+`, 0600)
+	if err := os.Symlink("../linked", filepath.Join(root, "scripts", "package-link")); err != nil {
+		t.Fatal(err)
+	}
+	out, err := toolingRun(t, root, nil, "make",
+		"FAST_MODULE=.",
+		"FAST_PACKAGE=./scripts/package-link/...",
+		"FAST_TEST=^TestFastSymlinkSelected$$",
+		"fast",
+	)
+	if err != nil {
+		t.Fatalf("valid in-module package symlink failed: %s", out)
+	}
+
+	outside := t.TempDir()
+	toolingFile(t, outside, "escape_test.go", `package external
+
+import "testing"
+
+func TestFastSymlinkEscape(t *testing.T) {}
+`, 0600)
+	if err := os.Symlink(outside, filepath.Join(root, "scripts", "outside-link")); err != nil {
+		t.Fatal(err)
+	}
+	out, err = toolingRun(t, root, nil, "make",
+		"FAST_MODULE=.",
+		"FAST_PACKAGE=./scripts/outside-link",
+		"FAST_TEST=^TestFastSymlinkEscape$$",
+		"fast",
+	)
+	if err == nil || !strings.Contains(out, "FAST_PACKAGE must resolve inside selected module") {
+		t.Fatalf("package symlink escaping module was accepted: err=%v output=%s", err, out)
 	}
 }
 
@@ -187,14 +259,14 @@ func TestNestedFastSelected(t *testing.T) {}
 			module:      ".",
 			packagePath: "./...",
 			test:        "^TestFastSelected$",
-			invocation:  "go1.26.8\ttest -count=1 -run ^TestFastSelected$ ./...",
+			invocation:  "go1.26.8\ttest -json=false -count=1 -run ^TestFastSelected$ ./...",
 		},
 		{
 			name:        "nested module",
 			module:      "./experiments/g01-scaleset",
 			packagePath: ".",
 			test:        "^TestNestedFastSelected$",
-			invocation:  "go1.26.8\ttest -count=1 -run ^TestNestedFastSelected$ .",
+			invocation:  "go1.26.8\ttest -json=false -count=1 -run ^TestNestedFastSelected$ .",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -219,6 +291,37 @@ func TestNestedFastSelected(t *testing.T) {}
 			}
 		})
 	}
+}
+
+func TestFastCheckRequiresExplicitSelectors(t *testing.T) {
+	root := toolingFixture(t)
+	fastCheck, err := filepath.Abs("fast-check.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertFastCheckRequiresExplicitSelectors(t, root, fastCheck)
+
+	repoRoot, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := toolingRun(t, repoRoot, nil, "make",
+		"FAST_MODULE=.",
+		"FAST_PACKAGE=./scripts",
+		"FAST_TEST=^TestFastCheckRequiresExplicitSelectorsUnderMake$$",
+		"fast",
+	); err != nil {
+		t.Fatalf("make fast negative-selector regression failed: %s", out)
+	}
+}
+
+func TestFastCheckRequiresExplicitSelectorsUnderMake(t *testing.T) {
+	root := toolingFixture(t)
+	fastCheck, err := filepath.Abs("fast-check.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertFastCheckRequiresExplicitSelectors(t, root, fastCheck)
 }
 
 func TestFastCheckRejectsInvalidSelectors(t *testing.T) {

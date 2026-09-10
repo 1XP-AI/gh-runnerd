@@ -42,15 +42,13 @@ This audit was captured from `origin/main` at
 | --- | --- | --- |
 | Main CI | `ci.yml` has three parallel test-bearing jobs (`root`, `offline`, `vuln`) plus the required `Go checks` aggregator; each remains capped at 15 minutes, with pinned actions and `cache: false`. | Preserve the current complete coverage, job/check names, cache policy and timeouts; no path classifier or cache shortcut was added. |
 | Makefile | Existing `check` prerequisites remain `toolchain`, formatting, build, vet, unit/race, fuzz, dependency, license, offline-experiment and vulnerability checks. New `fast` is an opt-in target and is not a `check` prerequisite. | Keep `make check` complete and unchanged as the local public gate; focused iteration cannot silently weaken it. |
-| [PR #72 review history](https://github.com/1XP-AI/gh-runnerd/pull/72) | The exact review-record command below counted 14 Codex bot reviews on immutable heads from `951e1b8b10fab768461be2db6620ec276c2fe005` through `116beda04dc2bf69280cdefc4de4ef2fef397ef3`. The recorded iteration pattern repeated the complete suite for one writer and two independent reviewers per round (42 actor-side full-suite runs, derived from 14 × 3); human review/comment replies are not additional Codex rounds. | Batch findings, source and docs before one candidate push; reviewers perform delta/risk probes against shared CI evidence, and the coordinator audits rather than acting as a third tester. |
-| [PR #72 hosted critical path](https://github.com/1XP-AI/gh-runnerd/actions/runs/34419651240) | `gh run view 34419651240 --json jobs` measured workflow start `00:04:06Z`, required jobs finishing by `00:15:14Z`, and aggregator completion `00:15:18Z` (`00:15:19Z` workflow update): 11m13s end-to-end. Root ran 11m06s, offline 8m49s, vulnerability 33s, aggregator 2s. | No workflow critical-path speedup is claimed or changed; full CI remains the stable candidate gate. |
+| [PR #72 review history](https://github.com/1XP-AI/gh-runnerd/pull/72) | Audit snapshot through immutable PR #72 head `116beda04dc2bf69280cdefc4de4ef2fef397ef3`, captured 2026-09-10. Review records and public checkpoints do not measure actor-side full-suite run counts; the checkpoint comments identify focused/offline or focused race regressions. | Batch findings, source and docs before one candidate push; reviewers perform delta/risk probes against shared CI evidence, and the coordinator audits rather than acting as a third tester. |
+| [PR #72 hosted critical path](https://github.com/1XP-AI/gh-runnerd/actions/runs/34419651240) | `gh run view 34419651240 --json jobs` measured workflow start `00:04:06Z`, required jobs finishing by `00:15:14Z`, and aggregator completion at `00:15:18Z`; `00:15:19Z` is a workflow metadata update, not completion. Start-to-aggregator completion was 11m12s. Root ran 11m06s, offline 8m49s, vulnerability 33s, aggregator 2s. | No workflow critical-path speedup is claimed or changed; full CI remains the stable candidate gate. |
 | Focused local command | Warmed direct baseline: `env GOTOOLCHAIN=go1.26.8 GOWORK=off go test -count=1 -run '^TestFixedTarget$' ./internal/scheduler/capacity` → `real 0.32s`. New entry point: `env FAST_MODULE=. FAST_PACKAGE=./internal/scheduler/capacity FAST_TEST='^TestFixedTarget$' make fast` → `real 0.34s`; both passed. | This one local pair demonstrates bounded behavior only; it does not claim a speedup or predict CI duration. |
 
 ```console
-$ gh api --paginate --slurp repos/1XP-AI/gh-runnerd/pulls/72/reviews | jq '[.[][] | select(.user.login == "chatgpt-codex-connector[bot]")] | length'
-14
 $ gh run view 34419651240 --repo 1XP-AI/gh-runnerd --json headSha,startedAt,updatedAt,jobs
-# head 116beda04dc2bf69280cdefc4de4ef2fef397ef3; start 00:04:06Z; update 00:15:19Z;
+# head 116beda04dc2bf69280cdefc4de4ef3; start 00:04:06Z; aggregator 00:15:18Z; metadata update 00:15:19Z;
 # jobs: root 00:04:08Z-00:15:14Z, offline 00:04:09Z-00:12:58Z,
 # vuln 00:04:10Z-00:04:43Z, checks 00:15:16Z-00:15:18Z
 ```
@@ -93,10 +91,13 @@ For example:
 FAST_MODULE=. FAST_PACKAGE=./internal/scheduler/capacity FAST_TEST='^TestFixedTarget$' make fast
 ```
 
-The script rejects absolute or escaping module/package paths, missing `go.mod`,
-missing selectors and selectors that match no compiled test. If selectors are
-passed as Make command-line variables instead of environment assignments, escape
-literal `$` as `$$` so Make preserves the regexp anchor.
+The script resolves the selected module and package/pattern prefix and rejects
+selectors whose physical paths leave the current repository or selected module,
+as well as absolute or lexical `..` paths, missing `go.mod`, missing selectors
+and selectors that match no compiled test. This is a trusted local helper, not a
+hostile-code sandbox. If selectors are passed as Make command-line variables
+instead of environment assignments, escape literal `$` as `$$` so Make
+preserves the regexp anchor.
 
 No hardware, live GitHub, Docker or daemon suite is part of this public check. Those profiles remain explicit future or maintainer-controlled runs; they are not silently converted into passing tests here. G04 introduces the first application behavior contracts and should add meaningful unit and fuzz targets before claiming those forms of coverage.
 
