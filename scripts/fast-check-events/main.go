@@ -123,6 +123,7 @@ func (s compiledSelector) matches(name string) bool {
 func hasCompleteMatch(input io.Reader, selector compiledSelector) (bool, error) {
 	reader := bufio.NewReader(input)
 	results := make(map[string]testResult)
+	passedAny := false
 	for {
 		line, err := reader.ReadString('\n')
 		parseFramedTestEvents(line, func(action, name string) {
@@ -137,18 +138,14 @@ func hasCompleteMatch(input io.Reader, selector compiledSelector) (bool, error) 
 				if result.ran && !result.terminal {
 					result.terminal = true
 					result.passed = action == "pass"
+					passedAny = passedAny || result.passed
 				}
 			}
 			results[name] = result
 		})
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				for _, result := range results {
-					if result.passed {
-						return true, nil
-					}
-				}
-				return false, nil
+				return passedAny, nil
 			}
 			return false, err
 		}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -139,6 +140,26 @@ func TestHasCompleteMatchRequiresFramedPass(t *testing.T) {
 			want:  false,
 		},
 		{
+			name:  "skip in an earlier package and pass in a later package qualify",
+			input: "\x16=== RUN   TestSelected\n\x16--- SKIP: TestSelected (0.00s)\n\x16=== RUN   TestSelected\n\x16--- PASS: TestSelected (0.00s)\n",
+			want:  true,
+		},
+		{
+			name:  "pass in an earlier package and skip in a later package qualify",
+			input: "\x16=== RUN   TestSelected\n\x16--- PASS: TestSelected (0.00s)\n\x16=== RUN   TestSelected\n\x16--- SKIP: TestSelected (0.00s)\n",
+			want:  true,
+		},
+		{
+			name:  "pass in an earlier package and fail in a later package retain match evidence",
+			input: "\x16=== RUN   TestSelected\n\x16--- PASS: TestSelected (0.00s)\n\x16=== RUN   TestSelected\n\x16--- FAIL: TestSelected (0.00s)\n",
+			want:  true,
+		},
+		{
+			name:  "fail in an earlier package and pass in a later package qualify",
+			input: "\x16=== RUN   TestSelected\n\x16--- FAIL: TestSelected (0.00s)\n\x16=== RUN   TestSelected\n\x16--- PASS: TestSelected (0.00s)\n",
+			want:  true,
+		},
+		{
 			name:  "pass without run is ignored",
 			input: "\x16--- PASS: TestSelected (0.00s)\n",
 			want:  false,
@@ -161,17 +182,34 @@ func TestHasCompleteMatchRequiresFramedPass(t *testing.T) {
 	}
 }
 
-func TestHasCompleteMatchAcceptsSameNameFromLaterPackage(t *testing.T) {
+func TestHasCompleteMatchPropagatesReaderError(t *testing.T) {
 	selector, err := compileSelector("^TestSelected$")
 	if err != nil {
 		t.Fatal(err)
 	}
-	input := strings.NewReader("\x16=== RUN   TestSelected\n\x16--- SKIP: TestSelected (0.00s)\n\x16=== RUN   TestSelected\n\x16--- PASS: TestSelected (0.00s)\n")
+	wantErr := errors.New("reader failed")
+	input := readerWithError{
+		data: "\x16=== RUN   TestSelected\n\x16--- PASS: TestSelected (0.00s)\n",
+		err:  wantErr,
+	}
 	found, err := hasCompleteMatch(input, selector)
-	if err != nil {
-		t.Fatal(err)
+	if found {
+		t.Fatal("reader error was hidden by a passing event")
 	}
-	if !found {
-		t.Fatal("same-name passing test in a later package was not recognized")
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("hasCompleteMatch() error = %v, want %v", err, wantErr)
 	}
+}
+
+type readerWithError struct {
+	data string
+	err  error
+}
+
+func (r readerWithError) Read(p []byte) (int, error) {
+	if r.data == "" {
+		return 0, r.err
+	}
+	n := copy(p, r.data)
+	return n, r.err
 }

@@ -372,30 +372,70 @@ func TestFastSkipped(t *testing.T) {
 	}
 }
 
-func TestFastCheckAcceptsPassingSameNameInLaterPackage(t *testing.T) {
-	root := toolingFixture(t)
-	toolingFile(t, root, "internal/fast-check-multi/a-skip/fast_check_test.go", `package skipfixture
+func TestFastCheckAcceptsPassingSameNameAcrossPackages(t *testing.T) {
+	for _, tc := range []struct {
+		name, firstDir, firstPackage, firstBody, secondDir, secondPackage, secondBody, wantOutput string
+		wantErr                                                                                   bool
+	}{
+		{
+			name:          "skip then pass",
+			firstDir:      "a-skip",
+			firstPackage:  "skipfixture",
+			firstBody:     "\tt.Skip(\"bounded fixture skip\")\n",
+			secondDir:     "b-pass",
+			secondPackage: "passfixture",
+			secondBody:    "",
+		},
+		{
+			name:          "pass then skip",
+			firstDir:      "a-pass",
+			firstPackage:  "passfixture",
+			firstBody:     "",
+			secondDir:     "b-skip",
+			secondPackage: "skipfixture",
+			secondBody:    "\tt.Skip(\"bounded fixture skip\")\n",
+		},
+		{
+			name:          "pass then fail",
+			firstDir:      "a-pass",
+			firstPackage:  "passfixture",
+			firstBody:     "",
+			secondDir:     "b-fail",
+			secondPackage: "failfixture",
+			secondBody:    "\tt.Fatal(\"bounded fixture failure\")\n",
+			wantOutput:    "fast check failed: selected test command exited",
+			wantErr:       true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := toolingFixture(t)
+			toolingFile(t, root, "internal/fast-check-multi/"+tc.firstDir+"/fast_check_test.go", `package `+tc.firstPackage+`
 
 import "testing"
 
 func TestFastSameName(t *testing.T) {
-	t.Skip("bounded fixture skip")
-}
+`+tc.firstBody+`}
 `, 0600)
-	toolingFile(t, root, "internal/fast-check-multi/b-pass/fast_check_test.go", `package passfixture
+			toolingFile(t, root, "internal/fast-check-multi/"+tc.secondDir+"/fast_check_test.go", `package `+tc.secondPackage+`
 
 import "testing"
 
-func TestFastSameName(t *testing.T) {}
+func TestFastSameName(t *testing.T) {
+`+tc.secondBody+`}
 `, 0600)
-	out, err := toolingRun(t, root, nil, "make",
-		"FAST_MODULE=.",
-		"FAST_PACKAGE=./internal/fast-check-multi/...",
-		"FAST_TEST=^TestFastSameName$$",
-		"fast",
-	)
-	if err != nil {
-		t.Fatalf("passing same-name test in a later package was not accepted after a skipped package: %s", out)
+			out, err := toolingRun(t, root, []string{"GOFLAGS=-p=1"}, "make",
+				"FAST_MODULE=.",
+				"FAST_PACKAGE=./internal/fast-check-multi/...",
+				"FAST_TEST=^TestFastSameName$$",
+				"fast",
+			)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("same-name package order %s returned err=%v, want error=%t: %s", tc.name, err, tc.wantErr, out)
+			}
+			if tc.wantOutput != "" && !strings.Contains(out, tc.wantOutput) {
+				t.Fatalf("same-name package order %s output lacks %q: %s", tc.name, tc.wantOutput, out)
+			}
+		})
 	}
 }
 
