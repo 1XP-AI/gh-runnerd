@@ -949,6 +949,97 @@ b3d45cb648965913090dcb08c3674341f76f483a` followed by a separate revert of
 this documentation append if needed; retain the current journal and any
 uncertainty for inspection, and never reset, erase, replay or run live cleanup.
 
+### Exact-head follow-up: acquisition request body and session-close wire binding
+
+The fresh exact-head Codex detail for PR72 was read against immutable baseline
+`d85213a2123ed260d9dd1fc01771705bc2b96ae`. It identified [P1 acquisition
+request-body binding](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3974007599)
+and [P1 session-close DELETE binding](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3974007586).
+The review command was the repository's `codex-review` detail path for PR72;
+no raw review payload, token or private machine path is included here.
+
+The meaningful red regressions were added before the source correction and run
+against the exact baseline with the real pinned `github.com/actions/scaleset
+v0.4.0` SDK and an offline TLS loopback fixture:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^TestPinnedSDKDrainBindsAcquireToPhysicalRequestBody$' -count=1 -v -timeout=180s
+```
+
+At `2026-09-09T23:53:39Z` UTC this exited 1. The valid SDK-array control
+passed, while mismatched, duplicate, case-folded, malformed and oversized
+request bodies were forwarded and accepted by the old response-only capture;
+the read-error control also reached the loopback acquisition handler
+(`acquires=1`). The sanitized failing assertion was `want quarantine before
+forwarding`, and no request body, bearer, URL or SDK error text was retained.
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^TestPinnedSDKDrainBindsSessionCloseToPhysicalDelete$' -count=1 -v -timeout=180s
+```
+
+At `2026-09-09T23:53:46Z` UTC this exited 1: both wrong-session and wrong-
+scale-set DELETE controls returned SDK `nil` from the permissive loopback
+handler, so the old direct `session.Close` path recorded success instead of
+retaining uncertainty.
+
+The minimal source/test correction was committed as
+`05b5fffa9b6798e20d5454838252dd21de412fdc`. The pinned SDK's actual acquisition
+schema is a JSON array of `int64` IDs. The innermost request transport capture
+receives the final request after the physical-mutation seam, reads at most the
+existing response budget, rejects malformed, duplicate, case-folded, semantic
+duplicate, mismatched, oversized and read-error bodies before forwarding, and
+replaces a valid body with the same bounded bytes for the real SDK transport;
+the forwarding copy is cleared after the synchronous request and on close.
+Expected IDs are cloned into the ephemeral capture, while no raw request body,
+token or response error is journaled. The response-side acquisition status and
+accepted IDs remain required, and ACK-before-acquisition and unknown/replay
+guards are unchanged.
+
+Drain session close now reuses the existing `terminal-session-close` exact
+wire capture with the approved SetID/session ID and requires one matching
+DELETE plus HTTP 204 before `Driver.effect` can persist a successful
+`session-close` result. A wrong target that nevertheless receives 204 is
+therefore recorded as unknown and leaves the session/reservation fence for
+inspection; it is never retried or cleaned up automatically.
+
+Focused green verification completed on the corrected source:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^(TestPinnedSDKDrain.*|TestDriverDrainThroughPinnedSDKAndPollHook)$' -count=1 -v -timeout=180s
+```
+
+At `2026-09-10T00:02:24Z` UTC this passed in 0.630s, including the valid and
+negative request-body matrix, wrong set/session close paths, the existing
+pinned-SDK poll/ACK/acquisition/identity/queue controls and the legitimate
+observed drain.
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -run '^(TestPinnedSDKDrain.*|TestDriverDrainThroughPinnedSDKAndPollHook)$' -count=1 -v -timeout=180s
+```
+
+At `2026-09-10T00:02:33Z` UTC this passed in 2.019s with no race report. At
+`2026-09-10T00:02:42Z` UTC, `GOTOOLCHAIN=go1.26.8 go vet ./livecanary`,
+relevant-file `gofmt -l`, and `git diff --check` all exited 0; gofmt emitted no
+paths. Package-wide `livecanary` normal and race runs also passed before this
+commit (28.241s and 40.834s respectively). All checks remained offline TLS
+loopback evidence: no live runner, workflow, credential, App, Keychain,
+launchd, Docker/Lima or cleanup operation was performed.
+
+The remaining gap is that a client-side request write and a matching response
+still do not claim server receipt or an atomic remote drain barrier. A close
+target mismatch may have changed remote state before it became unknown, so the
+durable fence intentionally retains the session and requires operator
+inspection. G01's full live evidence gate and parent goal remain open.
+
+Rollback is a focused normal `git revert --no-edit
+05b5fffa9b6798e20d5454838252dd21de412fdc` followed by a separate revert of
+this evidence append if needed; retain the current journal, reservation and
+uncertainty, and never reset, erase, replay or run live cleanup.
+
 ## Remaining gate and rollback
 
 The live G01 gate remains unresolved until a separately authorized run uses an
