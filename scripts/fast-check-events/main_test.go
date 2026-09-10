@@ -77,6 +77,7 @@ func TestHasCompleteMatchFindsChild(t *testing.T) {
 	}
 	input := strings.NewReader(`{"Action":"run","Test":"TestParent"}
 {"Action":"run","Test":"TestParent/Actual"}
+{"Action":"pass","Test":"TestParent/Actual"}
 `)
 	found, err := hasCompleteMatch(input, selector)
 	if err != nil {
@@ -84,5 +85,50 @@ func TestHasCompleteMatchFindsChild(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("complete selector run event was not recognized")
+	}
+}
+
+func TestHasCompleteMatchRequiresAuthenticatedPass(t *testing.T) {
+	selector, err := compileSelector("^TestSelected$")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{
+			name:  "synthetic run has no terminal evidence",
+			input: `{"Action":"run","Test":"TestSelected"}`,
+			want:  false,
+		},
+		{
+			name: "skip is not a passing terminal",
+			input: `{"Action":"run","Test":"TestSelected"}
+{"Action":"skip","Test":"TestSelected"}`,
+			want: false,
+		},
+		{
+			name:  "pass without run is unauthenticated",
+			input: `{"Action":"pass","Test":"TestSelected"}`,
+			want:  false,
+		},
+		{
+			name: "run and pass are authenticated",
+			input: `{"Action":"run","Test":"TestSelected"}
+{"Action":"pass","Test":"TestSelected"}`,
+			want: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			found, err := hasCompleteMatch(strings.NewReader(tc.input), selector)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if found != tc.want {
+				t.Fatalf("hasCompleteMatch() = %t, want %t", found, tc.want)
+			}
+		})
 	}
 }

@@ -181,6 +181,24 @@ func TestFastSelected(t *testing.T) {}
 	}
 }
 
+func TestFastCheckPreservesEnvironmentSelectorDollar(t *testing.T) {
+	root := toolingFixture(t)
+	toolingFile(t, root, "cmd/gh-runnerd/fast_check_test.go", `package main
+
+import "testing"
+
+func TestB(t *testing.T) {}
+`, 0600)
+	out, err := toolingRun(t, root, []string{
+		"FAST_MODULE=.",
+		"FAST_PACKAGE=./cmd/gh-runnerd",
+		"FAST_TEST=^TestA$.*",
+	}, "make", "fast")
+	if err == nil || !strings.Contains(out, "FAST_TEST matched no compiled test") {
+		t.Fatalf("environment selector was changed before matching: err=%v output=%s", err, out)
+	}
+}
+
 func TestFastCheckExecutesSelectedTestWithListGOFLAGS(t *testing.T) {
 	root := toolingFixture(t)
 	toolingFile(t, root, "cmd/gh-runnerd/fast_check_test.go", `package main
@@ -268,6 +286,55 @@ func TestFastCheckParent(t *testing.T) {
 				t.Fatalf("selector %q output lacks %q: %s", tc.selector, tc.wantOutput, out)
 			}
 		})
+	}
+}
+
+func TestFastCheckRejectsSyntheticTestMainRun(t *testing.T) {
+	root := toolingFixture(t)
+	toolingFile(t, root, "cmd/gh-runnerd/fast_check_test.go", `package main
+
+import (
+	"fmt"
+	"os"
+	"testing"
+)
+
+func TestMain(m *testing.M) {
+	fmt.Println("=== RUN   NoSuchTest")
+	os.Exit(m.Run())
+}
+
+func TestFastActual(t *testing.T) {}
+`, 0600)
+	out, err := toolingRun(t, root, []string{"GOFLAGS=-v"}, "make",
+		"FAST_MODULE=.",
+		"FAST_PACKAGE=./cmd/gh-runnerd",
+		"FAST_TEST=^NoSuchTest$$",
+		"fast",
+	)
+	if err == nil || !strings.Contains(out, "FAST_TEST matched no compiled test") {
+		t.Fatalf("synthetic TestMain run was treated as selected-test evidence: err=%v output=%s", err, out)
+	}
+}
+
+func TestFastCheckRejectsSkippedSelectedTest(t *testing.T) {
+	root := toolingFixture(t)
+	toolingFile(t, root, "cmd/gh-runnerd/fast_check_test.go", `package main
+
+import "testing"
+
+func TestFastSkipped(t *testing.T) {
+	t.Skip("bounded fixture skip")
+}
+`, 0600)
+	out, err := toolingRun(t, root, nil, "make",
+		"FAST_MODULE=.",
+		"FAST_PACKAGE=./cmd/gh-runnerd",
+		"FAST_TEST=^TestFastSkipped$$",
+		"fast",
+	)
+	if err == nil || !strings.Contains(out, "FAST_TEST matched no compiled test") {
+		t.Fatalf("skipped test was treated as passing evidence: err=%v output=%s", err, out)
 	}
 }
 
@@ -660,6 +727,62 @@ func TestNestedFastSelected(t *testing.T) {}
 				t.Fatalf("focused selector invocation = %q, want %q", log, tc.invocation)
 			}
 		})
+	}
+}
+
+func TestFastCheckResolvesRelativeGoOverride(t *testing.T) {
+	root := toolingFixture(t)
+	toolingFile(t, root, "experiments/g01-scaleset/fast_check_test.go", `package fixture
+
+import "testing"
+
+func TestNestedFastSelected(t *testing.T) {}
+`, 0600)
+	wrapper, logPath, realGo := toolingGoWrapper(t, root)
+	data, err := os.ReadFile(wrapper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolingFile(t, root, "tools/go", string(data), 0700)
+	out, err := toolingRun(t, root, []string{
+		"GO=./tools/go",
+		"TOOLING_REAL_GO=" + realGo,
+		"TOOLING_GO_LOG=" + logPath,
+	}, "make",
+		"FAST_MODULE=./experiments/g01-scaleset",
+		"FAST_PACKAGE=.",
+		"FAST_TEST=^TestNestedFastSelected$$",
+		"fast",
+	)
+	if err != nil {
+		t.Fatalf("relative Go override failed after changing directories: %s", out)
+	}
+}
+
+func TestFastCheckDisablesDependencyExpansionForPackageResolution(t *testing.T) {
+	root := toolingFixture(t)
+	toolingFile(t, root, "cmd/gh-runnerd/main.go", `package main
+
+import "fmt"
+
+var _ = fmt.Sprint
+
+func main() {}
+`, 0600)
+	toolingFile(t, root, "cmd/gh-runnerd/fast_check_test.go", `package main
+
+import "testing"
+
+func TestFastSelected(t *testing.T) {}
+`, 0600)
+	out, err := toolingRun(t, root, []string{"GOFLAGS=-deps"}, "make",
+		"FAST_MODULE=.",
+		"FAST_PACKAGE=./cmd/gh-runnerd",
+		"FAST_TEST=^TestFastSelected$$",
+		"fast",
+	)
+	if err != nil {
+		t.Fatalf("dependency expansion escaped selected module during package resolution: %s", out)
 	}
 }
 

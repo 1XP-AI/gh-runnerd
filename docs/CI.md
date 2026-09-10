@@ -102,16 +102,16 @@ beyond `FAST_TEST`; `-list`, `-skip`, and build-only `-c` are cleared so they
 cannot suppress it; explicit `-run`/`-count` values retain the requested
 selector and `-cpu=1` bounds each selected test to one execution. Inherited
 `-exec` is cleared so a wrapper cannot bypass the test binary. The command uses
-Go's JSON test events and requires a structured per-test `Action=run` event whose
-`Test` field is a complete match under Go's slash-separated component and
-top-level alternation semantics; possible-parent events do not count. Package
-summaries and arbitrary `TestMain` output do not count, and dry-run or
-unsupported build modes fail closed when no test event is observed. Useful build
-flags such as `-race` and `-mod=readonly` remain inherited; this is not a
-blanket `GOFLAGS` removal. This is a trusted local helper, not a hostile-code
-sandbox. If selectors are passed as Make command-line variables instead of
-environment assignments, escape literal `$` as `$$` so Make preserves the
-regexp anchor.
+Go's JSON test events and requires paired per-test `Action=run` and terminal
+`Action=pass` events whose `Test` field is a complete match under Go's
+slash-separated component and top-level alternation semantics; possible-parent
+events do not count. A terminal `skip` or `fail`, package summaries, and arbitrary
+`TestMain` output do not count, and dry-run or unsupported build modes fail closed
+when no passing test event is observed. Useful build flags such as `-race` and
+`-mod=readonly` remain inherited; this is not a blanket `GOFLAGS` removal. This
+is a trusted local helper, not a hostile-code sandbox. If selectors are passed
+as Make command-line variables instead of environment assignments, escape literal
+`$` as `$$` so Make preserves the regexp anchor.
 
 No hardware, live GitHub, Docker or daemon suite is part of this public check. Those profiles remain explicit future or maintainer-controlled runs; they are not silently converted into passing tests here. G04 introduces the first application behavior contracts and should add meaningful unit and fuzz targets before claiming those forms of coverage.
 

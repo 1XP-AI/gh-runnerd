@@ -14,8 +14,9 @@ import (
 )
 
 type testEvent struct {
-	Action string `json:"Action"`
-	Test   string `json:"Test"`
+	Action  string `json:"Action"`
+	Package string `json:"Package"`
+	Test    string `json:"Test"`
 }
 
 type compiledSelector [][]*regexp.Regexp
@@ -126,22 +127,43 @@ func (s compiledSelector) matches(name string) bool {
 
 func hasCompleteMatch(input io.Reader, selector compiledSelector) (bool, error) {
 	reader := bufio.NewReader(input)
-	found := false
+	results := make(map[string]testResult)
 	for {
 		line, err := reader.ReadString('\n')
 		if len(strings.TrimSpace(line)) != 0 {
 			var event testEvent
-			if json.Unmarshal([]byte(line), &event) == nil && event.Action == "run" && event.Test != "" && selector.matches(event.Test) {
-				found = true
+			if json.Unmarshal([]byte(line), &event) == nil && event.Test != "" && selector.matches(event.Test) {
+				result := results[event.Package+"\x00"+event.Test]
+				switch event.Action {
+				case "run":
+					result.ran = true
+				case "pass", "skip", "fail":
+					if result.ran && !result.terminal {
+						result.terminal = true
+						result.passed = event.Action == "pass"
+					}
+				}
+				results[event.Package+"\x00"+event.Test] = result
 			}
 		}
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				return found, nil
+				for _, result := range results {
+					if result.passed {
+						return true, nil
+					}
+				}
+				return false, nil
 			}
 			return false, err
 		}
 	}
+}
+
+type testResult struct {
+	ran      bool
+	terminal bool
+	passed   bool
 }
 
 func rewrite(s string) string {

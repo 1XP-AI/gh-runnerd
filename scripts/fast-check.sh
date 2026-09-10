@@ -61,13 +61,21 @@ for part in "${module_parts[@]}" "${package_parts[@]}"; do
 done
 
 repo_root="$(pwd -P)"
+case "${go_cmd}" in
+	*/*)
+		case "${go_cmd}" in
+			/*) ;;
+			*) go_cmd="${repo_root}/${go_cmd}" ;;
+		esac
+		;;
+esac
 module_root="$(cd "${fast_module}" 2>/dev/null && pwd -P)" || fail "module directory does not exist: ${fast_module}"
 [[ -f "${module_root}/go.mod" ]] || fail "selected module has no go.mod: ${fast_module}"
 if [[ "${module_root}" != "${repo_root}" && "${module_root}" != "${repo_root}"/* ]]; then
 	fail 'FAST_MODULE must resolve inside the current repository'
 fi
 
-if ! package_dirs="$(cd "${module_root}" && "${go_cmd}" list -json=false -f '{{.Dir}}' "${fast_package}")"; then
+if ! package_dirs="$(cd "${module_root}" && GOFLAGS="${GOFLAGS:-} -deps=false" "${go_cmd}" list -json=false -f '{{.Dir}}' "${fast_package}")"; then
 	fail "package pattern could not be resolved: ${fast_package}"
 fi
 package_found=0
