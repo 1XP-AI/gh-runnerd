@@ -45,9 +45,9 @@ case "${fast_package}" in
 	*) fail 'FAST_PACKAGE must be . or a relative package pattern beginning with ./' ;;
 esac
 
-# Resolve the selected module and package/pattern prefix physically before
-# running tests. The `...` package wildcard is valid; only an actual `..` path
-# segment is refused lexically.
+# Resolve the selected module and every package matched by the Go pattern
+# physically before running tests. The `...` package wildcard is valid in any
+# path segment; only an actual `..` path segment is refused lexically.
 module_path="${fast_module#./}"
 package_parts=()
 IFS='/' read -r -a package_parts <<< "${fast_package}"
@@ -64,23 +64,26 @@ if [[ "${module_root}" != "${repo_root}" && "${module_root}" != "${repo_root}"/*
 	fail 'FAST_MODULE must resolve inside the current repository'
 fi
 
-package_path="${fast_package#./}"
-package_prefix="${package_path}"
-case "${package_path}" in
-	...) package_prefix='.' ;;
-	*/...) package_prefix="${package_path%/...}" ;;
-esac
-package_root="$(cd "${module_root}/${package_prefix}" 2>/dev/null && pwd -P)" || fail "package directory does not exist: ${fast_package}"
-if [[ "${package_root}" != "${module_root}" && "${package_root}" != "${module_root}"/* ]]; then
-	fail 'FAST_PACKAGE must resolve inside selected module'
+if ! package_dirs="$(cd "${module_root}" && "${go_cmd}" list -json=false -f '{{.Dir}}' "${fast_package}")"; then
+	fail "package pattern could not be resolved: ${fast_package}"
 fi
+package_found=0
+while IFS= read -r package_dir; do
+	[[ -n "${package_dir}" ]] || continue
+	package_found=1
+	package_root="$(cd "${package_dir}" 2>/dev/null && pwd -P)" || fail "package directory does not exist: ${fast_package}"
+	if [[ "${package_root}" != "${module_root}" && "${package_root}" != "${module_root}"/* ]]; then
+		fail 'FAST_PACKAGE must resolve inside selected module'
+	fi
+done <<< "${package_dirs}"
+((package_found == 1)) || fail "FAST_PACKAGE matched no packages: ${fast_package}"
 
 printf 'fast check: module=%s package=%s test=%s (focused selector only; not make check)\n' \
 	"${fast_module}" "${fast_package}" "${fast_test}"
 (
 	cd "${module_root}"
 	set +e
-	test_output="$("${go_cmd}" test -json=false -count=1 -run "${fast_test}" "${fast_package}" 2>&1)"
+	test_output="$("${go_cmd}" test -json=false -list= -count=1 -run "${fast_test}" "${fast_package}" 2>&1)"
 	status=$?
 	set -e
 	printf '%s\n' "${test_output}"

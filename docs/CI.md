@@ -91,13 +91,16 @@ For example:
 FAST_MODULE=. FAST_PACKAGE=./internal/scheduler/capacity FAST_TEST='^TestFixedTarget$' make fast
 ```
 
-The script resolves the selected module and package/pattern prefix and rejects
+The script resolves the selected module and every package matched by the Go
+pattern, preserving wildcard forms such as `./.../capacity`, and rejects
 selectors whose physical paths leave the current repository or selected module,
-as well as absolute or lexical `..` paths, missing `go.mod`, missing selectors
-and selectors that match no compiled test. This is a trusted local helper, not a
-hostile-code sandbox. If selectors are passed as Make command-line variables
-instead of environment assignments, escape literal `$` as `$$` so Make
-preserves the regexp anchor.
+as well as absolute or lexical `..` paths, missing `go.mod`, missing selectors,
+package patterns that match no package, and selectors that match no compiled
+test. It overrides execution-suppressing `GOFLAGS=-list=...` for the focused
+test invocation while preserving useful flags such as `-race`. This is a trusted
+local helper, not a hostile-code sandbox. If selectors are passed as Make
+command-line variables instead of environment assignments, escape literal `$`
+as `$$` so Make preserves the regexp anchor.
 
 No hardware, live GitHub, Docker or daemon suite is part of this public check. Those profiles remain explicit future or maintainer-controlled runs; they are not silently converted into passing tests here. G04 introduces the first application behavior contracts and should add meaningful unit and fuzz targets before claiming those forms of coverage.
 

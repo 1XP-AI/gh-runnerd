@@ -179,6 +179,36 @@ func TestFastSelected(t *testing.T) {}
 	}
 }
 
+func TestFastCheckExecutesSelectedTestWithListGOFLAGS(t *testing.T) {
+	root := toolingFixture(t)
+	toolingFile(t, root, "cmd/gh-runnerd/fast_check_test.go", `package main
+
+import "testing"
+
+func TestFastSelected(t *testing.T) {
+	t.Fatal("selected-test-ran")
+}
+`, 0600)
+	for _, tc := range []struct {
+		name, test, want string
+	}{
+		{name: "selected test runs", test: "^TestFastSelected$", want: "selected-test-ran"},
+		{name: "no matching test remains an error", test: "^NoSuchTest$", want: "fast check failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := toolingRun(t, root, []string{"GOFLAGS=-list=."}, "make",
+				"FAST_MODULE=.",
+				"FAST_PACKAGE=./cmd/gh-runnerd",
+				"FAST_TEST="+strings.ReplaceAll(tc.test, "$", "$$"),
+				"fast",
+			)
+			if err == nil || !strings.Contains(out, tc.want) {
+				t.Fatalf("GOFLAGS=-list=. accepted %s: err=%v output=%s", tc.name, err, out)
+			}
+		})
+	}
+}
+
 func TestFastCheckResolvesPackageSymlinks(t *testing.T) {
 	root := toolingFixture(t)
 	toolingFile(t, root, "linked/selected/fast_check_test.go", `package selected
@@ -195,6 +225,12 @@ func TestFastSymlinkNotSelected(t *testing.T) {
 	t.Fatal("wrong test ran")
 }
 `, 0600)
+	toolingFile(t, root, "linked/selected/capacity/fast_check_test.go", `package capacity
+
+import "testing"
+
+func TestFastWildcardSelected(t *testing.T) {}
+`, 0600)
 	if err := os.Symlink("../linked", filepath.Join(root, "scripts", "package-link")); err != nil {
 		t.Fatal(err)
 	}
@@ -206,6 +242,15 @@ func TestFastSymlinkNotSelected(t *testing.T) {
 	)
 	if err != nil {
 		t.Fatalf("valid in-module package symlink failed: %s", out)
+	}
+	out, err = toolingRun(t, root, nil, "make",
+		"FAST_MODULE=.",
+		"FAST_PACKAGE=./.../capacity",
+		"FAST_TEST=^TestFastWildcardSelected$$",
+		"fast",
+	)
+	if err != nil {
+		t.Fatalf("valid general package wildcard failed: %s", out)
 	}
 
 	outside := t.TempDir()
@@ -259,14 +304,14 @@ func TestNestedFastSelected(t *testing.T) {}
 			module:      ".",
 			packagePath: "./...",
 			test:        "^TestFastSelected$",
-			invocation:  "go1.26.8\ttest -json=false -count=1 -run ^TestFastSelected$ ./...",
+			invocation:  "go1.26.8\tlist -json=false -f {{.Dir}} ./...\ngo1.26.8\ttest -json=false -list= -count=1 -run ^TestFastSelected$ ./...",
 		},
 		{
 			name:        "nested module",
 			module:      "./experiments/g01-scaleset",
 			packagePath: ".",
 			test:        "^TestNestedFastSelected$",
-			invocation:  "go1.26.8\ttest -json=false -count=1 -run ^TestNestedFastSelected$ .",
+			invocation:  "go1.26.8\tlist -json=false -f {{.Dir}} .\ngo1.26.8\ttest -json=false -list= -count=1 -run ^TestNestedFastSelected$ .",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
