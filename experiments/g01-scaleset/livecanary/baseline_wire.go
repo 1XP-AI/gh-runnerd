@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"github.com/actions/scaleset"
 	"io"
 	"net/http"
 	"net/url"
@@ -12,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/actions/scaleset"
 )
 
 type baselineWireKey struct{}
@@ -25,6 +26,8 @@ type baselineWireCapture struct {
 	allowedHosts  []string
 	cursor        int
 	count, status int
+	requestIDs    []int64
+	requestCount  int
 	invalid       bool
 	session       *baselineSessionFacts
 	batch         *baselineBatch
@@ -95,6 +98,123 @@ func baselineWireAllowedHosts(a Approval, apiHost string) []string {
 		hosts = append(hosts, apiHost)
 	}
 	return hosts
+}
+
+// baselineRequestCaptureTransport runs immediately above the physical
+// transport. User-supplied test wrappers may mutate a request before it gets
+// here, so this is the final request-side boundary before any bytes leave the
+// process. Only the explicitly expected acquisition request is inspected.
+type baselineRequestCaptureTransport struct{ inner http.RoundTripper }
+
+func (t baselineRequestCaptureTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	c, _ := req.Context().Value(baselineWireKey{}).(*baselineWireCapture)
+	captured := false
+	if c != nil {
+		if err := c.captureRequest(req); err != nil {
+			return nil, err
+		}
+		captured = c.stage == "acquire" && c.requestObserved()
+	}
+	response, err := t.inner.RoundTrip(req)
+	if captured {
+		// The standard transport closes request bodies, but the wrapper contract
+		// does not require a custom inner transport to do so on every path. Clear
+		// the bounded forwarding copy once the synchronous RoundTrip returns.
+		_ = req.Body.Close()
+	}
+	return response, err
+}
+
+func validBaselineRequestIDs(ids []int64) bool {
+	if len(ids) == 0 || len(ids) > 4 {
+		return false
+	}
+	seen := make(map[int64]struct{}, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			return false
+		}
+		if _, ok := seen[id]; ok {
+			return false
+		}
+		seen[id] = struct{}{}
+	}
+	return true
+}
+
+func readBaselineRequestBody(body io.ReadCloser) ([]byte, error) {
+	if body == nil {
+		return nil, ErrRemote
+	}
+	data, readErr := io.ReadAll(io.LimitReader(body, responseBodyLimit+1))
+	closeErr := body.Close()
+	if readErr != nil || closeErr != nil || int64(len(data)) > responseBodyLimit {
+		clear(data)
+		return nil, ErrRemote
+	}
+	return data, nil
+}
+
+func (c *baselineWireCapture) captureRequest(req *http.Request) error {
+	if c == nil || c.stage != "acquire" || len(c.requestIDs) == 0 || !c.target(req) {
+		return nil
+	}
+	c.mu.Lock()
+	c.requestCount++
+	if c.requestCount != 1 {
+		c.invalid = true
+		c.mu.Unlock()
+		if req.Body != nil {
+			_ = req.Body.Close()
+		}
+		return ErrRemote
+	}
+	expected := slices.Clone(c.requestIDs)
+	c.mu.Unlock()
+
+	data, err := readBaselineRequestBody(req.Body)
+	if err != nil {
+		c.mu.Lock()
+		c.invalid = true
+		c.mu.Unlock()
+		return ErrRemote
+	}
+	var got []int64
+	if DecodeStrict(data, &got) != nil || !validBaselineRequestIDs(got) || !validBaselineRequestIDs(expected) || !slices.Equal(got, expected) {
+		clear(data)
+		c.mu.Lock()
+		c.invalid = true
+		c.mu.Unlock()
+		return ErrRemote
+	}
+	// Keep the one bounded copy only as the request stream the pinned SDK must
+	// forward. The capture itself retains no body bytes or decoded payload.
+	replacement := &baselineRequestBody{reader: bytes.NewReader(data), data: data}
+	req.Body = replacement
+	req.ContentLength = int64(len(data))
+	return nil
+}
+
+type baselineRequestBody struct {
+	reader *bytes.Reader
+	data   []byte
+}
+
+func (b *baselineRequestBody) Read(p []byte) (int, error) { return b.reader.Read(p) }
+func (b *baselineRequestBody) Close() error {
+	clear(b.data)
+	b.data = nil
+	b.reader.Reset(nil)
+	return nil
+}
+
+func (c *baselineWireCapture) requestObserved() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.requestCount == 1 && !c.invalid
 }
 
 // Run after the ordinary response budget has wrapped the body. Only this

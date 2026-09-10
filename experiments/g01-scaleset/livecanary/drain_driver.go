@@ -170,7 +170,7 @@ func (c *journaledDrainClient) AcquireJobs(ctx context.Context, ids []int64) ([]
 			if reader, ok := c.d.API.(drainEndpointHostReader); ok {
 				apiHost = reader.drainEndpointHost()
 			}
-			wire = &baselineWireCapture{stage: "acquire", setID: setID, queue: queue, allowedHosts: baselineWireAllowedHosts(c.d.Approval, apiHost)}
+			wire = &baselineWireCapture{stage: "acquire", setID: setID, queue: queue, requestIDs: slices.Clone(ids), allowedHosts: baselineWireAllowedHosts(c.d.Approval, apiHost)}
 			call = wire.context(call)
 		}
 		got, err = c.inner.AcquireJobs(call, slices.Clone(ids))
@@ -179,7 +179,7 @@ func (c *journaledDrainClient) AcquireJobs(ctx context.Context, ids []int64) ([]
 		}
 		if wire != nil {
 			_, _, accepted, status := wire.facts()
-			if !wire.observed() || status != 200 || !accepted.matches(ids) {
+			if !wire.requestObserved() || !wire.observed() || status != 200 || !accepted.matches(ids) {
 				return Event{}, errors.New("acquisition response did not match the one-shot request")
 			}
 		}
@@ -372,8 +372,14 @@ func (d *Driver) drain(ctx context.Context, setID int) error {
 		return runErr
 	}
 	closeErr := d.effect(ctx, "session-close", nil, func(call context.Context) (Event, error) {
+		wire := &baselineWireCapture{stage: "terminal-session-close", setID: setID, sessionID: sessionID}
+		call = wire.context(call)
 		if err := session.Close(call); err != nil {
 			return Event{}, err
+		}
+		_, _, _, status := wire.facts()
+		if !wire.observed() || status != http.StatusNoContent {
+			return Event{}, errors.New("session close response did not match the one-shot request")
 		}
 		return Event{SessionID: sessionID}, nil
 	})

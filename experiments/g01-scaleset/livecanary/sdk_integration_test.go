@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -521,6 +522,119 @@ func TestPinnedSDKDrainBindsACKToPhysicalDelete(t *testing.T) {
 	}
 }
 
+func TestPinnedSDKDrainBindsAcquireToPhysicalRequestBody(t *testing.T) {
+	a := approval()
+	tests := []struct {
+		name       string
+		mutateBody func(*http.Request)
+		good       bool
+	}{
+		{name: "valid pinned SDK array", good: true},
+		{name: "mismatched ID", mutateBody: replaceSDKRequestBody(`[99]`)},
+		{name: "duplicate ID", mutateBody: replaceSDKRequestBody(`[41,41]`)},
+		{name: "case-folded duplicate field", mutateBody: replaceSDKRequestBody(`{"RequestIDs":[99],"requestids":[41]}`)},
+		{name: "malformed JSON", mutateBody: replaceSDKRequestBody(`[41`)},
+		{name: "oversized body", mutateBody: replaceSDKRequestBody(strings.Repeat("0", int(responseBodyLimit)+1))},
+		{name: "read error", mutateBody: func(req *http.Request) {
+			req.Body = &sdkRequestBodyFault{data: []byte(`[41]`), err: io.ErrUnexpectedEOF}
+			req.ContentLength = -1
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			options := pinnedDrainOptions{mutateRequest: func(req *http.Request) {
+				if tc.mutateBody != nil && req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/acquirejobs") {
+					tc.mutateBody(req)
+				}
+			}}
+			fixture, base, session, hook := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), options)
+			journal := &memoryJournal{}
+			d := &Driver{Approval: a, Journal: journal, API: base}
+			client := &journaledDrainClient{d: d, inner: session, sessionID: session.Session().SessionID.String(), setID: 7, hook: hook}
+			hook.releaseResponse()
+			message, err := client.GetMessage(context.Background(), 0, drainInitialCapacity)
+			if err != nil || message == nil {
+				t.Fatalf("pinned SDK setup poll = message %v err %v", message, err)
+			}
+			if err := client.DeleteMessage(context.Background(), message.MessageID); err != nil {
+				t.Fatalf("pinned SDK setup ACK = %v", err)
+			}
+			got, err := client.AcquireJobs(context.Background(), []int64{41})
+			if tc.good {
+				if err != nil || !slices.Equal(got, []int64{41}) {
+					t.Fatalf("valid pinned SDK acquisition = %v, got %v", err, got)
+				}
+				if fixture.acquires.Load() != 1 || fixture.acquireRequestBody() != "[41]" {
+					t.Fatalf("valid pinned SDK request = acquires %d body %q", fixture.acquires.Load(), fixture.acquireRequestBody())
+				}
+				return
+			}
+			if !errors.Is(err, ErrQuarantine) || got != nil {
+				t.Fatalf("invalid acquisition body = got %v err %v, want quarantine before forwarding", got, err)
+			}
+			if fixture.acquires.Load() != 0 {
+				t.Fatalf("invalid acquisition body reached loopback endpoint: acquires=%d", fixture.acquires.Load())
+			}
+			if state := replay(journal.Events()); !state.uncertain {
+				t.Fatal("invalid acquisition body did not retain uncertainty")
+			}
+		})
+	}
+}
+
+func TestPinnedSDKDrainBindsSessionCloseToPhysicalDelete(t *testing.T) {
+	a := approval()
+	a.Phases = append(a.Phases, "drain")
+	for _, tc := range []struct {
+		name   string
+		mutate func(*http.Request)
+	}{
+		{
+			name: "wrong session",
+			mutate: func(req *http.Request) {
+				if req.Method == http.MethodDelete && strings.Contains(req.URL.Path, "/sessions/") {
+					req.URL.Path = strings.TrimSuffix(req.URL.Path, "/00000000-0000-0000-0000-000000000021") + "/00000000-0000-0000-0000-000000000099"
+					req.URL.RawPath = ""
+				}
+			},
+		},
+		{
+			name: "wrong scale set",
+			mutate: func(req *http.Request) {
+				if req.Method == http.MethodDelete && strings.Contains(req.URL.Path, "/sessions/") {
+					req.URL.Path = strings.Replace(req.URL.Path, "/runnerscalesets/7/", "/runnerscalesets/8/", 1)
+					req.URL.RawPath = ""
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture, base, _, _ := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{mutateRequest: tc.mutate})
+			journal := &memoryJournal{}
+			for _, event := range drainReplayPrefix()[:3] {
+				if err := journal.Append(event); err != nil {
+					t.Fatal(err)
+				}
+			}
+			d := &Driver{Approval: a, Journal: journal, API: fixtureSDK{base}}
+			if err := d.Run(context.Background(), "drain"); !errors.Is(err, ErrQuarantine) {
+				t.Fatalf("wrong session-close target = %v, want quarantine", err)
+			}
+			if fixture.closeRequests.Load() != 1 {
+				t.Fatalf("wrong session-close target requests = %d, want one loopback attempt", fixture.closeRequests.Load())
+			}
+			for _, event := range journal.Events() {
+				if event.Kind == "result" && event.Operation == "session-close" {
+					t.Fatal("wrong session-close target recorded a successful result")
+				}
+			}
+			if state := replay(journal.Events()); !state.uncertain {
+				t.Fatal("wrong session-close target did not retain uncertainty")
+			}
+		})
+	}
+}
+
 func TestPinnedSDKDrainRejectsAmbiguousRunnerSnapshot(t *testing.T) {
 	a := approval()
 	runnerBody := `{"count":1,"value":[{"id":19,"name":"` + a.workerName() + `","runnerScaleSetId":7,"RunnerScaleSetId":7}]}`
@@ -655,11 +769,14 @@ type pinnedDrainFixture struct {
 	polls          atomic.Int32
 	acks           atomic.Int32
 	acquires       atomic.Int32
+	closeRequests  atomic.Int32
 	verifyCalls    atomic.Int32
 	snapshotReads  atomic.Int32
 	mu             sync.Mutex
 	cursors        []string
 	capacity       []string
+	acquireBodies  []string
+	closePaths     []string
 }
 
 func newPinnedDrainSession(t *testing.T, a Approval, body string) (*pinnedDrainFixture, *SDKAPI, Session, *drainPollHook) {
@@ -741,6 +858,12 @@ func newPinnedDrainSessionOptions(t *testing.T, a Approval, body string, options
 			w.WriteHeader(http.StatusNoContent)
 		case strings.HasSuffix(r.URL.Path, "/acquirejobs") && r.Method == http.MethodPost:
 			fixture.acquires.Add(1)
+			requestBody, readErr := io.ReadAll(r.Body)
+			if readErr == nil {
+				fixture.mu.Lock()
+				fixture.acquireBodies = append(fixture.acquireBodies, string(requestBody))
+				fixture.mu.Unlock()
+			}
 			w.Header().Set("Content-Type", "application/json")
 			if fixture.acquireBody != "" {
 				_, _ = io.WriteString(w, fixture.acquireBody)
@@ -748,6 +871,10 @@ func newPinnedDrainSessionOptions(t *testing.T, a Approval, body string, options
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"count": 1, "value": []int64{41}})
 		case strings.Contains(r.URL.Path, "/sessions/") && r.Method == http.MethodDelete:
+			fixture.closeRequests.Add(1)
+			fixture.mu.Lock()
+			fixture.closePaths = append(fixture.closePaths, r.URL.Path)
+			fixture.mu.Unlock()
 			w.WriteHeader(http.StatusNoContent)
 		case strings.HasSuffix(r.URL.Path, "/runnerscalesets/7") && r.Method == http.MethodGet:
 			read := int(fixture.snapshotReads.Add(1))
@@ -833,6 +960,43 @@ func newPinnedDrainSessionOptions(t *testing.T, a Approval, body string, options
 		return fixture, base, nil, hook
 	}
 	return fixture, base, session, hook
+}
+
+func replaceSDKRequestBody(body string) func(*http.Request) {
+	return func(req *http.Request) {
+		data := []byte(body)
+		req.Body = io.NopCloser(strings.NewReader(body))
+		req.ContentLength = int64(len(data))
+	}
+}
+
+type sdkRequestBodyFault struct {
+	data   []byte
+	offset int
+	err    error
+}
+
+func (b *sdkRequestBodyFault) Read(p []byte) (int, error) {
+	if b.offset >= len(b.data) {
+		return 0, b.err
+	}
+	n := copy(p, b.data[b.offset:])
+	b.offset += n
+	if b.offset == len(b.data) {
+		return n, b.err
+	}
+	return n, nil
+}
+
+func (b *sdkRequestBodyFault) Close() error { return nil }
+
+func (f *pinnedDrainFixture) acquireRequestBody() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.acquireBodies) == 0 {
+		return ""
+	}
+	return f.acquireBodies[len(f.acquireBodies)-1]
 }
 
 type sdkResponseBodyFaultRoundTripper struct {

@@ -15,7 +15,7 @@ var errResponseBudget = errors.New("response body budget exceeded")
 // response wrapper without replacing that required type or patching the SDK.
 // The inner clone preserves the already configured TLS/host/proxy restrictions.
 func withResponseBudget(transport *http.Transport, wrappers ...func(http.RoundTripper) http.RoundTripper) *http.Transport {
-	var inner http.RoundTripper = transport
+	var inner http.RoundTripper = baselineRequestCaptureTransport{inner: transport}
 	for _, wrap := range wrappers {
 		if wrap != nil {
 			inner = wrap(inner)
