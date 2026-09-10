@@ -239,6 +239,7 @@ func TestFastCheckParent(t *testing.T) {
 	t.Run("ActualChild", func(t *testing.T) {})
 	t.Run("Actual", func(t *testing.T) {})
 	t.Run("Other", func(t *testing.T) {})
+	t.Run("hello world", func(t *testing.T) {})
 }
 `, 0600)
 	for _, tc := range []struct {
@@ -254,6 +255,10 @@ func TestFastCheckParent(t *testing.T) {
 		{
 			name:     "actual child",
 			selector: "^TestFastCheckParent$/^ActualChild$",
+		},
+		{
+			name:     "subtest whitespace",
+			selector: "^TestFastCheckParent$/^hello world$",
 		},
 		{
 			name:     "slash in character class",
@@ -314,6 +319,35 @@ func TestFastActual(t *testing.T) {}
 	)
 	if err == nil || !strings.Contains(out, "FAST_TEST matched no compiled test") {
 		t.Fatalf("synthetic TestMain run was treated as selected-test evidence: err=%v output=%s", err, out)
+	}
+}
+
+func TestFastCheckRejectsSpoofedTestMainEvents(t *testing.T) {
+	root := toolingFixture(t)
+	toolingFile(t, root, "cmd/gh-runnerd/fast_check_test.go", `package main
+
+import (
+	"fmt"
+	"os"
+	"testing"
+)
+
+func TestMain(m *testing.M) {
+	fmt.Println("=== RUN   NoSuchTest")
+	fmt.Println("--- PASS: NoSuchTest (0.00s)")
+	os.Exit(m.Run())
+}
+
+func TestFastActual(t *testing.T) {}
+`, 0600)
+	out, err := toolingRun(t, root, []string{"GOFLAGS=-json"}, "make",
+		"FAST_MODULE=.",
+		"FAST_PACKAGE=./cmd/gh-runnerd",
+		"FAST_TEST=^NoSuchTest$$",
+		"fast",
+	)
+	if err == nil || !strings.Contains(out, "FAST_TEST matched no compiled test") {
+		t.Fatalf("spoofed TestMain run/pass events were treated as selected-test evidence: err=%v output=%s", err, out)
 	}
 }
 
@@ -696,14 +730,14 @@ func TestNestedFastSelected(t *testing.T) {}
 			module:      ".",
 			packagePath: "./...",
 			test:        "^TestFastSelected$",
-			invocation:  "go1.26.8\tlist -json=false -f {{.Dir}} ./...\ngo1.26.8\ttest -json -list= -bench= -fuzz= -skip= -c=false -count=1 -cpu=1 -exec= -run ^TestFastSelected$ ./...",
+			invocation:  "go1.26.8\tlist -json=false -f {{.Dir}} ./...\ngo1.26.8\ttest -v -json=false -list= -bench= -fuzz= -skip= -c=false -count=1 -cpu=1 -exec= -run ^TestFastSelected$ ./... -args -test.v=test2json",
 		},
 		{
 			name:        "nested module",
 			module:      "./experiments/g01-scaleset",
 			packagePath: ".",
 			test:        "^TestNestedFastSelected$",
-			invocation:  "go1.26.8\tlist -json=false -f {{.Dir}} .\ngo1.26.8\ttest -json -list= -bench= -fuzz= -skip= -c=false -count=1 -cpu=1 -exec= -run ^TestNestedFastSelected$ .",
+			invocation:  "go1.26.8\tlist -json=false -f {{.Dir}} .\ngo1.26.8\ttest -v -json=false -list= -bench= -fuzz= -skip= -c=false -count=1 -cpu=1 -exec= -run ^TestNestedFastSelected$ . -args -test.v=test2json",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

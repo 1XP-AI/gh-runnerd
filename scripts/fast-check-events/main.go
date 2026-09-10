@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -13,13 +12,9 @@ import (
 	"strings"
 )
 
-type testEvent struct {
-	Action  string `json:"Action"`
-	Package string `json:"Package"`
-	Test    string `json:"Test"`
-}
-
 type compiledSelector [][]*regexp.Regexp
+
+const test2JSONMarker = byte(0x16)
 
 func main() {
 	var pattern string
@@ -127,31 +122,27 @@ func (s compiledSelector) matches(name string) bool {
 
 func hasCompleteMatch(input io.Reader, selector compiledSelector) (bool, error) {
 	reader := bufio.NewReader(input)
-	results := make(map[string]testResult)
+	ran := make(map[string]bool)
+	passed := make(map[string]bool)
 	for {
 		line, err := reader.ReadString('\n')
-		if len(strings.TrimSpace(line)) != 0 {
-			var event testEvent
-			if json.Unmarshal([]byte(line), &event) == nil && event.Test != "" && selector.matches(event.Test) {
-				result := results[event.Package+"\x00"+event.Test]
-				switch event.Action {
-				case "run":
-					result.ran = true
-				case "pass", "skip", "fail":
-					if result.ran && !result.terminal {
-						result.terminal = true
-						result.passed = event.Action == "pass"
-					}
-				}
-				results[event.Package+"\x00"+event.Test] = result
+		parseFramedTestEvents(line, func(action, name string) {
+			if name == "" || !selector.matches(name) {
+				return
 			}
-		}
+			switch action {
+			case "run":
+				ran[name] = true
+			case "pass":
+				if ran[name] {
+					passed[name] = true
+				}
+			}
+		})
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				for _, result := range results {
-					if result.passed {
-						return true, nil
-					}
+				if len(passed) > 0 {
+					return true, nil
 				}
 				return false, nil
 			}
@@ -160,10 +151,49 @@ func hasCompleteMatch(input io.Reader, selector compiledSelector) (bool, error) 
 	}
 }
 
-type testResult struct {
-	ran      bool
-	terminal bool
-	passed   bool
+func parseFramedTestEvents(line string, visit func(action, name string)) {
+	for {
+		marker := strings.IndexByte(line, test2JSONMarker)
+		if marker < 0 {
+			return
+		}
+		line = line[marker:]
+		next := strings.IndexByte(line[1:], test2JSONMarker)
+		if next >= 0 {
+			next++
+		}
+		framed := line
+		if next >= 0 {
+			framed = line[:next]
+			line = line[next:]
+		} else {
+			line = ""
+		}
+		if action, name, ok := parseFramedTestEvent(framed); ok {
+			visit(action, name)
+		}
+	}
+}
+
+func parseFramedTestEvent(line string) (action, name string, ok bool) {
+	marker := strings.IndexByte(line, test2JSONMarker)
+	if marker < 0 {
+		return "", "", false
+	}
+	line = strings.TrimSuffix(line[marker+1:], "\n")
+	line = strings.TrimSuffix(line, "\r")
+	switch {
+	case strings.HasPrefix(line, "=== RUN   "):
+		return "run", strings.TrimSpace(line[len("=== RUN   "):]), true
+	case strings.HasPrefix(line, "--- PASS: "):
+		name = strings.TrimSpace(line[len("--- PASS: "):])
+		if i := strings.Index(name, " ("); i >= 0 && strings.HasSuffix(name, "s)") {
+			name = name[:i]
+		}
+		return "pass", name, true
+	default:
+		return "", "", false
+	}
 }
 
 func rewrite(s string) string {

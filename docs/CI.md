@@ -101,17 +101,24 @@ inherited `-bench` and `-fuzz` selectors are cleared so they cannot expand work
 beyond `FAST_TEST`; `-list`, `-skip`, and build-only `-c` are cleared so they
 cannot suppress it; explicit `-run`/`-count` values retain the requested
 selector and `-cpu=1` bounds each selected test to one execution. Inherited
-`-exec` is cleared so a wrapper cannot bypass the test binary. The command uses
-Go's JSON test events and requires paired per-test `Action=run` and terminal
-`Action=pass` events whose `Test` field is a complete match under Go's
-slash-separated component and top-level alternation semantics; possible-parent
-events do not count. A terminal `skip` or `fail`, package summaries, and arbitrary
-`TestMain` output do not count, and dry-run or unsupported build modes fail closed
-when no passing test event is observed. Useful build flags such as `-race` and
-`-mod=readonly` remain inherited; this is not a blanket `GOFLAGS` removal. This
-is a trusted local helper, not a hostile-code sandbox. If selectors are passed
-as Make command-line variables instead of environment assignments, escape literal
-`$` as `$$` so Make preserves the regexp anchor.
+`-exec` is cleared so a wrapper cannot bypass the test binary. The command forces
+Go's `-test.v=test2json` framed output while disabling the outer `-json` mode, and
+requires paired framed per-test `=== RUN` and terminal `--- PASS` lines whose test
+name is a complete match under Go's slash-separated component and top-level
+alternation semantics; possible-parent events do not count. Framed `skip` or
+`fail` outcomes, package summaries, and ordinary unframed `TestMain` output do
+not count, and dry-run or unsupported build modes fail closed when no passing
+framed test result is observed. The frame is a Go test protocol boundary against
+ordinary output, not authentication against a deliberately spoofing test process;
+this remains a trusted local helper, not a hostile-code sandbox. Useful build
+flags such as `-race` and `-mod=readonly` remain inherited; this is not a blanket
+`GOFLAGS` removal. If selectors are passed as Make command-line variables instead
+of environment assignments, escape literal `$` as `$$` so Make preserves the
+regexp anchor.
+
+`FAST_TEST` is passed as one argument and may contain whitespace in a Go
+subtest name; `FAST_MODULE` and `FAST_PACKAGE` remain whitespace-free path
+selectors.
 
 No hardware, live GitHub, Docker or daemon suite is part of this public check. Those profiles remain explicit future or maintainer-controlled runs; they are not silently converted into passing tests here. G04 introduces the first application behavior contracts and should add meaningful unit and fuzz targets before claiming those forms of coverage.
 

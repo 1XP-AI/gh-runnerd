@@ -58,9 +58,7 @@ func TestHasCompleteMatchIgnoresAncestors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	input := strings.NewReader(`{"Action":"run","Test":"TestParent"}
-{"Action":"pass","Test":"TestParent"}
-`)
+	input := strings.NewReader("\x16=== RUN   TestParent\n\x16--- PASS: TestParent (0.00s)\n")
 	found, err := hasCompleteMatch(input, selector)
 	if err != nil {
 		t.Fatal(err)
@@ -75,10 +73,7 @@ func TestHasCompleteMatchFindsChild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	input := strings.NewReader(`{"Action":"run","Test":"TestParent"}
-{"Action":"run","Test":"TestParent/Actual"}
-{"Action":"pass","Test":"TestParent/Actual"}
-`)
+	input := strings.NewReader("\x16=== RUN   TestParent\n\x16=== RUN   TestParent/Actual\n\x16--- PASS: TestParent/Actual (0.00s)\n")
 	found, err := hasCompleteMatch(input, selector)
 	if err != nil {
 		t.Fatal(err)
@@ -88,7 +83,22 @@ func TestHasCompleteMatchFindsChild(t *testing.T) {
 	}
 }
 
-func TestHasCompleteMatchRequiresAuthenticatedPass(t *testing.T) {
+func TestHasCompleteMatchHandlesFramingBoundaries(t *testing.T) {
+	selector, err := compileSelector("^TestSelected$")
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := strings.NewReader("ordinary output\x16=== RUN   TestSelected\x16--- PASS: TestSelected (0.00s)\n")
+	found, err := hasCompleteMatch(input, selector)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("framed test events after ordinary output were not recognized")
+	}
+}
+
+func TestHasCompleteMatchRequiresFramedPass(t *testing.T) {
 	selector, err := compileSelector("^TestSelected$")
 	if err != nil {
 		t.Fatal(err)
@@ -100,25 +110,28 @@ func TestHasCompleteMatchRequiresAuthenticatedPass(t *testing.T) {
 	}{
 		{
 			name:  "synthetic run has no terminal evidence",
-			input: `{"Action":"run","Test":"TestSelected"}`,
+			input: "\x16=== RUN   TestSelected\n",
 			want:  false,
 		},
 		{
-			name: "skip is not a passing terminal",
-			input: `{"Action":"run","Test":"TestSelected"}
-{"Action":"skip","Test":"TestSelected"}`,
-			want: false,
-		},
-		{
-			name:  "pass without run is unauthenticated",
-			input: `{"Action":"pass","Test":"TestSelected"}`,
+			name:  "unframed run and pass are ignored",
+			input: "=== RUN   TestSelected\n--- PASS: TestSelected (0.00s)\n",
 			want:  false,
 		},
 		{
-			name: "run and pass are authenticated",
-			input: `{"Action":"run","Test":"TestSelected"}
-{"Action":"pass","Test":"TestSelected"}`,
-			want: true,
+			name:  "skip is not a passing terminal",
+			input: "\x16=== RUN   TestSelected\n\x16--- SKIP: TestSelected (0.00s)\n",
+			want:  false,
+		},
+		{
+			name:  "pass without run is ignored",
+			input: "\x16--- PASS: TestSelected (0.00s)\n",
+			want:  false,
+		},
+		{
+			name:  "framed run and pass qualify",
+			input: "\x16=== RUN   TestSelected\n\x16--- PASS: TestSelected (0.00s)\n",
+			want:  true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

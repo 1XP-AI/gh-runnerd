@@ -7,9 +7,10 @@ the Go 1.26.8 standard-library source file `src/testing/match.go`:
   machine.
 - `rewrite` and `isSpace` adapt the corresponding upstream functions.
 
-The adaptation uses the project's selector and event-parser interfaces and
-keeps the project-specific complete-match behavior. This is source provenance
-documentation; the functions are not represented as independent authorship.
+The adaptation uses the project's selector and framed-output parser interfaces
+and keeps the project-specific complete-match behavior. This is source
+provenance documentation; the functions are not represented as independent
+authorship.
 
 The upstream source identifies its notice as follows:
 

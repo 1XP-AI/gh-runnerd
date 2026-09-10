@@ -23,7 +23,9 @@ require_selector() {
 	local value="$2"
 
 	[[ -n "${value}" ]] || fail "${name} is required; specify FAST_MODULE, FAST_PACKAGE, and FAST_TEST"
-	[[ "${value}" != *[[:space:]]* ]] || fail "${name} must not contain whitespace"
+	if [[ "${name}" != FAST_TEST && "${value}" == *[[:space:]]* ]]; then
+		fail "${name} must not contain whitespace"
+	fi
 	[[ "${value}" != -* ]] || fail "${name} must not begin with '-'"
 }
 
@@ -94,7 +96,7 @@ printf 'fast check: module=%s package=%s test=%s (focused selector only; not mak
 (
 	cd "${module_root}"
 	set +e
-	test_output="$("${go_cmd}" test -json -list= -bench= -fuzz= -skip= -c=false -count=1 -cpu=1 -exec= -run "${fast_test}" "${fast_package}" 2>&1)"
+	test_output="$("${go_cmd}" test -v -json=false -list= -bench= -fuzz= -skip= -c=false -count=1 -cpu=1 -exec= -run "${fast_test}" "${fast_package}" -args -test.v=test2json 2>&1)"
 	status=$?
 	set -e
 	printf '%s\n' "${test_output}"
