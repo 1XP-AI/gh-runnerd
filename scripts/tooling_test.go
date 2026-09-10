@@ -338,6 +338,104 @@ func FuzzFastCheckFalseSuccess(f *testing.F) {
 	}
 }
 
+func TestFastCheckNeutralizesExecAndCPUControls(t *testing.T) {
+	root := toolingFixture(t)
+	toolingFile(t, root, "cmd/gh-runnerd/fast_check_test.go", `package main
+
+import (
+	"os"
+	"testing"
+)
+
+func TestFastCheckSelected(t *testing.T) {
+	path := os.Getenv("TOOLING_FAST_SENTINEL_LOG")
+	if path == "" {
+		t.Fatal("TOOLING_FAST_SENTINEL_LOG is not set")
+	}
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if _, err := file.WriteString("selected-test\n"); err != nil {
+		t.Fatal(err)
+	}
+	t.Fatal("selected-test-ran")
+}
+`, 0600)
+	sentinelLog := filepath.Join(root, "fast-check-sentinel.log")
+	for _, tc := range []struct {
+		name, goflags, wantSentinel string
+		wantErr                     bool
+	}{
+		{
+			name:         "exec cannot bypass selected test",
+			goflags:      "-exec=true",
+			wantErr:      true,
+			wantSentinel: "selected-test\n",
+		},
+		{
+			name:         "cpu list cannot repeat selected test",
+			goflags:      "-cpu=1,2",
+			wantErr:      true,
+			wantSentinel: "selected-test\n",
+		},
+		{
+			name:         "dry run cannot satisfy execution evidence",
+			goflags:      "-n",
+			wantErr:      true,
+			wantSentinel: "",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(sentinelLog, nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+			out, err := toolingRun(t, root, []string{
+				"GOFLAGS=" + tc.goflags,
+				"TOOLING_FAST_SENTINEL_LOG=" + sentinelLog,
+			}, "make",
+				"FAST_MODULE=.",
+				"FAST_PACKAGE=./cmd/gh-runnerd",
+				"FAST_TEST=^TestFastCheckSelected$$",
+				"fast",
+			)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("GOFLAGS=%q returned err=%v, want error=%t; output=%s", tc.goflags, err, tc.wantErr, out)
+			}
+			if got := toolingReadFile(t, sentinelLog); got != tc.wantSentinel {
+				t.Fatalf("GOFLAGS=%q sentinel log = %q, want %q; output=%s", tc.goflags, got, tc.wantSentinel, out)
+			}
+		})
+	}
+}
+
+func TestFastCheckIgnoresTestMainOutputForMatchEvidence(t *testing.T) {
+	root := toolingFixture(t)
+	toolingFile(t, root, "cmd/gh-runnerd/fast_check_test.go", `package main
+
+import (
+	"fmt"
+	"os"
+	"testing"
+)
+
+func TestMain(m *testing.M) {
+	fmt.Println("ok\tfrom TestMain")
+	os.Exit(m.Run())
+}
+`, 0600)
+	out, err := toolingRun(t, root, []string{"GOFLAGS=-v"}, "make",
+		"FAST_MODULE=.",
+		"FAST_PACKAGE=./cmd/gh-runnerd",
+		"FAST_TEST=^NoSuchTest$$",
+		"fast",
+	)
+	if err == nil || !strings.Contains(out, "FAST_TEST matched no compiled test") {
+		t.Fatalf("TestMain output was treated as selected-test evidence: err=%v output=%s", err, out)
+	}
+}
+
 func TestFastCheckPreservesRaceGOFLAGS(t *testing.T) {
 	root := toolingFixture(t)
 	toolingFile(t, root, "cmd/gh-runnerd/fast_check_test.go", `package main
@@ -469,14 +567,14 @@ func TestNestedFastSelected(t *testing.T) {}
 			module:      ".",
 			packagePath: "./...",
 			test:        "^TestFastSelected$",
-			invocation:  "go1.26.8\tlist -json=false -f {{.Dir}} ./...\ngo1.26.8\ttest -json=false -list= -bench= -fuzz= -skip= -c=false -count=1 -run ^TestFastSelected$ ./...",
+			invocation:  "go1.26.8\tlist -json=false -f {{.Dir}} ./...\ngo1.26.8\ttest -json -list= -bench= -fuzz= -skip= -c=false -count=1 -cpu=1 -exec= -run ^TestFastSelected$ ./...",
 		},
 		{
 			name:        "nested module",
 			module:      "./experiments/g01-scaleset",
 			packagePath: ".",
 			test:        "^TestNestedFastSelected$",
-			invocation:  "go1.26.8\tlist -json=false -f {{.Dir}} .\ngo1.26.8\ttest -json=false -list= -bench= -fuzz= -skip= -c=false -count=1 -run ^TestNestedFastSelected$ .",
+			invocation:  "go1.26.8\tlist -json=false -f {{.Dir}} .\ngo1.26.8\ttest -json -list= -bench= -fuzz= -skip= -c=false -count=1 -cpu=1 -exec= -run ^TestNestedFastSelected$ .",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
