@@ -22,11 +22,53 @@ disabled. The aggregator uses `always()` so a failed, cancelled, or skipped
 required job is observed, then fails unless all three dependency results are
 exactly `success`; it does not check out source or run a test itself.
 
+The pull-request workflow is the premerge source gate. The identical workflow on
+`main` is postmerge integration evidence; a green postmerge run cannot substitute
+for the exact-head premerge gate. During local editing, use focused checks and the
+opt-in `make fast` selector below. After source, documentation and finding-ledger
+changes are batched into one stable candidate, hosted CI supplies the complete
+matrix; reviewers and the coordinator use that exact-source evidence rather than
+rerunning the full suite independently. Release, macOS, soak and other trusted
+profiles run only before an applicable release/live qualification, with explicit
+maintainer authorization, and are not implied by this hosted check.
+
+### Issue #73 audit evidence
+
+This audit was captured from `origin/main` at
+`cf67d4aeb511116fee0de31a4ac38409f28fa29f` and the live PR #72 record on
+2026-09-10. It records measured observations, not a forecast of savings:
+
+| Surface | Measured observation | Policy consequence |
+| --- | --- | --- |
+| Main CI | `ci.yml` has three parallel test-bearing jobs (`root`, `offline`, `vuln`) plus the required `Go checks` aggregator; each remains capped at 15 minutes, with pinned actions and `cache: false`. | Preserve the current complete coverage, job/check names, cache policy and timeouts; no path classifier or cache shortcut was added. |
+| Makefile | Existing `check` prerequisites remain `toolchain`, formatting, build, vet, unit/race, fuzz, dependency, license, offline-experiment and vulnerability checks. New `fast` is an opt-in target and is not a `check` prerequisite. | Keep `make check` complete and unchanged as the local public gate; focused iteration cannot silently weaken it. |
+| [PR #72 review history](https://github.com/1XP-AI/gh-runnerd/pull/72) | The exact review-record command below counted 14 Codex bot reviews on immutable heads from `951e1b8b10fab768461be2db6620ec276c2fe005` through `116beda04dc2bf69280cdefc4de4ef2fef397ef3`. The recorded iteration pattern repeated the complete suite for one writer and two independent reviewers per round (42 actor-side full-suite runs, derived from 14 × 3); human review/comment replies are not additional Codex rounds. | Batch findings, source and docs before one candidate push; reviewers perform delta/risk probes against shared CI evidence, and the coordinator audits rather than acting as a third tester. |
+| [PR #72 hosted critical path](https://github.com/1XP-AI/gh-runnerd/actions/runs/34419651240) | `gh run view 34419651240 --json jobs` measured workflow start `00:04:06Z`, required jobs finishing by `00:15:14Z`, and aggregator completion `00:15:18Z` (`00:15:19Z` workflow update): 11m13s end-to-end. Root ran 11m06s, offline 8m49s, vulnerability 33s, aggregator 2s. | No workflow critical-path speedup is claimed or changed; full CI remains the stable candidate gate. |
+| Focused local command | Warmed direct baseline: `env GOTOOLCHAIN=go1.26.8 GOWORK=off go test -count=1 -run '^TestFixedTarget$' ./internal/scheduler/capacity` → `real 0.32s`. New entry point: `env FAST_MODULE=. FAST_PACKAGE=./internal/scheduler/capacity FAST_TEST='^TestFixedTarget$' make fast` → `real 0.34s`; both passed. | This one local pair demonstrates bounded behavior only; it does not claim a speedup or predict CI duration. |
+
+```console
+$ gh api --paginate --slurp repos/1XP-AI/gh-runnerd/pulls/72/reviews | jq '[.[][] | select(.user.login == "chatgpt-codex-connector[bot]")] | length'
+14
+$ gh run view 34419651240 --repo 1XP-AI/gh-runnerd --json headSha,startedAt,updatedAt,jobs
+# head 116beda04dc2bf69280cdefc4de4ef2fef397ef3; start 00:04:06Z; update 00:15:19Z;
+# jobs: root 00:04:08Z-00:15:14Z, offline 00:04:09Z-00:12:58Z,
+# vuln 00:04:10Z-00:04:43Z, checks 00:15:16Z-00:15:18Z
+```
+
+The audit commands and exact observed values are kept in this single summary
+instead of accumulating per-step logs. Finding ledgers must retain original URLs,
+source SHAs and resolution evidence without copying credentials or private job
+logs.
+
 Run the same checks locally with:
 
 ```console
 make check
 ```
+
+`make check` remains the complete local public gate, but it is not a per-commit
+requirement; use it on demand when the environment supports it and rely on hosted
+CI for the stable candidate gate.
 
 Individual commands are available when iterating:
 
@@ -43,6 +85,18 @@ Individual commands are available when iterating:
 | `make licenses` | Compare the exact runtime module/version/replacement graph with its inventory and require a top-level license file. |
 | `make experiments` | Require both established G01/G02 modules, run their static-partitioned default race/vet suites, then exercise the two explicitly reviewed G01 CLI packages with `g01_live,g01_worker` tags and the reviewed `g01_pair_fixture` livecanary collection/listener and terminal partitions with tagged vet. |
 | `make vuln` | Run the exact `golang.org/x/vuln/cmd/govulncheck@v1.7.0` tool. |
+| `make fast FAST_MODULE=... FAST_PACKAGE=... FAST_TEST=...` | Run one explicit test selector in one selected module/package. All three selectors are required and invalid/no-match selectors fail closed; this is focused evidence only, never the complete gate. |
+
+For example:
+
+```console
+FAST_MODULE=. FAST_PACKAGE=./internal/scheduler/capacity FAST_TEST='^TestFixedTarget$' make fast
+```
+
+The script rejects absolute or escaping module/package paths, missing `go.mod`,
+missing selectors and selectors that match no compiled test. If selectors are
+passed as Make command-line variables instead of environment assignments, escape
+literal `$` as `$$` so Make preserves the regexp anchor.
 
 No hardware, live GitHub, Docker or daemon suite is part of this public check. Those profiles remain explicit future or maintainer-controlled runs; they are not silently converted into passing tests here. G04 introduces the first application behavior contracts and should add meaningful unit and fuzz targets before claiming those forms of coverage.
 

@@ -6,16 +6,18 @@ GOFLAGS ?=
 override GOTOOLCHAIN := go1.26.8
 export GOTOOLCHAIN
 export GOFLAGS
+export FAST_MODULE FAST_PACKAGE FAST_TEST
 FUZZTIME ?= 1s
 GOVULNCHECK_VERSION ?= v1.7.0
 
-.PHONY: help build check toolchain fmt fmt-check vet test test-race fuzz-smoke deps licenses vuln experiments
+.PHONY: help build check fast toolchain fmt fmt-check vet test test-race fuzz-smoke deps licenses vuln experiments
 
 help:
 	@printf '%s\n' \
 		'gh-runnerd development commands:' \
 		'  make fmt          format Go sources in place' \
 		'  make check        run the complete public validation suite' \
+		'  make fast         run one explicit FAST_MODULE/FAST_PACKAGE/FAST_TEST selector (not the full gate)' \
 		'  make build        compile all packages' \
 		'  make experiments  test reviewed offline gate modules when present' \
 		'  make vuln         run pinned govulncheck (network access may be needed)'
@@ -24,6 +26,9 @@ build:
 	"$(GO)" build -o /dev/null ./cmd/gh-runnerd
 
 check: toolchain fmt-check build vet test test-race fuzz-smoke deps licenses experiments vuln
+
+fast:
+	GO="$(GO)" bash scripts/fast-check.sh
 
 toolchain:
 	GO="$(GO)" bash scripts/check-toolchain.sh

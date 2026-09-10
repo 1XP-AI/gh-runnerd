@@ -13,6 +13,37 @@ The repository default is Luna max, including contract-setting evidence gates su
 
 Verify each issue's contract and dependencies before dependent implementation begins. Escalate discovered architecture, secret handling, process isolation or concurrency changes to an additional independent Luna max review; do not stretch a small issue into an unreviewed redesign. Parallelize only independent issues with non-overlapping file ownership; no simultaneous edits to shared protocol/state definitions.
 
+## Incremental validation and review
+
+Validation is incremental during editing and complete at the stable merge
+candidate. Do not require or automatically run the whole suite for every local
+commit. The writer records a meaningful red case for behavior changes, applies a
+minimal green fix, and runs the explicit focused unit/negative checks relevant to
+the changed surface; documentation-only changes record why no artificial test is
+needed. The opt-in `make fast` entry point requires an explicit module, package,
+and test selector, fails closed for missing/invalid selectors, and never stands in
+for the complete gate.
+
+| Role/tier | Required work and evidence |
+|---|---|
+| Writer / edit | Red -> minimal green -> refactor; focused checks and `git diff --check` while iterating. Batch source, docs and finding-ledger changes before one review candidate push. |
+| Independent reviewer(s) | Review the immutable candidate source and shared exact-source CI evidence; run only delta/risk probes. Add the independent Luna max security/recovery pass when the changed boundary warrants it. Do not duplicate the full suite by default. |
+| Coordinator | Audit the contract, changed surface, finding ledger and exact-source CI/review records; coordinate resolution. The coordinator is not a third full-suite tester. |
+| Candidate / premerge | The pushed PR head receives the complete hosted CI matrix once stable. Preserve required job/check names, complete coverage, exact pull-request-head checkout, cache policy and timeouts. |
+| Main / postmerge | The same workflow on `main` is integration evidence after merge; it does not replace the premerge candidate gate or authorize a merge. |
+| Release/live qualification | Run release, macOS, soak and other trusted/live profiles only before the applicable release or live qualification, on a reviewed immutable commit with explicit maintainer authorization. Do not defer a mandatory security gate. |
+
+Use one finding ledger per candidate: carry each previously resolved finding with
+its immutable source SHA, original finding URL and resolution evidence, then record
+the final delta sign-off against the exact candidate SHA. A new internal full review
+is needed only when the changed diff crosses a new risk or interface boundary;
+focused delta review remains required for ordinary fixes. GitHub Codex review and
+the required CI gate are separate and stricter: immediately before merge, Codex
+must have reviewed the exact final HEAD, stale/outdated findings must be read and
+resolved or rebutted, required CI must pass for that same SHA, and a security
+second pass remains required where applicable. Do not request repetitive Codex
+reviews mid-edit; after a fix push, request and await the fresh exact-head review.
+
 ## Per-issue goal workflow
 
 1. Select a Ready issue from the live GitHub Project whose dependencies are Done; read the plan, relevant ADR and current repository instructions. Do not treat `backlog.json` `status` as live Ready.

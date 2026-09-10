@@ -223,6 +223,31 @@ For every new issue, after checking for an explicit current user override:
   one integrator owns shared protocol/state definitions;
 - a Project field never launches work by itself.
 
+## Incremental validation and review handoff
+
+Use focused validation while the candidate is changing and the complete gate once
+the candidate is stable. The writer owns meaningful red -> minimal green ->
+refactor evidence and focused unit/negative checks; an explicit `make fast`
+module/package/test selector may help with local iteration, but it is fail-closed
+and never represents `make check` or CI success. Do not make a whole-suite run an
+automatic requirement for every local commit.
+
+| Role | Handoff contract |
+|---|---|
+| Writer | Batch all source, documentation and finding-ledger changes before one candidate push; include exact commands/results and `git diff --check`. |
+| Independent reviewers | Inspect the immutable candidate and shared exact-source hosted CI evidence; run delta/risk probes only. Add the independent Luna max security/recovery pass for applicable boundaries. |
+| Coordinator | Audit the issue contract, changed surface, ledger and exact-head evidence; coordinate fixes. Do not act as a third full-suite tester. |
+| CI / merge | Hosted PR CI is the complete premerge source gate. GitHub Codex must review the exact final HEAD, including stale/outdated findings, and required CI must pass for that SHA. |
+| Main / release | `main` CI is postmerge integration evidence. Release, macOS, soak and trusted/live checks are required only for their applicable qualification, on a reviewed immutable commit with explicit maintainer authorization; no mandatory security gate is deferred. |
+
+Carry resolved findings into each candidate ledger with the original finding URL,
+immutable source SHA and resolution evidence, then record final delta sign-off for
+the exact candidate SHA. New internal full review is limited to a changed risk or
+interface boundary; ordinary fixes receive delta review. After a fix push, obtain
+fresh exact-head Codex review and CI; do not request repetitive Codex reviews
+mid-edit. The full candidate gate remains separate from internal review, and the
+postmerge `main` run never substitutes for premerge evidence.
+
 Suggested handoff prompt to give the next agent:
 
 > Work on ISSUE_URL in `1XP-AI/gh-runnerd`. Use the issue's implementer (default `gpt-5.6-luna` with `max` unless an explicit current user override is recorded) and one active goal exactly equal to the issue's Goal statement; do not invent a token budget. Independent review is Luna max even when the implementer is overridden. Read `AGENTS.md`, `docs/EXECUTION.md`, the plan, the linked ADRs and the current Project item. Verify dependencies first. Create the goal and isolated branch/worktree, then set the item to In progress. Follow meaningful red test -> minimal green implementation -> refactor -> boundary/failure tests. Preserve no-secrets, no-busy-kill, owned-cleanup, stable-idempotency and trusted-native invariants. Do not change live runners, Docker context, App/Keychain/launchd state or GitHub credentials without explicit maintainer authorization. Open one focused PR with exact commands/results, red evidence, gaps and rollback notes. Obtain independent Luna max review, then the exact-head GitHub Codex review before merge. Update the Project, issue and goal only when their actual state changes. Do not write Luna into the Project Agent field over an inspected override that has no Agent option; preserve the existing Agent value.
@@ -417,14 +442,17 @@ Preserve these invariants:
 
 ### 5. Review, PR and exact-head gate
 
-Run the repository checks appropriate to the issue and create one focused PR. Public
+Run focused checks appropriate to the changed surface while editing, then batch
+source, docs and finding-ledger changes into one stable review candidate. Public
 CI must not require live App credentials, local runner access or the unreleased
-manager. Trusted hardware/live tests require a reviewed immutable commit and
+manager. The hosted PR workflow supplies the complete candidate gate; local
+`make check` is available on demand but is not an automatic per-commit
+requirement. Trusted hardware/live tests require a reviewed immutable commit and
 explicit maintainer-triggered execution on the scoped runner group.
 
 ```sh
 git diff --check
-make check                    # when the issue's files and environment support it
+make check                    # optional local confidence; hosted PR CI is the full candidate gate
 git add path/to/changed/files
 git commit -m "..."
 git push -u origin "$BRANCH"
@@ -597,6 +625,10 @@ Before handing work onward, confirm:
       values were not rewritten.
 - [ ] A meaningful red case, minimal green fix and relevant boundary tests are
       recorded, with actual commands/results and remaining gaps.
+- [ ] Source, documentation and finding-ledger changes were batched before the
+      candidate push; focused checks are not represented as full-gate evidence.
+- [ ] Previously resolved findings retain original URLs, immutable source SHAs and
+      resolution evidence, with final delta sign-off on the exact candidate SHA.
 - [ ] No secrets, personal paths, raw SDK errors, live tokens or unreviewed runner
       operations entered files, issues, logs or artifacts.
 - [ ] Busy work was never killed and cleanup is ownership-bound.

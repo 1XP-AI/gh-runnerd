@@ -66,7 +66,7 @@ exec "$TOOLING_REAL_GO" "$@"
 func toolingFixture(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
-	for _, name := range []string{"Makefile", "go.mod", "LICENSE", "docs/DEPENDENCIES.md", "scripts/check-toolchain.sh", "scripts/check-licenses.sh", "scripts/check-offline-experiments.sh", "scripts/gofmt.sh", "scripts/fuzz-smoke.sh"} {
+	for _, name := range []string{"Makefile", "go.mod", "LICENSE", "docs/DEPENDENCIES.md", "scripts/check-toolchain.sh", "scripts/check-licenses.sh", "scripts/check-offline-experiments.sh", "scripts/gofmt.sh", "scripts/fuzz-smoke.sh", "scripts/fast-check.sh"} {
 		data, err := os.ReadFile(filepath.Join("..", name))
 		if err != nil {
 			t.Fatal(err)
@@ -130,6 +130,132 @@ func TestToolingPinsNewerSystemGo(t *testing.T) {
 	env := []string{"GOTOOLCHAIN=auto", "TOOLING_REAL_GO=" + realGo}
 	if out, err := toolingRun(t, root, env, "make", "GO="+filepath.Join(root, "newer-go"), "build"); err != nil {
 		t.Errorf("build did not receive the exact toolchain selection: %s", out)
+	}
+}
+
+func TestFastCheckRequiresExplicitSelectors(t *testing.T) {
+	root := toolingFixture(t)
+	fastCheck, err := filepath.Abs("fast-check.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		env  []string
+		want string
+	}{
+		{name: "missing module", env: []string{"FAST_PACKAGE=./cmd/gh-runnerd", "FAST_TEST=^TestFastSelected$"}, want: "FAST_MODULE"},
+		{name: "missing package", env: []string{"FAST_MODULE=.", "FAST_TEST=^TestFastSelected$"}, want: "FAST_PACKAGE"},
+		{name: "missing test", env: []string{"FAST_MODULE=.", "FAST_PACKAGE=./cmd/gh-runnerd"}, want: "FAST_TEST"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := toolingRun(t, root, tc.env, "bash", fastCheck)
+			if err == nil || !strings.Contains(out, tc.want) {
+				t.Fatalf("fast check accepted %s: err=%v output=%s", tc.name, err, out)
+			}
+		})
+	}
+}
+
+func TestFastCheckRunsOnlyTheExplicitSelector(t *testing.T) {
+	root := toolingFixture(t)
+	toolingFile(t, root, "cmd/gh-runnerd/fast_check_test.go", `package main
+
+import "testing"
+
+func TestFastSelected(t *testing.T) {}
+
+func TestFastNotSelected(t *testing.T) {
+	t.Fatal("fast check ran an unselected test")
+}
+`, 0600)
+	toolingFile(t, root, "internal/no_tests/empty.go", "package no_tests\n", 0600)
+	toolingFile(t, root, "experiments/g01-scaleset/fast_check_test.go", `package fixture
+
+import "testing"
+
+func TestNestedFastSelected(t *testing.T) {}
+`, 0600)
+
+	wrapper, logPath, realGo := toolingGoWrapper(t, root)
+	env := []string{"GO=" + wrapper, "TOOLING_REAL_GO=" + realGo, "TOOLING_GO_LOG=" + logPath}
+	for _, tc := range []struct {
+		name, module, packagePath, test, invocation string
+	}{
+		{
+			name:        "root module",
+			module:      ".",
+			packagePath: "./...",
+			test:        "^TestFastSelected$",
+			invocation:  "go1.26.8\ttest -count=1 -run ^TestFastSelected$ ./...",
+		},
+		{
+			name:        "nested module",
+			module:      "./experiments/g01-scaleset",
+			packagePath: ".",
+			test:        "^TestNestedFastSelected$",
+			invocation:  "go1.26.8\ttest -count=1 -run ^TestNestedFastSelected$ .",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(logPath, nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+			out, err := toolingRun(t, root, env, "make",
+				"FAST_MODULE="+tc.module,
+				"FAST_PACKAGE="+tc.packagePath,
+				"FAST_TEST="+strings.ReplaceAll(tc.test, "$", "$$"),
+				"fast",
+			)
+			if err != nil {
+				t.Fatalf("focused selector failed: %s", out)
+			}
+			if !strings.Contains(out, "focused selector only") || !strings.Contains(out, "complete public validation remains make check/CI") {
+				t.Fatalf("focused selector output did not identify its bounded scope: %s", out)
+			}
+			log := strings.TrimSpace(toolingReadFile(t, logPath))
+			if log != tc.invocation {
+				t.Fatalf("focused selector invocation = %q, want %q", log, tc.invocation)
+			}
+		})
+	}
+}
+
+func TestFastCheckRejectsInvalidSelectors(t *testing.T) {
+	root := toolingFixture(t)
+	toolingFile(t, root, "cmd/gh-runnerd/fast_check_test.go", `package main
+
+import "testing"
+
+func TestFastSelected(t *testing.T) {}
+`, 0600)
+	wrapper, logPath, realGo := toolingGoWrapper(t, root)
+	env := []string{"GO=" + wrapper, "TOOLING_REAL_GO=" + realGo, "TOOLING_GO_LOG=" + logPath}
+	for _, tc := range []struct {
+		name, module, packagePath, test string
+	}{
+		{name: "missing module directory", module: "./missing", packagePath: "./cmd/gh-runnerd", test: "^TestFastSelected$"},
+		{name: "module without go.mod", module: "./cmd/gh-runnerd", packagePath: "./", test: "^TestFastSelected$"},
+		{name: "escaping module path", module: "./../", packagePath: "./cmd/gh-runnerd", test: "^TestFastSelected$"},
+		{name: "missing package directory", module: ".", packagePath: "./missing", test: "^TestFastSelected$"},
+		{name: "escaping package path", module: ".", packagePath: "./../outside", test: "^TestFastSelected$"},
+		{name: "no matching test", module: ".", packagePath: "./cmd/gh-runnerd", test: "^NoSuchTest$"},
+		{name: "malformed test regexp", module: ".", packagePath: "./cmd/gh-runnerd", test: "["},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(logPath, nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+			out, err := toolingRun(t, root, env, "make",
+				"FAST_MODULE="+tc.module,
+				"FAST_PACKAGE="+tc.packagePath,
+				"FAST_TEST="+strings.ReplaceAll(tc.test, "$", "$$"),
+				"fast",
+			)
+			if err == nil || !strings.Contains(out, "fast check failed") {
+				t.Fatalf("invalid %s was accepted: err=%v output=%s", tc.name, err, out)
+			}
+		})
 	}
 }
 
