@@ -119,8 +119,23 @@ func TestHasCompleteMatchRequiresFramedPass(t *testing.T) {
 			want:  false,
 		},
 		{
+			name:  "unmatched framed run and pass are ignored",
+			input: "\x16=== RUN   TestOther\n\x16--- PASS: TestOther (0.00s)\n",
+			want:  false,
+		},
+		{
 			name:  "skip is not a passing terminal",
 			input: "\x16=== RUN   TestSelected\n\x16--- SKIP: TestSelected (0.00s)\n",
+			want:  false,
+		},
+		{
+			name:  "first fail terminal blocks a later pass in the same run",
+			input: "\x16=== RUN   TestSelected\n\x16--- FAIL: TestSelected (0.00s)\n\x16--- PASS: TestSelected (0.00s)\n",
+			want:  false,
+		},
+		{
+			name:  "first skip terminal blocks a later pass in the same run",
+			input: "\x16=== RUN   TestSelected\n\x16--- SKIP: TestSelected (0.00s)\n\x16--- PASS: TestSelected (0.00s)\n",
 			want:  false,
 		},
 		{
@@ -143,5 +158,20 @@ func TestHasCompleteMatchRequiresFramedPass(t *testing.T) {
 				t.Fatalf("hasCompleteMatch() = %t, want %t", found, tc.want)
 			}
 		})
+	}
+}
+
+func TestHasCompleteMatchAcceptsSameNameFromLaterPackage(t *testing.T) {
+	selector, err := compileSelector("^TestSelected$")
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := strings.NewReader("\x16=== RUN   TestSelected\n\x16--- SKIP: TestSelected (0.00s)\n\x16=== RUN   TestSelected\n\x16--- PASS: TestSelected (0.00s)\n")
+	found, err := hasCompleteMatch(input, selector)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("same-name passing test in a later package was not recognized")
 	}
 }

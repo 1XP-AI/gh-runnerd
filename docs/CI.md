@@ -106,11 +106,14 @@ Go's `-test.v=test2json` framed output while disabling the outer `-json` mode, a
 requires paired framed per-test `=== RUN` and terminal `--- PASS` lines whose test
 name is a complete match under Go's slash-separated component and top-level
 alternation semantics; possible-parent events do not count. Framed `skip` or
-`fail` outcomes, package summaries, and ordinary unframed `TestMain` output do
-not count, and dry-run or unsupported build modes fail closed when no passing
-framed test result is observed. The frame is a Go test protocol boundary against
-ordinary output, not authentication against a deliberately spoofing test process;
-this remains a trusted local helper, not a hostile-code sandbox. Useful build
+`fail` outcomes, including a later contradictory terminal after the first
+terminal in one `RUN` lifecycle, package summaries, and ordinary unframed
+`TestMain` output do not count. Each new framed `RUN` starts a new lifecycle for
+that name, so a same-named test in a later package may qualify after an earlier
+package skipped it. Dry-run or unsupported build modes fail closed when no
+passing framed test result is observed. The frame is a Go test protocol boundary
+against ordinary output, not authentication against a deliberately spoofing test
+process; this remains a trusted local helper, not a hostile-code sandbox. Useful build
 flags such as `-race` and `-mod=readonly` remain inherited; this is not a blanket
 `GOFLAGS` removal. If selectors are passed as Make command-line variables instead
 of environment assignments, escape literal `$` as `$$` so Make preserves the

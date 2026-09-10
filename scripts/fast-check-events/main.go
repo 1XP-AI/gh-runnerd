@@ -122,33 +122,43 @@ func (s compiledSelector) matches(name string) bool {
 
 func hasCompleteMatch(input io.Reader, selector compiledSelector) (bool, error) {
 	reader := bufio.NewReader(input)
-	ran := make(map[string]bool)
-	passed := make(map[string]bool)
+	results := make(map[string]testResult)
 	for {
 		line, err := reader.ReadString('\n')
 		parseFramedTestEvents(line, func(action, name string) {
 			if name == "" || !selector.matches(name) {
 				return
 			}
+			result := results[name]
 			switch action {
 			case "run":
-				ran[name] = true
-			case "pass":
-				if ran[name] {
-					passed[name] = true
+				result = testResult{ran: true}
+			case "pass", "skip", "fail":
+				if result.ran && !result.terminal {
+					result.terminal = true
+					result.passed = action == "pass"
 				}
 			}
+			results[name] = result
 		})
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				if len(passed) > 0 {
-					return true, nil
+				for _, result := range results {
+					if result.passed {
+						return true, nil
+					}
 				}
 				return false, nil
 			}
 			return false, err
 		}
 	}
+}
+
+type testResult struct {
+	ran      bool
+	terminal bool
+	passed   bool
 }
 
 func parseFramedTestEvents(line string, visit func(action, name string)) {
@@ -186,14 +196,22 @@ func parseFramedTestEvent(line string) (action, name string, ok bool) {
 	case strings.HasPrefix(line, "=== RUN   "):
 		return "run", strings.TrimSpace(line[len("=== RUN   "):]), true
 	case strings.HasPrefix(line, "--- PASS: "):
-		name = strings.TrimSpace(line[len("--- PASS: "):])
-		if i := strings.Index(name, " ("); i >= 0 && strings.HasSuffix(name, "s)") {
-			name = name[:i]
-		}
-		return "pass", name, true
+		return "pass", parseFramedTestName(line[len("--- PASS: "):]), true
+	case strings.HasPrefix(line, "--- SKIP: "):
+		return "skip", parseFramedTestName(line[len("--- SKIP: "):]), true
+	case strings.HasPrefix(line, "--- FAIL: "):
+		return "fail", parseFramedTestName(line[len("--- FAIL: "):]), true
 	default:
 		return "", "", false
 	}
+}
+
+func parseFramedTestName(line string) string {
+	name := strings.TrimSpace(line)
+	if i := strings.Index(name, " ("); i >= 0 && strings.HasSuffix(name, "s)") {
+		name = name[:i]
+	}
+	return name
 }
 
 func rewrite(s string) string {

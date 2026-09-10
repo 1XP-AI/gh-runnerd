@@ -372,6 +372,33 @@ func TestFastSkipped(t *testing.T) {
 	}
 }
 
+func TestFastCheckAcceptsPassingSameNameInLaterPackage(t *testing.T) {
+	root := toolingFixture(t)
+	toolingFile(t, root, "internal/fast-check-multi/a-skip/fast_check_test.go", `package skipfixture
+
+import "testing"
+
+func TestFastSameName(t *testing.T) {
+	t.Skip("bounded fixture skip")
+}
+`, 0600)
+	toolingFile(t, root, "internal/fast-check-multi/b-pass/fast_check_test.go", `package passfixture
+
+import "testing"
+
+func TestFastSameName(t *testing.T) {}
+`, 0600)
+	out, err := toolingRun(t, root, nil, "make",
+		"FAST_MODULE=.",
+		"FAST_PACKAGE=./internal/fast-check-multi/...",
+		"FAST_TEST=^TestFastSameName$$",
+		"fast",
+	)
+	if err != nil {
+		t.Fatalf("passing same-name test in a later package was not accepted after a skipped package: %s", out)
+	}
+}
+
 func TestFastCheckNeutralizesGoTestExecutionFlags(t *testing.T) {
 	root := toolingFixture(t)
 	toolingFile(t, root, "cmd/gh-runnerd/fast_check_test.go", `package main
