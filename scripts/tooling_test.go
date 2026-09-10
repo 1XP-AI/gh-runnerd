@@ -209,6 +209,171 @@ func TestFastSelected(t *testing.T) {
 	}
 }
 
+func TestFastCheckNeutralizesGoTestExecutionFlags(t *testing.T) {
+	root := toolingFixture(t)
+	toolingFile(t, root, "cmd/gh-runnerd/fast_check_test.go", `package main
+
+import (
+	"os"
+	"testing"
+)
+
+func fastCheckRecord(t testing.TB, marker string) {
+	t.Helper()
+	path := os.Getenv("TOOLING_FAST_SENTINEL_LOG")
+	if path == "" {
+		t.Fatal("TOOLING_FAST_SENTINEL_LOG is not set")
+	}
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if _, err := file.WriteString(marker + "\n"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFastCheckSelected(t *testing.T) {
+	fastCheckRecord(t, "selected-test")
+}
+
+func BenchmarkFastCheckUnexpected(b *testing.B) {
+	fastCheckRecord(b, "unexpected-benchmark")
+	b.Fatal("unexpected benchmark ran")
+}
+
+func BenchmarkFastCheckFalseSuccess(b *testing.B) {
+	fastCheckRecord(b, "false-success-benchmark")
+}
+
+func FuzzFastCheckUnexpected(f *testing.F) {
+	f.Add("fixture-seed")
+	f.Fuzz(func(t *testing.T, _ string) {
+		fastCheckRecord(t, "unexpected-fuzz")
+		t.Fatal("unexpected fuzz ran")
+	})
+}
+
+func FuzzFastCheckFalseSuccess(f *testing.F) {
+	f.Add("fixture-seed")
+	f.Fuzz(func(t *testing.T, _ string) {
+		fastCheckRecord(t, "false-success-fuzz")
+	})
+}
+`, 0600)
+	sentinelLog := filepath.Join(root, "fast-check-sentinel.log")
+	for _, tc := range []struct {
+		name, goflags, test, wantOutput string
+		wantErr                         bool
+		wantSentinel                    string
+	}{
+		{
+			name:         "benchmark cannot expand selected test",
+			goflags:      "-bench=. -benchtime=1x",
+			test:         "^TestFastCheckSelected$",
+			wantSentinel: "selected-test\n",
+		},
+		{
+			name:         "inherited run and count cannot replace bounded selector",
+			goflags:      "-run=^NoSuchTest$ -count=5",
+			test:         "^TestFastCheckSelected$",
+			wantSentinel: "selected-test\n",
+		},
+		{
+			name:         "fuzz cannot expand selected test",
+			goflags:      "-fuzz=^FuzzFastCheckUnexpected$ -fuzztime=1x",
+			test:         "^TestFastCheckSelected$",
+			wantSentinel: "selected-test\n",
+		},
+		{
+			name:         "skip and build-only cannot suppress selected test",
+			goflags:      "-skip=^TestFastCheckSelected$ -c -count=5",
+			test:         "^TestFastCheckSelected$",
+			wantSentinel: "selected-test\n",
+		},
+		{
+			name:       "benchmark cannot satisfy missing test",
+			goflags:    "-bench=^BenchmarkFastCheckFalseSuccess$ -benchtime=1x",
+			test:       "^NoSuchTest$",
+			wantErr:    true,
+			wantOutput: "FAST_TEST matched no compiled test",
+		},
+		{
+			name:       "fuzz cannot satisfy missing test",
+			goflags:    "-fuzz=^FuzzFastCheckFalseSuccess$ -fuzztime=1x",
+			test:       "^NoSuchTest$",
+			wantErr:    true,
+			wantOutput: "FAST_TEST matched no compiled test",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(sentinelLog, nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+			env := []string{
+				"GOFLAGS=" + tc.goflags,
+				"TOOLING_FAST_SENTINEL_LOG=" + sentinelLog,
+			}
+			out, err := toolingRun(t, root, env, "make",
+				"FAST_MODULE=.",
+				"FAST_PACKAGE=./cmd/gh-runnerd",
+				"FAST_TEST="+strings.ReplaceAll(tc.test, "$", "$$"),
+				"fast",
+			)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("GOFLAGS=%q test=%q returned err=%v, want error=%t; output=%s", tc.goflags, tc.test, err, tc.wantErr, out)
+			}
+			if tc.wantOutput != "" && !strings.Contains(out, tc.wantOutput) {
+				t.Fatalf("GOFLAGS=%q test=%q output lacks %q: %s", tc.goflags, tc.test, tc.wantOutput, out)
+			}
+			gotSentinel := toolingReadFile(t, sentinelLog)
+			if tc.wantSentinel != "" && gotSentinel != tc.wantSentinel {
+				t.Fatalf("GOFLAGS=%q test=%q sentinel log = %q, want %q; output=%s", tc.goflags, tc.test, gotSentinel, tc.wantSentinel, out)
+			}
+			if tc.wantSentinel == "" && gotSentinel != "" {
+				t.Fatalf("GOFLAGS=%q test=%q ran an execution-expanding target: sentinel log = %q; output=%s", tc.goflags, tc.test, gotSentinel, out)
+			}
+		})
+	}
+}
+
+func TestFastCheckPreservesRaceGOFLAGS(t *testing.T) {
+	root := toolingFixture(t)
+	toolingFile(t, root, "cmd/gh-runnerd/fast_check_test.go", `package main
+
+import "testing"
+
+var fastCheckRaceValue int
+
+func TestFastCheckRaceTarget(t *testing.T) {
+	start := make(chan struct{})
+	done := make(chan struct{}, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			<-start
+			for j := 0; j < 1000; j++ {
+				fastCheckRaceValue = j
+			}
+			done <- struct{}{}
+		}()
+	}
+	close(start)
+	<-done
+	<-done
+}
+`, 0600)
+	out, err := toolingRun(t, root, []string{"GOFLAGS=-race"}, "make",
+		"FAST_MODULE=.",
+		"FAST_PACKAGE=./cmd/gh-runnerd",
+		"FAST_TEST=^TestFastCheckRaceTarget$$",
+		"fast",
+	)
+	if err == nil || !strings.Contains(out, "DATA RACE") {
+		t.Fatalf("GOFLAGS=-race was not preserved by fast check: err=%v output=%s", err, out)
+	}
+}
+
 func TestFastCheckResolvesPackageSymlinks(t *testing.T) {
 	root := toolingFixture(t)
 	toolingFile(t, root, "linked/selected/fast_check_test.go", `package selected
@@ -304,14 +469,14 @@ func TestNestedFastSelected(t *testing.T) {}
 			module:      ".",
 			packagePath: "./...",
 			test:        "^TestFastSelected$",
-			invocation:  "go1.26.8\tlist -json=false -f {{.Dir}} ./...\ngo1.26.8\ttest -json=false -list= -count=1 -run ^TestFastSelected$ ./...",
+			invocation:  "go1.26.8\tlist -json=false -f {{.Dir}} ./...\ngo1.26.8\ttest -json=false -list= -bench= -fuzz= -skip= -c=false -count=1 -run ^TestFastSelected$ ./...",
 		},
 		{
 			name:        "nested module",
 			module:      "./experiments/g01-scaleset",
 			packagePath: ".",
 			test:        "^TestNestedFastSelected$",
-			invocation:  "go1.26.8\tlist -json=false -f {{.Dir}} .\ngo1.26.8\ttest -json=false -list= -count=1 -run ^TestNestedFastSelected$ .",
+			invocation:  "go1.26.8\tlist -json=false -f {{.Dir}} .\ngo1.26.8\ttest -json=false -list= -bench= -fuzz= -skip= -c=false -count=1 -run ^TestNestedFastSelected$ .",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
