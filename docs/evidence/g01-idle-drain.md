@@ -1040,6 +1040,107 @@ Rollback is a focused normal `git revert --no-edit
 this evidence append if needed; retain the current journal, reservation and
 uncertainty, and never reset, erase, replay or run live cleanup.
 
+### Exact-head follow-up: acquisition preflight, session-close origin, and request-body lifetime
+
+This follow-up was developed from immutable baseline
+`116beda04dc2bf69280cdefc4de4ef2fef397ef3`. Fresh Codex detail for PR72
+identified [acquisition target preflight](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3974234277)
+and [session-close endpoint origin binding](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3974234284)
+as P1 findings. The review detail was read through the repository wrapper; no
+raw review payload, token, private path, request body or SDK error was retained.
+
+The meaningful normal regressions were added before the source correction. At
+`2026-09-10T00:32:14Z` UTC, this command was run against the immutable baseline:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run 'TestBaselineAcquireTargetMismatchStopsBeforeInner|TestBaselineAcquireForwardingBodySurvivesAsyncRoundTripClose|TestPinnedSDKDrainBindsSessionCloseToSessionOpenOrigin' -count=1 -v -timeout=180s
+```
+
+It exited 1: all four acquisition host, scale-set, query and endpoint
+mutations reached the inner transport; the asynchronous forwarding control
+observed an empty body after the old wrapper returned; and the wrong allowed
+Actions origin was not quarantined. The failing assertions were sanitized and
+no remote payload, bearer, private path or raw SDK error was recorded.
+
+The additional body-lifetime regression isolated the standard RoundTripper
+contract race after the target/origin corrections were present. At
+`2026-09-10T00:46:54Z` UTC, the new body mutex was temporarily removed from the
+worktree while the target/origin corrections remained, and this race command
+exited 1 with a `bytes.Reader.Reset`/`Read` data race:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -run '^TestBaselineAcquireForwardingBodyConcurrentReadCloseIsSafe$' -count=1 -v -timeout=180s
+```
+
+This was a focused isolation red, not a claim that the entire pristine
+baseline had been rerun. The mutex was restored immediately; no reviewer
+successfully modified the owned tests or source.
+
+Source/test commit `1d25d31061b0be6dcad50a67a7263c5157b69a6f` makes the minimal
+corrections. Acquisition-shaped non-target requests are rejected before the
+inner transport, while bootstrap requests outside that shape remain
+untouched; the valid acquisition target still has strict host, path, method,
+query and ID/body checks. Session-open capture now validates the actual HTTPS
+scheme/host/port against the approved runtime identity and records that exact
+origin; terminal session close requires the same origin while retaining the
+legitimate dynamic Actions API base path. The capture transport no longer
+closes the replacement body after the inner RoundTripper returns, and the
+bounded forwarding body's `Read` and `Close` operations are synchronized for
+the asynchronous ownership permitted by `net/http.RoundTripper`. No blanket
+response clean-EOF close-error quarantine was added.
+
+Fresh focused normal verification at `2026-09-10T00:50:24Z` UTC was:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^(TestBaselineAcquireTargetMismatchStopsBeforeInner|TestBaselineSessionCloseTargetRequiresExactOrigin|TestBaselineAcquireForwardingBodySurvivesAsyncRoundTripClose|TestBaselineAcquireForwardingBodyConcurrentReadCloseIsSafe|TestPinnedSDKDrainRejectsAcquireTargetMutationBeforeFixture|TestPinnedSDKDrainBindsSessionCloseToSessionOpenOrigin|TestPinnedSDKDrainBindsAcquireToPhysicalRequestBody)$' -count=1 -timeout=180s
+```
+
+It passed in 0.529s. The corresponding focused race command at
+`2026-09-10T00:50:45Z` UTC passed in 1.432s with no race report. Both suites
+used the real pinned `github.com/actions/scaleset v0.4.0` SDK and offline TLS
+loopback fixtures, including the legitimate dynamic `/tenant/v2/` path and a
+wrong-but-otherwise-allowed close origin.
+
+The complete relevant package normal run began at `2026-09-10T00:51:11Z` UTC
+and passed in 26.637s:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test ./livecanary -count=1 -timeout=240s
+```
+
+The package-wide race command was also run in the final validation window and
+the captured successful result was 39.272s:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -count=1 -timeout=300s
+```
+
+At `2026-09-10T00:53:42Z` UTC, `GOTOOLCHAIN=go1.26.8 go vet ./livecanary` exited
+0. At `2026-09-10T00:53:50Z` UTC, `bash scripts/gofmt.sh check` exited 0;
+`git diff --check` also exited 0. No additional root-plus-G01/G02 offline gate
+was rerun after the coordinator's throughput direction; those exact broader
+gates remain coordinator/CI evidence. All work here stayed offline: no live
+runner, workflow, credential, App, Keychain, launchd, Docker, Lima, ScaleSet,
+JIT or cleanup operation was performed.
+
+The bounded security adjudication independently confirmed the standard HTTP
+early-response/body-truncation race and found no actionable clean-EOF response
+close-error contract issue. Final independent delta review, exact-head Codex
+review and CI remain coordinator gates; this worker does not claim those gates
+are complete. The durable unknown/replay fence remains unchanged whenever a
+target or response cannot be proven, and the live G01 evidence gate and parent
+goal remain open.
+
+Rollback is a focused normal `git revert --no-edit
+1d25d31061b0be6dcad50a67a7263c5157b69a6f` followed by a separate revert of
+this evidence append if needed; retain the current journal, reservation and
+uncertainty, and never reset, erase, replay or run live cleanup.
+
 ## Remaining gate and rollback
 
 The live G01 gate remains unresolved until a separately authorized run uses an
