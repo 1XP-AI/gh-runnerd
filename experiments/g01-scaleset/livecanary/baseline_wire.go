@@ -102,6 +102,10 @@ func baselineAcquireRequestCandidate(r *http.Request) bool {
 	return r != nil && r.URL != nil && (strings.Contains(r.URL.Path, "/_apis/runtime/runnerscalesets/") || strings.HasSuffix(r.URL.Path, "/acquirejobs"))
 }
 
+func baselineSessionOpenRequestCandidate(r *http.Request) bool {
+	return r != nil && r.URL != nil && strings.Contains(r.URL.Path, "/runnerscalesets/")
+}
+
 func baselineRequestOrigin(u *url.URL) (string, bool) {
 	if u == nil || !strings.EqualFold(u.Scheme, "https") || u.Hostname() == "" || u.User != nil || u.Fragment != "" {
 		return "", false
@@ -194,6 +198,9 @@ func (c *baselineWireCapture) captureRequest(req *http.Request) error {
 	}
 	if c.stage == "session-open" {
 		if !c.target(req) {
+			if baselineSessionOpenRequestCandidate(req) {
+				return c.rejectRequest(req)
+			}
 			return nil
 		}
 		origin, ok := baselineRequestOrigin(req.URL)

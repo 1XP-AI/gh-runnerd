@@ -1141,6 +1141,61 @@ Rollback is a focused normal `git revert --no-edit
 this evidence append if needed; retain the current journal, reservation and
 uncertainty, and never reset, erase, replay or run live cleanup.
 
+### Exact-head follow-up: fail-closed marked session-open target binding
+
+Fresh exact-head Codex detail for PR72 identified [P1 session-open target
+pre-forwarding](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3974562078)
+on `f08e9f3e0b1b7cb5d028e437160f7afa3a838f00`. The finding covers marked
+session-open host, path, scale-set ID, method and query mutations: the old
+capture returned success for a non-target request, allowing the innermost
+transport to run before `OpenDrainSession` rejected the response and discarded
+the remote session identity.
+
+The meaningful red regression was added before the source correction:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^TestBaselineSessionOpenTargetMismatchStopsBeforeInner$' -count=1 -v -timeout=60s
+```
+
+It exited 1. The valid session-open and both SDK bootstrap controls passed, while
+the wrong-host, wrong-scale-set, wrong-endpoint-path, wrong-method and wrong-
+query cases returned nil instead of rejecting before the inner transport; the
+counter assertions therefore exposed the pre-forwarding gap. No request body,
+token, URL, response error or private path was retained.
+
+The minimal source/test correction adds a narrow session-open candidate check to
+the marked capture: requests in the `/runnerscalesets/` route family that fail
+the exact host/path/method/query target are rejected before the inner transport.
+The two pinned SDK bootstrap POST paths remain unclassified and continue through
+the transport, while the valid session-open request remains accepted. Existing
+acquisition target preflight, session-close origin binding and asynchronous
+request-body lifetime fixes are unchanged.
+
+The batched focused normal verification was:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^(TestBaselineSessionOpenTargetMismatchStopsBeforeInner|TestBaselineAcquireTargetMismatchStopsBeforeInner|TestBaselineSessionCloseTargetRequiresExactOrigin|TestBaselineAcquireForwardingBodySurvivesAsyncRoundTripClose|TestBaselineAcquireForwardingBodyConcurrentReadCloseIsSafe|TestPinnedSDKDrainRejectsAcquireTargetMutationBeforeFixture|TestPinnedSDKDrainBindsSessionCloseToSessionOpenOrigin|TestPinnedSDKDrainBindsAcquireToPhysicalRequestBody|TestPinnedSDKDrainRejectsAmbiguousSessionResponse|TestPinnedSDKDrainRequiresApprovedHTTPSQueueHost|TestDriverDrainThroughPinnedSDKAndPollHook)$' -count=1 -v -timeout=180s
+```
+
+This passed. The corresponding focused race command passed with no race report;
+the valid session-open/bootstrap controls, all five session-open mutation
+boundaries, prior acquisition/origin/body-lifetime regressions and pinned SDK
+drain integration all remained green. These are offline loopback tests only;
+the full G01 live evidence gate and parent goal remain open.
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -run '^(TestBaselineSessionOpenTargetMismatchStopsBeforeInner|TestBaselineAcquireTargetMismatchStopsBeforeInner|TestBaselineSessionCloseTargetRequiresExactOrigin|TestBaselineAcquireForwardingBodySurvivesAsyncRoundTripClose|TestBaselineAcquireForwardingBodyConcurrentReadCloseIsSafe|TestPinnedSDKDrainRejectsAcquireTargetMutationBeforeFixture|TestPinnedSDKDrainBindsSessionCloseToSessionOpenOrigin|TestPinnedSDKDrainBindsAcquireToPhysicalRequestBody|TestPinnedSDKDrainRejectsAmbiguousSessionResponse|TestPinnedSDKDrainRequiresApprovedHTTPSQueueHost|TestDriverDrainThroughPinnedSDKAndPollHook)$' -count=1 -timeout=180s
+```
+
+This passed in 1.838s with no race report.
+
+Rollback is a focused normal `git revert --no-edit` of this correction commit;
+retain the journal, reservation and uncertainty, and never reset, erase, replay,
+or run live cleanup.
+
 ## Remaining gate and rollback
 
 The live G01 gate remains unresolved until a separately authorized run uses an

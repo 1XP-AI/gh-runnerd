@@ -84,6 +84,56 @@ func TestBaselineAcquireTargetMismatchStopsBeforeInner(t *testing.T) {
 	}
 }
 
+func TestBaselineSessionOpenTargetMismatchStopsBeforeInner(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		method string
+		target string
+		reject bool
+	}{
+		{name: "valid session-open", method: http.MethodPost, target: "https://api.example/_apis/runtime/runnerscalesets/7/sessions?api-version=6.0-preview"},
+		{name: "wrong host", method: http.MethodPost, target: "https://other.example/_apis/runtime/runnerscalesets/7/sessions?api-version=6.0-preview", reject: true},
+		{name: "wrong scale set", method: http.MethodPost, target: "https://api.example/_apis/runtime/runnerscalesets/8/sessions?api-version=6.0-preview", reject: true},
+		{name: "wrong endpoint path", method: http.MethodPost, target: "https://api.example/_apis/runtime/runnerscalesets/7/not-session?api-version=6.0-preview", reject: true},
+		{name: "wrong method", method: http.MethodGet, target: "https://api.example/_apis/runtime/runnerscalesets/7/sessions?api-version=6.0-preview", reject: true},
+		{name: "wrong query", method: http.MethodPost, target: "https://api.example/_apis/runtime/runnerscalesets/7/sessions?api-version=6.0-preview&unexpected=1", reject: true},
+		{name: "registration bootstrap", method: http.MethodPost, target: "https://api.example/fixture-org/actions/runners/registration-token"},
+		{name: "actions bootstrap", method: http.MethodPost, target: "https://api.example/fixture-org/actions/runner-registration"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capture := &baselineWireCapture{stage: "session-open", setID: 7, allowedHosts: []string{"api.example"}}
+			innerCalls := 0
+			transport := baselineRequestCaptureTransport{inner: drainRoundTripper(func(req *http.Request) (*http.Response, error) {
+				innerCalls++
+				return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}, nil
+			})}
+			req, err := http.NewRequestWithContext(capture.context(context.Background()), tc.method, tc.target, strings.NewReader("{}"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = transport.RoundTrip(req)
+			if tc.reject {
+				if !errors.Is(err, ErrRemote) {
+					t.Fatalf("mismatched session-open target error = %v, want remote rejection", err)
+				}
+				if innerCalls != 0 {
+					t.Fatalf("mismatched session-open target reached inner transport: calls=%d", innerCalls)
+				}
+				if capture.observed() {
+					t.Fatal("mismatched session-open target was marked observed")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("valid or bootstrap request error = %v", err)
+			}
+			if innerCalls != 1 {
+				t.Fatalf("valid or bootstrap request inner calls = %d, want one", innerCalls)
+			}
+		})
+	}
+}
+
 func TestBaselineSessionCloseTargetRequiresExactOrigin(t *testing.T) {
 	capture := &baselineWireCapture{stage: "terminal-session-close", setID: 7, sessionID: "session", origin: "https://actions.example:443"}
 	for _, tc := range []struct {
