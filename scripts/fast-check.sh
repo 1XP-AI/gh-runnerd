@@ -83,7 +83,7 @@ printf 'fast check: module=%s package=%s test=%s (focused selector only; not mak
 (
 	cd "${module_root}"
 	set +e
-	test_output="$("${go_cmd}" test -json=false -list= -count=1 -run "${fast_test}" "${fast_package}" 2>&1)"
+	test_output="$("${go_cmd}" test -json=false -list= -bench= -fuzz= -skip= -c=false -count=1 -run "${fast_test}" "${fast_package}" 2>&1)"
 	status=$?
 	set -e
 	printf '%s\n' "${test_output}"
