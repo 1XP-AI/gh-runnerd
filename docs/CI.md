@@ -102,8 +102,10 @@ beyond `FAST_TEST`; `-list`, `-skip`, and build-only `-c` are cleared so they
 cannot suppress it; explicit `-run`/`-count` values retain the requested
 selector and `-cpu=1` bounds each selected test to one execution. Inherited
 `-exec` is cleared so a wrapper cannot bypass the test binary. The command uses
-Go's JSON test events and requires an unescaped per-test `Action=run` event;
-package summaries and arbitrary `TestMain` output do not count, and dry-run or
+Go's JSON test events and requires a structured per-test `Action=run` event whose
+`Test` field is a complete match under Go's slash-separated component and
+top-level alternation semantics; possible-parent events do not count. Package
+summaries and arbitrary `TestMain` output do not count, and dry-run or
 unsupported build modes fail closed when no test event is observed. Useful build
 flags such as `-race` and `-mod=readonly` remain inherited; this is not a
 blanket `GOFLAGS` removal. This is a trusted local helper, not a hostile-code

@@ -64,7 +64,9 @@ func toolingGoWrapper(t *testing.T, root string) (string, string, string) {
 	wrapperPath := filepath.Join(root, "logging-go")
 	toolingFile(t, root, "logging-go", `#!/bin/sh
 set -eu
-printf '%s\t%s\n' "${GOTOOLCHAIN:-}" "$*" >> "$TOOLING_GO_LOG"
+if [ "${1:-}" != run ]; then
+	printf '%s\t%s\n' "${GOTOOLCHAIN:-}" "$*" >> "$TOOLING_GO_LOG"
+fi
 exec "$TOOLING_REAL_GO" "$@"
 `, 0700)
 	return wrapperPath, logPath, realGo
@@ -73,7 +75,7 @@ exec "$TOOLING_REAL_GO" "$@"
 func toolingFixture(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
-	for _, name := range []string{"Makefile", "go.mod", "LICENSE", "docs/DEPENDENCIES.md", "scripts/check-toolchain.sh", "scripts/check-licenses.sh", "scripts/check-offline-experiments.sh", "scripts/gofmt.sh", "scripts/fuzz-smoke.sh", "scripts/fast-check.sh"} {
+	for _, name := range []string{"Makefile", "go.mod", "LICENSE", "docs/DEPENDENCIES.md", "scripts/check-toolchain.sh", "scripts/check-licenses.sh", "scripts/check-offline-experiments.sh", "scripts/gofmt.sh", "scripts/fuzz-smoke.sh", "scripts/fast-check.sh", "scripts/fast-check-events/main.go"} {
 		data, err := os.ReadFile(filepath.Join("..", name))
 		if err != nil {
 			t.Fatal(err)
@@ -204,6 +206,66 @@ func TestFastSelected(t *testing.T) {
 			)
 			if err == nil || !strings.Contains(out, tc.want) {
 				t.Fatalf("GOFLAGS=-list=. accepted %s: err=%v output=%s", tc.name, err, out)
+			}
+		})
+	}
+}
+
+func TestFastCheckRequiresCompleteSubtestSelector(t *testing.T) {
+	root := toolingFixture(t)
+	toolingFile(t, root, "cmd/gh-runnerd/fast_check_test.go", `package main
+
+import "testing"
+
+func TestFastCheckParent(t *testing.T) {
+	t.Run("ActualChild", func(t *testing.T) {})
+	t.Run("Actual", func(t *testing.T) {})
+	t.Run("Other", func(t *testing.T) {})
+}
+`, 0600)
+	for _, tc := range []struct {
+		name, selector, wantOutput string
+		wantErr                    bool
+	}{
+		{
+			name:       "missing child",
+			selector:   "^TestFastCheckParent$/^MissingChild$",
+			wantErr:    true,
+			wantOutput: "FAST_TEST matched no compiled test",
+		},
+		{
+			name:     "actual child",
+			selector: "^TestFastCheckParent$/^ActualChild$",
+		},
+		{
+			name:     "slash in character class",
+			selector: "^TestFastCheckParent$/^Actual[/]?$",
+		},
+		{
+			name:     "slash in parentheses",
+			selector: "^TestFastCheckParent$/^Actual(/)?$",
+		},
+		{
+			name:     "grouped alternation",
+			selector: "^TestFastCheckParent$/^(Actual|Other)$",
+		},
+		{
+			name:     "top-level alternation",
+			selector: "^TestFastCheckParent$/^ActualChild$|^TestFastCheckParent$/^Other$",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := toolingRun(t, root, nil, "make",
+				"FAST_MODULE=.",
+				"FAST_PACKAGE=./cmd/gh-runnerd",
+				"FAST_TEST="+strings.ReplaceAll(tc.selector, "$", "$$"),
+				"fast",
+			)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("selector %q returned err=%v, want error=%t; output=%s", tc.selector, err, tc.wantErr, out)
+			}
+			if tc.wantOutput != "" && !strings.Contains(out, tc.wantOutput) {
+				t.Fatalf("selector %q output lacks %q: %s", tc.selector, tc.wantOutput, out)
 			}
 		})
 	}

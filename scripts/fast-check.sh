@@ -15,6 +15,9 @@ fail() {
 	exit 2
 }
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P)" || fail 'fast-check.sh directory does not exist'
+event_checker="${script_dir}/fast-check-events"
+
 require_selector() {
 	local name="$1"
 	local value="$2"
@@ -83,9 +86,6 @@ printf 'fast check: module=%s package=%s test=%s (focused selector only; not mak
 (
 	cd "${module_root}"
 	set +e
-	# Keep useful inherited build flags such as -race and -mod=readonly, while
-	# bounding controls that can suppress or repeat the selected test. JSON mode
-	# makes per-test run events distinct from arbitrary TestMain output below.
 	test_output="$("${go_cmd}" test -json -list= -bench= -fuzz= -skip= -c=false -count=1 -cpu=1 -exec= -run "${fast_test}" "${fast_package}" 2>&1)"
 	status=$?
 	set -e
@@ -94,20 +94,7 @@ printf 'fast check: module=%s package=%s test=%s (focused selector only; not mak
 		printf 'fast check failed: selected test command exited %d\n' "${status}" >&2
 		exit "${status}"
 	fi
-	matched_test=0
-	while IFS= read -r line; do
-		# `go test -json` emits one JSON object per line. An Action=run event
-		# has a Test field; arbitrary test-process output is escaped inside an
-		# Output string and cannot provide these unescaped JSON keys.
-		case "${line}" in
-			*'"Action":"run"'*)
-				case "${line}" in
-					*'"Test":"'*) matched_test=1 ;;
-				esac
-				;;
-		esac
-	done <<< "${test_output}"
-	if ((matched_test == 0)); then
+	if ! printf '%s\n' "${test_output}" | (cd "${event_checker}" && GOFLAGS='' "${go_cmd}" run . --selector "${fast_test}"); then
 		printf 'fast check failed: FAST_TEST matched no compiled test in FAST_PACKAGE\n' >&2
 		exit 2
 	fi
