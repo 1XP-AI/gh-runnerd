@@ -18,23 +18,23 @@ var errBaselineCollected = errors.New("baseline callback collection complete")
 // No current phase/CLI calls this. The future pair orchestrator must prove
 // completed pairing and host preflight before invoking this experiment slice.
 type baselineListener struct {
-	finalizer              *pairedBaselineScope
-	finalizing             bool
-	pairGuard              func() error
-	mu                     sync.Mutex
-	ctx                    context.Context
-	cancel                 context.CancelFunc
-	approval               Approval
-	journal                *FileJournal
-	api                    SDKAPI
-	identity               controllerJournalIdentity
-	creation               controllerRecordRef
-	setID                  int
-	session                Session
-	initial                scaleset.RunnerScaleSetSession
-	sessionID, queue       string
-	running, used, invalid bool
-	after                  func(context.Context, baselineAcquisition) error
+	finalizer                *pairedBaselineScope
+	finalizing               bool
+	pairGuard                func() error
+	mu                       sync.Mutex
+	ctx                      context.Context
+	cancel                   context.CancelFunc
+	approval                 Approval
+	journal                  *FileJournal
+	api                      SDKAPI
+	identity                 controllerJournalIdentity
+	creation                 controllerRecordRef
+	setID                    int
+	session                  Session
+	initial                  scaleset.RunnerScaleSetSession
+	sessionID, queue, origin string
+	running, used, invalid   bool
+	after                    func(context.Context, baselineAcquisition) error
 }
 
 func newBaselineListenerHeld(ctx context.Context, a Approval, j *FileJournal, api *SDKAPI, setID int) (*baselineListener, error) {
@@ -163,7 +163,16 @@ func (b *baselineListener) finish(r baselineRecord, known bool) (controllerRecor
 	return ref, nil
 }
 func (b *baselineListener) wire(stage string) *baselineWireCapture {
-	return &baselineWireCapture{stage: stage, setID: b.setID, queue: b.queue, allowedHosts: baselineWireAllowedHosts(b.approval, b.api.drainEndpointHost())}
+	return &baselineWireCapture{stage: stage, setID: b.setID, organization: b.approval.Organization, queue: b.queue, origin: b.origin, allowedHosts: baselineWireAllowedHosts(b.approval, b.api.drainEndpointHost())}
+}
+
+func (b *baselineListener) capturedOrigin() string {
+	if b == nil {
+		return ""
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.origin
 }
 func (b *baselineListener) run(after func(context.Context, baselineAcquisition) error) error {
 	if b == nil || b.ctx == nil || b.cancel == nil || !b.mu.TryLock() {
@@ -238,6 +247,7 @@ func (b *baselineListener) initialize() error {
 	session, callErr := b.api.OpenSession(c.context(ctx), b.setID, b.approval.setName())
 	cancel()
 	sf, _, _, status := c.facts()
+	origin := c.requestOrigin()
 	r.Session = sf
 	r.HTTPStatus = status
 	known = c.observed() && sf.eligible(b.approval, b.setID) && ((callErr != nil && b.ctx.Err() != nil) || (callErr == nil && session != nil))
@@ -247,6 +257,9 @@ func (b *baselineListener) initialize() error {
 	}
 	if known && callErr == nil {
 		known = initial.SessionID.String() == sf.SessionID && initial.OwnerName == sf.Owner && sf.Statistics.matches(initial.Statistics) && initial.MessageQueueURL != ""
+	}
+	if known && origin != "" {
+		b.origin = origin
 	}
 	if callErr == nil && session != nil && sf != nil && initial.SessionID.String() == sf.SessionID && initial.OwnerName == b.approval.setName() {
 		b.session = session

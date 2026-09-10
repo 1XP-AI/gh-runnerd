@@ -151,7 +151,11 @@ func (s *pairedBaselineScope) terminalStepCall(stage string) error {
 		if s.listener.session == nil || s.listener.session.Session().SessionID.String() != state.sessionID {
 			return ErrQuarantine
 		}
-		capture := &baselineWireCapture{stage: stage, setID: s.setID, sessionID: state.sessionID}
+		origin := s.listener.capturedOrigin()
+		if origin == "" {
+			return ErrQuarantine
+		}
+		capture := &baselineWireCapture{stage: stage, setID: s.setID, sessionID: state.sessionID, origin: origin}
 		ctx, cancel := context.WithTimeout(s.ctx, operationTimeout)
 		callErr = s.listener.session.Close(capture.context(ctx))
 		cancel()

@@ -20,6 +20,7 @@ func TestBaselineAcquireTargetIsActionsOnly(t *testing.T) {
 		setID:        7,
 		queue:        "https://queue.example/queue?access_token=fixture",
 		allowedHosts: []string{"api.example"},
+		origin:       "https://api.example:443",
 	}
 	for _, tc := range []struct {
 		name   string
@@ -51,6 +52,9 @@ func TestBaselineAcquireTargetMismatchStopsBeforeInner(t *testing.T) {
 		"https://other.example/_apis/runtime/runnerscalesets/7/acquirejobs?api-version=6.0-preview",
 		"https://api.example/_apis/runtime/runnerscalesets/8/acquirejobs?api-version=6.0-preview",
 		"https://api.example/_apis/runtime/runnerscalesets/7/acquirejobs?api-version=6.0-preview&extra=1",
+		"https://api.example/_apis/runtime/runnerscalesets/7/acquirejobs?api-version=6.0-preview&bad=%zz",
+		"https://api.example/_apis/runtime/runnerscalesets/7/acquirejobs?api-version=6.0-preview;extra=1",
+		"https://api.example/_apis/runtime/runnerscalesets/7/acquirejobs?api-version=6.0-preview&api-version=6.0-preview",
 		"https://api.example/_apis/runtime/runnerscalesets/7/wrong?api-version=6.0-preview",
 	} {
 		t.Run(target, func(t *testing.T) {
@@ -97,11 +101,26 @@ func TestBaselineSessionOpenTargetMismatchStopsBeforeInner(t *testing.T) {
 		{name: "wrong endpoint path", method: http.MethodPost, target: "https://api.example/_apis/runtime/runnerscalesets/7/not-session?api-version=6.0-preview", reject: true},
 		{name: "wrong method", method: http.MethodGet, target: "https://api.example/_apis/runtime/runnerscalesets/7/sessions?api-version=6.0-preview", reject: true},
 		{name: "wrong query", method: http.MethodPost, target: "https://api.example/_apis/runtime/runnerscalesets/7/sessions?api-version=6.0-preview&unexpected=1", reject: true},
-		{name: "registration bootstrap", method: http.MethodPost, target: "https://api.example/fixture-org/actions/runners/registration-token"},
-		{name: "actions bootstrap", method: http.MethodPost, target: "https://api.example/fixture-org/actions/runner-registration"},
+		{name: "malformed query escape", method: http.MethodPost, target: "https://api.example/_apis/runtime/runnerscalesets/7/sessions?api-version=6.0-preview&bad=%zz", reject: true},
+		{name: "duplicate query", method: http.MethodPost, target: "https://api.example/_apis/runtime/runnerscalesets/7/sessions?api-version=6.0-preview&api-version=6.0-preview", reject: true},
+		{name: "semicolon query", method: http.MethodPost, target: "https://api.example/_apis/runtime/runnerscalesets/7/sessions?api-version=6.0-preview;unexpected=1", reject: true},
+		{name: "case route family", method: http.MethodPost, target: "https://api.example/_apis/runtime/RunnerScaleSets/7/sessions?api-version=6.0-preview", reject: true},
+		{name: "route family delimiter", method: http.MethodPost, target: "https://api.example/_apis/runtime/runnerscalesets7/sessions?api-version=6.0-preview", reject: true},
+		{name: "route family omitted", method: http.MethodPost, target: "https://api.example/_apis/runtime/sessions?api-version=6.0-preview", reject: true},
+		{name: "registration bootstrap", method: http.MethodPost, target: "https://api.example/orgs/fixture-org/actions/runners/registration-token"},
+		{name: "actions bootstrap", method: http.MethodPost, target: "https://api.example/actions/runner-registration"},
+		{name: "bootstrap organization collision", method: http.MethodPost, target: "https://api.example/orgs/runnerscalesets/actions/runners/registration-token"},
+		{name: "bootstrap organization collision actions", method: http.MethodPost, target: "https://api.example/orgs/runnerscalesets/actions/runner-registration"},
+		{name: "bootstrap wrong organization", method: http.MethodPost, target: "https://api.example/orgs/other-org/actions/runners/registration-token", reject: true},
+		{name: "bootstrap extra path", method: http.MethodPost, target: "https://api.example/orgs/fixture-org/actions/runners/registration-token/extra", reject: true},
+		{name: "bootstrap unexpected query", method: http.MethodPost, target: "https://api.example/orgs/fixture-org/actions/runners/registration-token?unexpected=1", reject: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			capture := &baselineWireCapture{stage: "session-open", setID: 7, allowedHosts: []string{"api.example"}}
+			organization := "fixture-org"
+			if strings.Contains(tc.name, "organization collision") {
+				organization = "runnerscalesets"
+			}
+			capture := &baselineWireCapture{stage: "session-open", setID: 7, organization: organization, allowedHosts: []string{"api.example"}}
 			innerCalls := 0
 			transport := baselineRequestCaptureTransport{inner: drainRoundTripper(func(req *http.Request) (*http.Response, error) {
 				innerCalls++
@@ -134,6 +153,49 @@ func TestBaselineSessionOpenTargetMismatchStopsBeforeInner(t *testing.T) {
 	}
 }
 
+func TestBaselineAcquireTargetRequiresCapturedSessionOrigin(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		origin string
+		target string
+		want   bool
+	}{
+		{name: "captured origin", origin: "https://api.example:443", target: "https://api.example/_apis/runtime/runnerscalesets/7/acquirejobs?api-version=6.0-preview", want: true},
+		{name: "second approved origin", origin: "https://api.example:443", target: "https://actions.example/_apis/runtime/runnerscalesets/7/acquirejobs?api-version=6.0-preview"},
+		{name: "missing captured origin", target: "https://api.example/_apis/runtime/runnerscalesets/7/acquirejobs?api-version=6.0-preview"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capture := &baselineWireCapture{stage: "acquire", setID: 7, origin: tc.origin, allowedHosts: []string{"api.example", "actions.example"}}
+			req, err := http.NewRequest(http.MethodPost, tc.target, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := capture.target(req); got != tc.want {
+				t.Fatalf("acquisition target match = %v, want %v for %s", got, tc.want, tc.target)
+			}
+		})
+	}
+}
+
+func TestBaselineAcquireOriginMismatchStopsBeforeInner(t *testing.T) {
+	capture := &baselineWireCapture{stage: "acquire", setID: 7, origin: "https://api.example:443", requestIDs: []int64{41}, allowedHosts: []string{"api.example", "actions.example"}}
+	innerCalls := 0
+	transport := baselineRequestCaptureTransport{inner: drainRoundTripper(func(req *http.Request) (*http.Response, error) {
+		innerCalls++
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}, nil
+	})}
+	req, err := http.NewRequestWithContext(capture.context(context.Background()), http.MethodPost, "https://actions.example/_apis/runtime/runnerscalesets/7/acquirejobs?api-version=6.0-preview", strings.NewReader("[41]"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transport.RoundTrip(req); !errors.Is(err, ErrRemote) {
+		t.Fatalf("mismatched acquisition origin error = %v, want remote rejection", err)
+	}
+	if innerCalls != 0 {
+		t.Fatalf("mismatched acquisition origin reached inner transport: calls=%d", innerCalls)
+	}
+}
+
 func TestBaselineSessionCloseTargetRequiresExactOrigin(t *testing.T) {
 	capture := &baselineWireCapture{stage: "terminal-session-close", setID: 7, sessionID: "session", origin: "https://actions.example:443"}
 	for _, tc := range []struct {
@@ -145,6 +207,9 @@ func TestBaselineSessionCloseTargetRequiresExactOrigin(t *testing.T) {
 		{name: "wrong scheme", target: "http://actions.example/tenant/v2/_apis/runtime/runnerscalesets/7/sessions/session?api-version=6.0-preview", want: false},
 		{name: "wrong host", target: "https://other.actions.example/tenant/v2/_apis/runtime/runnerscalesets/7/sessions/session?api-version=6.0-preview", want: false},
 		{name: "wrong port", target: "https://actions.example:8443/tenant/v2/_apis/runtime/runnerscalesets/7/sessions/session?api-version=6.0-preview", want: false},
+		{name: "malformed query escape", target: "https://actions.example/tenant/v2/_apis/runtime/runnerscalesets/7/sessions/session?api-version=6.0-preview&bad=%zz", want: false},
+		{name: "semicolon query", target: "https://actions.example/tenant/v2/_apis/runtime/runnerscalesets/7/sessions/session?api-version=6.0-preview;bad=1", want: false},
+		{name: "duplicate query", target: "https://actions.example/tenant/v2/_apis/runtime/runnerscalesets/7/sessions/session?api-version=6.0-preview&api-version=6.0-preview", want: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req, err := http.NewRequest(http.MethodDelete, tc.target, nil)
@@ -159,7 +224,7 @@ func TestBaselineSessionCloseTargetRequiresExactOrigin(t *testing.T) {
 }
 
 func TestBaselineAcquireForwardingBodySurvivesAsyncRoundTripClose(t *testing.T) {
-	capture := &baselineWireCapture{stage: "acquire", setID: 7, requestIDs: []int64{41}, allowedHosts: []string{"api.example"}}
+	capture := &baselineWireCapture{stage: "acquire", setID: 7, origin: "https://api.example:443", requestIDs: []int64{41}, allowedHosts: []string{"api.example"}}
 	release := make(chan struct{})
 	returned := make(chan struct{})
 	readBody := make(chan string, 1)
@@ -197,7 +262,7 @@ func TestBaselineAcquireForwardingBodySurvivesAsyncRoundTripClose(t *testing.T) 
 }
 
 func TestBaselineAcquireForwardingBodyConcurrentReadCloseIsSafe(t *testing.T) {
-	capture := &baselineWireCapture{stage: "acquire", setID: 7, requestIDs: []int64{41}, allowedHosts: []string{"api.example"}}
+	capture := &baselineWireCapture{stage: "acquire", setID: 7, origin: "https://api.example:443", requestIDs: []int64{41}, allowedHosts: []string{"api.example"}}
 	start := make(chan struct{})
 	done := make(chan struct{}, 2)
 	transport := baselineRequestCaptureTransport{inner: drainRoundTripper(func(req *http.Request) (*http.Response, error) {

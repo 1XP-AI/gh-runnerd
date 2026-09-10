@@ -1214,3 +1214,95 @@ correction, revert the focused `b3d45cb648965913090dcb08c3674341f76f483a`
 source/test/evidence commits while retaining the current journal and owned
 resources for inspection; do not reset, erase or replay the journal. No live
 cleanup, workflow replay, runner mutation or rollback operation was performed.
+
+### Exact-head correction: captured origin, bootstrap boundaries, and paired close
+
+Date: 2026-09-10. This correction addresses the two independent private review
+findings on exact head c0e8a2e: acquisition was bound to the approved-host set
+rather than the session-open origin, and the marked session-open classifier
+could forward route-family escapes or reject an organization named
+"runnerscalesets". It also addresses the paired terminal cleanup finding: the
+paired close capture omitted the origin learned during its own session-open, so
+the DELETE could occur while the local close receipt remained unknown.
+
+The red-first chronology was:
+
+1. The required c0 paired regression was run first with
+   GOWORK=off GOTOOLCHAIN=go1.26.8 go test -tags=g01_pair_fixture ./livecanary
+   -run '^TestPairedTerminalCapturedAcknowledgementCancellation$/session$'
+   -count=1 -v -timeout=180s. It exited 1 with
+   "captured close acknowledgement/history lost"; this is the c0 failure where
+   the close DELETE reached the fixture but the paired capture had no origin
+   and recorded no close response.
+2. After adding the request-boundary regression cases, the focused red command
+   was GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run
+   '^(TestBaselineSessionOpenTargetMismatchStopsBeforeInner|TestBaselineAcquireTargetRequiresCapturedSessionOrigin|TestBaselineAcquireOriginMismatchStopsBeforeInner)$'
+   -count=1 -v -timeout=60s. It exited 1 as expected: malformed-percent,
+   semicolon, duplicate, case, delimiter, and omitted-route session-open cases
+   were forwarded; the colliding organization bootstrap cases were rejected; a
+   second approved acquisition origin and a missing captured origin were
+   accepted; and the acquisition origin mismatch reached the inner transport.
+
+The minimal correction then made the following boundaries explicit. RawQuery is
+parsed through the error-returning parser and requires the exact key/value set,
+rejecting malformed percent escapes, semicolon syntax, duplicates, empty or
+unexpected pairs. A marked session-open accepts its exact target or only the
+known organization registration-token and runner-registration bootstrap paths
+for the approved organization, including the hosted and /api/v3 API prefixes;
+all other marked non-target requests reject before the inner transport. The
+organization is carried into the capture so an organization slug equal to
+"runnerscalesets" remains compatible without restoring substring matching.
+Acquisition now copies the exact canonical HTTPS origin captured at session-open
+and requires equality with the physical acquisition request while retaining the
+approved-host check. The paired listener records that session-open origin, the
+paired terminal close refuses an absent origin before invoking the SDK, and the
+close capture receives the recorded origin; the drain path copies its hook
+origin as well. Redirects, missing origins, and ambiguous origins remain
+quarantined, and the asynchronous request-body ownership and error-redaction
+behavior remains unchanged.
+
+The first focused green command was
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run
+'^(TestBaselineSessionOpenTargetMismatchStopsBeforeInner|TestBaselineAcquireTargetMismatchStopsBeforeInner|TestBaselineAcquireTargetRequiresCapturedSessionOrigin|TestBaselineAcquireOriginMismatchStopsBeforeInner|TestBaselineSessionCloseTargetRequiresExactOrigin|TestBaselineAcquireTargetIsActionsOnly|TestBaselineAcquireForwardingBodySurvivesAsyncRoundTripClose|TestBaselineAcquireForwardingBodyConcurrentReadCloseIsSafe|TestPinnedSDKDrainRejectsAcquireTargetMutationBeforeFixture|TestPinnedSDKDrainBindsSessionCloseToSessionOpenOrigin|TestPinnedSDKDrainBindsAcquireToPhysicalRequestBody|TestPinnedSDKDrainRejectsAmbiguousSessionResponse|TestPinnedSDKDrainRequiresApprovedHTTPSQueueHost|TestDriverDrainThroughPinnedSDKAndPollHook)$'
+-count=1 -timeout=180s; it exited 0. The same expression with go test -race
+exited 0 in 1.873s with no race diagnostics.
+
+The tagged required paired matrix was then run with
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -tags=g01_pair_fixture ./livecanary
+-run
+'^(TestPairedTerminalFinalResultCapacity|TestPairedTerminalPendingChildCapacity|TestPairedTerminalEligibilityUsesFreshExactFacts|TestPairedTerminalCapturedAcknowledgementCancellation|TestPairedTerminalMissingAcknowledgementsAndPostchecks)$'
+-count=1 -v -timeout=180s; it exited 0 in 12.247s. The pinned SDK subset
+was initially run with
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run
+'^(TestPinnedSDKDrainRejectsAcquireTargetMutationBeforeFixture|TestPinnedSDKDrainBindsAcquireToPhysicalRequestBody|TestPinnedSDKDrainBindsSessionCloseToSessionOpenOrigin|TestPinnedSDKDrainRequiresApprovedHTTPSQueueHost|TestDriverDrainThroughPinnedSDKAndPollHook)$'
+-count=1 -v -timeout=180s; that run failed because the explicit bootstrap
+allowlist did not yet include the valid /api/v3 prefix. After adding that known
+prefix, the same command exited 0 in 0.774s.
+
+The expanded tagged paired command
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -tags=g01_pair_fixture ./livecanary
+-run
+'^(TestPairedTerminalActualJournalsFinalize|TestPairedTerminalCompletionCadenceAndReceiptSeparation|TestPairedTerminalFinalResultCapacity|TestPairedTerminalPendingChildCapacity|TestPairedTerminalEligibilityUsesFreshExactFacts|TestPairedTerminalCapturedAcknowledgementCancellation|TestPairedTerminalMissingAcknowledgementsAndPostchecks)$'
+-count=1 -v -timeout=240s exited 0 in 13.518s, including actual paired
+terminal finalize and cleanup. The final untagged focused normal expression
+covering the same request boundaries plus all pinned SDK integration cases
+exited 0 in 0.509s; its exact fourteen-test expression is recorded in the
+correction report. The corresponding final untagged go test -race expression
+exited 0 in 1.873s with no race diagnostics. The final tagged paired race
+command used the seven-test expression above with go test -race; it exited 0 in
+44.187s with no race diagnostics.
+
+Focused verification also passed: GOWORK=off GOTOOLCHAIN=go1.26.8 go vet
+./livecanary exited 0; gofmt reported no files for the touched implementation
+and test files; and git diff --check exited 0. Tests named above cover the c0
+paired close root cause, exact acquisition-origin binding, session-open
+host/path/method/query and route-family pre-forward rejection, organization
+collision compatibility, strict raw-query parsing, dynamic session-close
+paths, physical request-body binding, terminal
+capacity/eligibility/cancellation/missing-receipt behavior, and pinned SDK
+drain integration. Verification was offline and focused on the permitted
+package and tagged fixture; no full root, G01, G02, makecheck, GitHub,
+workflow, runner, credential, App, Keychain, launchd, Docker, Lima, live
+cleanup, or rollback operation was performed. Independent final review,
+exact-head Codex review, CI, and the live G01 evidence gate remain
+coordinator-owned, and the parent G01 goal remains active.

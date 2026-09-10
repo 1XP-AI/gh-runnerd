@@ -21,6 +21,7 @@ type baselineWireCapture struct {
 	mu            sync.Mutex
 	stage         string
 	setID         int
+	organization  string
 	runnerName    string
 	sessionID     string
 	queue         string // private, captured from the exact session; never journaled
@@ -64,17 +65,15 @@ func (c *baselineWireCapture) target(r *http.Request) bool {
 	}
 	suffix := "/runnerscalesets/" + strconv.Itoa(c.setID) + "/"
 	if c.stage == "set-observe" || c.stage == "terminal-set" || c.stage == "terminal-set-recheck" || c.stage == "terminal-set-absence" || c.stage == "terminal-set-delete" {
-		q := r.URL.Query()
 		method := "GET"
 		if c.stage == "terminal-set-delete" {
 			method = "DELETE"
 		}
-		return r.Method == method && strings.HasSuffix(r.URL.Path, strings.TrimSuffix(suffix, "/")) && len(q) == 1 && len(q["api-version"]) == 1 && q.Get("api-version") == "6.0-preview"
+		return r.Method == method && strings.HasSuffix(r.URL.Path, strings.TrimSuffix(suffix, "/")) && baselineExactAPIVersionQuery(r.URL.RawQuery)
 	}
 	if c.stage == "terminal-session-close" {
-		q := r.URL.Query()
 		origin, ok := baselineRequestOrigin(r.URL)
-		return c.origin != "" && ok && origin == c.origin && c.sessionID != "" && r.Method == "DELETE" && strings.HasSuffix(r.URL.Path, suffix+"sessions/"+c.sessionID) && len(q) == 1 && len(q["api-version"]) == 1 && q.Get("api-version") == "6.0-preview"
+		return c.origin != "" && ok && origin == c.origin && c.sessionID != "" && r.Method == "DELETE" && strings.HasSuffix(r.URL.Path, suffix+"sessions/"+c.sessionID) && baselineExactAPIVersionQuery(r.URL.RawQuery)
 	}
 	if c.stage == "session-open" {
 		if len(c.allowedHosts) > 0 && !baselineOriginAllowed(r.URL, c.allowedHosts) {
@@ -82,10 +81,10 @@ func (c *baselineWireCapture) target(r *http.Request) bool {
 		}
 		suffix += "sessions"
 	} else if c.stage == "runner-observe" {
-		q := r.URL.Query()
-		return r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/_apis/distributedtask/pools/0/agents") && len(q) == 2 && len(q["agentName"]) == 1 && q.Get("agentName") == c.runnerName && len(q["api-version"]) == 1 && q.Get("api-version") == "6.0-preview"
+		return r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/_apis/distributedtask/pools/0/agents") && baselineExactQuery(r.URL.RawQuery, map[string]string{"agentName": c.runnerName, "api-version": "6.0-preview"})
 	} else if c.stage == "acquire" {
-		if len(c.allowedHosts) == 0 || !slices.Contains(c.allowedHosts, r.URL.Host) {
+		origin, ok := baselineRequestOrigin(r.URL)
+		if c.origin == "" || !ok || origin != c.origin || len(c.allowedHosts) == 0 || !baselineOriginAllowed(r.URL, c.allowedHosts) {
 			return false
 		}
 		suffix = "/_apis/runtime" + suffix + "acquirejobs"
@@ -94,16 +93,49 @@ func (c *baselineWireCapture) target(r *http.Request) bool {
 	} else {
 		return false
 	}
-	q := r.URL.Query()
-	return r.Method == "POST" && strings.HasSuffix(r.URL.Path, suffix) && len(q) == 1 && len(q["api-version"]) == 1 && q.Get("api-version") == "6.0-preview"
+	return r.Method == "POST" && strings.HasSuffix(r.URL.Path, suffix) && baselineExactAPIVersionQuery(r.URL.RawQuery)
 }
 
 func baselineAcquireRequestCandidate(r *http.Request) bool {
 	return r != nil && r.URL != nil && (strings.Contains(r.URL.Path, "/_apis/runtime/runnerscalesets/") || strings.HasSuffix(r.URL.Path, "/acquirejobs"))
 }
 
-func baselineSessionOpenRequestCandidate(r *http.Request) bool {
-	return r != nil && r.URL != nil && strings.Contains(r.URL.Path, "/runnerscalesets/")
+func baselineExactQuery(rawQuery string, expected map[string]string) bool {
+	if rawQuery == "" || len(strings.Split(rawQuery, "&")) != len(expected) {
+		return false
+	}
+	values, err := url.ParseQuery(rawQuery)
+	if err != nil || len(values) != len(expected) {
+		return false
+	}
+	for key, want := range expected {
+		got, ok := values[key]
+		if !ok || len(got) != 1 || got[0] != want {
+			return false
+		}
+	}
+	return true
+}
+
+func baselineExactAPIVersionQuery(rawQuery string) bool {
+	return baselineExactQuery(rawQuery, map[string]string{"api-version": "6.0-preview"})
+}
+
+func (c *baselineWireCapture) sessionOpenBootstrapTarget(r *http.Request) bool {
+	if c == nil || r == nil || r.URL == nil || r.URL.Fragment != "" || r.URL.User != nil || r.URL.EscapedPath() != r.URL.Path || r.Method != http.MethodPost || r.URL.RawQuery != "" || len(c.allowedHosts) == 0 || !baselineOriginAllowed(r.URL, c.allowedHosts) || c.organization == "" || !component.MatchString(c.organization) || c.organization == "." || c.organization == ".." {
+		return false
+	}
+	paths := make([]string, 0, 10)
+	for _, prefix := range []string{"", "/api/v3"} {
+		paths = append(paths,
+			prefix+"/orgs/"+c.organization+"/actions/runners/registration-token",
+			prefix+"/orgs/"+c.organization+"/actions/runner-registration",
+			prefix+"/"+c.organization+"/actions/runners/registration-token",
+			prefix+"/"+c.organization+"/actions/runner-registration",
+			prefix+"/actions/runner-registration",
+		)
+	}
+	return slices.Contains(paths, r.URL.Path)
 }
 
 func baselineRequestOrigin(u *url.URL) (string, bool) {
@@ -149,7 +181,7 @@ func baselineWireAllowedHosts(a Approval, apiHost string) []string {
 // baselineRequestCaptureTransport runs immediately above the physical
 // transport. User-supplied test wrappers may mutate a request before it gets
 // here, so this is the final request-side boundary before any bytes leave the
-// process. Only the explicitly expected acquisition request is inspected.
+// process. Only explicitly marked session-open and acquisition requests are inspected.
 type baselineRequestCaptureTransport struct{ inner http.RoundTripper }
 
 func (t baselineRequestCaptureTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -198,10 +230,10 @@ func (c *baselineWireCapture) captureRequest(req *http.Request) error {
 	}
 	if c.stage == "session-open" {
 		if !c.target(req) {
-			if baselineSessionOpenRequestCandidate(req) {
-				return c.rejectRequest(req)
+			if c.sessionOpenBootstrapTarget(req) {
+				return nil
 			}
-			return nil
+			return c.rejectRequest(req)
 		}
 		origin, ok := baselineRequestOrigin(req.URL)
 		if !ok {
