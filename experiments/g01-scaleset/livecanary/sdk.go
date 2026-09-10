@@ -390,17 +390,18 @@ func (a *SDKAPI) OpenDrainSession(c context.Context, id int, owner string, hook 
 	if configured == nil || configured.client == nil {
 		return nil, ErrRemote
 	}
-	wire := &baselineWireCapture{stage: "session-open", setID: id}
+	wire := &baselineWireCapture{stage: "session-open", setID: id, allowedHosts: baselineWireAllowedHosts(configured.approval, configured.drainEndpointHost())}
 	session, err := configured.client.MessageSessionClient(wire.context(c), id, owner, configured.options...)
 	if err != nil {
 		return nil, ErrRemote
 	}
 	sessionFacts, _, _, status := wire.facts()
-	if session == nil || !wire.observed() || status != http.StatusOK || !validDrainSessionWire(configured.approval, id, owner, sessionFacts, session.Session()) {
+	if session == nil || !wire.observed() || status != http.StatusOK || wire.requestOrigin() == "" || !validDrainSessionWire(configured.approval, id, owner, sessionFacts, session.Session()) {
 		return nil, ErrQuarantine
 	}
 	hook.mu.Lock()
 	hook.target = sessionFacts.queueURL
+	hook.origin = wire.requestOrigin()
 	hook.mu.Unlock()
 	return session, nil
 }

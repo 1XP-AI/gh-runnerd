@@ -325,6 +325,7 @@ func (o *drainObservation) poll(index int) *drainPollObservation {
 type drainPollHook struct {
 	inner          http.RoundTripper
 	target         string
+	origin         string
 	wrote          chan struct{}
 	withdrawalDone chan struct{}
 	response       chan struct{}

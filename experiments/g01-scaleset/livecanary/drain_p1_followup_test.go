@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/actions/scaleset"
 )
@@ -41,6 +43,145 @@ func TestBaselineAcquireTargetIsActionsOnly(t *testing.T) {
 				t.Fatalf("acquisition target match = %v, want %v for %s", got, tc.want, tc.target)
 			}
 		})
+	}
+}
+
+func TestBaselineAcquireTargetMismatchStopsBeforeInner(t *testing.T) {
+	for _, target := range []string{
+		"https://other.example/_apis/runtime/runnerscalesets/7/acquirejobs?api-version=6.0-preview",
+		"https://api.example/_apis/runtime/runnerscalesets/8/acquirejobs?api-version=6.0-preview",
+		"https://api.example/_apis/runtime/runnerscalesets/7/acquirejobs?api-version=6.0-preview&extra=1",
+		"https://api.example/_apis/runtime/runnerscalesets/7/wrong?api-version=6.0-preview",
+	} {
+		t.Run(target, func(t *testing.T) {
+			capture := &baselineWireCapture{
+				stage:      "acquire",
+				setID:      7,
+				requestIDs: []int64{41},
+				allowedHosts: []string{
+					"api.example",
+				},
+			}
+			innerCalls := 0
+			transport := baselineRequestCaptureTransport{inner: drainRoundTripper(func(req *http.Request) (*http.Response, error) {
+				innerCalls++
+				return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}, nil
+			})}
+			req, err := http.NewRequestWithContext(capture.context(context.Background()), http.MethodPost, target, strings.NewReader("[41]"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := transport.RoundTrip(req); !errors.Is(err, ErrRemote) {
+				t.Fatalf("mismatched acquisition target error = %v, want remote rejection", err)
+			}
+			if innerCalls != 0 {
+				t.Fatalf("mismatched acquisition target reached inner transport: calls=%d", innerCalls)
+			}
+			if capture.requestObserved() {
+				t.Fatal("mismatched acquisition target was marked observed")
+			}
+		})
+	}
+}
+
+func TestBaselineSessionCloseTargetRequiresExactOrigin(t *testing.T) {
+	capture := &baselineWireCapture{stage: "terminal-session-close", setID: 7, sessionID: "session", origin: "https://actions.example:443"}
+	for _, tc := range []struct {
+		name   string
+		target string
+		want   bool
+	}{
+		{name: "expected origin and dynamic path", target: "https://actions.example/tenant/v2/_apis/runtime/runnerscalesets/7/sessions/session?api-version=6.0-preview", want: true},
+		{name: "wrong scheme", target: "http://actions.example/tenant/v2/_apis/runtime/runnerscalesets/7/sessions/session?api-version=6.0-preview", want: false},
+		{name: "wrong host", target: "https://other.actions.example/tenant/v2/_apis/runtime/runnerscalesets/7/sessions/session?api-version=6.0-preview", want: false},
+		{name: "wrong port", target: "https://actions.example:8443/tenant/v2/_apis/runtime/runnerscalesets/7/sessions/session?api-version=6.0-preview", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodDelete, tc.target, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := capture.target(req); got != tc.want {
+				t.Fatalf("session-close target match = %v, want %v for %s", got, tc.want, tc.target)
+			}
+		})
+	}
+}
+
+func TestBaselineAcquireForwardingBodySurvivesAsyncRoundTripClose(t *testing.T) {
+	capture := &baselineWireCapture{stage: "acquire", setID: 7, requestIDs: []int64{41}, allowedHosts: []string{"api.example"}}
+	release := make(chan struct{})
+	returned := make(chan struct{})
+	readBody := make(chan string, 1)
+	transport := baselineRequestCaptureTransport{inner: drainRoundTripper(func(req *http.Request) (*http.Response, error) {
+		go func() {
+			<-release
+			data, _ := io.ReadAll(req.Body)
+			_ = req.Body.Close()
+			readBody <- string(data)
+		}()
+		close(returned)
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}, nil
+	})}
+	req, err := http.NewRequestWithContext(capture.context(context.Background()), http.MethodPost, "https://api.example/_apis/runtime/runnerscalesets/7/acquirejobs?api-version=6.0-preview", strings.NewReader("[41]"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transport.RoundTrip(req); err != nil {
+		t.Fatalf("valid acquisition transport = %v", err)
+	}
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("inner transport did not return")
+	}
+	close(release)
+	select {
+	case got := <-readBody:
+		if got != "[41]" {
+			t.Fatalf("asynchronous forwarding body = %q, want valid request bytes", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("asynchronous forwarding read did not finish")
+	}
+}
+
+func TestBaselineAcquireForwardingBodyConcurrentReadCloseIsSafe(t *testing.T) {
+	capture := &baselineWireCapture{stage: "acquire", setID: 7, requestIDs: []int64{41}, allowedHosts: []string{"api.example"}}
+	start := make(chan struct{})
+	done := make(chan struct{}, 2)
+	transport := baselineRequestCaptureTransport{inner: drainRoundTripper(func(req *http.Request) (*http.Response, error) {
+		go func() {
+			<-start
+			buf := make([]byte, 1)
+			for i := 0; i < 1024; i++ {
+				_, _ = req.Body.Read(buf)
+			}
+			done <- struct{}{}
+		}()
+		go func() {
+			<-start
+			for i := 0; i < 1024; i++ {
+				_ = req.Body.Close()
+			}
+			done <- struct{}{}
+		}()
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}, nil
+	})}
+	req, err := http.NewRequestWithContext(capture.context(context.Background()), http.MethodPost, "https://api.example/_apis/runtime/runnerscalesets/7/acquirejobs?api-version=6.0-preview", strings.NewReader("[41]"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transport.RoundTrip(req); err != nil {
+		t.Fatalf("valid acquisition transport = %v", err)
+	}
+	close(start)
+	for i := 0; i < 2; i++ {
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("concurrent request body operation did not finish")
+		}
 	}
 }
 

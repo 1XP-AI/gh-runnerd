@@ -372,7 +372,16 @@ func (d *Driver) drain(ctx context.Context, setID int) error {
 		return runErr
 	}
 	closeErr := d.effect(ctx, "session-close", nil, func(call context.Context) (Event, error) {
-		wire := &baselineWireCapture{stage: "terminal-session-close", setID: setID, sessionID: sessionID}
+		origin := ""
+		if hook != nil {
+			hook.mu.Lock()
+			origin = hook.origin
+			hook.mu.Unlock()
+		}
+		if origin == "" {
+			return Event{}, ErrQuarantine
+		}
+		wire := &baselineWireCapture{stage: "terminal-session-close", setID: setID, sessionID: sessionID, origin: origin}
 		call = wire.context(call)
 		if err := session.Close(call); err != nil {
 			return Event{}, err

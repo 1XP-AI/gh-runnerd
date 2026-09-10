@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
@@ -28,6 +29,7 @@ type baselineWireCapture struct {
 	count, status int
 	requestIDs    []int64
 	requestCount  int
+	origin        string
 	invalid       bool
 	session       *baselineSessionFacts
 	batch         *baselineBatch
@@ -41,7 +43,7 @@ func (c *baselineWireCapture) context(ctx context.Context) context.Context {
 	return context.WithValue(ctx, baselineWireKey{}, c)
 }
 func (c *baselineWireCapture) target(r *http.Request) bool {
-	if r.URL.Fragment != "" || r.URL.User != nil || r.URL.EscapedPath() != r.URL.Path {
+	if r == nil || r.URL == nil || r.URL.Fragment != "" || r.URL.User != nil || r.URL.EscapedPath() != r.URL.Path {
 		return false
 	}
 	if c.stage == "poll" || c.stage == "ack" {
@@ -71,9 +73,13 @@ func (c *baselineWireCapture) target(r *http.Request) bool {
 	}
 	if c.stage == "terminal-session-close" {
 		q := r.URL.Query()
-		return c.sessionID != "" && r.Method == "DELETE" && strings.HasSuffix(r.URL.Path, suffix+"sessions/"+c.sessionID) && len(q) == 1 && len(q["api-version"]) == 1 && q.Get("api-version") == "6.0-preview"
+		origin, ok := baselineRequestOrigin(r.URL)
+		return c.origin != "" && ok && origin == c.origin && c.sessionID != "" && r.Method == "DELETE" && strings.HasSuffix(r.URL.Path, suffix+"sessions/"+c.sessionID) && len(q) == 1 && len(q["api-version"]) == 1 && q.Get("api-version") == "6.0-preview"
 	}
 	if c.stage == "session-open" {
+		if len(c.allowedHosts) > 0 && !baselineOriginAllowed(r.URL, c.allowedHosts) {
+			return false
+		}
 		suffix += "sessions"
 	} else if c.stage == "runner-observe" {
 		q := r.URL.Query()
@@ -92,6 +98,42 @@ func (c *baselineWireCapture) target(r *http.Request) bool {
 	return r.Method == "POST" && strings.HasSuffix(r.URL.Path, suffix) && len(q) == 1 && len(q["api-version"]) == 1 && q.Get("api-version") == "6.0-preview"
 }
 
+func baselineAcquireRequestCandidate(r *http.Request) bool {
+	return r != nil && r.URL != nil && (strings.Contains(r.URL.Path, "/_apis/runtime/runnerscalesets/") || strings.HasSuffix(r.URL.Path, "/acquirejobs"))
+}
+
+func baselineRequestOrigin(u *url.URL) (string, bool) {
+	if u == nil || !strings.EqualFold(u.Scheme, "https") || u.Hostname() == "" || u.User != nil || u.Fragment != "" {
+		return "", false
+	}
+	port := u.Port()
+	if port == "" {
+		port = "443"
+	}
+	parsed, err := strconv.Atoi(port)
+	if err != nil || parsed <= 0 || parsed > 65535 {
+		return "", false
+	}
+	return "https://" + net.JoinHostPort(strings.ToLower(u.Hostname()), port), true
+}
+
+func baselineOriginAllowed(u *url.URL, approvedHosts []string) bool {
+	origin, ok := baselineRequestOrigin(u)
+	if !ok {
+		return false
+	}
+	for _, approved := range approvedHosts {
+		host, port, valid := drainApprovedHostPort(approved)
+		if !valid {
+			continue
+		}
+		if origin == "https://"+net.JoinHostPort(strings.ToLower(host), port) {
+			return true
+		}
+	}
+	return false
+}
+
 func baselineWireAllowedHosts(a Approval, apiHost string) []string {
 	hosts := slices.Clone(a.ActionsHosts)
 	if apiHost != "" && !slices.Contains(hosts, apiHost) {
@@ -108,21 +150,12 @@ type baselineRequestCaptureTransport struct{ inner http.RoundTripper }
 
 func (t baselineRequestCaptureTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	c, _ := req.Context().Value(baselineWireKey{}).(*baselineWireCapture)
-	captured := false
 	if c != nil {
 		if err := c.captureRequest(req); err != nil {
 			return nil, err
 		}
-		captured = c.stage == "acquire" && c.requestObserved()
 	}
-	response, err := t.inner.RoundTrip(req)
-	if captured {
-		// The standard transport closes request bodies, but the wrapper contract
-		// does not require a custom inner transport to do so on every path. Clear
-		// the bounded forwarding copy once the synchronous RoundTrip returns.
-		_ = req.Body.Close()
-	}
-	return response, err
+	return t.inner.RoundTrip(req)
 }
 
 func validBaselineRequestIDs(ids []int64) bool {
@@ -156,7 +189,32 @@ func readBaselineRequestBody(body io.ReadCloser) ([]byte, error) {
 }
 
 func (c *baselineWireCapture) captureRequest(req *http.Request) error {
-	if c == nil || c.stage != "acquire" || len(c.requestIDs) == 0 || !c.target(req) {
+	if c == nil {
+		return nil
+	}
+	if c.stage == "session-open" {
+		if !c.target(req) {
+			return nil
+		}
+		origin, ok := baselineRequestOrigin(req.URL)
+		if !ok {
+			return c.rejectRequest(req)
+		}
+		c.mu.Lock()
+		if c.origin != "" && c.origin != origin {
+			c.invalid = true
+		}
+		c.origin = origin
+		c.mu.Unlock()
+		return nil
+	}
+	if c.stage != "acquire" || len(c.requestIDs) == 0 {
+		return nil
+	}
+	if !c.target(req) {
+		if baselineAcquireRequestCandidate(req) {
+			return c.rejectRequest(req)
+		}
 		return nil
 	}
 	c.mu.Lock()
@@ -195,17 +253,44 @@ func (c *baselineWireCapture) captureRequest(req *http.Request) error {
 	return nil
 }
 
+func (c *baselineWireCapture) rejectRequest(req *http.Request) error {
+	c.mu.Lock()
+	c.requestCount++
+	c.invalid = true
+	c.mu.Unlock()
+	if req != nil && req.Body != nil {
+		_ = req.Body.Close()
+	}
+	return ErrRemote
+}
+
 type baselineRequestBody struct {
+	mu     sync.Mutex
 	reader *bytes.Reader
 	data   []byte
 }
 
-func (b *baselineRequestBody) Read(p []byte) (int, error) { return b.reader.Read(p) }
+func (b *baselineRequestBody) Read(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.reader.Read(p)
+}
 func (b *baselineRequestBody) Close() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	clear(b.data)
 	b.data = nil
 	b.reader.Reset(nil)
 	return nil
+}
+
+func (c *baselineWireCapture) requestOrigin() string {
+	if c == nil {
+		return ""
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.origin
 }
 
 func (c *baselineWireCapture) requestObserved() bool {

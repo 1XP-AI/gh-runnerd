@@ -542,7 +542,7 @@ func TestPinnedSDKDrainBindsAcquireToPhysicalRequestBody(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			options := pinnedDrainOptions{mutateRequest: func(req *http.Request) {
+			options := pinnedDrainOptions{runtimeActionsBasePath: "/tenant/v2/", mutateRequest: func(req *http.Request) {
 				if tc.mutateBody != nil && req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/acquirejobs") {
 					tc.mutateBody(req)
 				}
@@ -577,6 +577,68 @@ func TestPinnedSDKDrainBindsAcquireToPhysicalRequestBody(t *testing.T) {
 			}
 			if state := replay(journal.Events()); !state.uncertain {
 				t.Fatal("invalid acquisition body did not retain uncertainty")
+			}
+		})
+	}
+}
+
+func TestPinnedSDKDrainRejectsAcquireTargetMutationBeforeFixture(t *testing.T) {
+	a := approval()
+	for _, tc := range []struct {
+		name   string
+		mutate func(*http.Request)
+	}{
+		{
+			name: "wrong allowed host",
+			mutate: func(req *http.Request) {
+				req.URL.Host = "other.example.com"
+			},
+		},
+		{
+			name: "wrong scale set",
+			mutate: func(req *http.Request) {
+				req.URL.Path = strings.Replace(req.URL.Path, "/runnerscalesets/7/", "/runnerscalesets/8/", 1)
+				req.URL.RawPath = ""
+			},
+		},
+		{
+			name: "wrong query",
+			mutate: func(req *http.Request) {
+				query := req.URL.Query()
+				query.Set("unexpected", "1")
+				req.URL.RawQuery = query.Encode()
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture, base, session, hook := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{
+				wrongCloseOrigin:  true,
+				extraActionsHosts: []string{"other.example.com"},
+				mutateRequest: func(req *http.Request) {
+					if req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/acquirejobs") {
+						tc.mutate(req)
+					}
+				},
+			})
+			journal := &memoryJournal{}
+			d := &Driver{Approval: a, Journal: journal, API: base}
+			client := &journaledDrainClient{d: d, inner: session, sessionID: session.Session().SessionID.String(), setID: 7, hook: hook}
+			hook.releaseResponse()
+			message, err := client.GetMessage(context.Background(), 0, drainInitialCapacity)
+			if err != nil || message == nil {
+				t.Fatalf("pinned SDK setup poll = message %v err %v", message, err)
+			}
+			if err := client.DeleteMessage(context.Background(), message.MessageID); err != nil {
+				t.Fatalf("pinned SDK setup ACK = %v", err)
+			}
+			if got, err := client.AcquireJobs(context.Background(), []int64{41}); !errors.Is(err, ErrQuarantine) || got != nil {
+				t.Fatalf("mutated acquisition target = got %v err %v, want quarantine", got, err)
+			}
+			if fixture.acquires.Load() != 0 {
+				t.Fatalf("mutated acquisition target reached loopback endpoint: acquires=%d", fixture.acquires.Load())
+			}
+			if state := replay(journal.Events()); !state.uncertain {
+				t.Fatal("mutated acquisition target did not retain uncertainty")
 			}
 		})
 	}
@@ -632,6 +694,37 @@ func TestPinnedSDKDrainBindsSessionCloseToPhysicalDelete(t *testing.T) {
 				t.Fatal("wrong session-close target did not retain uncertainty")
 			}
 		})
+	}
+}
+
+func TestPinnedSDKDrainBindsSessionCloseToSessionOpenOrigin(t *testing.T) {
+	a := approval()
+	a.Phases = append(a.Phases, "drain")
+	fixture, base, _, _ := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{
+		wrongCloseOrigin:       true,
+		extraActionsHosts:      []string{"other.example.com"},
+		runtimeActionsBasePath: "/tenant/v2/",
+	})
+	j := &memoryJournal{}
+	for _, event := range drainReplayPrefix()[:3] {
+		if err := j.Append(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d := &Driver{Approval: a, Journal: j, API: fixtureSDK{base}}
+	if err := d.Run(context.Background(), "drain"); !errors.Is(err, ErrQuarantine) {
+		t.Fatalf("wrong session-close origin = %v, want quarantine", err)
+	}
+	if fixture.closeRequests.Load() != 1 {
+		t.Fatalf("wrong session-close origin requests = %d, want one loopback attempt", fixture.closeRequests.Load())
+	}
+	for _, event := range j.Events() {
+		if event.Kind == "result" && event.Operation == "session-close" {
+			t.Fatal("wrong session-close origin recorded a successful result")
+		}
+	}
+	if state := replay(j.Events()); !state.uncertain {
+		t.Fatal("wrong session-close origin did not retain uncertainty")
 	}
 }
 
@@ -743,17 +836,20 @@ func pinnedDrainJobBody(a Approval) string {
 }
 
 type pinnedDrainOptions struct {
-	firstPollBody  string
-	withdrawnBody  string
-	acquireBody    string
-	verifyBody     string
-	sessionBody    string
-	runnerBody     string
-	allowOpenError bool
-	acceptAnyACK   bool
-	pollReadError  error
-	snapshotBodies []string
-	mutateRequest  func(*http.Request)
+	firstPollBody          string
+	withdrawnBody          string
+	acquireBody            string
+	verifyBody             string
+	sessionBody            string
+	runnerBody             string
+	allowOpenError         bool
+	acceptAnyACK           bool
+	pollReadError          error
+	snapshotBodies         []string
+	mutateRequest          func(*http.Request)
+	wrongCloseOrigin       bool
+	extraActionsHosts      []string
+	runtimeActionsBasePath string
 }
 
 type pinnedDrainFixture struct {
@@ -801,7 +897,7 @@ func newPinnedDrainSessionOptions(t *testing.T, a Approval, body string, options
 			claims, _ := json.Marshal(map[string]int64{"exp": time.Now().Add(time.Hour).Unix()})
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]string{
-				"url":   fixture.server.URL,
+				"url":   fixture.server.URL + options.runtimeActionsBasePath,
 				"token": "eyJhbGciOiJub25lIn0." + base64.RawURLEncoding.EncodeToString(claims) + ".",
 			})
 		case strings.HasSuffix(r.URL.Path, "/sessions") && r.Method == http.MethodPost:
@@ -901,7 +997,7 @@ func newPinnedDrainSessionOptions(t *testing.T, a Approval, body string, options
 	// The offline TLS fixture's loopback host is explicitly approved for this
 	// test-only SDK factory; production Approval validation still permits only
 	// the provider's Actions hostnames.
-	fixtureApproval.ActionsHosts = []string{fixture.server.Listener.Addr().String()}
+	fixtureApproval.ActionsHosts = append([]string{fixture.server.Listener.Addr().String()}, options.extraActionsHosts...)
 
 	buildAPI := func(hook *drainPollHook) (*SDKAPI, error) {
 		retry := retryablehttp.NewClient()
@@ -915,10 +1011,14 @@ func newPinnedDrainSessionOptions(t *testing.T, a Approval, body string, options
 		transport := fixtureTransport.Clone()
 		transport.Proxy = nil
 		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
-			if address != fixture.server.Listener.Addr().String() {
+			if address != fixture.server.Listener.Addr().String() && (!options.wrongCloseOrigin || address != "other.example.com:443") {
 				return nil, errors.New("non-fixture address denied")
 			}
-			return (&net.Dialer{}).DialContext(ctx, network, address)
+			dialAddress := address
+			if address == "other.example.com:443" {
+				dialAddress = fixture.server.Listener.Addr().String()
+			}
+			return (&net.Dialer{}).DialContext(ctx, network, dialAddress)
 		}
 		wrappers := []func(http.RoundTripper) http.RoundTripper(nil)
 		if hook != nil {
@@ -930,6 +1030,16 @@ func newPinnedDrainSessionOptions(t *testing.T, a Approval, body string, options
 			wrappers = append(wrappers, func(inner http.RoundTripper) http.RoundTripper {
 				hook.inner = inner
 				return hook
+			})
+		}
+		if options.wrongCloseOrigin {
+			wrappers = append(wrappers, func(inner http.RoundTripper) http.RoundTripper {
+				return sdkRequestMutationRoundTripper{inner: inner, mutate: func(req *http.Request) {
+					if req.Method == http.MethodDelete && strings.Contains(req.URL.Path, "/sessions/") {
+						req.URL.Host = "other.example.com"
+						req.URL.RawPath = ""
+					}
+				}}
 			})
 		}
 		if options.mutateRequest != nil {
