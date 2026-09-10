@@ -48,7 +48,7 @@ This audit was captured from `origin/main` at
 
 ```console
 $ gh run view 34419651240 --repo 1XP-AI/gh-runnerd --json headSha,startedAt,updatedAt,jobs
-# head 116beda04dc2bf69280cdefc4de4ef3; start 00:04:06Z; aggregator 00:15:18Z; metadata update 00:15:19Z;
+# head 116beda04dc2bf69280cdefc4de4ef2fef397ef3; start 00:04:06Z; aggregator 00:15:18Z; metadata update 00:15:19Z;
 # jobs: root 00:04:08Z-00:15:14Z, offline 00:04:09Z-00:12:58Z,
 # vuln 00:04:10Z-00:04:43Z, checks 00:15:16Z-00:15:18Z
 ```
