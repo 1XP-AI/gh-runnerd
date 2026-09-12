@@ -128,6 +128,7 @@ current board; verify them with `gh project field-list` if GitHub reports a mism
 | Agent field | `PVTSSF_lADOD2M2gs4Bismwzhhjobs` |
 | Agent: Astra xhigh | `cf617d72` (historical only for completed work) |
 | Agent: Luna max | `9317c27f` (repository default dispatch) |
+| Agent: Grok high | `ab0d6d0d` (`grok-high`) |
 | Release field | `PVTSSF_lADOD2M2gs4Bismwzhhr3bc` |
 | Release: R1 - Internal MVP | `a0a78eb0` |
 | Release: R2 - Everyday operations | `58b696ee` |
@@ -144,9 +145,10 @@ current board; verify them with `gh project field-list` if GitHub reports a mism
 
 `Agent` is routing metadata. Setting it does not start a Codex agent. A goal in a
 Project item is a durable work specification; it is not an active Codex goal.
-Grok 4.6 xhigh is recorded on #66/#67/#68/#69 issue bodies; it is not currently a
-Project Agent option. Do not overwrite #1/#2/#60 Agent values for this planning
-change.
+New work uses only `gpt-luna-max` or `grok-high`. The Project Agent field must
+provide `Luna max` and `Grok high`; the Astra option remains only for historical
+cards. Verify the live option ID before editing a Ready item. Do not overwrite a
+currently owned In progress item during routing changes.
 
 ### Live board snapshot
 
@@ -158,9 +160,9 @@ dispatch. The last verified snapshot is 36 items. The full map is in
 |---|---|---|---|
 | #1 G01 | In progress | R1 | Luna max; **full** ACK/acquisition/JIT Goal unresolved |
 | #2 G02 | In progress | R3 | Luna max; Manifest/multi-org/launchd remains here; also pre-release gate for R1 #68 production |
-| #67 | Ready | R1 | Grok 4.6 xhigh / Luna review; child of #2; no native blockers |
+| #67 | Ready | R1 | `grok-high` / `gpt-luna-max` review; child of #2; no native blockers |
 | #60 G01g | In progress | R1 | Luna max; separate worktree/PR #62; do not edit from #66 |
-| #66 | In progress | R1 | Grok 4.6 xhigh / Luna review; this documentation change |
+| #66 | Done | R1 | Planning-only release map; historical `grok-high` / `gpt-luna-max` review |
 | #68 | Blocked | R1 | child of #13; native blockedBy #60/#66/#67; contract/offline evidence only until full #1/#2; production implementation only then |
 | #69 | Blocked | R1 | child of #16; blocked by #1/#68 |
 | #3 G03, #30, #40 G12a, #44, #46, #47, #50, #52, #54 G01f, #61, #64 | Done | R1 except #40 R2 | historical records preserved; #54 Done does not close #1 |
@@ -195,29 +197,28 @@ to Done when only a PR was opened or a test was planned.
 
 The repository default routes **implementation, contract work, architecture,
 authentication, protocol, concurrency, documentation, coordination and independent
-review through `gpt-5.6-luna` with `max` reasoning**. This includes G01/G02/G04
-evidence gates unless an issue records an explicit current user override.
-Historical Astra/Luna assignments in old review and evidence records are facts
-about who did that work and must stay unchanged. If a later task contains an
-explicit current user model or effort override, that override takes precedence.
+review through `gpt-luna-max`** (`gpt-5.6-luna` with `max` reasoning). An explicit
+current user override may select **`grok-high`** (Grok 4.6 with `xhigh` reasoning).
+These are the only routes for new work. Historical Astra/Luna assignments in old
+review and evidence records are facts about who did that work and must stay
+unchanged.
 
-The maintainer-authorized override for [#66](https://github.com/1XP-AI/gh-runnerd/issues/66)
+The current documented override for [#66](https://github.com/1XP-AI/gh-runnerd/issues/66)
 and R1 children [#67](https://github.com/1XP-AI/gh-runnerd/issues/67)/[#68](https://github.com/1XP-AI/gh-runnerd/issues/68)/[#69](https://github.com/1XP-AI/gh-runnerd/issues/69)
-is main author Grok 4.6 xhigh with independent Luna max review. Do not create a
-second native Goal on #1 while this planning work runs.
+is `grok-high` with independent `gpt-luna-max` review. Do not create a second
+native Goal on #1 while this planning work runs.
 
 For every new issue, after checking for an explicit current user override:
 
 - set `IMPLEMENTER_OVERRIDE` to the inspected current implementer name, or to an
-  empty string when there is no override (repository default `Luna max`);
+  empty string when there is no override (repository default `gpt-luna-max`);
 - look up that name in live `gh project field-list` Agent options by exact match;
 - when the name matches one option, write that option unless the item is not Ready
   or already has a conflicting Agent;
-- when an override exists and has **no** Project option (current example: Grok 4.6
-  xhigh on #66/#67/#68/#69), **skip the Agent edit** and preserve the existing
-  field — do not write Luna as a substitute implementer and do not clear Agent.
-  Independent review remains Luna max. Do not keep a permanent issue-number
-  whitelist;
+- when an override is `grok-high`, require the live `Grok high` Project option;
+  missing allowed options are a routing configuration error, not a reason to
+  substitute Astra or silently write Luna. Independent review remains
+  `gpt-luna-max`. Do not keep a permanent issue-number whitelist;
 - use one active goal whose objective is exactly the issue's `Goal` statement;
 - do not invent a token budget;
 - use an independent contract review with the current selected review model/effort
@@ -230,11 +231,14 @@ For every new issue, after checking for an explicit current user override:
 ## Incremental validation and review handoff
 
 Use focused validation while the candidate is changing and the complete gate once
-the candidate is stable. The writer owns meaningful red -> minimal green ->
-refactor evidence and focused unit/negative checks; an explicit `make fast`
-module/package/test selector may help with local iteration, but it is fail-closed
-and never represents `make check` or CI success. Do not make a whole-suite run an
-automatic requirement for every local commit.
+the candidate is stable. Keep intermediate commits local. The writer owns
+meaningful red -> minimal green -> refactor evidence and focused unit/negative
+checks; an explicit `make fast` module/package/test selector may help with local
+iteration, but it is fail-closed and never represents `make check` or CI success.
+Push one batched stable candidate, then run the hosted full matrix once. After a
+review fix, batch all actionable fixes before the next candidate push. Do not
+repeat a full suite for an unchanged SHA, unchanged risk boundary or already
+conclusive result.
 
 | Role | Handoff contract |
 |---|---|
@@ -254,7 +258,7 @@ postmerge `main` run never substitutes for premerge evidence.
 
 Suggested handoff prompt to give the next agent:
 
-> Work on ISSUE_URL in `1XP-AI/gh-runnerd`. Use the issue's implementer (default `gpt-5.6-luna` with `max` unless an explicit current user override is recorded) and one active goal exactly equal to the issue's Goal statement; do not invent a token budget. Independent review is Luna max even when the implementer is overridden. Read `AGENTS.md`, `docs/EXECUTION.md`, the plan, the linked ADRs and the current Project item. Verify dependencies first. Create the goal and isolated branch/worktree, then set the item to In progress. Follow meaningful red test -> minimal green implementation -> refactor -> boundary/failure tests. Preserve no-secrets, no-busy-kill, owned-cleanup, stable-idempotency and trusted-native invariants. Do not change live runners, Docker context, App/Keychain/launchd state or GitHub credentials without explicit maintainer authorization. Open one focused PR with exact commands/results, red evidence, gaps and rollback notes. Obtain independent Luna max review, then the exact-head GitHub Codex review before merge. Update the Project, issue and goal only when their actual state changes. Do not write Luna into the Project Agent field over an inspected override that has no Agent option; preserve the existing Agent value.
+> Work on ISSUE_URL in `1XP-AI/gh-runnerd`. Use `gpt-luna-max` by default or the issue's explicit `grok-high` override, and one active goal exactly equal to the issue's Goal statement; do not invent a token budget. Independent review uses `gpt-luna-max` unless the user explicitly selects another allowed route. Read `AGENTS.md`, `docs/EXECUTION.md`, the plan, the linked ADRs and the current Project item. Verify dependencies first. Create the goal and isolated branch/worktree, then set the item to In progress. Follow meaningful red test -> minimal green implementation -> refactor -> boundary/failure tests. Keep intermediate commits local and push one batched candidate; do not run the full suite or request Codex review for every commit. Preserve no-secrets, no-busy-kill, owned-cleanup, stable-idempotency and trusted-native invariants. Do not change live runners, Docker context, App/Keychain/launchd state or GitHub credentials without explicit maintainer authorization. Open one focused PR with exact commands/results, red evidence, gaps and rollback notes. Obtain independent `gpt-luna-max` review, then the exact-head GitHub Codex review before merge. Update the Project, issue and goal only when their actual state changes. A missing allowed Project Agent option is a routing failure; do not substitute Astra or silently fall back.
 
 ## Per-issue Project workflow
 
@@ -303,8 +307,9 @@ STATUS_IN_PROGRESS_ID=7a569f61
 DEFAULT_IMPLEMENTER="Luna max"
 
 # Operator-inspected current contract. Must be set: empty string means no
-# override (repository default Luna max). Unset is fail-closed. Exact Project
-# option names only; do not branch on issue numbers.
+# override (repository default gpt-luna-max). Unset is fail-closed. Exact Project
+# option names only; allowed values are Luna max and Grok high; do not branch on
+# issue numbers.
 : "${IMPLEMENTER_OVERRIDE?set IMPLEMENTER_OVERRIDE after inspecting the current issue override; empty string means no override}"
 
 ITEM_JSON="$(gh project item-list "$PROJECT_NUMBER" --owner "$OWNER" \
@@ -345,29 +350,20 @@ if ! AGENT_OPTION_ID="$(printf '%s' "$AGENT_OPTIONS_JSON" | jq -r --arg name "$I
   exit 1
 fi
 
-if [ -n "$IMPLEMENTER_OVERRIDE" ] && [ -z "$AGENT_OPTION_ID" ]; then
-  SKIP_AGENT_EDIT=1
-elif [ -z "$AGENT_OPTION_ID" ]; then
+if [ -z "$AGENT_OPTION_ID" ]; then
   printf 'default implementer %s is not a Project Agent option; fail closed\n' \
     "$INTENDED_IMPLEMENTER" >&2
   exit 1
-else
-  SKIP_AGENT_EDIT=0
 fi
 
-if [ "$SKIP_AGENT_EDIT" = 0 ] && [ "$ITEM_AGENT" != "(unset)" ] && [ "$ITEM_AGENT" != "$INTENDED_IMPLEMENTER" ]; then
+if [ "$ITEM_AGENT" != "(unset)" ] && [ "$ITEM_AGENT" != "$INTENDED_IMPLEMENTER" ]; then
   printf 'selected issue already has Agent %s; will not overwrite with %s\n' \
     "$ITEM_AGENT" "$INTENDED_IMPLEMENTER" >&2
   exit 1
 fi
 
-if [ "$SKIP_AGENT_EDIT" = 1 ]; then
-  printf 'issue %s override %s has no Project Agent option; preserving Agent (was %s)\n' \
-    "$ISSUE" "$IMPLEMENTER_OVERRIDE" "$ITEM_AGENT"
-else
-  gh project item-edit --id "$ITEM_ID" --project-id "$PROJECT_ID" \
-    --field-id "$AGENT_FIELD_ID" --single-select-option-id "$AGENT_OPTION_ID"
-fi
+gh project item-edit --id "$ITEM_ID" --project-id "$PROJECT_ID" \
+  --field-id "$AGENT_FIELD_ID" --single-select-option-id "$AGENT_OPTION_ID"
 ```
 
 If the item is already In progress or otherwise not Ready, the guard above stops
@@ -378,10 +374,10 @@ Do not rewrite original JSON `status`/`agent` snapshots to look live; the Projec
 is dispatch authority. The script does not branch on issue numbers.
 `IMPLEMENTER_OVERRIDE` is the operator-inspected current contract, not an LLM
 scrape and not a permanent whitelist. Live Agent options come from
-`gh project field-list`. Exact match writes; a missing option preserves Agent
-and does not clear it; non-Ready and conflicting Agent fail closed. Independent
-review stays Luna max. Current #66/#67/#68/#69 still record Grok 4.6 xhigh with
-no Project option; that is today's inspected override, not a routing table.
+`gh project field-list`. Exact match writes; a missing allowed option fails
+closed; non-Ready and conflicting Agent fail closed. Independent review uses
+`gpt-luna-max`. Current Grok assignments must resolve to the live `Grok high`
+option rather than being silently left unrepresented.
 
 ### 3. Start one active goal and an isolated worktree
 
@@ -591,9 +587,10 @@ modify runtime, CI or evidence docs belonging to those PRs.
 
 ### This planning change
 
-Issue [#66](https://github.com/1XP-AI/gh-runnerd/issues/66) on `orca/release-reframe`.
-Main author Grok 4.6 xhigh; independent Luna max review; exact-head Codex+CI before
-merge. #68 stays natively Blocked until #60, #66 and #67 are complete. After that,
+Issue [#66](https://github.com/1XP-AI/gh-runnerd/issues/66) on `orca/release-reframe`
+is a completed historical planning record. Its author route was Grok 4.6 xhigh;
+independent Luna max review and exact-head Codex+CI preceded merge. #68 stays natively
+Blocked until #60, #66 and #67 are complete. After that,
 authorized work is the reviewed minimal contract and offline evidence only until
 full G01 #1 and G02 #2 pass; production implementation starts only then.
 Completing #67 does not complete G02. Because full G02 remains classified R3,
@@ -624,19 +621,19 @@ Before handing work onward, confirm:
 - [ ] The issue Goal was copied exactly into one active goal; no invented budget.
 - [ ] Dependencies and Project status were checked live.
 - [ ] Implementer matches the inspected current user override (default
-      `Luna max` if none). If that override has no Project Agent option, the
-      Agent field was left unchanged. Historical records and #1/#2/#60 Agent
-      values were not rewritten.
+      `gpt-luna-max` / `Luna max` if none), and the Project Agent option is one
+      of `Luna max` or `Grok high`. Historical records are not rewritten.
 - [ ] A meaningful red case, minimal green fix and relevant boundary tests are
       recorded, with actual commands/results and remaining gaps.
 - [ ] Source, documentation and finding-ledger changes were batched before the
-      candidate push; focused checks are not represented as full-gate evidence.
+      candidate push; focused checks are not represented as full-gate evidence,
+      and unchanged full runs were not repeated without a recorded reason.
 - [ ] Previously resolved findings retain original URLs, immutable source SHAs and
       resolution evidence, with final delta sign-off on the exact candidate SHA.
 - [ ] No secrets, personal paths, raw SDK errors, live tokens or unreviewed runner
       operations entered files, issues, logs or artifacts.
 - [ ] Busy work was never killed and cleanup is ownership-bound.
-- [ ] Internal independent Luna max review is recorded. An implementer override
+- [ ] Internal independent `gpt-luna-max` review is recorded. An implementer override
       does not change the reviewer.
 - [ ] Codex reviewed the exact current PR head; inline and issue-comment findings
       were read and resolved/rebutted; post-fix review was requested and awaited.

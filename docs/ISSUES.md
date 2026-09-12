@@ -31,7 +31,7 @@ These are issue goals. The table records the initial planning inventory; the liv
 
 The original plan's 48 dependency edges are recorded as native GitHub blocking relationships and linked in issue bodies. Start G01/G02/G03; evidence gates control dependent full-scope work.
 
-This table intentionally preserves the initial planning inventory. Current dispatch is recorded in the live Project Agent field and the open issue execution contracts. The repository default is Luna max; #66 and R1 children #67/#68/#69 record main author Grok 4.6 xhigh with independent Luna max review. Do not rewrite historical Astra records.
+This table intentionally preserves the initial planning inventory. Current dispatch is recorded in the live Project Agent field and the open issue execution contracts. New dispatch uses `gpt-luna-max` by default or an explicit `grok-high` override, with `gpt-luna-max` review. #66 and R1 children #67/#68/#69 retain their historical Grok routing records. Do not rewrite historical Astra records.
 
 Each original issue has one Goal statement, scope, TDD cases, acceptance criteria, model/effort, risk and dependencies. See [backlog.json](backlog.json) for machine-readable specifications. Original JSON `status` and `agent` values are the initial/historical snapshot, not live dispatch authority; the live Project is authoritative after work begins. Do not redispatch from historical Ready values. Release placement is additive; see [approved delivery releases](PLAN.md#approved-delivery-releases).
 
@@ -73,7 +73,7 @@ Verified 2026-09-08 against Project #2 (`36` items) and native GitHub parent/`bl
 | [#60](https://github.com/1XP-AI/gh-runnerd/issues/60) G01g | In progress | R1 | Native parent unset; `blockedBy` #54; blocks #68. Do not retarget from this docs change | Luna max |
 | [#61](https://github.com/1XP-AI/gh-runnerd/issues/61) | Done | R1 | CI paired-fixture deadline | Luna max |
 | [#64](https://github.com/1XP-AI/gh-runnerd/issues/64) | Done | R1 | CI default G01 deadline coverage | Luna max |
-| [#66](https://github.com/1XP-AI/gh-runnerd/issues/66) | In progress | R1 | Planning only. Main author Grok 4.6 xhigh; independent Luna max review | unset |
+| [#66](https://github.com/1XP-AI/gh-runnerd/issues/66) | Done | R1 | Planning only. Historical `grok-high`; independent `gpt-luna-max` review | unset |
 | [#67](https://github.com/1XP-AI/gh-runnerd/issues/67) | Ready | R1 | Child of #2. Manual single-org credentials. No native blockers | unset |
 | [#68](https://github.com/1XP-AI/gh-runnerd/issues/68) | Blocked | R1 | Child of #13. Native `blockedBy` #60/#66/#67. Contract/offline evidence only until full G01 #1 and G02 #2 pass; production implementation only then. Not a G01/G02/G04 bypass. Completing #67 does not complete G02. Live recovery is #69←#1 | unset |
 | [#69](https://github.com/1XP-AI/gh-runnerd/issues/69) | Blocked | R1 | Child of #16. `blockedBy` #1/#68 | unset |
