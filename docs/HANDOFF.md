@@ -1,5 +1,9 @@
 # gh-runnerd agent handoff
 
+Latest continuation checkpoint: [2026-09-12](handoffs/2026-09-12.md).
+Read that checkpoint before the older snapshot below; recheck live GitHub state
+before acting on either document.
+
 This is the operational handoff for an agent continuing the `1XP-AI/gh-runnerd`
 project. It combines the repository rules, the GitHub Project control loop, the
 runner pilot context, the current gates and the exact review/merge discipline.
