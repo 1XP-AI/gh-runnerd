@@ -1956,3 +1956,91 @@ documentation-only commit. Rollback is recoverable with
 rollback, App, runner, workflow, canary, Docker/Lima, Keychain, launchd,
 credential or cleanup operation was performed. The unresolved live G01 gate,
 independent exact-head Codex review, CI and merge remain coordinator-owned.
+
+### Exact-head follow-up: case-folded duplicate poll capacity header
+
+Date: 2026-09-13. This correction started from exact head
+`2c3227780a5b5ef1ae4424ecbc50b53b795fbf96` and addresses the fresh Codex P1
+[case-folded duplicate marked poll capacity finding](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3997489022).
+The pinned SDK v0.4.0 header is `X-ScaleSetMaxCapacity`; no review request,
+merge, Project/Issue/goal/status change, live App, runner, workflow, GitHub
+API, credential, cleanup, or canary operation was performed.
+
+#### Red-first reproduction
+
+After adding `TestPinnedSDKDrainRejectsCaseFoldedDuplicateCapacityBeforeFixture`
+and before changing the source boundary, this focused pinned-SDK TLS loopback
+command exited 1:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^TestPinnedSDKDrainRejectsCaseFoldedDuplicateCapacityBeforeFixture$' -count=1 -v -timeout=120s
+```
+
+The canonical-only check accepted the lower-case map-key duplicate injected by
+the intervening wrapper; the fixture saw both polls, the observation was
+`Outcome:observed`, and the returned error was `err=<nil>`. The regression keeps
+only fixed outcome/counter evidence and does not retain a request body, token,
+URL, response error, or private log.
+
+#### Minimal correction and green evidence
+
+The marked poll boundary now scans every `http.Header` map key with
+`strings.EqualFold`, collects all matching values, and requires exactly one
+value equal to the intended capacity (`1` on the first poll and `0` on the
+withdrawn poll). This rejects case-folded duplicate keys before the inner
+transport while preserving the pinned SDK's valid canonical header, exact
+origin/tenant/Host/Opaque/session/ACK/acquisition/close guards, unmarked
+forwarding, and the existing snapshot bootstrap allowlist.
+
+The focused normal command exited 0 in 0.464s:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^(TestPinnedSDKDrainRejectsCaseFoldedDuplicateCapacityBeforeFixture|TestPinnedSDKDrainRejectsPhysicalPollMutationBeforeInner|TestPinnedSDKDrainVerifyRunRejectsAmbiguousWireFieldsBeforeEffects|TestPinnedSDKDrainAcquisitionRequiresStrictWireResponse|TestDrainPollHookRejectsDuplicatePhysicalWrites|TestDrainPollHookRequiresOneSuccessfulWritePerPoll|TestDriverDrainThroughPinnedSDKAndPollHook)$' -count=1 -v -timeout=300s
+```
+
+The corresponding focused race command exited 0 in 1.962s with no race
+diagnostics:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -run '^(TestPinnedSDKDrainRejectsCaseFoldedDuplicateCapacityBeforeFixture|TestPinnedSDKDrainRejectsPhysicalPollMutationBeforeInner|TestPinnedSDKDrainVerifyRunRejectsAmbiguousWireFieldsBeforeEffects|TestPinnedSDKDrainAcquisitionRequiresStrictWireResponse|TestDrainPollHookRejectsDuplicatePhysicalWrites|TestDrainPollHookRequiresOneSuccessfulWritePerPoll|TestDriverDrainThroughPinnedSDKAndPollHook)$' -count=1 -v -timeout=300s
+```
+
+The complete offline `livecanary` package normal run exited 0 in 28.402s and
+the race run exited 0 in 38.714s with no race diagnostics:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -count=1 -timeout=360s
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -count=1 -timeout=420s
+```
+
+`GOWORK=off GOTOOLCHAIN=go1.26.8 go vet ./livecanary`,
+`GOTOOLCHAIN=go1.26.8 bash ../../scripts/gofmt.sh check`, and `git diff --check`
+each exited 0. The final diff secret/private-path scan exited 0 and printed
+`diff secret/private-path scan passed`:
+
+```text
+set -e
+path_pattern="$(printf '/%s/|/%s/' Users home)"
+if git diff --text | rg -n "(${path_pattern}|-----BEGIN (RSA|OPENSSH|EC|PRIVATE)|github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9_]{20,}|Authorization[^\n]{0,20}Bearer[[:space:]]+[A-Za-z0-9._-]{20,})"; then exit 1; fi
+printf '%s\n' 'diff secret/private-path scan passed'
+```
+
+The two-module offline gate exited 0 and printed
+`offline experiment checks passed: 2 module(s)`:
+
+```text
+GOTOOLCHAIN=go1.26.8 bash scripts/check-offline-experiments.sh
+```
+
+The exact tested source/evidence implementation head is
+`e4e2a28fd24c767db51a83869369631e86b3c919` (`fix(g01): reject case-folded
+duplicate poll capacity`); this evidence append is documentation-only on top
+of that source commit. Rollback is recoverable with
+`git revert --no-edit e4e2a28fd24c767db51a83869369631e86b3c919`; revert this
+documentation append separately if needed. No live rollback was run, and the
+unresolved live G01 gate, exact-head Codex review, CI and merge remain
+coordinator-owned.
