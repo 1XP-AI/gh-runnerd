@@ -677,8 +677,8 @@ func TestPinnedSDKDrainBindsACKToPhysicalDelete(t *testing.T) {
 	if err := client.DeleteMessage(context.Background(), message.MessageID); !errors.Is(err, ErrQuarantine) {
 		t.Fatalf("wrong physical ACK = %v, want quarantine", err)
 	}
-	if fixture.acks.Load() != 1 {
-		t.Fatalf("wrong physical ACK did not reach successful fixture endpoint: ack=%d", fixture.acks.Load())
+	if fixture.acks.Load() != 0 {
+		t.Fatalf("wrong physical ACK reached fixture endpoint: ack=%d", fixture.acks.Load())
 	}
 }
 
@@ -825,6 +825,15 @@ func TestPinnedSDKDrainBindsSessionCloseToPhysicalDelete(t *testing.T) {
 			mutate: func(req *http.Request) {
 				if req.Method == http.MethodDelete && strings.Contains(req.URL.Path, "/sessions/") {
 					req.URL.Path = strings.Replace(req.URL.Path, "/runnerscalesets/7/", "/runnerscalesets/8/", 1)
+					req.URL.RawPath = ""
+				}
+			},
+		},
+		{
+			name: "route family omitted",
+			mutate: func(req *http.Request) {
+				if req.Method == http.MethodDelete && strings.Contains(req.URL.Path, "/sessions/") {
+					req.URL.Path = strings.Replace(req.URL.Path, "/runnerscalesets/7", "", 1)
 					req.URL.RawPath = ""
 				}
 			},

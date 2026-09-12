@@ -132,13 +132,35 @@ func (c *journaledDrainClient) DeleteMessage(ctx context.Context, id int) error 
 		if c.hook != nil {
 			c.hook.mu.Lock()
 			queue := c.hook.target
+			origin := c.hook.origin
 			runtimePathPrefix := c.hook.runtimePathPrefix
 			runtimePathPrefixSet := c.hook.runtimePathPrefixSet
 			c.hook.mu.Unlock()
 			if !runtimePathPrefixSet {
 				return Event{}, c.reject("ack")
 			}
-			wire = &baselineWireCapture{stage: "ack", queue: queue, cursor: id, runtimePathPrefix: runtimePathPrefix, runtimePathPrefixSet: runtimePathPrefixSet}
+			setID := c.setID
+			sessionID := c.sessionID
+			if c.inner != nil {
+				current := c.inner.Session()
+				if setID <= 0 && current.RunnerScaleSet != nil {
+					setID = current.RunnerScaleSet.ID
+				}
+				if sessionID == "" {
+					sessionID = current.SessionID.String()
+				}
+			}
+			apiHost := ""
+			if c.d != nil {
+				if reader, ok := c.d.API.(drainEndpointHostReader); ok {
+					apiHost = reader.drainEndpointHost()
+				}
+			}
+			var approval Approval
+			if c.d != nil {
+				approval = c.d.Approval
+			}
+			wire = &baselineWireCapture{stage: "ack", setID: setID, sessionID: sessionID, queue: queue, cursor: id, origin: origin, runtimePathPrefix: runtimePathPrefix, runtimePathPrefixSet: runtimePathPrefixSet, allowedHosts: baselineWireAllowedHosts(approval, apiHost)}
 			call = wire.context(call)
 		}
 		if err := c.inner.DeleteMessage(call, id); err != nil {
@@ -441,7 +463,11 @@ func (d *Driver) drain(ctx context.Context, setID int) error {
 		if origin == "" || !runtimePathPrefixSet {
 			return Event{}, ErrQuarantine
 		}
-		wire := &baselineWireCapture{stage: "terminal-session-close", setID: setID, sessionID: sessionID, origin: origin, runtimePathPrefix: runtimePathPrefix, runtimePathPrefixSet: runtimePathPrefixSet}
+		allowedHosts := []string(nil)
+		if reader, ok := d.API.(drainEndpointHostReader); ok {
+			allowedHosts = baselineWireAllowedHosts(d.Approval, reader.drainEndpointHost())
+		}
+		wire := &baselineWireCapture{stage: "terminal-session-close", setID: setID, sessionID: sessionID, origin: origin, runtimePathPrefix: runtimePathPrefix, runtimePathPrefixSet: runtimePathPrefixSet, allowedHosts: allowedHosts}
 		call = wire.context(call)
 		if err := session.Close(call); err != nil {
 			return Event{}, err

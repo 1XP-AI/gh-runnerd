@@ -466,7 +466,7 @@ func TestBaselineAcquireOriginMismatchStopsBeforeInner(t *testing.T) {
 }
 
 func TestBaselineSessionCloseTargetRequiresExactOrigin(t *testing.T) {
-	capture := &baselineWireCapture{stage: "terminal-session-close", setID: 7, sessionID: "session", origin: "https://actions.example:443"}
+	capture := &baselineWireCapture{stage: "terminal-session-close", setID: 7, sessionID: "session", origin: "https://actions.example:443", runtimePathPrefix: "/tenant/v2", runtimePathPrefixSet: true}
 	for _, tc := range []struct {
 		name   string
 		target string
@@ -489,6 +489,232 @@ func TestBaselineSessionCloseTargetRequiresExactOrigin(t *testing.T) {
 				t.Fatalf("session-close target match = %v, want %v for %s", got, tc.want, tc.target)
 			}
 		})
+	}
+}
+
+func TestBaselineMarkedACKMismatchStopsBeforeInner(t *testing.T) {
+	const (
+		queue  = "https://api.example/tenant/v2/queue?proof=fixture"
+		origin = "https://api.example:443"
+		prefix = "/tenant/v2"
+	)
+	for _, tc := range []struct {
+		name   string
+		target string
+	}{
+		{name: "wrong message", target: "https://api.example/tenant/v2/queue/42?proof=fixture"},
+		{name: "wrong path", target: "https://api.example/tenant/v2/other/41?proof=fixture"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capture := &baselineWireCapture{
+				stage: "ack", setID: 7, sessionID: "session", queue: queue, cursor: 41,
+				origin: origin, runtimePathPrefix: prefix, runtimePathPrefixSet: true,
+				allowedHosts: []string{"api.example"},
+			}
+			innerCalls := 0
+			transport := baselineRequestCaptureTransport{inner: drainRoundTripper(func(req *http.Request) (*http.Response, error) {
+				innerCalls++
+				return &http.Response{StatusCode: http.StatusNoContent, Body: http.NoBody, Request: req}, nil
+			})}
+			req, err := http.NewRequestWithContext(capture.context(context.Background()), http.MethodDelete, tc.target, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := transport.RoundTrip(req); !errors.Is(err, ErrRemote) {
+				t.Fatalf("mismatched marked ACK error = %v, want remote rejection", err)
+			}
+			if innerCalls != 0 {
+				t.Fatalf("mismatched marked ACK reached inner transport: calls=%d", innerCalls)
+			}
+			if capture.requestObserved() {
+				t.Fatal("mismatched marked ACK was marked observed")
+			}
+		})
+	}
+}
+
+func TestBaselineMarkedACKRequiresIdentityAndOneShotCardinality(t *testing.T) {
+	const target = "https://api.example/tenant/v2/queue/41?proof=fixture"
+	for _, tc := range []struct {
+		name   string
+		mutate func(*baselineWireCapture)
+	}{
+		{name: "missing origin", mutate: func(c *baselineWireCapture) { c.origin = "" }},
+		{name: "missing tenant prefix", mutate: func(c *baselineWireCapture) { c.runtimePathPrefix = ""; c.runtimePathPrefixSet = false }},
+		{name: "missing scale set", mutate: func(c *baselineWireCapture) { c.setID = 0 }},
+		{name: "missing session", mutate: func(c *baselineWireCapture) { c.sessionID = "" }},
+		{name: "unapproved queue origin", mutate: func(c *baselineWireCapture) { c.queue = "https://other.example/tenant/v2/queue?proof=fixture" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capture := &baselineWireCapture{
+				stage: "ack", setID: 7, sessionID: "session", queue: "https://api.example/tenant/v2/queue?proof=fixture", cursor: 41,
+				origin: "https://api.example:443", runtimePathPrefix: "/tenant/v2", runtimePathPrefixSet: true,
+				allowedHosts: []string{"api.example"},
+			}
+			tc.mutate(capture)
+			innerCalls := 0
+			transport := baselineRequestCaptureTransport{inner: drainRoundTripper(func(req *http.Request) (*http.Response, error) {
+				innerCalls++
+				return &http.Response{StatusCode: http.StatusNoContent, Body: http.NoBody, Request: req}, nil
+			})}
+			req, err := http.NewRequestWithContext(capture.context(context.Background()), http.MethodDelete, target, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := transport.RoundTrip(req); !errors.Is(err, ErrRemote) {
+				t.Fatalf("invalid marked ACK identity error = %v, want remote rejection", err)
+			}
+			if innerCalls != 0 {
+				t.Fatalf("invalid marked ACK identity reached inner transport: calls=%d", innerCalls)
+			}
+		})
+	}
+
+	capture := &baselineWireCapture{
+		stage: "ack", setID: 7, sessionID: "session", queue: "https://api.example/tenant/v2/queue?proof=fixture", cursor: 41,
+		origin: "https://api.example:443", runtimePathPrefix: "/tenant/v2", runtimePathPrefixSet: true,
+		allowedHosts: []string{"api.example"},
+	}
+	innerCalls := 0
+	transport := baselineRequestCaptureTransport{inner: drainRoundTripper(func(req *http.Request) (*http.Response, error) {
+		innerCalls++
+		return &http.Response{StatusCode: http.StatusNoContent, Body: http.NoBody, Request: req}, nil
+	})}
+	for i := 0; i < 2; i++ {
+		req, err := http.NewRequestWithContext(capture.context(context.Background()), http.MethodDelete, target, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = transport.RoundTrip(req)
+		if i == 0 && err != nil {
+			t.Fatalf("valid marked ACK = %v, want forwarding", err)
+		}
+		if i == 1 && !errors.Is(err, ErrRemote) {
+			t.Fatalf("duplicate marked ACK = %v, want remote rejection", err)
+		}
+	}
+	if innerCalls != 1 {
+		t.Fatalf("marked ACK physical cardinality = %d, want one inner call", innerCalls)
+	}
+}
+
+func TestBaselineMarkedSessionCloseMismatchStopsBeforeInner(t *testing.T) {
+	const (
+		origin = "https://api.example:443"
+		prefix = "/tenant/v2"
+	)
+	for _, tc := range []struct {
+		name string
+		path string
+	}{
+		{name: "route family omitted", path: "/tenant/v2/_apis/runtime/sessions/session?api-version=6.0-preview"},
+		{name: "wrong session path", path: "/tenant/v2/_apis/runtime/runnerscalesets/7/sessions/other?api-version=6.0-preview"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capture := &baselineWireCapture{
+				stage: "terminal-session-close", setID: 7, sessionID: "session", origin: origin,
+				runtimePathPrefix: prefix, runtimePathPrefixSet: true, allowedHosts: []string{"api.example"},
+			}
+			innerCalls := 0
+			transport := baselineRequestCaptureTransport{inner: drainRoundTripper(func(req *http.Request) (*http.Response, error) {
+				innerCalls++
+				return &http.Response{StatusCode: http.StatusNoContent, Body: http.NoBody, Request: req}, nil
+			})}
+			req, err := http.NewRequestWithContext(capture.context(context.Background()), http.MethodDelete, "https://api.example"+tc.path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := transport.RoundTrip(req); !errors.Is(err, ErrRemote) {
+				t.Fatalf("mismatched marked session-close error = %v, want remote rejection", err)
+			}
+			if innerCalls != 0 {
+				t.Fatalf("mismatched marked session-close reached inner transport: calls=%d", innerCalls)
+			}
+			if capture.requestObserved() {
+				t.Fatal("mismatched marked session-close was marked observed")
+			}
+		})
+	}
+}
+
+func TestBaselineMarkedSessionCloseRequiresIdentityAndOneShotCardinality(t *testing.T) {
+	const target = "https://api.example/tenant/v2/_apis/runtime/runnerscalesets/7/sessions/session?api-version=6.0-preview"
+	for _, tc := range []struct {
+		name   string
+		mutate func(*baselineWireCapture)
+	}{
+		{name: "missing origin", mutate: func(c *baselineWireCapture) { c.origin = "" }},
+		{name: "missing tenant prefix", mutate: func(c *baselineWireCapture) { c.runtimePathPrefix = ""; c.runtimePathPrefixSet = false }},
+		{name: "missing scale set", mutate: func(c *baselineWireCapture) { c.setID = 0 }},
+		{name: "missing session", mutate: func(c *baselineWireCapture) { c.sessionID = "" }},
+		{name: "wrong origin", mutate: func(c *baselineWireCapture) { c.origin = "https://other.example:443" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capture := &baselineWireCapture{
+				stage: "terminal-session-close", setID: 7, sessionID: "session", origin: "https://api.example:443",
+				runtimePathPrefix: "/tenant/v2", runtimePathPrefixSet: true, allowedHosts: []string{"api.example"},
+			}
+			tc.mutate(capture)
+			innerCalls := 0
+			transport := baselineRequestCaptureTransport{inner: drainRoundTripper(func(req *http.Request) (*http.Response, error) {
+				innerCalls++
+				return &http.Response{StatusCode: http.StatusNoContent, Body: http.NoBody, Request: req}, nil
+			})}
+			req, err := http.NewRequestWithContext(capture.context(context.Background()), http.MethodDelete, target, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := transport.RoundTrip(req); !errors.Is(err, ErrRemote) {
+				t.Fatalf("invalid marked session-close identity error = %v, want remote rejection", err)
+			}
+			if innerCalls != 0 {
+				t.Fatalf("invalid marked session-close identity reached inner transport: calls=%d", innerCalls)
+			}
+		})
+	}
+
+	capture := &baselineWireCapture{
+		stage: "terminal-session-close", setID: 7, sessionID: "session", origin: "https://api.example:443",
+		runtimePathPrefix: "/tenant/v2", runtimePathPrefixSet: true, allowedHosts: []string{"api.example"},
+	}
+	innerCalls := 0
+	transport := baselineRequestCaptureTransport{inner: drainRoundTripper(func(req *http.Request) (*http.Response, error) {
+		innerCalls++
+		return &http.Response{StatusCode: http.StatusNoContent, Body: http.NoBody, Request: req}, nil
+	})}
+	for i := 0; i < 2; i++ {
+		req, err := http.NewRequestWithContext(capture.context(context.Background()), http.MethodDelete, target, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = transport.RoundTrip(req)
+		if i == 0 && err != nil {
+			t.Fatalf("valid marked session-close = %v, want forwarding", err)
+		}
+		if i == 1 && !errors.Is(err, ErrRemote) {
+			t.Fatalf("duplicate marked session-close = %v, want remote rejection", err)
+		}
+	}
+	if innerCalls != 1 {
+		t.Fatalf("marked session-close physical cardinality = %d, want one inner call", innerCalls)
+	}
+}
+
+func TestUnmarkedDeletePreservesInnerTransport(t *testing.T) {
+	innerCalls := 0
+	transport := baselineRequestCaptureTransport{inner: drainRoundTripper(func(req *http.Request) (*http.Response, error) {
+		innerCalls++
+		return &http.Response{StatusCode: http.StatusNoContent, Body: http.NoBody, Request: req}, nil
+	})}
+	req, err := http.NewRequest(http.MethodDelete, "http://unmarked.invalid/arbitrary-target", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transport.RoundTrip(req); err != nil {
+		t.Fatalf("unmarked delete = %v, want forwarding", err)
+	}
+	if innerCalls != 1 {
+		t.Fatalf("unmarked delete inner calls = %d, want one", innerCalls)
 	}
 }
 

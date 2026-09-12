@@ -165,7 +165,7 @@ func (b *baselineListener) finish(r baselineRecord, known bool) (controllerRecor
 	return ref, nil
 }
 func (b *baselineListener) wire(stage string) *baselineWireCapture {
-	return &baselineWireCapture{stage: stage, setID: b.setID, organization: b.approval.Organization, owner: b.approval.setName(), queue: b.queue, origin: b.origin, runtimePathPrefix: b.runtimePathPrefix, runtimePathPrefixSet: b.runtimePathPrefixSet, allowedHosts: baselineWireAllowedHosts(b.approval, b.api.drainEndpointHost())}
+	return &baselineWireCapture{stage: stage, setID: b.setID, organization: b.approval.Organization, owner: b.approval.setName(), sessionID: b.sessionID, queue: b.queue, origin: b.origin, runtimePathPrefix: b.runtimePathPrefix, runtimePathPrefixSet: b.runtimePathPrefixSet, allowedHosts: baselineWireAllowedHosts(b.approval, b.api.drainEndpointHost())}
 }
 
 func (b *baselineListener) capturedOrigin() string {

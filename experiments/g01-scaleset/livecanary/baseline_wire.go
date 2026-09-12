@@ -133,14 +133,10 @@ func (c *baselineWireCapture) target(r *http.Request) bool {
 	if r == nil || r.URL == nil || r.URL.Fragment != "" || r.URL.User != nil || r.URL.EscapedPath() != r.URL.Path {
 		return false
 	}
-	if c.stage == "poll" || c.stage == "ack" {
+	if c.stage == "poll" {
 		u, e := url.Parse(c.queue)
 		if e != nil {
 			return false
-		}
-		if c.stage == "ack" {
-			u.Path += "/" + strconv.Itoa(c.cursor)
-			return r.Method == "DELETE" && r.URL.String() == u.String()
 		}
 		if c.cursor > 0 {
 			q := u.Query()
@@ -148,6 +144,24 @@ func (c *baselineWireCapture) target(r *http.Request) bool {
 			u.RawQuery = q.Encode()
 		}
 		return r.Method == "GET" && r.URL.String() == u.String()
+	}
+	if c.stage == "ack" {
+		if !c.markedDeleteIdentityReady() || c.queue == "" || c.cursor <= 0 {
+			return false
+		}
+		u, err := url.Parse(c.queue)
+		if err != nil || u.Fragment != "" || u.User != nil || u.EscapedPath() != u.Path {
+			return false
+		}
+		queueOrigin, ok := baselineRequestOrigin(u)
+		if !ok || queueOrigin != c.origin {
+			return false
+		}
+		if len(c.allowedHosts) > 0 && !baselineOriginAllowed(u, c.allowedHosts) {
+			return false
+		}
+		u.Path += "/" + strconv.Itoa(c.cursor)
+		return r.Method == http.MethodDelete && r.URL.String() == u.String()
 	}
 	suffix := "/runnerscalesets/" + strconv.Itoa(c.setID) + "/"
 	if c.stage == "set-observe" || c.stage == "terminal-set" || c.stage == "terminal-set-recheck" || c.stage == "terminal-set-absence" || c.stage == "terminal-set-delete" {
@@ -162,7 +176,7 @@ func (c *baselineWireCapture) target(r *http.Request) bool {
 	}
 	if c.stage == "terminal-session-close" {
 		origin, ok := baselineRequestOrigin(r.URL)
-		return c.origin != "" && ok && origin == c.origin && c.sessionID != "" && r.Method == "DELETE" && c.runtimeRequestTarget(r, "sessions/"+c.sessionID) && baselineExactAPIVersionQuery(r.URL.RawQuery)
+		return c.markedDeleteIdentityReady() && ok && origin == c.origin && (len(c.allowedHosts) == 0 || baselineOriginAllowed(r.URL, c.allowedHosts)) && r.Method == http.MethodDelete && c.runtimeRequestTarget(r, "sessions/"+c.sessionID) && baselineExactAPIVersionQuery(r.URL.RawQuery)
 	}
 	if c.stage == "session-open" {
 		if len(c.allowedHosts) > 0 && !baselineOriginAllowed(r.URL, c.allowedHosts) {
@@ -183,6 +197,29 @@ func (c *baselineWireCapture) target(r *http.Request) bool {
 		return false
 	}
 	return r.Method == "POST" && strings.HasSuffix(r.URL.Path, suffix) && baselineExactAPIVersionQuery(r.URL.RawQuery)
+}
+
+// markedDeleteIdentityReady requires the private identity captured by the
+// approved G01 session and snapshot sequence before a marked DELETE can be
+// forwarded. The fields are never serialized; they bind the physical request
+// to the one-shot operation that created the capture.
+func (c *baselineWireCapture) markedDeleteIdentityReady() bool {
+	return c != nil && c.setID > 0 && c.sessionID != "" && c.origin != "" && c.runtimePathPrefixSet && c.runtimePathPrefix != ""
+}
+
+func (c *baselineWireCapture) reserveOneShot(req *http.Request) error {
+	c.mu.Lock()
+	if c.requestCount != 0 || c.invalid {
+		c.invalid = true
+		c.mu.Unlock()
+		if req != nil && req.Body != nil {
+			_ = req.Body.Close()
+		}
+		return ErrRemote
+	}
+	c.requestCount = 1
+	c.mu.Unlock()
+	return nil
 }
 
 func (c *baselineWireCapture) runtimeRequestTarget(r *http.Request, tail string) bool {
@@ -354,6 +391,21 @@ func (c *baselineWireCapture) captureRequest(req *http.Request) error {
 	if c == nil {
 		return nil
 	}
+	if c.stage == "ack" {
+		if !c.target(req) {
+			return c.rejectRequest(req)
+		}
+		return c.reserveOneShot(req)
+	}
+	if c.stage == "terminal-session-close" {
+		// A close DELETE is a marked terminal effect, not a snapshot read. It
+		// must reject every mismatch, including a route that does not contain
+		// the runnerscalesets family, before the inner transport is called.
+		if !c.markedDeleteIdentityReady() || !c.target(req) {
+			return c.rejectRequest(req)
+		}
+		return c.reserveOneShot(req)
+	}
 	if c.stage == "session-open" {
 		if !c.target(req) {
 			if c.sessionOpenBootstrapTarget(req) {
@@ -397,7 +449,7 @@ func (c *baselineWireCapture) captureRequest(req *http.Request) error {
 		c.mu.Unlock()
 		return nil
 	}
-	if c.stage == "set-observe" || c.stage == "runner-observe" || strings.HasPrefix(c.stage, "terminal-set") || c.stage == "terminal-session-close" {
+	if c.stage == "set-observe" || c.stage == "runner-observe" || strings.HasPrefix(c.stage, "terminal-set") {
 		if !snapshotRequestCandidate(req) {
 			return nil
 		}
