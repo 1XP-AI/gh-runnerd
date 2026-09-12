@@ -46,6 +46,85 @@ func TestGuardBaselineResponseRejectsRunnerFactsWhenBodyCloseFails(t *testing.T)
 	}
 }
 
+func TestGuardBaselineResponseRejectsTerminalCloseWhenBodyCloseFails(t *testing.T) {
+	capture := &baselineWireCapture{
+		stage:                "terminal-session-close",
+		setID:                7,
+		sessionID:            "session",
+		origin:               "https://api.example:443",
+		runtimePathPrefix:    "/tenant/v2",
+		runtimePathPrefixSet: true,
+	}
+	req, err := http.NewRequestWithContext(capture.context(context.Background()), http.MethodDelete, "https://api.example/tenant/v2/_apis/runtime/runnerscalesets/7/sessions/session?api-version=6.0-preview", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := guardBaselineResponse(req, &http.Response{
+		StatusCode: http.StatusNoContent,
+		Body:       &baselineCloseErrorBody{Reader: strings.NewReader(""), err: io.ErrClosedPipe},
+	})
+	if !errors.Is(err, ErrRemote) || response != nil {
+		t.Fatalf("terminal close body with close error = response %v err %v, want remote rejection", response, err)
+	}
+	_, _, _, status := capture.facts()
+	if status != http.StatusNoContent || capture.observed() {
+		t.Fatalf("terminal close body close error published evidence: status=%d observed=%v", status, capture.observed())
+	}
+}
+
+func TestGuardBaselineResponseRejectsEvidenceDeleteWhenBodyCloseFails(t *testing.T) {
+	tests := []struct {
+		name    string
+		capture *baselineWireCapture
+		target  string
+	}{
+		{
+			name: "ack",
+			capture: &baselineWireCapture{
+				stage: "ack", setID: 7, sessionID: "session", queue: "https://api.example/tenant/v2/queue?proof=fixture", cursor: 41,
+				origin: "https://api.example:443", runtimePathPrefix: "/tenant/v2", runtimePathPrefixSet: true,
+			},
+			target: "https://api.example/tenant/v2/queue/41?proof=fixture",
+		},
+		{
+			name: "terminal-session-close",
+			capture: &baselineWireCapture{
+				stage: "terminal-session-close", setID: 7, sessionID: "session", origin: "https://api.example:443",
+				runtimePathPrefix: "/tenant/v2", runtimePathPrefixSet: true,
+			},
+			target: "https://api.example/tenant/v2/_apis/runtime/runnerscalesets/7/sessions/session?api-version=6.0-preview",
+		},
+		{
+			name: "terminal-set-delete",
+			capture: &baselineWireCapture{
+				stage: "terminal-set-delete", setID: 7, origin: "https://api.example:443",
+				runtimePathPrefix: "/tenant/v2", runtimePathPrefixSet: true, allowedHosts: []string{"api.example"},
+			},
+			target: "https://api.example/tenant/v2/_apis/runtime/runnerscalesets/7?api-version=6.0-preview",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := http.NewRequestWithContext(tc.capture.context(context.Background()), http.MethodDelete, tc.target, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := guardBaselineResponse(req, &http.Response{
+				StatusCode: http.StatusNoContent,
+				Body:       &baselineCloseErrorBody{Reader: strings.NewReader(""), err: io.ErrClosedPipe},
+			})
+			if !errors.Is(err, ErrRemote) || response != nil {
+				t.Fatalf("evidence DELETE body with close error = response %v err %v, want remote rejection", response, err)
+			}
+			_, _, _, status := tc.capture.facts()
+			if status != http.StatusNoContent || tc.capture.observed() {
+				t.Fatalf("evidence DELETE close error published evidence: status=%d observed=%v", status, tc.capture.observed())
+			}
+		})
+	}
+}
+
 type replacingContextRoundTripper struct{ inner http.RoundTripper }
 
 func (t replacingContextRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {

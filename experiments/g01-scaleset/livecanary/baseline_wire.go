@@ -740,6 +740,12 @@ func guardBaselineResponse(req *http.Request, response *http.Response) (*http.Re
 		return nil, ErrRemote
 	}
 	if response.StatusCode != http.StatusOK {
+		if response.StatusCode == http.StatusNoContent && (c.stage == "ack" || c.stage == "terminal-session-close" || c.stage == "terminal-set-delete") {
+			if closeErr := response.Body.Close(); closeErr != nil {
+				c.invalid = true
+				return nil, ErrRemote
+			}
+		}
 		return response, nil
 	}
 	data, err := io.ReadAll(response.Body)
