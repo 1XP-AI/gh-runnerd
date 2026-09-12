@@ -1871,3 +1871,88 @@ and this evidence append is documentation-only. Rollback is recoverable with
 append can be reverted separately if required. No live rollback was run, and
 the unresolved live G01 gate, exact-head Codex review, CI and merge remain
 coordinator-owned.
+
+### Exact-head follow-up: marked session-open origin binding
+
+Date: 2026-09-13. This correction started from exact head
+`91aa852cc2f66102aad54c402b7da8e552163828`. The fresh Codex P1 finding is
+[marked session-open origin mismatch forwarded before rejection](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3997399947).
+No Project, Issue, goal, dependency or status field was changed.
+
+#### Red-first reproduction
+
+After adding the regression and before changing production code, this focused
+command exited 1:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^TestBaselineSessionOpenOriginBindsToBeforeSnapshot$' -count=1 -v -timeout=60s
+```
+
+The same-origin control passed, while the different-but-approved origin failed
+with `err=<nil> inner calls=1`, proving the marked POST reached the inner
+transport before the fix. The regression retained only fixed counters and
+error categories; no request body, token, URL, response error or private log
+was recorded.
+
+#### Correction and verification
+
+The before Scale Set snapshot origin now initializes the paired listener's
+session-open capture, and the pinned drain session capture inherits the
+before-snapshot origin from its poll hook. A marked session-open target now
+rejects a different origin before body handling or inner transport forwarding;
+same-origin session-open, the explicit bootstrap allowlist, unmarked requests,
+and the existing tenant-prefix, Host and Opaque checks remain intact. The
+correction source/test commit is
+`3be170f82e4b173baf808f22e3637dfd533fe7d4`.
+
+The focused normal run exited 0 in 0.513s, including the new regression, the
+pinned-SDK mismatch regression, same-origin session-open, bootstrap,
+tenant-prefix, Opaque, Host and unmarked-forwarding controls:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^(TestBaselineSessionOpenOriginBindsToBeforeSnapshot|TestPinnedSDKDrainRejectsSessionOriginMismatchBeforeListener|TestBaselineSessionOpenTargetMismatchStopsBeforeInner|TestBaselineSessionOpenBodyMustMatchOwnerBeforeInner|TestBaselineRuntimePathPrefixMismatchStopsBeforeInner|TestMarkedRequestOpaqueStopsBeforeInner|TestMarkedSnapshotRewriteAllowsOnlyRequiredBootstrap|TestUnmarkedOpaqueRequestPreservesInnerForwarding|TestDrainPollHookForwardsUnmarkedNonPollRequest)$' -count=1 -v -timeout=240s
+```
+
+The focused race run exited 0 in 4.737s with no race diagnostics:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -run '^(TestDrain|TestPinnedSDKDrain|TestDriverDrainThroughPinnedSDKAndPollHook|TestBaseline.*(Acquire|SessionOpen|Snapshot)|TestMarked|TestUnmarked)' -count=1 -timeout=300s
+```
+
+The full package normal run exited 0 in 28.681s and the full race run exited 0
+in 40.923s with no race diagnostics:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -count=1 -timeout=300s
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -count=1 -timeout=300s
+```
+
+`GOWORK=off GOTOOLCHAIN=go1.26.8 go vet ./livecanary`,
+`bash scripts/gofmt.sh check`, and `git diff --check` each exited 0. The
+diff secret/private-path scan exited 0 and printed
+`diff secret/private-path scan passed`:
+
+```text
+set -e
+if git diff --text | rg -n '(/Users/|/home/|-----BEGIN (RSA|OPENSSH|EC|PRIVATE)|github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9_]{20,}|Authorization[^\n]{0,20}Bearer[[:space:]]+[A-Za-z0-9._-]{20,})'; then exit 1; fi
+printf '%s\n' 'diff secret/private-path scan passed'
+```
+
+The repository offline gate exited 0 and printed
+`offline experiment checks passed: 2 module(s)`:
+
+```text
+GOTOOLCHAIN=go1.26.8 bash scripts/check-offline-experiments.sh
+```
+
+The exact tested implementation head is
+`3be170f82e4b173baf808f22e3637dfd533fe7d4`; this evidence append is a separate
+documentation-only commit. Rollback is recoverable with
+`git revert --no-edit 3be170f82e4b173baf808f22e3637dfd533fe7d4`; no live
+rollback, App, runner, workflow, canary, Docker/Lima, Keychain, launchd,
+credential or cleanup operation was performed. The unresolved live G01 gate,
+independent exact-head Codex review, CI and merge remain coordinator-owned.
