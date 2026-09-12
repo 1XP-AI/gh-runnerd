@@ -2230,3 +2230,97 @@ commit. Rollback is recoverable with
 documentation append separately if needed. No live App/runner/canary evidence
 is claimed; the unresolved live G01 gate, independent exact-head Codex review,
 CI and merge remain coordinator-owned.
+
+### Exact-head follow-up: runner close failure and wrapper marker propagation
+
+Date: 2026-09-13. This correction started from exact head
+`a8bfc277e7b663034dc1903bd9e8d758e3b0c88b` and addresses the fresh Codex P1
+[runner response close failure finding](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3997904130)
+and [marked request context replacement finding](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3997904133).
+No Project, Issue, goal, dependency, status or branch field was changed; no
+review request, live App/runner/canary operation, workflow replay, Docker/Lima,
+Keychain, launchd, credential or cleanup operation was performed.
+
+#### Red-first reproduction
+
+The meaningful regressions were added before the source correction and run
+against the unchanged starting head. This focused command exited 1:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^(TestGuardBaselineResponseRejectsRunnerFactsWhenBodyCloseFails|TestBaselineMarkedBoundariesRejectReplacementContextBeforeInner)$' -count=1 -v
+```
+
+The runner case failed because complete JSON followed by `Close` returning
+`io.ErrClosedPipe` still returned a response with nil error and published
+runner facts. The initial replacement-context matrix failed because the set,
+runner, session-open, ACK, acquisition, JIT and terminal-session-close marked
+requests either returned a response or reached the inner transport; the runner
+case reported one inner call. The final regression matrix also covers the
+terminal-set variants. The assertions retain only bounded status/error/
+observation state and inner-call counts; no response body, Authorization
+value, token, URL or private log is retained.
+
+#### Minimal correction and green evidence
+
+`guardBaselineResponse` now checks the body `Close` result alongside the read
+result and size before decoding or publishing any runner facts. Clean EOF is
+still accepted, while non-EOF read errors remain fail-closed. The shared
+response-budget boundary clones only marked requests and adds an ephemeral
+private transport marker; `Request.Clone`-style wrappers preserve that marker,
+and the final baseline transport rejects a marker whose private operation
+context was lost before calling its inner transport. The marker is deleted at
+that final boundary and carries no operation, credential, response or token
+data, so valid pinned-SDK traffic and intentionally unmarked forwarding remain
+unchanged.
+
+The focused normal command exited 0 in 0.626s:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^(TestGuardBaselineResponseRejectsRunnerFactsWhenBodyCloseFails|TestBaselineMarkedBoundariesRejectReplacementContextBeforeInner|TestBaselineWireMarkerIsRemovedBeforeInner|TestPinnedSDKDrainRejectsPollCloseErrorBeforeEffects|TestPinnedSDKDrainRejectsNonEOFPollReadError|TestPinnedSDKDrainRejectsAcquireTargetMutationBeforeFixture|TestPinnedSDKDrainBindsSessionCloseToPhysicalDelete|TestDriverDrainThroughPinnedSDKAndPollHook)$' -count=1 -v -timeout=300s
+```
+
+The corresponding focused race command exited 0 in 1.755s with no race
+diagnostics:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -run '^(TestGuardBaselineResponseRejectsRunnerFactsWhenBodyCloseFails|TestBaselineMarkedBoundariesRejectReplacementContextBeforeInner|TestBaselineWireMarkerIsRemovedBeforeInner|TestPinnedSDKDrainRejectsPollCloseErrorBeforeEffects|TestPinnedSDKDrainRejectsNonEOFPollReadError|TestPinnedSDKDrainRejectsAcquireTargetMutationBeforeFixture|TestPinnedSDKDrainBindsSessionCloseToPhysicalDelete|TestDriverDrainThroughPinnedSDKAndPollHook)$' -count=1 -timeout=300s
+```
+
+The full `livecanary` package normal run exited 0 in 26.544s and the full race
+run exited 0 in 38.923s, with no race diagnostics:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -count=1 -timeout=300s
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -count=1 -timeout=360s
+```
+
+`GOWORK=off GOTOOLCHAIN=go1.26.8 go vet ./livecanary`,
+`GOTOOLCHAIN=go1.26.8 bash scripts/gofmt.sh check`, and `git diff --check`
+each exited 0. The diff secret/private-path scan exited 0 and printed
+`diff secret/private-path scan passed`:
+
+```text
+set -e
+if git show --format= --text 3c8567795c69ec3d4b0171b685d0ac21506f83f5 -- experiments/g01-scaleset/livecanary/baseline_wire.go experiments/g01-scaleset/livecanary/response_budget.go experiments/g01-scaleset/livecanary/baseline_wire_p1_test.go | rg -n -i '(/Users/|/home/|-----BEGIN (RSA|OPENSSH|EC|PRIVATE)|github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9_]{20,}|Authorization[^\n]{0,20}Bearer[[:space:]]+[A-Za-z0-9._-]{20,})'; then exit 1; fi
+printf '%s\n' 'diff secret/private-path scan passed'
+```
+
+The exact implementation source head is
+`3c8567795c69ec3d4b0171b685d0ac21506f83f5` (`fix(g01): fence marked wire
+requests across wrappers`). The exact two-module offline gate was run against
+that source head and exited 0 with `offline experiment checks passed: 2
+module(s)`:
+
+```text
+GOTOOLCHAIN=go1.26.8 bash scripts/check-offline-experiments.sh
+```
+
+Rollback is recoverable with `git revert --no-edit
+3c8567795c69ec3d4b0171b685d0ac21506f83f5`; this evidence append is a separate
+documentation-only commit and can be reverted independently. No live
+App/runner/canary evidence is claimed; the unresolved live G01 gate,
+independent exact-head Codex review, CI and merge remain coordinator-owned.
