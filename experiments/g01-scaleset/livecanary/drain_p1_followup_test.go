@@ -1158,6 +1158,26 @@ func TestPinnedSDKDrainRejectsPhysicalPollMutationBeforeInner(t *testing.T) {
 	}
 }
 
+func TestPinnedSDKDrainRejectsCaseFoldedDuplicateCapacityBeforeFixture(t *testing.T) {
+	a := approval()
+	fixture, _, session, hook := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{
+		mutateRequest: func(req *http.Request) {
+			if req.Method == http.MethodGet && req.URL.Path == "/queue" && req.URL.Query().Get("lastMessageId") != "" {
+				// Direct map assignment models an intervening wrapper that bypasses
+				// Header.Set's canonicalization and adds a duplicate wire key.
+				req.Header[strings.ToLower(scaleset.HeaderScaleSetMaxCapacity)] = []string{"1"}
+			}
+		},
+	})
+	observation, err := runDrainListener(context.Background(), session, 7, hook)
+	if !errors.Is(err, ErrQuarantine) || observation.Outcome == drainOutcomeObserved {
+		t.Fatalf("case-folded duplicate capacity was promoted: observation=%+v err=%v", observation, err)
+	}
+	if got := fixture.polls.Load(); got != 1 {
+		t.Fatalf("case-folded duplicate capacity reached fixture: polls=%d, want first poll only", got)
+	}
+}
+
 func TestDrainCancellationStopsBeforeReleasingHeldResponse(t *testing.T) {
 	var order []string
 	cancelAndJoinDrain(

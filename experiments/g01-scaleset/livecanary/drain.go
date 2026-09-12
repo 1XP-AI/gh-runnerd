@@ -457,6 +457,16 @@ func sameDrainQuery(left, right url.Values) bool {
 	return true
 }
 
+func drainHeaderValues(header http.Header, name string) []string {
+	var values []string
+	for key, candidates := range header {
+		if strings.EqualFold(key, name) {
+			values = append(values, candidates...)
+		}
+	}
+	return values
+}
+
 func (h *drainPollHook) pollRequestValid(req *http.Request, attempt int) bool {
 	if h == nil || req == nil || req.URL == nil || (attempt != 1 && attempt != 2) {
 		return false
@@ -490,7 +500,7 @@ func (h *drainPollHook) pollRequestValid(req *http.Request, attempt int) bool {
 	if strings.EqualFold(want.Scheme, "https") && !runtimePathPrefixSet {
 		return false
 	}
-	values := req.Header.Values(scaleset.HeaderScaleSetMaxCapacity)
+	values := drainHeaderValues(req.Header, scaleset.HeaderScaleSetMaxCapacity)
 	wantCapacity := drainInitialCapacity
 	if attempt == 2 {
 		wantCapacity = drainWithdrawnCapacity
