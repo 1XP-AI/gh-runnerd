@@ -388,6 +388,109 @@ qualification. No credentials, runner/session/JIT operation,
 workflow operation, app/keychain/launchd/Docker/Lima mutation or cleanup was
 performed.
 
+### Exact-head follow-up: snapshot-bound session origin and marked listener polls
+
+Date: 2026-09-13. This correction started from exact head
+`8439c12e431bb25bd229c9783119bee125b0c0bd`. The current-head Codex findings
+were [session origin not bound to the before snapshot](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3996893012)
+and [marked listener poll mismatch forwarded before rejection](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3996893019).
+No Project or Issue ownership/status/goal/dependency field was changed.
+
+#### Red-first reproductions
+
+After adding the two behavioral regressions and before changing production
+code, this focused command exited 1:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^(TestPinnedSDKDrainRejectsSessionOriginMismatchBeforeListener|TestDrainListenerRejectsMarkedPollTargetMismatchBeforeInner)$' -count=1 -v -timeout=240s
+```
+
+The session-origin regression observed one listener poll (`polls=1`) instead
+of quarantining before listener start. The marked-poll regression observed
+the wrong-host, wrong-path and wrong-scheme mutations reach the inner
+transport (`calls=1` in each case); the already-existing query validator
+rejected the wrong queue-proof case, so that subcase passed in the red run.
+The failing output retained only fixed counters and error categories; no
+request body, bearer, URL query, response error or private log was recorded.
+
+#### Corrections and boundary evidence
+
+The drain driver now initializes the poll hook with the exact origin captured
+by the before Scale Set snapshot, and `OpenDrainSession` refuses a different
+session-open origin. The driver independently compares `hook.origin` with the
+captured origin after session-open and before `runDrainListener`; a mismatch
+quarantines without starting a poll. Synthetic API fakes keep the prior
+no-wire path, while the pinned SDK path remains origin-bound.
+
+Listener polls now carry a private per-hook approval marker through the
+listener call context. Only a marked poll is admitted to the poll hook's
+physical validation: exact queue target/path/query, canonical origin,
+capacity and cursor are checked before calling the inner transport, and a
+foreign marker or any mismatch is rejected/quarantined before forwarding.
+Unmarked session-open, ACK and acquisition requests continue through their
+existing baseline wire boundaries.
+
+The focused green normal and boundary run passed after the corrections:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^(TestPinnedSDKDrainRejectsSessionOriginMismatchBeforeListener|TestDrainListenerRejectsMarkedPollTargetMismatchBeforeInner|TestDrainPollHookRejectsApprovalFromDifferentHook|TestDrainPollHookForwardsUnmarkedNonPollRequest)$' -count=1 -v -timeout=240s
+```
+
+It passed with all four marked-poll mutations rejected before the inner
+transport, the foreign marker rejected before the inner transport, and the
+unmarked session request forwarded once. The focused race expression covering
+the drain, pinned-SDK and baseline boundary families also passed with no race
+diagnostics:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -run 'TestDrain|TestPinnedSDKDrain|TestDriverDrainThroughPinnedSDKAndPollHook|TestBaseline.*(Acquire|SessionOpen|Snapshot)' -count=1 -timeout=300s
+```
+
+The focused normal run passed in 2.358s and the focused race run passed in
+4.700s. The full package gates also passed:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -count=1 -timeout=300s
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -count=1 -timeout=300s
+GOWORK=off GOTOOLCHAIN=go1.26.8 go vet ./livecanary
+cd ../..
+bash scripts/gofmt.sh check
+git diff --check
+set -e
+if git diff --text | rg -n '(/Users/|/home/|-----BEGIN (RSA|OPENSSH|EC|PRIVATE)|github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9_]{20,}|Authorization[^\n]{0,20}Bearer[[:space:]]+[A-Za-z0-9._-]{20,})'; then exit 1; fi
+```
+
+The full normal package passed in 27.179s, the full race package passed in
+40.157s, vet was silent and successful, gofmt/diff were clean, and the
+secret/private-path scan printed `diff secret/private-path scan passed`.
+The repository offline gate was also run from the repository root; it passed
+all bounded G01/G02 partitions and printed `offline experiment checks passed:
+2 module(s)`.
+
+```text
+GOTOOLCHAIN=go1.26.8 bash scripts/check-offline-experiments.sh
+```
+
+#### Finding matrix, exact head and rollback
+
+| Finding | Reproduction and resolution | Rollback scope |
+|---|---|---|
+| [r3996893012](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3996893012) session origin | Red regression above reproduced a poll after a mismatched session-open origin; the pinned regression now quarantines with zero listener polls, and the driver/SDK checks bind the origin to the before snapshot. | Revert the correction source/test commit only; no live close, cleanup or rollback operation was run. |
+| [r3996893019](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3996893019) marked poll forwarding | Red regression above reproduced wrong host/path/scheme forwarding; marked target/path/origin/query and foreign-marker boundaries now reject before inner transport while unmarked non-poll requests retain prior behavior. | Revert the correction source/test commit only; no network or runner rollback was run. |
+
+The source/test correction is commit
+`cbf711cb582ccd6a68eca13312697be21cea580a`; it is the exact implementation
+head before this evidence-only follow-up commit and is independently
+recoverable with `git revert --no-edit cbf711cb582ccd6a68eca13312697be21cea580a`.
+The evidence-only follow-up commit is immediately on that head. The unresolved live gap is the
+coordinator-owned exact-head Codex review, required CI and maintainer-authorized
+live G01 gate. No live GitHub App, runner, workflow, Docker/Lima, Keychain,
+launchd, credential, cleanup or canary operation was performed.
+
 ### Historical exact-head blocker corrections (snapshot `1eb48afb...`; published correction `5d715c486...`)
 
 The following entries preserve the historical chronology of the blocker
