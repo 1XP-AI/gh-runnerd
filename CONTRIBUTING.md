@@ -7,8 +7,10 @@ green -> refactor, then runs focused unit/negative checks while iterating;
 documentation-only changes record why no artificial test is needed. Use
 `make fast` only with explicit `FAST_MODULE`, `FAST_PACKAGE` and `FAST_TEST`
 selectors; it fails closed for missing or no-match selectors and is not the full
-gate. Batch source, documentation and finding-ledger fixes before pushing one
-stable review candidate rather than launching a review for every local commit.
+gate. Keep intermediate commits local. Batch source, documentation and
+finding-ledger fixes before pushing one stable review candidate rather than
+launching hosted CI and a review for every local commit. Repeat the full
+candidate gate only after the head or relevant risk boundary changes.
 
 Independent reviewers use the immutable candidate source and exact-source CI
 evidence, adding delta/risk probes instead of repeating the complete suite. A

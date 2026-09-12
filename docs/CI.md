@@ -66,7 +66,12 @@ make check
 
 `make check` remains the complete local public gate, but it is not a per-commit
 requirement; use it on demand when the environment supports it and rely on hosted
-CI for the stable candidate gate.
+CI for the stable candidate gate. A local commit does not justify a hosted run:
+keep intermediate commits local, batch the source/docs/finding changes, and push
+once for the stable candidate. After a review fix, batch all actionable fixes into
+one new head before starting the next full CI/Codex cycle. Repeat a full run only
+when the head, relevant dependency/toolchain, changed risk boundary or prior
+result changed, or the previous run was inconclusive.
 
 Individual commands are available when iterating:
 
