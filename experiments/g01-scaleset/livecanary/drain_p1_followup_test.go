@@ -348,6 +348,90 @@ func TestBaselineSnapshotRequestsRequireExactOriginBeforeInner(t *testing.T) {
 	}
 }
 
+func TestBaselineTerminalSetEffectsRequireCapturedOriginBeforeInner(t *testing.T) {
+	const (
+		capturedOrigin = "https://api.example:443"
+		prefix         = "/tenant/v2"
+	)
+	for _, tc := range []struct {
+		name          string
+		stage         string
+		method        string
+		status        int
+		captureOrigin string
+		targetOrigin  string
+		wantInner     bool
+	}{
+		{
+			name:          "same-origin set deletion",
+			stage:         "terminal-set-delete",
+			method:        http.MethodDelete,
+			status:        http.StatusNoContent,
+			captureOrigin: capturedOrigin,
+			targetOrigin:  "https://api.example",
+			wantInner:     true,
+		},
+		{
+			name:         "rewritten set deletion",
+			stage:        "terminal-set-delete",
+			method:       http.MethodDelete,
+			status:       http.StatusNoContent,
+			targetOrigin: "https://other.example",
+		},
+		{
+			name:          "same-origin absence",
+			stage:         "terminal-set-absence",
+			method:        http.MethodGet,
+			status:        http.StatusNotFound,
+			captureOrigin: capturedOrigin,
+			targetOrigin:  "https://api.example",
+			wantInner:     true,
+		},
+		{
+			name:         "rewritten absence",
+			stage:        "terminal-set-absence",
+			method:       http.MethodGet,
+			status:       http.StatusNotFound,
+			targetOrigin: "https://other.example",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capture := &baselineWireCapture{
+				stage: tc.stage, setID: 7, origin: tc.captureOrigin,
+				runtimePathPrefix: prefix, runtimePathPrefixSet: true,
+				allowedHosts: []string{"api.example", "other.example"},
+			}
+			innerCalls := 0
+			transport := responseBudgetTransport{inner: baselineRequestCaptureTransport{inner: drainRoundTripper(func(req *http.Request) (*http.Response, error) {
+				innerCalls++
+				return &http.Response{StatusCode: tc.status, Body: http.NoBody, Request: req}, nil
+			})}}
+			target := tc.targetOrigin + prefix + "/_apis/runtime/runnerscalesets/7?api-version=6.0-preview"
+			req, err := http.NewRequestWithContext(capture.context(context.Background()), tc.method, target, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := transport.RoundTrip(req)
+			if tc.wantInner {
+				if err != nil || innerCalls != 1 || response == nil || response.StatusCode != tc.status || !capture.requestObserved() {
+					t.Fatalf("same-origin %s err=%v inner calls=%d status=%v observed=%v, want one accepted request", tc.stage, err, innerCalls, responseStatus(response), capture.requestObserved())
+				}
+				return
+			}
+			if !errors.Is(err, ErrRemote) || innerCalls != 0 || response != nil || capture.requestObserved() {
+				t.Fatalf("rewritten marked %s request was accepted before inner: err=%v inner calls=%d response=%v observed=%v", tc.stage, err, innerCalls, responseStatus(response), capture.requestObserved())
+			}
+		})
+	}
+}
+
+func responseStatus(response *http.Response) any {
+	if response == nil {
+		return nil
+	}
+	return response.StatusCode
+}
+
 func TestBaselineRuntimePathPrefixMismatchStopsBeforeInner(t *testing.T) {
 	const (
 		origin = "https://api.example:443"

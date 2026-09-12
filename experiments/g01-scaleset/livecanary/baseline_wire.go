@@ -250,7 +250,14 @@ func (c *baselineWireCapture) snapshotOriginAllowed(r *http.Request) bool {
 	if !ok {
 		return false
 	}
-	return c.origin == "" || c.origin == origin
+	if c.origin == "" {
+		// The initial unbound snapshot is allowed to establish the origin. Every
+		// terminal Scale Set snapshot is a post-session operation and must carry
+		// the listener's already captured origin instead of bootstrapping one
+		// from the request being authorized.
+		return !strings.HasPrefix(c.stage, "terminal-set")
+	}
+	return c.origin == origin
 }
 
 func snapshotRequestCandidate(r *http.Request) bool {

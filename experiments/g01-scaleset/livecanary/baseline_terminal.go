@@ -131,11 +131,12 @@ func (s *pairedBaselineScope) terminalStepCall(stage string) error {
 		r.Terminal.Roster = &observation
 		known = e == nil && state.rosterMatches(&observation, func(ref controllerRecordRef) *Event { return s.event(workerRef(ref)) })
 	case stage == "terminal-set" || stage == "terminal-set-recheck" || stage == "terminal-set-absence":
+		origin := s.listener.capturedOrigin()
 		runtimePathPrefix, runtimePathPrefixSet := s.listener.capturedRuntimePathPrefix()
-		if !runtimePathPrefixSet {
+		if origin == "" || !runtimePathPrefixSet {
 			return ErrQuarantine
 		}
-		capture := &baselineWireCapture{stage: stage, setID: s.setID, organization: s.approval.Organization, runtimePathPrefix: runtimePathPrefix, runtimePathPrefixSet: runtimePathPrefixSet, allowedHosts: baselineWireAllowedHosts(s.approval, s.captured.drainEndpointHost())}
+		capture := &baselineWireCapture{stage: stage, setID: s.setID, organization: s.approval.Organization, origin: origin, runtimePathPrefix: runtimePathPrefix, runtimePathPrefixSet: runtimePathPrefixSet, allowedHosts: baselineWireAllowedHosts(s.approval, s.captured.drainEndpointHost())}
 		ctx, cancel := context.WithTimeout(s.ctx, operationTimeout)
 		set, e := s.captured.GetScaleSet(capture.context(ctx), s.setID)
 		callErr = e
@@ -176,11 +177,12 @@ func (s *pairedBaselineScope) terminalStepCall(stage string) error {
 		}
 		known = e == nil && r.Terminal.Deletion != nil && receipt.AbsenceResult != nil
 	case stage == "terminal-set-delete":
+		origin := s.listener.capturedOrigin()
 		runtimePathPrefix, runtimePathPrefixSet := s.listener.capturedRuntimePathPrefix()
-		if !runtimePathPrefixSet {
+		if origin == "" || !runtimePathPrefixSet {
 			return ErrQuarantine
 		}
-		capture := &baselineWireCapture{stage: stage, setID: s.setID, organization: s.approval.Organization, runtimePathPrefix: runtimePathPrefix, runtimePathPrefixSet: runtimePathPrefixSet, allowedHosts: baselineWireAllowedHosts(s.approval, s.captured.drainEndpointHost())}
+		capture := &baselineWireCapture{stage: stage, setID: s.setID, organization: s.approval.Organization, origin: origin, runtimePathPrefix: runtimePathPrefix, runtimePathPrefixSet: runtimePathPrefixSet, allowedHosts: baselineWireAllowedHosts(s.approval, s.captured.drainEndpointHost())}
 		ctx, cancel := context.WithTimeout(s.ctx, operationTimeout)
 		callErr = s.captured.DeleteScaleSet(capture.context(ctx), s.setID)
 		cancel()
