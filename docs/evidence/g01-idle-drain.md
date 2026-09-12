@@ -2135,3 +2135,98 @@ workflow, canary, Docker/Lima, Keychain, launchd, credential or cleanup
 operation was performed, and no live App/runner/canary evidence is claimed.
 The unresolved live G01 gate, independent exact-head Codex review, CI and
 merge remain coordinator-owned.
+
+### Exact-head follow-up: poll close failure and opened-session authorization binding
+
+Date: 2026-09-13. This correction started from exact head
+`e68d51f335f589d23ca49646489f4d3684072a77` and addresses the fresh Codex P1
+[poll close failure finding](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3997740103)
+and [opened-session authorization finding](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3997740106).
+No Project, Issue, goal, dependency, status or branch field was changed; no
+review request, live App/runner/canary operation, workflow replay, Docker/Lima,
+Keychain, launchd, credential or cleanup operation was performed.
+
+#### Red-first reproduction
+
+The two regressions were added before the source correction. This focused
+pinned-SDK/TLS-loopback command exited 1:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^TestPinnedSDKDrain(RejectsPollCloseErrorBeforeEffects|RejectsSubstitutedSessionAuthorizationBeforeEffects)$' -count=1 -v -timeout=180s
+```
+
+The close-failure regression reported `poll close error published known
+statistics`; the authorization regression reported `got [41] err <nil>, want
+pre-inner quarantine`. Thus complete poll bytes plus a failing `Close` could
+publish known facts, and a nonempty substituted runtime authorization could
+reach acquisition. The regressions retain only fixed outcome, status and
+counter assertions; no raw token, Authorization value, response body, SDK
+error, URL or private log is retained.
+
+#### Minimal correction and green evidence
+
+The bounded poll body now records the source `Close` error before finalizing an
+unfinished body and synchronously retracts all statistics, batch and
+message-presence facts if EOF had already published an initial snapshot;
+clean EOF and existing non-EOF read-error behavior remain unchanged. Strict
+session capture retains the message-queue token only in private memory,
+compares it exactly with the pinned SDK session value, and captures the exact
+opened-session admin authorization for the pinned SDK close request. Marked
+poll, ACK, acquisition and session-close requests require one
+case-insensitive-header-key match with one exact `Bearer` value before the
+inner transport, while valid same-session traffic and existing route, origin,
+tenant-prefix, Host/Opaque, target/cardinality, snapshot and unmarked controls
+remain covered.
+
+The focused normal command exited 0 in 2.314s:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^(TestPinnedSDKDrainRejectsPollCloseErrorBeforeEffects|TestPinnedSDKDrainRejectsSubstitutedSessionAuthorizationBeforeEffects|TestPinnedSDKDrainRejectsSubstitutedSessionCloseAuthorizationBeforeEffects|TestPinnedSDKDrainRejectsNonEOFPollReadError|TestMarkedRuntimeAuthorizationMismatchStopsBeforeInner|TestValidDrainSessionWireRequiresExactQueueAuthorization|TestDriverDrainThroughPinnedSDKAndPollHook)$' -count=1 -v -timeout=300s
+```
+
+The corresponding focused race command exited 0 in 4.067s with no race
+diagnostics:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -run '^(TestPinnedSDKDrainRejectsPollCloseErrorBeforeEffects|TestPinnedSDKDrainRejectsSubstitutedSessionAuthorizationBeforeEffects|TestPinnedSDKDrainRejectsSubstitutedSessionCloseAuthorizationBeforeEffects|TestPinnedSDKDrainRejectsNonEOFPollReadError|TestMarkedRuntimeAuthorizationMismatchStopsBeforeInner|TestValidDrainSessionWireRequiresExactQueueAuthorization|TestDriverDrainThroughPinnedSDKAndPollHook)$' -count=1 -v -timeout=300s
+```
+
+The full `livecanary` package normal run exited 0 in 29.032s and the full race
+run exited 0 in 39.918s, with no race diagnostics:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -count=1 -timeout=300s
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -count=1 -timeout=360s
+```
+
+`GOWORK=off GOTOOLCHAIN=go1.26.8 go vet ./livecanary`,
+`GOTOOLCHAIN=go1.26.8 bash scripts/gofmt.sh check`, and `git diff --check`
+each exited 0. The diff secret/private-path scan exited 0 and printed
+`diff secret/private-path scan passed`:
+
+```text
+set -e
+path_pattern="$(printf '/%s/|/%s/' Users home)"
+if git diff --text | rg -n "(${path_pattern}|-----BEGIN (RSA|OPENSSH|EC|PRIVATE)|github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9_]{20,}|Authorization[^\n]{0,20}Bearer[[:space:]]+[A-Za-z0-9._-]{20,})"; then exit 1; fi
+printf '%s\n' 'diff secret/private-path scan passed'
+```
+
+The two-module offline gate exited 0 and printed
+`offline experiment checks passed: 2 module(s)`:
+
+```text
+GOTOOLCHAIN=go1.26.8 bash scripts/check-offline-experiments.sh
+```
+
+The exact tested implementation source head is
+`cbab4d80d44ddbd44dc4226bafa8e626fe1c119d4` (`fix(g01): bind drain wire
+close and session auth`); this evidence append is a separate documentation-only
+commit. Rollback is recoverable with
+`git revert --no-edit cbab4d80d44ddbd44dc4226bafa8e626fe1c119d4`; revert this
+documentation append separately if needed. No live App/runner/canary evidence
+is claimed; the unresolved live G01 gate, independent exact-head Codex review,
+CI and merge remain coordinator-owned.
