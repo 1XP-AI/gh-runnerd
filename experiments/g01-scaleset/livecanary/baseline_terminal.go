@@ -135,7 +135,7 @@ func (s *pairedBaselineScope) terminalStepCall(stage string) error {
 		if !runtimePathPrefixSet {
 			return ErrQuarantine
 		}
-		capture := &baselineWireCapture{stage: stage, setID: s.setID, runtimePathPrefix: runtimePathPrefix, runtimePathPrefixSet: runtimePathPrefixSet, allowedHosts: baselineWireAllowedHosts(s.approval, s.captured.drainEndpointHost())}
+		capture := &baselineWireCapture{stage: stage, setID: s.setID, organization: s.approval.Organization, runtimePathPrefix: runtimePathPrefix, runtimePathPrefixSet: runtimePathPrefixSet, allowedHosts: baselineWireAllowedHosts(s.approval, s.captured.drainEndpointHost())}
 		ctx, cancel := context.WithTimeout(s.ctx, operationTimeout)
 		set, e := s.captured.GetScaleSet(capture.context(ctx), s.setID)
 		callErr = e
@@ -180,7 +180,7 @@ func (s *pairedBaselineScope) terminalStepCall(stage string) error {
 		if !runtimePathPrefixSet {
 			return ErrQuarantine
 		}
-		capture := &baselineWireCapture{stage: stage, setID: s.setID, runtimePathPrefix: runtimePathPrefix, runtimePathPrefixSet: runtimePathPrefixSet, allowedHosts: baselineWireAllowedHosts(s.approval, s.captured.drainEndpointHost())}
+		capture := &baselineWireCapture{stage: stage, setID: s.setID, organization: s.approval.Organization, runtimePathPrefix: runtimePathPrefix, runtimePathPrefixSet: runtimePathPrefixSet, allowedHosts: baselineWireAllowedHosts(s.approval, s.captured.drainEndpointHost())}
 		ctx, cancel := context.WithTimeout(s.ctx, operationTimeout)
 		callErr = s.captured.DeleteScaleSet(capture.context(ctx), s.setID)
 		cancel()

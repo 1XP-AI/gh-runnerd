@@ -260,7 +260,7 @@ func (d *Driver) drainSnapshotWithBinding(ctx context.Context, setID int, stage,
 	if err := d.effect(ctx, "observe-owned", nil, func(call context.Context) (Event, error) {
 		var err error
 		if setWire {
-			wire := &baselineWireCapture{stage: "set-observe", setID: setID, origin: expectedOrigin, runtimePathPrefix: expectedRuntimePathPrefix, runtimePathPrefixSet: expectedRuntimePathPrefix != "", allowedHosts: allowedHosts}
+			wire := &baselineWireCapture{stage: "set-observe", setID: setID, organization: d.Approval.Organization, origin: expectedOrigin, runtimePathPrefix: expectedRuntimePathPrefix, runtimePathPrefixSet: expectedRuntimePathPrefix != "", allowedHosts: allowedHosts}
 			set, err = setReader.drainGetScaleSet(call, setID, wire)
 			wireSet, status := wire.setFacts()
 			wireOrigin := wire.requestOrigin()
@@ -299,7 +299,7 @@ func (d *Driver) drainSnapshotWithBinding(ctx context.Context, setID int, stage,
 	if err := d.effect(ctx, "observe-runner", nil, func(call context.Context) (Event, error) {
 		var err error
 		if runnerWire {
-			wire := &baselineWireCapture{stage: "runner-observe", runnerName: d.Approval.workerName(), origin: origin, runtimePathPrefix: runtimePathPrefix, runtimePathPrefixSet: runtimePathPrefix != "", allowedHosts: allowedHosts}
+			wire := &baselineWireCapture{stage: "runner-observe", runnerName: d.Approval.workerName(), organization: d.Approval.Organization, origin: origin, runtimePathPrefix: runtimePathPrefix, runtimePathPrefixSet: runtimePathPrefix != "", allowedHosts: allowedHosts}
 			runner, err = runnerReader.drainFindRunner(call, d.Approval.workerName(), wire)
 			wireRunner, status := wire.runnerFacts()
 			wireOrigin := wire.requestOrigin()

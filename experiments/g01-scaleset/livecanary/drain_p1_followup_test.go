@@ -337,6 +337,181 @@ func TestBaselineRuntimePathPrefixMismatchStopsBeforeInner(t *testing.T) {
 	}
 }
 
+func TestMarkedRequestOpaqueStopsBeforeInner(t *testing.T) {
+	const (
+		origin = "https://api.example:443"
+		prefix = "/tenant/v2"
+	)
+	for _, tc := range []struct {
+		name   string
+		stage  string
+		method string
+		target string
+		body   string
+	}{
+		{
+			name:   "set snapshot",
+			stage:  "set-observe",
+			method: http.MethodGet,
+			target: "https://api.example/tenant/v2/_apis/runtime/runnerscalesets/7?api-version=6.0-preview",
+		},
+		{
+			name:   "runner snapshot",
+			stage:  "runner-observe",
+			method: http.MethodGet,
+			target: "https://api.example/tenant/v2/_apis/distributedtask/pools/0/agents?agentName=g01-test-worker-1&api-version=6.0-preview",
+		},
+		{
+			name:   "session open",
+			stage:  "session-open",
+			method: http.MethodPost,
+			target: "https://api.example/tenant/v2/_apis/runtime/runnerscalesets/7/sessions?api-version=6.0-preview",
+			body:   `{"sessionId":"00000000-0000-0000-0000-000000000000","ownerName":"g01-test"}`,
+		},
+		{
+			name:   "ACK",
+			stage:  "ack",
+			method: http.MethodDelete,
+			target: "https://api.example/tenant/v2/queue/41?proof=fixture",
+		},
+		{
+			name:   "acquisition",
+			stage:  "acquire",
+			method: http.MethodPost,
+			target: "https://api.example/tenant/v2/_apis/runtime/runnerscalesets/7/acquirejobs?api-version=6.0-preview",
+			body:   `[41]`,
+		},
+		{
+			name:   "JIT",
+			stage:  "jit",
+			method: http.MethodPost,
+			target: "https://api.example/_apis/runtime/runnerscalesets/7/generatejitconfig?api-version=6.0-preview",
+			body:   `{}`,
+		},
+		{
+			name:   "session close",
+			stage:  "terminal-session-close",
+			method: http.MethodDelete,
+			target: "https://api.example/tenant/v2/_apis/runtime/runnerscalesets/7/sessions/session?api-version=6.0-preview",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capture := &baselineWireCapture{
+				stage: tc.stage, setID: 7, organization: "fixture-org", owner: "g01-test", runnerName: "g01-test-worker-1", sessionID: "session",
+				queue: "https://api.example/tenant/v2/queue?proof=fixture", cursor: 41,
+				origin: origin, runtimePathPrefix: prefix, runtimePathPrefixSet: true, requestIDs: []int64{41}, allowedHosts: []string{"api.example"},
+			}
+			innerCalls := 0
+			transport := baselineRequestCaptureTransport{inner: drainRoundTripper(func(req *http.Request) (*http.Response, error) {
+				innerCalls++
+				return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}, nil
+			})}
+			req, err := http.NewRequestWithContext(capture.context(context.Background()), tc.method, tc.target, strings.NewReader(tc.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.URL.Opaque = "opaque-target"
+			if _, err := transport.RoundTrip(req); !errors.Is(err, ErrRemote) {
+				t.Fatalf("marked %s opaque URL error = %v, want remote rejection", tc.name, err)
+			}
+			if innerCalls != 0 {
+				t.Fatalf("marked %s opaque URL reached inner transport: calls=%d", tc.name, innerCalls)
+			}
+			if capture.requestObserved() {
+				t.Fatalf("marked %s opaque URL was marked observed", tc.name)
+			}
+		})
+	}
+}
+
+func TestMarkedPollOpaqueStopsBeforeInner(t *testing.T) {
+	const target = "https://fixture.invalid/queue?proof=fixture"
+	hook := newDrainPollHookWithOriginAndPrefix(target, "https://fixture.invalid:443", "/tenant/v2")
+	innerCalls := 0
+	hook.inner = drainRoundTripper(func(req *http.Request) (*http.Response, error) {
+		innerCalls++
+		return &http.Response{StatusCode: http.StatusAccepted, Body: http.NoBody, Request: req}, nil
+	})
+	req, err := http.NewRequestWithContext(hook.markPoll(context.Background()), http.MethodGet, target, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set(scaleset.HeaderScaleSetMaxCapacity, "1")
+	req.URL.Opaque = "opaque-target"
+	if _, err := hook.RoundTrip(req); !errors.Is(err, ErrQuarantine) {
+		t.Fatalf("marked poll opaque URL error = %v, want quarantine", err)
+	}
+	if innerCalls != 0 {
+		t.Fatalf("marked poll opaque URL reached inner transport: calls=%d", innerCalls)
+	}
+}
+
+func TestMarkedSnapshotRewriteAllowsOnlyRequiredBootstrap(t *testing.T) {
+	for _, stage := range []string{"set-observe", "runner-observe", "terminal-set"} {
+		for _, tc := range []struct {
+			name   string
+			method string
+			target string
+			allow  bool
+		}{
+			{name: "registration bootstrap", method: http.MethodPost, target: "https://api.example/orgs/fixture-org/actions/runners/registration-token", allow: true},
+			{name: "actions bootstrap", method: http.MethodPost, target: "https://api.example/actions/runner-registration", allow: true},
+			{name: "repository bootstrap rewrite", method: http.MethodPost, target: "https://api.example/repos/fixture/repo/actions/runners/registration-token"},
+			{name: "dispatch state change", method: http.MethodPost, target: "https://api.example/repos/fixture/repo/dispatches"},
+			{name: "session state change", method: http.MethodPost, target: "https://api.example/tenant/v2/_apis/runtime/runnerscalesets/7/sessions?api-version=6.0-preview"},
+			{name: "unrelated read", method: http.MethodGet, target: "https://api.example/repos/fixture/repo"},
+		} {
+			t.Run(stage+"/"+tc.name, func(t *testing.T) {
+				capture := &baselineWireCapture{stage: stage, setID: 7, organization: "fixture-org", origin: "https://api.example:443", runtimePathPrefix: "/tenant/v2", runtimePathPrefixSet: true, allowedHosts: []string{"api.example"}}
+				innerCalls := 0
+				transport := baselineRequestCaptureTransport{inner: drainRoundTripper(func(req *http.Request) (*http.Response, error) {
+					innerCalls++
+					return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}, nil
+				})}
+				req, err := http.NewRequestWithContext(capture.context(context.Background()), tc.method, tc.target, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = transport.RoundTrip(req)
+				if tc.allow {
+					if err != nil || innerCalls != 1 {
+						t.Fatalf("required snapshot bootstrap err=%v inner calls=%d, want one forwarded request", err, innerCalls)
+					}
+					if capture.requestObserved() {
+						t.Fatal("required bootstrap was counted as the snapshot")
+					}
+					return
+				}
+				if !errors.Is(err, ErrRemote) {
+					t.Fatalf("non-required snapshot rewrite error = %v, want remote rejection", err)
+				}
+				if innerCalls != 0 {
+					t.Fatalf("non-required snapshot rewrite reached inner transport: calls=%d", innerCalls)
+				}
+			})
+		}
+	}
+}
+
+func TestUnmarkedOpaqueRequestPreservesInnerForwarding(t *testing.T) {
+	innerCalls := 0
+	transport := baselineRequestCaptureTransport{inner: drainRoundTripper(func(req *http.Request) (*http.Response, error) {
+		innerCalls++
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}, nil
+	})}
+	req, err := http.NewRequest(http.MethodPost, "https://api.example/unmarked", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.URL.Opaque = "opaque-target"
+	if _, err := transport.RoundTrip(req); err != nil {
+		t.Fatalf("unmarked opaque request = %v, want forwarding", err)
+	}
+	if innerCalls != 1 {
+		t.Fatalf("unmarked opaque request inner calls = %d, want one", innerCalls)
+	}
+}
+
 func TestDrainListenerRejectsMarkedPollTargetMismatchBeforeInner(t *testing.T) {
 	const target = "https://fixture.invalid/queue?proof=fixture"
 	for _, tc := range []struct {

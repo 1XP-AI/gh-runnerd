@@ -351,7 +351,7 @@ type baselineRequestCaptureTransport struct{ inner http.RoundTripper }
 // physical HTTP Host header. The SDK normally leaves it empty; an explicitly
 // supplied value is accepted only when it equals the URL's canonical host.
 func baselineRequestHostMatchesURL(req *http.Request) bool {
-	return req != nil && req.URL != nil && (req.Host == "" || req.Host == req.URL.Host)
+	return req != nil && req.URL != nil && req.URL.Opaque == "" && (req.Host == "" || req.Host == req.URL.Host)
 }
 
 func (t baselineRequestCaptureTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -461,7 +461,10 @@ func (c *baselineWireCapture) captureRequest(req *http.Request) error {
 	}
 	if c.stage == "set-observe" || c.stage == "runner-observe" || strings.HasPrefix(c.stage, "terminal-set") {
 		if !snapshotRequestCandidate(req) {
-			return nil
+			if c.sessionOpenBootstrapTarget(req) {
+				return nil
+			}
+			return c.rejectRequest(req)
 		}
 		if !c.target(req) {
 			return c.rejectRequest(req)
