@@ -1786,3 +1786,88 @@ documentation-only commit immediately after it. Rollback is recoverable with
 append can be reverted separately if required. No live rollback was run, and
 the unresolved live G01 gate, exact-head Codex review, CI and merge remain
 coordinator-owned.
+
+### Exact-head follow-up: opaque marked URLs and snapshot bootstrap allowlist
+
+Date: 2026-09-13. This correction started from exact head
+`d58224fe9a6b20b45b61eeb839fd84642ec587a2` and addresses the fresh Codex P1
+findings [non-empty marked URL.Opaque forwarding](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3997312693)
+and [marked snapshot non-target rewrite](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3997312695).
+No review request, merge, Project/Issue/goal/status change, live App, runner,
+workflow, GitHub API, credential, cleanup or canary operation was performed.
+
+#### Red-first reproductions
+
+After adding the two behavioral regressions and before changing source, this
+focused command exited 1:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^(TestMarkedRequestOpaqueStopsBeforeInner|TestMarkedPollOpaqueStopsBeforeInner|TestMarkedSnapshotRewriteAllowsOnlyRequiredBootstrap|TestUnmarkedOpaqueRequestPreservesInnerForwarding)$' -count=1 -v -timeout=120s
+```
+
+The marked set/runner snapshot, session-open, ACK, acquisition, JIT,
+session-close and poll cases with non-empty `URL.Opaque` returned nil and
+reached the inner transport; the repository-token and dispatch snapshot
+rewrites also returned nil and reached the inner transport. The exact required
+bootstrap routes and unmarked opaque control passed. The regressions retain
+only fixed error categories and inner-call counters; no request body, token,
+URL, response error or private log is recorded.
+
+#### Minimal correction and green evidence
+
+The final marked request boundary now rejects every non-empty `URL.Opaque`
+before forwarding, covering both the baseline marked transport and the marked
+drain poll hook through the shared hierarchical-URL/Host check. Snapshot
+captures now allow non-candidate requests only when they match the existing
+exact approved registration-token or Actions runner-registration bootstrap
+allowlist; all other marked non-target requests, including state-changing or
+wrong-scope routes, reject before the inner transport. The production snapshot
+captures carry the approved organization needed to validate those bootstrap
+routes. Unmarked requests remain outside the marked check and retain prior
+forwarding behavior.
+
+The focused normal command exited 0 in 0.513s:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^(TestMarkedRequestOpaqueStopsBeforeInner|TestMarkedPollOpaqueStopsBeforeInner|TestMarkedSnapshotRewriteAllowsOnlyRequiredBootstrap|TestUnmarkedOpaqueRequestPreservesInnerForwarding)$' -count=1 -v -timeout=120s
+```
+
+The corresponding focused race command exited 0 in 1.542s with no race
+diagnostics. The complete `livecanary` package normal run exited 0 in 28.951s,
+and the complete race run exited 0 in 41.493s with no race diagnostics:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -run '^(TestMarkedRequestOpaqueStopsBeforeInner|TestMarkedPollOpaqueStopsBeforeInner|TestMarkedSnapshotRewriteAllowsOnlyRequiredBootstrap|TestUnmarkedOpaqueRequestPreservesInnerForwarding)$' -count=1 -v -timeout=120s
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -count=1 -timeout=360s
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -count=1 -timeout=420s
+```
+
+`GOWORK=off GOTOOLCHAIN=go1.26.8 go vet ./livecanary`,
+`GOTOOLCHAIN=go1.26.8 bash scripts/gofmt.sh check`, and `git diff --check`
+each exited 0. The repository offline gate exited 0 and printed
+`offline experiment checks passed: 2 module(s)`:
+
+```text
+GOTOOLCHAIN=go1.26.8 bash scripts/check-offline-experiments.sh
+```
+
+The final diff secret/private-path scan exited 0 and printed
+`diff secret/private-path scan passed`:
+
+```text
+set -e
+path_pattern="$(printf '/%s/|/%s/' Users home)"
+if git diff --text | rg -n "(${path_pattern}|-----BEGIN (RSA|OPENSSH|EC|PRIVATE)|github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9_]{20,}|Authorization[^\n]{0,20}Bearer[[:space:]]+[A-Za-z0-9._-]{20,})"; then exit 1; fi
+printf '%s\n' 'diff secret/private-path scan passed'
+```
+
+The exact tested implementation head is
+`bf45b498db8bd35150d0f75181336663ea4cb027` (`fix G01 marked opaque and snapshot boundaries`),
+and this evidence append is documentation-only. Rollback is recoverable with
+`git revert --no-edit bf45b498db8bd35150d0f75181336663ea4cb027`; this evidence
+append can be reverted separately if required. No live rollback was run, and
+the unresolved live G01 gate, exact-head Codex review, CI and merge remain
+coordinator-owned.
