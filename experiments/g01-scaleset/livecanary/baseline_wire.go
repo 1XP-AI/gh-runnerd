@@ -22,6 +22,7 @@ type baselineWireCapture struct {
 	stage         string
 	setID         int
 	organization  string
+	owner         string
 	runnerName    string
 	sessionID     string
 	queue         string // private, captured from the exact session; never journaled
@@ -65,6 +66,9 @@ func (c *baselineWireCapture) target(r *http.Request) bool {
 	}
 	suffix := "/runnerscalesets/" + strconv.Itoa(c.setID) + "/"
 	if c.stage == "set-observe" || c.stage == "terminal-set" || c.stage == "terminal-set-recheck" || c.stage == "terminal-set-absence" || c.stage == "terminal-set-delete" {
+		if !c.snapshotOriginAllowed(r) {
+			return false
+		}
 		method := "GET"
 		if c.stage == "terminal-set-delete" {
 			method = "DELETE"
@@ -81,7 +85,7 @@ func (c *baselineWireCapture) target(r *http.Request) bool {
 		}
 		suffix += "sessions"
 	} else if c.stage == "runner-observe" {
-		return r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/_apis/distributedtask/pools/0/agents") && baselineExactQuery(r.URL.RawQuery, map[string]string{"agentName": c.runnerName, "api-version": "6.0-preview"})
+		return c.snapshotOriginAllowed(r) && r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/_apis/distributedtask/pools/0/agents") && baselineExactQuery(r.URL.RawQuery, map[string]string{"agentName": c.runnerName, "api-version": "6.0-preview"})
 	} else if c.stage == "acquire" {
 		origin, ok := baselineRequestOrigin(r.URL)
 		if c.origin == "" || !ok || origin != c.origin || len(c.allowedHosts) == 0 || !baselineOriginAllowed(r.URL, c.allowedHosts) {
@@ -96,8 +100,26 @@ func (c *baselineWireCapture) target(r *http.Request) bool {
 	return r.Method == "POST" && strings.HasSuffix(r.URL.Path, suffix) && baselineExactAPIVersionQuery(r.URL.RawQuery)
 }
 
-func baselineAcquireRequestCandidate(r *http.Request) bool {
-	return r != nil && r.URL != nil && (strings.Contains(r.URL.Path, "/_apis/runtime/runnerscalesets/") || strings.HasSuffix(r.URL.Path, "/acquirejobs"))
+func (c *baselineWireCapture) snapshotOriginAllowed(r *http.Request) bool {
+	if c == nil || r == nil || r.URL == nil || len(c.allowedHosts) == 0 || !baselineOriginAllowed(r.URL, c.allowedHosts) {
+		return false
+	}
+	origin, ok := baselineRequestOrigin(r.URL)
+	if !ok {
+		return false
+	}
+	return c.origin == "" || c.origin == origin
+}
+
+func snapshotRequestCandidate(r *http.Request) bool {
+	if r == nil || r.URL == nil {
+		return false
+	}
+	if r.Method == http.MethodGet {
+		return true
+	}
+	path := r.URL.Path
+	return strings.Contains(path, "/runnerscalesets/") || strings.HasSuffix(path, "/agents")
 }
 
 func baselineExactQuery(rawQuery string, expected map[string]string) bool {
@@ -235,6 +257,13 @@ func (c *baselineWireCapture) captureRequest(req *http.Request) error {
 			}
 			return c.rejectRequest(req)
 		}
+		data, err := readBaselineRequestBody(req.Body)
+		req.Body = nil
+		if err != nil || !validBaselineSessionOpenBody(data, c.owner) {
+			clear(data)
+			return c.rejectRequest(req)
+		}
+		installBaselineRequestBody(req, data)
 		origin, ok := baselineRequestOrigin(req.URL)
 		if !ok {
 			return c.rejectRequest(req)
@@ -247,14 +276,39 @@ func (c *baselineWireCapture) captureRequest(req *http.Request) error {
 		c.mu.Unlock()
 		return nil
 	}
-	if c.stage != "acquire" || len(c.requestIDs) == 0 {
-		return nil
-	}
-	if !c.target(req) {
-		if baselineAcquireRequestCandidate(req) {
+	if c.stage == "set-observe" || c.stage == "runner-observe" {
+		if !snapshotRequestCandidate(req) {
+			return nil
+		}
+		if !c.target(req) {
+			return c.rejectRequest(req)
+		}
+		origin, ok := baselineRequestOrigin(req.URL)
+		if !ok {
+			return c.rejectRequest(req)
+		}
+		c.mu.Lock()
+		c.requestCount++
+		if c.origin == "" {
+			c.origin = origin
+		} else if c.origin != origin {
+			c.invalid = true
+		}
+		valid := c.requestCount == 1 && !c.invalid
+		c.mu.Unlock()
+		if !valid {
 			return c.rejectRequest(req)
 		}
 		return nil
+	}
+	if c.stage != "acquire" {
+		return nil
+	}
+	if len(c.requestIDs) == 0 {
+		return c.rejectRequest(req)
+	}
+	if !c.target(req) {
+		return c.rejectRequest(req)
 	}
 	c.mu.Lock()
 	c.requestCount++
@@ -286,10 +340,28 @@ func (c *baselineWireCapture) captureRequest(req *http.Request) error {
 	}
 	// Keep the one bounded copy only as the request stream the pinned SDK must
 	// forward. The capture itself retains no body bytes or decoded payload.
-	replacement := &baselineRequestBody{reader: bytes.NewReader(data), data: data}
-	req.Body = replacement
-	req.ContentLength = int64(len(data))
+	installBaselineRequestBody(req, data)
 	return nil
+}
+
+func validBaselineSessionOpenBody(data []byte, owner string) bool {
+	if owner == "" {
+		return false
+	}
+	var body struct {
+		SessionID *string `json:"sessionId"`
+		Owner     *string `json:"ownerName"`
+	}
+	return DecodeStrict(data, &body) == nil && body.SessionID != nil && *body.SessionID == "00000000-0000-0000-0000-000000000000" && body.Owner != nil && *body.Owner == owner
+}
+
+func installBaselineRequestBody(req *http.Request, data []byte) {
+	if req == nil {
+		clear(data)
+		return
+	}
+	req.Body = &baselineRequestBody{reader: bytes.NewReader(data), data: data}
+	req.ContentLength = int64(len(data))
 }
 
 func (c *baselineWireCapture) rejectRequest(req *http.Request) error {

@@ -368,6 +368,74 @@ func TestDriverDrainThroughPinnedSDKAndPollHook(t *testing.T) {
 	}
 }
 
+func TestPinnedSDKDrainRejectsSnapshotOriginMismatchBeforeEffects(t *testing.T) {
+	a := approval()
+	a.Phases = append(a.Phases, "drain")
+	var snapshotRequests atomic.Int32
+	fixture, base, _, _ := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{
+		wrongCloseOrigin:  false,
+		extraActionsHosts: []string{"other.example.com"},
+		mutateRequest: func(req *http.Request) {
+			if req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/runnerscalesets/7") && snapshotRequests.Add(1) == 2 {
+				req.URL.Host = "other.example.com"
+				req.URL.RawPath = ""
+			}
+		},
+	})
+	j := &memoryJournal{}
+	for _, event := range drainReplayPrefix()[:3] {
+		if err := j.Append(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d := &Driver{Approval: a, Journal: j, API: fixtureSDK{base}}
+	runErr := d.Run(context.Background(), "drain")
+	if !errors.Is(runErr, ErrQuarantine) {
+		t.Fatalf("snapshot origin mismatch = %v, want quarantine", runErr)
+	}
+	if got := fixture.snapshotReads.Load(); got != 1 {
+		t.Fatalf("mismatched after snapshot reached fixture: reads=%d, want before only", got)
+	}
+	for _, event := range j.Events() {
+		if event.Kind == "observation" && event.Operation == "drain" && event.Drain != nil && event.Drain.Outcome == drainOutcomeObserved {
+			t.Fatal("mismatched snapshot origin produced an observed drain")
+		}
+	}
+}
+
+func TestPinnedSDKDrainRejectsRunnerSnapshotOriginMismatchBeforeListener(t *testing.T) {
+	a := approval()
+	a.Phases = append(a.Phases, "drain")
+	var runnerRequests atomic.Int32
+	fixture, base, _, _ := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{
+		extraActionsHosts: []string{"other.example.com"},
+		mutateRequest: func(req *http.Request) {
+			if req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/agents") && runnerRequests.Add(1) == 1 {
+				req.URL.Host = "other.example.com"
+				req.URL.RawPath = ""
+			}
+		},
+	})
+	j := &memoryJournal{}
+	for _, event := range drainReplayPrefix()[:3] {
+		if err := j.Append(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d := &Driver{Approval: a, Journal: j, API: fixtureSDK{base}}
+	if err := d.Run(context.Background(), "drain"); !errors.Is(err, ErrQuarantine) {
+		t.Fatalf("runner snapshot origin mismatch = %v, want quarantine", err)
+	}
+	if got := fixture.polls.Load(); got != 0 {
+		t.Fatalf("mismatched runner snapshot reached listener effects: polls=%d", got)
+	}
+	for _, event := range j.Events() {
+		if event.Kind == "observation" && event.Operation == "drain" && event.Drain != nil && event.Drain.Outcome == drainOutcomeObserved {
+			t.Fatal("mismatched runner snapshot origin produced an observed drain")
+		}
+	}
+}
+
 func TestPinnedSDKDrainRejectsAmbiguousEmbeddedJobIdentityBeforeEffects(t *testing.T) {
 	a := approval()
 	for _, test := range []struct {
@@ -749,6 +817,36 @@ func TestPinnedSDKDrainRejectsAmbiguousSessionResponse(t *testing.T) {
 	}
 }
 
+func TestPinnedSDKDrainRejectsAmbiguousSessionRequestBeforeFixture(t *testing.T) {
+	a := approval()
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "wrong owner", body: `{"ownerName":"foreign-owner"}`},
+		{name: "case-fold duplicate owner", body: `{"ownerName":"` + a.setName() + `","OwnerName":"foreign-owner"}`},
+		{name: "unknown field", body: `{"ownerName":"` + a.setName() + `","unexpected":1}`},
+		{name: "malformed", body: `{"ownerName":"` + a.setName() + `"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture, _, session, _ := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{
+				allowOpenError: true,
+				mutateRequest: func(req *http.Request) {
+					if req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/sessions") {
+						replaceSDKRequestBody(tc.body)(req)
+					}
+				},
+			})
+			if fixture.openErr == nil || session != nil {
+				t.Fatalf("ambiguous session-open request accepted: err=%v session=%v", fixture.openErr, session)
+			}
+			if got := fixture.sessionOpens.Load(); got != 0 {
+				t.Fatalf("ambiguous session-open request reached fixture: opens=%d", got)
+			}
+		})
+	}
+}
+
 func TestPinnedSDKDrainRequiresApprovedHTTPSQueueHost(t *testing.T) {
 	a := approval()
 	for _, tc := range []struct {
@@ -866,6 +964,7 @@ type pinnedDrainFixture struct {
 	acks           atomic.Int32
 	acquires       atomic.Int32
 	closeRequests  atomic.Int32
+	sessionOpens   atomic.Int32
 	verifyCalls    atomic.Int32
 	snapshotReads  atomic.Int32
 	mu             sync.Mutex
@@ -901,6 +1000,7 @@ func newPinnedDrainSessionOptions(t *testing.T, a Approval, body string, options
 				"token": "eyJhbGciOiJub25lIn0." + base64.RawURLEncoding.EncodeToString(claims) + ".",
 			})
 		case strings.HasSuffix(r.URL.Path, "/sessions") && r.Method == http.MethodPost:
+			fixture.sessionOpens.Add(1)
 			w.Header().Set("Content-Type", "application/json")
 			if options.sessionBody != "" {
 				_, _ = io.WriteString(w, strings.ReplaceAll(options.sessionBody, "QUEUE_URL", fixture.server.URL+"/queue"))
@@ -1011,11 +1111,20 @@ func newPinnedDrainSessionOptions(t *testing.T, a Approval, body string, options
 		transport := fixtureTransport.Clone()
 		transport.Proxy = nil
 		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
-			if address != fixture.server.Listener.Addr().String() && (!options.wrongCloseOrigin || address != "other.example.com:443") {
+			aliasAllowed := options.wrongCloseOrigin && address == "other.example.com:443"
+			if !aliasAllowed {
+				for _, host := range options.extraActionsHosts {
+					if address == host+":443" {
+						aliasAllowed = true
+						break
+					}
+				}
+			}
+			if address != fixture.server.Listener.Addr().String() && !aliasAllowed {
 				return nil, errors.New("non-fixture address denied")
 			}
 			dialAddress := address
-			if address == "other.example.com:443" {
+			if aliasAllowed {
 				dialAddress = fixture.server.Listener.Addr().String()
 			}
 			return (&net.Dialer{}).DialContext(ctx, network, dialAddress)

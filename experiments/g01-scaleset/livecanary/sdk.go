@@ -390,7 +390,7 @@ func (a *SDKAPI) OpenDrainSession(c context.Context, id int, owner string, hook 
 	if configured == nil || configured.client == nil {
 		return nil, ErrRemote
 	}
-	wire := &baselineWireCapture{stage: "session-open", setID: id, organization: configured.approval.Organization, allowedHosts: baselineWireAllowedHosts(configured.approval, configured.drainEndpointHost())}
+	wire := &baselineWireCapture{stage: "session-open", setID: id, organization: configured.approval.Organization, owner: owner, allowedHosts: baselineWireAllowedHosts(configured.approval, configured.drainEndpointHost())}
 	session, err := configured.client.MessageSessionClient(wire.context(c), id, owner, configured.options...)
 	if err != nil {
 		return nil, ErrRemote

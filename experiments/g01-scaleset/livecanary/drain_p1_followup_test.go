@@ -56,6 +56,8 @@ func TestBaselineAcquireTargetMismatchStopsBeforeInner(t *testing.T) {
 		"https://api.example/_apis/runtime/runnerscalesets/7/acquirejobs?api-version=6.0-preview;extra=1",
 		"https://api.example/_apis/runtime/runnerscalesets/7/acquirejobs?api-version=6.0-preview&api-version=6.0-preview",
 		"https://api.example/_apis/runtime/runnerscalesets/7/wrong?api-version=6.0-preview",
+		"https://api.example/_apis/runtime/RunnerScaleSets/7/AcquireJobs?api-version=6.0-preview",
+		"https://api.example/_apis/runtime/runnersets/7/acquire?api-version=6.0-preview",
 	} {
 		t.Run(target, func(t *testing.T) {
 			capture := &baselineWireCapture{
@@ -85,6 +87,33 @@ func TestBaselineAcquireTargetMismatchStopsBeforeInner(t *testing.T) {
 				t.Fatal("mismatched acquisition target was marked observed")
 			}
 		})
+	}
+}
+
+func TestBaselineMarkedAcquireWithoutIDsStopsBeforeInner(t *testing.T) {
+	capture := &baselineWireCapture{
+		stage:        "acquire",
+		setID:        7,
+		origin:       "https://api.example:443",
+		allowedHosts: []string{"api.example"},
+	}
+	innerCalls := 0
+	transport := baselineRequestCaptureTransport{inner: drainRoundTripper(func(req *http.Request) (*http.Response, error) {
+		innerCalls++
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}, nil
+	})}
+	req, err := http.NewRequestWithContext(capture.context(context.Background()), http.MethodPost, "https://api.example/_apis/runtime/runnerscalesets/7/acquirejobs?api-version=6.0-preview", strings.NewReader("[]"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transport.RoundTrip(req); !errors.Is(err, ErrRemote) {
+		t.Fatalf("marked acquisition without IDs error = %v, want remote rejection", err)
+	}
+	if innerCalls != 0 {
+		t.Fatalf("marked acquisition without IDs reached inner transport: calls=%d", innerCalls)
+	}
+	if capture.requestObserved() {
+		t.Fatal("marked acquisition without IDs was marked observed")
 	}
 }
 
@@ -120,13 +149,17 @@ func TestBaselineSessionOpenTargetMismatchStopsBeforeInner(t *testing.T) {
 			if strings.Contains(tc.name, "organization collision") {
 				organization = "runnerscalesets"
 			}
-			capture := &baselineWireCapture{stage: "session-open", setID: 7, organization: organization, allowedHosts: []string{"api.example"}}
+			capture := &baselineWireCapture{stage: "session-open", setID: 7, organization: organization, owner: "g01-test", allowedHosts: []string{"api.example"}}
 			innerCalls := 0
 			transport := baselineRequestCaptureTransport{inner: drainRoundTripper(func(req *http.Request) (*http.Response, error) {
 				innerCalls++
 				return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}, nil
 			})}
-			req, err := http.NewRequestWithContext(capture.context(context.Background()), tc.method, tc.target, strings.NewReader("{}"))
+			body := "{}"
+			if tc.name == "valid session-open" {
+				body = `{"sessionId":"00000000-0000-0000-0000-000000000000","ownerName":"g01-test"}`
+			}
+			req, err := http.NewRequestWithContext(capture.context(context.Background()), tc.method, tc.target, strings.NewReader(body))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -148,6 +181,85 @@ func TestBaselineSessionOpenTargetMismatchStopsBeforeInner(t *testing.T) {
 			}
 			if innerCalls != 1 {
 				t.Fatalf("valid or bootstrap request inner calls = %d, want one", innerCalls)
+			}
+		})
+	}
+}
+
+func TestBaselineSessionOpenBodyMustMatchOwnerBeforeInner(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want bool
+	}{
+		{name: "approved owner", body: `{"sessionId":"00000000-0000-0000-0000-000000000000","ownerName":"g01-test"}`, want: true},
+		{name: "missing session id", body: `{"ownerName":"g01-test"}`},
+		{name: "missing owner", body: `{}`},
+		{name: "wrong owner", body: `{"ownerName":"foreign-owner"}`},
+		{name: "case-fold duplicate owner", body: `{"ownerName":"g01-test","OwnerName":"foreign-owner"}`},
+		{name: "unknown field", body: `{"ownerName":"g01-test","unexpected":1}`},
+		{name: "malformed", body: `{"ownerName":"g01-test"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capture := &baselineWireCapture{stage: "session-open", setID: 7, owner: "g01-test", organization: "fixture-org", allowedHosts: []string{"api.example"}}
+			innerCalls := 0
+			transport := baselineRequestCaptureTransport{inner: drainRoundTripper(func(req *http.Request) (*http.Response, error) {
+				innerCalls++
+				return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}, nil
+			})}
+			req, err := http.NewRequestWithContext(capture.context(context.Background()), http.MethodPost, "https://api.example/_apis/runtime/runnerscalesets/7/sessions?api-version=6.0-preview", strings.NewReader(tc.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = transport.RoundTrip(req)
+			if tc.want {
+				if err != nil || innerCalls != 1 {
+					t.Fatalf("approved session-open body err=%v inner calls=%d, want one forwarded request", err, innerCalls)
+				}
+				return
+			}
+			if !errors.Is(err, ErrRemote) {
+				t.Fatalf("ambiguous session-open body error = %v, want remote rejection", err)
+			}
+			if innerCalls != 0 {
+				t.Fatalf("ambiguous session-open body reached inner transport: calls=%d", innerCalls)
+			}
+		})
+	}
+}
+
+func TestBaselineSnapshotRequestsRequireExactOriginBeforeInner(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		stage string
+		path  string
+	}{
+		{name: "scale-set wrong origin", stage: "set-observe", path: "/tenant/v2/_apis/runtime/runnerscalesets/7"},
+		{name: "runner wrong origin", stage: "runner-observe", path: "/tenant/v2/_apis/distributedtask/pools/0/agents"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capture := &baselineWireCapture{stage: tc.stage, setID: 7, runnerName: "g01-test-worker-1", origin: "https://api.example:443", allowedHosts: []string{"api.example", "other.example"}}
+			innerCalls := 0
+			transport := baselineRequestCaptureTransport{inner: drainRoundTripper(func(req *http.Request) (*http.Response, error) {
+				innerCalls++
+				return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}, nil
+			})}
+			query := "api-version=6.0-preview"
+			if tc.stage == "runner-observe" {
+				query = "agentName=g01-test-worker-1&api-version=6.0-preview"
+			}
+			method := http.MethodGet
+			target := "https://other.example" + tc.path + "?" + query
+			req, err := http.NewRequestWithContext(capture.context(context.Background()), method, target, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = transport.RoundTrip(req)
+			if !errors.Is(err, ErrRemote) {
+				t.Fatalf("%s error = %v, want remote rejection", tc.name, err)
+			}
+			if innerCalls != 0 {
+				t.Fatalf("%s reached inner transport: calls=%d", tc.name, innerCalls)
 			}
 		})
 	}

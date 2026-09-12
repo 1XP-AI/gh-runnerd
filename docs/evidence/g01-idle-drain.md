@@ -244,6 +244,125 @@ client-side only, `server_receipt` is `unproven`, the real high-level pinned
 listener is retained, the hook is bounded to one old and one next poll, and no
 pre-provision, recovery, replay, `RemoveRunner` or live operation was added.
 
+## Exact-head P1 follow-up: marked boundaries and runtime-origin binding
+
+Date: 2026-09-13. This section records the current exact-head follow-up against
+starting snapshot `6357865735034ff326401c9d535afe5d07ba3433`. The independent
+finding URLs are [acquisition mismatch pre-forwarding](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3976535985),
+[Scale Set origin binding](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3976535994),
+[session-open body ownership](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3976536000),
+and [durable finding evidence](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3976536008).
+The durable-evidence finding specifically named the two preceding exact-head
+findings, so their URLs are retained here as well: [acquisition origin](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3976171401)
+and [session-open route binding](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3976171403).
+
+### Red-first reproductions
+
+After the boundary tests were added and before the corresponding source
+corrections, this focused command exited 1:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^(TestBaselineAcquireTargetMismatchStopsBeforeInner|TestBaselineSessionOpenBodyMustMatchOwnerBeforeInner|TestBaselineSnapshotRequestsRequireExactOriginBeforeInner)$' -count=1 -v -timeout=60s
+```
+
+The current-head red result was meaningful: the case-folded and wrong-route
+acquisition mutations, every invalid/ambiguous session-open body, and the
+wrong-origin Scale Set and runner requests reached the inner transport instead
+of being rejected. The test retained only counters and fixed error outcomes;
+no request body, token, URL, response error, or private log was recorded.
+
+The pinned-SDK body regression was independently run before the body fix:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^TestPinnedSDKDrainRejectsAmbiguousSessionRequestBeforeFixture$' -count=1 -v -timeout=180s
+```
+
+It exited 1 because all four mutated bodies (wrong owner, case-fold duplicate,
+unknown field, and malformed JSON) were accepted and reached the fixture. The
+pinned Scale Set origin regression was also run before its source fix:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^TestPinnedSDKDrainRejectsSnapshotOriginMismatchBeforeEffects$' -count=1 -v -timeout=180s
+```
+
+It exited 1 because the second snapshot on the other runtime origin reached the
+fixture/listener path. The direct boundary red test above also covered the
+runner-origin mismatch; the pinned runner regression was added after that red
+reproduction and then verified against the pinned SDK.
+
+### Corrections and resolution evidence
+
+Marked acquisition captures now reject every request unless the exact Actions
+route, method, query, approved HTTPS origin and one expected request-ID set are
+present. A marked acquisition with no IDs is itself quarantined, and there is
+no acquisition bootstrap exception; case-folded route spellings, wrong route
+families, duplicate/extra query pairs and second requests stop before the inner
+transport.
+
+Marked session-open POSTs are decoded with strict unknown-field and duplicate-key
+handling. The approved pinned SDK v0.4.0 request must contain the all-zero
+session ID and an exact `ownerName` equal to the approved owner; absent, wrong,
+case-folded, duplicate, unknown or malformed bodies are rejected before
+forwarding. A rejected body never captures an origin or session identity, so a
+later close cannot claim a safe identity; the pinned fixture counter proves the
+ambiguous request does not reach the fixture.
+
+Scale Set and runner snapshot captures now require an approved HTTPS runtime
+origin. The before Scale Set request learns one exact canonical origin; the
+before runner, after Scale Set and after runner observations all require that
+same origin. `drainSnapshotWithOrigin` quarantines incomplete wire-reader pairs,
+missing endpoint host allowlists, status/fact mismatches and any changed origin.
+The production `SDKAPI` implements both wire readers and the endpoint-host
+reader; the no-wire branch remains only for pre-existing synthetic API tests and
+does not claim a runtime origin or serve as pinned-SDK evidence.
+
+The focused green command after the corrections exited 0:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^(TestBaselineAcquireTargetIsActionsOnly|TestBaselineAcquireTargetMismatchStopsBeforeInner|TestBaselineMarkedAcquireWithoutIDsStopsBeforeInner|TestBaselineSessionOpenTargetMismatchStopsBeforeInner|TestBaselineSessionOpenBodyMustMatchOwnerBeforeInner|TestBaselineSnapshotRequestsRequireExactOriginBeforeInner|TestBaselineAcquireTargetRequiresCapturedSessionOrigin|TestBaselineAcquireOriginMismatchStopsBeforeInner|TestBaselineSessionCloseTargetRequiresExactOrigin|TestPinnedSDKDrainRejectsAmbiguousSessionRequestBeforeFixture|TestPinnedSDKDrainRejectsSnapshotOriginMismatchBeforeEffects|TestPinnedSDKDrainRejectsRunnerSnapshotOriginMismatchBeforeListener|TestDriverDrainThroughPinnedSDKAndPollHook|TestPinnedSDKDrainAcceptsUnrelatedRunnerMetadata|TestPinnedSDKDrainSnapshotsRequireStrictWireFacts)$' -count=1 -timeout=240s
+```
+
+The command passed in 0.427s. The same expression with `go test -race` also
+passed with no race diagnostics. The runner-origin pinned test specifically
+observed zero listener polls, while the Scale Set-origin test observed exactly
+one fixture snapshot read and no observed drain.
+
+The required full package gates then passed:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -count=1 -timeout=300s
+```
+
+This passed in 27.859s.
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -count=1 -timeout=300s
+```
+
+This passed in 39.211s with no race diagnostics. `GOWORK=off
+GOTOOLCHAIN=go1.26.8 go vet ./livecanary`, `gofmt -d` over the seven touched
+Go files, and `git diff --check` all exited 0.
+
+### Finding matrix and rollback
+
+| Finding | Reproduction and resolution | Rollback evidence |
+|---|---|---|
+| [r3976535985](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3976535985) acquisition mismatch | Red command above; exact marked acquisition/no-ID tests now reject before inner transport. | Revert this candidate source/test/evidence commit as one unit; no live rollback was run. |
+| [r3976535994](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3976535994) Scale Set origin | Red command above plus pinned second-origin test; before/after Scale Set and runner snapshots now share one exact origin. | The pinned wrong-origin test quarantines before the second fixture snapshot; focused revert only. |
+| [r3976536000](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3976536000) session-open body | Pinned body red command above; strict owner/body validation and zero fixture opens now pass. | Ambiguity retains no close identity; focused revert only, with no live close/cleanup. |
+| [r3976536008](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3976536008) durable evidence | This section records all four current URLs, the two prior URLs named by the finding, red/green results, resolution and rollback scope. | Documentation is included in the same candidate commit and can be reverted with it. |
+| Independently reproduced runner-origin gap | Direct runner wrong-origin red case and pinned `TestPinnedSDKDrainRejectsRunnerSnapshotOriginMismatchBeforeListener` green regression; no separate review URL was supplied. | Runner mismatch quarantines before listener effects; focused revert only. |
+
+No live GitHub App, runner, workflow, Docker/Lima, Keychain, launchd, network
+resource, cleanup or rollback operation was performed. The live G01 gate,
+independent exact-head Codex review and CI remain coordinator-owned.
+
 Verified locally with the pinned `github.com/actions/scaleset v0.4.0` module:
 
 ```text

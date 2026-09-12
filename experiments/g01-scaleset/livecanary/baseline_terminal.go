@@ -131,7 +131,7 @@ func (s *pairedBaselineScope) terminalStepCall(stage string) error {
 		r.Terminal.Roster = &observation
 		known = e == nil && state.rosterMatches(&observation, func(ref controllerRecordRef) *Event { return s.event(workerRef(ref)) })
 	case stage == "terminal-set" || stage == "terminal-set-recheck" || stage == "terminal-set-absence":
-		capture := &baselineWireCapture{stage: stage, setID: s.setID}
+		capture := &baselineWireCapture{stage: stage, setID: s.setID, allowedHosts: baselineWireAllowedHosts(s.approval, s.captured.drainEndpointHost())}
 		ctx, cancel := context.WithTimeout(s.ctx, operationTimeout)
 		set, e := s.captured.GetScaleSet(capture.context(ctx), s.setID)
 		callErr = e
@@ -171,7 +171,7 @@ func (s *pairedBaselineScope) terminalStepCall(stage string) error {
 		}
 		known = e == nil && r.Terminal.Deletion != nil && receipt.AbsenceResult != nil
 	case stage == "terminal-set-delete":
-		capture := &baselineWireCapture{stage: stage, setID: s.setID}
+		capture := &baselineWireCapture{stage: stage, setID: s.setID, allowedHosts: baselineWireAllowedHosts(s.approval, s.captured.drainEndpointHost())}
 		ctx, cancel := context.WithTimeout(s.ctx, operationTimeout)
 		callErr = s.captured.DeleteScaleSet(capture.context(ctx), s.setID)
 		cancel()

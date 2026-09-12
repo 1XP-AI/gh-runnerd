@@ -195,18 +195,37 @@ func (c *journaledDrainClient) AcquireJobs(ctx context.Context, ids []int64) ([]
 }
 
 func (d *Driver) drainSnapshot(ctx context.Context, setID int, stage string) (drainSnapshot, error) {
+	snapshot, _, err := d.drainSnapshotWithOrigin(ctx, setID, stage, "")
+	return snapshot, err
+}
+
+func (d *Driver) drainSnapshotWithOrigin(ctx context.Context, setID int, stage, expectedOrigin string) (drainSnapshot, string, error) {
 	var snapshot drainSnapshot
 	var set *scaleset.RunnerScaleSet
+	setReader, setWire := d.API.(drainScaleSetWireReader)
+	runnerReader, runnerWire := d.API.(drainRunnerWireReader)
+	if setWire != runnerWire || (expectedOrigin != "" && !setWire) {
+		return drainSnapshot{}, "", ErrQuarantine
+	}
+	origin := expectedOrigin
+	allowedHosts := []string(nil)
+	if reader, ok := d.API.(drainEndpointHostReader); ok {
+		allowedHosts = baselineWireAllowedHosts(d.Approval, reader.drainEndpointHost())
+	}
 	if err := d.effect(ctx, "observe-owned", nil, func(call context.Context) (Event, error) {
 		var err error
-		if reader, ok := d.API.(drainScaleSetWireReader); ok {
-			wire := &baselineWireCapture{stage: "set-observe", setID: setID}
-			set, err = reader.drainGetScaleSet(call, setID, wire)
+		if setWire {
+			wire := &baselineWireCapture{stage: "set-observe", setID: setID, origin: expectedOrigin, allowedHosts: allowedHosts}
+			set, err = setReader.drainGetScaleSet(call, setID, wire)
 			wireSet, status := wire.setFacts()
-			if err != nil || !wire.observed() || status != 200 || !wireSet.eligibleForDrain(d.Approval, setID) || !wireSet.matches(set) {
-				return Event{}, ErrRemote
+			wireOrigin := wire.requestOrigin()
+			if err != nil || !wire.observed() || status != 200 || wireOrigin == "" || (origin != "" && wireOrigin != origin) || !wireSet.eligibleForDrain(d.Approval, setID) || !wireSet.matches(set) {
+				return Event{}, ErrQuarantine
 			}
+			origin = wireOrigin
 		} else {
+			// Synthetic API fakes used by state-machine tests have no physical
+			// request origin. Production SDKAPI always takes the wire branch.
 			set, err = d.API.GetScaleSet(call, setID)
 		}
 		if err != nil || set == nil || set.ID != setID || set.Name != d.Approval.setName() || set.RunnerGroupID != d.Approval.RunnerGroupID || !set.RunnerSetting.DisableUpdate {
@@ -227,19 +246,22 @@ func (d *Driver) drainSnapshot(ctx context.Context, setID int, stage string) (dr
 		snapshot.StatsKnown = true
 		return Event{ID: set.ID}, nil
 	}); err != nil {
-		return drainSnapshot{}, err
+		return drainSnapshot{}, "", err
 	}
 	var runner *scaleset.RunnerReference
 	if err := d.effect(ctx, "observe-runner", nil, func(call context.Context) (Event, error) {
 		var err error
-		if reader, ok := d.API.(drainRunnerWireReader); ok {
-			wire := &baselineWireCapture{stage: "runner-observe", runnerName: d.Approval.workerName()}
-			runner, err = reader.drainFindRunner(call, d.Approval.workerName(), wire)
+		if runnerWire {
+			wire := &baselineWireCapture{stage: "runner-observe", runnerName: d.Approval.workerName(), origin: origin, allowedHosts: allowedHosts}
+			runner, err = runnerReader.drainFindRunner(call, d.Approval.workerName(), wire)
 			wireRunner, status := wire.runnerFacts()
-			if err != nil || !wire.observed() || status != http.StatusOK || !wireRunner.matches(runner) {
+			wireOrigin := wire.requestOrigin()
+			if err != nil || !wire.observed() || status != http.StatusOK || origin == "" || wireOrigin != origin || !wireRunner.matches(runner) {
 				return Event{}, ErrQuarantine
 			}
 		} else {
+			// Synthetic API fakes used by state-machine tests have no physical
+			// request origin. Production SDKAPI always takes the wire branch.
 			runner, err = d.API.FindRunner(call, d.Approval.workerName())
 		}
 		if err != nil {
@@ -254,10 +276,10 @@ func (d *Driver) drainSnapshot(ctx context.Context, setID int, stage string) (dr
 		snapshot.Runner = &drainRunnerIdentity{ID: runner.ID, Name: runner.Name, ScaleSetID: runner.RunnerScaleSetID}
 		return Event{ID: runner.ID, DrainSnapshot: &snapshot, DrainSnapshotStage: stage}, nil
 	}); err != nil {
-		return drainSnapshot{}, err
+		return drainSnapshot{}, "", err
 	}
 	_ = stage // Stage is retained by the caller's before/after final payload.
-	return snapshot, nil
+	return snapshot, origin, nil
 }
 
 func validDrainIdlePrerequisite(s drainSnapshot) bool {
@@ -296,7 +318,7 @@ func (d *Driver) drain(ctx context.Context, setID int) error {
 		return ErrQuarantine
 	}
 	phaseSequence := phaseState.drainPhaseSequence
-	before, err := d.drainSnapshot(ctx, setID, "before")
+	before, origin, err := d.drainSnapshotWithOrigin(ctx, setID, "before", "")
 	if err != nil {
 		if markerErr := d.recordDrainMarker(drainMarkerFor(ctx, err)); markerErr != nil {
 			return markerErr
@@ -357,7 +379,7 @@ func (d *Driver) drain(ctx context.Context, setID int) error {
 		if markerErr := d.recordDrainMarker(drainMarkerFor(ctx, runErr)); markerErr != nil {
 			return markerErr
 		}
-		after, afterErr := d.drainSnapshot(ctx, setID, "after")
+		after, _, afterErr := d.drainSnapshotWithOrigin(ctx, setID, "after", origin)
 		if afterErr != nil {
 			if markerErr := d.recordDrainMarker(drainMarkerFor(ctx, afterErr)); markerErr != nil {
 				return markerErr
@@ -398,7 +420,7 @@ func (d *Driver) drain(ctx context.Context, setID int) error {
 		}
 		return closeErr
 	}
-	after, afterErr := d.drainSnapshot(ctx, setID, "after")
+	after, _, afterErr := d.drainSnapshotWithOrigin(ctx, setID, "after", origin)
 	if afterErr != nil {
 		if markerErr := d.recordDrainMarker(drainMarkerFor(ctx, afterErr)); markerErr != nil {
 			return markerErr

@@ -163,7 +163,7 @@ func (b *baselineListener) finish(r baselineRecord, known bool) (controllerRecor
 	return ref, nil
 }
 func (b *baselineListener) wire(stage string) *baselineWireCapture {
-	return &baselineWireCapture{stage: stage, setID: b.setID, organization: b.approval.Organization, queue: b.queue, origin: b.origin, allowedHosts: baselineWireAllowedHosts(b.approval, b.api.drainEndpointHost())}
+	return &baselineWireCapture{stage: stage, setID: b.setID, organization: b.approval.Organization, owner: b.approval.setName(), queue: b.queue, origin: b.origin, allowedHosts: baselineWireAllowedHosts(b.approval, b.api.drainEndpointHost())}
 }
 
 func (b *baselineListener) capturedOrigin() string {
@@ -401,6 +401,7 @@ func (b *baselineListener) AcquireJobs(_ context.Context, ids []int64) ([]int64,
 		return nil, err
 	}
 	c := b.wire("acquire")
+	c.requestIDs = slices.Clone(ids)
 	ctx, cancel := context.WithTimeout(b.ctx, operationTimeout)
 	got, callErr := b.session.AcquireJobs(c.context(ctx), slices.Clone(ids))
 	cancel()
