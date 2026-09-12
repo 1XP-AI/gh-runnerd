@@ -379,6 +379,32 @@ func (c *baselineWireCapture) authorizationMatches(req *http.Request) bool {
 	return req != nil && exactDrainAuthorization(req.Header, c.authorization)
 }
 
+// baselineWireMarkerHeader is an ephemeral in-process transport marker. It is
+// copied by the standard Request.Clone path used by SDK/intervening wrappers,
+// then removed at the final request boundary before any physical transport is
+// called. Its value carries no operation, credential or response data.
+const baselineWireMarkerHeader = "X-GH-Runnerd-Baseline-Wire"
+const baselineWireMarkerValue = "1"
+
+func baselineWireMarkerValues(req *http.Request) []string {
+	if req == nil || req.Header == nil {
+		return nil
+	}
+	return req.Header.Values(baselineWireMarkerHeader)
+}
+
+func markBaselineWireRequest(req *http.Request) *http.Request {
+	if req == nil {
+		return nil
+	}
+	marked := req.Clone(req.Context())
+	if marked.Header == nil {
+		marked.Header = make(http.Header)
+	}
+	marked.Header.Set(baselineWireMarkerHeader, baselineWireMarkerValue)
+	return marked
+}
+
 // baselineRequestCaptureTransport runs immediately above the physical
 // transport. User-supplied test wrappers may mutate a request before it gets
 // here, so this is the final request-side boundary before any bytes leave the
@@ -393,8 +419,25 @@ func baselineRequestHostMatchesURL(req *http.Request) bool {
 }
 
 func (t baselineRequestCaptureTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req == nil {
+		return nil, ErrRemote
+	}
 	c, _ := req.Context().Value(baselineWireKey{}).(*baselineWireCapture)
+	markerValues := baselineWireMarkerValues(req)
+	if c == nil && len(markerValues) > 0 {
+		if req.Body != nil {
+			_ = req.Body.Close()
+		}
+		return nil, ErrRemote
+	}
 	if c != nil {
+		if len(markerValues) > 0 {
+			if len(markerValues) != 1 || markerValues[0] != baselineWireMarkerValue {
+				return nil, c.rejectRequest(req)
+			}
+			// Never expose the private marker to the physical transport.
+			req.Header.Del(baselineWireMarkerHeader)
+		}
 		if !baselineRequestHostMatchesURL(req) {
 			return nil, c.rejectRequest(req)
 		}
@@ -700,8 +743,8 @@ func guardBaselineResponse(req *http.Request, response *http.Response) (*http.Re
 		return response, nil
 	}
 	data, err := io.ReadAll(response.Body)
-	_ = response.Body.Close()
-	if err != nil || int64(len(data)) > responseBodyLimit {
+	closeErr := response.Body.Close()
+	if err != nil || closeErr != nil || int64(len(data)) > responseBodyLimit {
 		c.invalid = true
 		clear(data)
 		return nil, ErrRemote
