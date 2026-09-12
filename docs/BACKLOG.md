@@ -1,10 +1,26 @@
 # Ordered implementation backlog
 
-Every original row is a full-scope goal. G01/G02 remain evidence gates; G03 is done. See [execution policy](EXECUTION.md), [approved delivery releases](PLAN.md#approved-delivery-releases) and each GitHub issue for acceptance and TDD details.
+Every original row is a full-scope goal. G01/G02 remain evidence gates; G03 is done. The current G01 Goal and its historical predecessor are labeled below so a resumed task copies the current statement only. See [execution policy](EXECUTION.md), [approved delivery releases](PLAN.md#approved-delivery-releases) and each GitHub issue for acceptance and TDD details.
 
-**Release placement names which user-visible release needs the complete original scope.** Historical M0–M5 stages, original Goal text, Agent history and native `blockedBy` edges are retained. Relabeling does not make a blocked full-scope issue Ready, does not close a parent when a child lands, and does not make an R2 original-acceptance set independently shippable while it is natively blocked by R3-placed issues.
+**Release placement names which user-visible release needs the complete original scope.** Historical M0–M5 stages, original Goal text where it is explicitly marked as historical, Agent history and native `blockedBy` edges are retained. Relabeling does not make a blocked full-scope issue Ready, does not close a parent when a child lands, and does not make an R2 original-acceptance set independently shippable while it is natively blocked by R3-placed issues.
 
-The live 36-item map is in [ISSUES.md](ISSUES.md). Default implementer is Luna max unless the issue records an explicit current user override; #66 and R1 children #67/#68/#69 are Grok 4.6 xhigh with independent Luna max review.
+The live 38-item map is in [ISSUES.md](ISSUES.md). The canonical default route is `gpt-luna-max` (Project label `Luna max`) unless the issue records an explicit current `grok-high` override (Project label `Grok high`); #66 and R1 children #67/#68/#69 retain their historical Grok routing with independent `gpt-luna-max` review.
+
+## Current G01 active Goal
+
+For issue [#1](https://github.com/1XP-AI/gh-runnerd/issues/1) and its one parent
+active goal, copy this exact current statement:
+
+> Select and pin one supported Scale Set integration path and produce a reusable evidence packet for recovery at message acknowledgement, acquisition and JIT boundaries, rerunning only changed-boundary checks while keeping unchanged evidence and live gaps explicit.
+
+The pre-optimization wording is retained for provenance only and must not be used
+as the objective for a resumed active goal:
+
+> Select and pin a supported Scale Set integration path with demonstrated recovery at message acknowledgement, acquisition and JIT boundaries.
+
+Child [#71](https://github.com/1XP-AI/gh-runnerd/issues/71) is bounded
+experiment-only work under this single parent Goal; it does not create a second
+active Goal or close G01.
 
 ## R1 critical path
 
@@ -14,10 +30,11 @@ User-visible R1 scope is not independently deliverable: #68 production waits for
 
 | Key | Issue | Role | Native blockers | Live status |
 |---|---|---|---|---|
-| G01 | [#1](https://github.com/1XP-AI/gh-runnerd/issues/1) | **Full original** ACK/acquisition/JIT recovery Goal; no subset and no false completion | none | In progress |
+| G01 | [#1](https://github.com/1XP-AI/gh-runnerd/issues/1) | **Current active Goal** is the optimized statement above; the historical predecessor is provenance only. No subset or child completion closes G01 | none | In progress |
 | G02-R1 | [#67](https://github.com/1XP-AI/gh-runnerd/issues/67) | R1 subset of G02 #2 (manual single-org credentials). Parent #2 stays R3 In progress | none | Ready |
-| G01g | [#60](https://github.com/1XP-AI/gh-runnerd/issues/60) | Bounded broker handoff for the paired Linux-container path | #54 (Done) | In progress |
-| P66 | [#66](https://github.com/1XP-AI/gh-runnerd/issues/66) | Delivery-plan documentation | none | In progress |
+| G01g | [#60](https://github.com/1XP-AI/gh-runnerd/issues/60) | Bounded broker handoff for the paired Linux-container path | #54 (Done) | Done |
+| G01h | [#71](https://github.com/1XP-AI/gh-runnerd/issues/71) | Experiment-only idle-drain observation under the single current G01 Goal; no second Goal or parent completion | #60 (closed) | In progress |
+| P66 | [#66](https://github.com/1XP-AI/gh-runnerd/issues/66) | Delivery-plan documentation | none | Done |
 | G13-R1 | [#68](https://github.com/1XP-AI/gh-runnerd/issues/68) | R1 subset of G13 #13. Native blockers #60, #66, #67. Until full G01 #1 and G02 #2 pass, authorized work is a reviewed minimal contract and offline evidence only; production implementation starts only then. Not a G01/G02/G04 bypass. Completing #67 does not complete G02. Live recovery stays on #1→#69 | #60, #66, #67 | Blocked |
 | G16-R1 | [#69](https://github.com/1XP-AI/gh-runnerd/issues/69) | R1 subset of G16 #16: authorized real job plus required recovery | #1, #68 | Blocked |
 
@@ -54,7 +71,7 @@ The machine-readable source is [backlog.json](backlog.json). Original JSON `stat
 
 ## Parallel work boundaries
 
-- Continue G01 (full recovery Goal) and G02 (full Manifest/multi-org/launchd Goal) independently; they are not replaced by #67.
+- Continue G01 (the current optimized recovery/evidence Goal) and G02 (full Manifest/multi-org/launchd Goal) independently; they are not replaced by #67 or bounded child #71.
 - #67 may proceed as isolated R1 credential evidence without waiting on G02's remaining R3 criteria; it does not authorize live App/Keychain/launchd mutation.
 - G04 still integrates the full gates before shared full-scope implementation. #68 is not a G04 bypass: until full G01 #1 and G02 #2 pass, authorized work is a reviewed R1 contract and offline evidence only; production implementation starts only then. Completing #67 does not complete G02. Live G01 recovery remains #69 blocked by #1.
 - After G05, IPC, auth, and pure scheduling can proceed with separate file ownership for R2/R3 work.

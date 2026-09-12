@@ -11,7 +11,7 @@ Treat the live GitHub Project and the issue body as authoritative when they diff
 from this snapshot. Re-read this file, `AGENTS.md` and the linked design documents
 before changing code.
 
-Snapshot: 2026-09-08 KST, documentation branch `orca/release-reframe` based on `main` `31ae8102f6f20f8e79258eb824af1400eba21954` (`[CI] Split default G01 deadline checks (#65)`). Live Project #2 has 36 items after the maintainer-accepted release reorganization ([#66](https://github.com/1XP-AI/gh-runnerd/issues/66)). This file is a snapshot; the live Project and issue bodies win when they differ.
+Historical baseline snapshot: 2026-09-08 KST, documentation branch `orca/release-reframe` based on `main` `31ae8102f6f20f8e79258eb824af1400eba21954` (`[CI] Split default G01 deadline checks (#65)`). That baseline had 36 Project items after the maintainer-accepted release reorganization ([#66](https://github.com/1XP-AI/gh-runnerd/issues/66)). The current read-only Project snapshot is 38 items; the live Project and issue bodies win when they differ from either snapshot.
 
 ## Mission and product boundary
 
@@ -61,7 +61,10 @@ Shared envelope limits that still apply:
 Linux still needs a Linux kernel/runtime on macOS. A native macOS runner cannot run
 a Linux Actions job, and a Linux container cannot provide a macOS runner. Native
 macOS execution remains a host process; optional VM/multi-host work is future
-research in G21. Issue #1's exact Goal is unchanged.
+research in G21. Issue #1's current active Goal is the optimized statement in
+the [G01 Goal synchronization](#g01-goal-synchronization) section below. The
+pre-optimization wording remains only as explicitly labeled historical
+provenance; it is not the objective for a resumed active goal.
 
 ## Host and current fallback runners
 
@@ -126,9 +129,9 @@ current board; verify them with `gh project field-list` if GitHub reports a mism
 | Repository | `1XP-AI/gh-runnerd` |
 | Project | `2` / `PVT_kwDOD2M2gs4Bismw` |
 | Agent field | `PVTSSF_lADOD2M2gs4Bismwzhhjobs` |
-| Agent: Astra xhigh | `cf617d72` (historical only for completed work) |
-| Agent: Luna max | `9317c27f` (repository default dispatch) |
-| Agent: Grok high | `ab0d6d0d` (`grok-high`) |
+| Route `gpt-luna-max` → Agent: Luna max | `9317c27f` (repository default dispatch) |
+| Route `grok-high` → Agent: Grok high | `ab0d6d0d` (explicit override only) |
+| Agent: Astra xhigh | `cf617d72` (historical only; never selected for new work) |
 | Release field | `PVTSSF_lADOD2M2gs4Bismwzhhr3bc` |
 | Release: R1 - Internal MVP | `a0a78eb0` |
 | Release: R2 - Everyday operations | `58b696ee` |
@@ -153,16 +156,19 @@ currently owned In progress item during routing changes.
 ### Live board snapshot
 
 Run `gh project item-list 2 --owner 1XP-AI --limit 1000 --format json` before
-dispatch. The last verified snapshot is 36 items. The full map is in
+dispatch. The latest read-only snapshot was verified 2026-09-13 KST and has 38
+items. The full map is in
 [ISSUES.md](ISSUES.md). Compact routing:
 
 | Issues | Project status | Release | Current routing |
 |---|---|---|---|
 | #1 G01 | In progress | R1 | Luna max; **full** ACK/acquisition/JIT Goal unresolved |
 | #2 G02 | In progress | R3 | Luna max; Manifest/multi-org/launchd remains here; also pre-release gate for R1 #68 production |
-| #67 | Ready | R1 | `grok-high` / `gpt-luna-max` review; child of #2; no native blockers |
-| #60 G01g | In progress | R1 | Luna max; separate worktree/PR #62; do not edit from #66 |
+| #67 | Ready | R1 | Project Agent `Grok high` (`grok-high`); independent `gpt-luna-max` review; child of #2; no native blockers |
+| #60 G01g | Done | R1 | Luna max; merged PR #62; its evidence is a slice and does not close G01 |
+| #71 G01h | In progress | R1 | Luna max; experiment-only idle-drain observation under the single current G01 Goal; do not create a second goal |
 | #66 | Done | R1 | Planning-only release map; historical `grok-high` / `gpt-luna-max` review |
+| #73 | Done | — | Luna max; workflow validation/process improvement merged as PR #74 |
 | #68 | Blocked | R1 | child of #13; native blockedBy #60/#66/#67; contract/offline evidence only until full #1/#2; production implementation only then |
 | #69 | Blocked | R1 | child of #16; blocked by #1/#68 |
 | #3 G03, #30, #40 G12a, #44, #46, #47, #50, #52, #54 G01f, #61, #64 | Done | R1 except #40 R2 | historical records preserved; #54 Done does not close #1 |
@@ -193,6 +199,22 @@ applied.
 Do not move an issue to Ready merely because an agent is available. Do not move it
 to Done when only a PR was opened or a test was planned.
 
+## G01 Goal synchronization
+
+The current active Goal for issue [#1](https://github.com/1XP-AI/gh-runnerd/issues/1)
+and its one parent active goal is:
+
+> Select and pin one supported Scale Set integration path and produce a reusable evidence packet for recovery at message acknowledgement, acquisition and JIT boundaries, rerunning only changed-boundary checks while keeping unchanged evidence and live gaps explicit.
+
+The pre-optimization wording below is retained for historical provenance only;
+operators must not copy it into a new or resumed active goal:
+
+> Select and pin a supported Scale Set integration path with demonstrated recovery at message acknowledgement, acquisition and JIT boundaries.
+
+Child [#71](https://github.com/1XP-AI/gh-runnerd/issues/71) is bounded
+experiment-only work under this parent Goal. It does not replace the parent
+Goal, close the G01 evidence gate, or authorize a second active goal.
+
 ## Model and delegation policy
 
 The repository default routes **implementation, contract work, architecture,
@@ -210,10 +232,13 @@ native Goal on #1 while this planning work runs.
 
 For every new issue, after checking for an explicit current user override:
 
-- set `IMPLEMENTER_OVERRIDE` to the inspected current implementer name, or to an
-  empty string when there is no override (repository default `gpt-luna-max`);
-- look up that name in live `gh project field-list` Agent options by exact match;
-- when the name matches one option, write that option unless the item is not Ready
+- set `IMPLEMENTER_OVERRIDE` to the inspected canonical route key (`gpt-luna-max`
+  or `grok-high`), or to an empty string when there is no override (repository
+  default `gpt-luna-max`);
+- normalize that key to its Project Agent display label (`Luna max` or `Grok
+  high`), then look up that label in live `gh project field-list` options by exact
+  match;
+- when the normalized display label matches one option, write that option unless the item is not Ready
   or already has a conflicting Agent;
 - when an override is `grok-high`, require the live `Grok high` Project option;
   missing allowed options are a routing configuration error, not a reason to
@@ -293,7 +318,7 @@ every blocker must be closed and its acceptance actually complete before dispatc
 Then read the exact Goal, TDD cases, acceptance checklist, test profile and safety
 invariants. If a blocker is open, stop and report that state for the authorized
 issue. Select another issue only when a separate user task explicitly authorizes
-that new scope. Record the inspected current implementer override as
+that new scope. Record the inspected current canonical route key as
 `IMPLEMENTER_OVERRIDE` (empty string when there is none). Do not infer it from
 the issue number and do not scrape issue prose automatically into the Agent write.
 
@@ -304,12 +329,12 @@ PROJECT_ID=PVT_kwDOD2M2gs4Bismw
 STATUS_FIELD_ID=PVTSSF_lADOD2M2gs4BismwzhhjoZA
 AGENT_FIELD_ID=PVTSSF_lADOD2M2gs4Bismwzhhjobs
 STATUS_IN_PROGRESS_ID=7a569f61
-DEFAULT_IMPLEMENTER="Luna max"
+DEFAULT_ROUTE_KEY="gpt-luna-max"
 
 # Operator-inspected current contract. Must be set: empty string means no
-# override (repository default gpt-luna-max). Unset is fail-closed. Exact Project
-# option names only; allowed values are Luna max and Grok high; do not branch on
-# issue numbers.
+# override (repository default gpt-luna-max). Unset is fail-closed. Canonical
+# route keys are normalized to Project display labels below; only the two
+# allowlisted keys may select new work. Do not branch on issue numbers.
 : "${IMPLEMENTER_OVERRIDE?set IMPLEMENTER_OVERRIDE after inspecting the current issue override; empty string means no override}"
 
 ITEM_JSON="$(gh project item-list "$PROJECT_NUMBER" --owner "$OWNER" \
@@ -333,10 +358,31 @@ if [ "$ITEM_STATUS" != "Ready" ]; then
   exit 1
 fi
 
-if [ -n "$IMPLEMENTER_OVERRIDE" ]; then
-  INTENDED_IMPLEMENTER="$IMPLEMENTER_OVERRIDE"
-else
-  INTENDED_IMPLEMENTER="$DEFAULT_IMPLEMENTER"
+normalize_route_key() {
+  case "$1" in
+    gpt-luna-max|grok-high) printf '%s\n' "$1" ;;
+    *) return 1 ;;
+  esac
+}
+
+route_project_label() {
+  case "$1" in
+    gpt-luna-max) printf '%s\n' 'Luna max' ;;
+    grok-high) printf '%s\n' 'Grok high' ;;
+    *) return 1 ;;
+  esac
+}
+
+ROUTE_INPUT="${IMPLEMENTER_OVERRIDE:-$DEFAULT_ROUTE_KEY}"
+if ! ROUTE_KEY="$(normalize_route_key "$ROUTE_INPUT")"; then
+  printf 'route %s is not an allowed canonical new-work route; fail closed\n' \
+    "$ROUTE_INPUT" >&2
+  exit 1
+fi
+if ! INTENDED_IMPLEMENTER="$(route_project_label "$ROUTE_KEY")"; then
+  printf 'route %s has no Project Agent display label; fail closed\n' \
+    "$ROUTE_KEY" >&2
+  exit 1
 fi
 
 AGENT_OPTIONS_JSON="$(gh project field-list "$PROJECT_NUMBER" --owner "$OWNER" --format json)"
@@ -351,8 +397,8 @@ if ! AGENT_OPTION_ID="$(printf '%s' "$AGENT_OPTIONS_JSON" | jq -r --arg name "$I
 fi
 
 if [ -z "$AGENT_OPTION_ID" ]; then
-  printf 'default implementer %s is not a Project Agent option; fail closed\n' \
-    "$INTENDED_IMPLEMENTER" >&2
+  printf 'route %s requires Project Agent option %s; fail closed\n' \
+    "$ROUTE_KEY" "$INTENDED_IMPLEMENTER" >&2
   exit 1
 fi
 
@@ -372,12 +418,13 @@ overwriting a currently owned Agent. Keep the issue's durable Goal/Dependencies
 fields and `docs/backlog.json` aligned only when the contract actually changes.
 Do not rewrite original JSON `status`/`agent` snapshots to look live; the Project
 is dispatch authority. The script does not branch on issue numbers.
-`IMPLEMENTER_OVERRIDE` is the operator-inspected current contract, not an LLM
-scrape and not a permanent whitelist. Live Agent options come from
+`IMPLEMENTER_OVERRIDE` is the operator-inspected canonical route key, not an LLM
+scrape and not a permanent whitelist. The resolver allowlists only
+`gpt-luna-max` and `grok-high`, normalizes them to the Project display labels
+`Luna max` and `Grok high`, and then obtains the option from
 `gh project field-list`. Exact match writes; a missing allowed option fails
-closed; non-Ready and conflicting Agent fail closed. Independent review uses
-`gpt-luna-max`. Current Grok assignments must resolve to the live `Grok high`
-option rather than being silently left unrepresented.
+closed; non-Ready and conflicting Agent fail closed. Historical `Astra xhigh`
+is never a valid new-work key. Independent review uses `gpt-luna-max`.
 
 ### 3. Start one active goal and an isolated worktree
 
@@ -529,7 +576,7 @@ Use this compact map to orient a new agent; the live Project decides what is Rea
 
 | Goal | Issue | Outcome |
 |---|---:|---|
-| G01 | #1 | Scale Set delivery, acquisition, drain and crash/replay evidence gate |
+| G01 | #1 | Current active Goal: pin one supported Scale Set path and produce reusable ACK/acquisition/JIT recovery evidence; the historical pre-optimization wording is provenance only |
 | G02 | #2 | App Manifest enrollment and macOS launchd credential identity gate |
 | G03 | #3 | Go module, public CI and toolchain baseline (Done) |
 | G04 | #4 | Versioned CLI/config/provider/resource/scaling contracts |
@@ -552,6 +599,7 @@ Use this compact map to orient a new agent; the live Project decides what is Rea
 | G20 | #20 | Reversible pilot/migration with legacy fallback |
 | G21 | #21 | Optional macOS VM and multi-host provider research (Future) |
 | G02-R1 | #67 | R1 manual single-organization credentials (child of #2; parent remains R3) |
+| G01h | #71 | Experiment-only idle-drain observation under the single current G01 Goal (child of #1; In progress) |
 | G13-R1 | #68 | R1 foreground command, capacity one (child of #13; native blockedBy #60/#66/#67; production waits on full G01/G02) |
 | G16-R1 | #69 | R1 authorized real job plus required recovery (child of #16; blocked by #1/#68) |
 | P66 | #66 | Delivery-plan documentation; not a runtime Goal |
@@ -579,7 +627,7 @@ open because its full recovery Goal is not complete.
 
 ### Active runtime work in other worktrees (do not edit from #66)
 
-- [#60](https://github.com/1XP-AI/gh-runnerd/issues/60) G01g / open PR [#62](https://github.com/1XP-AI/gh-runnerd/pull/62): bounded broker handoff. Blocks #68.
+- [#60](https://github.com/1XP-AI/gh-runnerd/issues/60) G01g / merged PR [#62](https://github.com/1XP-AI/gh-runnerd/pull/62): bounded broker handoff. Its completion does not close G01 or authorize dependent production.
 - [#2](https://github.com/1XP-AI/gh-runnerd/issues/2) readiness review / open PR [#59](https://github.com/1XP-AI/gh-runnerd/pull/59): G02 macOS live-validation packet. Do not treat it as R1 completion of #67.
 
 Inspect those PRs in their own worktrees. This documentation change must not
@@ -596,6 +644,26 @@ full G01 #1 and G02 #2 pass; production implementation starts only then.
 Completing #67 does not complete G02. Because full G02 remains classified R3,
 R1 is not independently deliverable until that gate passes. No live authorization
 and no merge of blocked implementation are implied.
+
+## PR #76 documentation finding ledger
+
+This focused correction addresses the three actionable inline findings on review
+commit `3901c9f8ad676a12b8f700ae60c242901111e0fd`:
+
+- [route-key normalization](https://github.com/1XP-AI/gh-runnerd/pull/76#discussion_r3996581696): the documented resolver now accepts only canonical `gpt-luna-max`/`grok-high` keys, maps them to the exact Project labels `Luna max`/`Grok high`, and rejects Astra for new work.
+- [G01 Goal synchronization](https://github.com/1XP-AI/gh-runnerd/pull/76#discussion_r3996581698): the optimized current Goal is repeated in planning docs, while the prior wording is explicitly historical and not an active objective.
+- [live map refresh](https://github.com/1XP-AI/gh-runnerd/pull/76#discussion_r3996581700): `ISSUES.md` and this compact map use the read-only 2026-09-13 KST Project snapshot of 38 items, including #71 In progress and #73 Done.
+
+Documentation-only validation run on 2026-09-13 KST (no live App, runner,
+workflow, Docker/Lima, Keychain or launchd operation):
+
+- `git diff --check` — PASS (exit 0).
+- `jq empty docs/backlog.json` — PASS (exit 0).
+- `current_goal="$(jq -r '.issues[] | select(.key == "G01") | .goal' docs/backlog.json)"; for file in docs/HANDOFF.md docs/PLAN.md docs/BACKLOG.md docs/ISSUES.md; do rg -F -q "> $current_goal" "$file"; done` — PASS (current optimized Goal matches all four docs; historical predecessor is explicitly labeled in each).
+- `route_functions="$(sed -n '361,374p' docs/HANDOFF.md)"; eval "$route_functions";` canonical-key/display-label assertions against `gh project field-list` plus Astra rejection — PASS (exit 0).
+- `project_json="$(gh project item-list 2 --owner 1XP-AI --limit 1000 --format json)";` map-count, status, Agent and Release assertions — PASS (38 Project items, 38 map rows; #71 In progress/Luna max/R1; #73 Done/Luna max/—).
+- `p1="$(printf '/'; printf 'Users/')"; p2="$(printf '/'; printf 'private/')"; p3="$(printf '%s' '-----BE' 'GIN')"; p4="$(printf '%s' 'github_' 'pat_')"; p5="$(printf '%s' 'Bear' 'er ')"; git diff --unified=0 -- docs/HANDOFF.md docs/PLAN.md docs/BACKLOG.md docs/ISSUES.md | rg -n -e "$p1" -e "$p2" -e "$p3" -e "$p4" -e "$p5"` — PASS (no matches).
+- `p1="$(printf '36'; printf '-item')"; p2="$(printf 'last verified snapshot is '; printf '36')"; p3="$(printf 'live board now has '; printf '36')"; p4="$(printf 'Verified '; printf '2026-09-08 against Project #2')"; rg -n -e "^## Live $p1" -e "$p2" -e "$p3" -e "$p4" docs/HANDOFF.md docs/PLAN.md docs/BACKLOG.md docs/ISSUES.md` — PASS (no unlabelled stale-count matches; historical baseline remains explicitly labeled).
 
 ## Live-operation gate
 

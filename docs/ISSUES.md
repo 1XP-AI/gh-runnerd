@@ -35,13 +35,29 @@ This table intentionally preserves the initial planning inventory. Current dispa
 
 Each original issue has one Goal statement, scope, TDD cases, acceptance criteria, model/effort, risk and dependencies. See [backlog.json](backlog.json) for machine-readable specifications. Original JSON `status` and `agent` values are the initial/historical snapshot, not live dispatch authority; the live Project is authoritative after work begins. Do not redispatch from historical Ready values. Release placement is additive; see [approved delivery releases](PLAN.md#approved-delivery-releases).
 
-## Live 36-item release map
+## Current G01 active Goal
 
-Verified 2026-09-08 against Project #2 (`36` items) and native GitHub parent/`blockedBy` relations. **Release** is the stage that needs the complete original scope; it is not a closed DAG that can ship before natively blocking issues on later releases, and R1 is not independently deliverable until the R3-placed full G02 #2 evidence gate passes. **R1 subset** is an explicit child when the parent mixes MVP and later acceptance. Children do not close parents. Native edges below were not added by this documentation change.
+For issue [#1](https://github.com/1XP-AI/gh-runnerd/issues/1) and its one parent
+active goal, copy this exact current statement:
+
+> Select and pin one supported Scale Set integration path and produce a reusable evidence packet for recovery at message acknowledgement, acquisition and JIT boundaries, rerunning only changed-boundary checks while keeping unchanged evidence and live gaps explicit.
+
+The pre-optimization wording is retained for provenance only and must not be used
+as the objective for a resumed active goal:
+
+> Select and pin a supported Scale Set integration path with demonstrated recovery at message acknowledgement, acquisition and JIT boundaries.
+
+Child [#71](https://github.com/1XP-AI/gh-runnerd/issues/71) is bounded
+experiment-only work under this single parent Goal; it does not create a second
+active Goal or close G01.
+
+## Live 38-item release map
+
+Verified 2026-09-13 KST against the read-only Project #2 snapshot (`38` items) and native GitHub parent/`blockedBy` relations. The snapshot includes #71 **In progress** and #73 **Done**. **Release** is the stage that needs the complete original scope; it is not a closed DAG that can ship before natively blocking issues on later releases, and R1 is not independently deliverable until the R3-placed full G02 #2 evidence gate passes. **R1 subset** is an explicit child when the parent mixes MVP and later acceptance. Children do not close parents. Native edges below were not added by this documentation change.
 
 | Issue | Live status | Release (full original) | R1 subset / notes | Live Agent |
 |---|---|---|---|---|
-| [#1](https://github.com/1XP-AI/gh-runnerd/issues/1) G01 | In progress | R1 | Full original Goal retained; children #44/#46/#47/#50/#52/#54 are Done slices and do not complete G01 | Luna max |
+| [#1](https://github.com/1XP-AI/gh-runnerd/issues/1) G01 | In progress | R1 | Current active Goal is the optimized statement in [PLAN.md](PLAN.md#g01-goal-synchronization); historical predecessor is provenance only. Children #44/#46/#47/#50/#52/#54 are Done slices and do not complete G01 | Luna max |
 | [#2](https://github.com/1XP-AI/gh-runnerd/issues/2) G02 | In progress | R3 | Broad Manifest/multi-org/launchd remains here. R1 subset is #67. Full #2 is also a mandatory pre-release evidence gate for #68 production; R1 is not independently deliverable until it passes | Luna max |
 | [#3](https://github.com/1XP-AI/gh-runnerd/issues/3) G03 | Done | R1 | Full original bootstrap | Luna max |
 | [#4](https://github.com/1XP-AI/gh-runnerd/issues/4) G04 | Backlog | R2 | Full contracts. Still blocked by #1/#2/#3. Not bypassed by #68 | Luna max |
@@ -70,13 +86,15 @@ Verified 2026-09-08 against Project #2 (`36` items) and native GitHub parent/`bl
 | [#50](https://github.com/1XP-AI/gh-runnerd/issues/50) G01d | Done | R1 | Child of #1 | Astra xhigh |
 | [#52](https://github.com/1XP-AI/gh-runnerd/issues/52) G01e | Done | R1 | Child of #1 | Astra xhigh |
 | [#54](https://github.com/1XP-AI/gh-runnerd/issues/54) G01f | Done | R1 | Child of #1; merged paired execution | Luna max |
-| [#60](https://github.com/1XP-AI/gh-runnerd/issues/60) G01g | In progress | R1 | Native parent unset; `blockedBy` #54; blocks #68. Do not retarget from this docs change | Luna max |
+| [#60](https://github.com/1XP-AI/gh-runnerd/issues/60) G01g | Done | R1 | Native parent unset; `blockedBy` #54 (Done); merged PR #62. Its former edge to #68 is satisfied; does not close G01 | Luna max |
 | [#61](https://github.com/1XP-AI/gh-runnerd/issues/61) | Done | R1 | CI paired-fixture deadline | Luna max |
 | [#64](https://github.com/1XP-AI/gh-runnerd/issues/64) | Done | R1 | CI default G01 deadline coverage | Luna max |
 | [#66](https://github.com/1XP-AI/gh-runnerd/issues/66) | Done | R1 | Planning only. Historical `grok-high`; independent `gpt-luna-max` review | unset |
-| [#67](https://github.com/1XP-AI/gh-runnerd/issues/67) | Ready | R1 | Child of #2. Manual single-org credentials. No native blockers | unset |
+| [#67](https://github.com/1XP-AI/gh-runnerd/issues/67) | Ready | R1 | Child of #2. Manual single-org credentials. No native blockers | Grok high |
 | [#68](https://github.com/1XP-AI/gh-runnerd/issues/68) | Blocked | R1 | Child of #13. Native `blockedBy` #60/#66/#67. Contract/offline evidence only until full G01 #1 and G02 #2 pass; production implementation only then. Not a G01/G02/G04 bypass. Completing #67 does not complete G02. Live recovery is #69←#1 | unset |
 | [#69](https://github.com/1XP-AI/gh-runnerd/issues/69) | Blocked | R1 | Child of #16. `blockedBy` #1/#68 | unset |
+| [#71](https://github.com/1XP-AI/gh-runnerd/issues/71) G01h | In progress | R1 | Child of #1. Experiment-only idle-drain observation under the single current G01 Goal; native `blockedBy` #60 is closed. Does not create a second Goal or close G01 | Luna max |
+| [#73](https://github.com/1XP-AI/gh-runnerd/issues/73) | Done | — | Independent workflow validation/process improvement; merged as PR #74 | Luna max |
 
 ### Verified native relations (do not duplicate)
 
@@ -98,7 +116,7 @@ Original G04 `blockedBy` #1/#2/#3 and original G13 `blockedBy` #6/#9/#10/#11/#12
 - [Ready](https://github.com/orgs/1XP-AI/projects/2/views/2): dispatch only issues currently marked Ready in the live Project. As of this snapshot that includes #67; it does not include #68 or #69.
 - [Board](https://github.com/orgs/1XP-AI/projects/2/views/3): status columns with stage, priority, model and Release on cards.
 
-The initial board contained 4 Ready, 17 Backlog and 1 Future issue, including the independent G12a child. The live board now has 36 items after additive Release labels and R1 children. Consult the live Project for current status. Move later full-scope issues to Ready only when their dependencies are Done. Model metadata is a dispatch instruction, not an automatic agent scheduler.
+The initial board contained 4 Ready, 17 Backlog and 1 Future issue, including the independent G12a child. The current read-only Project snapshot has 38 items after additive Release labels, R1 children and the tracked G01h/workflow follow-ups. Consult the live Project for current status. Move later full-scope issues to Ready only when their dependencies are Done. Model metadata is a dispatch instruction, not an automatic agent scheduler.
 
 ## Parallel arithmetic child
 
