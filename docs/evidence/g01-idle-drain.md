@@ -1528,3 +1528,87 @@ workflow, runner, credential, App, Keychain, launchd, Docker, Lima, live
 cleanup, or rollback operation was performed. Independent final review,
 exact-head Codex review, CI, and the live G01 evidence gate remain
 coordinator-owned, and the parent G01 goal remains active.
+
+### Exact-head follow-up: runtime tenant-prefix binding and session-open cardinality
+
+Date: 2026-09-12 UTC. This correction addresses the fresh exact-head Codex
+P1 findings [runtime path-prefix binding](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3996992590)
+and [duplicate marked session-open cardinality](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3996992592).
+
+The meaningful red-first command was run before the implementation change:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^(TestBaselineSessionOpenRejectsDuplicateMarkedPOSTBeforeInner|TestPinnedSDKDrainRejectsSnapshotTenantPrefixMismatchBeforeEffects|TestPinnedSDKDrainRejectsSessionTenantPrefixMismatchBeforeListener)$' -count=1 -v -timeout=180s
+```
+
+It exited 1. The duplicate marked session-open returned nil on its second
+request instead of `ErrRemote`; the same-origin foreign-prefix after-snapshot
+and session-open cases returned nil instead of quarantine. The failing cases
+also showed the pre-fix request could reach the inner/fixture boundary, while
+the existing origin and queue-target controls remained separate green
+regressions.
+
+The minimal correction captures the exact private runtime path prefix from the
+first approved scale-set snapshot and carries it through the before/after
+scale-set and runner snapshots, session-open, listener hook, ACK, acquisition,
+and session-close captures. A same-origin different tenant prefix is rejected
+at the marked request boundary before inner transport effects; the exact
+origin and private approval marker semantics remain unchanged, and the prefix
+is never journaled. Marked session-open request cardinality is reserved before
+body forwarding, so a second marked POST is rejected before the inner transport
+and cannot create a duplicate live session.
+
+The focused normal green command was:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^(TestBaselineSessionOpenRejectsDuplicateMarkedPOSTBeforeInner|TestBaselineRuntimePathPrefixMismatchStopsBeforeInner|TestPinnedSDKDrainRejectsSnapshotTenantPrefixMismatchBeforeEffects|TestPinnedSDKDrainRejectsSessionTenantPrefixMismatchBeforeListener|TestPinnedSDKDrainRejectsSnapshotOriginMismatchBeforeEffects|TestPinnedSDKDrainRejectsSessionOriginMismatchBeforeListener|TestPinnedSDKDrainBindsAcquireToPhysicalRequestBody|TestPinnedSDKDrainBindsSessionCloseToSessionOpenOrigin|TestDrainListenerRejectsMarkedPollTargetMismatchBeforeInner)$' -count=1 -v -timeout=180s
+```
+
+It exited 0 in 0.481s. The corresponding focused race command exited 0 in
+1.528s with no race report. The new boundary matrix covers same-origin
+foreign-prefix scale-set, runner, session-open, acquisition and close requests
+and asserts zero inner calls; the duplicate session-open regression asserts
+exactly one inner call.
+
+The complete offline package normal run exited 0 in 32.259s:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -count=1 -timeout=240s
+```
+
+The complete package race run exited 0 in 42.067s with no race report:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -count=1 -timeout=300s
+```
+
+The tagged paired-terminal preservation matrix exited 0 in 14.716s:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -tags=g01_pair_fixture ./livecanary -run '^(TestPairedTerminalActualJournalsFinalize|TestPairedTerminalCompletionCadenceAndReceiptSeparation|TestPairedTerminalFinalResultCapacity|TestPairedTerminalPendingChildCapacity|TestPairedTerminalEligibilityUsesFreshExactFacts|TestPairedTerminalCapturedAcknowledgementCancellation|TestPairedTerminalMissingAcknowledgementsAndPostchecks)$' -count=1 -v -timeout=240s
+```
+
+`GOWORK=off GOTOOLCHAIN=go1.26.8 go vet ./livecanary`, `bash
+scripts/gofmt.sh check`, and `git diff --check` each exited 0. The exact
+tested implementation head is
+`1f12e11309b273ca54b2b222f702539425ac91b1` (`fix G01 runtime tenant binding
+and session cardinality`); the evidence append is documentation-only and
+follows that head. No live runner, workflow, credential, App, Keychain,
+launchd, Docker, Lima, ScaleSet, JIT, cleanup, or canary operation was run.
+
+Files changed: `experiments/g01-scaleset/livecanary/baseline_listener.go`,
+`baseline_terminal.go`, `baseline_wire.go`, `drain.go`, `drain_driver.go`,
+`drain_p1_followup_test.go`, `sdk.go`, `sdk_integration_test.go`, and this
+evidence file.
+
+The remaining live gap is the separately authorized G01 canary/evidence gate;
+exact-head Codex review, CI and merge remain coordinator-owned. Rollback is a
+focused `git revert --no-edit 1f12e11309b273ca54b2b222f702539425ac91b1`
+followed, if needed, by a separate revert of this evidence append; retain the
+current journal, reservation and uncertainty, and never reset, erase, replay,
+or run live cleanup.
