@@ -229,6 +229,37 @@ func TestBaselineSessionOpenBodyMustMatchOwnerBeforeInner(t *testing.T) {
 	}
 }
 
+func TestBaselineSessionOpenRejectsDuplicateMarkedPOSTBeforeInner(t *testing.T) {
+	capture := &baselineWireCapture{
+		stage:        "session-open",
+		setID:        7,
+		owner:        "g01-test",
+		organization: "fixture-org",
+		allowedHosts: []string{"api.example"},
+	}
+	innerCalls := 0
+	transport := baselineRequestCaptureTransport{inner: drainRoundTripper(func(req *http.Request) (*http.Response, error) {
+		innerCalls++
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}, nil
+	})}
+	request := func() *http.Request {
+		req, err := http.NewRequestWithContext(capture.context(context.Background()), http.MethodPost, "https://api.example/_apis/runtime/runnerscalesets/7/sessions?api-version=6.0-preview", strings.NewReader(`{"sessionId":"00000000-0000-0000-0000-000000000000","ownerName":"g01-test"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return req
+	}
+	if _, err := transport.RoundTrip(request()); err != nil {
+		t.Fatalf("first marked session-open = %v, want forwarding", err)
+	}
+	if _, err := transport.RoundTrip(request()); !errors.Is(err, ErrRemote) {
+		t.Fatalf("duplicate marked session-open = %v, want remote rejection", err)
+	}
+	if innerCalls != 1 {
+		t.Fatalf("duplicate marked session-open reached inner transport: calls=%d, want one", innerCalls)
+	}
+}
+
 func TestBaselineSnapshotRequestsRequireExactOriginBeforeInner(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -261,6 +292,46 @@ func TestBaselineSnapshotRequestsRequireExactOriginBeforeInner(t *testing.T) {
 			}
 			if innerCalls != 0 {
 				t.Fatalf("%s reached inner transport: calls=%d", tc.name, innerCalls)
+			}
+		})
+	}
+}
+
+func TestBaselineRuntimePathPrefixMismatchStopsBeforeInner(t *testing.T) {
+	const (
+		origin = "https://api.example:443"
+		prefix = "/tenant/approved"
+	)
+	tests := []struct {
+		name   string
+		stage  string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "scale-set snapshot", stage: "set-observe", method: http.MethodGet, path: "/tenant/foreign/_apis/runtime/runnerscalesets/7?api-version=6.0-preview"},
+		{name: "runner snapshot", stage: "runner-observe", method: http.MethodGet, path: "/tenant/foreign/_apis/distributedtask/pools/0/agents?agentName=g01-test-worker-1&api-version=6.0-preview"},
+		{name: "session open", stage: "session-open", method: http.MethodPost, path: "/tenant/foreign/_apis/runtime/runnerscalesets/7/sessions?api-version=6.0-preview", body: `{"sessionId":"00000000-0000-0000-0000-000000000000","ownerName":"g01-test"}`},
+		{name: "acquisition", stage: "acquire", method: http.MethodPost, path: "/tenant/foreign/_apis/runtime/runnerscalesets/7/acquirejobs?api-version=6.0-preview", body: `[41]`},
+		{name: "session close", stage: "terminal-session-close", method: http.MethodDelete, path: "/tenant/foreign/_apis/runtime/runnerscalesets/7/sessions/session?api-version=6.0-preview"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			capture := &baselineWireCapture{stage: tc.stage, setID: 7, owner: "g01-test", runnerName: "g01-test-worker-1", sessionID: "session", origin: origin, runtimePathPrefix: prefix, runtimePathPrefixSet: true, requestIDs: []int64{41}, allowedHosts: []string{"api.example"}}
+			innerCalls := 0
+			transport := baselineRequestCaptureTransport{inner: drainRoundTripper(func(req *http.Request) (*http.Response, error) {
+				innerCalls++
+				return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}, nil
+			})}
+			req, err := http.NewRequestWithContext(capture.context(context.Background()), tc.method, "https://api.example"+tc.path, strings.NewReader(tc.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := transport.RoundTrip(req); !errors.Is(err, ErrRemote) {
+				t.Fatalf("same-origin foreign-prefix request = %v, want remote rejection", err)
+			}
+			if innerCalls != 0 {
+				t.Fatalf("same-origin foreign-prefix request reached inner transport: calls=%d", innerCalls)
 			}
 		})
 	}

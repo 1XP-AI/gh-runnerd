@@ -332,25 +332,27 @@ type drainPollHook struct {
 	response       chan struct{}
 	release        chan struct{}
 
-	mu                  sync.Mutex
-	wroteRequest        bool
-	withdrawalCompleted bool
-	responseBeforeWrite bool
-	responseHeld        bool
-	invalid             bool
-	pollAttempts        int
-	statistics          [3]drainStatistics
-	statisticsKnown     [3]bool
-	batches             [3]*baselineBatch
-	batchesKnown        [3]bool
-	messagePresent      [3]bool
-	messageAbsent       [3]bool
-	wroteCallbacks      [3]int
-	onRequestWritten    func()
-	wroteOnce           sync.Once
-	withdrawalOnce      sync.Once
-	responseOnce        sync.Once
-	releaseOnce         sync.Once
+	mu                   sync.Mutex
+	runtimePathPrefix    string
+	runtimePathPrefixSet bool
+	wroteRequest         bool
+	withdrawalCompleted  bool
+	responseBeforeWrite  bool
+	responseHeld         bool
+	invalid              bool
+	pollAttempts         int
+	statistics           [3]drainStatistics
+	statisticsKnown      [3]bool
+	batches              [3]*baselineBatch
+	batchesKnown         [3]bool
+	messagePresent       [3]bool
+	messageAbsent        [3]bool
+	wroteCallbacks       [3]int
+	onRequestWritten     func()
+	wroteOnce            sync.Once
+	withdrawalOnce       sync.Once
+	responseOnce         sync.Once
+	releaseOnce          sync.Once
 }
 
 func newDrainPollHook(target string) *drainPollHook {
@@ -362,9 +364,17 @@ func newDrainPollHook(target string) *drainPollHook {
 }
 
 func newDrainPollHookWithOrigin(target, origin string) *drainPollHook {
+	return newDrainPollHookWithOriginAndPrefix(target, origin, "")
+}
+
+func newDrainPollHookWithOriginAndPrefix(target, origin, runtimePathPrefix string) *drainPollHook {
 	hook := newDrainPollHook(target)
 	hook.mu.Lock()
 	hook.origin = origin
+	if runtimePathPrefix != "" {
+		hook.runtimePathPrefix = runtimePathPrefix
+		hook.runtimePathPrefixSet = true
+	}
 	hook.mu.Unlock()
 	return hook
 }
@@ -469,8 +479,15 @@ func (h *drainPollHook) pollRequestValid(req *http.Request, attempt int) bool {
 	}
 	h.mu.Lock()
 	approvedOrigin := h.origin
+	runtimePathPrefixSet := h.runtimePathPrefixSet
 	h.mu.Unlock()
 	if (approvedOrigin == "" && strings.EqualFold(want.Scheme, "https")) || (approvedOrigin != "" && requestOrigin != approvedOrigin) {
+		return false
+	}
+	// Production queue URLs are HTTPS and must only be marked after the
+	// scale-set snapshot has captured a runtime tenant prefix. HTTP remains
+	// available for the in-process synthetic listener seams.
+	if strings.EqualFold(want.Scheme, "https") && !runtimePathPrefixSet {
 		return false
 	}
 	values := req.Header.Values(scaleset.HeaderScaleSetMaxCapacity)

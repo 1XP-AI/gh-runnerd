@@ -390,23 +390,31 @@ func (a *SDKAPI) OpenDrainSession(c context.Context, id int, owner string, hook 
 	if configured == nil || configured.client == nil {
 		return nil, ErrRemote
 	}
-	wire := &baselineWireCapture{stage: "session-open", setID: id, organization: configured.approval.Organization, owner: owner, allowedHosts: baselineWireAllowedHosts(configured.approval, configured.drainEndpointHost())}
+	hook.mu.Lock()
+	expectedRuntimePathPrefix := hook.runtimePathPrefix
+	expectedRuntimePathPrefixSet := hook.runtimePathPrefixSet
+	hook.mu.Unlock()
+	wire := &baselineWireCapture{stage: "session-open", setID: id, organization: configured.approval.Organization, owner: owner, runtimePathPrefix: expectedRuntimePathPrefix, runtimePathPrefixSet: expectedRuntimePathPrefixSet, allowedHosts: baselineWireAllowedHosts(configured.approval, configured.drainEndpointHost())}
 	session, err := configured.client.MessageSessionClient(wire.context(c), id, owner, configured.options...)
 	if err != nil {
 		return nil, ErrRemote
 	}
 	sessionFacts, _, _, status := wire.facts()
-	if session == nil || !wire.observed() || status != http.StatusOK || wire.requestOrigin() == "" || !validDrainSessionWire(configured.approval, id, owner, sessionFacts, session.Session()) {
+	sessionOrigin := wire.requestOrigin()
+	sessionRuntimePathPrefix, prefixKnown := wire.requestRuntimePathPrefix()
+	if session == nil || !wire.observed() || status != http.StatusOK || sessionOrigin == "" || !prefixKnown || !validDrainSessionWire(configured.approval, id, owner, sessionFacts, session.Session()) {
 		return nil, ErrQuarantine
 	}
 	hook.mu.Lock()
-	if hook.origin != "" && hook.origin != wire.requestOrigin() {
+	if (hook.origin != "" && hook.origin != sessionOrigin) || (hook.runtimePathPrefixSet && hook.runtimePathPrefix != sessionRuntimePathPrefix) {
 		hook.invalid = true
 		hook.mu.Unlock()
 		return nil, ErrQuarantine
 	}
 	hook.target = sessionFacts.queueURL
-	hook.origin = wire.requestOrigin()
+	hook.origin = sessionOrigin
+	hook.runtimePathPrefix = sessionRuntimePathPrefix
+	hook.runtimePathPrefixSet = true
 	hook.mu.Unlock()
 	return session, nil
 }

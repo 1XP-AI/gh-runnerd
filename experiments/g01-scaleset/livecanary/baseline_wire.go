@@ -18,32 +18,117 @@ import (
 
 type baselineWireKey struct{}
 type baselineWireCapture struct {
-	mu            sync.Mutex
-	stage         string
-	setID         int
-	organization  string
-	owner         string
-	runnerName    string
-	sessionID     string
-	queue         string // private, captured from the exact session; never journaled
-	allowedHosts  []string
-	cursor        int
-	count, status int
-	requestIDs    []int64
-	requestCount  int
-	origin        string
-	invalid       bool
-	session       *baselineSessionFacts
-	batch         *baselineBatch
-	accepted      *baselineAccepted
-	set           *baselineSetFacts
-	runner        *baselineRunnerFacts
-	jit           *scaleset.RunnerScaleSetJitRunnerConfig
+	mu                   sync.Mutex
+	stage                string
+	setID                int
+	organization         string
+	owner                string
+	runnerName           string
+	sessionID            string
+	queue                string // private, captured from the exact session; never journaled
+	runtimePathPrefix    string // private tenant path prefix; never journaled
+	runtimePathPrefixSet bool
+	allowedHosts         []string
+	cursor               int
+	count, status        int
+	requestIDs           []int64
+	requestCount         int
+	origin               string
+	invalid              bool
+	session              *baselineSessionFacts
+	batch                *baselineBatch
+	accepted             *baselineAccepted
+	set                  *baselineSetFacts
+	runner               *baselineRunnerFacts
+	jit                  *scaleset.RunnerScaleSetJitRunnerConfig
 }
 
 func (c *baselineWireCapture) context(ctx context.Context) context.Context {
 	return context.WithValue(ctx, baselineWireKey{}, c)
 }
+
+// baselinePathPrefix returns the path before an exact endpoint marker. The
+// prefix is intentionally retained only in memory: it binds later marked
+// requests to the first approved tenant/runtime route without putting private
+// URLs in journal evidence.
+func baselinePathPrefix(path, marker string) (string, bool) {
+	if path == "" || marker == "" || !strings.HasSuffix(path, marker) {
+		return "", false
+	}
+	prefix := strings.TrimSuffix(path, marker)
+	if prefix != "" && (!strings.HasPrefix(prefix, "/") || strings.HasSuffix(prefix, "/")) {
+		return "", false
+	}
+	if prefix == "" {
+		prefix = "/"
+	}
+	return prefix, true
+}
+
+func baselineRuntimeScaleSetPrefix(path string, setID int) (string, bool) {
+	return baselineRuntimeScaleSetPrefixForTail(path, setID, "")
+}
+
+func baselineRuntimeScaleSetPrefixForTail(path string, setID int, tail string) (string, bool) {
+	if setID <= 0 {
+		return "", false
+	}
+	return baselinePathPrefix(path, "/_apis/runtime/runnerscalesets/"+strconv.Itoa(setID)+tail)
+}
+
+func baselineRuntimeRunnerPrefix(path string) (string, bool) {
+	return baselinePathPrefix(path, "/_apis/distributedtask/pools/0/agents")
+}
+
+func baselineRuntimeScaleSetPath(prefix string, setID int, tail string) string {
+	if prefix == "/" {
+		prefix = ""
+	}
+	return prefix + "/_apis/runtime/runnerscalesets/" + strconv.Itoa(setID) + tail
+}
+
+func baselineRuntimeRunnerPath(prefix string) string {
+	if prefix == "/" {
+		prefix = ""
+	}
+	return prefix + "/_apis/distributedtask/pools/0/agents"
+}
+
+func (c *baselineWireCapture) runtimePrefixMatches(prefix string) bool {
+	return c == nil || !c.runtimePathPrefixSet || c.runtimePathPrefix == prefix
+}
+
+func (c *baselineWireCapture) runtimeRequestPrefix(r *http.Request) (string, bool) {
+	if c == nil || r == nil || r.URL == nil {
+		return "", false
+	}
+	var (
+		prefix string
+		ok     bool
+	)
+	if c.stage == "runner-observe" {
+		prefix, ok = baselineRuntimeRunnerPrefix(r.URL.Path)
+	} else {
+		tail := ""
+		switch c.stage {
+		case "session-open":
+			tail = "/sessions"
+		case "acquire":
+			tail = "/acquirejobs"
+		case "terminal-session-close":
+			if c.sessionID == "" {
+				return "", false
+			}
+			tail = "/sessions/" + c.sessionID
+		}
+		prefix, ok = baselineRuntimeScaleSetPrefixForTail(r.URL.Path, c.setID, tail)
+	}
+	if !ok || !c.runtimePrefixMatches(prefix) {
+		return "", false
+	}
+	return prefix, true
+}
+
 func (c *baselineWireCapture) target(r *http.Request) bool {
 	if r == nil || r.URL == nil || r.URL.Fragment != "" || r.URL.User != nil || r.URL.EscapedPath() != r.URL.Path {
 		return false
@@ -73,31 +158,50 @@ func (c *baselineWireCapture) target(r *http.Request) bool {
 		if c.stage == "terminal-set-delete" {
 			method = "DELETE"
 		}
-		return r.Method == method && strings.HasSuffix(r.URL.Path, strings.TrimSuffix(suffix, "/")) && baselineExactAPIVersionQuery(r.URL.RawQuery)
+		return r.Method == method && c.runtimeRequestTarget(r, "") && baselineExactAPIVersionQuery(r.URL.RawQuery)
 	}
 	if c.stage == "terminal-session-close" {
 		origin, ok := baselineRequestOrigin(r.URL)
-		return c.origin != "" && ok && origin == c.origin && c.sessionID != "" && r.Method == "DELETE" && strings.HasSuffix(r.URL.Path, suffix+"sessions/"+c.sessionID) && baselineExactAPIVersionQuery(r.URL.RawQuery)
+		return c.origin != "" && ok && origin == c.origin && c.sessionID != "" && r.Method == "DELETE" && c.runtimeRequestTarget(r, "sessions/"+c.sessionID) && baselineExactAPIVersionQuery(r.URL.RawQuery)
 	}
 	if c.stage == "session-open" {
 		if len(c.allowedHosts) > 0 && !baselineOriginAllowed(r.URL, c.allowedHosts) {
 			return false
 		}
-		suffix += "sessions"
+		return r.Method == "POST" && c.runtimeRequestTarget(r, "sessions") && baselineExactAPIVersionQuery(r.URL.RawQuery)
 	} else if c.stage == "runner-observe" {
-		return c.snapshotOriginAllowed(r) && r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/_apis/distributedtask/pools/0/agents") && baselineExactQuery(r.URL.RawQuery, map[string]string{"agentName": c.runnerName, "api-version": "6.0-preview"})
+		return c.snapshotOriginAllowed(r) && r.Method == http.MethodGet && c.runtimeRequestTarget(r, "") && baselineExactQuery(r.URL.RawQuery, map[string]string{"agentName": c.runnerName, "api-version": "6.0-preview"})
 	} else if c.stage == "acquire" {
 		origin, ok := baselineRequestOrigin(r.URL)
 		if c.origin == "" || !ok || origin != c.origin || len(c.allowedHosts) == 0 || !baselineOriginAllowed(r.URL, c.allowedHosts) {
 			return false
 		}
-		suffix = "/_apis/runtime" + suffix + "acquirejobs"
+		return r.Method == "POST" && c.runtimeRequestTarget(r, "acquirejobs") && baselineExactAPIVersionQuery(r.URL.RawQuery)
 	} else if c.stage == "jit" {
 		suffix += "generatejitconfig"
 	} else {
 		return false
 	}
 	return r.Method == "POST" && strings.HasSuffix(r.URL.Path, suffix) && baselineExactAPIVersionQuery(r.URL.RawQuery)
+}
+
+func (c *baselineWireCapture) runtimeRequestTarget(r *http.Request, tail string) bool {
+	if c == nil || r == nil || r.URL == nil {
+		return false
+	}
+	if c.stage == "runner-observe" {
+		prefix, ok := baselineRuntimeRunnerPrefix(r.URL.Path)
+		return ok && c.runtimePrefixMatches(prefix) && r.URL.Path == baselineRuntimeRunnerPath(prefix)
+	}
+	prefixTail := ""
+	if tail != "" {
+		prefixTail = "/" + tail
+	}
+	prefix, ok := baselineRuntimeScaleSetPrefixForTail(r.URL.Path, c.setID, prefixTail)
+	if !ok || !c.runtimePrefixMatches(prefix) {
+		return false
+	}
+	return r.URL.Path == baselineRuntimeScaleSetPath(prefix, c.setID, "/"+tail) || (tail == "" && r.URL.Path == baselineRuntimeScaleSetPath(prefix, c.setID, ""))
 }
 
 func (c *baselineWireCapture) snapshotOriginAllowed(r *http.Request) bool {
@@ -203,7 +307,7 @@ func baselineWireAllowedHosts(a Approval, apiHost string) []string {
 // baselineRequestCaptureTransport runs immediately above the physical
 // transport. User-supplied test wrappers may mutate a request before it gets
 // here, so this is the final request-side boundary before any bytes leave the
-// process. Only explicitly marked session-open and acquisition requests are inspected.
+// process. Only explicitly marked G01 runtime requests are inspected.
 type baselineRequestCaptureTransport struct{ inner http.RoundTripper }
 
 func (t baselineRequestCaptureTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -257,30 +361,51 @@ func (c *baselineWireCapture) captureRequest(req *http.Request) error {
 			}
 			return c.rejectRequest(req)
 		}
+		c.mu.Lock()
+		if c.requestCount != 0 || c.invalid {
+			c.mu.Unlock()
+			return c.rejectRequest(req)
+		}
+		c.requestCount = 1
+		c.mu.Unlock()
 		data, err := readBaselineRequestBody(req.Body)
 		req.Body = nil
 		if err != nil || !validBaselineSessionOpenBody(data, c.owner) {
 			clear(data)
-			return c.rejectRequest(req)
+			return c.rejectReservedRequest(req)
 		}
 		installBaselineRequestBody(req, data)
 		origin, ok := baselineRequestOrigin(req.URL)
 		if !ok {
-			return c.rejectRequest(req)
+			return c.rejectReservedRequest(req)
+		}
+		prefix, ok := c.runtimeRequestPrefix(req)
+		if !ok {
+			return c.rejectReservedRequest(req)
 		}
 		c.mu.Lock()
 		if c.origin != "" && c.origin != origin {
 			c.invalid = true
 		}
 		c.origin = origin
+		if !c.runtimePathPrefixSet {
+			c.runtimePathPrefix = prefix
+			c.runtimePathPrefixSet = true
+		} else if c.runtimePathPrefix != prefix {
+			c.invalid = true
+		}
 		c.mu.Unlock()
 		return nil
 	}
-	if c.stage == "set-observe" || c.stage == "runner-observe" {
+	if c.stage == "set-observe" || c.stage == "runner-observe" || strings.HasPrefix(c.stage, "terminal-set") || c.stage == "terminal-session-close" {
 		if !snapshotRequestCandidate(req) {
 			return nil
 		}
 		if !c.target(req) {
+			return c.rejectRequest(req)
+		}
+		prefix, ok := c.runtimeRequestPrefix(req)
+		if !ok {
 			return c.rejectRequest(req)
 		}
 		origin, ok := baselineRequestOrigin(req.URL)
@@ -292,6 +417,12 @@ func (c *baselineWireCapture) captureRequest(req *http.Request) error {
 		if c.origin == "" {
 			c.origin = origin
 		} else if c.origin != origin {
+			c.invalid = true
+		}
+		if !c.runtimePathPrefixSet {
+			c.runtimePathPrefix = prefix
+			c.runtimePathPrefixSet = true
+		} else if c.runtimePathPrefix != prefix {
 			c.invalid = true
 		}
 		valid := c.requestCount == 1 && !c.invalid
@@ -375,6 +506,16 @@ func (c *baselineWireCapture) rejectRequest(req *http.Request) error {
 	return ErrRemote
 }
 
+func (c *baselineWireCapture) rejectReservedRequest(req *http.Request) error {
+	c.mu.Lock()
+	c.invalid = true
+	c.mu.Unlock()
+	if req != nil && req.Body != nil {
+		_ = req.Body.Close()
+	}
+	return ErrRemote
+}
+
 type baselineRequestBody struct {
 	mu     sync.Mutex
 	reader *bytes.Reader
@@ -402,6 +543,15 @@ func (c *baselineWireCapture) requestOrigin() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.origin
+}
+
+func (c *baselineWireCapture) requestRuntimePathPrefix() (string, bool) {
+	if c == nil {
+		return "", false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.runtimePathPrefix, c.runtimePathPrefixSet && !c.invalid
 }
 
 func (c *baselineWireCapture) requestObserved() bool {

@@ -403,6 +403,34 @@ func TestPinnedSDKDrainRejectsSnapshotOriginMismatchBeforeEffects(t *testing.T) 
 	}
 }
 
+func TestPinnedSDKDrainRejectsSnapshotTenantPrefixMismatchBeforeEffects(t *testing.T) {
+	a := approval()
+	a.Phases = append(a.Phases, "drain")
+	var snapshotRequests atomic.Int32
+	fixture, base, _, _ := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{
+		runtimeActionsBasePath: "/tenant/approved/",
+		mutateRequest: func(req *http.Request) {
+			if req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/runnerscalesets/7") && snapshotRequests.Add(1) == 2 {
+				req.URL.Path = "/tenant/foreign/_apis/runtime/runnerscalesets/7"
+				req.URL.RawPath = ""
+			}
+		},
+	})
+	j := &memoryJournal{}
+	for _, event := range drainReplayPrefix()[:3] {
+		if err := j.Append(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d := &Driver{Approval: a, Journal: j, API: fixtureSDK{base}}
+	if err := d.Run(context.Background(), "drain"); !errors.Is(err, ErrQuarantine) {
+		t.Fatalf("snapshot tenant-prefix mismatch = %v, want quarantine", err)
+	}
+	if got := fixture.snapshotReads.Load(); got != 1 {
+		t.Fatalf("mismatched after snapshot reached fixture: reads=%d, want before only", got)
+	}
+}
+
 func TestPinnedSDKDrainRejectsSessionOriginMismatchBeforeListener(t *testing.T) {
 	a := approval()
 	a.Phases = append(a.Phases, "drain")
@@ -433,6 +461,37 @@ func TestPinnedSDKDrainRejectsSessionOriginMismatchBeforeListener(t *testing.T) 
 		if event.Kind == "observation" && event.Operation == "drain" && event.Drain != nil && event.Drain.Outcome == drainOutcomeObserved {
 			t.Fatal("session-open origin mismatch produced an observed drain")
 		}
+	}
+}
+
+func TestPinnedSDKDrainRejectsSessionTenantPrefixMismatchBeforeListener(t *testing.T) {
+	a := approval()
+	a.Phases = append(a.Phases, "drain")
+	fixture, base, _, _ := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{
+		runtimeActionsBasePath: "/tenant/approved/",
+		mutateRequest: func(req *http.Request) {
+			if req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/sessions") {
+				req.URL.Path = "/tenant/foreign/_apis/runtime/runnerscalesets/7/sessions"
+				req.URL.RawPath = ""
+			}
+		},
+	})
+	fixture.sessionOpens.Store(0)
+	j := &memoryJournal{}
+	for _, event := range drainReplayPrefix()[:3] {
+		if err := j.Append(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d := &Driver{Approval: a, Journal: j, API: fixtureSDK{base}}
+	if err := d.Run(context.Background(), "drain"); !errors.Is(err, ErrQuarantine) {
+		t.Fatalf("session tenant-prefix mismatch = %v, want quarantine", err)
+	}
+	if got := fixture.sessionOpens.Load(); got != 0 {
+		t.Fatalf("mismatched session-open reached fixture: opens=%d", got)
+	}
+	if got := fixture.polls.Load(); got != 0 {
+		t.Fatalf("session tenant-prefix mismatch started listener polls: polls=%d", got)
 	}
 }
 
@@ -783,8 +842,8 @@ func TestPinnedSDKDrainBindsSessionCloseToPhysicalDelete(t *testing.T) {
 			if err := d.Run(context.Background(), "drain"); !errors.Is(err, ErrQuarantine) {
 				t.Fatalf("wrong session-close target = %v, want quarantine", err)
 			}
-			if fixture.closeRequests.Load() != 1 {
-				t.Fatalf("wrong session-close target requests = %d, want one loopback attempt", fixture.closeRequests.Load())
+			if fixture.closeRequests.Load() != 0 {
+				t.Fatalf("wrong session-close target requests = %d, want pre-inner rejection", fixture.closeRequests.Load())
 			}
 			for _, event := range journal.Events() {
 				if event.Kind == "result" && event.Operation == "session-close" {
@@ -816,8 +875,8 @@ func TestPinnedSDKDrainBindsSessionCloseToSessionOpenOrigin(t *testing.T) {
 	if err := d.Run(context.Background(), "drain"); !errors.Is(err, ErrQuarantine) {
 		t.Fatalf("wrong session-close origin = %v, want quarantine", err)
 	}
-	if fixture.closeRequests.Load() != 1 {
-		t.Fatalf("wrong session-close origin requests = %d, want one loopback attempt", fixture.closeRequests.Load())
+	if fixture.closeRequests.Load() != 0 {
+		t.Fatalf("wrong session-close origin requests = %d, want pre-inner rejection", fixture.closeRequests.Load())
 	}
 	for _, event := range j.Events() {
 		if event.Kind == "result" && event.Operation == "session-close" {

@@ -132,8 +132,13 @@ func (c *journaledDrainClient) DeleteMessage(ctx context.Context, id int) error 
 		if c.hook != nil {
 			c.hook.mu.Lock()
 			queue := c.hook.target
+			runtimePathPrefix := c.hook.runtimePathPrefix
+			runtimePathPrefixSet := c.hook.runtimePathPrefixSet
 			c.hook.mu.Unlock()
-			wire = &baselineWireCapture{stage: "ack", queue: queue, cursor: id}
+			if !runtimePathPrefixSet {
+				return Event{}, c.reject("ack")
+			}
+			wire = &baselineWireCapture{stage: "ack", queue: queue, cursor: id, runtimePathPrefix: runtimePathPrefix, runtimePathPrefixSet: runtimePathPrefixSet}
 			call = wire.context(call)
 		}
 		if err := c.inner.DeleteMessage(call, id); err != nil {
@@ -168,12 +173,17 @@ func (c *journaledDrainClient) AcquireJobs(ctx context.Context, ids []int64) ([]
 			}
 			c.hook.mu.Lock()
 			queue, origin := c.hook.target, c.hook.origin
+			runtimePathPrefix := c.hook.runtimePathPrefix
+			runtimePathPrefixSet := c.hook.runtimePathPrefixSet
 			c.hook.mu.Unlock()
+			if !runtimePathPrefixSet {
+				return Event{}, c.reject("acquire")
+			}
 			apiHost := ""
 			if reader, ok := c.d.API.(drainEndpointHostReader); ok {
 				apiHost = reader.drainEndpointHost()
 			}
-			wire = &baselineWireCapture{stage: "acquire", setID: setID, queue: queue, requestIDs: slices.Clone(ids), origin: origin, allowedHosts: baselineWireAllowedHosts(c.d.Approval, apiHost)}
+			wire = &baselineWireCapture{stage: "acquire", setID: setID, queue: queue, requestIDs: slices.Clone(ids), origin: origin, runtimePathPrefix: runtimePathPrefix, runtimePathPrefixSet: runtimePathPrefixSet, allowedHosts: baselineWireAllowedHosts(c.d.Approval, apiHost)}
 			call = wire.context(call)
 		}
 		got, err = c.inner.AcquireJobs(call, slices.Clone(ids))
@@ -203,14 +213,24 @@ func (d *Driver) drainSnapshot(ctx context.Context, setID int, stage string) (dr
 }
 
 func (d *Driver) drainSnapshotWithOrigin(ctx context.Context, setID int, stage, expectedOrigin string) (drainSnapshot, string, error) {
+	snapshot, origin, _, err := d.drainSnapshotWithBinding(ctx, setID, stage, expectedOrigin, "")
+	return snapshot, origin, err
+}
+
+// drainSnapshotWithBinding captures the first approved runtime tenant prefix
+// from the scale-set request and requires the runner request to use that same
+// prefix. A non-empty expected prefix binds a later snapshot to the prefix
+// already established by the drain phase.
+func (d *Driver) drainSnapshotWithBinding(ctx context.Context, setID int, stage, expectedOrigin, expectedRuntimePathPrefix string) (drainSnapshot, string, string, error) {
 	var snapshot drainSnapshot
 	var set *scaleset.RunnerScaleSet
 	setReader, setWire := d.API.(drainScaleSetWireReader)
 	runnerReader, runnerWire := d.API.(drainRunnerWireReader)
 	if setWire != runnerWire || (expectedOrigin != "" && !setWire) {
-		return drainSnapshot{}, "", ErrQuarantine
+		return drainSnapshot{}, "", "", ErrQuarantine
 	}
 	origin := expectedOrigin
+	runtimePathPrefix := expectedRuntimePathPrefix
 	allowedHosts := []string(nil)
 	if reader, ok := d.API.(drainEndpointHostReader); ok {
 		allowedHosts = baselineWireAllowedHosts(d.Approval, reader.drainEndpointHost())
@@ -218,14 +238,16 @@ func (d *Driver) drainSnapshotWithOrigin(ctx context.Context, setID int, stage, 
 	if err := d.effect(ctx, "observe-owned", nil, func(call context.Context) (Event, error) {
 		var err error
 		if setWire {
-			wire := &baselineWireCapture{stage: "set-observe", setID: setID, origin: expectedOrigin, allowedHosts: allowedHosts}
+			wire := &baselineWireCapture{stage: "set-observe", setID: setID, origin: expectedOrigin, runtimePathPrefix: expectedRuntimePathPrefix, runtimePathPrefixSet: expectedRuntimePathPrefix != "", allowedHosts: allowedHosts}
 			set, err = setReader.drainGetScaleSet(call, setID, wire)
 			wireSet, status := wire.setFacts()
 			wireOrigin := wire.requestOrigin()
-			if err != nil || !wire.observed() || status != 200 || wireOrigin == "" || (origin != "" && wireOrigin != origin) || !wireSet.eligibleForDrain(d.Approval, setID) || !wireSet.matches(set) {
+			wireRuntimePathPrefix, prefixKnown := wire.requestRuntimePathPrefix()
+			if err != nil || !wire.observed() || status != 200 || wireOrigin == "" || !prefixKnown || (origin != "" && wireOrigin != origin) || !wireSet.eligibleForDrain(d.Approval, setID) || !wireSet.matches(set) {
 				return Event{}, ErrQuarantine
 			}
 			origin = wireOrigin
+			runtimePathPrefix = wireRuntimePathPrefix
 		} else {
 			// Synthetic API fakes used by state-machine tests have no physical
 			// request origin. Production SDKAPI always takes the wire branch.
@@ -249,17 +271,18 @@ func (d *Driver) drainSnapshotWithOrigin(ctx context.Context, setID int, stage, 
 		snapshot.StatsKnown = true
 		return Event{ID: set.ID}, nil
 	}); err != nil {
-		return drainSnapshot{}, "", err
+		return drainSnapshot{}, "", "", err
 	}
 	var runner *scaleset.RunnerReference
 	if err := d.effect(ctx, "observe-runner", nil, func(call context.Context) (Event, error) {
 		var err error
 		if runnerWire {
-			wire := &baselineWireCapture{stage: "runner-observe", runnerName: d.Approval.workerName(), origin: origin, allowedHosts: allowedHosts}
+			wire := &baselineWireCapture{stage: "runner-observe", runnerName: d.Approval.workerName(), origin: origin, runtimePathPrefix: runtimePathPrefix, runtimePathPrefixSet: runtimePathPrefix != "", allowedHosts: allowedHosts}
 			runner, err = runnerReader.drainFindRunner(call, d.Approval.workerName(), wire)
 			wireRunner, status := wire.runnerFacts()
 			wireOrigin := wire.requestOrigin()
-			if err != nil || !wire.observed() || status != http.StatusOK || origin == "" || wireOrigin != origin || !wireRunner.matches(runner) {
+			wireRuntimePathPrefix, prefixKnown := wire.requestRuntimePathPrefix()
+			if err != nil || !wire.observed() || status != http.StatusOK || origin == "" || wireOrigin != origin || !prefixKnown || wireRuntimePathPrefix != runtimePathPrefix || !wireRunner.matches(runner) {
 				return Event{}, ErrQuarantine
 			}
 		} else {
@@ -279,10 +302,10 @@ func (d *Driver) drainSnapshotWithOrigin(ctx context.Context, setID int, stage, 
 		snapshot.Runner = &drainRunnerIdentity{ID: runner.ID, Name: runner.Name, ScaleSetID: runner.RunnerScaleSetID}
 		return Event{ID: runner.ID, DrainSnapshot: &snapshot, DrainSnapshotStage: stage}, nil
 	}); err != nil {
-		return drainSnapshot{}, "", err
+		return drainSnapshot{}, "", "", err
 	}
 	_ = stage // Stage is retained by the caller's before/after final payload.
-	return snapshot, origin, nil
+	return snapshot, origin, runtimePathPrefix, nil
 }
 
 func validDrainIdlePrerequisite(s drainSnapshot) bool {
@@ -321,7 +344,7 @@ func (d *Driver) drain(ctx context.Context, setID int) error {
 		return ErrQuarantine
 	}
 	phaseSequence := phaseState.drainPhaseSequence
-	before, origin, err := d.drainSnapshotWithOrigin(ctx, setID, "before", "")
+	before, origin, runtimePathPrefix, err := d.drainSnapshotWithBinding(ctx, setID, "before", "", "")
 	if err != nil {
 		if markerErr := d.recordDrainMarker(drainMarkerFor(ctx, err)); markerErr != nil {
 			return markerErr
@@ -334,7 +357,7 @@ func (d *Driver) drain(ctx context.Context, setID int) error {
 		}
 		return ErrQuarantine
 	}
-	hook := newDrainPollHookWithOrigin("", origin)
+	hook := newDrainPollHookWithOriginAndPrefix("", origin, runtimePathPrefix)
 	var session Session
 	var sessionID string
 	err = d.effect(ctx, "session-open", nil, func(call context.Context) (Event, error) {
@@ -345,8 +368,10 @@ func (d *Driver) drain(ctx context.Context, setID int) error {
 		}
 		hook.mu.Lock()
 		sessionOrigin := hook.origin
+		sessionRuntimePathPrefix := hook.runtimePathPrefix
+		sessionRuntimePathPrefixSet := hook.runtimePathPrefixSet
 		hook.mu.Unlock()
-		if sessionOrigin != origin {
+		if sessionOrigin != origin || (runtimePathPrefix != "" && (!sessionRuntimePathPrefixSet || sessionRuntimePathPrefix != runtimePathPrefix)) {
 			return Event{}, ErrQuarantine
 		}
 		current := session.Session()
@@ -388,7 +413,7 @@ func (d *Driver) drain(ctx context.Context, setID int) error {
 		if markerErr := d.recordDrainMarker(drainMarkerFor(ctx, runErr)); markerErr != nil {
 			return markerErr
 		}
-		after, _, afterErr := d.drainSnapshotWithOrigin(ctx, setID, "after", origin)
+		after, _, _, afterErr := d.drainSnapshotWithBinding(ctx, setID, "after", origin, runtimePathPrefix)
 		if afterErr != nil {
 			if markerErr := d.recordDrainMarker(drainMarkerFor(ctx, afterErr)); markerErr != nil {
 				return markerErr
@@ -404,15 +429,19 @@ func (d *Driver) drain(ctx context.Context, setID int) error {
 	}
 	closeErr := d.effect(ctx, "session-close", nil, func(call context.Context) (Event, error) {
 		origin := ""
+		runtimePathPrefix := ""
+		runtimePathPrefixSet := false
 		if hook != nil {
 			hook.mu.Lock()
 			origin = hook.origin
+			runtimePathPrefix = hook.runtimePathPrefix
+			runtimePathPrefixSet = hook.runtimePathPrefixSet
 			hook.mu.Unlock()
 		}
-		if origin == "" {
+		if origin == "" || !runtimePathPrefixSet {
 			return Event{}, ErrQuarantine
 		}
-		wire := &baselineWireCapture{stage: "terminal-session-close", setID: setID, sessionID: sessionID, origin: origin}
+		wire := &baselineWireCapture{stage: "terminal-session-close", setID: setID, sessionID: sessionID, origin: origin, runtimePathPrefix: runtimePathPrefix, runtimePathPrefixSet: runtimePathPrefixSet}
 		call = wire.context(call)
 		if err := session.Close(call); err != nil {
 			return Event{}, err
@@ -429,7 +458,7 @@ func (d *Driver) drain(ctx context.Context, setID int) error {
 		}
 		return closeErr
 	}
-	after, _, afterErr := d.drainSnapshotWithOrigin(ctx, setID, "after", origin)
+	after, _, _, afterErr := d.drainSnapshotWithBinding(ctx, setID, "after", origin, runtimePathPrefix)
 	if afterErr != nil {
 		if markerErr := d.recordDrainMarker(drainMarkerFor(ctx, afterErr)); markerErr != nil {
 			return markerErr

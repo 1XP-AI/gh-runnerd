@@ -33,6 +33,8 @@ type baselineListener struct {
 	session                  Session
 	initial                  scaleset.RunnerScaleSetSession
 	sessionID, queue, origin string
+	runtimePathPrefix        string
+	runtimePathPrefixSet     bool
 	running, used, invalid   bool
 	after                    func(context.Context, baselineAcquisition) error
 }
@@ -163,7 +165,7 @@ func (b *baselineListener) finish(r baselineRecord, known bool) (controllerRecor
 	return ref, nil
 }
 func (b *baselineListener) wire(stage string) *baselineWireCapture {
-	return &baselineWireCapture{stage: stage, setID: b.setID, organization: b.approval.Organization, owner: b.approval.setName(), queue: b.queue, origin: b.origin, allowedHosts: baselineWireAllowedHosts(b.approval, b.api.drainEndpointHost())}
+	return &baselineWireCapture{stage: stage, setID: b.setID, organization: b.approval.Organization, owner: b.approval.setName(), queue: b.queue, origin: b.origin, runtimePathPrefix: b.runtimePathPrefix, runtimePathPrefixSet: b.runtimePathPrefixSet, allowedHosts: baselineWireAllowedHosts(b.approval, b.api.drainEndpointHost())}
 }
 
 func (b *baselineListener) capturedOrigin() string {
@@ -173,6 +175,15 @@ func (b *baselineListener) capturedOrigin() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.origin
+}
+
+func (b *baselineListener) capturedRuntimePathPrefix() (string, bool) {
+	if b == nil {
+		return "", false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.runtimePathPrefix, b.runtimePathPrefixSet && !b.invalid
 }
 func (b *baselineListener) run(after func(context.Context, baselineAcquisition) error) error {
 	if b == nil || b.ctx == nil || b.cancel == nil || !b.mu.TryLock() {
@@ -234,7 +245,12 @@ func (b *baselineListener) initialize() error {
 	cancel()
 	r.Set = c.set
 	r.HTTPStatus = c.status
-	known := c.observed() && r.Set.eligible(b.approval, b.setID) && ((callErr != nil && b.ctx.Err() != nil) || (callErr == nil && set != nil && set.ID == r.Set.ID && set.Name == r.Set.Name && set.RunnerGroupID == r.Set.GroupID && set.RunnerSetting.DisableUpdate && r.Set.Statistics.matches(set.Statistics)))
+	prefix, prefixKnown := c.requestRuntimePathPrefix()
+	known := c.observed() && prefixKnown && r.Set.eligible(b.approval, b.setID) && ((callErr != nil && b.ctx.Err() != nil) || (callErr == nil && set != nil && set.ID == r.Set.ID && set.Name == r.Set.Name && set.RunnerGroupID == r.Set.GroupID && set.RunnerSetting.DisableUpdate && r.Set.Statistics.matches(set.Statistics)))
+	if prefixKnown {
+		b.runtimePathPrefix = prefix
+		b.runtimePathPrefixSet = true
+	}
 	if _, err = b.finish(r, known); err != nil {
 		return err
 	}
@@ -248,15 +264,19 @@ func (b *baselineListener) initialize() error {
 	cancel()
 	sf, _, _, status := c.facts()
 	origin := c.requestOrigin()
+	sessionPrefix, sessionPrefixKnown := c.requestRuntimePathPrefix()
 	r.Session = sf
 	r.HTTPStatus = status
-	known = c.observed() && sf.eligible(b.approval, b.setID) && ((callErr != nil && b.ctx.Err() != nil) || (callErr == nil && session != nil))
+	known = c.observed() && sessionPrefixKnown && sf.eligible(b.approval, b.setID) && ((callErr != nil && b.ctx.Err() != nil) || (callErr == nil && session != nil))
 	var initial scaleset.RunnerScaleSetSession
 	if callErr == nil && session != nil {
 		initial = session.Session()
 	}
 	if known && callErr == nil {
 		known = initial.SessionID.String() == sf.SessionID && initial.OwnerName == sf.Owner && sf.Statistics.matches(initial.Statistics) && initial.MessageQueueURL != ""
+	}
+	if known && (origin == "" || !b.runtimePathPrefixSet || sessionPrefix != b.runtimePathPrefix) {
+		known = false
 	}
 	if known && origin != "" {
 		b.origin = origin
