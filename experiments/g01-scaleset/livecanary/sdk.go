@@ -391,10 +391,11 @@ func (a *SDKAPI) OpenDrainSession(c context.Context, id int, owner string, hook 
 		return nil, ErrRemote
 	}
 	hook.mu.Lock()
+	expectedOrigin := hook.origin
 	expectedRuntimePathPrefix := hook.runtimePathPrefix
 	expectedRuntimePathPrefixSet := hook.runtimePathPrefixSet
 	hook.mu.Unlock()
-	wire := &baselineWireCapture{stage: "session-open", setID: id, organization: configured.approval.Organization, owner: owner, runtimePathPrefix: expectedRuntimePathPrefix, runtimePathPrefixSet: expectedRuntimePathPrefixSet, allowedHosts: baselineWireAllowedHosts(configured.approval, configured.drainEndpointHost())}
+	wire := &baselineWireCapture{stage: "session-open", setID: id, organization: configured.approval.Organization, owner: owner, origin: expectedOrigin, runtimePathPrefix: expectedRuntimePathPrefix, runtimePathPrefixSet: expectedRuntimePathPrefixSet, allowedHosts: baselineWireAllowedHosts(configured.approval, configured.drainEndpointHost())}
 	session, err := configured.client.MessageSessionClient(wire.context(c), id, owner, configured.options...)
 	if err != nil {
 		return nil, ErrRemote

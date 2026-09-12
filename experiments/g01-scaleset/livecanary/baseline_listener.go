@@ -245,11 +245,15 @@ func (b *baselineListener) initialize() error {
 	cancel()
 	r.Set = c.set
 	r.HTTPStatus = c.status
+	beforeOrigin := c.requestOrigin()
 	prefix, prefixKnown := c.requestRuntimePathPrefix()
 	known := c.observed() && prefixKnown && r.Set.eligible(b.approval, b.setID) && ((callErr != nil && b.ctx.Err() != nil) || (callErr == nil && set != nil && set.ID == r.Set.ID && set.Name == r.Set.Name && set.RunnerGroupID == r.Set.GroupID && set.RunnerSetting.DisableUpdate && r.Set.Statistics.matches(set.Statistics)))
 	if prefixKnown {
 		b.runtimePathPrefix = prefix
 		b.runtimePathPrefixSet = true
+	}
+	if c.observed() && beforeOrigin != "" {
+		b.origin = beforeOrigin
 	}
 	if _, err = b.finish(r, known); err != nil {
 		return err

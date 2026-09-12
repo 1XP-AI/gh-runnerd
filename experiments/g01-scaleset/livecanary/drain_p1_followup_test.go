@@ -260,6 +260,57 @@ func TestBaselineSessionOpenRejectsDuplicateMarkedPOSTBeforeInner(t *testing.T) 
 	}
 }
 
+func TestBaselineSessionOpenOriginBindsToBeforeSnapshot(t *testing.T) {
+	const (
+		beforeOrigin = "https://api.example:443"
+		path         = "/tenant/v2/_apis/runtime/runnerscalesets/7/sessions?api-version=6.0-preview"
+		body         = `{"sessionId":"00000000-0000-0000-0000-000000000000","ownerName":"g01-test"}`
+	)
+	for _, tc := range []struct {
+		name   string
+		target string
+		reject bool
+	}{
+		{name: "same origin", target: beforeOrigin + path},
+		{name: "different approved origin", target: "https://other.example" + path, reject: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capture := &baselineWireCapture{
+				stage:                "session-open",
+				setID:                7,
+				organization:         "fixture-org",
+				owner:                "g01-test",
+				origin:               beforeOrigin,
+				runtimePathPrefix:    "/tenant/v2",
+				runtimePathPrefixSet: true,
+				allowedHosts:         []string{"api.example", "other.example"},
+			}
+			innerCalls := 0
+			transport := baselineRequestCaptureTransport{inner: drainRoundTripper(func(req *http.Request) (*http.Response, error) {
+				innerCalls++
+				return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}, nil
+			})}
+			req, err := http.NewRequestWithContext(capture.context(context.Background()), http.MethodPost, tc.target, strings.NewReader(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = transport.RoundTrip(req)
+			if tc.reject {
+				if !errors.Is(err, ErrRemote) || innerCalls != 0 {
+					t.Fatalf("different approved session-open origin err=%v inner calls=%d, want remote rejection before inner transport", err, innerCalls)
+				}
+				if capture.requestObserved() {
+					t.Fatal("different approved session-open origin was marked observed")
+				}
+				return
+			}
+			if err != nil || innerCalls != 1 || !capture.requestObserved() {
+				t.Fatalf("same-origin session-open err=%v inner calls=%d observed=%v, want one forwarded request", err, innerCalls, capture.requestObserved())
+			}
+		})
+	}
+}
+
 func TestBaselineSnapshotRequestsRequireExactOriginBeforeInner(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

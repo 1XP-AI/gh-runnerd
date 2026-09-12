@@ -179,7 +179,8 @@ func (c *baselineWireCapture) target(r *http.Request) bool {
 		return c.markedDeleteIdentityReady() && ok && origin == c.origin && (len(c.allowedHosts) == 0 || baselineOriginAllowed(r.URL, c.allowedHosts)) && r.Method == http.MethodDelete && c.runtimeRequestTarget(r, "sessions/"+c.sessionID) && baselineExactAPIVersionQuery(r.URL.RawQuery)
 	}
 	if c.stage == "session-open" {
-		if len(c.allowedHosts) > 0 && !baselineOriginAllowed(r.URL, c.allowedHosts) {
+		origin, ok := baselineRequestOrigin(r.URL)
+		if !ok || (c.origin != "" && origin != c.origin) || (len(c.allowedHosts) > 0 && !baselineOriginAllowed(r.URL, c.allowedHosts)) {
 			return false
 		}
 		return r.Method == "POST" && c.runtimeRequestTarget(r, "sessions") && baselineExactAPIVersionQuery(r.URL.RawQuery)

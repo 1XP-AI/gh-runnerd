@@ -457,6 +457,9 @@ func TestPinnedSDKDrainRejectsSessionOriginMismatchBeforeListener(t *testing.T) 
 	if got := fixture.polls.Load(); got != 0 {
 		t.Fatalf("session-open origin mismatch started listener polls: polls=%d", got)
 	}
+	if got := fixture.sessionOpens.Load(); got != 1 {
+		t.Fatalf("session-open origin mismatch reached fixture: opens=%d, want setup open only", got)
+	}
 	for _, event := range j.Events() {
 		if event.Kind == "observation" && event.Operation == "drain" && event.Drain != nil && event.Drain.Outcome == drainOutcomeObserved {
 			t.Fatal("session-open origin mismatch produced an observed drain")
