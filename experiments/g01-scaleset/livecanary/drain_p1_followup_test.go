@@ -344,6 +344,7 @@ func TestDrainListenerRejectsMarkedPollTargetMismatchBeforeInner(t *testing.T) {
 		mutate func(*http.Request)
 	}{
 		{name: "wrong host", mutate: func(req *http.Request) { req.URL.Host = "other.invalid" }},
+		{name: "overridden Host", mutate: func(req *http.Request) { req.Host = "other.invalid" }},
 		{name: "wrong path", mutate: func(req *http.Request) { req.URL.Path = "/wrong-queue"; req.URL.RawPath = "" }},
 		{name: "wrong origin scheme", mutate: func(req *http.Request) { req.URL.Scheme = "http" }},
 		{name: "wrong queue proof", mutate: func(req *http.Request) {
@@ -356,6 +357,8 @@ func TestDrainListenerRejectsMarkedPollTargetMismatchBeforeInner(t *testing.T) {
 			hook := newDrainPollHook(target)
 			hook.mu.Lock()
 			hook.origin = "https://fixture.invalid:443"
+			hook.runtimePathPrefix = "/tenant/v2"
+			hook.runtimePathPrefixSet = true
 			hook.mu.Unlock()
 			innerCalls := 0
 			hook.inner = drainRoundTripper(func(req *http.Request) (*http.Response, error) {
@@ -378,6 +381,98 @@ func TestDrainListenerRejectsMarkedPollTargetMismatchBeforeInner(t *testing.T) {
 				t.Fatalf("marked poll target mismatch reached inner transport: calls=%d", innerCalls)
 			}
 		})
+	}
+}
+
+func TestMarkedRequestHostOverrideStopsBeforeInner(t *testing.T) {
+	const (
+		origin = "https://api.example:443"
+		prefix = "/tenant/v2"
+	)
+	for _, tc := range []struct {
+		name   string
+		stage  string
+		method string
+		target string
+		body   string
+	}{
+		{
+			name:   "session-open",
+			stage:  "session-open",
+			method: http.MethodPost,
+			target: "https://api.example/tenant/v2/_apis/runtime/runnerscalesets/7/sessions?api-version=6.0-preview",
+			body:   `{"sessionId":"00000000-0000-0000-0000-000000000000","ownerName":"g01-test"}`,
+		},
+		{
+			name:   "ACK",
+			stage:  "ack",
+			method: http.MethodDelete,
+			target: "https://api.example/tenant/v2/queue/41?proof=fixture",
+		},
+		{
+			name:   "acquisition",
+			stage:  "acquire",
+			method: http.MethodPost,
+			target: "https://api.example/tenant/v2/_apis/runtime/runnerscalesets/7/acquirejobs?api-version=6.0-preview",
+			body:   "[41]",
+		},
+		{
+			name:   "session-close",
+			stage:  "terminal-session-close",
+			method: http.MethodDelete,
+			target: "https://api.example/tenant/v2/_apis/runtime/runnerscalesets/7/sessions/session?api-version=6.0-preview",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capture := &baselineWireCapture{
+				stage: tc.stage, setID: 7, owner: "g01-test", organization: "fixture-org", sessionID: "session",
+				queue: "https://api.example/tenant/v2/queue?proof=fixture", cursor: 41,
+				origin: origin, runtimePathPrefix: prefix, runtimePathPrefixSet: true, requestIDs: []int64{41}, allowedHosts: []string{"api.example"},
+			}
+			innerCalls := 0
+			transport := baselineRequestCaptureTransport{inner: drainRoundTripper(func(req *http.Request) (*http.Response, error) {
+				innerCalls++
+				return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}, nil
+			})}
+			req, err := http.NewRequestWithContext(capture.context(context.Background()), tc.method, tc.target, strings.NewReader(tc.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Host = "other.example"
+			_, err = transport.RoundTrip(req)
+			if !errors.Is(err, ErrRemote) {
+				t.Fatalf("marked %s Host override error = %v, want remote rejection", tc.name, err)
+			}
+			if innerCalls != 0 {
+				t.Fatalf("marked %s Host override reached inner transport: calls=%d", tc.name, innerCalls)
+			}
+			if capture.requestObserved() {
+				t.Fatalf("marked %s Host override was marked observed", tc.name)
+			}
+		})
+	}
+}
+
+func TestMarkedRequestHostMatchingURLHostPreservesForwarding(t *testing.T) {
+	capture := &baselineWireCapture{
+		stage: "acquire", setID: 7, origin: "https://api.example:443", runtimePathPrefix: "/tenant/v2", runtimePathPrefixSet: true,
+		requestIDs: []int64{41}, allowedHosts: []string{"api.example"},
+	}
+	innerCalls := 0
+	transport := baselineRequestCaptureTransport{inner: drainRoundTripper(func(req *http.Request) (*http.Response, error) {
+		innerCalls++
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}, nil
+	})}
+	req, err := http.NewRequestWithContext(capture.context(context.Background()), http.MethodPost, "https://api.example/tenant/v2/_apis/runtime/runnerscalesets/7/acquirejobs?api-version=6.0-preview", strings.NewReader("[41]"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = req.URL.Host
+	if _, err := transport.RoundTrip(req); err != nil {
+		t.Fatalf("marked request with URL Host override = %v, want forwarding", err)
+	}
+	if innerCalls != 1 {
+		t.Fatalf("marked request with URL Host override inner calls = %d, want one", innerCalls)
 	}
 }
 
@@ -414,6 +509,7 @@ func TestDrainPollHookForwardsUnmarkedNonPollRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	req.Host = "override.invalid"
 	if _, err := hook.RoundTrip(req); err != nil {
 		t.Fatalf("unmarked session request: %v", err)
 	}
@@ -712,6 +808,7 @@ func TestUnmarkedDeletePreservesInnerTransport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	req.Host = "override.invalid"
 	if _, err := transport.RoundTrip(req); err != nil {
 		t.Fatalf("unmarked delete = %v, want forwarding", err)
 	}

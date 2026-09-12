@@ -553,6 +553,9 @@ func (h *drainPollHook) RoundTrip(req *http.Request) (*http.Response, error) {
 	if approved != h {
 		return h.rejectPoll()
 	}
+	if !baselineRequestHostMatchesURL(req) {
+		return h.rejectPoll()
+	}
 	h.mu.Lock()
 	h.pollAttempts++
 	attempt := h.pollAttempts

@@ -347,9 +347,19 @@ func baselineWireAllowedHosts(a Approval, apiHost string) []string {
 // process. Only explicitly marked G01 runtime requests are inspected.
 type baselineRequestCaptureTransport struct{ inner http.RoundTripper }
 
+// baselineRequestHostMatchesURL fences Request.Host, which overrides the
+// physical HTTP Host header. The SDK normally leaves it empty; an explicitly
+// supplied value is accepted only when it equals the URL's canonical host.
+func baselineRequestHostMatchesURL(req *http.Request) bool {
+	return req != nil && req.URL != nil && (req.Host == "" || req.Host == req.URL.Host)
+}
+
 func (t baselineRequestCaptureTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	c, _ := req.Context().Value(baselineWireKey{}).(*baselineWireCapture)
 	if c != nil {
+		if !baselineRequestHostMatchesURL(req) {
+			return nil, c.rejectRequest(req)
+		}
 		if err := c.captureRequest(req); err != nil {
 			return nil, err
 		}
