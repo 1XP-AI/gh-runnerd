@@ -1418,6 +1418,96 @@ Rollback is a focused normal `git revert --no-edit` of this correction commit;
 retain the journal, reservation and uncertainty, and never reset, erase, replay,
 or run live cleanup.
 
+### Exact-head follow-up: marked ACK and session-close DELETE pre-forward fences
+
+Date: 2026-09-13. This correction started from exact head
+`1bb0c878fe97b81cae61f3416cd074670ec2292d` for PR #72. The fresh Codex
+findings were [marked ACK DELETE validation](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3997097883)
+and [marked session-close DELETE fall-through](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3997097890).
+No Project, Issue, goal, dependency, branch-ownership or live-operation state
+was changed.
+
+#### Red-first reproductions
+
+The meaningful red-first command ran after adding the behavioral regressions
+and before changing production code:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^(TestBaselineMarkedACKMismatchStopsBeforeInner|TestBaselineMarkedACKRequiresIdentityAndOneShotCardinality|TestBaselineMarkedSessionCloseMismatchStopsBeforeInner|TestBaselineMarkedSessionCloseRequiresIdentityAndOneShotCardinality|TestUnmarkedDeletePreservesInnerTransport)$' -count=1 -v -timeout=120s
+```
+
+It exited 1 as intended. Wrong ACK message/path and the omitted
+`runnerscalesets` session-close route returned nil instead of a pre-forward
+`ErrRemote`; duplicate marked ACK and close requests were also accepted by the
+old transport boundary, while the unmarked DELETE control passed. The
+regressions count inner calls and retain only fixed outcomes/counters; no
+request body, bearer, queue URL, response error or private log is recorded.
+
+#### Corrections and boundary evidence
+
+Marked ACK captures now require the exact captured queue URL plus message ID,
+canonical expected origin, an approved queue host when an allowlist is
+available, a captured tenant prefix, and positive scale-set/session identity
+before reserving the one-shot physical request. The request reservation is
+made before the inner SDK transport and rejects a second physical DELETE;
+`baseline_listener` now carries its session identity into the same marked
+capture, and the drain client carries origin, tenant prefix, set/session ID and
+approved host metadata into ACK captures. Existing ACK-before-acquisition and
+response-status checks remain unchanged.
+
+Marked session-close DELETEs now take a dedicated branch before
+`snapshotRequestCandidate`, so a mismatch cannot fall through merely because
+its route omits the `runnerscalesets` family. The branch requires exact HTTPS
+origin, approved host, tenant prefix, scale-set ID, session ID, method, route,
+API-version query and one-shot cardinality before forwarding; unmarked
+non-G01 requests retain the prior inner-transport behavior.
+
+The focused green normal command passed in 0.478s:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^(TestBaselineMarkedACKMismatchStopsBeforeInner|TestBaselineMarkedACKRequiresIdentityAndOneShotCardinality|TestBaselineMarkedSessionCloseMismatchStopsBeforeInner|TestBaselineMarkedSessionCloseRequiresIdentityAndOneShotCardinality|TestUnmarkedDeletePreservesInnerTransport|TestPinnedSDKDrainBindsACKToPhysicalDelete|TestPinnedSDKDrainBindsSessionCloseToPhysicalDelete)$' -count=1 -v -timeout=240s
+```
+
+The corresponding focused race suite passed in 1.571s with no race
+diagnostics. The pinned-SDK controls now assert zero fixture calls for a
+rewritten ACK and for wrong session-close session/set/route-family paths; the
+direct boundary matrix covers missing/wrong origin, tenant prefix, set/session
+identity and duplicate physical requests, while the unmarked control asserts
+one forwarded inner call.
+
+The full offline package and related preservation checks passed after the
+correction:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -count=1 -timeout=300s
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -count=1 -timeout=360s
+GOWORK=off GOTOOLCHAIN=go1.26.8 go vet ./livecanary
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -tags=g01_pair_fixture ./livecanary -run '^(TestPairedTerminalActualJournalsFinalize|TestPairedTerminalCompletionCadenceAndReceiptSeparation|TestPairedTerminalFinalResultCapacity|TestPairedTerminalPendingChildCapacity|TestPairedTerminalEligibilityUsesFreshExactFacts|TestPairedTerminalCapturedAcknowledgementCancellation|TestPairedTerminalMissingAcknowledgementsAndPostchecks)$' -count=1 -v -timeout=300s
+cd ../..
+GOTOOLCHAIN=go1.26.8 bash scripts/check-offline-experiments.sh
+bash scripts/gofmt.sh check
+git diff --check
+```
+
+The normal package exited 0 in 29.692s, the race package exited 0 in 45.666s
+with no race diagnostics, vet and the tagged paired-terminal matrix exited 0,
+and the two-module offline gate exited 0; format/diff checks were clean. The
+exact implementation/test head is
+`a0702639247bc1f97f030d3c9adbecdc38af37da`, comprising source correction
+`a1f20770dd4f13d3a5979489607447503cf82ff4` and test assertion refinement
+`a0702639247bc1f97f030d3c9adbecdc38af37da`.
+
+Rollback is recoverable with focused normal
+`git revert --no-edit a0702639247bc1f97f030d3c9adbecdc38af37da a1f20770dd4f13d3a5979489607447503cf82ff4`;
+the documentation-only append can be reverted separately. No live GitHub App,
+runner, Scale Set, JIT, workflow, Docker/Lima, Keychain, launchd, credential,
+network, cleanup or rollback operation was performed. The remaining gap is
+the coordinator-owned exact-head Codex review and required CI/live G01 gate;
+this worker did not request review or merge.
+
 ## Remaining gate and rollback
 
 The live G01 gate remains unresolved until a separately authorized run uses an
