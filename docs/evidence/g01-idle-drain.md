@@ -2044,3 +2044,94 @@ of that source commit. Rollback is recoverable with
 documentation append separately if needed. No live rollback was run, and the
 unresolved live G01 gate, exact-head Codex review, CI and merge remain
 coordinator-owned.
+
+### Exact-head follow-up: terminal Scale Set deletion/absence origin binding
+
+Date: 2026-09-13. This correction started from exact head
+`dff2e031707377d9d16a1ad39a4069a596abb1b9` and addresses the fresh Codex P1
+[terminal-set-delete origin capture finding](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3997562319).
+The marked terminal Scale Set DELETE capture previously left its origin empty;
+the same omission affected the terminal absence GET. A request rewritten to a
+different approved Actions origin could therefore reach the inner transport,
+and a 404 from that origin could be accepted as the expected absence. No
+Project, Issue, goal, dependency or status field was changed.
+
+#### Red-first reproduction
+
+The regression was added before the source correction and this focused command
+exited 1:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^TestBaselineTerminalSetEffectsRequireCapturedOriginBeforeInner$' -count=1 -v -timeout=120s
+```
+
+The same-origin deletion and absence controls passed, while the rewritten
+marked deletion and rewritten marked absence both reported `err=<nil>`, one
+inner call, the rewritten request as observed, and statuses 204/404. This is
+the intended boundary red: the different origin was approved by the host
+allowlist but was not bound to the original listener origin. The test retains
+only fixed counters/status categories; no request body, token, URL, response
+error or private log is recorded.
+
+#### Minimal correction and green evidence
+
+Terminal Scale Set captures now copy the listener's captured session/snapshot
+origin into every `terminal-set`, `terminal-set-recheck`,
+`terminal-set-delete`, and `terminal-set-absence` capture. Marked terminal
+Scale Set requests reject an empty captured origin and require exact canonical
+origin equality before the inner transport or response validation; the
+initial unbound snapshot remains allowed to establish its origin. The existing
+tenant-prefix, Host/Opaque/session/ACK/acquisition/close/poll guards,
+bootstrap allowlist, unmarked forwarding and no-live-cleanup contract remain
+unchanged.
+
+The focused normal command exited 0 in 0.321s:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^(TestBaselineTerminalSetEffectsRequireCapturedOriginBeforeInner|TestBaselineSnapshotRequestsRequireExactOriginBeforeInner|TestBaselineSessionOpenOriginBindsToBeforeSnapshot|TestBaselineSessionCloseTargetRequiresExactOrigin|TestBaselineRuntimePathPrefixMismatchStopsBeforeInner)$' -count=1 -v -timeout=180s
+```
+
+The corresponding focused race command exited 0 in 1.498s with no race
+diagnostics. The same-origin deletion and 404 absence controls each forwarded
+exactly once; rewritten requests were rejected before the inner transport.
+
+The relevant pinned-SDK/TLS-loopback terminal integration controls exited 0
+(normal 1.980s, race 9.113s):
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -tags g01_pair_fixture ./livecanary -run '^TestPairedTerminal(ActualJournalsFinalize|ExportedAdapterActualJournalsFinalize)$' -count=1 -v -timeout=300s
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -tags g01_pair_fixture -race ./livecanary -run '^TestPairedTerminal(ActualJournalsFinalize|ExportedAdapterActualJournalsFinalize)$' -count=1 -timeout=360s
+```
+
+The full `livecanary` package normal run exited 0 in 27.555s and the race run
+exited 0 in 40.396s, with no race diagnostics:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -count=1 -timeout=360s
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -count=1 -timeout=420s
+```
+
+`GOWORK=off GOTOOLCHAIN=go1.26.8 go vet ./livecanary`,
+`GOTOOLCHAIN=go1.26.8 bash ../../scripts/gofmt.sh check`, and `git diff --check`
+each exited 0. The diff secret/private-path scan exited 0 and printed
+`diff secret/private-path scan passed`; the two-module offline gate exited 0
+and printed `offline experiment checks passed: 2 module(s)`:
+
+```text
+GOTOOLCHAIN=go1.26.8 bash scripts/check-offline-experiments.sh
+```
+
+The exact tested source head is
+`c68e8c2783a344a1863e873612dfa3336da3ad3c` (`fix(g01): bind terminal set
+origin`); the final source/evidence head is this source commit plus the
+documentation-only append. Rollback is recoverable with
+`git revert --no-edit c68e8c2783a344a1863e873612dfa3336da3ad3c`; revert this
+documentation append separately if needed. No live rollback, App, runner,
+workflow, canary, Docker/Lima, Keychain, launchd, credential or cleanup
+operation was performed, and no live App/runner/canary evidence is claimed.
+The unresolved live G01 gate, independent exact-head Codex review, CI and
+merge remain coordinator-owned.
