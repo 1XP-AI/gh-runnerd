@@ -657,6 +657,100 @@ func TestPinnedSDKDrainRejectsNonEOFPollReadError(t *testing.T) {
 	}
 }
 
+func TestPinnedSDKDrainRejectsPollCloseErrorBeforeEffects(t *testing.T) {
+	a := approval()
+	fixture, base, session, hook := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{pollCloseError: io.ErrClosedPipe})
+	hook.releaseResponse()
+	j := &memoryJournal{}
+	d := &Driver{Approval: a, Journal: j, API: fixtureSDK{base}}
+	client := &journaledDrainClient{d: d, inner: session, sessionID: session.Session().SessionID.String(), setID: 7, hook: hook}
+
+	message, err := client.GetMessage(context.Background(), 0, drainInitialCapacity)
+	if err == nil || message != nil {
+		t.Fatalf("poll close error = message %v err %v, want rejection", message, err)
+	}
+	if _, known := hook.pollStatistics(1); known {
+		t.Fatal("poll close error published known statistics")
+	}
+	if _, known := hook.pollBatch(1); known {
+		t.Fatal("poll close error published a known batch")
+	}
+	if present, absent := hook.pollMessageState(1); present || absent {
+		t.Fatalf("poll close error published message state: present=%v absent=%v", present, absent)
+	}
+	if fixture.acks.Load() != 0 || fixture.acquires.Load() != 0 {
+		t.Fatalf("poll close error reached effects: ack=%d acquire=%d", fixture.acks.Load(), fixture.acquires.Load())
+	}
+	for _, event := range j.Events() {
+		if event.Kind == "result" && (event.Operation == "ack" || event.Operation == "acquire" || event.Operation == "drain") {
+			t.Fatalf("poll close error recorded an observed effect: operation=%s", event.Operation)
+		}
+	}
+}
+
+func TestPinnedSDKDrainRejectsSubstitutedSessionAuthorizationBeforeEffects(t *testing.T) {
+	a := approval()
+	fixture, base, session, hook := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{
+		mutateRequest: func(req *http.Request) {
+			if req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/acquirejobs") {
+				req.Header.Set("Authorization", "Bearer "+strings.Repeat("x", 24))
+			}
+		},
+	})
+	hook.releaseResponse()
+	j := &memoryJournal{}
+	d := &Driver{Approval: a, Journal: j, API: fixtureSDK{base}}
+	client := &journaledDrainClient{d: d, inner: session, sessionID: session.Session().SessionID.String(), setID: 7, hook: hook}
+	message, err := client.GetMessage(context.Background(), 0, drainInitialCapacity)
+	if err != nil || message == nil {
+		t.Fatalf("valid setup poll = message %v err %v", message, err)
+	}
+	if err := client.DeleteMessage(context.Background(), message.MessageID); err != nil {
+		t.Fatalf("valid setup ACK = %v", err)
+	}
+	got, err := client.AcquireJobs(context.Background(), []int64{41})
+	if !errors.Is(err, ErrQuarantine) || got != nil {
+		t.Fatalf("substituted session authorization = got %v err %v, want pre-inner quarantine", got, err)
+	}
+	if fixture.acquires.Load() != 0 {
+		t.Fatalf("substituted session authorization reached acquisition endpoint: acquires=%d", fixture.acquires.Load())
+	}
+	if state := replay(j.Events()); !state.uncertain {
+		t.Fatal("substituted session authorization did not retain uncertainty")
+	}
+}
+
+func TestPinnedSDKDrainRejectsSubstitutedSessionCloseAuthorizationBeforeEffects(t *testing.T) {
+	a := approval()
+	a.Phases = append(a.Phases, "drain")
+	fixture, base, _, _ := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{
+		mutateRequest: func(req *http.Request) {
+			if req.Method == http.MethodDelete && strings.Contains(req.URL.Path, "/sessions/") {
+				req.Header.Set("Authorization", "Bearer "+strings.Repeat("x", 24))
+			}
+		},
+	})
+	j := &memoryJournal{}
+	for _, event := range drainReplayPrefix()[:3] {
+		if err := j.Append(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d := &Driver{Approval: a, Journal: j, API: fixtureSDK{base}}
+	err := d.Run(context.Background(), "drain")
+	if !errors.Is(err, ErrQuarantine) {
+		t.Fatalf("substituted session-close authorization = %v, want quarantine", err)
+	}
+	if fixture.closeRequests.Load() != 0 {
+		t.Fatalf("substituted session-close authorization reached close endpoint: closes=%d", fixture.closeRequests.Load())
+	}
+	for _, event := range j.Events() {
+		if event.Kind == "observation" && event.Operation == "drain" && event.Drain != nil && event.Drain.Outcome == drainOutcomeObserved {
+			t.Fatal("substituted session-close authorization produced an observed drain")
+		}
+	}
+}
+
 func TestPinnedSDKDrainBindsACKToPhysicalDelete(t *testing.T) {
 	a := approval()
 	fixture, base, session, hook := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{
@@ -1047,6 +1141,7 @@ type pinnedDrainOptions struct {
 	allowOpenError         bool
 	acceptAnyACK           bool
 	pollReadError          error
+	pollCloseError         error
 	snapshotBodies         []string
 	mutateRequest          func(*http.Request)
 	wrongCloseOrigin       bool
@@ -1235,9 +1330,9 @@ func newPinnedDrainSessionOptions(t *testing.T, a Approval, body string, options
 		}
 		wrappers := []func(http.RoundTripper) http.RoundTripper(nil)
 		if hook != nil {
-			if options.pollReadError != nil {
+			if options.pollReadError != nil || options.pollCloseError != nil {
 				wrappers = append(wrappers, func(inner http.RoundTripper) http.RoundTripper {
-					return sdkResponseBodyFaultRoundTripper{inner: inner, path: "/queue", err: options.pollReadError}
+					return sdkResponseBodyFaultRoundTripper{inner: inner, path: "/queue", err: options.pollReadError, closeErr: options.pollCloseError}
 				})
 			}
 			wrappers = append(wrappers, func(inner http.RoundTripper) http.RoundTripper {
@@ -1323,9 +1418,10 @@ func (f *pinnedDrainFixture) acquireRequestBody() string {
 }
 
 type sdkResponseBodyFaultRoundTripper struct {
-	inner http.RoundTripper
-	path  string
-	err   error
+	inner    http.RoundTripper
+	path     string
+	err      error
+	closeErr error
 }
 
 func (t sdkResponseBodyFaultRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -1333,13 +1429,14 @@ func (t sdkResponseBodyFaultRoundTripper) RoundTrip(req *http.Request) (*http.Re
 	if err != nil || response == nil || req.URL == nil || req.URL.Path != t.path || response.Body == nil {
 		return response, err
 	}
-	response.Body = &sdkResponseBodyFault{source: response.Body, err: t.err}
+	response.Body = &sdkResponseBodyFault{source: response.Body, err: t.err, closeErr: t.closeErr}
 	return response, nil
 }
 
 type sdkResponseBodyFault struct {
 	source   io.ReadCloser
 	err      error
+	closeErr error
 	injected bool
 	pending  bool
 }
@@ -1361,7 +1458,12 @@ func (b *sdkResponseBodyFault) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func (b *sdkResponseBodyFault) Close() error { return b.source.Close() }
+func (b *sdkResponseBodyFault) Close() error {
+	if err := b.source.Close(); err != nil {
+		return err
+	}
+	return b.closeErr
+}
 
 type sdkRequestMutationRoundTripper struct {
 	inner  http.RoundTripper

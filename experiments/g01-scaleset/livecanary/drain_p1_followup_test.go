@@ -581,6 +581,75 @@ func TestMarkedPollOpaqueStopsBeforeInner(t *testing.T) {
 	}
 }
 
+func TestMarkedRuntimeAuthorizationMismatchStopsBeforeInner(t *testing.T) {
+	token := strings.Repeat("t", 24)
+	wrong := strings.Repeat("x", 24)
+	const (
+		origin = "https://fixture.invalid:443"
+		prefix = "/tenant/v2"
+	)
+	t.Run("poll", func(t *testing.T) {
+		const target = "https://fixture.invalid/queue?proof=fixture"
+		hook := newDrainPollHookWithOriginAndPrefix(target, origin, prefix)
+		hook.mu.Lock()
+		hook.authorization = token
+		hook.mu.Unlock()
+		innerCalls := 0
+		hook.inner = drainRoundTripper(func(req *http.Request) (*http.Response, error) {
+			innerCalls++
+			return &http.Response{StatusCode: http.StatusAccepted, Body: http.NoBody, Request: req}, nil
+		})
+		req, err := http.NewRequestWithContext(hook.markPoll(context.Background()), http.MethodGet, target, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set(scaleset.HeaderScaleSetMaxCapacity, "1")
+		req.Header.Set("Authorization", "Bearer "+wrong)
+		if _, err := hook.RoundTrip(req); !errors.Is(err, ErrQuarantine) {
+			t.Fatalf("mismatched poll authorization = %v, want quarantine", err)
+		}
+		if innerCalls != 0 {
+			t.Fatalf("mismatched poll authorization reached inner transport: calls=%d", innerCalls)
+		}
+	})
+
+	for _, tc := range []struct {
+		name   string
+		stage  string
+		method string
+		target string
+		body   string
+	}{
+		{name: "ACK", stage: "ack", method: http.MethodDelete, target: "https://fixture.invalid/queue/41?proof=fixture"},
+		{name: "acquisition", stage: "acquire", method: http.MethodPost, target: "https://fixture.invalid" + prefix + "/_apis/runtime/runnerscalesets/7/acquirejobs?api-version=6.0-preview", body: `[41]`},
+		{name: "session close", stage: "terminal-session-close", method: http.MethodDelete, target: "https://fixture.invalid" + prefix + "/_apis/runtime/runnerscalesets/7/sessions/session?api-version=6.0-preview"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capture := &baselineWireCapture{
+				stage: tc.stage, setID: 7, sessionID: "session", queue: "https://fixture.invalid/queue?proof=fixture", cursor: 41,
+				origin: origin, authorization: token, runtimePathPrefix: prefix, runtimePathPrefixSet: true,
+				requestIDs: []int64{41}, allowedHosts: []string{"fixture.invalid"},
+			}
+			innerCalls := 0
+			transport := baselineRequestCaptureTransport{inner: drainRoundTripper(func(req *http.Request) (*http.Response, error) {
+				innerCalls++
+				return &http.Response{StatusCode: http.StatusNoContent, Body: http.NoBody, Request: req}, nil
+			})}
+			req, err := http.NewRequestWithContext(capture.context(context.Background()), tc.method, tc.target, strings.NewReader(tc.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Authorization", "Bearer "+wrong)
+			if _, err := transport.RoundTrip(req); !errors.Is(err, ErrRemote) {
+				t.Fatalf("mismatched %s authorization = %v, want remote rejection", tc.name, err)
+			}
+			if innerCalls != 0 {
+				t.Fatalf("mismatched %s authorization reached inner transport: calls=%d", tc.name, innerCalls)
+			}
+		})
+	}
+}
+
 func TestMarkedSnapshotRewriteAllowsOnlyRequiredBootstrap(t *testing.T) {
 	for _, stage := range []string{"set-observe", "runner-observe", "terminal-set"} {
 		for _, tc := range []struct {

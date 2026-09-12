@@ -353,7 +353,7 @@ func drainApprovedHostPort(value string) (string, string, bool) {
 }
 
 func validDrainSessionWire(a Approval, id int, owner string, wire *baselineSessionFacts, session scaleset.RunnerScaleSetSession) bool {
-	if wire == nil || session.SessionID == [16]byte{} || wire.SessionID != session.SessionID.String() || wire.Owner != owner || session.OwnerName != owner || !validDrainQueueURL(wire.queueURL, a.ActionsHosts) || wire.queueURL != session.MessageQueueURL || session.MessageQueueAccessToken == "" || !wire.Statistics.completeDrain() || !wire.NestedSet || wire.SetID != id || wire.SetName != owner || wire.GroupID != a.RunnerGroupID || !wire.NestedStatistics.completeDrain() || !wire.Statistics.matches(session.Statistics) {
+	if wire == nil || session.SessionID == [16]byte{} || wire.SessionID != session.SessionID.String() || wire.Owner != owner || session.OwnerName != owner || !validDrainQueueURL(wire.queueURL, a.ActionsHosts) || wire.queueURL != session.MessageQueueURL || !validDrainAuthorizationToken(wire.authorization) || wire.authorization != session.MessageQueueAccessToken || !wire.Statistics.completeDrain() || !wire.NestedSet || wire.SetID != id || wire.SetName != owner || wire.GroupID != a.RunnerGroupID || !wire.NestedStatistics.completeDrain() || !wire.Statistics.matches(session.Statistics) {
 		return false
 	}
 	set := session.RunnerScaleSet
@@ -403,7 +403,8 @@ func (a *SDKAPI) OpenDrainSession(c context.Context, id int, owner string, hook 
 	sessionFacts, _, _, status := wire.facts()
 	sessionOrigin := wire.requestOrigin()
 	sessionRuntimePathPrefix, prefixKnown := wire.requestRuntimePathPrefix()
-	if session == nil || !wire.observed() || status != http.StatusOK || sessionOrigin == "" || !prefixKnown || !validDrainSessionWire(configured.approval, id, owner, sessionFacts, session.Session()) {
+	sessionAuthorization, authorizationKnown := wire.requestAuthorizationValue()
+	if session == nil || !wire.observed() || status != http.StatusOK || sessionOrigin == "" || !prefixKnown || !authorizationKnown || !validDrainSessionWire(configured.approval, id, owner, sessionFacts, session.Session()) {
 		return nil, ErrQuarantine
 	}
 	hook.mu.Lock()
@@ -416,6 +417,8 @@ func (a *SDKAPI) OpenDrainSession(c context.Context, id int, owner string, hook 
 	hook.origin = sessionOrigin
 	hook.runtimePathPrefix = sessionRuntimePathPrefix
 	hook.runtimePathPrefixSet = true
+	hook.authorization = sessionFacts.authorization
+	hook.closeAuthorization = sessionAuthorization
 	hook.mu.Unlock()
 	return session, nil
 }

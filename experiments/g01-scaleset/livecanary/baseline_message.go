@@ -57,6 +57,7 @@ type baselineSessionFacts struct {
 	SetName          string              `json:"set_name"`
 	GroupID          int                 `json:"group_id"`
 	queueURL         string              `json:"-"` // ephemeral drain validation only; never serialized
+	authorization    string              `json:"-"` // ephemeral drain validation only; never serialized
 }
 
 // baselineRunnerFacts retains only the bounded fields needed to compare the
@@ -202,6 +203,14 @@ func baselineText(s string, limit int) bool {
 	}
 	return true
 }
+
+// validDrainAuthorizationToken accepts only a bounded, header-safe opaque
+// token. The value is retained solely in memory to corroborate the pinned SDK
+// session and bind later marked runtime requests.
+func validDrainAuthorizationToken(value string) bool {
+	return value != "" && baselineText(value, 4096) && strings.TrimSpace(value) == value && !strings.ContainsAny(value, "\r\n\x00")
+}
+
 func baselineStats(data json.RawMessage) (*baselineStatistics, error) {
 	if len(data) == 0 || string(data) == "null" {
 		return nil, nil
@@ -363,7 +372,7 @@ func decodeBaselineSession(data []byte) (*baselineSessionFacts, error) {
 	if err != nil {
 		return nil, err
 	}
-	x := &baselineSessionFacts{SessionID: w.ID, Owner: w.Owner, Statistics: s, queueURL: w.URL}
+	x := &baselineSessionFacts{SessionID: w.ID, Owner: w.Owner, Statistics: s, queueURL: w.URL, authorization: w.Token}
 	if len(w.Set) > 0 && string(w.Set) != "null" {
 		// Set contains SDK-defined fields not used here; ambiguity is rejected,
 		// but unrelated forward-compatible set metadata is not copied to history.

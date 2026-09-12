@@ -26,6 +26,8 @@ type baselineWireCapture struct {
 	runnerName           string
 	sessionID            string
 	queue                string // private, captured from the exact session; never journaled
+	authorization        string // private, captured from the exact session; never journaled
+	requestAuthorization string // private, captured from the session-open request; never journaled
 	runtimePathPrefix    string // private tenant path prefix; never journaled
 	runtimePathPrefixSet bool
 	allowedHosts         []string
@@ -349,6 +351,34 @@ func baselineWireAllowedHosts(a Approval, apiHost string) []string {
 	return hosts
 }
 
+func exactDrainAuthorization(header http.Header, token string) bool {
+	got, ok := drainAuthorizationToken(header)
+	return ok && got == token
+}
+
+func drainAuthorizationToken(header http.Header) (string, bool) {
+	values := drainHeaderValues(header, "Authorization")
+	if len(values) != 1 || !strings.HasPrefix(values[0], "Bearer ") {
+		return "", false
+	}
+	token := strings.TrimPrefix(values[0], "Bearer ")
+	if !validDrainAuthorizationToken(token) {
+		return "", false
+	}
+	return token, true
+}
+
+// authorizationMatches is intentionally optional for synthetic state-machine
+// transports that have no opened pinned SDK session. Production marked drain
+// captures always receive the non-empty token from OpenDrainSession and thus
+// require one exact Authorization header before forwarding.
+func (c *baselineWireCapture) authorizationMatches(req *http.Request) bool {
+	if c == nil || c.authorization == "" {
+		return true
+	}
+	return req != nil && exactDrainAuthorization(req.Header, c.authorization)
+}
+
 // baselineRequestCaptureTransport runs immediately above the physical
 // transport. User-supplied test wrappers may mutate a request before it gets
 // here, so this is the final request-side boundary before any bytes leave the
@@ -409,6 +439,9 @@ func (c *baselineWireCapture) captureRequest(req *http.Request) error {
 	if c == nil {
 		return nil
 	}
+	if (c.stage == "ack" || c.stage == "acquire" || c.stage == "terminal-session-close") && !c.authorizationMatches(req) {
+		return c.rejectRequest(req)
+	}
 	if c.stage == "ack" {
 		if !c.target(req) {
 			return c.rejectRequest(req)
@@ -437,6 +470,7 @@ func (c *baselineWireCapture) captureRequest(req *http.Request) error {
 			return c.rejectRequest(req)
 		}
 		c.requestCount = 1
+		c.requestAuthorization, _ = drainAuthorizationToken(req.Header)
 		c.mu.Unlock()
 		data, err := readBaselineRequestBody(req.Body)
 		req.Body = nil
@@ -634,6 +668,15 @@ func (c *baselineWireCapture) requestObserved() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.requestCount == 1 && !c.invalid
+}
+
+func (c *baselineWireCapture) requestAuthorizationValue() (string, bool) {
+	if c == nil {
+		return "", false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.requestAuthorization, validDrainAuthorizationToken(c.requestAuthorization) && !c.invalid
 }
 
 // Run after the ordinary response budget has wrapped the body. Only this

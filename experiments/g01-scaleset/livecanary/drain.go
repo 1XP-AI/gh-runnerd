@@ -335,6 +335,8 @@ type drainPollHook struct {
 	mu                   sync.Mutex
 	runtimePathPrefix    string
 	runtimePathPrefixSet bool
+	authorization        string // private session token; never journaled
+	closeAuthorization   string // private opened-session admin token; never journaled
 	wroteRequest         bool
 	withdrawalCompleted  bool
 	responseBeforeWrite  bool
@@ -473,6 +475,7 @@ func (h *drainPollHook) pollRequestValid(req *http.Request, attempt int) bool {
 	}
 	h.mu.Lock()
 	target := h.target
+	authorization := h.authorization
 	messageID := 0
 	if attempt == 2 && h.batches[1] != nil {
 		messageID = h.batches[1].MessageID
@@ -498,6 +501,9 @@ func (h *drainPollHook) pollRequestValid(req *http.Request, attempt int) bool {
 	// scale-set snapshot has captured a runtime tenant prefix. HTTP remains
 	// available for the in-process synthetic listener seams.
 	if strings.EqualFold(want.Scheme, "https") && !runtimePathPrefixSet {
+		return false
+	}
+	if authorization != "" && !exactDrainAuthorization(req.Header, authorization) {
 		return false
 	}
 	values := drainHeaderValues(req.Header, scaleset.HeaderScaleSetMaxCapacity)
@@ -738,14 +744,17 @@ func (h *drainPollHook) pollMessageState(index int) (present, absent bool) {
 // strict embedded job facts. It never persists, logs or rewrites the response
 // payload.
 type drainObservedBody struct {
-	source     io.ReadCloser
-	status     int
-	data       []byte
-	over       bool
-	mu         sync.Mutex
-	finished   bool
-	readFailed bool
-	onComplete func(drainStatistics, bool, *baselineBatch, bool, bool, bool)
+	source      io.ReadCloser
+	status      int
+	data        []byte
+	over        bool
+	mu          sync.Mutex
+	finishMu    sync.Mutex
+	finished    bool
+	invalidated bool
+	readFailed  bool
+	closeFailed bool
+	onComplete  func(drainStatistics, bool, *baselineBatch, bool, bool, bool)
 }
 
 func (b *drainObservedBody) capture(data []byte) {
@@ -765,16 +774,30 @@ func (b *drainObservedBody) capture(data []byte) {
 }
 
 func (b *drainObservedBody) finish() {
+	b.finishMu.Lock()
+	defer b.finishMu.Unlock()
+
 	b.mu.Lock()
 	if b.finished {
+		invalidate := b.closeFailed && !b.invalidated
+		if invalidate {
+			b.invalidated = true
+		}
 		b.mu.Unlock()
+		if invalidate && b.onComplete != nil {
+			b.onComplete(drainStatistics{}, false, nil, false, false, false)
+		}
 		return
 	}
 	b.finished = true
 	data := append([]byte(nil), b.data...)
 	over := b.over
 	readFailed := b.readFailed
+	closeFailed := b.closeFailed
 	b.data = nil
+	if over || readFailed || closeFailed {
+		b.invalidated = true
+	}
 	b.mu.Unlock()
 
 	stats, known := drainStatisticsFromBody(data)
@@ -789,7 +812,7 @@ func (b *drainObservedBody) finish() {
 		present = false
 		absent = false
 	}
-	if over || readFailed {
+	if over || readFailed || closeFailed {
 		known = false
 		stats = drainStatistics{}
 		batch = nil
@@ -844,9 +867,15 @@ func (b *drainObservedBody) Close() error {
 			b.over = true
 			b.mu.Unlock()
 		}
-		b.finish()
 	}
-	return b.source.Close()
+	closeErr := b.source.Close()
+	if closeErr != nil {
+		b.mu.Lock()
+		b.closeFailed = true
+		b.mu.Unlock()
+	}
+	b.finish()
+	return closeErr
 }
 
 func (h *drainPollHook) releaseResponse() {

@@ -133,6 +133,7 @@ func (c *journaledDrainClient) DeleteMessage(ctx context.Context, id int) error 
 			c.hook.mu.Lock()
 			queue := c.hook.target
 			origin := c.hook.origin
+			authorization := c.hook.authorization
 			runtimePathPrefix := c.hook.runtimePathPrefix
 			runtimePathPrefixSet := c.hook.runtimePathPrefixSet
 			c.hook.mu.Unlock()
@@ -160,7 +161,7 @@ func (c *journaledDrainClient) DeleteMessage(ctx context.Context, id int) error 
 			if c.d != nil {
 				approval = c.d.Approval
 			}
-			wire = &baselineWireCapture{stage: "ack", setID: setID, sessionID: sessionID, queue: queue, cursor: id, origin: origin, runtimePathPrefix: runtimePathPrefix, runtimePathPrefixSet: runtimePathPrefixSet, allowedHosts: baselineWireAllowedHosts(approval, apiHost)}
+			wire = &baselineWireCapture{stage: "ack", setID: setID, sessionID: sessionID, queue: queue, cursor: id, origin: origin, authorization: authorization, runtimePathPrefix: runtimePathPrefix, runtimePathPrefixSet: runtimePathPrefixSet, allowedHosts: baselineWireAllowedHosts(approval, apiHost)}
 			call = wire.context(call)
 		}
 		if err := c.inner.DeleteMessage(call, id); err != nil {
@@ -195,6 +196,7 @@ func (c *journaledDrainClient) AcquireJobs(ctx context.Context, ids []int64) ([]
 			}
 			c.hook.mu.Lock()
 			queue, origin := c.hook.target, c.hook.origin
+			authorization := c.hook.authorization
 			runtimePathPrefix := c.hook.runtimePathPrefix
 			runtimePathPrefixSet := c.hook.runtimePathPrefixSet
 			c.hook.mu.Unlock()
@@ -205,7 +207,7 @@ func (c *journaledDrainClient) AcquireJobs(ctx context.Context, ids []int64) ([]
 			if reader, ok := c.d.API.(drainEndpointHostReader); ok {
 				apiHost = reader.drainEndpointHost()
 			}
-			wire = &baselineWireCapture{stage: "acquire", setID: setID, queue: queue, requestIDs: slices.Clone(ids), origin: origin, runtimePathPrefix: runtimePathPrefix, runtimePathPrefixSet: runtimePathPrefixSet, allowedHosts: baselineWireAllowedHosts(c.d.Approval, apiHost)}
+			wire = &baselineWireCapture{stage: "acquire", setID: setID, queue: queue, requestIDs: slices.Clone(ids), origin: origin, authorization: authorization, runtimePathPrefix: runtimePathPrefix, runtimePathPrefixSet: runtimePathPrefixSet, allowedHosts: baselineWireAllowedHosts(c.d.Approval, apiHost)}
 			call = wire.context(call)
 		}
 		got, err = c.inner.AcquireJobs(call, slices.Clone(ids))
@@ -451,11 +453,13 @@ func (d *Driver) drain(ctx context.Context, setID int) error {
 	}
 	closeErr := d.effect(ctx, "session-close", nil, func(call context.Context) (Event, error) {
 		origin := ""
+		closeAuthorization := ""
 		runtimePathPrefix := ""
 		runtimePathPrefixSet := false
 		if hook != nil {
 			hook.mu.Lock()
 			origin = hook.origin
+			closeAuthorization = hook.closeAuthorization
 			runtimePathPrefix = hook.runtimePathPrefix
 			runtimePathPrefixSet = hook.runtimePathPrefixSet
 			hook.mu.Unlock()
@@ -467,7 +471,7 @@ func (d *Driver) drain(ctx context.Context, setID int) error {
 		if reader, ok := d.API.(drainEndpointHostReader); ok {
 			allowedHosts = baselineWireAllowedHosts(d.Approval, reader.drainEndpointHost())
 		}
-		wire := &baselineWireCapture{stage: "terminal-session-close", setID: setID, sessionID: sessionID, origin: origin, runtimePathPrefix: runtimePathPrefix, runtimePathPrefixSet: runtimePathPrefixSet, allowedHosts: allowedHosts}
+		wire := &baselineWireCapture{stage: "terminal-session-close", setID: setID, sessionID: sessionID, origin: origin, authorization: closeAuthorization, runtimePathPrefix: runtimePathPrefix, runtimePathPrefixSet: runtimePathPrefixSet, allowedHosts: allowedHosts}
 		call = wire.context(call)
 		if err := session.Close(call); err != nil {
 			return Event{}, err
