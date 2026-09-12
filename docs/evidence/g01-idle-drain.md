@@ -1702,3 +1702,87 @@ focused `git revert --no-edit 1f12e11309b273ca54b2b222f702539425ac91b1`
 followed, if needed, by a separate revert of this evidence append; retain the
 current journal, reservation and uncertainty, and never reset, erase, replay,
 or run live cleanup.
+
+### Exact-head follow-up: physical Host authority at marked wire boundaries
+
+Date: 2026-09-13. This correction started from exact head
+`1e19ec56acbeda044acaf80c2b8ada0e5d66c192` and addresses the fresh Codex P1
+[request Host override finding](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3997211059).
+No review request, merge, Project/Issue/goal/status change, live App, runner,
+workflow, GitHub API, credential, or cleanup operation was performed.
+
+#### Red-first reproductions
+
+After adding the marked-operation and marked-poll Host regressions, but before
+the source correction, this focused command exited 1:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^(TestMarkedRequestHostOverrideStopsBeforeInner|TestDrainListenerRejectsMarkedPollTargetMismatchBeforeInner|TestMarkedRequestHostMatchingURLHostPreservesForwarding|TestUnmarkedDeletePreservesInnerTransport)$' -count=1 -v -timeout=120s
+```
+
+The overridden Host poll case reached its inner transport once, and all four
+marked session-open, ACK, acquisition and session-close cases returned nil and
+would have reached their inner transport; the exact-Host and unmarked controls
+passed. The test retained only fixed error categories and inner-call counters.
+
+#### Minimal correction and green evidence
+
+The final baseline wire boundary now accepts only an empty `req.Host` (the
+normal SDK form) or exact equality with `req.URL.Host`; a mismatch is rejected
+before any marked session-open, ACK, acquisition or session-close inner call.
+The marked poll hook applies the same check before its inner transport, while
+unmarked requests retain their prior forwarding behavior. The explicit
+`req.Host == req.URL.Host` marked control and unmarked overridden-Host controls
+pass.
+
+The focused normal command exited 0 in 0.517s:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^(TestDrain|TestPinnedSDKDrain|TestBaseline.*(Acquire|SessionOpen|Snapshot|SessionClose)|TestMarkedRequestHost.*|TestUnmarkedDeletePreservesInnerTransport)$' -count=1 -timeout=300s
+```
+
+The corresponding focused race command exited 0 in 1.912s with no race
+diagnostics:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -run '^(TestDrain|TestPinnedSDKDrain|TestBaseline.*(Acquire|SessionOpen|Snapshot|SessionClose)|TestMarkedRequestHost.*|TestUnmarkedDeletePreservesInnerTransport)$' -count=1 -timeout=300s
+```
+
+The complete `livecanary` package normal run exited 0 in 30.030s, and the
+complete race run exited 0 in 41.306s with no race diagnostics:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -count=1 -timeout=300s
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -count=1 -timeout=300s
+```
+
+The repository offline gate then exited 0 and printed
+`offline experiment checks passed: 2 module(s)`:
+
+```text
+GOTOOLCHAIN=go1.26.8 bash scripts/check-offline-experiments.sh
+```
+
+`GOWORK=off GOTOOLCHAIN=go1.26.8 go vet ./livecanary`,
+`GOWORK=off GOTOOLCHAIN=go1.26.8 bash ../../scripts/gofmt.sh check`, and
+`git diff --check` each exited 0. The final diff secret/private-path scan
+exited 0 and printed `diff secret/private-path scan passed`:
+
+```text
+set -e
+path_pattern="$(printf '/%s/|/%s/' Users home)"
+if git diff --text | rg -n "(${path_pattern}|-----BEGIN (RSA|OPENSSH|EC|PRIVATE)|github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9_]{20,}|Authorization[^\n]{0,20}Bearer[[:space:]]+[A-Za-z0-9._-]{20,})"; then exit 1; fi
+printf '%s\n' 'diff secret/private-path scan passed'
+```
+
+The source/test correction is commit
+`44524b9f290689378348951a722d7eb2ffb3d070`; this evidence append is the
+documentation-only commit immediately after it. Rollback is recoverable with
+`git revert --no-edit 44524b9f290689378348951a722d7eb2ffb3d070`; the evidence
+append can be reverted separately if required. No live rollback was run, and
+the unresolved live G01 gate, exact-head Codex review, CI and merge remain
+coordinator-owned.
