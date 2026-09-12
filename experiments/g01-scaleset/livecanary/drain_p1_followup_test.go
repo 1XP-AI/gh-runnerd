@@ -520,11 +520,12 @@ func TestBaselineMarkedACKMismatchStopsBeforeInner(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := transport.RoundTrip(req); !errors.Is(err, ErrRemote) {
-				t.Fatalf("mismatched marked ACK error = %v, want remote rejection", err)
-			}
+			_, err = transport.RoundTrip(req)
 			if innerCalls != 0 {
 				t.Fatalf("mismatched marked ACK reached inner transport: calls=%d", innerCalls)
+			}
+			if !errors.Is(err, ErrRemote) {
+				t.Fatalf("mismatched marked ACK error = %v, want remote rejection", err)
 			}
 			if capture.requestObserved() {
 				t.Fatal("mismatched marked ACK was marked observed")
@@ -624,11 +625,12 @@ func TestBaselineMarkedSessionCloseMismatchStopsBeforeInner(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := transport.RoundTrip(req); !errors.Is(err, ErrRemote) {
-				t.Fatalf("mismatched marked session-close error = %v, want remote rejection", err)
-			}
+			_, err = transport.RoundTrip(req)
 			if innerCalls != 0 {
 				t.Fatalf("mismatched marked session-close reached inner transport: calls=%d", innerCalls)
+			}
+			if !errors.Is(err, ErrRemote) {
+				t.Fatalf("mismatched marked session-close error = %v, want remote rejection", err)
 			}
 			if capture.requestObserved() {
 				t.Fatal("mismatched marked session-close was marked observed")
