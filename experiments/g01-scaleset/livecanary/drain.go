@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
@@ -353,7 +354,65 @@ type drainPollHook struct {
 }
 
 func newDrainPollHook(target string) *drainPollHook {
-	return &drainPollHook{inner: http.DefaultTransport, target: target, wrote: make(chan struct{}), withdrawalDone: make(chan struct{}), response: make(chan struct{}), release: make(chan struct{})}
+	hook := &drainPollHook{inner: http.DefaultTransport, target: target, wrote: make(chan struct{}), withdrawalDone: make(chan struct{}), response: make(chan struct{}), release: make(chan struct{})}
+	if origin, ok := drainPollOrigin(target); ok {
+		hook.origin = origin
+	}
+	return hook
+}
+
+func newDrainPollHookWithOrigin(target, origin string) *drainPollHook {
+	hook := newDrainPollHook(target)
+	hook.mu.Lock()
+	hook.origin = origin
+	hook.mu.Unlock()
+	return hook
+}
+
+// drainPollApprovalKey marks the one listener poll that the drain boundary
+// permits to reach the physical transport. Other SDK requests (session-open,
+// ACK and acquisition) use their own baseline wire markers and remain
+// unmarked here.
+type drainPollApprovalKey struct{}
+
+func (h *drainPollHook) markPoll(ctx context.Context) context.Context {
+	if h == nil || ctx == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, drainPollApprovalKey{}, h)
+}
+
+func drainPollOrigin(value string) (string, bool) {
+	// Production session responses are admitted only with HTTPS queue URLs by
+	// validDrainQueueURL. HTTP remains accepted here solely for the bounded
+	// in-process transport seams used by offline listener tests.
+	u, err := url.Parse(value)
+	if err != nil {
+		return "", false
+	}
+	return drainPollURLOrigin(u)
+}
+
+func drainPollURLOrigin(u *url.URL) (string, bool) {
+	if u == nil || u.Scheme == "" || u.Hostname() == "" || u.User != nil || u.Fragment != "" || u.EscapedPath() != u.Path {
+		return "", false
+	}
+	if !strings.EqualFold(u.Scheme, "http") && !strings.EqualFold(u.Scheme, "https") {
+		return "", false
+	}
+	port := u.Port()
+	if port == "" {
+		if strings.EqualFold(u.Scheme, "https") {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	parsed, err := strconv.Atoi(port)
+	if err != nil || parsed <= 0 || parsed > 65535 {
+		return "", false
+	}
+	return strings.ToLower(u.Scheme) + "://" + net.JoinHostPort(strings.ToLower(u.Hostname()), port), true
 }
 
 func (h *drainPollHook) matches(req *http.Request) bool {
@@ -401,6 +460,17 @@ func (h *drainPollHook) pollRequestValid(req *http.Request, attempt int) bool {
 	h.mu.Unlock()
 	want, err := url.Parse(target)
 	if err != nil || want.Scheme == "" || want.Host == "" || want.User != nil || want.Fragment != "" || want.EscapedPath() != want.Path || req.Method != http.MethodGet || req.URL.Scheme != want.Scheme || req.URL.Host != want.Host || req.URL.Path != want.Path || req.URL.User != nil || req.URL.Fragment != "" || req.URL.EscapedPath() != req.URL.Path {
+		return false
+	}
+	wantOrigin, wantOriginOK := drainPollOrigin(target)
+	requestOrigin, requestOriginOK := drainPollURLOrigin(req.URL)
+	if !wantOriginOK || !requestOriginOK || wantOrigin != requestOrigin {
+		return false
+	}
+	h.mu.Lock()
+	approvedOrigin := h.origin
+	h.mu.Unlock()
+	if (approvedOrigin == "" && strings.EqualFold(want.Scheme, "https")) || (approvedOrigin != "" && requestOrigin != approvedOrigin) {
 		return false
 	}
 	values := req.Header.Values(scaleset.HeaderScaleSetMaxCapacity)
@@ -451,18 +521,27 @@ func (h *drainPollHook) rejectPoll() (*http.Response, error) {
 }
 
 func (h *drainPollHook) RoundTrip(req *http.Request) (*http.Response, error) {
-	if h == nil || h.inner == nil || !h.matches(req) {
+	if h == nil || h.inner == nil {
 		if h == nil || h.inner == nil {
 			return nil, ErrQuarantine
 		}
+	}
+	if req == nil {
+		return h.rejectPoll()
+	}
+	approved, marked := req.Context().Value(drainPollApprovalKey{}).(*drainPollHook)
+	if !marked {
 		return h.inner.RoundTrip(req)
+	}
+	if approved != h {
+		return h.rejectPoll()
 	}
 	h.mu.Lock()
 	h.pollAttempts++
 	attempt := h.pollAttempts
 	first := h.pollAttempts == 1
 	h.mu.Unlock()
-	if !h.pollRequestValid(req, attempt) {
+	if !h.matches(req) || !h.pollRequestValid(req, attempt) {
 		return h.rejectPoll()
 	}
 	if !first {
@@ -870,6 +949,9 @@ func (c *drainClient) GetMessage(ctx context.Context, last, capacity int) (*scal
 	c.obs.Ordering = append(c.obs.Ordering, map[int]string{1: "poll-old", 2: "poll-zero"}[index])
 	c.mu.Unlock()
 
+	if c.hook != nil {
+		ctx = c.hook.markPoll(ctx)
+	}
 	message, err := c.inner.GetMessage(ctx, last, capacity)
 	stats, statsKnown := drainStatistics{}, false
 	if c.hook == nil {

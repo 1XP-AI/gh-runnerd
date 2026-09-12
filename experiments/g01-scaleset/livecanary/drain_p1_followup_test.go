@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/actions/scaleset"
+	"github.com/google/uuid"
 )
 
 func TestBaselineAcquireTargetIsActionsOnly(t *testing.T) {
@@ -262,6 +263,91 @@ func TestBaselineSnapshotRequestsRequireExactOriginBeforeInner(t *testing.T) {
 				t.Fatalf("%s reached inner transport: calls=%d", tc.name, innerCalls)
 			}
 		})
+	}
+}
+
+func TestDrainListenerRejectsMarkedPollTargetMismatchBeforeInner(t *testing.T) {
+	const target = "https://fixture.invalid/queue?proof=fixture"
+	for _, tc := range []struct {
+		name   string
+		mutate func(*http.Request)
+	}{
+		{name: "wrong host", mutate: func(req *http.Request) { req.URL.Host = "other.invalid" }},
+		{name: "wrong path", mutate: func(req *http.Request) { req.URL.Path = "/wrong-queue"; req.URL.RawPath = "" }},
+		{name: "wrong origin scheme", mutate: func(req *http.Request) { req.URL.Scheme = "http" }},
+		{name: "wrong queue proof", mutate: func(req *http.Request) {
+			query := req.URL.Query()
+			query.Set("proof", "other")
+			req.URL.RawQuery = query.Encode()
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hook := newDrainPollHook(target)
+			hook.mu.Lock()
+			hook.origin = "https://fixture.invalid:443"
+			hook.mu.Unlock()
+			innerCalls := 0
+			hook.inner = drainRoundTripper(func(req *http.Request) (*http.Response, error) {
+				innerCalls++
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{}`)), Request: req}, nil
+			})
+			session := &drainSyntheticSession{
+				client: &http.Client{Transport: sdkRequestMutationRoundTripper{inner: hook, mutate: tc.mutate}},
+				initial: scaleset.RunnerScaleSetSession{
+					SessionID: uuid.New(), OwnerName: "fixture-owner", MessageQueueURL: target,
+					Statistics: &scaleset.RunnerScaleSetStatistic{TotalRegisteredRunners: 1, TotalIdleRunners: 1},
+				},
+				order: new([]string),
+			}
+			_, err := runDrainListener(context.Background(), session, 7, hook)
+			if err == nil {
+				t.Fatal("marked poll target mismatch was accepted")
+			}
+			if innerCalls != 0 {
+				t.Fatalf("marked poll target mismatch reached inner transport: calls=%d", innerCalls)
+			}
+		})
+	}
+}
+
+func TestDrainPollHookRejectsApprovalFromDifferentHook(t *testing.T) {
+	const target = "https://fixture.invalid/queue?proof=fixture"
+	hook := newDrainPollHook(target)
+	other := newDrainPollHook(target)
+	innerCalls := 0
+	hook.inner = drainRoundTripper(func(req *http.Request) (*http.Response, error) {
+		innerCalls++
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}, nil
+	})
+	req, err := http.NewRequestWithContext(other.markPoll(context.Background()), http.MethodGet, target, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set(scaleset.HeaderScaleSetMaxCapacity, "1")
+	if _, err := hook.RoundTrip(req); !errors.Is(err, ErrQuarantine) {
+		t.Fatalf("foreign poll approval error = %v, want quarantine", err)
+	}
+	if innerCalls != 0 {
+		t.Fatalf("foreign poll approval reached inner transport: calls=%d", innerCalls)
+	}
+}
+
+func TestDrainPollHookForwardsUnmarkedNonPollRequest(t *testing.T) {
+	hook := newDrainPollHook("https://fixture.invalid/queue?proof=fixture")
+	innerCalls := 0
+	hook.inner = drainRoundTripper(func(req *http.Request) (*http.Response, error) {
+		innerCalls++
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}, nil
+	})
+	req, err := http.NewRequest(http.MethodPost, "https://fixture.invalid/_apis/runtime/runnerscalesets/7/sessions?api-version=6.0-preview", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hook.RoundTrip(req); err != nil {
+		t.Fatalf("unmarked session request: %v", err)
+	}
+	if innerCalls != 1 {
+		t.Fatalf("unmarked session request inner calls = %d, want one", innerCalls)
 	}
 }
 

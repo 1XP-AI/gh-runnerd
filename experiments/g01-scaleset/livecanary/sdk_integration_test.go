@@ -403,6 +403,39 @@ func TestPinnedSDKDrainRejectsSnapshotOriginMismatchBeforeEffects(t *testing.T) 
 	}
 }
 
+func TestPinnedSDKDrainRejectsSessionOriginMismatchBeforeListener(t *testing.T) {
+	a := approval()
+	a.Phases = append(a.Phases, "drain")
+	var sessionAttempts atomic.Int32
+	fixture, base, _, _ := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{
+		extraActionsHosts: []string{"other.example.com"},
+		mutateRequest: func(req *http.Request) {
+			if req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/sessions") && sessionAttempts.Add(1) == 2 {
+				req.URL.Host = "other.example.com"
+				req.URL.RawPath = ""
+			}
+		},
+	})
+	j := &memoryJournal{}
+	for _, event := range drainReplayPrefix()[:3] {
+		if err := j.Append(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d := &Driver{Approval: a, Journal: j, API: fixtureSDK{base}}
+	if err := d.Run(context.Background(), "drain"); !errors.Is(err, ErrQuarantine) {
+		t.Fatalf("session-open origin mismatch = %v, want quarantine", err)
+	}
+	if got := fixture.polls.Load(); got != 0 {
+		t.Fatalf("session-open origin mismatch started listener polls: polls=%d", got)
+	}
+	for _, event := range j.Events() {
+		if event.Kind == "observation" && event.Operation == "drain" && event.Drain != nil && event.Drain.Outcome == drainOutcomeObserved {
+			t.Fatal("session-open origin mismatch produced an observed drain")
+		}
+	}
+}
+
 func TestPinnedSDKDrainRejectsRunnerSnapshotOriginMismatchBeforeListener(t *testing.T) {
 	a := approval()
 	a.Phases = append(a.Phases, "drain")

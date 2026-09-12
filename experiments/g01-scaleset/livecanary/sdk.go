@@ -400,6 +400,11 @@ func (a *SDKAPI) OpenDrainSession(c context.Context, id int, owner string, hook 
 		return nil, ErrQuarantine
 	}
 	hook.mu.Lock()
+	if hook.origin != "" && hook.origin != wire.requestOrigin() {
+		hook.invalid = true
+		hook.mu.Unlock()
+		return nil, ErrQuarantine
+	}
 	hook.target = sessionFacts.queueURL
 	hook.origin = wire.requestOrigin()
 	hook.mu.Unlock()

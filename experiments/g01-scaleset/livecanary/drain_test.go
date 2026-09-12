@@ -676,6 +676,7 @@ func TestDrainPollHookPreservesStatisticsFieldPresence(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			req = req.WithContext(hook.markPoll(req.Context()))
 			req.Header.Set(scaleset.HeaderScaleSetMaxCapacity, strconv.Itoa(drainInitialCapacity))
 			response, err := hook.RoundTrip(req)
 			if err != nil {
@@ -833,6 +834,7 @@ func TestDrainPollHookRejectsDuplicatePhysicalWrites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	req = req.WithContext(hook.markPoll(req.Context()))
 	req.Header.Set(scaleset.HeaderScaleSetMaxCapacity, strconv.Itoa(drainInitialCapacity))
 	response, err := hook.RoundTrip(req)
 	if err != nil {
@@ -881,6 +883,7 @@ func TestDrainPollHookRequiresOneSuccessfulWritePerPoll(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				request = request.WithContext(hook.markPoll(request.Context()))
 				request.Header.Set(scaleset.HeaderScaleSetMaxCapacity, strconv.Itoa(drainInitialCapacity))
 				firstResponse, _ := hook.RoundTrip(request)
 				if firstResponse != nil {

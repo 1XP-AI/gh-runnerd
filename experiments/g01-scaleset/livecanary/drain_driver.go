@@ -63,6 +63,9 @@ func (c *journaledDrainClient) GetMessage(ctx context.Context, last, capacity in
 	if err != nil {
 		return nil, err
 	}
+	if c.hook != nil {
+		callCtx = c.hook.markPoll(callCtx)
+	}
 	var message *scaleset.RunnerScaleSetMessage
 	err = c.d.effect(callCtx, "observe-poll", nil, func(call context.Context) (Event, error) {
 		var callErr error
@@ -331,7 +334,7 @@ func (d *Driver) drain(ctx context.Context, setID int) error {
 		}
 		return ErrQuarantine
 	}
-	hook := newDrainPollHook("")
+	hook := newDrainPollHookWithOrigin("", origin)
 	var session Session
 	var sessionID string
 	err = d.effect(ctx, "session-open", nil, func(call context.Context) (Event, error) {
@@ -339,6 +342,12 @@ func (d *Driver) drain(ctx context.Context, setID int) error {
 		session, err = opener.OpenDrainSession(call, setID, d.Approval.setName(), hook)
 		if err != nil || session == nil {
 			return Event{}, ErrRemote
+		}
+		hook.mu.Lock()
+		sessionOrigin := hook.origin
+		hook.mu.Unlock()
+		if sessionOrigin != origin {
+			return Event{}, ErrQuarantine
 		}
 		current := session.Session()
 		if current.SessionID == [16]byte{} || current.OwnerName != d.Approval.setName() || current.RunnerScaleSet == nil || current.RunnerScaleSet.ID != setID || current.RunnerScaleSet.Name != d.Approval.setName() || current.RunnerScaleSet.RunnerGroupID != d.Approval.RunnerGroupID || !current.RunnerScaleSet.RunnerSetting.DisableUpdate || !slices.ContainsFunc(current.RunnerScaleSet.Labels, func(label scaleset.Label) bool { return label.Name == d.Approval.setName() }) || current.Statistics == nil || current.RunnerScaleSet.Statistics == nil {
