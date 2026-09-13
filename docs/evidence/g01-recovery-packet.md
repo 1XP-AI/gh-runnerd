@@ -216,9 +216,10 @@ slash-delimited `-run`/`-skip` subtest expressions and unsupported regexp
 syntax are rejected because source declarations cannot prove their subtest
 set or semantics. The guarded command shape accepts optional leading
 `NAME=VALUE` assignments
-followed directly by `go test`; a standard `env NAME=VALUE ... go test`
-wrapper is discovered by the static audit but explicitly rejected before any
-Go child starts. Go's equivalent double-dash selector spellings
+followed directly by `go test`; standard `env NAME=VALUE ... go test` and
+shell `command [options] go test` wrappers are discovered by the static audit
+but explicitly rejected before any Go child starts. Go's equivalent double-dash
+selector spellings
 `--run`/`--run=REGEXP` and `--skip`/`--skip=REGEXP` are likewise rejected
 before source validation, so the audit and wrapper never disagree about the
 effective selector. Go's `-toolexec FILE`/`-toolexec=FILE`, `-overlay FILE`/
@@ -249,8 +250,9 @@ either source derivation or test execution. Exactly one `-count=1` and one posit
 `-timeout` (at most 300 seconds) are required; `-args` and test-binary
 selector/count/timeout overrides, Go `-modfile FILE`/`-modfile=FILE`
 alternate-module-file overrides, Go `-overlay FILE`/`-overlay=FILE` build
-overrides, `-toolexec` execution hooks, `env` command wrappers, double-dash
-`--run`/`--skip` selectors, and `-exec` execution wrappers are rejected.
+overrides, `-toolexec` execution hooks, `env` and shell `command` wrappers,
+double-dash `--run`/`--skip` selectors, and `-exec` execution wrappers are
+rejected.
 The execution command adds a wrapper-controlled `-json` stream and fails closed
 on malformed output, non-empty stderr or any Go test `Action` of `skip`,
 including skipped subtests; it also requires a top-level `run` and `pass` event
@@ -343,6 +345,11 @@ if command and command[0] == "env":
     raise SystemExit(
         f"{label}: standard env-wrapped go test commands are not allowed; "
         "put assignments before go test"
+    )
+if command and command[0] == "command":
+    raise SystemExit(
+        f"{label}: shell command-prefix go test wrappers are not allowed; "
+        "invoke go test directly"
     )
 if len(command) < 3 or command[:2] != ["go", "test"]:
     raise SystemExit(f"{label}: expected a go test command")
@@ -1001,22 +1008,22 @@ The packet also audits every future shell `go test` selector prescription
 containing either spelling of `-run`/`-skip` (`-run REGEXP` or `-run=REGEXP`, and
 the corresponding `-skip` forms), including Go's equivalent double-dash
 `--run`/`--skip` spellings, whether or not the command starts with a
-`GOTOOLCHAIN=` assignment. Standard `env NAME=VALUE ... go test` command
-prefixes are discovered as well; the wrapper rejects them explicitly, so they
-cannot become an unguarded alternative syntax. The guard audit joins shell
-backslash continuations, discovers all selector-bearing logical commands first,
-and treats an unguarded continued command as an error rather than relying on a
-visual review of the selector block. The package/build metadata audit below is
-a separate gate: every guarded prescription must still carry explicit
-`GOTOOLCHAIN`, tag and race metadata.
+`GOTOOLCHAIN=` assignment. Standard `env NAME=VALUE ... go test` and shell
+`command [options] go test` prefixes are discovered as well; the wrapper rejects
+them explicitly, so they cannot become an unguarded alternative syntax. The
+guard audit joins shell backslash continuations, discovers all selector-bearing
+logical commands first, and treats an unguarded continued command as an error
+rather than relying on a visual review of the selector block. The package/build
+metadata audit below is a separate gate: every guarded prescription must still
+carry explicit `GOTOOLCHAIN`, tag and race metadata.
 
 ```sh
 set -euo pipefail
-selector_pattern='^[[:space:]]*(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]+)[[:space:]]+)*(?:env[[:space:]]+.*[[:space:]]+)?go test .*[[:space:]]--?(run|skip)(=|[[:space:]])'
+selector_pattern='^[[:space:]]*(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]+)[[:space:]]+)*(?:env[[:space:]]+.*[[:space:]]+)?(?:command(?:[[:space:]]+-[^[:space:]]+)*[[:space:]]+)?go test .*[[:space:]]--?(run|skip)(=|[[:space:]])'
 selector_lines="$(rg -n "$selector_pattern" docs/evidence/g01-recovery-packet.md)"
 test -n "$selector_lines"
-selector_probe=$'GOTOOLCHAIN=go1.26.8 go test ./livecanary -run=^TestProbe$\nenv GOTOOLCHAIN=go1.26.8 go test ./livecanary --run=^TestProbe$\nenv -i GOTOOLCHAIN=go1.26.8 go test ./livecanary --skip ^TestProbe$\n  GOTOOLCHAIN=go1.26.8 go test ./livecanary -skip ^TestProbe$'
-test "$(rg -n "$selector_pattern" <<< "$selector_probe" | wc -l | tr -d ' ')" -eq 4
+selector_probe=$'GOTOOLCHAIN=go1.26.8 go test ./livecanary -run=^TestProbe$\nenv GOTOOLCHAIN=go1.26.8 go test ./livecanary --run=^TestProbe$\nenv -i GOTOOLCHAIN=go1.26.8 go test ./livecanary --skip ^TestProbe$\n  GOTOOLCHAIN=go1.26.8 go test ./livecanary -skip ^TestProbe$\ncommand go test ./livecanary -run ^TestCommandProbe$\nGOTOOLCHAIN=go1.26.8 command go test ./livecanary -skip=^TestCommandProbe$'
+test "$(rg -n "$selector_pattern" <<< "$selector_probe" | wc -l | tr -d ' ')" -eq 6
 python3 - <<'PY'
 from pathlib import Path
 import re
@@ -1025,12 +1032,12 @@ import tempfile
 lines = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8").splitlines()
 selector_command = re.compile(
     r"^\s*(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+)\s+)*"
-    r"(?:env\s+.*\s+)?go test\b.*\s--?(?:run|skip)(?:=|\s)"
+    r"(?:env\s+.*\s+)?(?:command(?:\s+-[^\s]+)*\s+)?go test\b.*\s--?(?:run|skip)(?:=|\s)"
 )
 logical_selector_command = re.compile(
     r"^\s*(?:go_test_checked\b.*\bgo test\b|"
     r"(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+)\s+)*"
-    r"(?:env\s+.*\s+)?go test\b)"
+    r"(?:env\s+.*\s+)?(?:command(?:\s+-[^\s]+)*\s+)?go test\b)"
     r".*\s--?(?:run|skip)(?:=|\s)",
     re.DOTALL,
 )
@@ -1145,6 +1152,27 @@ print(
     "go test selector forms were discovered and rejected when unguarded"
 )
 
+command_selector_probes = [
+    "command go test ./livecanary -run ^TestCommandProbe$",
+    "GOTOOLCHAIN=go1.26.8 command go test ./livecanary -skip=^TestCommandProbe$",
+    "command -p go test ./livecanary --run ^TestCommandProbe$",
+]
+for command_selector_probe in command_selector_probes:
+    try:
+        audit_logical_selectors([command_selector_probe])
+    except SystemExit as error:
+        if "unguarded future selector" not in str(error):
+            raise
+    else:
+        raise SystemExit(
+            "command-prefix selector probe: unguarded command was accepted"
+        )
+print(
+    "command-prefix selector probe: passed; bare, assignment-prefixed and "
+    "option-bearing shell command go test selector forms were discovered and "
+    "rejected when unguarded"
+)
+
 guarded = 0
 for index, line in enumerate(lines):
     if line.lstrip().startswith("selector_probe=$'"):
@@ -1162,6 +1190,8 @@ with tempfile.NamedTemporaryFile("w+", encoding="utf-8", suffix=".md") as probe:
         + "\ngo test ./livecanary -run ^TestZeroIndentProbe$\n"
         + "GOTOOLCHAIN=go1.26.8 go test ./livecanary -run ^TestAssignmentProbe$\n"
         + "env GOTOOLCHAIN=go1.26.8 go test ./livecanary --skip ^TestZeroIndentProbe$\n"
+        + "command go test ./livecanary -run ^TestCommandProbe$\n"
+        + "GOTOOLCHAIN=go1.26.8 command go test ./livecanary -skip=^TestCommandProbe$\n"
     )
     probe.flush()
     try:
@@ -1176,26 +1206,28 @@ with tempfile.NamedTemporaryFile("w+", encoding="utf-8", suffix=".md") as probe:
             raise
         print(
             "zero-indent selector probe: passed; an unguarded column-zero "
-            "`go test -run` without GOTOOLCHAIN was discovered and rejected"
+            "`go test -run` without GOTOOLCHAIN, assignment, env or command "
+            "prefix was discovered and rejected"
         )
     else:
         raise SystemExit("zero-indent selector probe: unguarded command was accepted")
 print(
     f"future selector guard audit: passed; {guarded} go test selector "
     "prescriptions are wrapper-guarded and equal the logical wrapper count; "
-    "column-zero, assignment-prefixed, env-wrapped, double-dash and indented "
-    "discovery forms recognized"
+    "column-zero, assignment-prefixed, env-wrapped, command-prefixed, "
+    "double-dash and indented discovery forms recognized"
 )
 PY
 ```
 
 The selector guard audit exited 0 and found 28 future `go test` selector
 prescriptions containing `-run` or `-skip`, each immediately preceded by
-`go_test_checked`; the focused zero-indent, assignment-prefixed, env-wrapped and continued-command
-probes discovered and rejected unguarded selectors without relying on line
-layout, while the explicit read-only samples cover separated and equals
-spellings, both dash widths, standard `env` prefixes and both zero-indent and
-indented shell forms. No test body was run by this grep/audit. For the paired
+`go_test_checked`; the focused zero-indent, assignment-prefixed, env-wrapped,
+command-prefixed and continued-command probes discovered and rejected
+unguarded selectors without relying on line layout, while the explicit
+read-only samples cover separated and equals spellings, both dash widths,
+standard `env` and shell `command` prefixes and both zero-indent and indented
+shell forms. No test body was run by this grep/audit. For the paired
 partitions, the wrapper validates
 the filtered executed sets: collection 22/22, all-except 106/106, worker 24/24,
 heavy 5/5, terminal remainder 15/15, and storage 6/6; their recorded
@@ -1208,8 +1240,9 @@ The recorded selector-audit output was:
 line-continuation selector probe: passed; unguarded continued single- and double-dash/env-wrapped selectors were discovered and rejected
 env-wrapped selector probe: passed; standard env command prefixes were discovered and rejected when unguarded
 assignment-prefixed selector probe: passed; standard GOTOOLCHAIN=... go test selector forms were discovered and rejected when unguarded
+command-prefix selector probe: passed; bare, assignment-prefixed and option-bearing shell command go test selector forms were discovered and rejected when unguarded
 zero-indent selector probe: passed; an unguarded column-zero `go test -run` without GOTOOLCHAIN was discovered and rejected
-future selector guard audit: passed; 28 go test selector prescriptions equal the logical wrapper count; column-zero, assignment-prefixed, env-wrapped, double-dash and indented discovery forms recognized
+future selector guard audit: passed; 28 go test selector prescriptions equal the logical wrapper count; column-zero, assignment-prefixed, env-wrapped, command-prefixed, double-dash and indented discovery forms recognized
 ```
 
 The wrapper metadata is independently checked against each command's literal
@@ -1251,6 +1284,10 @@ for index, line in enumerate(lines):
     if command and command[0] == "env":
         raise SystemExit(
             f"line {index + 2}: standard env-wrapped go test command is not allowed"
+        )
+    if command and command[0] == "command":
+        raise SystemExit(
+            f"line {index + 2}: shell command-prefix go test command is not allowed"
         )
     if command[:2] != ["go", "test"]:
         raise SystemExit(f"line {index + 2}: not a go test command")
@@ -1343,7 +1380,7 @@ print(
     f"package/build metadata audit: passed; {len(seen)} wrapper prescriptions "
     "matched one package identity and explicit GOTOOLCHAIN/tag/race build "
     "configuration, exact PR #78/PR #72 source-tree family pins, exactly one "
-    "count/timeout, and no test-binary overrides; "
+    "count/timeout, and no test-binary overrides or env/command wrappers; "
     "duplicate package candidates fail closed"
 )
 PY
@@ -1356,14 +1393,14 @@ positive timeout no greater than 300 seconds, and every build identity matched
 its tag set, race mode and toolchain. The two drain labels selected the exact
 PR #72 module tree `9b30ef1b69c6375cb264c759d366fc5a52a5439f`; all other labels
 selected the PR #78 module tree `08c7830de7bc5120d1302d7ba6df162abd582315`.
-`-args`, test-binary overrides, `-toolexec` hooks, standard `env` wrappers,
-double-dash `--run`/`--skip` selectors and a duplicate
+`-args`, test-binary overrides, `-toolexec` hooks, standard `env` and shell
+`command` wrappers, double-dash `--run`/`--skip` selectors and a duplicate
 `./livecanary`/`./liveworker` package list are rejected before source-derived
 selector validation.
 The recorded metadata-audit output was:
 
 ```text
-package/build metadata audit: passed; 28 wrapper prescriptions matched one package identity, explicit GOTOOLCHAIN/tag/race build configuration, exact PR #78/PR #72 source-tree family pins, exactly one count/timeout, and no test-binary overrides; duplicate package candidates fail closed
+package/build metadata audit: passed; 28 wrapper prescriptions matched one package identity, explicit GOTOOLCHAIN/tag/race build configuration, exact PR #78/PR #72 source-tree family pins, exactly one count/timeout, and no test-binary overrides or env/command wrappers; duplicate package candidates fail closed
 ```
 
 The wrapper's selector edge cases were then exercised with a trimmed copy of
@@ -1778,6 +1815,16 @@ selector_guard_cases = [
          "-run=^" + one_name + "$"],
     ),
     (
+        "command-prefix-run",
+        ["command", *env_test, "./livecanary",
+         "-run=^" + one_name + "$"],
+    ),
+    (
+        "assignment-command-prefix-skip",
+        ["GOTOOLCHAIN=go1.26.8", "command", *env_test, "./livecanary",
+         "-skip=^" + one_name + "$"],
+    ),
+    (
         "double-dash-run-separated",
         common + ["./livecanary", "--run", "^" + one_name + "$"],
     ),
@@ -1832,12 +1879,13 @@ finally:
     subprocess.run = real_run
 if selector_guard_go_children:
     raise SystemExit(
-        "selector guard regression: a Go child started before env/double-dash "
+        "selector guard regression: a Go child started before env/command/double-dash "
         "rejection: " + repr(selector_guard_go_children)
     )
 print(
-    "selector guard regression: standard env wrappers and separated/equals-form "
-    "--run/--skip selectors rejected before any Go child or result recording"
+    "selector guard regression: standard env/command wrappers and "
+    "separated/equals-form --run/--skip selectors rejected before any Go child "
+    "or result recording"
 )
 
 def observe_go_child(*args, **kwargs):
@@ -1940,12 +1988,14 @@ both direct Go metadata probes before derivation; slash-delimited subtest
 selectors, `-count=0`, `-count=2`, missing/duplicate/zero/overlarge
 `-timeout`, inherited `GORACE`, `-args`, direct test-binary selector, `-exec`,
 both separated and equals-form `-toolexec`, `-modfile` and `-overlay` overrides,
-standard `env` assignment/option wrappers, all separated and equals-form
-double-dash `--run`/`--skip` selectors, active package `init`, and inherited
+standard `env` assignment/option wrappers, bare and assignment-prefixed shell
+`command go test` wrappers, all separated and equals-form double-dash
+`--run`/`--skip` selectors, active package `init`, and inherited
 `G01_INPUT_CHILD=blocked` were each rejected before source derivation. The
 focused no-Go-child regressions patched direct Go-child launches and required
-both `-toolexec`, `-modfile` and `-overlay` forms, both `env` forms and all four
-double-dash selector forms to reject with no pre-guard result output; the
+both `-toolexec`, `-modfile` and `-overlay` forms, both `env` forms, both
+command-prefix forms and all four double-dash selector forms to reject with no
+pre-guard result output; the
 output-only stream without expected `run` and `pass` events was rejected before
 result recording. No test body, live operation or secret-bearing input was run.
 
@@ -1963,11 +2013,13 @@ overlay-equals: rejected before test body/result recording: overlay-equals: Go -
 overlay regression: both separated and equals-form -overlay rejected before any Go child or result recording
 env-assignment-wrapper: rejected before test body/result recording: env-assignment-wrapper: standard env-wrapped go test commands are not allowed; put assignments before go test
 env-option-wrapper: rejected before test body/result recording: env-option-wrapper: standard env-wrapped go test commands are not allowed; put assignments before go test
+command-prefix-run: rejected before test body/result recording: command-prefix-run: shell command-prefix go test wrappers are not allowed; invoke go test directly
+assignment-command-prefix-skip: rejected before test body/result recording: assignment-command-prefix-skip: shell command-prefix go test wrappers are not allowed; invoke go test directly
 double-dash-run-separated: rejected before test body/result recording: double-dash-run-separated: double-dash --run/--skip selectors are not allowed in a guarded rerun
 double-dash-run-equals: rejected before test body/result recording: double-dash-run-equals: double-dash --run/--skip selectors are not allowed in a guarded rerun
 double-dash-skip-separated: rejected before test body/result recording: double-dash-skip-separated: double-dash --run/--skip selectors are not allowed in a guarded rerun
 double-dash-skip-equals: rejected before test body/result recording: double-dash-skip-equals: double-dash --run/--skip selectors are not allowed in a guarded rerun
-selector guard regression: standard env wrappers and separated/equals-form --run/--skip selectors rejected before any Go child or result recording
+selector guard regression: standard env/command wrappers and separated/equals-form --run/--skip selectors rejected before any Go child or result recording
 slash-subtest-skip: rejected before test body: slash-subtest-skip: slash-delimited -skip selectors are rejected because top-level -list cannot validate subtest names
 count-zero: rejected before test body: count-zero: exactly one -count=1 is required
 timeout-missing: rejected before test body: timeout-missing: exactly one -timeout value is required
@@ -2119,6 +2171,75 @@ starting wrapper lacked both `-toolexec` forms, a naive wrapper-only selector
 count ignored the synthetic assignment-prefixed command, and the starting
 wrapper still invoked `go test -list` without package-variable/imported-init
 coverage. The focused green corrections and boundary checks follow below.
+
+The command-prefix selector finding was then reproduced against the exact prior
+packet head `ec5eb8087420bbbbb2a8ccf5c5df190b3c644895`, immediately before this
+correction. The prior shell and logical selector regexes matched neither the
+bare `command go test ./livecanary -run ...` form nor the
+`GOTOOLCHAIN=go1.26.8 command go test ./livecanary -skip=...` form, so a
+wrapper-only count could remain unchanged; the prior wrapper also had no
+explicit command-prefix rejection. The red probe below reads the immutable
+prior packet and records those exact misses without starting any child:
+
+```sh
+set -euo pipefail
+python3 - <<'PY'
+import re
+import subprocess
+
+prior_head = "ec5eb8087420bbbbb2a8ccf5c5df190b3c644895"
+previous = subprocess.check_output(
+    [
+        "git",
+        "show",
+        f"{prior_head}:docs/evidence/g01-recovery-packet.md",
+    ],
+    text=True,
+)
+wrapper_start = previous.index("\nimport hashlib\n", previous.index("go_test_checked()")) + 1
+wrapper_end = previous.index("\nPY\n}", wrapper_start)
+previous_wrapper = previous[wrapper_start:wrapper_end]
+if "shell command-prefix go test wrappers are not allowed" in previous_wrapper:
+    raise SystemExit("red reproduction setup changed: prior wrapper already had command guard")
+
+old_shell_selector = re.compile(
+    r"^\s*(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+)\s+)*"
+    r"(?:env\s+.*\s+)?go test\b.*\s--?(?:run|skip)(?:=|\s)"
+)
+old_logical_selector = re.compile(
+    r"^\s*(?:go_test_checked\b.*\bgo test\b|"
+    r"(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+)\s+)*"
+    r"(?:env\s+.*\s+)?go test\b)"
+    r".*\s--?(?:run|skip)(?:=|\s)",
+    re.DOTALL,
+)
+probes = [
+    "command go test ./livecanary -run ^TestCommandProbe$",
+    "GOTOOLCHAIN=go1.26.8 command go test ./livecanary -skip=^TestCommandProbe$",
+]
+for probe in probes:
+    if old_shell_selector.search(probe) or old_logical_selector.search(probe):
+        raise SystemExit(f"red reproduction setup changed: prior regex matched {probe!r}")
+old_wrapper_count = sum(
+    line.lstrip().startswith("go_test_checked ")
+    for line in previous.splitlines()
+)
+if old_wrapper_count != 28:
+    raise SystemExit(f"red reproduction setup changed: prior wrapper count was {old_wrapper_count}")
+print(
+    f"RED command-prefix selector audit: prior {prior_head} matched 0/2 required "
+    "command-prefixed selectors in both regexes; wrapper-only count stayed at 28 "
+    "and no explicit command-prefix guard was present"
+)
+PY
+```
+
+Recorded red output (the command exited 0 after both expected misses were
+observed) was:
+
+```text
+RED command-prefix selector audit: prior ec5eb8087420bbbbb2a8ccf5c5df190b3c644895 matched 0/2 required command-prefixed selectors in both regexes; wrapper-only count stayed at 28 and no explicit command-prefix guard was present
+```
 
 ### Markdown links, JSON, and ledger shape
 
@@ -3204,3 +3325,12 @@ are the TDD-like red-before-green record for this head correction. The old
 `go test -list` records remain explicitly historical/pre-correction evidence;
 the current prescription boundary is non-executing source derivation followed
 by the guarded original command only after count/set validation.
+
+### Current exact-head command-prefix selector finding
+
+The Codex finding on the exact prior packet head
+[`ec5eb8087420bbbbb2a8ccf5c5df190b3c644895`](https://github.com/1XP-AI/gh-runnerd/commit/ec5eb8087420bbbbb2a8ccf5c5df190b3c644895)—[4000820533](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000820533)—was reproduced against that immutable head and corrected here; it is not treated as resolved by a new head or staleness alone:
+
+| Finding and immutable source | Reproduction and disposition |
+|---|---|
+| [4000820533](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000820533), source [ec5eb8087420bbbbb2a8ccf5c5df190b3c644895](https://github.com/1XP-AI/gh-runnerd/commit/ec5eb8087420bbbbb2a8ccf5c5df190b3c644895) | Reproduced: the prior static shell and logical-command selector regexes did not discover `command go test ./livecanary -run ...` or `GOTOOLCHAIN=go1.26.8 command go test ./livecanary -skip=...`, so a wrapper-only count could remain 28; the prior wrapper had no explicit command-prefix guard. Corrected: both audits now discover bare and assignment-prefixed `command [options] go test` forms, while the wrapper and package/build metadata audit reject any `command` prefix before the first Go child. Focused red/green probes covered the two exact forms, option-bearing discovery and no-Go-child rejection with no pre-guard output; no Go test body, live operation, credential or private path was used. |
