@@ -214,7 +214,11 @@ imported initialization paths and `TestMain` before printing names. The source
 derivation therefore validates selectors without executing package code;
 slash-delimited `-run`/`-skip` subtest expressions and unsupported regexp
 syntax are rejected because source declarations cannot prove their subtest
-set or semantics. The guarded command shape accepts optional leading
+set or semantics. The selector preflight also rejects Go Perl classes and
+boundaries (`\\b`, `\\B`, `\\w`, `\\W`, `\\d`, `\\D`, `\\s`, `\\S`) whose
+ASCII Go semantics differ from Python's Unicode defaults, while preserving
+escaped literal backslashes and the reviewed POSIX-class subset. The guarded
+command shape accepts optional leading
 `NAME=VALUE` assignments
 followed directly by `go test`; standard `env NAME=VALUE ... go test` and
 shell `command [options] go test` wrappers are discovered by the static audit
@@ -242,7 +246,10 @@ ignored Go or test file, requires a new review before selector validation can
 proceed, while effectful package-level variables and applicable imported init
 paths cannot run during the derivation. Source-derived names use Go's `isTest`
 predicate, so valid `Test`, `Test1` and `Test_Foo` declarations are retained;
-executable `Example` declarations are rejected before a set digest is claimed
+top-level `Fuzz*` declarations are rejected before digest or selector validation
+because the paired-all-except prescription has no `-run` and Go could execute
+fuzz seed work that is absent from the source-derived expected set. Executable
+`Example` declarations are likewise rejected before a set digest is claimed
 because examples are otherwise outside the source-derived test-name set. The
 wrapper queries the effective
 `go env GOFLAGS`, including GOENV/configuration, rejects non-empty output, and
@@ -804,6 +811,135 @@ if actual_package != expected_package:
         f"{label}: expected package {expected_package}, observed {actual_package}"
     )
 
+def source_fuzz_declarations(source_path):
+    source = source_path.read_text(encoding="utf-8")
+
+    def skip_ignored(position):
+        while position < len(source):
+            if source[position].isspace():
+                position += 1
+                continue
+            if source.startswith("//", position):
+                newline = source.find("\n", position + 2)
+                return len(source) if newline < 0 else newline + 1
+            if source.startswith("/*", position):
+                close = source.find("*/", position + 2)
+                if close < 0:
+                    raise SystemExit(f"{label}: unterminated Go block comment")
+                position = close + 2
+                continue
+            break
+        return position
+
+    def skip_literal(position):
+        quote = source[position]
+        position += 1
+        while position < len(source):
+            if quote != "`" and source[position] == "\\":
+                position += 2
+                continue
+            if source[position] == quote:
+                return position + 1
+            position += 1
+        raise SystemExit(f"{label}: unterminated Go literal")
+
+    names = []
+    position = 0
+    brace_depth = 0
+    while position < len(source):
+        ignored = skip_ignored(position)
+        if ignored != position:
+            position = ignored
+            continue
+        if source[position] in ('"', "'", "`"):
+            position = skip_literal(position)
+            continue
+        if source[position] == "{":
+            brace_depth += 1
+            position += 1
+            continue
+        if source[position] == "}":
+            if brace_depth == 0:
+                raise SystemExit(f"{label}: unbalanced Go source braces")
+            brace_depth -= 1
+            position += 1
+            continue
+        if brace_depth != 0 or not source.startswith("func", position):
+            position += 1
+            continue
+        before = source[position - 1] if position else " "
+        after = source[position + 4] if position + 4 < len(source) else " "
+        if (before.isalnum() or before == "_") or (after.isalnum() or after == "_"):
+            position += 1
+            continue
+        cursor = skip_ignored(position + 4)
+        if cursor >= len(source) or source[cursor] == "(":
+            position += 4
+            continue
+        if not (source[cursor].isalpha() or source[cursor] == "_"):
+            position += 4
+            continue
+        name_start = cursor
+        cursor += 1
+        while cursor < len(source) and (source[cursor].isalnum() or source[cursor] == "_"):
+            cursor += 1
+        name = source[name_start:cursor]
+        cursor = skip_ignored(cursor)
+        if cursor < len(source) and source[cursor] == "(" and name.startswith("Fuzz"):
+            names.append(name)
+        position = cursor
+    if brace_depth:
+        raise SystemExit(f"{label}: unbalanced Go source braces")
+    return names
+
+
+def source_fuzz_guard():
+    package_dir = (repo_root / module_dir / package_value).resolve()
+    try:
+        package_dir.relative_to(repo_root / module_dir)
+    except ValueError:
+        raise SystemExit(f"{label}: package source escaped the reviewed module")
+    if not package_dir.is_dir():
+        raise SystemExit(f"{label}: package source directory was missing")
+    for source_path in sorted(package_dir.glob("*_test.go")):
+        try:
+            source_path.resolve().relative_to(package_dir)
+        except ValueError:
+            raise SystemExit(f"{label}: package test source escaped its directory")
+        fuzz_names = source_fuzz_declarations(source_path)
+        if fuzz_names:
+            raise SystemExit(
+                f"{label}: top-level Fuzz* declaration requires a new reviewed guard: "
+                + ", ".join(sorted(set(fuzz_names)))
+            )
+
+
+def reject_python_semantic_regexp_constructs(pattern, phase):
+    # Go's Perl classes/boundaries are ASCII-oriented while Python's are
+    # Unicode-oriented. Consume escaped pairs so a literal \\b remains valid.
+    position = 0
+    while position < len(pattern):
+        if pattern[position] != "\\":
+            position += 1
+            continue
+        position += 1
+        if position < len(pattern):
+            if pattern[position] in "bBwWdDsS":
+                raise SystemExit(
+                    f"{label}: {phase} uses Go Perl regexp construct "
+                    f"\\{pattern[position]} whose Python semantics differ"
+                )
+            position += 1
+
+
+def reject_unsupported_regexp_syntax(pattern, phase):
+    reject_python_semantic_regexp_constructs(pattern, phase)
+    if "(?" in pattern or re.search(r"\\[1-9]", pattern):
+        raise SystemExit(f"{label}: {phase} uses regexp syntax outside the reviewed Go subset")
+
+
+source_fuzz_guard()
+
 run_indices = [
     index for index, value in enumerate(list_base_args)
     if value == "-run" or value.startswith("-run=")
@@ -813,8 +949,6 @@ if len(run_indices) > 1:
 if flag_values(test_args, "-list"):
     raise SystemExit(f"{label}: original command must not contain -list")
 
-test_source_paths = package_initialization_guard()
-
 original_run_pattern = "."
 if run_indices:
     run_index = run_indices[0]
@@ -823,6 +957,16 @@ if run_indices:
         if list_base_args[run_index] == "-run"
         else list_base_args[run_index][len("-run="):]
     )
+if "/" in original_run_pattern:
+    raise SystemExit(
+        f"{label}: slash-delimited -run selectors are rejected because "
+        "source declarations cannot validate subtest names"
+    )
+reject_unsupported_regexp_syntax(original_run_pattern, "-run")
+for skip_pattern in skip_patterns:
+    reject_unsupported_regexp_syntax(skip_pattern, "-skip")
+
+test_source_paths = package_initialization_guard()
 
 def skip_source_ignored(source, position):
     while position < len(source):
@@ -900,6 +1044,10 @@ def source_test_names(source_path):
         name = source[name_start:cursor]
         cursor = skip_source_ignored(source, cursor)
         if cursor < len(source) and source[cursor] == "(" and name != "TestMain":
+            if name.startswith("Fuzz"):
+                raise SystemExit(
+                    f"{label}: top-level Fuzz* declaration requires a new reviewed guard"
+                )
             if name.startswith("Example"):
                 raise SystemExit(
                     f"{label}: executable Example declaration requires a new reviewed guard"
@@ -918,6 +1066,7 @@ def go_compatible_regexp(pattern, phase):
     # Python's engine is used only for this non-executing derivation. Translate
     # the POSIX classes used by the reviewed selectors and reject constructs
     # that Python might accept but Go RE2 does not.
+    reject_unsupported_regexp_syntax(pattern, phase)
     for source_class, python_class in {
         "[[:alnum:]]": "[A-Za-z0-9]",
         "[[:alpha:]]": "[A-Za-z]",
@@ -928,8 +1077,6 @@ def go_compatible_regexp(pattern, phase):
         "[[:word:]]": r"[A-Za-z0-9_]",
     }.items():
         pattern = pattern.replace(source_class, python_class)
-    if "(?" in pattern or re.search(r"\\[1-9]", pattern):
-        raise SystemExit(f"{label}: {phase} uses regexp syntax outside the reviewed Go subset")
     try:
         return re.compile(pattern)
     except re.error as error:
@@ -942,11 +1089,6 @@ for source_path in test_source_paths:
 if not all_test_names or len(all_test_names) != len(set(all_test_names)):
     raise SystemExit(f"{label}: source-derived test names were empty or duplicated")
 run_regexp = go_compatible_regexp(original_run_pattern, "-run")
-if "/" in original_run_pattern:
-    raise SystemExit(
-        f"{label}: slash-delimited -run selectors are rejected because "
-        "source declarations cannot validate subtest names"
-    )
 listed = sorted(name for name in all_test_names if run_regexp.search(name))
 skipped = set()
 if skip_patterns:
@@ -2682,6 +2824,308 @@ observed) was:
 RED command-prefix selector audit: prior ec5eb8087420bbbbb2a8ccf5c5df190b3c644895 matched 0/2 required command-prefixed selectors in both regexes; wrapper-only count stayed at 28 and no explicit command-prefix guard was present
 ```
 
+### Fresh exact-head P2 corrections at `3bc8445567fe68cc355cf3f88f0c962a41e9cad5`
+
+The three fresh Codex P2 findings were reproduced against the immutable packet
+head at task start. Each red witness reads only the prior packet blob; each
+current green probe is static or source-only and proves its rejection boundary
+without starting a Go child, test body or live operation.
+
+#### Root 4001124039: top-level fuzz declarations
+
+The immutable red witness confirms that the starting source-name helper silently
+omitted a synthetic `FuzzSeed` declaration and that `paired-all-except` had no
+`-run`, so an unrepresented fuzz seed could reach the original Go command:
+
+```sh
+set -euo pipefail
+python3 - <<'PY'
+import subprocess
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+starting_head = "3bc8445567fe68cc355cf3f88f0c962a41e9cad5"
+previous = subprocess.check_output(
+    [
+        "git",
+        "show",
+        f"{starting_head}:docs/evidence/g01-recovery-packet.md",
+    ],
+    text=True,
+)
+wrapper_start = previous.index("\nimport hashlib\n", previous.index("go_test_checked()")) + 1
+wrapper_end = previous.index("\nPY\n}", wrapper_start)
+previous_wrapper = previous[wrapper_start:wrapper_end]
+if "top-level Fuzz* declaration" in previous_wrapper:
+    raise SystemExit("red reproduction setup changed: starting wrapper already rejected Fuzz*")
+pair_start = previous.index("go_test_checked 106 ", previous.index("go_test_checked()"))
+pair_end = previous.index("\ngo_test_checked ", pair_start + 1)
+paired_all_except = previous[pair_start:pair_end]
+if " -run " in paired_all_except or " -run=" in paired_all_except:
+    raise SystemExit("red reproduction setup changed: paired-all-except gained -run")
+helper_start = previous_wrapper.index("def skip_source_ignored")
+helper_end = previous_wrapper.index("\nall_test_names = []", helper_start)
+namespace = {"label": "prior-fuzz-red"}
+exec(compile(previous_wrapper[helper_start:helper_end], "<prior-fuzz-source-parser>", "exec"), namespace)
+with TemporaryDirectory() as directory:
+    source_path = Path(directory) / "synthetic_test.go"
+    source_path.write_text(
+        "package p\n"
+        "func FuzzSeed(f *testing.F) {}\n"
+        "func TestStable(t *testing.T) {}\n",
+        encoding="utf-8",
+    )
+    source_names = namespace["source_test_names"]
+    if source_names(source_path) != ["TestStable"]:
+        raise SystemExit("red reproduction setup changed: prior parser no longer omitted FuzzSeed")
+print(
+    f"RED fuzz source-set gap: prior {starting_head} omitted top-level FuzzSeed; "
+    "paired-all-except had no -run and could execute an unrepresented fuzz seed"
+)
+PY
+```
+
+Recorded red output:
+
+```text
+RED fuzz source-set gap: prior 3bc8445567fe68cc355cf3f88f0c962a41e9cad5 omitted top-level FuzzSeed; paired-all-except had no -run and could execute an unrepresented fuzz seed
+```
+
+The current source-only guard scans the reviewed package directory before any
+Go metadata child, and the source-name helper retains the same rejection as a
+defense-in-depth check. The no-Go-child probe uses a temporary synthetic
+`FuzzSeed` source and patches any attempted subprocess child to fail:
+
+```sh
+set -euo pipefail
+python3 - <<'PY'
+import io
+import subprocess
+from contextlib import redirect_stdout
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
+wrapper_start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
+wrapper_end = packet.index("\nPY\n}", wrapper_start)
+wrapper = packet[wrapper_start:wrapper_end]
+helper_start = wrapper.index("def source_fuzz_declarations")
+helper_end = wrapper.index("\nsource_fuzz_guard()", helper_start)
+with TemporaryDirectory() as directory:
+    root = Path(directory)
+    module = root / "module"
+    module.mkdir()
+    (module / "synthetic_test.go").write_text(
+        "package p\nfunc FuzzSeed(f *testing.F) {}\n",
+        encoding="utf-8",
+    )
+    namespace = {
+        "label": "fuzz-green",
+        "repo_root": root.resolve(),
+        "module_dir": "module",
+        "package_value": ".",
+    }
+    exec(compile(wrapper[helper_start:helper_end], "<fuzz-guard>", "exec"), namespace)
+    real_run = subprocess.run
+    go_children = []
+
+    def reject_go_child(*args, **kwargs):
+        command = args[0] if args else kwargs.get("args", [])
+        if command and command[0] == "go":
+            go_children.append(tuple(command))
+            raise AssertionError("fuzz guard started a Go child")
+        return real_run(*args, **kwargs)
+
+    subprocess.run = reject_go_child
+    try:
+        output = io.StringIO()
+        try:
+            with redirect_stdout(output):
+                namespace["source_fuzz_guard"]()
+        except SystemExit as error:
+            if "top-level Fuzz* declaration" not in str(error):
+                raise
+        else:
+            raise SystemExit("fuzz guard unexpectedly accepted FuzzSeed")
+    finally:
+        subprocess.run = real_run
+    if go_children:
+        raise SystemExit(f"fuzz guard started Go child(ren): {go_children!r}")
+print("fuzz guard regression: passed; top-level FuzzSeed rejected before any Go child or digest")
+PY
+```
+
+#### Root 4001124042: Go/Python regexp semantic mismatch
+
+The immutable red witness uses Unicode `é`: Python's `\\w` accepts it, while
+Go's reviewed regexp Perl class is ASCII-oriented. The starting helper compiled
+the pattern without rejecting it, so Python could derive an expected set that
+Go would not execute:
+
+```sh
+set -euo pipefail
+python3 - <<'PY'
+import re
+import subprocess
+from pathlib import Path
+
+starting_head = "3bc8445567fe68cc355cf3f88f0c962a41e9cad5"
+previous = subprocess.check_output(
+    [
+        "git",
+        "show",
+        f"{starting_head}:docs/evidence/g01-recovery-packet.md",
+    ],
+    text=True,
+)
+wrapper_start = previous.index("\nimport hashlib\n", previous.index("go_test_checked()")) + 1
+wrapper_end = previous.index("\nPY\n}", wrapper_start)
+previous_wrapper = previous[wrapper_start:wrapper_end]
+helper_start = previous_wrapper.index("def go_compatible_regexp")
+helper_end = previous_wrapper.index("\nall_test_names = []", helper_start)
+namespace = {"label": "prior-unicode-regexp-red", "re": re}
+exec(compile(previous_wrapper[helper_start:helper_end], "<prior-regexp>", "exec"), namespace)
+go_regexp = namespace["go_compatible_regexp"]
+compiled = go_regexp(r"\w", "-run")
+if not compiled.search("é"):
+    raise SystemExit("red reproduction setup changed: Python no longer accepts Unicode \\w")
+print(
+    f"RED regexp semantic gap: prior {starting_head} accepted \\w and Python matched Unicode é; "
+    "Go's ASCII Perl-class semantics were not fail-closed"
+)
+PY
+```
+
+Recorded red output:
+
+```text
+RED regexp semantic gap: prior 3bc8445567fe68cc355cf3f88f0c962a41e9cad5 accepted \w and Python matched Unicode é; Go's ASCII Perl-class semantics were not fail-closed
+```
+
+The current preflight rejects all eight reviewed Go Perl classes/boundaries
+before Python compilation and before the package metadata child. It consumes
+escaped pairs, so a literal backslash followed by `b` remains supported. The
+green probe records both properties and rejects any attempted Go child:
+
+```sh
+set -euo pipefail
+python3 - <<'PY'
+import re
+import subprocess
+from pathlib import Path
+
+packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
+wrapper_start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
+wrapper_end = packet.index("\nPY\n}", wrapper_start)
+wrapper = packet[wrapper_start:wrapper_end]
+preflight = wrapper.index("reject_unsupported_regexp_syntax(original_run_pattern")
+metadata_guard = wrapper.index("test_source_paths = package_initialization_guard()")
+if preflight > metadata_guard:
+    raise SystemExit("regexp preflight moved after the first package metadata child")
+helper_start = wrapper.index("def reject_python_semantic_regexp_constructs")
+guard_call = wrapper.index("\nsource_fuzz_guard()", helper_start)
+go_start = wrapper.index("def go_compatible_regexp", helper_start)
+go_end = wrapper.index("\nall_test_names = []", go_start)
+namespace = {"label": "unicode-regexp-green", "re": re}
+helper_source = wrapper[helper_start:guard_call] + wrapper[go_start:go_end]
+exec(compile(helper_source, "<regexp-guard>", "exec"), namespace)
+real_compile = re.compile
+compile_calls = []
+
+def recording_compile(pattern, *args, **kwargs):
+    compile_calls.append(pattern)
+    return real_compile(pattern, *args, **kwargs)
+
+real_run = subprocess.run
+go_children = []
+
+def reject_go_child(*args, **kwargs):
+    command = args[0] if args else kwargs.get("args", [])
+    if command and command[0] == "go":
+        go_children.append(tuple(command))
+        raise AssertionError("regexp guard started a Go child")
+    return real_run(*args, **kwargs)
+
+re.compile = recording_compile
+subprocess.run = reject_go_child
+try:
+    go_regexp = namespace["go_compatible_regexp"]
+    for unsupported_pattern in [r"\b", r"\B", r"\w", r"\W", r"\d", r"\D", r"\s", r"\S"]:
+        try:
+            go_regexp(unsupported_pattern, "-run")
+        except SystemExit as error:
+            if "Go Perl regexp construct" not in str(error):
+                raise
+        else:
+            raise SystemExit(f"unsupported Go Perl construct was accepted: {unsupported_pattern!r}")
+finally:
+    re.compile = real_compile
+    subprocess.run = real_run
+if compile_calls:
+    raise SystemExit(f"regexp guard compiled unsupported pattern(s): {compile_calls!r}")
+literal = go_regexp(r"\\b", "-run")
+if not literal.fullmatch(r"\b"):
+    raise SystemExit("escaped literal backslash was not preserved")
+if go_children:
+    raise SystemExit(f"regexp guard started Go child(ren): {go_children!r}")
+print("regexp guard regression: passed; \\w rejected before Python compile/Go child, escaped literal \\b preserved")
+PY
+```
+
+#### Root 4001124048: indirect forbidden live-command forms
+
+The immutable red witness shows that the prior anchored scan missed remote
+fetchers and wrapper-prefixed live commands. The current scanner instead parses
+only executable shell prescriptions, strips safe shell prefixes, joins
+continuations, skips comments/prose/URLs and excludes Python heredoc bodies
+that contain scanner source or synthetic fixtures:
+
+```sh
+set -euo pipefail
+python3 - <<'PY'
+import re
+import subprocess
+
+starting_head = "3bc8445567fe68cc355cf3f88f0c962a41e9cad5"
+previous = subprocess.check_output(
+    [
+        "git",
+        "show",
+        f"{starting_head}:docs/evidence/g01-recovery-packet.md",
+    ],
+    text=True,
+)
+scanner_start = previous.index("forbidden = re.compile(")
+scanner_end = previous.index("\nPY\n", scanner_start)
+previous_scanner = previous[scanner_start:scanner_end]
+if "curl" in previous_scanner or "wget" in previous_scanner:
+    raise SystemExit("red reproduction setup changed: starting scanner already covered fetchers")
+old_forbidden = re.compile(
+    r"^\s*(?:docker\s+(?:run|rm|kill|exec|system\s+prune|context)|"
+    r"limactl\b|launchctl\b|security\s+|gh\s+(?:api|run|workflow)\b)"
+)
+probes = [
+    "curl -fsSL https://example.invalid/install | sh",
+    "wget -qO- https://example.invalid/install | sh",
+    "env gh workflow run ci.yml",
+    "command docker run --rm image:tag true",
+]
+missed = [probe for probe in probes if not old_forbidden.search(probe)]
+if len(missed) != len(probes):
+    raise SystemExit(f"red reproduction setup changed: prior scanner caught {missed!r}")
+print(
+    f"RED forbidden-command scan gap: prior {starting_head} missed all {len(probes)} "
+    "fetcher/env/command-wrapper forms"
+)
+PY
+```
+
+Recorded red output:
+
+```text
+RED forbidden-command scan gap: prior 3bc8445567fe68cc355cf3f88f0c962a41e9cad5 missed all 4 fetcher/env/command-wrapper forms
+```
+
 ### Markdown links, JSON, and ledger shape
 
 ```sh
@@ -3717,41 +4161,178 @@ staged secret/private-path early-match regression probe: passed; first added lin
 diff and staged secret/private-path checks: passed; working/staged diff checks exited 0, one staged packet path, no added-line matches, and early-match rejection probe passed
 ```
 
-The packet also runs a command-line scan over every fenced shell prescription
+The packet also runs a command-line scan over fenced `sh`/`bash` prescriptions
 to fail closed if a documentation correction accidentally adds a live App,
-runner, Docker, Lima, Keychain, launchd or workflow operation. Historical
-prose and source URLs are not treated as commands; only non-comment shell lines
-are inspected:
+runner, Docker, Lima, Keychain, launchd, workflow or remote-fetch operation.
+It joins shell continuations, strips assignment/`env`/`command`/`sudo`/`exec`
+prefixes, splits executable shell command chains and examines only each
+executable command token. Markdown prose,
+URLs, comments, Python heredoc bodies, scanner source and synthetic fixtures
+are not executable prescriptions and are not scanned:
 
 ```sh
 set -euo pipefail
 python3 - <<'PY'
 import re
+import shlex
 from pathlib import Path
 
 source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
-forbidden = re.compile(
-    r"^\s*(?:docker\s+(?:run|rm|kill|exec|system\s+prune|context)|"
-    r"limactl\b|launchctl\b|security\s+|gh\s+(?:api|run|workflow)\b)"
-)
-in_shell = False
+fence_languages = {"sh", "bash", "shell", "zsh"}
+assignment = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
+heredoc = re.compile(r"\bpython(?:3)?\b.*<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+
+def shell_commands(markdown):
+    in_shell = False
+    skip_until = None
+    pending = []
+    pending_numbers = []
+    for number, line in enumerate(markdown.splitlines(), start=1):
+        if line.startswith("```"):
+            info = line[3:].strip().lower()
+            if in_shell:
+                if not info:
+                    in_shell = False
+                    pending = []
+                    pending_numbers = []
+                continue
+            if info in fence_languages:
+                in_shell = True
+            continue
+        if not in_shell:
+            continue
+        stripped = line.strip()
+        if skip_until is not None:
+            if stripped == skip_until:
+                skip_until = None
+            continue
+        heredoc_match = heredoc.search(stripped)
+        if heredoc_match:
+            skip_until = heredoc_match.group(2)
+            continue
+        if not stripped or stripped.startswith("#"):
+            continue
+        pending.append(stripped[:-1].rstrip() if stripped.endswith("\\") else stripped)
+        pending_numbers.append(number)
+        if stripped.endswith("\\"):
+            continue
+        yield " ".join(pending), pending_numbers[0]
+        pending = []
+        pending_numbers = []
+
+def shell_token_segments(command):
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return []
+    segments = [[]]
+    for token in tokens:
+        if token in {";", "&&", "||", "|", "&"}:
+            segments.append([])
+        else:
+            segments[-1].append(token)
+    return [segment for segment in segments if segment]
+
+def executable_tokens(tokens):
+    tokens = list(tokens)
+    while tokens and tokens[0] in {"if", "then", "else", "do", "while", "until", "!"}:
+        tokens.pop(0)
+    while tokens and (assignment.fullmatch(tokens[0]) or tokens[0] in {";", "&&", "||", "|"}):
+        tokens.pop(0)
+    wrappers = {"env", "command", "sudo", "exec", "nohup"}
+    while tokens and tokens[0] in wrappers:
+        wrapper = tokens.pop(0)
+        while tokens:
+            if assignment.fullmatch(tokens[0]):
+                tokens.pop(0)
+                continue
+            if wrapper == "env" and tokens[0] in {"-u", "--unset"}:
+                tokens.pop(0)
+                if tokens:
+                    tokens.pop(0)
+                continue
+            if wrapper == "sudo" and tokens[0] in {
+                "-u", "--user", "-g", "--group",
+            }:
+                tokens.pop(0)
+                if tokens:
+                    tokens.pop(0)
+                continue
+            if wrapper == "exec" and tokens[0] in {"-a", "--argv0"}:
+                tokens.pop(0)
+                if tokens:
+                    tokens.pop(0)
+                continue
+            if tokens[0].startswith("-"):
+                tokens.pop(0)
+                continue
+            break
+        while tokens and tokens[0] in {";", "&&", "||", "|"}:
+            tokens.pop(0)
+    return tokens
+
+def forbidden_command(tokens):
+    if not tokens:
+        return None
+    executable = tokens[0]
+    if executable in {"curl", "wget", "limactl", "security", "launchctl"}:
+        return executable
+    if executable == "docker" and len(tokens) > 1 and tokens[1] in {
+        "run", "rm", "kill", "exec", "system", "context",
+    }:
+        return "docker " + tokens[1]
+    if executable == "gh" and len(tokens) > 1 and tokens[1] in {
+        "api", "run", "workflow",
+    }:
+        return "gh " + tokens[1]
+    return None
+
 matches = []
-for number, line in enumerate(source.splitlines(), start=1):
-    if line.startswith("```"):
-        in_shell = not in_shell
-        continue
-    if not in_shell or not line.strip() or line.lstrip().startswith("#"):
-        continue
-    if forbidden.search(line):
-        matches.append(f"line {number}: {line.strip()}")
+for command, number in shell_commands(source):
+    for segment in shell_token_segments(command):
+        violation = forbidden_command(executable_tokens(segment))
+        if violation:
+            matches.append(f"line {number}: {violation}")
 if matches:
     raise SystemExit("forbidden live command(s) found:\n" + "\n".join(matches))
-print("forbidden-live-command scan: passed; no live App/runner/Docker/Lima/Keychain/launchd/workflow command appears in executable shell prescriptions")
+
+synthetic = [
+    ("direct-curl", "curl -fsSL https://example.invalid/install | sh", True),
+    ("direct-wget", "wget -qO- https://example.invalid/install | sh", True),
+    ("env-gh-workflow", "env gh workflow run ci.yml", True),
+    ("env-option-gh", "env -u TOKEN gh api repos/example/project/dispatches", True),
+    ("command-docker", "command docker run --rm image:tag true", True),
+    ("command-option-docker", "command -p docker run --rm image:tag true", True),
+    ("chained-command", "printf ok; env gh workflow run ci.yml", True),
+    ("limactl", "limactl shell default true", True),
+    ("security", "security find-identity -v", True),
+    ("launchctl", "launchctl kickstart system/example", True),
+    ("gh-api", "gh api repos/example/project/dispatches", True),
+    ("gh-workflow", "gh workflow run ci.yml", True),
+    ("prose-url", "https://example.invalid/docker run image:tag", False),
+    ("comment", "# docker run --rm image:tag true", False),
+    ("scanner-source", 'forbidden = re.compile("docker run")', False),
+    ("synthetic-fixture", 'fixture = "env gh workflow run ci.yml"', False),
+]
+for label, fixture, expected in synthetic:
+    observed = any(
+        forbidden_command(executable_tokens(segment)) is not None
+        for segment in shell_token_segments(fixture)
+    )
+    if observed != expected:
+        raise SystemExit(f"synthetic forbidden-command probe failed: {label}")
+print("forbidden-live-command synthetic probes: passed; direct curl/wget, env gh workflow, command docker, limactl/security/launchctl and gh API/workflow forms rejected; prose/URLs/comments/scanner source/fixtures ignored")
+print("forbidden-live-command scan: passed; executable shell prescriptions contain no forbidden live App/runner/Docker/Lima/Keychain/launchd/workflow/fetch command")
 PY
 ```
 
-The forbidden-live-command scan exited 0; no live operation, workflow replay,
-credential access or destructive cleanup command was introduced.
+The forbidden-live-command scan and its static synthetic probes exited 0; all
+direct and wrapped forbidden forms were rejected without execution, while
+prose, URLs, comments, scanner source and fixtures were ignored. No live
+operation, workflow replay, credential access or destructive cleanup command
+was introduced.
 
 No check is claimed against an unrecorded SHA. The staged correction diff is
 distinct from the cumulative PR #78 diff; the cumulative history still
@@ -3925,6 +4506,20 @@ The Codex finding on the exact prior packet head
 | Finding and immutable source | Reproduction and disposition |
 |---|---|
 | [4000820533](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000820533), source [ec5eb8087420bbbbb2a8ccf5c5df190b3c644895](https://github.com/1XP-AI/gh-runnerd/commit/ec5eb8087420bbbbb2a8ccf5c5df190b3c644895) | Reproduced: the prior static shell and logical-command selector regexes did not discover `command go test ./livecanary -run ...` or `GOTOOLCHAIN=go1.26.8 command go test ./livecanary -skip=...`, so a wrapper-only count could remain 28; the prior wrapper had no explicit command-prefix guard. Corrected: both audits now discover bare and assignment-prefixed `command [options] go test` forms, while the wrapper and package/build metadata audit reject any `command` prefix before the first Go child. Focused red/green probes covered the two exact forms, option-bearing discovery and no-Go-child rejection with no pre-guard output; no Go test body, live operation, credential or private path was used. |
+
+### Current exact-head P2 findings at `3bc8445567fe68cc355cf3f88f0c962a41e9cad5`
+
+These three fresh roots were observed on the immutable packet head at task
+start. Each row preserves the discussion URL and exact source blob where the
+gap existed, then cites the current wrapper/probe line anchors and the
+immutable red/current-green evidence; no row treats head movement as proof of
+resolution.
+
+| Finding and immutable source | Red reproduction, correction and final evidence |
+|---|---|
+| [4001124039](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4001124039), source [3bc8445567fe68cc355cf3f88f0c962a41e9cad5 lines 858-914](https://github.com/1XP-AI/gh-runnerd/blob/3bc8445567fe68cc355cf3f88f0c962a41e9cad5/docs/evidence/g01-recovery-packet.md#L858-L914) | Reproduced: the immutable source-name helper omitted top-level `Fuzz*`, while `paired-all-except` has no `-run`; an unrepresented fuzz seed could therefore execute. Corrected: the wrapper's pre-Go-child `source_fuzz_guard` scans package test declarations and `source_test_names` rejects `Fuzz*` before digest derivation. Immutable red/current-green evidence is at packet lines 2834-2954; final wrapper anchors are `source_fuzz_declarations`/`source_fuzz_guard` at lines 814-916 and the defense-in-depth `Fuzz*` rejection at lines 1047-1049. |
+| [4001124042](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4001124042), source [3bc8445567fe68cc355cf3f88f0c962a41e9cad5 lines 917-936](https://github.com/1XP-AI/gh-runnerd/blob/3bc8445567fe68cc355cf3f88f0c962a41e9cad5/docs/evidence/g01-recovery-packet.md#L917-L936) | Reproduced: the immutable helper passed Go `\\w` to Python, where Unicode `é` matched despite Go's ASCII Perl-class semantics. Corrected: preflight rejects unescaped `\\b`, `\\B`, `\\w`, `\\W`, `\\d`, `\\D`, `\\s`, `\\S` before Python compilation/metadata, while escaped literal backslashes remain supported. Immutable red/current-green evidence is at packet lines 2958-3071; final anchors are `reject_python_semantic_regexp_constructs`/`reject_unsupported_regexp_syntax` at lines 917-937 and preflight ordering at lines 952-967. |
+| [4001124048](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4001124048), source [3bc8445567fe68cc355cf3f88f0c962a41e9cad5 lines 3726-3750](https://github.com/1XP-AI/gh-runnerd/blob/3bc8445567fe68cc355cf3f88f0c962a41e9cad5/docs/evidence/g01-recovery-packet.md#L3726-L3750) | Reproduced: the immutable anchored scan missed curl/wget and `env gh`/`command docker` wrappers. Corrected: the current scanner inspects only executable shell fences, joins continuations, skips Python heredocs/comments/prose/URLs/fixtures and strips assignment/env/command wrappers before checking curl/wget, Docker, Lima, Keychain, launchd and gh API/workflow forms. Static synthetic probes and the current scan are at packet lines 4164-4310. |
 
 ### Current exact-head Luna/Codex finding ledger
 
