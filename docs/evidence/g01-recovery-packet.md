@@ -181,64 +181,208 @@ The exact focused commands referenced above are recorded here. They are
 prescriptions for future reruns, not completed results. None of these
 prescriptions reports a completed test or live server success/receipt.
 
-```sh
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s -run '^(TestSDKACKBoundaries|TestSDKDemandAboveFiftyAndPartialAcquisition|TestSDKRepeatedStatisticsAnd202ReuseLastObservation|TestRecoveryAfterACKCallbackCrash|TestRecoveryMissingLifecycleCallback|TestRecoveryErrorsHoldReservationsAndRedact|TestSDKAcquisitionResponseLossAfterACK|TestSDKCapacityWithdrawalDoesNotFenceInFlightAcquisition|TestSDKHTTPFailuresAndSessionRefresh)$' .
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestSupportedListenerBarriersAndReservation|TestDriverBarriersThroughPinnedSDK|TestForeignIdentityAndUnreviewedWorkNeverACKOrDelete|TestAuditPR25MultiJobAcquisitionMustRefuseBeforeACK|TestNoMessageDoesNotCountAsCompletedBarrier)$'
-```
+Every runnable test prescription below uses the reusable wrapper in this first
+block. It derives a list-only command from the same package, build flags and
+selector, then compares the observed count and SHA-256 of the sorted intended
+test-name set before it invokes the original command. A command failure,
+unexpected list output, zero expected names, count mismatch or set mismatch
+stops before any test body runs; the set digest is recorded beside each
+prescription so renamed, removed or build-tagged tests fail closed.
 
 ```sh
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=180s ./livecanary -run '^TestBaseline'
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=180s ./livecanary -run '^(TestAdmission.*|TestAuditPR25DistinctStateDirectoriesMustShareCap)$'
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=180s ./liveworker -run '^(TestAdmissionDirectoryUsesOSAccountWithoutEnvironmentFallback|TestAdmissionAuthorityChecksTheCurrentClaim|TestWorkerAdmissionCapsIndependentDirectories|TestWorkerAdmissionRetainsSlotAfterOutcomeAndClose|TestAdmissionRejectsCopiedJournalInDifferentDirectory|TestAdmissionSyncFailureMustBeRetried|TestAdmissionRefusesMissingUnsafeOrUnknownRootState|TestAdmissionInitializationLockPrecedesClaimCreation)$'
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -tags=osusergo -count=1 -timeout=180s ./liveworker -run '^TestUnsupportedAccountLookupRefusesBeforeJournal$'
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -tags=osusergo -count=1 -timeout=180s ./livecanary -run '^TestUnsupportedAccountLookupRefusesBeforeJournal$'
-```
+set -euo pipefail
 
-```sh
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s -run '^(TestSDKJITLookupBeforeCreationDoesNotDiscoverIdentity|TestSDKJITResponseLossWithoutCommitDoesNotDiscoverIdentity|TestSDKJITResponseLossDiscoversIdentityWithoutReissuing)$' .
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestJITLostResponseIsSecretSafeAndNeverReissued|TestDriverBarriersThroughPinnedSDK)$'
-```
+# The digest is SHA-256 of sorted test names joined with one trailing newline.
+# The wrapper lists with the same build flags before it runs the original command.
+go_test_checked() {
+  python3 - "$@" <<'PY'
+import hashlib
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
 
-```sh
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./liveworker -run '^(TestOneWorkerNeverRecreatedAndOnlyJITAddedToEnvironment|TestUncertainStartNeverRetriesAndCannotCleanup|TestEveryRuntimeBoundaryRejectsProfileAndOwnershipMismatch|TestUnverifiedRunnerUpdatePolicyRefusesBeforeRuntime|TestSocketReplacementAfterPreflightCannotReceiveAnyMutation|TestSocketModesAndControllerOwnership|TestSocketPostConnectRecheckClosesBeforeHTTP|TestNoCreateBeforeDurableIntent|TestUnknownCreateNeverRetriesAfterRestart|TestCreationWarningsPreserveKnownIDWithoutAuthorizingStart|TestWorkerPreparationReturnsCanonicalSnapshotAndRejectsPriorEffect|TestUnixInspectRequiresStateFlagsBeforeMutation|TestDockerInspectExact(KnownStatesAndSerializableFacts|StatePresenceAndLegacyRequirements|RejectsMalformedOrAmbiguousBodiesBeforeMutation|NotFoundReportsOnlyTheExactGET|RejectsOtherResponsesAndInvalidTargets|RequiresSupported404Body|CancellationNeverReportsPresenceOrAbsence|RejectsReplacedSocket|EOFCancellationKeepsUnknownOutcome)|TestDockerInspectLegacyCleanupKeepsSignedAndAbsentExitPolicy|TestDockerInspectMapsPreserveCaseSensitiveKeysAndProfile|TestDockerCompletedMutationResponseSurvivesEOFCancellation|TestDockerInspectUnknownOrAbsentStatusCannotAuthorizeMutation|TestUnixRuntimeRejectsWrongIdentityImagesAndUnsupportedLimits|TestUnixRuntimeOneShotCreateStartAndNonForceCleanup|TestUnixRuntimeAmbiguousEffectsNeverRetry|TestChangedDaemonCannotCreate|TestChangedDaemonOrAbsentContainerNeverMeansCleanupComplete|TestUnixTransportRejectsSymlinksAndInheritedTCPDestinations|TestAuditPR28MissingBridgeMustNotStart|TestCleanupRetainsActiveAndUnknownWorkers|TestOwnedTerminalCleanupAndRunningRemovalRace)$'
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestCreateRequestsDisabledRunnerUpdate|TestUnconfirmedUpdateSettingQuarantinesCreate|TestUpdateSettingDriftStopsBeforeSessionOrJIT|TestUpdateSettingDriftDoesNotBlockSafeEmptyCleanup)$'
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -tags=g01_worker -count=1 -timeout=45s ./cmd/g01-worker -run '^(TestBlockedJITInputHonorsDeadline|TestOfflinePlanAndRefusalDoNotReadSecretsOrEchoInput)$'
-```
+if len(sys.argv) < 5:
+    raise SystemExit("usage: go_test_checked COUNT SET_SHA LABEL ENV=VALUE... go test ...")
+expected_count = int(sys.argv[1])
+expected_digest = sys.argv[2]
+label = sys.argv[3]
+command = list(sys.argv[4:])
+if expected_count <= 0 or not re.fullmatch(r"[0-9a-f]{64}", expected_digest):
+    raise SystemExit(f"{label}: invalid expected count/digest")
 
-```sh
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestAmbiguousCreateNeverRetriesAfterRestart|TestObserve.*|TestObservationIntentFailureStopsBeforeRead|TestObservationResponseCaptureIsLocalAndRejectsOtherOperations|TestStatistics.*|TestDemandStatisticsAllowControlledProbeButNeverCleanup|TestInvalidOwnedProof.*|TestCanonicalPreparationRecordsNoPhaseOrRemoteIntent|TestCanonicalPreparationRefusesInvalidJournalAndPhase|TestCanonicalPreparationRecoveryAndDriverShareLocalGate|TestJournal.*|TestAuthority.*|TestInventoryStrictPages|TestInventoryMalformedStopsLegacyEffects|TestInventoryTransportRefusalIsBoundedAndSanitized|TestInventoryImpossibleTotalStopsBeforeNextPage|TestRosterActualTLSCompleteObservation|TestRosterPreservesOnlyAcceptedPagePrefix|TestRosterFinalPublicationGuardAfterDigest|TestRosterRefusesInvalidEntryWithoutNetwork|TestStrictJSONRejectsDecoderEquivalentDuplicateFields|TestStrictJSONRejectsDuplicateAuthorityFields|TestFailedDirectorySyncMustBeRetried|TestFileJournalRejectsUnrecordedAuthorityBeforeRawDriverEffect|TestRenewedRecoveryApprovalRetainsOwnedState)$'
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./liveworker -run '^(TestPrivateJournalLocksAndRetainsReservationAcrossRestart|TestJournalRejectsChangedApprovalTornTailAndUnsafeFiles|TestAuthorityLeaseRefusesConcurrentRunsAndFencesClose|TestAuthorityRejectsReplacedJournalOrDirectory|TestStrictJSONRejectsDecoderEquivalentDuplicateFields|TestStrictInputRejectsAmbiguousOrExtraAuthorityFields|TestFailedDirectorySyncMustBeRetried|TestFileJournalRejectsUnrecordedAuthorityBeforeRawDriverEffect|TestRenewedRecoveryApprovalRetainsOwnedState)$'
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestDemandStatisticsAllowControlledProbeButNeverCleanup|TestCleanupOnlyForNeverIssuedWorkerWithExactReceipt|TestZeroStatisticsAndOptionalAbsencePermitEmptyCleanup|TestUnsafeStatisticsStopNewEffectsBeforeControlledMessage|TestEmptyAvailableWithWorkStatisticsStaysQuarantined|TestOlderPendingIntentSurvivesSuccessfulZeroInspection|TestUnownedDiscoveryEvidenceCannotAuthorizeCreationAfterAbsence|TestAuditPR25ObservedJobsMustBlockCleanup|TestUnexpectedWorkMessageQuarantinesBeforeSafeClose|TestObservedRunnerSurvivesLaterAbsenceAndFirstCleanup|TestObservationResultFailureSurvivesFileReopenAndInspection)$'
-```
+invocation_root = Path.cwd().resolve()
+repo_root = Path(
+    subprocess.check_output(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=invocation_root,
+        text=True,
+    ).strip()
+).resolve()
+if invocation_root != repo_root:
+    raise SystemExit(f"{label}: run this selector from the repository root")
 
-```sh
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s -run '^TestSDKBusyRemovalSentinelAndRawErrorExposure$' .
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestHTTPErrorsDoNotReturnSecretResponseBody|TestSDKHTTPDebugDoesNotLogCredentials|TestSharedTransportRejectsOversizeSuccessAndErrorBodies|TestResponseReaderConsumesOnlyBudgetPlusOneAndRejectsTruncation|TestResponseBudgetAppliesAfterGzipDecompression|TestRealJournalCreateFailureBlocksRetryAndContainsNoErrorBody)$'
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./liveworker -run '^(TestUncertainStartNeverRetriesAndCannotCleanup|TestUnixResponsesAreBoundedAndRedirectsNeverFollowed|TestObservationDoesNotJournalRawRuntimeStatus)$'
-```
+env = dict(os.environ)
+while command and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", command[0]):
+    key, value = command.pop(0).split("=", 1)
+    env[key] = value
+if len(command) < 3 or command[:2] != ["go", "test"]:
+    raise SystemExit(f"{label}: expected a go test command")
 
-```sh
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -tags=g01_live -count=1 -timeout=45s ./cmd/g01-live -run '^(TestPlanAndRefusalsNeverReadCredentialsOrEchoInputs|TestPreparationCommandNeverReadsCredentialsOrRunsRemotePhase|TestPairedTerminalModeReadsControllerInputAfterAllGates|TestPairedTerminalModeRejectsUnusedPhaseAndControllerFlagsBeforeInput|TestPairedTerminalModeRequiresWorkflowVerificationAuthorityBeforeInput|TestInheritedNamedCredentialFIFODelayedEOF|TestInheritedCredentialPipeStopsAtDeadline|TestCredentialInputRejectsNonPipeDescriptor|TestBlockedCredentialPipeStopsAtDeadline|TestCredentialInputAcceptsCompleteAndRejectsOversize)$'
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -tags=g01_live -count=1 -timeout=45s ./livecanary -run '^(TestAuthoritySplitAndPolicyRejection|TestSDKTransportOwnership|TestCredentialAttestationMismatchAndExpiredTokenRejected|TestTransportRejectsPlaintextOffHostAndProxyBeforeNetwork)$'
-```
+test_args = command[2:]
+run_indices = [index for index, value in enumerate(test_args) if value == "-run"]
+if len(run_indices) > 1:
+    raise SystemExit(f"{label}: expected at most one -run flag")
+if run_indices:
+    list_args = test_args[:]
+    list_args[run_indices[0]] = "-list"
+else:
+    package_indices = [
+        index for index, value in enumerate(test_args)
+        if value == "." or value.startswith("./")
+    ]
+    if len(package_indices) != 1:
+        raise SystemExit(f"{label}: cannot locate one package argument")
+    list_args = test_args[:]
+    package_index = package_indices[0]
+    list_args[package_index + 1:package_index + 1] = ["-list", "."]
 
-```sh
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset ./livecanary -run '^(TestBaselineAcquireTargetIsActionsOnly|TestPinnedSDKDrain.*|TestDriverDrainThroughPinnedSDKAndPollHook|TestDrainListenerWithdrawsWhilePollResponseIsHeld|TestDrainCancellationStopsBeforeReleasingHeldResponse)$' -count=1 -v -timeout=180s
-```
+list_result = subprocess.run(
+    ["go", "test", *list_args],
+    cwd=repo_root,
+    env=env,
+    text=True,
+    capture_output=True,
+    check=False,
+)
+if list_result.returncode != 0:
+    raise SystemExit(f"{label}: list validation exited {list_result.returncode}")
+test_name = re.compile(r"Test[A-Za-z0-9_]+$")
+go_status = re.compile(r"ok\s+\S+\s+[0-9.]+s(?:\s+\(cached\))?$")
+output = [line for line in list_result.stdout.splitlines() if line]
+if any(not test_name.fullmatch(line) and not go_status.fullmatch(line) for line in output):
+    raise SystemExit(f"{label}: list validation emitted unexpected output")
+actual = [line for line in output if test_name.fullmatch(line)]
+actual_digest = hashlib.sha256(
+    ("\n".join(sorted(actual)) + "\n").encode()
+).hexdigest()
+if len(actual) != expected_count or len(set(actual)) != expected_count:
+    raise SystemExit(
+        f"{label}: expected {expected_count} names, observed {len(actual)}"
+    )
+if actual_digest != expected_digest:
+    raise SystemExit(
+        f"{label}: expected set {expected_digest}, observed {actual_digest}"
+    )
+print(
+    f"{label}: list validation passed; expected/observed {expected_count} names; "
+    f"set-sha256 {actual_digest}"
+)
 
-```sh
+run_result = subprocess.run(command, cwd=repo_root, env=env, check=False)
+if run_result.returncode:
+    raise SystemExit(run_result.returncode)
+PY
+}
+
+go_test_checked 9 9aef95c84ffd42ad632040498c628c78072ce94f5cc2f6af8493fcffc233b707 ack-root \
+  GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s -run '^(TestSDKACKBoundaries|TestSDKDemandAboveFiftyAndPartialAcquisition|TestSDKRepeatedStatisticsAnd202ReuseLastObservation|TestRecoveryAfterACKCallbackCrash|TestRecoveryMissingLifecycleCallback|TestRecoveryErrorsHoldReservationsAndRedact|TestSDKAcquisitionResponseLossAfterACK|TestSDKCapacityWithdrawalDoesNotFenceInFlightAcquisition|TestSDKHTTPFailuresAndSessionRefresh)$' .
+go_test_checked 5 f95a296947af0fb862e8b447d3e27b7ce9f01e726659f5f87393789b62b783c9 ack-livecanary \
+  GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestSupportedListenerBarriersAndReservation|TestDriverBarriersThroughPinnedSDK|TestForeignIdentityAndUnreviewedWorkNeverACKOrDelete|TestAuditPR25MultiJobAcquisitionMustRefuseBeforeACK|TestNoMessageDoesNotCountAsCompletedBarrier)$'
+
+go_test_checked 24 eae489a7d743c942dca803c9b13cb618dcd87fbd9a53634f022bc5381c7d6436 baseline \
+  GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=180s ./livecanary -run '^TestBaseline'
+go_test_checked 9 b6a378d192ba2c614cd82c20eab7cffcdbbb00115a1bba4da803fc262a1c3d8f admission-livecanary \
+  GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=180s ./livecanary -run '^(TestAdmission.*|TestAuditPR25DistinctStateDirectoriesMustShareCap)$'
+go_test_checked 8 4bce3c998c4f2e6806888de2ea9936c6dd9ea877c72b190d47f4f47e24cdb559 admission-liveworker \
+  GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=180s ./liveworker -run '^(TestAdmissionDirectoryUsesOSAccountWithoutEnvironmentFallback|TestAdmissionAuthorityChecksTheCurrentClaim|TestWorkerAdmissionCapsIndependentDirectories|TestWorkerAdmissionRetainsSlotAfterOutcomeAndClose|TestAdmissionRejectsCopiedJournalInDifferentDirectory|TestAdmissionSyncFailureMustBeRetried|TestAdmissionRefusesMissingUnsafeOrUnknownRootState|TestAdmissionInitializationLockPrecedesClaimCreation)$'
+go_test_checked 1 e7cdff09074beb49efb17b8e68201798140ea6f0e83ad10f3fc096aed98823ce unsupported-liveworker \
+  GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -tags=osusergo -count=1 -timeout=180s ./liveworker -run '^TestUnsupportedAccountLookupRefusesBeforeJournal$'
+go_test_checked 1 e7cdff09074beb49efb17b8e68201798140ea6f0e83ad10f3fc096aed98823ce unsupported-livecanary \
+  GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -tags=osusergo -count=1 -timeout=180s ./livecanary -run '^TestUnsupportedAccountLookupRefusesBeforeJournal$'
+
+go_test_checked 3 0f5a8b0633982f8cc04a541cb396c46736c6eec486622354a6456554c52cfc75 jit-root \
+  GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s -run '^(TestSDKJITLookupBeforeCreationDoesNotDiscoverIdentity|TestSDKJITResponseLossWithoutCommitDoesNotDiscoverIdentity|TestSDKJITResponseLossDiscoversIdentityWithoutReissuing)$' .
+go_test_checked 2 42eac255f830436a6fba9457bcb1964e8f9f596761fecfdb721c2d34b684f4cb jit-livecanary \
+  GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestJITLostResponseIsSecretSafeAndNeverReissued|TestDriverBarriersThroughPinnedSDK)$'
+
+go_test_checked 34 fcdcde4fce2efa204fdb352c035329a010f7a41b4b9746bf748b2ebc22b4d330 worker-runtime \
+  GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./liveworker -run '^(TestOneWorkerNeverRecreatedAndOnlyJITAddedToEnvironment|TestUncertainStartNeverRetriesAndCannotCleanup|TestEveryRuntimeBoundaryRejectsProfileAndOwnershipMismatch|TestUnverifiedRunnerUpdatePolicyRefusesBeforeRuntime|TestSocketReplacementAfterPreflightCannotReceiveAnyMutation|TestSocketModesAndControllerOwnership|TestSocketPostConnectRecheckClosesBeforeHTTP|TestNoCreateBeforeDurableIntent|TestUnknownCreateNeverRetriesAfterRestart|TestCreationWarningsPreserveKnownIDWithoutAuthorizingStart|TestWorkerPreparationReturnsCanonicalSnapshotAndRejectsPriorEffect|TestUnixInspectRequiresStateFlagsBeforeMutation|TestDockerInspectExact(KnownStatesAndSerializableFacts|StatePresenceAndLegacyRequirements|RejectsMalformedOrAmbiguousBodiesBeforeMutation|NotFoundReportsOnlyTheExactGET|RejectsOtherResponsesAndInvalidTargets|RequiresSupported404Body|CancellationNeverReportsPresenceOrAbsence|RejectsReplacedSocket|EOFCancellationKeepsUnknownOutcome)|TestDockerInspectLegacyCleanupKeepsSignedAndAbsentExitPolicy|TestDockerInspectMapsPreserveCaseSensitiveKeysAndProfile|TestDockerCompletedMutationResponseSurvivesEOFCancellation|TestDockerInspectUnknownOrAbsentStatusCannotAuthorizeMutation|TestUnixRuntimeRejectsWrongIdentityImagesAndUnsupportedLimits|TestUnixRuntimeOneShotCreateStartAndNonForceCleanup|TestUnixRuntimeAmbiguousEffectsNeverRetry|TestChangedDaemonCannotCreate|TestChangedDaemonOrAbsentContainerNeverMeansCleanupComplete|TestUnixTransportRejectsSymlinksAndInheritedTCPDestinations|TestAuditPR28MissingBridgeMustNotStart|TestCleanupRetainsActiveAndUnknownWorkers|TestOwnedTerminalCleanupAndRunningRemovalRace)$'
+go_test_checked 4 8a0a576036768baff9a9b7d53b3487ef84b2e95f502b3ca9dd453463f396cade update-policy \
+  GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestCreateRequestsDisabledRunnerUpdate|TestUnconfirmedUpdateSettingQuarantinesCreate|TestUpdateSettingDriftStopsBeforeSessionOrJIT|TestUpdateSettingDriftDoesNotBlockSafeEmptyCleanup)$'
+go_test_checked 2 2614438aa4873bd044d1f0d6247b929403e2225c2e5112c13787bf790af42413 worker-command \
+  GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -tags=g01_worker -count=1 -timeout=45s ./cmd/g01-worker -run '^(TestBlockedJITInputHonorsDeadline|TestOfflinePlanAndRefusalDoNotReadSecretsOrEchoInput)$'
+
+go_test_checked 45 2e182d6aeb4c278eddbe272be1693e6bf0143759c23c03348435da59addfde53 reconciliation \
+  GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestAmbiguousCreateNeverRetriesAfterRestart|TestObserve.*|TestObservationIntentFailureStopsBeforeRead|TestObservationResponseCaptureIsLocalAndRejectsOtherOperations|TestStatistics.*|TestDemandStatisticsAllowControlledProbeButNeverCleanup|TestInvalidOwnedProof.*|TestCanonicalPreparationRecordsNoPhaseOrRemoteIntent|TestCanonicalPreparationRefusesInvalidJournalAndPhase|TestCanonicalPreparationRecoveryAndDriverShareLocalGate|TestJournal.*|TestAuthority.*|TestInventoryStrictPages|TestInventoryMalformedStopsLegacyEffects|TestInventoryTransportRefusalIsBoundedAndSanitized|TestInventoryImpossibleTotalStopsBeforeNextPage|TestRosterActualTLSCompleteObservation|TestRosterPreservesOnlyAcceptedPagePrefix|TestRosterFinalPublicationGuardAfterDigest|TestRosterRefusesInvalidEntryWithoutNetwork|TestStrictJSONRejectsDecoderEquivalentDuplicateFields|TestStrictJSONRejectsDuplicateAuthorityFields|TestFailedDirectorySyncMustBeRetried|TestFileJournalRejectsUnrecordedAuthorityBeforeRawDriverEffect|TestRenewedRecoveryApprovalRetainsOwnedState)$'
+go_test_checked 9 47a97f1f9083abbe72dfc21a2477bd25580684506fbf71bf5aba9e7f6f1a40e8 reconciliation-worker \
+  GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./liveworker -run '^(TestPrivateJournalLocksAndRetainsReservationAcrossRestart|TestJournalRejectsChangedApprovalTornTailAndUnsafeFiles|TestAuthorityLeaseRefusesConcurrentRunsAndFencesClose|TestAuthorityRejectsReplacedJournalOrDirectory|TestStrictJSONRejectsDecoderEquivalentDuplicateFields|TestStrictInputRejectsAmbiguousOrExtraAuthorityFields|TestFailedDirectorySyncMustBeRetried|TestFileJournalRejectsUnrecordedAuthorityBeforeRawDriverEffect|TestRenewedRecoveryApprovalRetainsOwnedState)$'
+go_test_checked 11 84b872130057cf2103feaa8f7c6cdb69a4d779e135eebf11cc04cb00590eacb9 reconciliation-quarantine \
+  GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestDemandStatisticsAllowControlledProbeButNeverCleanup|TestCleanupOnlyForNeverIssuedWorkerWithExactReceipt|TestZeroStatisticsAndOptionalAbsencePermitEmptyCleanup|TestUnsafeStatisticsStopNewEffectsBeforeControlledMessage|TestEmptyAvailableWithWorkStatisticsStaysQuarantined|TestOlderPendingIntentSurvivesSuccessfulZeroInspection|TestUnownedDiscoveryEvidenceCannotAuthorizeCreationAfterAbsence|TestAuditPR25ObservedJobsMustBlockCleanup|TestUnexpectedWorkMessageQuarantinesBeforeSafeClose|TestObservedRunnerSurvivesLaterAbsenceAndFirstCleanup|TestObservationResultFailureSurvivesFileReopenAndInspection)$'
+
+go_test_checked 1 be0f21a92ce13d75e85a1182706e84b84884a8cf0ec01172e14e5ac2e04b600f secret-root \
+  GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s -run '^TestSDKBusyRemovalSentinelAndRawErrorExposure$' .
+go_test_checked 6 6d0b3fc255928a6c7a5f7ae087d25715f96c0bad9f9298b5fb08ea7bc5fc34df secret-livecanary \
+  GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestHTTPErrorsDoNotReturnSecretResponseBody|TestSDKHTTPDebugDoesNotLogCredentials|TestSharedTransportRejectsOversizeSuccessAndErrorBodies|TestResponseReaderConsumesOnlyBudgetPlusOneAndRejectsTruncation|TestResponseBudgetAppliesAfterGzipDecompression|TestRealJournalCreateFailureBlocksRetryAndContainsNoErrorBody)$'
+go_test_checked 3 feda1bf98e323aef3e209cc4ea2765131ca7d17d70dfd7bb4828c0faab14dff4 secret-liveworker \
+  GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./liveworker -run '^(TestUncertainStartNeverRetriesAndCannotCleanup|TestUnixResponsesAreBoundedAndRedirectsNeverFollowed|TestObservationDoesNotJournalRawRuntimeStatus)$'
+
+go_test_checked 10 7ced37498c6790e0a1276ffece4cf0bcb2cad09f39da3ebdd0e28694f752596c live-command \
+  GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -tags=g01_live -count=1 -timeout=45s ./cmd/g01-live -run '^(TestPlanAndRefusalsNeverReadCredentialsOrEchoInputs|TestPreparationCommandNeverReadsCredentialsOrRunsRemotePhase|TestPairedTerminalModeReadsControllerInputAfterAllGates|TestPairedTerminalModeRejectsUnusedPhaseAndControllerFlagsBeforeInput|TestPairedTerminalModeRequiresWorkflowVerificationAuthorityBeforeInput|TestInheritedNamedCredentialFIFODelayedEOF|TestInheritedCredentialPipeStopsAtDeadline|TestCredentialInputRejectsNonPipeDescriptor|TestBlockedCredentialPipeStopsAtDeadline|TestCredentialInputAcceptsCompleteAndRejectsOversize)$'
+go_test_checked 4 a751c8b1a6a22d2f4ce76d90d6d79c48ab377355deed0f3bf189496c22b5492e live-transport \
+  GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -tags=g01_live -count=1 -timeout=45s ./livecanary -run '^(TestAuthoritySplitAndPolicyRejection|TestSDKTransportOwnership|TestCredentialAttestationMismatchAndExpiredTokenRejected|TestTransportRejectsPlaintextOffHostAndProxyBeforeNetwork)$'
+
+go_test_checked 34 a79b7fa367d8eb1e7fe4ee4ef637696518946dab6f2f25410f6e04bfba137298 drain-pr72 \
+  GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset ./livecanary -run '^(TestBaselineAcquireTargetIsActionsOnly|TestPinnedSDKDrain.*|TestDriverDrainThroughPinnedSDKAndPollHook|TestDrainListenerWithdrawsWhilePollResponseIsHeld|TestDrainCancellationStopsBeforeReleasingHeldResponse)$' -count=1 -v -timeout=180s
+
 terminal_heavy_tests='^TestPairedTerminal(FinalResultCapacity|PendingChildCapacity|EligibilityUsesFreshExactFacts|CapturedAcknowledgementCancellation|MissingAcknowledgementsAndPostchecks)$'
 terminal_remainder_skip='^TestPairedTerminal(FinalResultCapacity|PendingChildCapacity|EligibilityUsesFreshExactFacts|CapturedAcknowledgementCancellation|MissingAcknowledgementsAndPostchecks|Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$'
 terminal_storage_tests='^TestPairedTerminal(Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$'
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run '^TestPaired' -skip '^TestPairedTerminal'
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -skip '^TestPaired'
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./liveworker -run '^TestPaired'
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run "$terminal_heavy_tests"
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run '^TestPairedTerminal' -skip "$terminal_remainder_skip"
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run "$terminal_storage_tests"
+go_test_checked 48 8c129ba2f85817cc91030ed49709b4ba4b25271955bc40ee569edb75b6685822 paired-collection \
+  GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run '^TestPaired' -skip '^TestPairedTerminal'
+go_test_checked 154 b2b52b8ad1ed929a17adc28558b5807320110cf8547c20eeb3cd80be6dc966d4 paired-all-except \
+  GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -skip '^TestPaired'
+go_test_checked 24 b7f253f33da157adba67fe4312eddb0ee90172e24f46d4f48502890ab5f080f paired-worker \
+  GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./liveworker -run '^TestPaired'
+go_test_checked 5 9e1a2e099c0fc48bbbd83dd0dc798d3c954910cd150b210037741b2c70211952 paired-heavy \
+  GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run "$terminal_heavy_tests"
+go_test_checked 26 6a40b0f8e472e5829a4306a55f6ed0d1d57628d6a477a3aacb1b2b5822965b2d paired-remainder \
+  GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run '^TestPairedTerminal' -skip "$terminal_remainder_skip"
+go_test_checked 6 458f77f55209a59338a63bfc27697d85ebe5e0c3c7d1b959a0b56b2527f3ead5 paired-storage \
+  GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run "$terminal_storage_tests"
 GOTOOLCHAIN=go1.26.8 go vet -C experiments/g01-scaleset -tags=g01_pair_fixture ./livecanary
 GOTOOLCHAIN=go1.26.8 go vet -C experiments/g01-scaleset -tags=g01_pair_fixture ./liveworker
 ```
+
+The packet also audits that every future `go test -run` line is immediately
+guarded by `go_test_checked`; the audit deliberately treats an unguarded line
+as an error rather than relying on a visual review of the selector block.
+
+```sh
+set -euo pipefail
+selector_lines="$(rg -n '^[[:space:]]+GOTOOLCHAIN=.*go test .* -run' docs/evidence/g01-recovery-packet.md)"
+test -n "$selector_lines"
+python3 - <<'PY'
+from pathlib import Path
+
+lines = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8").splitlines()
+guarded = 0
+for index, line in enumerate(lines):
+    if not line.lstrip().startswith("GOTOOLCHAIN=") or "go test" not in line or " -run " not in line:
+        continue
+    if index == 0 or "go_test_checked " not in lines[index - 1]:
+        raise SystemExit(f"unguarded future selector at line {index + 1}")
+    guarded += 1
+if guarded == 0:
+    raise SystemExit("no future go test -run prescriptions found")
+print(f"future selector guard audit: passed; {guarded} go test -run prescriptions are wrapper-guarded")
+PY
+```
+
+The selector guard audit exited 0 and found 26 future `go test -run`
+prescriptions, each immediately preceded by `go_test_checked`. No test body
+was run by this grep/audit.
 
 The tagged worker command is a complete `./liveworker` `^TestPaired` partition
 using the same fixture tag, toolchain, race detector, count and timeout as the
@@ -257,8 +401,9 @@ skipped, unavailable or unauthorized live phase into “passed.”
 This packet correction requires markdown/link-target, JSON syntax, ledger/table,
 fragment, selector, diff, and secret/private-path checks only. No artificial Go
 red or green test is created for documentation changes. The stable working
-directory and source boundary were checked against target head
-`ee8df8b7e00204c74a892b27f8b4c0ab278751ba`; the selector declaration audit is
+directory and source boundary were checked at exact reviewed PR #78 candidate
+head d4f03dd9d3e251025462845ec288f4afc72a5295; ee8df8b7e00204c74a892b27f8b4c0ab278751ba
+is only the unchanged experiments/g01-scaleset source-comparison parent. The selector declaration audit is
 anchored to immutable source commit
 `95cd9210620c54e098ecbe0df1217af1659f0c74` and tree
 `d8b79cd1ddc6993792a44a8e8ae88985ce7466c0`. The audited default-build
@@ -355,18 +500,39 @@ partition and worker vet command are intentionally packet-only additions.
 ```sh
 set -euo pipefail
 diff -u \
-  <(awk '/^terminal_heavy_tests=/{capture=1} capture { print; if ($0 ~ /^GOTOOLCHAIN=.*go vet -C experiments\/g01-scaleset -tags=g01_pair_fixture \.\/livecanary$/) exit }' docs/evidence/g01-paired-terminal.md) \
-  <(awk '/^terminal_heavy_tests=/{capture=1} capture { print; if ($0 ~ /^GOTOOLCHAIN=.*go vet -C experiments\/g01-scaleset -tags=g01_pair_fixture \.\/livecanary$/) exit }' docs/evidence/g01-recovery-packet.md | grep -v 'liveworker')
-printf 'paired-terminal command fragment comparison: passed; packet controller fragment matches g01-paired-terminal.md\n'
+  <(awk '
+    /^terminal_heavy_tests=/{capture=1}
+    capture {
+      line=$0
+      sub(/^[[:space:]]+/, "", line)
+      if (line ~ /^(terminal_(heavy|remainder|storage)_tests=|GOTOOLCHAIN=.*go (test|vet) -C )/) print line
+      if (line ~ /^GOTOOLCHAIN=.*go vet -C experiments\/g01-scaleset -tags=g01_pair_fixture \.\/livecanary$/) exit
+    }
+  ' docs/evidence/g01-paired-terminal.md) \
+  <(awk '
+    /^terminal_heavy_tests=/{capture=1}
+    capture {
+      line=$0
+      sub(/^[[:space:]]+/, "", line)
+      if (line ~ /^(terminal_(heavy|remainder|storage)_tests=|GOTOOLCHAIN=.*go (test|vet) -C )/) print line
+      if (line ~ /^GOTOOLCHAIN=.*go vet -C experiments\/g01-scaleset -tags=g01_pair_fixture \.\/livecanary$/) exit
+    }
+  ' docs/evidence/g01-recovery-packet.md | grep -v 'liveworker')
+printf 'paired-terminal normalized command fragment comparison: passed; packet controller commands match g01-paired-terminal.md\n'
 ```
 
-The paired-terminal fragment comparison exited 0 with no diff and printed the
-pass message above.
+The paired-terminal normalized fragment comparison exited 0 with no diff and
+printed the pass message above; wrapper metadata is intentionally excluded, but
+the underlying package, tag, selector, skip, toolchain, race, count and timeout
+arguments remain compared exactly.
 
 ### Stable checkout and selector audit
 
 ```sh
 set -euo pipefail
+current_head="$(git rev-parse HEAD)"
+test "$current_head" = "$(git rev-parse --verify HEAD^{commit})"
+test "$current_head" = "$(git show -s --format=%H HEAD)"
 test "$(git rev-parse --show-toplevel)" = "$(pwd -P)"
 test -d experiments/g01-scaleset
 test "$(git rev-parse --verify ee8df8b7e00204c74a892b27f8b4c0ab278751ba)" = "ee8df8b7e00204c74a892b27f8b4c0ab278751ba"
@@ -374,11 +540,14 @@ git diff --quiet ee8df8b7e00204c74a892b27f8b4c0ab278751ba -- experiments/g01-sca
 source_status="$(git status --porcelain=v1 --untracked-files=all -- experiments/g01-scaleset)"
 test -z "$source_status"
 test "$(git rev-parse 1396e201d905be204c3ac697be43723820581314:docs/evidence/g01-red.md)" = "c36e0af0c8e9b301f4889a02454c83ece8d5942f"
-printf 'stable checkout audit: passed; repo root is current directory, experiments/g01-scaleset exists, target source is unchanged, scoped tracked/untracked status is empty, and g01-red.md resolves to its pinned blob\n'
+printf 'stable checkout audit: passed; current HEAD is %s, repo root is current directory, experiments/g01-scaleset exists, source comparison parent is unchanged, scoped tracked/untracked status is empty, and g01-red.md resolves to its pinned blob\n' "$current_head"
 ```
 
-The stable checkout audit exited 0. It confirmed the target head, unchanged
-`experiments/g01-scaleset` source, and the `g01-red.md` commit/blob pin. The
+The stable checkout audit exited 0. At the prior exact-head validation point,
+git rev-parse HEAD returned d4f03dd9d3e251025462845ec288f4afc72a5295; the
+current-head assertion remains in the command for each rerun. It confirmed the
+unchanged experiments/g01-scaleset source relative to comparison parent
+ee8df8b7e00204c74a892b27f8b4c0ab278751ba and the g01-red.md commit/blob pin. The
 scoped `git status --porcelain=v1 --untracked-files=all --
 experiments/g01-scaleset` output was empty (zero lines), so no tracked or
 untracked source file could contaminate declaration or list results. It did not
@@ -541,7 +710,8 @@ PY
 ```
 
 The fail-closed selector audit exited 0 against the unchanged source under
-target head `ee8df8b7e00204c74a892b27f8b4c0ab278751ba`: exact sets matched at
+comparison parent ee8df8b7e00204c74a892b27f8b4c0ab278751ba (the exact reviewed
+packet candidate was d4f03dd9d3e251025462845ec288f4afc72a5295): exact sets matched at
 25/25 `liveworker` runtime names, 4/4 preparation names, 1/1 `osusergo`
 build-tag name and 26/26 reconciliation names. Every invocation used
 `go test -list`; no test body ran.
@@ -598,6 +768,41 @@ independent driver correction from `7ce053380003c9260f46bf93ea118893b95f01e7`
 and team-review routing corrections from
 `f59a30532bfdc62876065dcf8b4997520606e6a6`, which remain outside this staged
 change.
+
+## Historical Codex finding ledger
+
+The following stale/outdated root findings were omitted from the earlier
+correction paragraphs. Each row preserves the original finding URL and the
+immutable source commit where Codex observed it; disposition cites the packet
+change that reproduced and fixed the gap, not staleness alone. The residual
+selector-matching finding is resolved by the reusable wrapper above, which now
+guards every runnable long selector before executing its original command.
+
+| Finding and immutable source | Reproduction and disposition |
+|---|---|
+| [3998925786](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3998925786), source [0e08ce8285846e26a94fb6fcb33bbeede662bf14](https://github.com/1XP-AI/gh-runnerd/commit/0e08ce8285846e26a94fb6fcb33bbeede662bf14) | Reproduced: the root-only JIT rerun omitted worker transport. The packet now includes worker-runtime and tagged worker-command selectors; the wrapper validates their package/tag name sets before execution. |
+| [3998925788](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3998925788), source [0e08ce8285846e26a94fb6fcb33bbeede662bf14](https://github.com/1XP-AI/gh-runnerd/commit/0e08ce8285846e26a94fb6fcb33bbeede662bf14) | Reproduced: the non-terminal paired command excluded every terminal test. The packet now prescribes collection, all-except, worker, heavy, remainder and storage partitions, each guarded by list validation. |
+| [3998925790](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3998925790), source [0e08ce8285846e26a94fb6fcb33bbeede662bf14](https://github.com/1XP-AI/gh-runnerd/commit/0e08ce8285846e26a94fb6fcb33bbeede662bf14) | Reproduced: inline selector pipes could split the ledger table. Commands remain outside the ten-row ledger, and the recorded shape check requires ten data rows with four columns. |
+| [3998925793](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3998925793), source [0e08ce8285846e26a94fb6fcb33bbeede662bf14](https://github.com/1XP-AI/gh-runnerd/commit/0e08ce8285846e26a94fb6fcb33bbeede662bf14) | Reproduced: the earlier driver blob contradicted ACK-before-acquisition. The evidence index now points to the corrected driver revision 0e08ce8285846e26a94fb6fcb33bbeede662bf14. |
+| [3998925795](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3998925795), source [0e08ce8285846e26a94fb6fcb33bbeede662bf14](https://github.com/1XP-AI/gh-runnerd/commit/0e08ce8285846e26a94fb6fcb33bbeede662bf14) | Reproduced: callback-loss reruns omitted the missing-callback and error/quarantine cases. The ACK root selector now names all three recovery tests and the wrapper checks the resulting set/count. |
+| [3998973873](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3998973873), source [9d07f3ccbbf4ff2a80aaa5ff43f376cb2b3da999](https://github.com/1XP-AI/gh-runnerd/commit/9d07f3ccbbf4ff2a80aaa5ff43f376cb2b3da999) | Reproduced: root-only ACK reruns omitted driver ACK/acquisition checks. The livecanary ACK selector now includes the driver and refusal contracts, with pre-run set/count validation. |
+| [3998973876](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3998973876), source [9d07f3ccbbf4ff2a80aaa5ff43f376cb2b3da999](https://github.com/1XP-AI/gh-runnerd/commit/9d07f3ccbbf4ff2a80aaa5ff43f376cb2b3da999) | Reproduced: worker-only JIT reruns omitted controller JIT-loss probes. The livecanary JIT selector now names both controller cases and is guarded before execution. |
+| [3998973877](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3998973877), source [40daf0f074b9cc9559135adac1cafaad218275be](https://github.com/1XP-AI/gh-runnerd/commit/40daf0f074b9cc9559135adac1cafaad218275be) | Reproduced: the reconciliation prefix omitted retained-uncertainty predicates. The quarantine selector now explicitly includes all named predicates, with count/set validation. |
+| [3999010977](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999010977), source [9d07f3ccbbf4ff2a80aaa5ff43f376cb2b3da999](https://github.com/1XP-AI/gh-runnerd/commit/9d07f3ccbbf4ff2a80aaa5ff43f376cb2b3da999) | Reproduced: valid singleton cases did not reject foreign or multi-job messages. The ACK/livecanary selector now includes both refusal tests and validates their presence before running. |
+| [3999010981](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999010981), source [9d07f3ccbbf4ff2a80aaa5ff43f376cb2b3da999](https://github.com/1XP-AI/gh-runnerd/commit/9d07f3ccbbf4ff2a80aaa5ff43f376cb2b3da999) | Reproduced: the image/profile row selected only one worker test. The worker-runtime selector now includes profile, update-policy and Docker-preflight contracts, guarded by the wrapper. |
+| [3999010985](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999010985), source [9d07f3ccbbf4ff2a80aaa5ff43f376cb2b3da999](https://github.com/1XP-AI/gh-runnerd/commit/9d07f3ccbbf4ff2a80aaa5ff43f376cb2b3da999) | Reproduced: retained-uncertainty cases were absent from both reconciliation commands. The quarantine selector now includes observed-job, unexpected-work, later-absence and persistence-failure cases. |
+| [3999010989](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999010989), source [9d07f3ccbbf4ff2a80aaa5ff43f376cb2b3da999](https://github.com/1XP-AI/gh-runnerd/commit/9d07f3ccbbf4ff2a80aaa5ff43f376cb2b3da999) | Reproduced: the baseline-only command omitted global admission checks. The packet now has explicit controller and worker admission selectors, including cross-directory and concurrent-start cases. |
+| [3999010990](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999010990), source [9d07f3ccbbf4ff2a80aaa5ff43f376cb2b3da999](https://github.com/1XP-AI/gh-runnerd/commit/9d07f3ccbbf4ff2a80aaa5ff43f376cb2b3da999) | Reproduced: SDK session-refresh behavior was omitted from the ACK selector. The root selector now includes TestSDKHTTPFailuresAndSessionRefresh and validates the exact set. |
+| [3999060310](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999060310), source [60fdefe124d7c83ad54eac36950cb574f7e0c9aa](https://github.com/1XP-AI/gh-runnerd/commit/60fdefe124d7c83ad54eac36950cb574f7e0c9aa) | Reproduced: demand and stale-statistics tests were absent from the SDK rerun. The root selector now names both cases and the wrapper checks count and set before running. |
+| [3999208511](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999208511), source [cdaf879fed807da517ab88ea5db3dba6e99a948e](https://github.com/1XP-AI/gh-runnerd/commit/cdaf879fed807da517ab88ea5db3dba6e99a948e) | Reproduced: the tagged controller command was missing. The packet now prescribes the ten tagged cmd/g01-live input/refusal checks with fail-closed validation. |
+| [3999208514](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999208514), source [f59a30532bfdc62876065dcf8b4997520606e6a6](https://github.com/1XP-AI/gh-runnerd/commit/f59a30532bfdc62876065dcf8b4997520606e6a6) | Reproduced: tagged worker JIT input checks were absent. The packet now includes the g01_worker command and expected set/count guard. |
+| [3999208519](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999208519), source [9dea03887cc530f742e705055064579121a84206](https://github.com/1XP-AI/gh-runnerd/commit/9dea03887cc530f742e705055064579121a84206) | Reproduced: worker journal/authority tests were omitted. The liveworker reconciliation selector now names those durability contracts and validates them before execution. |
+| [3999433329](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999433329), source [9dea03887cc530f742e705055064579121a84206](https://github.com/1XP-AI/gh-runnerd/commit/9dea03887cc530f742e705055064579121a84206) | Reproduced: worker admission contracts were not explicit. The worker admission selector now covers the integrity suite and the tagged unsupported-account case, with wrapper validation. |
+| [3999433330](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999433330), source [080b9c29c0c056dffd03f54567b593a426a1909d](https://github.com/1XP-AI/gh-runnerd/commit/080b9c29c0c056dffd03f54567b593a426a1909d) | Reproduced: controller update-policy contracts were absent. The livecanary update-policy selector now includes disable-update, unconfirmed-setting and drift cases. |
+| [3999433331](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999433331), source [9dea03887cc530f742e705055064579121a84206](https://github.com/1XP-AI/gh-runnerd/commit/9dea03887cc530f742e705055064579121a84206) | Reproduced: uncertainty and cleanup contracts were omitted from the worker selector. The worker-runtime command now includes uncertain-start, active/unknown retention and terminal-removal cases. |
+| [3999433334](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999433334), source [9dea03887cc530f742e705055064579121a84206](https://github.com/1XP-AI/gh-runnerd/commit/9dea03887cc530f742e705055064579121a84206) | Reproduced: scheduled reconciliation was stated too much like implemented behavior. The packet now labels scheduling, fencing and rehydration as future production requirements and preserves the live gap. |
+| [3999433335](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999433335), source [9dea03887cc530f742e705055064579121a84206](https://github.com/1XP-AI/gh-runnerd/commit/9dea03887cc530f742e705055064579121a84206) | Reproduced: broad rollback could revert independent corrections. The rollback row now scopes removal/restoration to this packet and preserves driver and routing corrections. |
+
 The two new exact-head findings
 on `95cd9210620c54e098ecbe0df1217af1659f0c74`—[3999634756](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999634756)
 and [3999634759](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999634759)—are
