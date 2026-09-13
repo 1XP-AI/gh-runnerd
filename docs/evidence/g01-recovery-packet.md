@@ -507,62 +507,88 @@ GOTOOLCHAIN=go1.26.8 go vet -C experiments/g01-scaleset -tags=g01_pair_fixture .
 GOTOOLCHAIN=go1.26.8 go vet -C experiments/g01-scaleset -tags=g01_pair_fixture ./liveworker
 ```
 
-The packet also audits that every future `go test` selector line containing
-either spelling of `-run`/`-skip` (`-run REGEXP` or `-run=REGEXP`, and the
-corresponding `-skip` forms) is immediately guarded by `go_test_checked`; the
-audit deliberately treats an unguarded line as an error rather than relying on
-a visual review of the selector block.
+The packet also audits every future shell `go test` selector prescription
+containing either spelling of `-run`/`-skip` (`-run REGEXP` or `-run=REGEXP`, and
+the corresponding `-skip` forms), whether or not the command starts with a
+`GOTOOLCHAIN=` assignment. The guard audit discovers all selector-bearing
+commands first and treats an unguarded line as an error rather than relying on
+a visual review of the selector block. The package/build metadata audit below
+is a separate gate: every guarded prescription must still carry explicit
+`GOTOOLCHAIN`, tag and race metadata.
 
 ```sh
 set -euo pipefail
-selector_pattern='^[[:space:]]+GOTOOLCHAIN=.*go test .*[[:space:]]-(run|skip)(=|[[:space:]])'
+selector_pattern='^[[:space:]]+(?:[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]+[[:space:]]+)*go test .*[[:space:]]-(run|skip)(=|[[:space:]])'
 selector_lines="$(rg -n "$selector_pattern" docs/evidence/g01-recovery-packet.md)"
 test -n "$selector_lines"
-printf '%s\n' \
-  '  GOTOOLCHAIN=go1.26.8 go test ./livecanary -run=^TestProbe$' \
-  '  GOTOOLCHAIN=go1.26.8 go test ./livecanary -skip ^TestProbe$' |
-  rg -q "$selector_pattern"
+selector_probe=$'  GOTOOLCHAIN=go1.26.8 go test ./livecanary -run=^TestProbe$\n  GOTOOLCHAIN=go1.26.8 go test ./livecanary -skip ^TestProbe$'
+rg -q "$selector_pattern" <<< "$selector_probe"
 python3 - <<'PY'
 from pathlib import Path
 import re
+import tempfile
 
 lines = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8").splitlines()
-selector_flag = re.compile(r"(?:^|\s)-(?:run|skip)(?:=|\s)")
+selector_command = re.compile(
+    r"^\s+(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+)\s+)*go test .*\s-(?:run|skip)(?:=|\s)"
+)
 guarded = 0
 for index, line in enumerate(lines):
-    if not line.lstrip().startswith("GOTOOLCHAIN=") or "go test" not in line:
+    if not selector_command.search(line):
         continue
-    if not selector_flag.search(line):
-        continue
-    if index == 0 or "go_test_checked " not in lines[index - 1]:
+    if index == 0 or not lines[index - 1].lstrip().startswith("go_test_checked "):
         raise SystemExit(f"unguarded future selector at line {index + 1}")
     guarded += 1
 if guarded == 0:
     raise SystemExit("no future go test selector prescriptions found")
-for sample in (
-    "GOTOOLCHAIN=go1.26.8 go test ./livecanary -run ^TestProbe$",
-    "GOTOOLCHAIN=go1.26.8 go test ./livecanary -run=^TestProbe$",
-    "GOTOOLCHAIN=go1.26.8 go test ./livecanary -skip ^TestProbe$",
-    "GOTOOLCHAIN=go1.26.8 go test ./livecanary -skip=^TestProbe$",
-):
-    if not selector_flag.search(sample):
-        raise SystemExit(f"selector form not recognized: {sample}")
+with tempfile.NamedTemporaryFile("w+", encoding="utf-8", suffix=".md") as probe:
+    probe.write(
+        Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
+        + "\n  go test ./livecanary -run ^TestNoPrefixProbe$\n"
+    )
+    probe.flush()
+    try:
+        probe_lines = Path(probe.name).read_text(encoding="utf-8").splitlines()
+        for index, line in enumerate(probe_lines):
+            if not selector_command.search(line):
+                continue
+            if index == 0 or not probe_lines[index - 1].lstrip().startswith("go_test_checked "):
+                raise SystemExit(f"unguarded future selector at line {index + 1}")
+    except SystemExit as error:
+        if "unguarded future selector" not in str(error):
+            raise
+        print(
+            "no-prefix selector probe: passed; an unguarded `go test -run` "
+            "without GOTOOLCHAIN was discovered and rejected"
+        )
+    else:
+        raise SystemExit("no-prefix selector probe: unguarded command was accepted")
 print(
     f"future selector guard audit: passed; {guarded} go test selector "
-    "prescriptions are wrapper-guarded; separated and equals forms recognized"
+    "prescriptions are wrapper-guarded; prefixed and no-prefix discovery "
+    "forms recognized"
 )
 PY
 ```
 
 The selector guard audit exited 0 and found 27 future `go test` selector
 prescriptions containing `-run` or `-skip`, each immediately preceded by
-`go_test_checked`; both separated and equals spellings are covered by the
-audit's explicit read-only probes. No test body was run by this grep/audit. For
-the paired partitions, the wrapper validates the filtered executed sets: collection
+`go_test_checked`; the focused no-prefix probe discovered and rejected an
+unguarded selector without a leading `GOTOOLCHAIN=` assignment, while the
+explicit read-only samples cover both separated and equals spellings. No test
+body was run by this grep/audit. For the paired partitions, the wrapper validates
+the filtered executed sets: collection
 22/22 (raw list 48), all-except 106/106 (raw list 154), worker 24/24, heavy
 5/5, terminal remainder 15/15 (raw list 26), and storage 6/6; their recorded
 SHA-256 values are the sorted filtered-name digests on the corresponding
 prescription lines above.
+
+The recorded selector-audit output was:
+
+```text
+no-prefix selector probe: passed; an unguarded `go test -run` without GOTOOLCHAIN was discovered and rejected
+future selector guard audit: passed; 27 go test selector prescriptions are wrapper-guarded; prefixed and no-prefix discovery forms recognized
+```
 
 The wrapper metadata is independently checked against each command's literal
 package and build flags so a copied digest cannot target the other package or a
@@ -597,6 +623,8 @@ for index, line in enumerate(lines):
     if command[:2] != ["go", "test"]:
         raise SystemExit(f"line {index + 2}: not a go test command")
     args = command[2:]
+    if not env.get("GOTOOLCHAIN", "").strip():
+        raise SystemExit(f"line {index + 2}: missing explicit GOTOOLCHAIN metadata")
 
     def values(flag):
         result = []
@@ -639,17 +667,22 @@ if len(seen) != 27 or len(set(seen)) != len(seen):
     raise SystemExit(f"expected 27 unique wrapper metadata records, observed {len(seen)}")
 print(
     f"package/build metadata audit: passed; {len(seen)} wrapper prescriptions "
-    "matched one package identity and build configuration; duplicate package "
-    "candidates fail closed"
+    "matched one package identity and explicit GOTOOLCHAIN/tag/race build "
+    "configuration; duplicate package candidates fail closed"
 )
 PY
 ```
 
 The package/build metadata audit exited 0 with 27 unique records. Every
-package identity matched its `-C` directory and sole package argument, and
-every build identity matched its tag set, race mode and `GOTOOLCHAIN`; a
-duplicate `./livecanary`/`./liveworker` package list is rejected before the
-list probe.
+package identity matched its `-C` directory and sole package argument, every
+record carried explicit `GOTOOLCHAIN` metadata, and every build identity
+matched its tag set, race mode and toolchain; a duplicate
+`./livecanary`/`./liveworker` package list is rejected before the list probe.
+The recorded metadata-audit output was:
+
+```text
+package/build metadata audit: passed; 27 wrapper prescriptions matched one package identity and explicit GOTOOLCHAIN/tag/race build configuration; duplicate package candidates fail closed
+```
 
 The wrapper's selector edge cases were then exercised with a trimmed copy of
 the documented Python body that stops before the original test subprocess. Its
@@ -773,13 +806,16 @@ This packet correction requires markdown/link-target, JSON syntax, ledger/table,
 fragment, selector, diff, and secret/private-path checks only. No artificial Go
 red or green test is created for documentation changes. The stable working
 directory and source boundary were checked from immutable validation snapshot
-5979b7d722f3bf8e24404912f9b1f3e888d0828d; that snapshot is not the current PR
-#78 head. The current PR #78 head at the validation point was
-82eeef99f9bb5ec85c8cb3bea7a9a5947e8df26a and is verified separately by the
-read-only remote-ref check below; the pushed correction head will necessarily
-be a new SHA and requires its own PR metadata, exact-head review and CI. This
-packet correction updates only packet documentation, including selector-wrapper
-metadata and validation wording; it leaves the experiments source unchanged. The comparison parent
+5979b7d722f3bf8e24404912f9b1f3e888d0828d; that historical snapshot is not the
+current PR #78 head. The prior packet-correction head at the start of this
+correction was exactly
+6b1535ee7b6f08582ff162eca30f1e4294dbf32b and has the explicit exact-head
+record below. The earlier PR #78 head at the previous validation point was
+82eeef99f9bb5ec85c8cb3bea7a9a5947e8df26a and is retained only as historical
+provenance; the pushed correction head will necessarily be a new SHA and
+requires its own PR metadata, exact-head review and CI. This packet correction
+updates only packet documentation, including selector-wrapper metadata and
+validation wording; it leaves the experiments source unchanged. The comparison parent
 ee8df8b7e00204c74a892b27f8b4c0ab278751ba is only the unchanged
 experiments/g01-scaleset source-comparison parent. The selector declaration audit is
 anchored to immutable source commit
@@ -903,6 +939,37 @@ The paired-terminal normalized fragment comparison exited 0 with no diff and
 printed the pass message above; wrapper metadata is intentionally excluded, but
 the underlying package, tag, selector, skip, toolchain, race, count and timeout
 arguments remain compared exactly.
+
+### Prior packet-correction exact-head record
+
+At the start of this packet-only correction, the worktree was the exact prior
+packet-correction commit `6b1535ee7b6f08582ff162eca30f1e4294dbf32b`. The
+following immutable identity check was run before editing and its output is
+retained verbatim. It validates that actual commit, tree, packet blob and
+parent; it is the post-correction record for that prior head, not a claim that
+the later packet fix has the same SHA, and it must not be combined with the
+historical `5979...` snapshot block or the earlier `82ee...` head block as one
+passing checkout.
+
+```sh
+set -euo pipefail
+packet_correction_head='6b1535ee7b6f08582ff162eca30f1e4294dbf32b'
+packet_correction_tree='87a0724932277dd3cc79ca50fcf0b2c1fe9b9e06'
+packet_correction_blob='0907f18b9f664f7d021a88ad13a50423fbef21d4'
+packet_correction_parent='82eeef99f9bb5ec85c8cb3bea7a9a5947e8df26a'
+test "$(git rev-parse HEAD)" = "$packet_correction_head"
+test "$(git rev-parse --verify "${packet_correction_head}^{commit}")" = "$packet_correction_head"
+test "$(git rev-parse "${packet_correction_head}^{tree}")" = "$packet_correction_tree"
+test "$(git rev-parse "${packet_correction_head}:docs/evidence/g01-recovery-packet.md")" = "$packet_correction_blob"
+test "$(git rev-parse "${packet_correction_head}^")" = "$packet_correction_parent"
+printf 'existing packet-correction exact-head audit: passed; HEAD=%s; commit=%s; tree=%s; packet blob=%s; parent=%s\n' "$packet_correction_head" "$packet_correction_head" "$packet_correction_tree" "$packet_correction_blob" "$packet_correction_parent"
+```
+
+Recorded output from the pre-edit exact-head validation (the command exited 0):
+
+```text
+existing packet-correction exact-head audit: passed; HEAD=6b1535ee7b6f08582ff162eca30f1e4294dbf32b; commit=6b1535ee7b6f08582ff162eca30f1e4294dbf32b; tree=87a0724932277dd3cc79ca50fcf0b2c1fe9b9e06; packet blob=0907f18b9f664f7d021a88ad13a50423fbef21d4; parent=82eeef99f9bb5ec85c8cb3bea7a9a5947e8df26a
+```
 
 ### Stable checkout and selector audit
 
@@ -1177,21 +1244,47 @@ private_user_root='/'"Users/"
 private_home_root='/'"home/"
 private_var_root='/'"private/var/"
 secret_private_pattern='^\+.*(-----BEGIN[[:space:]]+[A-Z0-9 ]*PRIVATE KEY|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]+|'"${private_user_root}"'|'"${private_home_root}"'|'"${private_var_root}"')'
-if git diff --cached --unified=0 -- docs/evidence/g01-recovery-packet.md | rg -q "$secret_private_pattern"; then
+staged_diff="$(git diff --cached --unified=0 -- docs/evidence/g01-recovery-packet.md)"
+if rg -q -- "$secret_private_pattern" <<< "$staged_diff"; then
   printf 'staged secret/private-path scan: FAILED\n'
   exit 1
+else
+  staged_scan_status=$?
+  test "$staged_scan_status" -eq 1
 fi
-printf 'diff and staged secret/private-path checks: passed; working/staged diff checks exited 0, one staged packet path, and no added-line matches\n'
+early_match_probe="$(python3 - <<'PY'
+synthetic_match = "+" + "gh" + "p_" + "early_probe"
+print("\n".join([synthetic_match] + [f"+ordinary-line-{index:04d}" for index in range(2048)]))
+PY
+)"
+if rg -q -- "$secret_private_pattern" <<< "$early_match_probe"; then
+  printf 'staged secret/private-path early-match regression probe: passed; first added line was detected and would be rejected\n'
+else
+  printf 'staged secret/private-path early-match regression probe: FAILED; first added line was not detected\n'
+  exit 1
+fi
+printf 'diff and staged secret/private-path checks: passed; working/staged diff checks exited 0, one staged packet path, no added-line matches, and early-match rejection probe passed\n'
 ```
 
+The complete staged diff is captured in a shell variable before scanning, so an
+early `rg -q` match cannot send the diff producer SIGPIPE 141 under `pipefail`.
 The staged diff check exited 0, the staged path set was exactly this packet
-file, and the added-line secret/private-path scan found no matches. No check is
-claimed against an unrecorded SHA. The staged correction diff is distinct from
-the cumulative PR #78 diff; the cumulative history still includes the
-independent driver correction from `7ce053380003c9260f46bf93ea118893b95f01e7`
-and team-review routing corrections from
-`f59a30532bfdc62876065dcf8b4997520606e6a6`, which remain outside this staged
-change.
+file, and the added-line secret/private-path scan found no matches. The focused
+regression fixture put a synthetic matching added line first and 2,048 ordinary
+added lines after it; the scanner detected that early match and exercised the
+fail-closed rejection path. The recorded output was:
+
+```text
+staged secret/private-path early-match regression probe: passed; first added line was detected and would be rejected
+diff and staged secret/private-path checks: passed; working/staged diff checks exited 0, one staged packet path, no added-line matches, and early-match rejection probe passed
+```
+
+No check is claimed against an unrecorded SHA. The staged correction diff is
+distinct from the cumulative PR #78 diff; the cumulative history still
+includes the independent driver correction from
+`7ce053380003c9260f46bf93ea118893b95f01e7` and team-review routing corrections
+from `f59a30532bfdc62876065dcf8b4997520606e6a6`, which remain outside this
+staged change.
 
 ## Historical Codex finding ledger
 
