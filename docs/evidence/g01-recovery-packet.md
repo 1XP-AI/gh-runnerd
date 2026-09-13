@@ -183,11 +183,14 @@ prescriptions reports a completed test or live server success/receipt.
 
 Every runnable test prescription below uses the reusable wrapper in this first
 block. It derives a list-only command from the same package, build flags and
-selector, then compares the observed count and SHA-256 of the sorted intended
-test-name set before it invokes the original command. A command failure,
-unexpected list output, zero expected names, count mismatch or set mismatch
-stops before any test body runs; the set digest is recorded beside each
-prescription so renamed, removed or build-tagged tests fail closed.
+selector, then compares the observed count and SHA-256 of the sorted executed
+test-name set before it invokes the original command. Go's `-list` mode reports
+the pre-`-skip` candidates, so the wrapper removes `-skip` from the list probe
+and applies that exact expression locally before count and digest validation.
+A command failure, unexpected list output, zero expected names, count mismatch
+or set mismatch stops before any test body runs; the set digest is recorded
+beside each prescription so renamed, removed, build-tagged or newly unskipped
+tests fail closed.
 
 ```sh
 set -euo pipefail
@@ -231,20 +234,46 @@ if len(command) < 3 or command[:2] != ["go", "test"]:
     raise SystemExit(f"{label}: expected a go test command")
 
 test_args = command[2:]
-run_indices = [index for index, value in enumerate(test_args) if value == "-run"]
+skip_patterns = []
+list_base_args = []
+index = 0
+while index < len(test_args):
+    value = test_args[index]
+    if value == "-skip":
+        if index + 1 >= len(test_args):
+            raise SystemExit(f"{label}: -skip requires an expression")
+        skip_patterns.append(test_args[index + 1])
+        index += 2
+        continue
+    if value.startswith("-skip="):
+        skip_patterns.append(value[len("-skip="):])
+        index += 1
+        continue
+    list_base_args.append(value)
+    index += 1
+if len(skip_patterns) > 1:
+    raise SystemExit(f"{label}: expected at most one -skip flag")
+skip_re = None
+if skip_patterns:
+    try:
+        skip_re = re.compile(skip_patterns[0])
+    except re.error as error:
+        raise SystemExit(f"{label}: invalid -skip expression") from error
+
+run_indices = [index for index, value in enumerate(list_base_args) if value == "-run"]
 if len(run_indices) > 1:
     raise SystemExit(f"{label}: expected at most one -run flag")
 if run_indices:
-    list_args = test_args[:]
+    list_args = list_base_args[:]
     list_args[run_indices[0]] = "-list"
 else:
     package_indices = [
-        index for index, value in enumerate(test_args)
+        index for index, value in enumerate(list_base_args)
         if value == "." or value.startswith("./")
     ]
     if len(package_indices) != 1:
         raise SystemExit(f"{label}: cannot locate one package argument")
-    list_args = test_args[:]
+    list_args = list_base_args[:]
     package_index = package_indices[0]
     list_args[package_index + 1:package_index + 1] = ["-list", "."]
 
@@ -263,7 +292,10 @@ go_status = re.compile(r"ok\s+\S+\s+[0-9.]+s(?:\s+\(cached\))?$")
 output = [line for line in list_result.stdout.splitlines() if line]
 if any(not test_name.fullmatch(line) and not go_status.fullmatch(line) for line in output):
     raise SystemExit(f"{label}: list validation emitted unexpected output")
-actual = [line for line in output if test_name.fullmatch(line)]
+listed = [line for line in output if test_name.fullmatch(line)]
+if len(listed) != len(set(listed)):
+    raise SystemExit(f"{label}: list validation emitted duplicate test names")
+actual = listed if skip_re is None else [name for name in listed if not skip_re.search(name)]
 actual_digest = hashlib.sha256(
     ("\n".join(sorted(actual)) + "\n").encode()
 ).hexdigest()
@@ -276,7 +308,8 @@ if actual_digest != expected_digest:
         f"{label}: expected set {expected_digest}, observed {actual_digest}"
     )
 print(
-    f"{label}: list validation passed; expected/observed {expected_count} names; "
+    f"{label}: list validation passed; raw listed {len(listed)}; "
+    f"filtered executed {expected_count} names; "
     f"set-sha256 {actual_digest}"
 )
 
@@ -339,15 +372,15 @@ go_test_checked 34 a79b7fa367d8eb1e7fe4ee4ef637696518946dab6f2f25410f6e04bfba137
 terminal_heavy_tests='^TestPairedTerminal(FinalResultCapacity|PendingChildCapacity|EligibilityUsesFreshExactFacts|CapturedAcknowledgementCancellation|MissingAcknowledgementsAndPostchecks)$'
 terminal_remainder_skip='^TestPairedTerminal(FinalResultCapacity|PendingChildCapacity|EligibilityUsesFreshExactFacts|CapturedAcknowledgementCancellation|MissingAcknowledgementsAndPostchecks|Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$'
 terminal_storage_tests='^TestPairedTerminal(Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$'
-go_test_checked 48 8c129ba2f85817cc91030ed49709b4ba4b25271955bc40ee569edb75b6685822 paired-collection \
+go_test_checked 22 f3efc29451112b27d2cb590763612790db48f05b54718b1e023196ead6625222 paired-collection \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run '^TestPaired' -skip '^TestPairedTerminal'
-go_test_checked 154 b2b52b8ad1ed929a17adc28558b5807320110cf8547c20eeb3cd80be6dc966d4 paired-all-except \
+go_test_checked 106 bdeef850cfe820297e3896477219f0fcf90046bc30fb0bd454bfd0f8fe6db2ff paired-all-except \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -skip '^TestPaired'
-go_test_checked 24 b7f253f33da157adba67fe4312eddb0ee90172e24f46d4f48502890ab5f080f paired-worker \
+go_test_checked 24 b7f253f33da157adba67fe4312eddb0ee90172e24f46d4f48502890ab5f080f5 paired-worker \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./liveworker -run '^TestPaired'
 go_test_checked 5 9e1a2e099c0fc48bbbd83dd0dc798d3c954910cd150b210037741b2c70211952 paired-heavy \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run "$terminal_heavy_tests"
-go_test_checked 26 6a40b0f8e472e5829a4306a55f6ed0d1d57628d6a477a3aacb1b2b5822965b2d paired-remainder \
+go_test_checked 15 5e5dd1ee80d3d303271ab17b17aed22d5084e15684bcbe9f31152c1092ec1f73 paired-remainder \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run '^TestPairedTerminal' -skip "$terminal_remainder_skip"
 go_test_checked 6 458f77f55209a59338a63bfc27697d85ebe5e0c3c7d1b959a0b56b2527f3ead5 paired-storage \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run "$terminal_storage_tests"
@@ -355,13 +388,14 @@ GOTOOLCHAIN=go1.26.8 go vet -C experiments/g01-scaleset -tags=g01_pair_fixture .
 GOTOOLCHAIN=go1.26.8 go vet -C experiments/g01-scaleset -tags=g01_pair_fixture ./liveworker
 ```
 
-The packet also audits that every future `go test -run` line is immediately
-guarded by `go_test_checked`; the audit deliberately treats an unguarded line
-as an error rather than relying on a visual review of the selector block.
+The packet also audits that every future `go test` selector line containing
+`-run` or `-skip` is immediately guarded by `go_test_checked`; the audit
+deliberately treats an unguarded line as an error rather than relying on a
+visual review of the selector block.
 
 ```sh
 set -euo pipefail
-selector_lines="$(rg -n '^[[:space:]]+GOTOOLCHAIN=.*go test .* -run' docs/evidence/g01-recovery-packet.md)"
+selector_lines="$(rg -n '^[[:space:]]+GOTOOLCHAIN=.*go test .* (-run|-skip)' docs/evidence/g01-recovery-packet.md)"
 test -n "$selector_lines"
 python3 - <<'PY'
 from pathlib import Path
@@ -369,20 +403,27 @@ from pathlib import Path
 lines = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8").splitlines()
 guarded = 0
 for index, line in enumerate(lines):
-    if not line.lstrip().startswith("GOTOOLCHAIN=") or "go test" not in line or " -run " not in line:
+    if not line.lstrip().startswith("GOTOOLCHAIN=") or "go test" not in line:
+        continue
+    if " -run " not in line and " -skip " not in line:
         continue
     if index == 0 or "go_test_checked " not in lines[index - 1]:
         raise SystemExit(f"unguarded future selector at line {index + 1}")
     guarded += 1
 if guarded == 0:
-    raise SystemExit("no future go test -run prescriptions found")
-print(f"future selector guard audit: passed; {guarded} go test -run prescriptions are wrapper-guarded")
+    raise SystemExit("no future go test selector prescriptions found")
+print(f"future selector guard audit: passed; {guarded} go test selector prescriptions are wrapper-guarded")
 PY
 ```
 
-The selector guard audit exited 0 and found 26 future `go test -run`
-prescriptions, each immediately preceded by `go_test_checked`. No test body
-was run by this grep/audit.
+The selector guard audit exited 0 and found 27 future `go test` selector
+prescriptions containing `-run` or `-skip`, each immediately preceded by
+`go_test_checked`. No test body was run by this grep/audit. For the paired
+partitions, the wrapper validates the filtered executed sets: collection
+22/22 (raw list 48), all-except 106/106 (raw list 154), worker 24/24, heavy
+5/5, terminal remainder 15/15 (raw list 26), and storage 6/6; their recorded
+SHA-256 values are the sorted filtered-name digests on the corresponding
+prescription lines above.
 
 The tagged worker command is a complete `./liveworker` `^TestPaired` partition
 using the same fixture tag, toolchain, race detector, count and timeout as the
