@@ -82,6 +82,23 @@ result into a live result or claim that PR #72 is mergeable from this packet.
 | REST observation | GitHub REST API header `2022-11-28` for exact runner/job reads; Scale Set acquisition uses SDK's `api-version=6.0-preview` | Source/fixture request contract, not live acceptance or freshness evidence. |
 | Worker runtime support | Docker Engine API `1.45`, Moby schema `v26.1.5`, and the worker-harness image reference `ghcr.io/actions/actions-runner@sha256:f5a0d9a3d857315f2aed7075a02a29f46927ad198221c3b1c66585ae9fe36c0d` | Supporting fixture profile only; actual daemon/image normalization and runner startup remain live gaps. |
 
+### Runner pin/source-audit gate
+
+The Runner parser and JIT materialization are part of the pinned source
+contract, not evidence supplied by the local Go fixtures. Any proposed Runner
+version or source-commit change opens a mandatory immutable source-audit gate:
+inspect `CommandSettings.cs` and `Runner.cs` at the candidate commit, record
+that commit and the two immutable upstream URLs, and compare the accepted
+parser/input modes and JIT materialization behavior with this packet's
+transport boundary. Local Go fixture results may supplement that audit but
+cannot be reused as its substitute; a changed Runner pin remains an open
+source gate until the audit (and any required Runner-level fixture) is recorded.
+
+The current correction preserves Runner `v2.337.0` at source commit
+`397b032cbf865e9c3ddfab89d533ec19325e1273`; no Runner source audit, binary
+execution or Runner-level fixture result is claimed or required for this
+documentation-only selector correction.
+
 Published runner archive digests retained from the contract record are
 `9b1dc70626422526e3c94767cf024896beb15da5342a3f4819bf2feac13e0393`
 (Linux ARM64) and
@@ -148,7 +165,7 @@ wording/link correction does not invalidate an unchanged offline boundary.
 |---|---|---|---|
 | ACK, callback loss and acquisition order | SDK commit, listener source, adapter call order and root protocol fixtures are unchanged. | See the exact ACK/callback selector in the command block below, including `TestNoMessageDoesNotCountAsCompletedBarrier`. | Fixture: record ACK-before-acquisition and reservation/quarantine behavior; do not add server or exactly-once claims. |
 | Baseline listener/admission | listener, strict source reader, journal/lease, caps and selectors are unchanged. | See the exact baseline and admission selectors in the command block below, including the worker admission integrity suite and the tagged `TestUnsupportedAccountLookupRefusesBeforeJournal` selector. | Fixture: record actual test result and pinned SDK; no live result or production worker claim. |
-| JIT causality and transport | runner source/parser, JIT transport, causal fixture and response-loss controls are unchanged. | Root-package and livecanary selectors are in the command blocks below; tagged worker input/refusal and worker transport selectors are also recorded there. | Fixture/source: record one-request controls and quarantine; never print or retain JIT. |
+| Runner parser/JIT causality and transport | Runner version/source commit, parser/materialization behavior, JIT transport, causal fixture and response-loss controls are unchanged. | A Runner pin or source-commit change first requires the immutable source-audit gate above; then rerun the root-package and livecanary selectors in the command blocks below, with tagged worker input/refusal and worker transport selectors as applicable. Local Go fixture results cannot substitute for the source audit. | Source + fixture: record parser/materialization comparison, one-request controls and quarantine; never print or retain JIT. |
 | Controller update policy | pinned SDK update-setting request, confirmation and drift guards are unchanged. | See the exact `./livecanary` update-policy selectors in the worker/runtime command block below: `TestCreateRequestsDisabledRunnerUpdate`, `TestUnconfirmedUpdateSettingQuarantinesCreate`, `TestUpdateSettingDriftStopsBeforeSessionOrJIT` and `TestUpdateSettingDriftDoesNotBlockSafeEmptyCleanup`. | Source + fixture: record request/confirmation and pre-session/JIT refusal; no live service-setting result. |
 | Reconciliation, inventory/identity/quarantine | statistics readers, paged inventory normalization, generation fences, ownership checks and journal/authority schema are unchanged. | Retain the prior reconciliation selector and add the exact focused `TestObservation*` and `TestRoster*` families, inventory/quarantine and journal/authority selectors in the command block below, including the four `TestInventory*` cases, `TestDemandStatisticsAllowControlledProbeButNeverCleanup`, `TestCleanupOnlyForNeverIssuedWorkerWithExactReceipt`, and the named journal/authority contracts in both `./livecanary` and `./liveworker`. | Fixture: record normalized facts and retained uncertainty; no live equality/absence claim. |
 | Secret and error handling | SDK error sentinels, HTTP body/debug redaction and shared response-budget controls are unchanged. | See the exact root, livecanary and liveworker selectors in the secret/error command block below, including decoded-body truncation, gzip-budget, uncertain-start, bounded Unix-response/redirect, journal-create-failure and raw-runtime-status tests. | Fixture: record normalized sentinel/error and body-budget behavior; no secret-bearing output or live result is claimed. |
@@ -171,6 +188,7 @@ GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout
 GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=180s ./livecanary -run '^(TestAdmission.*|TestAuditPR25DistinctStateDirectoriesMustShareCap)$'
 GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=180s ./liveworker -run '^(TestAdmissionDirectoryUsesOSAccountWithoutEnvironmentFallback|TestAdmissionAuthorityChecksTheCurrentClaim|TestWorkerAdmissionCapsIndependentDirectories|TestWorkerAdmissionRetainsSlotAfterOutcomeAndClose|TestAdmissionRejectsCopiedJournalInDifferentDirectory|TestAdmissionSyncFailureMustBeRetried|TestAdmissionRefusesMissingUnsafeOrUnknownRootState|TestAdmissionInitializationLockPrecedesClaimCreation)$'
 GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -tags=osusergo -count=1 -timeout=180s ./liveworker -run '^TestUnsupportedAccountLookupRefusesBeforeJournal$'
+GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -tags=osusergo -count=1 -timeout=180s ./livecanary -run '^TestUnsupportedAccountLookupRefusesBeforeJournal$'
 ```
 
 ```sh
@@ -179,13 +197,13 @@ GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout
 ```
 
 ```sh
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./liveworker -run '^(TestOneWorkerNeverRecreatedAndOnlyJITAddedToEnvironment|TestUncertainStartNeverRetriesAndCannotCleanup|TestEveryRuntimeBoundaryRejectsProfileAndOwnershipMismatch|TestUnverifiedRunnerUpdatePolicyRefusesBeforeRuntime|TestSocketReplacementAfterPreflightCannotReceiveAnyMutation|TestUnixInspectRequiresStateFlagsBeforeMutation|TestDockerInspectExactRejectsMalformedOrAmbiguousBodiesBeforeMutation|TestDockerInspectUnknownOrAbsentStatusCannotAuthorizeMutation|TestUnixRuntimeRejectsWrongIdentityImagesAndUnsupportedLimits|TestUnixRuntimeOneShotCreateStartAndNonForceCleanup|TestUnixRuntimeAmbiguousEffectsNeverRetry|TestChangedDaemonOrAbsentContainerNeverMeansCleanupComplete|TestUnixTransportRejectsSymlinksAndInheritedTCPDestinations|TestAuditPR28MissingBridgeMustNotStart|TestCleanupRetainsActiveAndUnknownWorkers|TestOwnedTerminalCleanupAndRunningRemovalRace)$'
+GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./liveworker -run '^(TestOneWorkerNeverRecreatedAndOnlyJITAddedToEnvironment|TestUncertainStartNeverRetriesAndCannotCleanup|TestEveryRuntimeBoundaryRejectsProfileAndOwnershipMismatch|TestUnverifiedRunnerUpdatePolicyRefusesBeforeRuntime|TestSocketReplacementAfterPreflightCannotReceiveAnyMutation|TestSocketModesAndControllerOwnership|TestSocketPostConnectRecheckClosesBeforeHTTP|TestNoCreateBeforeDurableIntent|TestUnknownCreateNeverRetriesAfterRestart|TestCreationWarningsPreserveKnownIDWithoutAuthorizingStart|TestUnixInspectRequiresStateFlagsBeforeMutation|TestDockerInspectExactRejectsMalformedOrAmbiguousBodiesBeforeMutation|TestDockerInspectUnknownOrAbsentStatusCannotAuthorizeMutation|TestUnixRuntimeRejectsWrongIdentityImagesAndUnsupportedLimits|TestUnixRuntimeOneShotCreateStartAndNonForceCleanup|TestUnixRuntimeAmbiguousEffectsNeverRetry|TestChangedDaemonOrAbsentContainerNeverMeansCleanupComplete|TestUnixTransportRejectsSymlinksAndInheritedTCPDestinations|TestAuditPR28MissingBridgeMustNotStart|TestCleanupRetainsActiveAndUnknownWorkers|TestOwnedTerminalCleanupAndRunningRemovalRace)$'
 GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestCreateRequestsDisabledRunnerUpdate|TestUnconfirmedUpdateSettingQuarantinesCreate|TestUpdateSettingDriftStopsBeforeSessionOrJIT|TestUpdateSettingDriftDoesNotBlockSafeEmptyCleanup)$'
 GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -tags=g01_worker -count=1 -timeout=45s ./cmd/g01-worker -run '^(TestBlockedJITInputHonorsDeadline|TestOfflinePlanAndRefusalDoNotReadSecretsOrEchoInput)$'
 ```
 
 ```sh
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestObserve|TestObservationIntentFailureStopsBeforeRead|TestObservationResponseCaptureIsLocalAndRejectsOtherOperations|TestStatistics|TestDemandStatisticsAllowControlledProbeButNeverCleanup|TestInvalidOwnedProof|TestJournal|TestAuthority|TestInventoryStrictPages|TestInventoryMalformedStopsLegacyEffects|TestInventoryTransportRefusalIsBoundedAndSanitized|TestInventoryImpossibleTotalStopsBeforeNextPage|TestRosterActualTLSCompleteObservation|TestRosterPreservesOnlyAcceptedPagePrefix|TestRosterFinalPublicationGuardAfterDigest|TestRosterRefusesInvalidEntryWithoutNetwork|TestStrictJSONRejectsDecoderEquivalentDuplicateFields|TestStrictJSONRejectsDuplicateAuthorityFields|TestFailedDirectorySyncMustBeRetried|TestFileJournalRejectsUnrecordedAuthorityBeforeRawDriverEffect|TestRenewedRecoveryApprovalRetainsOwnedState)$'
+GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestObserve|TestObservationIntentFailureStopsBeforeRead|TestObservationResponseCaptureIsLocalAndRejectsOtherOperations|TestStatistics|TestDemandStatisticsAllowControlledProbeButNeverCleanup|TestInvalidOwnedProof|TestCanonicalPreparationRecordsNoPhaseOrRemoteIntent|TestCanonicalPreparationRefusesInvalidJournalAndPhase|TestCanonicalPreparationRecoveryAndDriverShareLocalGate|TestJournal|TestAuthority|TestInventoryStrictPages|TestInventoryMalformedStopsLegacyEffects|TestInventoryTransportRefusalIsBoundedAndSanitized|TestInventoryImpossibleTotalStopsBeforeNextPage|TestRosterActualTLSCompleteObservation|TestRosterPreservesOnlyAcceptedPagePrefix|TestRosterFinalPublicationGuardAfterDigest|TestRosterRefusesInvalidEntryWithoutNetwork|TestStrictJSONRejectsDecoderEquivalentDuplicateFields|TestStrictJSONRejectsDuplicateAuthorityFields|TestFailedDirectorySyncMustBeRetried|TestFileJournalRejectsUnrecordedAuthorityBeforeRawDriverEffect|TestRenewedRecoveryApprovalRetainsOwnedState)$'
 GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./liveworker -run '^(TestPrivateJournalLocksAndRetainsReservationAcrossRestart|TestJournalRejectsChangedApprovalTornTailAndUnsafeFiles|TestAuthorityLeaseRefusesConcurrentRunsAndFencesClose|TestAuthorityRejectsReplacedJournalOrDirectory|TestStrictJSONRejectsDecoderEquivalentDuplicateFields|TestStrictInputRejectsAmbiguousOrExtraAuthorityFields|TestFailedDirectorySyncMustBeRetried|TestFileJournalRejectsUnrecordedAuthorityBeforeRawDriverEffect|TestRenewedRecoveryApprovalRetainsOwnedState)$'
 GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestDemandStatisticsAllowControlledProbeButNeverCleanup|TestCleanupOnlyForNeverIssuedWorkerWithExactReceipt|TestZeroStatisticsAndOptionalAbsencePermitEmptyCleanup|TestUnsafeStatisticsStopNewEffectsBeforeControlledMessage|TestEmptyAvailableWithWorkStatisticsStaysQuarantined|TestOlderPendingIntentSurvivesSuccessfulZeroInspection|TestUnownedDiscoveryEvidenceCannotAuthorizeCreationAfterAbsence|TestAuditPR25ObservedJobsMustBlockCleanup|TestUnexpectedWorkMessageQuarantinesBeforeSafeClose|TestObservedRunnerSurvivesLaterAbsenceAndFirstCleanup|TestObservationResultFailureSurvivesFileReopenAndInspection)$'
 ```
@@ -236,22 +254,40 @@ skipped, unavailable or unauthorized live phase into “passed.”
 This packet correction requires markdown/link-target, JSON syntax, diff, and
 secret/private-path checks only. No artificial Go red or green test is created
 for documentation changes. The selector audit is anchored to the immutable
-exact-head source commit `2d809800d26097c5cf6841978df8091c898bb01f` and tree
-`ea5593c039ad2ef4e907eef8090dfd206a7638f3`; the named declarations are
-default-build tests in `./liveworker` (`docker_observation_test.go`,
-`journal_test.go`, and `journal_authority_test.go`) except
-`TestZeroStatisticsAndOptionalAbsencePermitEmptyCleanup`, which is a
-default-build `./livecanary` test in `statistics_fence_test.go`. The focused
-offline `go test -list` checks below were run against that checked-out source
+exact-head source commit `080b9c29c0c056dffd03f54567b593a426a1909d` and tree
+`75ad0daf5b47b453fcef778f7fe849c1718de6a2`; the added default-build
+declarations are in `./liveworker` (`docker_test.go`, `worker_test.go`, and
+`journal_test.go`) and `./livecanary` (`preparation_test.go`).
+`TestUnsupportedAccountLookupRefusesBeforeJournal` is duplicated in both
+packages and guarded by `//go:build !cgo || osusergo || android`, so the added
+livecanary invocation forces `-tags=osusergo`; `TestZeroStatisticsAndOptionalAbsencePermitEmptyCleanup`
+remains a default-build `./livecanary` test in `statistics_fence_test.go`. The
+focused offline `go test -list` checks below were run against that exact source
 head and listed every requested new name; they did not execute test bodies.
 
 ```sh
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./liveworker -list '^(TestUnixInspectRequiresStateFlagsBeforeMutation|TestDockerInspectExactRejectsMalformedOrAmbiguousBodiesBeforeMutation|TestDockerInspectUnknownOrAbsentStatusCannotAuthorizeMutation|TestPrivateJournalLocksAndRetainsReservationAcrossRestart|TestJournalRejectsChangedApprovalTornTailAndUnsafeFiles|TestAuthorityLeaseRefusesConcurrentRunsAndFencesClose|TestAuthorityRejectsReplacedJournalOrDirectory)$'
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -list '^TestZeroStatisticsAndOptionalAbsencePermitEmptyCleanup$'
+GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./liveworker -list '^(TestSocketModesAndControllerOwnership|TestSocketPostConnectRecheckClosesBeforeHTTP|TestNoCreateBeforeDurableIntent|TestUnknownCreateNeverRetriesAfterRestart|TestCreationWarningsPreserveKnownIDWithoutAuthorizingStart|TestUnixInspectRequiresStateFlagsBeforeMutation|TestDockerInspectExactRejectsMalformedOrAmbiguousBodiesBeforeMutation|TestDockerInspectUnknownOrAbsentStatusCannotAuthorizeMutation|TestPrivateJournalLocksAndRetainsReservationAcrossRestart|TestJournalRejectsChangedApprovalTornTailAndUnsafeFiles|TestAuthorityLeaseRefusesConcurrentRunsAndFencesClose|TestAuthorityRejectsReplacedJournalOrDirectory)$'
+GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -list '^(TestCanonicalPreparationRecordsNoPhaseOrRemoteIntent|TestCanonicalPreparationRefusesInvalidJournalAndPhase|TestCanonicalPreparationRecoveryAndDriverShareLocalGate|TestZeroStatisticsAndOptionalAbsencePermitEmptyCleanup)$'
+GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -tags=osusergo -count=1 -timeout=45s ./livecanary -list '^TestUnsupportedAccountLookupRefusesBeforeJournal$'
 ```
 
-Both commands exited 0 and listed every requested name; these were list-only
-source checks, not test-body execution.
+All three commands exited 0 and listed every requested name; these were
+list-only source checks, not test-body execution.
+
+The local source/declaration consistency check below exited 0: it confirmed the
+immutable exact-head commit/tree, all added declarations, and both unsupported
+account build-tag guards. It did not inspect upstream Runner sources; no Runner
+source audit or Runner-level fixture result is claimed.
+
+```sh
+test "$(git rev-parse HEAD)" = "080b9c29c0c056dffd03f54567b593a426a1909d"
+test "$(git rev-parse 'HEAD^{tree}')" = "75ad0daf5b47b453fcef778f7fe849c1718de6a2"
+rg -n 'func (TestSocketModesAndControllerOwnership|TestSocketPostConnectRecheckClosesBeforeHTTP)' experiments/g01-scaleset/liveworker/docker_test.go
+rg -n 'func (TestNoCreateBeforeDurableIntent|TestUnknownCreateNeverRetriesAfterRestart)' experiments/g01-scaleset/liveworker/worker_test.go
+rg -n 'func TestCreationWarningsPreserveKnownIDWithoutAuthorizingStart' experiments/g01-scaleset/liveworker/journal_test.go
+rg -n 'func (TestCanonicalPreparationRecordsNoPhaseOrRemoteIntent|TestCanonicalPreparationRefusesInvalidJournalAndPhase|TestCanonicalPreparationRecoveryAndDriverShareLocalGate)' experiments/g01-scaleset/livecanary/preparation_test.go
+rg -n '^//go:build !cgo \|\| osusergo \|\| android$|func TestUnsupportedAccountLookupRefusesBeforeJournal' experiments/g01-scaleset/liveworker/admission_lookup_unsupported_test.go experiments/g01-scaleset/livecanary/admission_lookup_unsupported_test.go
+```
 
 The local markdown link/anchor checker reported all local targets present
 (external URLs were syntax-skipped), `jq empty docs/backlog.json` exited 0,
@@ -261,13 +297,20 @@ root matched this packet worktree, `experiments/g01-scaleset` was present, and
 the staged path set was exactly this packet file.
 
 The staged correction diff was inspected as one packet-only file. It is
-distinct from the cumulative PR #78 diff, whose `origin/main...2d809800d26097c5cf6841978df8091c898bb01f`
-scope contains `docs/evidence/g01-recovery-packet.md` plus the independent
+distinct from the cumulative PR #78 diff. At that exact head,
+`origin/main...080b9c29c0c056dffd03f54567b593a426a1909d` contains
+`docs/evidence/g01-recovery-packet.md` plus the independent
 driver correction from `7ce053380003c9260f46bf93ea118893b95f01e7` in
 `docs/evidence/g01-live-driver.md` and the independent team-review routing
 corrections from `f59a30532bfdc62876065dcf8b4997520606e6a6` in
 `docs/reviews/team-review.md`; those files are outside this staged change.
-No check is claimed against an unrecorded SHA. The four new exact-head
+No check is claimed against an unrecorded SHA. The five new exact-head findings
+on `080b9c29c0c056dffd03f54567b593a426a1909d`—[3999566558](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999566558),
+[3999566563](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999566563),
+[3999566567](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999566567),
+[3999566570](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999566570),
+and [3999566571](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999566571)—are covered by the worker/runtime and canonical-preparation selectors, the tagged livecanary invocation, and the explicit Runner pin/source-audit gate above.
+The prior four exact-head
 findings [3999532146](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999532146),
 [3999532149](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999532149),
 [3999532151](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999532151),
