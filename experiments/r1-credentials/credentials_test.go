@@ -32,6 +32,45 @@ type fixtureAPI struct {
 	boundFingerprint    [32]byte
 }
 
+type blockingContextAPI struct {
+	fixture *fixtureAPI
+	started chan context.Context
+}
+
+func (f *blockingContextAPI) VerifyApp(ctx context.Context, credential CredentialRef) (AppIdentity, error) {
+	f.started <- ctx
+	<-ctx.Done()
+	return AppIdentity{}, ctx.Err()
+}
+
+func (f *blockingContextAPI) VerifyInstallation(ctx context.Context, credential CredentialRef, organization Organization) (Installation, error) {
+	return f.fixture.VerifyInstallation(ctx, credential, organization)
+}
+
+func (f *blockingContextAPI) VerifyRepository(ctx context.Context, credential CredentialRef, organization Organization, repository Repository) (Repository, error) {
+	return f.fixture.VerifyRepository(ctx, credential, organization, repository)
+}
+
+type contextRecordingAPI struct {
+	fixture  *fixtureAPI
+	contexts []context.Context
+}
+
+func (f *contextRecordingAPI) VerifyApp(ctx context.Context, credential CredentialRef) (AppIdentity, error) {
+	f.contexts = append(f.contexts, ctx)
+	return f.fixture.VerifyApp(ctx, credential)
+}
+
+func (f *contextRecordingAPI) VerifyInstallation(ctx context.Context, credential CredentialRef, organization Organization) (Installation, error) {
+	f.contexts = append(f.contexts, ctx)
+	return f.fixture.VerifyInstallation(ctx, credential, organization)
+}
+
+func (f *contextRecordingAPI) VerifyRepository(ctx context.Context, credential CredentialRef, organization Organization, repository Repository) (Repository, error) {
+	f.contexts = append(f.contexts, ctx)
+	return f.fixture.VerifyRepository(ctx, credential, organization, repository)
+}
+
 func (f *fixtureAPI) VerifyApp(_ context.Context, credential CredentialRef) (AppIdentity, error) {
 	f.calls = append(f.calls, "app")
 	if err := f.checkCredential(credential); err != nil {
@@ -275,6 +314,97 @@ func TestValidateUsesTrustedCurrentClockForExpiry(t *testing.T) {
 	}
 }
 
+func TestValidationAbortsBlockingVerificationAtCredentialExpiry(t *testing.T) {
+	pemBytes := fixturePEM(t)
+	expiresAt := time.Now().Add(150 * time.Millisecond)
+	parentDeadline := expiresAt.Add(time.Second)
+	ctx, cancel := context.WithDeadline(context.Background(), parentDeadline)
+	defer cancel()
+	api := &blockingContextAPI{fixture: fixtureAPIValue(), started: make(chan context.Context, 1)}
+	resultCh := make(chan struct {
+		binding ValidatedBinding
+		err     error
+	}, 1)
+	go func() {
+		binding, err := Validate(ctx, fixtureConfig(), NewManualSourceWithExpiry(fixtureAppID, pemBytes, expiresAt), api, nil)
+		resultCh <- struct {
+			binding ValidatedBinding
+			err     error
+		}{binding: binding, err: err}
+	}()
+
+	var verificationCtx context.Context
+	select {
+	case verificationCtx = <-api.started:
+	case <-time.After(time.Second):
+		t.Fatal("blocking verification fixture was not entered")
+	}
+	if deadline, ok := verificationCtx.Deadline(); !ok || !deadline.Equal(expiresAt) {
+		t.Errorf("verification context did not use credential expiry deadline: deadline=%v ok=%t want=%v", deadline, ok, expiresAt)
+	}
+
+	var result struct {
+		binding ValidatedBinding
+		err     error
+	}
+	select {
+	case result = <-resultCh:
+	case <-time.After(time.Second):
+		cancel()
+		result = <-resultCh
+		t.Fatalf("blocking verification was not aborted at credential expiry: binding=%+v err=%v", result.binding, result.err)
+	}
+	if !errors.Is(result.err, ErrExpired) || !reflect.DeepEqual(result.binding, ValidatedBinding{}) {
+		t.Fatalf("credential expiry did not stop blocking verification: binding=%+v err=%v", result.binding, result.err)
+	}
+}
+
+func TestValidationUsesOneBoundedContextForVerificationAndCommit(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		parentDeadline time.Time
+		expiresAt      time.Time
+		wantDeadline   time.Time
+	}{
+		{name: "credential expiry", expiresAt: time.Now().Add(5 * time.Second)},
+		{name: "earlier parent deadline", parentDeadline: time.Now().Add(5 * time.Second), expiresAt: time.Now().Add(10 * time.Second)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parent := context.Background()
+			if !tc.parentDeadline.IsZero() {
+				var cancel context.CancelFunc
+				parent, cancel = context.WithDeadline(parent, tc.parentDeadline)
+				defer cancel()
+				tc.wantDeadline = tc.parentDeadline
+			} else {
+				tc.wantDeadline = tc.expiresAt
+			}
+			api := &contextRecordingAPI{fixture: fixtureAPIValue()}
+			var commitCtx context.Context
+			_, err := Validate(parent, fixtureConfig(), NewManualSourceWithExpiry(fixtureAppID, fixturePEM(t), tc.expiresAt), api, func(ctx context.Context, _ ValidatedBinding) error {
+				commitCtx = ctx
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("manual fixture rejected: %v", err)
+			}
+			if len(api.contexts) != 3 || commitCtx == nil {
+				t.Fatalf("unexpected context observations: verification=%d commit=%v", len(api.contexts), commitCtx)
+			}
+			contexts := append(append([]context.Context(nil), api.contexts...), commitCtx)
+			for i, got := range contexts {
+				if got != contexts[0] {
+					t.Fatalf("context %d was not the shared bounded context: got=%v want=%v", i, got, contexts[0])
+				}
+				deadline, ok := got.Deadline()
+				if !ok || !deadline.Equal(tc.wantDeadline) {
+					t.Fatalf("context %d has wrong deadline: deadline=%v ok=%t want=%v", i, deadline, ok, tc.wantDeadline)
+				}
+			}
+		})
+	}
+}
+
 func TestValidationChecksCancellationImmediatelyBeforeAppBoundary(t *testing.T) {
 	ctx := newCancelOnErrContext(context.Background(), 4)
 	source := &sourceFixture{kind: SourceManual, appID: fixtureAppID, pem: fixturePEM(t)}
@@ -511,6 +641,27 @@ func TestValidationRejectsOversizedCredentialBeforeFixture(t *testing.T) {
 	_, err := validateAt(context.Background(), fixtureNow, fixtureConfig(), source, api, nil)
 	if !errors.Is(err, ErrCredential) || source.reads != 1 || len(api.calls) != 0 {
 		t.Fatalf("oversized credential crossed fixture boundary: err=%v reads=%d calls=%v", err, source.reads, api.calls)
+	}
+}
+
+func TestNewManualSourceRejectsOversizedInputBeforeCopying(t *testing.T) {
+	input := make([]byte, maxCredentialBytes*2)
+	source := NewManualSource(fixtureAppID, input)
+	manual, ok := source.(manualSource)
+	if !ok {
+		t.Fatalf("constructor returned unexpected source type %T", source)
+	}
+	if len(manual.pem) > maxCredentialBytes || cap(manual.pem) > maxCredentialBytes {
+		t.Fatalf("oversized credential was retained without a bounded sentinel: len=%d cap=%d", len(manual.pem), cap(manual.pem))
+	}
+	got, err := source.Read(context.Background())
+	if !errors.Is(err, ErrCredential) || len(got) != 0 {
+		t.Fatalf("oversized credential was not rejected before Read copied it: got=%d err=%v", len(got), err)
+	}
+	api := fixtureAPIValue()
+	_, err = Validate(context.Background(), fixtureConfig(), source, api, nil)
+	if !errors.Is(err, ErrCredential) || len(api.calls) != 0 {
+		t.Fatalf("oversized constructor source crossed validation boundary: err=%v calls=%v", err, api.calls)
 	}
 }
 
