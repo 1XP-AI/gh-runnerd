@@ -14,7 +14,7 @@ reach callers. Only the package-created manual source capability is accepted;
 the exported source shape and `SourceManual` value alone do not authorize a
 caller-provided implementation.
 
-Run the candidate checks from this directory:
+Run the candidate checks from this module directory:
 
 ```sh
 GOTOOLCHAIN=go1.26.8 go test ./...
@@ -22,34 +22,41 @@ GOTOOLCHAIN=go1.26.8 go test -race -count=1 ./...
 GOTOOLCHAIN=go1.26.8 go vet ./...
 ```
 
-The stable repository gate also runs the nested module with package discovery:
+The repository-level offline gate must run from the repository root because its
+module paths are root-relative. When starting in this module directory, run:
 
 ```sh
+cd ../..
 bash scripts/check-offline-experiments.sh
 ```
 
 ## Evidence recorded for issue #67
 
-On 2026-09-13, the following commands completed successfully from the module
-directory or repository root as shown:
+On 2026-09-13, the following commands completed successfully from the indicated
+working directory:
 
 ```text
+From experiments/r1-credentials:
 GOTOOLCHAIN=go1.26.8 go test -count=1 ./...       PASS
 GOTOOLCHAIN=go1.26.8 go test -race -count=1 ./... PASS
 GOTOOLCHAIN=go1.26.8 go vet ./...                PASS
+
+From repository root:
 bash scripts/check-offline-experiments.sh        PASS (3 offline modules)
 GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=15m ./scripts -run 'TestToolingEstablishedModulesAreRequired|TestToolingDefaultG01PartitionsRun|TestToolingDefaultG02PartitionsRun'  PASS
-gofmt -d experiments/r1-credentials/credentials.go experiments/r1-credentials/credentials_test.go  PASS (no output)
+gofmt -d experiments/r1-credentials/credentials.go experiments/r1-credentials/credentials_test.go experiments/r1-credentials/credentials_external_test.go  PASS (no output)
 git diff --check                                PASS
 ```
 
-The red-first evidence is preserved in the preceding test commit: the exact
-pre-fix command `GOTOOLCHAIN=go1.26.8 go test ./...` failed on wrong-valid-key,
-unmarked-source, late-expiry, cancellation-boundary and typed-nil regressions;
-the implementation is in the later commit. Fixtures generate ephemeral RSA
-keys with `crypto/rand`, use synthetic identity/permission responses, and keep
-all key bytes in memory. No credential, adapter response, private path or test
-log is an artifact of this module.
+The red-first evidence for the external boundary regression was recorded at
+pre-fix head `313360e`: `GOTOOLCHAIN=go1.26.8 go test ./...` failed because an
+external file-backed wrapper embedded `ManualSource`, overrode its source
+methods, read one fixture file and reached all three adapter boundaries. The
+marker fix and regression are in commit `3d7f287`. Fixtures generate ephemeral
+RSA keys with `crypto/rand`, use synthetic identity/permission responses, and
+keep key bytes in memory; only the regression fixture uses a temporary file,
+while the production package performs no filesystem, environment, Keychain,
+process, GitHub, runner, Docker or Lima operation.
 
 ## Ownership, ACL limits and live gap
 
@@ -61,12 +68,10 @@ authentication and must corroborate those identities with the same key
 fingerprint. It does not grant, inspect or change GitHub ACLs, and native
 same-user workdirs or Keychain access would not isolate hostile code.
 
-The module performs no filesystem, environment, Keychain, process, GitHub,
-runner, Docker or Lima operation. It does not implement the foreground command,
-worker handoff, JIT or live App/installation/repository verification, and does
-not satisfy the broader G02 Manifest, multi-organization or launchd evidence
-gate. A reviewed maintainer dispatch is still required for any real Mac or
-self-hosted runner test.
+It does not implement the foreground command, worker handoff, JIT or live
+App/installation/repository verification, and does not satisfy the broader G02
+Manifest, multi-organization or launchd evidence gate. A reviewed maintainer
+dispatch is still required for any real Mac or self-hosted runner test.
 
 The metadata commit callback receives a context and must be context-aware and
 transactional; this boundary checks cancellation and expiry before and after
