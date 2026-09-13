@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -688,6 +689,26 @@ func TestPinnedSDKDrainRejectsPollCloseErrorBeforeEffects(t *testing.T) {
 	}
 }
 
+func TestPinnedSDKDrainRejectsVerifyRunCloseErrorBeforeEffects(t *testing.T) {
+	a := approval()
+	fixture, base, session, hook := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{verifyCloseError: io.ErrClosedPipe})
+	hook.releaseResponse()
+	j := &memoryJournal{}
+	d := &Driver{Approval: a, Journal: j, API: base}
+	client := &journaledDrainClient{d: d, inner: session, sessionID: session.Session().SessionID.String(), setID: 7, hook: hook}
+
+	message, err := client.GetMessage(context.Background(), 0, drainInitialCapacity)
+	if !errors.Is(err, ErrQuarantine) || message != nil {
+		t.Fatalf("workflow verification close error = message %v err %v, want quarantine", message, err)
+	}
+	if fixture.verifyCalls.Load() != 1 {
+		t.Fatalf("workflow verification calls = %d, want one", fixture.verifyCalls.Load())
+	}
+	if fixture.acks.Load() != 0 || fixture.acquires.Load() != 0 {
+		t.Fatalf("workflow verification close error reached effects: ack=%d acquire=%d", fixture.acks.Load(), fixture.acquires.Load())
+	}
+}
+
 func TestPinnedSDKDrainRejectsSubstitutedSessionAuthorizationBeforeEffects(t *testing.T) {
 	a := approval()
 	fixture, base, session, hook := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{
@@ -1142,6 +1163,7 @@ type pinnedDrainOptions struct {
 	acceptAnyACK           bool
 	pollReadError          error
 	pollCloseError         error
+	verifyCloseError       error
 	snapshotBodies         []string
 	mutateRequest          func(*http.Request)
 	wrongCloseOrigin       bool
@@ -1338,6 +1360,12 @@ func newPinnedDrainSessionOptions(t *testing.T, a Approval, body string, options
 			wrappers = append(wrappers, func(inner http.RoundTripper) http.RoundTripper {
 				hook.inner = inner
 				return hook
+			})
+		}
+		if options.verifyCloseError != nil {
+			verifyPath := "/api/v3/repos/" + fixtureApproval.Organization + "/" + fixtureApproval.Repository + "/actions/runs/" + strconv.FormatInt(fixtureApproval.WorkflowRunID, 10)
+			wrappers = append(wrappers, func(inner http.RoundTripper) http.RoundTripper {
+				return sdkResponseBodyFaultRoundTripper{inner: inner, path: verifyPath, closeErr: options.verifyCloseError}
 			})
 		}
 		if options.wrongCloseOrigin {

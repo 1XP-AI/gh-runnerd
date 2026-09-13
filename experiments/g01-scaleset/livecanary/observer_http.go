@@ -53,10 +53,10 @@ func (a *SDKAPI) observationGET(ctx context.Context, path, token, endpoint strin
 	if err != nil {
 		return out, ErrRemote
 	}
-	defer resp.Body.Close()
 	out.Status = resp.StatusCode
-	data, err := io.ReadAll(io.LimitReader(resp.Body, responseBodyLimit+1))
-	if err != nil || int64(len(data)) > responseBodyLimit || ctx.Err() != nil {
+	data, readErr := io.ReadAll(io.LimitReader(resp.Body, responseBodyLimit+1))
+	closeErr := resp.Body.Close()
+	if readErr != nil || closeErr != nil || int64(len(data)) > responseBodyLimit || ctx.Err() != nil {
 		return out, ErrRemote
 	}
 	if resp.StatusCode == http.StatusNotFound {
