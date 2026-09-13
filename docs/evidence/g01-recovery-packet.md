@@ -173,7 +173,7 @@ the count includes the actual live-canary gate row.
 | Reconciliation, inventory/identity/quarantine | statistics readers, paged inventory normalization, generation fences, ownership checks and journal/authority schema are unchanged. | Retain the prior reconciliation selector and add the exact focused `TestObservation*` and `TestRoster*` families, inventory/quarantine and journal/authority selectors in the command block below, including controller-side `TestAmbiguousCreateNeverRetriesAfterRestart`, the four `TestInventory*` cases, `TestDemandStatisticsAllowControlledProbeButNeverCleanup`, `TestCleanupOnlyForNeverIssuedWorkerWithExactReceipt`, `TestWorkerPreparationReturnsCanonicalSnapshotAndRejectsPriorEffect`, and the named journal/authority contracts in both `./livecanary` and `./liveworker`. | Fixture: record normalized facts and retained uncertainty; no live equality/absence claim. |
 | Secret and error handling | SDK error sentinels, HTTP body/debug redaction and shared response-budget controls are unchanged. | See the exact root, livecanary and liveworker selectors in the secret/error command block below, including decoded-body truncation, gzip-budget, uncertain-start, bounded Unix-response/redirect, journal-create-failure and raw-runtime-status tests. | Fixture: record normalized sentinel/error and body-budget behavior; no secret-bearing output or live result is claimed. |
 | Tagged controller/JIT input and credential transport boundary | `g01_live` source, input reader, credential attestation and transport refusal tests are unchanged. | Run the tagged command below plus the livecanary credential/transport selector below, including `TestAuthoritySplitAndPolicyRejection`, `TestSDKTransportOwnership`, `TestCredentialAttestationMismatchAndExpiredTokenRejected` and `TestTransportRejectsPlaintextOffHostAndProxyBeforeNetwork`. | Fixture: record no-secret/no-echo/refusal result; no credential or live phase. |
-| Idle drain and withdrawal | Only reuse the authoritative current PR #72 head `f5560ba950f77343e57034cc1cf85dc67f5ac922` and its unchanged fixture/source. | On that authoritative current PR #72 checkout, run the guarded `drain-pr72` and `drain-pr72-race` commands below; both carry the same exact selector/package digest, with `default+norace+go1.26.8` and `default+race+go1.26.8` metadata respectively. | Fixture/source: record physical-write markers as client facts and inconclusive server receipt; never reuse as live assignment/drain evidence. |
+| Idle drain and withdrawal | Only reuse the authoritative current PR #72 head `f5560ba950f77343e57034cc1cf85dc67f5ac922` and its unchanged fixture/source. | On that authoritative current PR #72 checkout, run the guarded `drain-pr72` and `drain-pr72-race` commands below; both carry the same exact selector/package digest, with `default+norace+cgo1+go1.26.8` and `default+race+cgo1+go1.26.8` metadata respectively. | Fixture/source: record physical-write markers as client facts and inconclusive server receipt; never reuse as live assignment/drain evidence. |
 | Paired terminal/worker support | paired journal/lease, worker profile, `liveworker` runtime source/implementation, image/runtime pins and terminal selectors are unchanged. | See the exact controller update-policy and worker runtime commands plus the tagged partition commands below; the worker runtime selector includes the direct Docker state/inspection, mutation-EOF and changed-daemon contracts, while tagged partition commands retain `go1.26.8`, `-race`, `-count=1` and `-timeout=120s`, the complete worker `^TestPaired` partition is included, and the controller-side terminal groups remain exhaustive/disjoint. | Fixture: record receipt/identity checks only; no live worker or terminal success claim. |
 | Actual live canary | There is no live evidence to reuse today. A future result is reusable only for the same immutable workflow/run attempt, source/head, resources, authority scope and approved observation boundary. | Rebuild/plan the exact reviewed tagged binary, then run only the explicitly authorized phase from [the driver](g01-live-driver.md); never substitute fixture commands or broaden phases. | Live: record sanitized server observations, authorization and unresolved outcomes; any changed target or boundary requires a fresh approval/rerun. |
 
@@ -222,12 +222,15 @@ but explicitly rejected before any Go child starts. Go's equivalent double-dash
 selector spellings
 `--run`/`--run=REGEXP` and `--skip`/`--skip=REGEXP` are likewise rejected
 before source validation, so the audit and wrapper never disagree about the
-effective selector. Go's `-toolexec FILE`/`-toolexec=FILE`, `-overlay FILE`/
+effective selector. Every equivalent double-dash Go flag spelling is rejected
+before the first Go child, including `--toolexec`, `--modfile`, `--overlay`,
+`--timeout`, `--exec`, `--args`, benchmark, selector and build overrides. The
+single-dash `-toolexec FILE`/`-toolexec=FILE`, `-overlay FILE`/
 `-overlay=FILE` and `-modfile FILE`/`-modfile=FILE` build/module overrides are
 also rejected before the first Go child. Each prescription also carries an
 expected package identity
-(`module-directory:package`) and build configuration (tag set, race mode and
-`GOTOOLCHAIN`). Before source-derived selector validation, the wrapper resolves the active
+(`module-directory:package`) and build configuration (tag set, race mode,
+explicit reviewed `CGO_ENABLED=1` mode and `GOTOOLCHAIN`). Before source-derived selector validation, the wrapper resolves the active
 package and test source files with the non-executing metadata query, requires the
 reviewed immutable `experiments/g01-scaleset` source tree, rejects tracked,
 untracked or ignored paths under that module, and fails closed if any active
@@ -237,7 +240,11 @@ audit below covers the one package-level test initializer. This is the explicit
 package-initialization guard: a source-tree or build-tag change, including an
 ignored Go or test file, requires a new review before selector validation can
 proceed, while effectful package-level variables and applicable imported init
-paths cannot run during the derivation. The wrapper queries the effective
+paths cannot run during the derivation. Source-derived names use Go's `isTest`
+predicate, so valid `Test`, `Test1` and `Test_Foo` declarations are retained;
+executable `Example` declarations are rejected before a set digest is claimed
+because examples are otherwise outside the source-derived test-name set. The
+wrapper queries the effective
 `go env GOFLAGS`, including GOENV/configuration, rejects non-empty output, and
 then pins `GOFLAGS=` for metadata and the original command. After
 parsing command-prefix assignments, it creates the Go-child environment with
@@ -246,13 +253,16 @@ subprocess; inherited or command-supplied workspace paths are therefore
 ignored before package metadata can be selected. The reviewed behavior is
 force-off, not validation or reuse of a caller-provided `go.work` file.
 Race-mode prescriptions reject inherited or command-supplied `GORACE` before
-either source derivation or test execution. Exactly one `-count=1` and one positive bounded
+either source derivation or test execution. The wrapper pins `CGO_ENABLED=1`
+after command-prefix parsing, rejects a command-supplied conflicting value,
+and binds that effective mode into every build identity before metadata. Exactly one `-count=1` and one positive bounded
 `-timeout` (at most 300 seconds) are required; `-args` and test-binary
 selector/count/timeout overrides, Go `-modfile FILE`/`-modfile=FILE`
 alternate-module-file overrides, Go `-overlay FILE`/`-overlay=FILE` build
-overrides, `-toolexec` execution hooks, `env` and shell `command` wrappers,
-double-dash `--run`/`--skip` selectors, and `-exec` execution wrappers are
-rejected.
+overrides, `-toolexec` execution hooks, benchmark-enabling `-bench` and
+`-test.bench` overrides, `-cpu` multiplicity overrides, `env` and shell
+`command` wrappers, all double-dash Go flags, and `-exec` execution wrappers
+are rejected.
 The execution command adds a wrapper-controlled `-json` stream and fails closed
 on malformed output, non-empty stderr or any Go test `Action` of `skip`,
 including skipped subtests; it also requires a top-level `run` and `pass` event
@@ -268,8 +278,8 @@ set -euo pipefail
 
 # The digest is SHA-256 of sorted test names joined with one trailing newline.
 # Invocation metadata is: package ID module-dir:package, then build ID
-# tags+race-mode+toolchain (for example,
-# experiments/g01-scaleset:./livecanary default+race+go1.26.8).
+# tags+race-mode+cgo-mode+toolchain (for example,
+# experiments/g01-scaleset:./livecanary default+race+cgo1+go1.26.8).
 # The wrapper checks package initialization/build state, derives test names from
 # the same source/build selection without starting a test binary, then runs the
 # original command with its own JSON stream.
@@ -303,15 +313,17 @@ if not re.fullmatch(
 ):
     raise SystemExit(f"{label}: invalid expected package identity")
 build_parts = expected_build.split("+")
-if len(build_parts) != 3:
+if len(build_parts) != 4:
     raise SystemExit(f"{label}: invalid expected build configuration")
-expected_tags, expected_race, expected_toolchain = build_parts
+expected_tags, expected_race, expected_cgo, expected_toolchain = build_parts
 if expected_tags != "default" and not re.fullmatch(
     r"[A-Za-z0-9_]+(?:,[A-Za-z0-9_]+)*", expected_tags
 ):
     raise SystemExit(f"{label}: invalid expected build tags")
 if expected_race not in {"race", "norace"}:
     raise SystemExit(f"{label}: invalid expected race mode")
+if expected_cgo != "cgo1":
+    raise SystemExit(f"{label}: invalid expected CGO mode")
 if not re.fullmatch(r"go[A-Za-z0-9._-]+", expected_toolchain):
     raise SystemExit(f"{label}: invalid expected toolchain")
 
@@ -327,8 +339,10 @@ if invocation_root != repo_root:
     raise SystemExit(f"{label}: run this selector from the repository root")
 
 env = dict(os.environ)
+command_assignments = {}
 while command and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", command[0]):
     key, value = command.pop(0).split("=", 1)
+    command_assignments[key] = value
     env[key] = value
 fixture_child_env = {
     "G01_INPUT_CHILD",
@@ -353,47 +367,133 @@ if command and command[0] == "command":
     )
 if len(command) < 3 or command[:2] != ["go", "test"]:
     raise SystemExit(f"{label}: expected a go test command")
-
-# Reject Go tool-execution hooks before any Go child is started. Both the
-# separated `-toolexec FILE` and equals-form `-toolexec=FILE` spellings can
-# replace compiler/linker/tool subprocesses and therefore cannot be part of a
-# reviewed selector rerun.
 test_args = command[2:]
+
+# Reject every equivalent double-dash Go flag before any Go child is started.
+# Go accepts one or two leading dashes for flags; no guarded prescription needs
+# a double-dash form, so rejecting the complete class covers selectors,
+# benchmark/test-binary flags and all build/module overrides before `go env`.
+double_dash_names = [value.split("=", 1)[0] for value in test_args if value.startswith("--")]
+if double_dash_names:
+    raise SystemExit(
+        f"{label}: equivalent double-dash Go flags are not allowed: "
+        + ", ".join(sorted(set(double_dash_names)))
+    )
+
+# Pin the reviewed cgo mode before the first Go child. A command-supplied
+# conflicting value is rejected; an inherited value is replaced by the exact
+# reviewed value below, so metadata and test compilation cannot drift.
+if "CGO_ENABLED" in command_assignments and command_assignments["CGO_ENABLED"] != "1":
+    raise SystemExit(f"{label}: command-supplied CGO_ENABLED must be 1")
+env["CGO_ENABLED"] = "1"
+
+# Keep the single-dash rejection witnesses ahead of package parsing and the
+# first Go child as well. The later checks repeat these predicates after the
+# common flag parser so the source-derived path has the same fail-closed rules.
 if any(value == "-toolexec" or value.startswith("-toolexec=") for value in test_args):
     raise SystemExit(
         f"{label}: Go -toolexec execution hooks are not allowed in a guarded rerun"
     )
-
-# Reject Go overlay build overrides before any Go child is started. Both the
-# separated `-overlay FILE` and equals-form `-overlay=FILE` spellings can
-# redirect the package's source/build inputs and therefore require a separate
-# reviewed source-tree decision.
 if any(value == "-overlay" or value.startswith("-overlay=") for value in test_args):
     raise SystemExit(
         f"{label}: Go -overlay build overrides are not allowed in a guarded rerun"
     )
-
-# Reject Go alternate module-file overrides before any Go child is started.
-# Both the separated `-modfile FILE` and equals-form `-modfile=FILE` spellings
-# can substitute a different module graph and therefore require a separate
-# reviewed module-file decision.
 if any(value == "-modfile" or value.startswith("-modfile=") for value in test_args):
     raise SystemExit(
         f"{label}: Go -modfile alternate module files are not allowed in a guarded rerun"
     )
-
-# Go accepts one or two leading dashes for flags. Reject the double-dash
-# selector spellings before source validation so the wrapper cannot validate one
-# selector while the actual test command uses a later equivalent selector.
+if any(value == "-args" or value.startswith("-args=") for value in test_args):
+    raise SystemExit(f"{label}: -args is not allowed in a guarded rerun")
+if any(value == "-exec" or value.startswith("-exec=") for value in test_args):
+    raise SystemExit(f"{label}: -exec execution wrappers are not allowed")
 if any(
-    value == "--run"
-    or value.startswith("--run=")
-    or value == "--skip"
-    or value.startswith("--skip=")
+    value == "-bench"
+    or value.startswith("-bench=")
+    or value == "-benchmem"
+    or value == "-test.bench"
+    or value.startswith("-test.bench=")
+    or value == "-test.benchmem"
     for value in test_args
 ):
     raise SystemExit(
-        f"{label}: double-dash --run/--skip selectors are not allowed in a guarded rerun"
+        f"{label}: benchmark execution or benchmark overrides are not allowed"
+    )
+if any(value == "-cpu" or value.startswith("-cpu=") for value in test_args):
+    raise SystemExit(f"{label}: -cpu multiplicity overrides are not allowed")
+if any(value == "-json" or value.startswith("-json=") for value in test_args):
+    raise SystemExit(f"{label}: wrapper controls the test JSON stream")
+if any(value == "-list" or value.startswith("-list=") for value in test_args):
+    raise SystemExit(f"{label}: -list test-binary discovery is not allowed")
+early_test_binary_overrides = (
+    "-test.run",
+    "-test.skip",
+    "-test.count",
+    "-test.timeout",
+    "-test.list",
+)
+if any(
+    value == override or value.startswith(override + "=")
+    for value in test_args
+    for override in early_test_binary_overrides
+):
+    raise SystemExit(
+        f"{label}: test-binary selector/count/timeout overrides are not allowed"
+    )
+
+def pre_metadata_flag_values(args, flag):
+    values = []
+    index = 0
+    while index < len(args):
+        value = args[index]
+        if value == flag:
+            if index + 1 >= len(args):
+                raise SystemExit(f"{label}: {flag} requires a value")
+            values.append(args[index + 1])
+            index += 2
+            continue
+        if value.startswith(f"{flag}="):
+            values.append(value[len(flag) + 1:])
+        index += 1
+    return values
+
+# Reject malformed or extra package/import-path arguments before the first Go
+# child, including `go test ./expected example/import/path` and absolute or
+# module-qualified package patterns that the old `.`/`./...` scan overlooked.
+pre_value_flags = {"-C", "-tags", "-run", "-skip", "-list", "-count", "-timeout"}
+pre_boolean_flags = {"-race", "-v"}
+pre_package_values = []
+index = 0
+while index < len(test_args):
+    value = test_args[index]
+    if value in pre_value_flags:
+        if index + 1 >= len(test_args):
+            raise SystemExit(f"{label}: {value} requires a value")
+        index += 2
+        continue
+    if any(value.startswith(flag + "=") for flag in pre_value_flags):
+        index += 1
+        continue
+    if value in pre_boolean_flags or any(
+        value.startswith(flag + "=") for flag in pre_boolean_flags
+    ):
+        index += 1
+        continue
+    if value.startswith("-"):
+        raise SystemExit(
+            f"{label}: unsupported or unreviewed Go/test flag "
+            f"{value.split('=', 1)[0]}"
+        )
+    pre_package_values.append(value)
+    index += 1
+if len(pre_package_values) != 1:
+    raise SystemExit(f"{label}: expected one package argument before metadata")
+pre_modules = pre_metadata_flag_values(test_args, "-C")
+if pre_modules != ["experiments/g01-scaleset"]:
+    raise SystemExit(f"{label}: expected one -C module directory before metadata")
+if f"{pre_modules[0]}:{pre_package_values[0]}" != expected_package:
+    raise SystemExit(
+        f"{label}: expected package {expected_package}, observed "
+        f"{pre_modules[0]}:{pre_package_values[0]}"
     )
 
 # Pin the environment after parsing command-prefix assignments. This overrides
@@ -472,7 +572,8 @@ if len(race_modes) > 1:
     raise SystemExit(f"{label}: expected at most one -race flag")
 race_identity = race_modes[0] if race_modes else "norace"
 toolchain_identity = env.get("GOTOOLCHAIN", "")
-actual_build = f"{tag_identity}+{race_identity}+{toolchain_identity}"
+cgo_identity = "cgo" + env.get("CGO_ENABLED", "")
+actual_build = f"{tag_identity}+{race_identity}+{cgo_identity}+{toolchain_identity}"
 if actual_build != expected_build:
     raise SystemExit(
         f"{label}: expected build {expected_build}, observed {actual_build}"
@@ -671,29 +772,8 @@ for match in timeout_matches:
 if timeout_nanos <= 0 or timeout_nanos > Decimal("300000000000"):
     raise SystemExit(f"{label}: -timeout must be positive and at most 300s")
 
-if any(value == "-args" or value.startswith("-args=") for value in test_args):
-    raise SystemExit(f"{label}: -args is not allowed in a guarded rerun")
-if any(value == "-exec" or value.startswith("-exec=") for value in test_args):
-    raise SystemExit(f"{label}: -exec execution wrappers are not allowed")
-test_binary_overrides = (
-    "-test.run",
-    "-test.skip",
-    "-test.count",
-    "-test.timeout",
-    "-test.list",
-)
-if any(
-    value == override or value.startswith(override + "=")
-    for value in test_args
-    for override in test_binary_overrides
-):
-    raise SystemExit(
-        f"{label}: test-binary selector/count/timeout overrides are not allowed"
-    )
-if any(value == "-json" or value.startswith("-json=") for value in test_args):
-    raise SystemExit(f"{label}: wrapper controls the test JSON stream")
-
 package_value_flags = {"-C", "-tags", "-run", "-list", "-count", "-timeout"}
+package_boolean_flags = {"-race", "-v"}
 package_indices = []
 index = 0
 while index < len(list_base_args):
@@ -706,8 +786,14 @@ while index < len(list_base_args):
     if any(value.startswith(flag + "=") for flag in package_value_flags):
         index += 1
         continue
-    if value == "." or value.startswith("./"):
-        package_indices.append(index)
+    if value in package_boolean_flags or any(
+        value.startswith(flag + "=") for flag in package_boolean_flags
+    ):
+        index += 1
+        continue
+    if value.startswith("-"):
+        raise SystemExit(f"{label}: unsupported or unreviewed Go/test flag {value.split('=', 1)[0]}")
+    package_indices.append(index)
     index += 1
 if len(package_indices) != 1:
     raise SystemExit(f"{label}: expected one package argument")
@@ -814,8 +900,14 @@ def source_test_names(source_path):
         name = source[name_start:cursor]
         cursor = skip_source_ignored(source, cursor)
         if cursor < len(source) and source[cursor] == "(" and name != "TestMain":
-            if name.startswith("Test") and len(name) > len("Test") and name[4].isupper():
-                names.append(name)
+            if name.startswith("Example"):
+                raise SystemExit(
+                    f"{label}: executable Example declaration requires a new reviewed guard"
+                )
+            if name.startswith("Test"):
+                suffix = name[len("Test"):]
+                if not suffix or not suffix[0].islower():
+                    names.append(name)
         position = cursor
     if brace_depth:
         raise SystemExit(f"{label}: unbalanced Go source braces")
@@ -876,7 +968,7 @@ if actual_digest != expected_digest:
     )
 print(
     f"{label}: source selector validation passed; package {actual_package}; "
-    f"build {actual_build}; GOWORK={go_env['GOWORK']}; source-derived candidates {len(listed)}; "
+    f"build {actual_build}; CGO_ENABLED={go_env['CGO_ENABLED']}; GOWORK={go_env['GOWORK']}; source-derived candidates {len(listed)}; "
     f"filtered executed {expected_count} names; "
     f"set-sha256 {actual_digest}"
 )
@@ -933,72 +1025,72 @@ validate_test_stream(run_result.stdout, run_result.stderr)
 PY
 }
 
-go_test_checked 9 9aef95c84ffd42ad632040498c628c78072ce94f5cc2f6af8493fcffc233b707 ack-root experiments/g01-scaleset:. default+race+go1.26.8 \
+go_test_checked 9 9aef95c84ffd42ad632040498c628c78072ce94f5cc2f6af8493fcffc233b707 ack-root experiments/g01-scaleset:. default+race+cgo1+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s -run '^(TestSDKACKBoundaries|TestSDKDemandAboveFiftyAndPartialAcquisition|TestSDKRepeatedStatisticsAnd202ReuseLastObservation|TestRecoveryAfterACKCallbackCrash|TestRecoveryMissingLifecycleCallback|TestRecoveryErrorsHoldReservationsAndRedact|TestSDKAcquisitionResponseLossAfterACK|TestSDKCapacityWithdrawalDoesNotFenceInFlightAcquisition|TestSDKHTTPFailuresAndSessionRefresh)$' .
-go_test_checked 5 f95a296947af0fb862e8b447d3e27b7ce9f01e726659f5f87393789b62b783c9 ack-livecanary experiments/g01-scaleset:./livecanary default+race+go1.26.8 \
+go_test_checked 5 f95a296947af0fb862e8b447d3e27b7ce9f01e726659f5f87393789b62b783c9 ack-livecanary experiments/g01-scaleset:./livecanary default+race+cgo1+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestSupportedListenerBarriersAndReservation|TestDriverBarriersThroughPinnedSDK|TestForeignIdentityAndUnreviewedWorkNeverACKOrDelete|TestAuditPR25MultiJobAcquisitionMustRefuseBeforeACK|TestNoMessageDoesNotCountAsCompletedBarrier)$'
 
-go_test_checked 24 eae489a7d743c942dca803c9b13cb618dcd87fbd9a53634f022bc5381c7d6436 baseline experiments/g01-scaleset:./livecanary default+race+go1.26.8 \
+go_test_checked 24 eae489a7d743c942dca803c9b13cb618dcd87fbd9a53634f022bc5381c7d6436 baseline experiments/g01-scaleset:./livecanary default+race+cgo1+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=180s ./livecanary -run '^TestBaseline'
-go_test_checked 9 b6a378d192ba2c614cd82c20eab7cffcdbbb00115a1bba4da803fc262a1c3d8f admission-livecanary experiments/g01-scaleset:./livecanary default+race+go1.26.8 \
+go_test_checked 9 b6a378d192ba2c614cd82c20eab7cffcdbbb00115a1bba4da803fc262a1c3d8f admission-livecanary experiments/g01-scaleset:./livecanary default+race+cgo1+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=180s ./livecanary -run '^(TestAdmission.*|TestAuditPR25DistinctStateDirectoriesMustShareCap)$'
-go_test_checked 8 4bce3c998c4f2e6806888de2ea9936c6dd9ea877c72b190d47f4f47e24cdb559 admission-liveworker experiments/g01-scaleset:./liveworker default+race+go1.26.8 \
+go_test_checked 8 4bce3c998c4f2e6806888de2ea9936c6dd9ea877c72b190d47f4f47e24cdb559 admission-liveworker experiments/g01-scaleset:./liveworker default+race+cgo1+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=180s ./liveworker -run '^(TestAdmissionDirectoryUsesOSAccountWithoutEnvironmentFallback|TestAdmissionAuthorityChecksTheCurrentClaim|TestWorkerAdmissionCapsIndependentDirectories|TestWorkerAdmissionRetainsSlotAfterOutcomeAndClose|TestAdmissionRejectsCopiedJournalInDifferentDirectory|TestAdmissionSyncFailureMustBeRetried|TestAdmissionRefusesMissingUnsafeOrUnknownRootState|TestAdmissionInitializationLockPrecedesClaimCreation)$'
-go_test_checked 1 e7cdff09074beb49efb17b8e68201798140ea6f0e83ad10f3fc096aed98823ce unsupported-liveworker experiments/g01-scaleset:./liveworker osusergo+race+go1.26.8 \
+go_test_checked 1 e7cdff09074beb49efb17b8e68201798140ea6f0e83ad10f3fc096aed98823ce unsupported-liveworker experiments/g01-scaleset:./liveworker osusergo+race+cgo1+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -tags=osusergo -count=1 -timeout=180s ./liveworker -run '^TestUnsupportedAccountLookupRefusesBeforeJournal$'
-go_test_checked 1 e7cdff09074beb49efb17b8e68201798140ea6f0e83ad10f3fc096aed98823ce unsupported-livecanary experiments/g01-scaleset:./livecanary osusergo+race+go1.26.8 \
+go_test_checked 1 e7cdff09074beb49efb17b8e68201798140ea6f0e83ad10f3fc096aed98823ce unsupported-livecanary experiments/g01-scaleset:./livecanary osusergo+race+cgo1+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -tags=osusergo -count=1 -timeout=180s ./livecanary -run '^TestUnsupportedAccountLookupRefusesBeforeJournal$'
 
-go_test_checked 3 0f5a8b0633982f8cc04a541cb396c46736c6eec486622354a6456554c52cfc75 jit-root experiments/g01-scaleset:. default+race+go1.26.8 \
+go_test_checked 3 0f5a8b0633982f8cc04a541cb396c46736c6eec486622354a6456554c52cfc75 jit-root experiments/g01-scaleset:. default+race+cgo1+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s -run '^(TestSDKJITLookupBeforeCreationDoesNotDiscoverIdentity|TestSDKJITResponseLossWithoutCommitDoesNotDiscoverIdentity|TestSDKJITResponseLossDiscoversIdentityWithoutReissuing)$' .
-go_test_checked 2 42eac255f830436a6fba9457bcb1964e8f9f596761fecfdb721c2d34b684f4cb jit-livecanary experiments/g01-scaleset:./livecanary default+race+go1.26.8 \
+go_test_checked 2 42eac255f830436a6fba9457bcb1964e8f9f596761fecfdb721c2d34b684f4cb jit-livecanary experiments/g01-scaleset:./livecanary default+race+cgo1+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestJITLostResponseIsSecretSafeAndNeverReissued|TestDriverBarriersThroughPinnedSDK)$'
 
-go_test_checked 34 fcdcde4fce2efa204fdb352c035329a010f7a41b4b9746bf748b2ebc22b4d330 worker-runtime experiments/g01-scaleset:./liveworker default+race+go1.26.8 \
+go_test_checked 34 fcdcde4fce2efa204fdb352c035329a010f7a41b4b9746bf748b2ebc22b4d330 worker-runtime experiments/g01-scaleset:./liveworker default+race+cgo1+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./liveworker -run '^(TestOneWorkerNeverRecreatedAndOnlyJITAddedToEnvironment|TestUncertainStartNeverRetriesAndCannotCleanup|TestEveryRuntimeBoundaryRejectsProfileAndOwnershipMismatch|TestUnverifiedRunnerUpdatePolicyRefusesBeforeRuntime|TestSocketReplacementAfterPreflightCannotReceiveAnyMutation|TestSocketModesAndControllerOwnership|TestSocketPostConnectRecheckClosesBeforeHTTP|TestNoCreateBeforeDurableIntent|TestUnknownCreateNeverRetriesAfterRestart|TestCreationWarningsPreserveKnownIDWithoutAuthorizingStart|TestWorkerPreparationReturnsCanonicalSnapshotAndRejectsPriorEffect|TestUnixInspectRequiresStateFlagsBeforeMutation|TestDockerInspectExact(KnownStatesAndSerializableFacts|StatePresenceAndLegacyRequirements|RejectsMalformedOrAmbiguousBodiesBeforeMutation|NotFoundReportsOnlyTheExactGET|RejectsOtherResponsesAndInvalidTargets|RequiresSupported404Body|CancellationNeverReportsPresenceOrAbsence|RejectsReplacedSocket|EOFCancellationKeepsUnknownOutcome)|TestDockerInspectLegacyCleanupKeepsSignedAndAbsentExitPolicy|TestDockerInspectMapsPreserveCaseSensitiveKeysAndProfile|TestDockerCompletedMutationResponseSurvivesEOFCancellation|TestDockerInspectUnknownOrAbsentStatusCannotAuthorizeMutation|TestUnixRuntimeRejectsWrongIdentityImagesAndUnsupportedLimits|TestUnixRuntimeOneShotCreateStartAndNonForceCleanup|TestUnixRuntimeAmbiguousEffectsNeverRetry|TestChangedDaemonCannotCreate|TestChangedDaemonOrAbsentContainerNeverMeansCleanupComplete|TestUnixTransportRejectsSymlinksAndInheritedTCPDestinations|TestAuditPR28MissingBridgeMustNotStart|TestCleanupRetainsActiveAndUnknownWorkers|TestOwnedTerminalCleanupAndRunningRemovalRace)$'
-go_test_checked 4 8a0a576036768baff9a9b7d53b3487ef84b2e95f502b3ca9dd453463f396cade update-policy experiments/g01-scaleset:./livecanary default+race+go1.26.8 \
+go_test_checked 4 8a0a576036768baff9a9b7d53b3487ef84b2e95f502b3ca9dd453463f396cade update-policy experiments/g01-scaleset:./livecanary default+race+cgo1+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestCreateRequestsDisabledRunnerUpdate|TestUnconfirmedUpdateSettingQuarantinesCreate|TestUpdateSettingDriftStopsBeforeSessionOrJIT|TestUpdateSettingDriftDoesNotBlockSafeEmptyCleanup)$'
-go_test_checked 2 2614438aa4873bd044d1f0d6247b929403e2225c2e5112c13787bf790af42413 worker-command experiments/g01-scaleset:./cmd/g01-worker g01_worker+race+go1.26.8 \
+go_test_checked 2 2614438aa4873bd044d1f0d6247b929403e2225c2e5112c13787bf790af42413 worker-command experiments/g01-scaleset:./cmd/g01-worker g01_worker+race+cgo1+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -tags=g01_worker -count=1 -timeout=45s ./cmd/g01-worker -run '^(TestBlockedJITInputHonorsDeadline|TestOfflinePlanAndRefusalDoNotReadSecretsOrEchoInput)$'
 
-go_test_checked 45 2e182d6aeb4c278eddbe272be1693e6bf0143759c23c03348435da59addfde53 reconciliation experiments/g01-scaleset:./livecanary default+race+go1.26.8 \
+go_test_checked 45 2e182d6aeb4c278eddbe272be1693e6bf0143759c23c03348435da59addfde53 reconciliation experiments/g01-scaleset:./livecanary default+race+cgo1+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestAmbiguousCreateNeverRetriesAfterRestart|TestObserve.*|TestObservationIntentFailureStopsBeforeRead|TestObservationResponseCaptureIsLocalAndRejectsOtherOperations|TestStatistics.*|TestDemandStatisticsAllowControlledProbeButNeverCleanup|TestInvalidOwnedProof.*|TestCanonicalPreparationRecordsNoPhaseOrRemoteIntent|TestCanonicalPreparationRefusesInvalidJournalAndPhase|TestCanonicalPreparationRecoveryAndDriverShareLocalGate|TestJournal.*|TestAuthority.*|TestInventoryStrictPages|TestInventoryMalformedStopsLegacyEffects|TestInventoryTransportRefusalIsBoundedAndSanitized|TestInventoryImpossibleTotalStopsBeforeNextPage|TestRosterActualTLSCompleteObservation|TestRosterPreservesOnlyAcceptedPagePrefix|TestRosterFinalPublicationGuardAfterDigest|TestRosterRefusesInvalidEntryWithoutNetwork|TestStrictJSONRejectsDecoderEquivalentDuplicateFields|TestStrictJSONRejectsDuplicateAuthorityFields|TestFailedDirectorySyncMustBeRetried|TestFileJournalRejectsUnrecordedAuthorityBeforeRawDriverEffect|TestRenewedRecoveryApprovalRetainsOwnedState)$'
-go_test_checked 9 47a97f1f9083abbe72dfc21a2477bd25580684506fbf71bf5aba9e7f6f1a40e8 reconciliation-worker experiments/g01-scaleset:./liveworker default+race+go1.26.8 \
+go_test_checked 9 47a97f1f9083abbe72dfc21a2477bd25580684506fbf71bf5aba9e7f6f1a40e8 reconciliation-worker experiments/g01-scaleset:./liveworker default+race+cgo1+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./liveworker -run '^(TestPrivateJournalLocksAndRetainsReservationAcrossRestart|TestJournalRejectsChangedApprovalTornTailAndUnsafeFiles|TestAuthorityLeaseRefusesConcurrentRunsAndFencesClose|TestAuthorityRejectsReplacedJournalOrDirectory|TestStrictJSONRejectsDecoderEquivalentDuplicateFields|TestStrictInputRejectsAmbiguousOrExtraAuthorityFields|TestFailedDirectorySyncMustBeRetried|TestFileJournalRejectsUnrecordedAuthorityBeforeRawDriverEffect|TestRenewedRecoveryApprovalRetainsOwnedState)$'
-go_test_checked 11 84b872130057cf2103feaa8f7c6cdb69a4d779e135eebf11cc04cb00590eacb9 reconciliation-quarantine experiments/g01-scaleset:./livecanary default+race+go1.26.8 \
+go_test_checked 11 84b872130057cf2103feaa8f7c6cdb69a4d779e135eebf11cc04cb00590eacb9 reconciliation-quarantine experiments/g01-scaleset:./livecanary default+race+cgo1+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestDemandStatisticsAllowControlledProbeButNeverCleanup|TestCleanupOnlyForNeverIssuedWorkerWithExactReceipt|TestZeroStatisticsAndOptionalAbsencePermitEmptyCleanup|TestUnsafeStatisticsStopNewEffectsBeforeControlledMessage|TestEmptyAvailableWithWorkStatisticsStaysQuarantined|TestOlderPendingIntentSurvivesSuccessfulZeroInspection|TestUnownedDiscoveryEvidenceCannotAuthorizeCreationAfterAbsence|TestAuditPR25ObservedJobsMustBlockCleanup|TestUnexpectedWorkMessageQuarantinesBeforeSafeClose|TestObservedRunnerSurvivesLaterAbsenceAndFirstCleanup|TestObservationResultFailureSurvivesFileReopenAndInspection)$'
 
-go_test_checked 1 be0f21a92ce13d75e85a1182706e84b84884a8cf0ec01172e14e5ac2e04b600f secret-root experiments/g01-scaleset:. default+race+go1.26.8 \
+go_test_checked 1 be0f21a92ce13d75e85a1182706e84b84884a8cf0ec01172e14e5ac2e04b600f secret-root experiments/g01-scaleset:. default+race+cgo1+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s -run '^TestSDKBusyRemovalSentinelAndRawErrorExposure$' .
-go_test_checked 6 6d0b3fc255928a6c7a5f7ae087d25715f96c0bad9f9298b5fb08ea7bc5fc34df secret-livecanary experiments/g01-scaleset:./livecanary default+race+go1.26.8 \
+go_test_checked 6 6d0b3fc255928a6c7a5f7ae087d25715f96c0bad9f9298b5fb08ea7bc5fc34df secret-livecanary experiments/g01-scaleset:./livecanary default+race+cgo1+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestHTTPErrorsDoNotReturnSecretResponseBody|TestSDKHTTPDebugDoesNotLogCredentials|TestSharedTransportRejectsOversizeSuccessAndErrorBodies|TestResponseReaderConsumesOnlyBudgetPlusOneAndRejectsTruncation|TestResponseBudgetAppliesAfterGzipDecompression|TestRealJournalCreateFailureBlocksRetryAndContainsNoErrorBody)$'
-go_test_checked 3 feda1bf98e323aef3e209cc4ea2765131ca7d17d70dfd7bb4828c0faab14dff4 secret-liveworker experiments/g01-scaleset:./liveworker default+race+go1.26.8 \
+go_test_checked 3 feda1bf98e323aef3e209cc4ea2765131ca7d17d70dfd7bb4828c0faab14dff4 secret-liveworker experiments/g01-scaleset:./liveworker default+race+cgo1+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./liveworker -run '^(TestUncertainStartNeverRetriesAndCannotCleanup|TestUnixResponsesAreBoundedAndRedirectsNeverFollowed|TestObservationDoesNotJournalRawRuntimeStatus)$'
 
-go_test_checked 10 7ced37498c6790e0a1276ffece4cf0bcb2cad09f39da3ebdd0e28694f752596c live-command experiments/g01-scaleset:./cmd/g01-live g01_live+race+go1.26.8 \
+go_test_checked 10 7ced37498c6790e0a1276ffece4cf0bcb2cad09f39da3ebdd0e28694f752596c live-command experiments/g01-scaleset:./cmd/g01-live g01_live+race+cgo1+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -tags=g01_live -count=1 -timeout=45s ./cmd/g01-live -run '^(TestPlanAndRefusalsNeverReadCredentialsOrEchoInputs|TestPreparationCommandNeverReadsCredentialsOrRunsRemotePhase|TestPairedTerminalModeReadsControllerInputAfterAllGates|TestPairedTerminalModeRejectsUnusedPhaseAndControllerFlagsBeforeInput|TestPairedTerminalModeRequiresWorkflowVerificationAuthorityBeforeInput|TestInheritedNamedCredentialFIFODelayedEOF|TestInheritedCredentialPipeStopsAtDeadline|TestCredentialInputRejectsNonPipeDescriptor|TestBlockedCredentialPipeStopsAtDeadline|TestCredentialInputAcceptsCompleteAndRejectsOversize)$'
-go_test_checked 4 a751c8b1a6a22d2f4ce76d90d6d79c48ab377355deed0f3bf189496c22b5492e live-transport experiments/g01-scaleset:./livecanary g01_live+race+go1.26.8 \
+go_test_checked 4 a751c8b1a6a22d2f4ce76d90d6d79c48ab377355deed0f3bf189496c22b5492e live-transport experiments/g01-scaleset:./livecanary g01_live+race+cgo1+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -tags=g01_live -count=1 -timeout=45s ./livecanary -run '^(TestAuthoritySplitAndPolicyRejection|TestSDKTransportOwnership|TestCredentialAttestationMismatchAndExpiredTokenRejected|TestTransportRejectsPlaintextOffHostAndProxyBeforeNetwork)$'
 
-go_test_checked 34 a79b7fa367d8eb1e7fe4ee4ef637696518946dab6f2f25410f6e04bfba137298 drain-pr72 experiments/g01-scaleset:./livecanary default+norace+go1.26.8 \
+go_test_checked 34 a79b7fa367d8eb1e7fe4ee4ef637696518946dab6f2f25410f6e04bfba137298 drain-pr72 experiments/g01-scaleset:./livecanary default+norace+cgo1+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset ./livecanary -run '^(TestBaselineAcquireTargetIsActionsOnly|TestPinnedSDKDrain.*|TestDriverDrainThroughPinnedSDKAndPollHook|TestDrainListenerWithdrawsWhilePollResponseIsHeld|TestDrainCancellationStopsBeforeReleasingHeldResponse)$' -count=1 -v -timeout=180s
-go_test_checked 34 a79b7fa367d8eb1e7fe4ee4ef637696518946dab6f2f25410f6e04bfba137298 drain-pr72-race experiments/g01-scaleset:./livecanary default+race+go1.26.8 \
+go_test_checked 34 a79b7fa367d8eb1e7fe4ee4ef637696518946dab6f2f25410f6e04bfba137298 drain-pr72-race experiments/g01-scaleset:./livecanary default+race+cgo1+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race ./livecanary -run '^(TestBaselineAcquireTargetIsActionsOnly|TestPinnedSDKDrain.*|TestDriverDrainThroughPinnedSDKAndPollHook|TestDrainListenerWithdrawsWhilePollResponseIsHeld|TestDrainCancellationStopsBeforeReleasingHeldResponse)$' -count=1 -v -timeout=180s
 
 terminal_heavy_tests='^TestPairedTerminal(FinalResultCapacity|PendingChildCapacity|EligibilityUsesFreshExactFacts|CapturedAcknowledgementCancellation|MissingAcknowledgementsAndPostchecks)$'
 terminal_remainder_skip='^TestPairedTerminal(FinalResultCapacity|PendingChildCapacity|EligibilityUsesFreshExactFacts|CapturedAcknowledgementCancellation|MissingAcknowledgementsAndPostchecks|Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$'
 terminal_storage_tests='^TestPairedTerminal(Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$'
-go_test_checked 22 f3efc29451112b27d2cb590763612790db48f05b54718b1e023196ead6625222 paired-collection experiments/g01-scaleset:./livecanary g01_pair_fixture+race+go1.26.8 \
+go_test_checked 22 f3efc29451112b27d2cb590763612790db48f05b54718b1e023196ead6625222 paired-collection experiments/g01-scaleset:./livecanary g01_pair_fixture+race+cgo1+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run '^TestPaired' -skip '^TestPairedTerminal'
-go_test_checked 106 bdeef850cfe820297e3896477219f0fcf90046bc30fb0bd454bfd0f8fe6db2ff paired-all-except experiments/g01-scaleset:./livecanary g01_pair_fixture+race+go1.26.8 \
+go_test_checked 106 bdeef850cfe820297e3896477219f0fcf90046bc30fb0bd454bfd0f8fe6db2ff paired-all-except experiments/g01-scaleset:./livecanary g01_pair_fixture+race+cgo1+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -skip '^TestPaired'
-go_test_checked 24 b7f253f33da157adba67fe4312eddb0ee90172e24f46d4f48502890ab5f080f5 paired-worker experiments/g01-scaleset:./liveworker g01_pair_fixture+race+go1.26.8 \
+go_test_checked 24 b7f253f33da157adba67fe4312eddb0ee90172e24f46d4f48502890ab5f080f5 paired-worker experiments/g01-scaleset:./liveworker g01_pair_fixture+race+cgo1+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./liveworker -run '^TestPaired'
-go_test_checked 5 9e1a2e099c0fc48bbbd83dd0dc798d3c954910cd150b210037741b2c70211952 paired-heavy experiments/g01-scaleset:./livecanary g01_pair_fixture+race+go1.26.8 \
+go_test_checked 5 9e1a2e099c0fc48bbbd83dd0dc798d3c954910cd150b210037741b2c70211952 paired-heavy experiments/g01-scaleset:./livecanary g01_pair_fixture+race+cgo1+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run "$terminal_heavy_tests"
-go_test_checked 15 5e5dd1ee80d3d303271ab17b17aed22d5084e15684bcbe9f31152c1092ec1f73 paired-remainder experiments/g01-scaleset:./livecanary g01_pair_fixture+race+go1.26.8 \
+go_test_checked 15 5e5dd1ee80d3d303271ab17b17aed22d5084e15684bcbe9f31152c1092ec1f73 paired-remainder experiments/g01-scaleset:./livecanary g01_pair_fixture+race+cgo1+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run '^TestPairedTerminal' -skip "$terminal_remainder_skip"
-go_test_checked 6 458f77f55209a59338a63bfc27697d85ebe5e0c3c7d1b959a0b56b2527f3ead5 paired-storage experiments/g01-scaleset:./livecanary g01_pair_fixture+race+go1.26.8 \
+go_test_checked 6 458f77f55209a59338a63bfc27697d85ebe5e0c3c7d1b959a0b56b2527f3ead5 paired-storage experiments/g01-scaleset:./livecanary g01_pair_fixture+race+cgo1+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run "$terminal_storage_tests"
 GOTOOLCHAIN=go1.26.8 go vet -C experiments/g01-scaleset -tags=g01_pair_fixture ./livecanary
 GOTOOLCHAIN=go1.26.8 go vet -C experiments/g01-scaleset -tags=g01_pair_fixture ./liveworker
@@ -1292,15 +1384,9 @@ for index, line in enumerate(lines):
     if command[:2] != ["go", "test"]:
         raise SystemExit(f"line {index + 2}: not a go test command")
     args = command[2:]
-    if any(
-        value == "--run"
-        or value.startswith("--run=")
-        or value == "--skip"
-        or value.startswith("--skip=")
-        for value in args
-    ):
+    if any(value.startswith("--") for value in args):
         raise SystemExit(
-            f"line {index + 2}: double-dash --run/--skip selectors are not allowed"
+            f"line {index + 2}: equivalent double-dash Go flags are not allowed"
         )
     if any(value == "-toolexec" or value.startswith("-toolexec=") for value in args):
         raise SystemExit(
@@ -1327,7 +1413,32 @@ for index, line in enumerate(lines):
         return result
 
     modules = values("-C")
-    packages = [value for value in args if value == "." or value.startswith("./")]
+    value_flags = {"-C", "-tags", "-run", "-skip", "-list", "-count", "-timeout"}
+    boolean_flags = {"-race", "-v"}
+    packages = []
+    cursor = 0
+    while cursor < len(args):
+        value = args[cursor]
+        if value in value_flags:
+            if cursor + 1 >= len(args):
+                raise SystemExit(f"line {index + 2}: {value} requires a value")
+            cursor += 2
+            continue
+        if any(value.startswith(flag + "=") for flag in value_flags):
+            cursor += 1
+            continue
+        if value in boolean_flags or any(
+            value.startswith(flag + "=") for flag in boolean_flags
+        ):
+            cursor += 1
+            continue
+        if value.startswith("-"):
+            raise SystemExit(
+                f"line {index + 2}: unsupported or unreviewed Go/test flag "
+                f"{value.split('=', 1)[0]}"
+            )
+        packages.append(value)
+        cursor += 1
     if modules != ["experiments/g01-scaleset"] or len(packages) != 1:
         raise SystemExit(f"line {index + 2}: package/module identity is ambiguous")
     actual_package = f"{modules[0]}:{packages[0]}"
@@ -1365,7 +1476,9 @@ for index, line in enumerate(lines):
     if label.startswith("drain-") and label not in drain_source_pins:
         raise SystemExit(f"{label}: unknown drain source pin")
     expected_source_tree = drain_source_pins.get(label, pr78_module_tree)
-    actual_build = f"{tag_identity}+{race_identity}+{env.get('GOTOOLCHAIN', '')}"
+    if env.get("CGO_ENABLED") not in {None, "", "1"}:
+        raise SystemExit(f"line {index + 2}: conflicting CGO_ENABLED assignment")
+    actual_build = f"{tag_identity}+{race_identity}+cgo1+{env.get('GOTOOLCHAIN', '')}"
     if actual_package != fields[4] or actual_build != fields[5]:
         raise SystemExit(
             f"{fields[3]}: expected {fields[4]}/{fields[5]}, "
@@ -1378,29 +1491,31 @@ if len(seen) != 28 or len(set(seen)) != len(seen):
     raise SystemExit(f"expected 28 unique wrapper metadata records, observed {len(seen)}")
 print(
     f"package/build metadata audit: passed; {len(seen)} wrapper prescriptions "
-    "matched one package identity and explicit GOTOOLCHAIN/tag/race build "
-    "configuration, exact PR #78/PR #72 source-tree family pins, exactly one "
-    "count/timeout, and no test-binary overrides or env/command wrappers; "
+    "matched one package/import-path identity and explicit GOTOOLCHAIN/tag/race/CGO "
+    "build configuration, exact PR #78/PR #72 source-tree family pins, exactly "
+    "one count/timeout, and no test-binary, benchmark/CPU, double-dash or "
+    "env/command overrides; "
     "duplicate package candidates fail closed"
 )
 PY
 ```
 
 The package/build metadata audit exited 0 with 28 unique records. Every
-package identity matched its `-C` directory and sole package argument, every
-record carried explicit `GOTOOLCHAIN` metadata, exactly one `-count=1` and one
-positive timeout no greater than 300 seconds, and every build identity matched
-its tag set, race mode and toolchain. The two drain labels selected the exact
+package identity matched its `-C` directory and sole package/import-path
+argument, every record carried explicit `GOTOOLCHAIN` metadata, exactly one
+`-count=1` and one positive timeout no greater than 300 seconds, and every
+build identity matched its tag set, race mode, pinned `CGO_ENABLED=1` mode and
+toolchain. The two drain labels selected the exact
 PR #72 module tree `9b30ef1b69c6375cb264c759d366fc5a52a5439f`; all other labels
 selected the PR #78 module tree `08c7830de7bc5120d1302d7ba6df162abd582315`.
-`-args`, test-binary overrides, `-toolexec` hooks, standard `env` and shell
-`command` wrappers, double-dash `--run`/`--skip` selectors and a duplicate
-`./livecanary`/`./liveworker` package list are rejected before source-derived
-selector validation.
+`-args`, test-binary overrides, `-toolexec` hooks, benchmark/CPU flags, standard
+`env` and shell `command` wrappers, every equivalent double-dash Go flag and
+duplicate relative or import-path package arguments are rejected before
+source-derived selector validation.
 The recorded metadata-audit output was:
 
 ```text
-package/build metadata audit: passed; 28 wrapper prescriptions matched one package identity, explicit GOTOOLCHAIN/tag/race build configuration, exact PR #78/PR #72 source-tree family pins, exactly one count/timeout, and no test-binary overrides or env/command wrappers; duplicate package candidates fail closed
+package/build metadata audit: passed; 28 wrapper prescriptions matched one package/import-path identity, explicit GOTOOLCHAIN/tag/race/CGO build configuration, exact PR #78/PR #72 source-tree family pins, exactly one count/timeout, and no test-binary, benchmark/CPU, double-dash or env/command overrides; duplicate package candidates fail closed
 ```
 
 The wrapper's selector edge cases were then exercised with a trimmed copy of
@@ -1452,14 +1567,14 @@ cases = [
     (
         "equals-run",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+go1.26.8",
+        "default+race+cgo1+go1.26.8",
         common + ["./livecanary", "-run=" + "^" + one_name + "$"],
         True,
     ),
     (
         "separated-filter",
         "22", "f3efc29451112b27d2cb590763612790db48f05b54718b1e023196ead6625222",
-        "experiments/g01-scaleset:./livecanary", "g01_pair_fixture+race+go1.26.8",
+        "experiments/g01-scaleset:./livecanary", "g01_pair_fixture+race+cgo1+go1.26.8",
         common + ["-tags=g01_pair_fixture", "./livecanary", "-run", "^TestPaired",
                   "-skip", "^TestPairedTerminal"],
         True,
@@ -1467,14 +1582,14 @@ cases = [
     (
         "no-match",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+go1.26.8",
+        "default+race+cgo1+go1.26.8",
         common + ["./livecanary", "-run=^TestNoSuchSelectorName$"],
         False,
     ),
     (
         "skip-all-equals",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+go1.26.8",
+        "default+race+cgo1+go1.26.8",
         common + ["./livecanary", "-run=^" + one_name + "$",
                   "-skip=^" + one_name + "$"],
         False,
@@ -1482,7 +1597,7 @@ cases = [
     (
         "posix-class-skip",
         "1", supported_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+go1.26.8",
+        "default+race+cgo1+go1.26.8",
         common + ["./livecanary", "-run",
                   "^(TestSupportedListenerBarriersAndReservation|TestNoMessageDoesNotCountAsCompletedBarrier)$",
                   "-skip", "[[:upper:]]o"],
@@ -1491,7 +1606,7 @@ cases = [
     (
         "slash-subtest-skip",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+go1.26.8",
+        "default+race+cgo1+go1.26.8",
         common + ["./livecanary", "-run", "^TestProbe$",
                   "-skip", "^TestProbe/subtest$"],
         False,
@@ -1499,99 +1614,143 @@ cases = [
     (
         "count-zero",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+go1.26.8",
+        "default+race+cgo1+go1.26.8",
         count_zero_common + ["./livecanary", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "count-two",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+go1.26.8",
+        "default+race+cgo1+go1.26.8",
         count_two_common + ["./livecanary", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "timeout-zero",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+go1.26.8",
+        "default+race+cgo1+go1.26.8",
         timeout_zero_common + ["./livecanary", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "timeout-too-large",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+go1.26.8",
+        "default+race+cgo1+go1.26.8",
         timeout_large_common + ["./livecanary", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "timeout-missing",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+go1.26.8",
+        "default+race+cgo1+go1.26.8",
         no_timeout_common + ["./livecanary", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "timeout-duplicate",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+go1.26.8",
+        "default+race+cgo1+go1.26.8",
         common + ["./livecanary", "-timeout=30s", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "inherited-gorace",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+go1.26.8",
+        "default+race+cgo1+go1.26.8",
         gorace_common + ["./livecanary", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "args-test-selector",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+go1.26.8",
+        "default+race+cgo1+go1.26.8",
         common + ["./livecanary", "-run=^" + one_name + "$", "-args", "-test.run=^Other$"],
         False,
     ),
     (
         "direct-test-selector",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+go1.26.8",
+        "default+race+cgo1+go1.26.8",
         common + ["./livecanary", "-run=^" + one_name + "$", "-test.run=^Other$"],
+        False,
+    ),
+    (
+        "test-list-discovery",
+        "1", one_digest, "experiments/g01-scaleset:./livecanary",
+        "default+race+cgo1+go1.26.8",
+        common + ["./livecanary", "-list", ".", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "exec-wrapper",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+go1.26.8",
+        "default+race+cgo1+go1.26.8",
         common + ["-exec", "true", "./livecanary", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "active-package-init",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "g01_pair_fixture,g01_pair_real_cadence+race+go1.26.8",
+        "g01_pair_fixture,g01_pair_real_cadence+race+cgo1+go1.26.8",
         common + ["-tags=g01_pair_fixture,g01_pair_real_cadence", "./livecanary", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "package-mismatch",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+go1.26.8",
+        "default+race+cgo1+go1.26.8",
         common + ["./liveworker", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "build-mismatch",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+go1.26.8",
+        "default+race+cgo1+go1.26.8",
         common + ["-tags=g01_live", "./livecanary", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "duplicate-package-target",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+go1.26.8",
+        "default+race+cgo1+go1.26.8",
         common + ["./livecanary", "./liveworker", "-run=^" + one_name + "$"],
+        False,
+    ),
+    (
+        "extra-import-path-package",
+        "1", one_digest, "experiments/g01-scaleset:./livecanary",
+        "default+race+cgo1+go1.26.8",
+        common + ["./livecanary",
+                  "github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/liveworker",
+                  "-run=^" + one_name + "$"],
+        False,
+    ),
+    (
+        "benchmark-flag",
+        "1", one_digest, "experiments/g01-scaleset:./livecanary",
+        "default+race+cgo1+go1.26.8",
+        common + ["./livecanary", "-bench=.", "-run=^" + one_name + "$"],
+        False,
+    ),
+    (
+        "benchmark-test-binary-override",
+        "1", one_digest, "experiments/g01-scaleset:./livecanary",
+        "default+race+cgo1+go1.26.8",
+        common + ["./livecanary", "-test.bench=.", "-run=^" + one_name + "$"],
+        False,
+    ),
+    (
+        "cpu-multiplicity",
+        "1", one_digest, "experiments/g01-scaleset:./livecanary",
+        "default+race+cgo1+go1.26.8",
+        common + ["./livecanary", "-cpu=1,2", "-run=^" + one_name + "$"],
+        False,
+    ),
+    (
+        "conflicting-cgo",
+        "1", one_digest, "experiments/g01-scaleset:./livecanary",
+        "default+race+cgo1+go1.26.8",
+        ["CGO_ENABLED=0", *common, "./livecanary", "-run=^" + one_name + "$"],
         False,
     ),
 ]
@@ -1602,7 +1761,7 @@ with tempfile.TemporaryDirectory() as goenv_dir:
         (
             "persisted-goflags",
             "1", one_digest, "experiments/g01-scaleset:./livecanary",
-            "default+race+go1.26.8",
+            "default+race+cgo1+go1.26.8",
             [f"GOENV={goenv}", *common, "./livecanary",
              "-run=^" + one_name + "$"],
             False,
@@ -1655,7 +1814,7 @@ try:
     for toolexec_label, toolexec_command in toolexec_cases:
         sys.argv = [
             "wrapper-probe", "1", one_digest, toolexec_label,
-            "experiments/g01-scaleset:./livecanary", "default+race+go1.26.8",
+            "experiments/g01-scaleset:./livecanary", "default+race+cgo1+go1.26.8",
             *toolexec_command,
         ]
         output = io.StringIO()
@@ -1713,7 +1872,7 @@ try:
     for overlay_label, overlay_command in overlay_cases:
         sys.argv = [
             "wrapper-probe", "1", one_digest, overlay_label,
-            "experiments/g01-scaleset:./livecanary", "default+race+go1.26.8",
+            "experiments/g01-scaleset:./livecanary", "default+race+cgo1+go1.26.8",
             *overlay_command,
         ]
         output = io.StringIO()
@@ -1769,7 +1928,7 @@ try:
     for modfile_label, modfile_command in modfile_cases:
         sys.argv = [
             "wrapper-probe", "1", one_digest, modfile_label,
-            "experiments/g01-scaleset:./livecanary", "default+race+go1.26.8",
+            "experiments/g01-scaleset:./livecanary", "default+race+cgo1+go1.26.8",
             *modfile_command,
         ]
         output = io.StringIO()
@@ -1857,7 +2016,7 @@ try:
     for selector_label, selector_command in selector_guard_cases:
         sys.argv = [
             "wrapper-probe", "1", one_digest, selector_label,
-            "experiments/g01-scaleset:./livecanary", "default+race+go1.26.8",
+            "experiments/g01-scaleset:./livecanary", "default+race+cgo1+go1.26.8",
             *selector_command,
         ]
         output = io.StringIO()
@@ -1896,15 +2055,21 @@ def observe_go_child(*args, **kwargs):
             raise SystemExit(
                 "inherited-gowork: a direct Go child did not receive GOWORK=off"
             )
+        if child_env.get("CGO_ENABLED") != "1":
+            raise SystemExit(
+                "inherited-cgo: a direct Go child did not receive CGO_ENABLED=1"
+            )
         gowork_observed.append(tuple(command[:3]))
     return real_run(*args, **kwargs)
 
 os.environ["GOWORK"] = "/synthetic/external/workspace/go.work"
+inherited_cgo_previous = os.environ.get("CGO_ENABLED")
+os.environ["CGO_ENABLED"] = "0"
 subprocess.run = observe_go_child
 try:
     sys.argv = [
         "wrapper-probe", "1", one_digest, "inherited-gowork",
-        "experiments/g01-scaleset:./livecanary", "default+race+go1.26.8", *(
+        "experiments/g01-scaleset:./livecanary", "default+race+cgo1+go1.26.8", *(
             common + ["./livecanary", "-run=^" + one_name + "$"]
         ),
     ]
@@ -1926,8 +2091,9 @@ try:
     if "GOWORK=off" not in output.getvalue():
         raise SystemExit("inherited-gowork: force-off behavior was not recorded")
     print(
-        "inherited-gowork: passed; synthetic external workspace was overridden; "
-        "both direct Go metadata probes received GOWORK=off before source derivation"
+        "inherited-gowork/cgo: passed; synthetic external workspace and CGO_ENABLED=0 "
+        "were overridden; both direct Go metadata probes received GOWORK=off and "
+        "CGO_ENABLED=1 before source derivation"
     )
 finally:
     subprocess.run = real_run
@@ -1935,6 +2101,10 @@ finally:
         os.environ.pop("GOWORK", None)
     else:
         os.environ["GOWORK"] = inherited_gowork_previous
+    if inherited_cgo_previous is None:
+        os.environ.pop("CGO_ENABLED", None)
+    else:
+        os.environ["CGO_ENABLED"] = inherited_cgo_previous
 skip_stream = json.dumps({"Action": "skip", "Test": "TestSynthetic/subtest"}) + "\n"
 namespace["label"] = "skip-probe"
 validator = namespace.get("validate_test_stream")
@@ -1956,7 +2126,7 @@ inherited_previous = os.environ.get("G01_INPUT_CHILD")
 os.environ["G01_INPUT_CHILD"] = "blocked"
 sys.argv = [
     "wrapper-probe", "1", one_digest, "inherited-child-mode",
-    "experiments/g01-scaleset:./livecanary", "default+race+go1.26.8", *(
+    "experiments/g01-scaleset:./livecanary", "default+race+cgo1+go1.26.8", *(
         common + ["./livecanary", "-run=^" + one_name + "$"]
     ),
 ]
@@ -1983,11 +2153,14 @@ no-match and equals-form skip-all cases were rejected with 0 observed executed
 names before any test body; a livecanary/liveworker package mismatch, tag/build
 mismatch and temporary GOENV-persisted non-empty `GOFLAGS` were rejected before
 source derivation; duplicate package targeting was rejected before derivation;
-the synthetic inherited-workspace probe observed the force-off environment on
-both direct Go metadata probes before derivation; slash-delimited subtest
+the synthetic inherited-workspace/CGO probe observed `GOWORK=off` and
+`CGO_ENABLED=1` on both direct Go metadata probes before derivation;
+slash-delimited subtest
 selectors, `-count=0`, `-count=2`, missing/duplicate/zero/overlarge
 `-timeout`, inherited `GORACE`, `-args`, direct test-binary selector, `-exec`,
-both separated and equals-form `-toolexec`, `-modfile` and `-overlay` overrides,
+benchmark and test-binary benchmark overrides, `-cpu` multiplicity, an extra
+import-path package, conflicting `CGO_ENABLED=0`, both separated and equals-form
+`-toolexec`, `-modfile` and `-overlay` overrides, and `-list` discovery,
 standard `env` assignment/option wrappers, bare and assignment-prefixed shell
 `command go test` wrappers, all separated and equals-form double-dash
 `--run`/`--skip` selectors, active package `init`, and inherited
@@ -2059,8 +2232,276 @@ SHA-256 sets. It invoked only the effective `go env GOFLAGS` and
 the original JSON test subprocess, and the two PR #72 records remained
 correctly gated by their separate reviewed source-tree pin:
 
+The two historical PR #72 output lines below retain the pre-correction
+three-part build labels because that immutable replay predates the current
+`CGO_ENABLED=1` pin; every current prescription and metadata identity above
+uses the four-part `tags+race+cgo+toolchain` form.
+
 ```text
 source-derived prescription replay: passed; 26 non-PR72 wrapper records validated without go test -list or test-body execution
+```
+
+### Current exact-head double-dash and execution-set correction
+
+The exact starting packet head for this correction was
+`22a2923033c875ddd4f755774f79f60b94649449`. The red reproduction below runs
+only the immutable prior wrapper source with a synthetic `--overlay` input and
+stops at its first attempted Go child. It proves that the prior predicate let
+the bypass reach `go env GOFLAGS` before any overlay/flag rejection; it does
+not run the metadata query, test binary or test body. The current wrapper
+regression then covers separated and equals-form equivalents for tool, module,
+overlay, timeout, exec, args, benchmark, selector, CPU and build flags, and
+requires empty output and zero direct Go children for every case.
+
+```sh
+set -euo pipefail
+python3 - <<'PY'
+import io
+import subprocess
+import sys
+from contextlib import redirect_stdout
+from pathlib import Path
+
+prior_head = "22a2923033c875ddd4f755774f79f60b94649449"
+previous = subprocess.check_output(
+    ["git", "show", f"{prior_head}:docs/evidence/g01-recovery-packet.md"],
+    text=True,
+)
+wrapper_start = previous.index("\nimport hashlib\n", previous.index("go_test_checked()")) + 1
+wrapper_end = previous.index("\nPY\n}", wrapper_start)
+previous_wrapper = previous[wrapper_start:wrapper_end]
+if "double_dash_names" in previous_wrapper:
+    raise SystemExit("red reproduction setup changed: prior wrapper already had generic double-dash rejection")
+
+class StopAtGoChild(Exception):
+    pass
+
+real_run = subprocess.run
+go_children = []
+def observe_prior_go_child(*args, **kwargs):
+    command = args[0] if args else kwargs.get("args", [])
+    if command and command[0] == "go":
+        go_children.append(tuple(command))
+        raise StopAtGoChild
+    return real_run(*args, **kwargs)
+
+subprocess.run = observe_prior_go_child
+try:
+    sys.argv = [
+        "wrapper-probe", "1",
+        "9aef95c84ffd42ad632040498c628c78072ce94f5cc2f6af8493fcffc233b707",
+        "red-double-dash-overlay", "experiments/g01-scaleset:./livecanary",
+        "default+race+go1.26.8", "GOTOOLCHAIN=go1.26.8", "go", "test",
+        "-C", "experiments/g01-scaleset", "-race", "-count=1", "-timeout=45s",
+        "./livecanary", "-run=^TestNoMessageDoesNotCountAsCompletedBarrier$",
+        "--overlay=/synthetic/overlay.json",
+    ]
+    output = io.StringIO()
+    try:
+        with redirect_stdout(output):
+            exec(compile(previous_wrapper, "<prior-wrapper>", "exec"), {"__name__": "__main__"})
+    except StopAtGoChild:
+        pass
+finally:
+    subprocess.run = real_run
+if go_children != [("go", "env", "GOFLAGS")]:
+    raise SystemExit(f"red reproduction did not stop at prior go env: {go_children!r}")
+if output.getvalue():
+    raise SystemExit("red reproduction emitted a result before the prior go env child")
+print(
+    f"RED double-dash bypass: prior {prior_head} reached go env GOFLAGS before rejecting synthetic --overlay; no metadata/test body ran"
+)
+
+packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
+current_start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
+current_end = packet.index("\nPY\n}", current_start)
+current_wrapper = packet[current_start:current_end]
+current_wrapper = current_wrapper[:current_wrapper.index("run_result = subprocess.run")]
+common = [
+    "GOTOOLCHAIN=go1.26.8", "go", "test", "-C", "experiments/g01-scaleset",
+    "-race", "-count=1", "-timeout=45s", "./livecanary",
+    "-run=^TestNoMessageDoesNotCountAsCompletedBarrier$",
+]
+cases = {
+    "toolexec-separated": ["--toolexec", "/synthetic/toolexec"],
+    "toolexec-equals": ["--toolexec=/synthetic/toolexec"],
+    "modfile-separated": ["--modfile", "/synthetic/alternate.mod"],
+    "modfile-equals": ["--modfile=/synthetic/alternate.mod"],
+    "overlay-separated": ["--overlay", "/synthetic/overlay.json"],
+    "overlay-equals": ["--overlay=/synthetic/overlay.json"],
+    "timeout-separated": ["--timeout", "45s"],
+    "timeout-equals": ["--timeout=45s"],
+    "exec-separated": ["--exec", "true"],
+    "exec-equals": ["--exec=true"],
+    "args-separated": ["--args", "-test.run=^Other$"],
+    "args-equals": ["--args=-test.run=^Other$"],
+    "bench-separated": ["--bench", "."],
+    "bench-equals": ["--bench=."],
+    "test-bench-equals": ["--test.bench=."],
+    "selector-run-equals": ["--run=^TestNoMessageDoesNotCountAsCompletedBarrier$"],
+    "selector-skip-equals": ["--skip=^TestNoMessageDoesNotCountAsCompletedBarrier$"],
+    "cpu-equals": ["--cpu=1,2"],
+    "tags-equals": ["--tags=synthetic"],
+    "gcflags-equals": ["--gcflags=all=-N"],
+}
+real_run = subprocess.run
+current_go_children = []
+def reject_current_go_child(*args, **kwargs):
+    command = args[0] if args else kwargs.get("args", [])
+    if command and command[0] == "go":
+        current_go_children.append(tuple(command))
+        raise AssertionError("current generic double-dash guard started a Go child")
+    return real_run(*args, **kwargs)
+
+subprocess.run = reject_current_go_child
+try:
+    for label, option in cases.items():
+        sys.argv = [
+            "wrapper-probe", "1",
+            "9aef95c84ffd42ad632040498c628c78072ce94f5cc2f6af8493fcffc233b707",
+            label, "experiments/g01-scaleset:./livecanary",
+            "default+race+cgo1+go1.26.8", *common, *option,
+        ]
+        output = io.StringIO()
+        try:
+            with redirect_stdout(output):
+                exec(compile(current_wrapper, "<current-wrapper>", "exec"), {"__name__": "__main__"})
+        except SystemExit as error:
+            if output.getvalue():
+                raise SystemExit(f"{label}: guard emitted a result before rejection")
+            print(f"{label}: rejected before any Go child: {error}")
+        else:
+            raise SystemExit(f"{label}: equivalent double-dash flag was accepted")
+finally:
+    subprocess.run = real_run
+if current_go_children:
+    raise SystemExit(
+        "current double-dash regression started a Go child: "
+        + repr(current_go_children)
+    )
+print(
+    f"double-dash regression: passed; {len(cases)} equivalent tool/module/overlay/timeout/exec/args/benchmark/selector/CPU/build forms rejected before any Go child or result recording"
+)
+PY
+```
+
+The immutable prior-head red probe reached exactly `go env GOFLAGS` before any
+metadata query, while every current synthetic equivalent spelling rejected
+with empty pre-guard output and zero direct Go children. This is static/wrapper
+evidence only: no Go test body, `go test -list`, live operation, credential or
+private path was used.
+
+Recorded red/green output:
+
+```text
+RED double-dash bypass: prior 22a2923033c875ddd4f755774f79f60b94649449 reached go env GOFLAGS before rejecting synthetic --overlay; no metadata/test body ran
+double-dash regression: passed; 20 equivalent tool/module/overlay/timeout/exec/args/benchmark/selector/CPU/build forms rejected before any Go child or result recording
+```
+
+The same immutable prior-head probe independently covered the remaining
+single-dash bypasses. It runs the prior wrapper only until its first `go env`
+child for benchmark, test-binary benchmark, CPU, extra import-path and
+inherited-CGO inputs, and checks the prior source helper omitted executable
+`Example` declarations; no prior metadata query or test binary is allowed to
+start:
+
+```sh
+set -euo pipefail
+python3 - <<'PY'
+import io
+import os
+import subprocess
+import sys
+from contextlib import redirect_stdout
+from pathlib import Path
+
+prior_head = "22a2923033c875ddd4f755774f79f60b94649449"
+previous = subprocess.check_output(
+    ["git", "show", f"{prior_head}:docs/evidence/g01-recovery-packet.md"],
+    text=True,
+)
+wrapper_start = previous.index("\nimport hashlib\n", previous.index("go_test_checked()")) + 1
+wrapper_end = previous.index("\nPY\n}", wrapper_start)
+previous_wrapper = previous[wrapper_start:wrapper_end]
+if "benchmark execution or benchmark overrides" in previous_wrapper:
+    raise SystemExit("red reproduction setup changed: prior wrapper already rejected benchmarks")
+if "-cpu multiplicity overrides" in previous_wrapper:
+    raise SystemExit("red reproduction setup changed: prior wrapper already rejected CPU")
+if 'value == "." or value.startswith("./")' not in previous_wrapper:
+    raise SystemExit("red reproduction setup changed: prior package scan was not the narrow form")
+if "CGO_ENABLED" in previous_wrapper:
+    raise SystemExit("red reproduction setup changed: prior wrapper already pinned CGO")
+
+class StopAtGoChild(Exception):
+    pass
+
+real_run = subprocess.run
+go_children = []
+def stop_at_go_child(*args, **kwargs):
+    command = args[0] if args else kwargs.get("args", [])
+    if command and command[0] == "go":
+        go_children.append(tuple(command))
+        raise StopAtGoChild
+    return real_run(*args, **kwargs)
+
+common = [
+    "GOTOOLCHAIN=go1.26.8", "go", "test", "-C", "experiments/g01-scaleset",
+    "-race", "-count=1", "-timeout=45s", "./livecanary",
+    "-run=^TestNoMessageDoesNotCountAsCompletedBarrier$",
+]
+cases = {
+    "bench": ["-bench=."],
+    "test-bench": ["-test.bench=."],
+    "cpu": ["-cpu=1,2"],
+    "extra-import": ["github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/liveworker"],
+}
+inherited_cgo_previous = os.environ.get("CGO_ENABLED")
+os.environ["CGO_ENABLED"] = "0"
+subprocess.run = stop_at_go_child
+try:
+    for label, suffix in cases.items():
+        sys.argv = [
+            "wrapper-probe", "1",
+            "9aef95c84ffd42ad632040498c628c78072ce94f5cc2f6af8493fcffc233b707",
+            "red-" + label, "experiments/g01-scaleset:./livecanary",
+            "default+race+go1.26.8", *common, *suffix,
+        ]
+        try:
+            with redirect_stdout(io.StringIO()):
+                exec(compile(previous_wrapper, "<prior-wrapper>", "exec"), {"__name__": "__main__"})
+        except StopAtGoChild:
+            pass
+        else:
+            raise SystemExit(f"red-{label}: prior wrapper did not reach a Go child")
+        if go_children[-1] != ("go", "env", "GOFLAGS"):
+            raise SystemExit(f"red-{label}: unexpected first Go child {go_children[-1]!r}")
+finally:
+    subprocess.run = real_run
+    if inherited_cgo_previous is None:
+        os.environ.pop("CGO_ENABLED", None)
+    else:
+        os.environ["CGO_ENABLED"] = inherited_cgo_previous
+
+helper_start = previous_wrapper.index("def skip_source_ignored")
+helper_end = previous_wrapper.index("\nall_test_names = []", helper_start)
+namespace = {"label": "prior-example-red"}
+exec(compile(previous_wrapper[helper_start:helper_end], "<prior-source-name>", "exec"), namespace)
+source_names = namespace["source_test_names"]
+with __import__("tempfile").TemporaryDirectory() as directory:
+    example = Path(directory) / "example_test.go"
+    example.write_text("package p\nfunc ExampleWidget() {}\n", encoding="utf-8")
+    if source_names(example) != []:
+        raise SystemExit("red-example: prior parser unexpectedly included Example")
+print(
+    f"RED pre-correction bypasses: prior {prior_head} reached go env for bench/test-bench/CPU/extra-import and inherited CGO cases; prior source parser omitted Example; no test body ran"
+)
+PY
+```
+
+Recorded red output:
+
+```text
+RED pre-correction bypasses: prior 22a2923033c875ddd4f755774f79f60b94649449 reached go env for bench/test-bench/CPU/extra-import and inherited CGO cases; prior source parser omitted Example; no test body ran
 ```
 
 The tagged worker command is a complete `./liveworker` `^TestPaired` partition
@@ -2554,7 +2995,7 @@ repo_root = Path(
 if invocation_root != repo_root:
     raise SystemExit("run this selector audit from the repository root")
 
-env = {**os.environ, "GOTOOLCHAIN": "go1.26.8", "GOWORK": "off"}
+env = {**os.environ, "CGO_ENABLED": "1", "GOTOOLCHAIN": "go1.26.8", "GOWORK": "off"}
 effective_goflags = subprocess.run(
     ["go", "env", "GOFLAGS"], cwd=repo_root, env=env, text=True,
     capture_output=True, check=False,
@@ -2949,7 +3390,7 @@ The package-level initialization guard also resolves the effective source set
 for every package/build combination used by the wrapper. It pins the reviewed
 module subtree, requires a clean source path with no tracked, untracked or
 ignored paths (the status probe uses `--ignored=matching`), pins `GOWORK=off`
-before each `go list -json -test` metadata query, includes ordinary and test
+and `CGO_ENABLED=1` before each `go list -json -test` metadata query, includes ordinary and test
 Go files selected by the exact build tags, and rejects any active `func init`
 before source derivation. Because selector validation parses those source files
 instead of invoking `go test -list`, effectful package-level variable
@@ -3000,6 +3441,7 @@ for label, package, tags in cases:
     env = {
         **os.environ,
         "GOFLAGS": "",
+        "CGO_ENABLED": "1",
         "GOTOOLCHAIN": "go1.26.8",
         "GOWORK": "off",
     }
@@ -3049,7 +3491,7 @@ for label, package, tags in cases:
         if re.search(r"(?m)^\s*func\s+init\s*\(", source):
             raise SystemExit(f"{label}: active package init was not reviewed")
     print(f"{label}: passed; active source/test files contain no package init")
-print("package-initialization guard audit: passed; 7 reviewed package/build sets; source tree pinned and no active init effects")
+print("package-initialization guard audit: passed; 7 reviewed package/build sets; source tree pinned, CGO_ENABLED=1 bound, and no active init effects")
 PY
 ```
 
@@ -3062,6 +3504,60 @@ probe separately enabled the reviewed
 `g01_pair_real_cadence` tag and rejected its active `init` before source derivation,
 demonstrating the fail-closed path without executing it.
 
+The immutable red witness for root [4000820538](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000820538) was run against packet head
+`22a2923033c875ddd4f755774f79f60b94649449`: its source guard recognized only an
+explicit `func init`, and its source-name helper accepted a synthetic
+package-variable initializer without a separate effect check. The current
+green boundary is stronger and conservative: selector names are derived from
+the exact `go list -json -test` source metadata, the wrapper contains no
+`go test -list` child, and the focused synthetic package-variable/imported-init
+probe therefore has no test-binary path on which those initializers could run.
+
+```sh
+set -euo pipefail
+python3 - <<'PY'
+import subprocess
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+prior_head = "22a2923033c875ddd4f755774f79f60b94649449"
+previous = subprocess.check_output(
+    ["git", "show", f"{prior_head}:docs/evidence/g01-recovery-packet.md"],
+    text=True,
+)
+wrapper_start = previous.index("\nimport hashlib\n", previous.index("go_test_checked()")) + 1
+wrapper_end = previous.index("\nPY\n}", wrapper_start)
+previous_wrapper = previous[wrapper_start:wrapper_end]
+if "func" not in previous_wrapper or "init" not in previous_wrapper or "source_test_names" not in previous_wrapper:
+    raise SystemExit("red reproduction setup changed: prior source guard/parser shape was not found")
+helper_start = previous_wrapper.index("def skip_source_ignored")
+helper_end = previous_wrapper.index("\nall_test_names = []", helper_start)
+namespace = {"label": "prior-source-init-red"}
+exec(compile(previous_wrapper[helper_start:helper_end], "<prior-source-derivation>", "exec"), namespace)
+source_names = namespace["source_test_names"]
+synthetic = (
+    "package p\n"
+    "var effect = touchRunner()\n"
+    "func touchRunner() int { return 1 }\n"
+    "func TestSynthetic(t *testing.T) {}\n"
+)
+with TemporaryDirectory() as directory:
+    path = Path(directory) / "synthetic_test.go"
+    path.write_text(synthetic, encoding="utf-8")
+    if source_names(path) != ["TestSynthetic"]:
+        raise SystemExit("red reproduction setup changed: prior source parser no longer accepted synthetic package var")
+print(
+    f"RED source/init package-variable gap: prior {prior_head} checked explicit func init only; synthetic package var was accepted by source parsing; no runtime child ran"
+)
+PY
+```
+
+Recorded red output:
+
+```text
+RED source/init package-variable gap: prior 22a2923033c875ddd4f755774f79f60b94649449 checked explicit func init only; synthetic package var was accepted by source parsing; no runtime child ran
+```
+
 The source-derived selector boundary was separately regression-tested with a
 synthetic package-level effect and an imported `init` path. The parser only
 reads declarations, and the extracted wrapper body contains no `go test -list`
@@ -3071,6 +3567,7 @@ is checked:
 ```sh
 set -euo pipefail
 python3 - <<'PY'
+import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -3084,6 +3581,32 @@ helper_start = wrapper.index("def skip_source_ignored")
 helper_end = wrapper.index("\nall_test_names = []", helper_start)
 namespace = {"label": "synthetic-init-boundary"}
 exec(compile(wrapper[helper_start:helper_end], "<source-derivation>", "exec"), namespace)
+prior_head = "22a2923033c875ddd4f755774f79f60b94649449"
+previous = subprocess.check_output(
+    ["git", "show", f"{prior_head}:docs/evidence/g01-recovery-packet.md"],
+    text=True,
+)
+prior_start = previous.index("\nimport hashlib\n", previous.index("go_test_checked()")) + 1
+prior_end = previous.index("\nPY\n}", prior_start)
+prior_wrapper = previous[prior_start:prior_end]
+prior_helper_start = prior_wrapper.index("def skip_source_ignored")
+prior_helper_end = prior_wrapper.index("\nall_test_names = []", prior_helper_start)
+prior_namespace = {"label": "prior-source-name-red"}
+exec(compile(prior_wrapper[prior_helper_start:prior_helper_end], "<prior-source-name>", "exec"), prior_namespace)
+with TemporaryDirectory() as prior_directory:
+    prior_names = Path(prior_directory) / "names_test.go"
+    prior_names.write_text(
+        "package p\n"
+        "func Test(t *testing.T) {}\n"
+        "func Test1(t *testing.T) {}\n"
+        "func Test_Foo(t *testing.T) {}\n",
+        encoding="utf-8",
+    )
+    if prior_namespace.get("source_test_names")(prior_names) != []:
+        raise SystemExit("red reproduction setup changed: prior name parser already accepted all Go isTest forms")
+print(
+    f"RED source-name gap: prior {prior_head} omitted Test, Test1 and Test_Foo from source-derived names"
+)
 with TemporaryDirectory() as directory:
     root = Path(directory) / "root_test.go"
     imported = Path(directory) / "imported.go"
@@ -3103,7 +3626,32 @@ with TemporaryDirectory() as directory:
         raise SystemExit("synthetic effectful initializer source derivation failed")
     if namespace.get("source_test_names")(imported):
         raise SystemExit("synthetic imported init unexpectedly looked like a test")
+    names = Path(directory) / "names_test.go"
+    names.write_text(
+        "package p\n"
+        "func Test(t *testing.T) {}\n"
+        "func Test1(t *testing.T) {}\n"
+        "func Test_Foo(t *testing.T) {}\n",
+        encoding="utf-8",
+    )
+    source_names = namespace.get("source_test_names")
+    if source_names(names) != ["Test", "Test1", "Test_Foo"]:
+        raise SystemExit("Go isTest name predicate regression failed")
+    example = Path(directory) / "example_test.go"
+    example.write_text(
+        "package p\n"
+        "func ExampleWidget() {}\n",
+        encoding="utf-8",
+    )
+    try:
+        source_names(example)
+    except SystemExit as error:
+        if "executable Example declaration" not in str(error):
+            raise
+    else:
+        raise SystemExit("executable Example declaration was not rejected")
 print("source-init boundary regression: passed; effectful package var and imported init were parsed only; wrapper contains no go test -list child")
+print("source-name regression: passed; Go isTest accepts Test, Test1 and Test_Foo; executable Example declarations fail closed")
 PY
 ```
 
@@ -3112,6 +3660,13 @@ initializer and an imported `init` function were present only as source text,
 the parser derived the top-level test name, and the wrapper contained no
 `go test -list` child. No synthetic initializer, Go test body or live
 operation executed.
+
+The immutable prior-head source-name probe recorded the omission red witness
+before the current `isTest` correction:
+
+```text
+RED source-name gap: prior 22a2923033c875ddd4f755774f79f60b94649449 omitted Test, Test1 and Test_Foo from source-derived names
+```
 
 ### Diff and staged secret/private-path scan
 
@@ -3161,6 +3716,42 @@ fail-closed rejection path. The recorded output was:
 staged secret/private-path early-match regression probe: passed; first added line was detected and would be rejected
 diff and staged secret/private-path checks: passed; working/staged diff checks exited 0, one staged packet path, no added-line matches, and early-match rejection probe passed
 ```
+
+The packet also runs a command-line scan over every fenced shell prescription
+to fail closed if a documentation correction accidentally adds a live App,
+runner, Docker, Lima, Keychain, launchd or workflow operation. Historical
+prose and source URLs are not treated as commands; only non-comment shell lines
+are inspected:
+
+```sh
+set -euo pipefail
+python3 - <<'PY'
+import re
+from pathlib import Path
+
+source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
+forbidden = re.compile(
+    r"^\s*(?:docker\s+(?:run|rm|kill|exec|system\s+prune|context)|"
+    r"limactl\b|launchctl\b|security\s+|gh\s+(?:api|run|workflow)\b)"
+)
+in_shell = False
+matches = []
+for number, line in enumerate(source.splitlines(), start=1):
+    if line.startswith("```"):
+        in_shell = not in_shell
+        continue
+    if not in_shell or not line.strip() or line.lstrip().startswith("#"):
+        continue
+    if forbidden.search(line):
+        matches.append(f"line {number}: {line.strip()}")
+if matches:
+    raise SystemExit("forbidden live command(s) found:\n" + "\n".join(matches))
+print("forbidden-live-command scan: passed; no live App/runner/Docker/Lima/Keychain/launchd/workflow command appears in executable shell prescriptions")
+PY
+```
+
+The forbidden-live-command scan exited 0; no live operation, workflow replay,
+credential access or destructive cleanup command was introduced.
 
 No check is claimed against an unrecorded SHA. The staged correction diff is
 distinct from the cumulative PR #78 diff; the cumulative history still
@@ -3334,3 +3925,22 @@ The Codex finding on the exact prior packet head
 | Finding and immutable source | Reproduction and disposition |
 |---|---|
 | [4000820533](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000820533), source [ec5eb8087420bbbbb2a8ccf5c5df190b3c644895](https://github.com/1XP-AI/gh-runnerd/commit/ec5eb8087420bbbbb2a8ccf5c5df190b3c644895) | Reproduced: the prior static shell and logical-command selector regexes did not discover `command go test ./livecanary -run ...` or `GOTOOLCHAIN=go1.26.8 command go test ./livecanary -skip=...`, so a wrapper-only count could remain 28; the prior wrapper had no explicit command-prefix guard. Corrected: both audits now discover bare and assignment-prefixed `command [options] go test` forms, while the wrapper and package/build metadata audit reject any `command` prefix before the first Go child. Focused red/green probes covered the two exact forms, option-bearing discovery and no-Go-child rejection with no pre-guard output; no Go test body, live operation, credential or private path was used. |
+
+### Current exact-head Luna/Codex finding ledger
+
+These nine actionable roots were reproduced against immutable prior packet
+heads and are carried with their discussion URL and exact source commit. The
+rows describe only offline/static or wrapper evidence; they do not resolve the
+GitHub discussions or claim a live result.
+
+| Finding and immutable source | Red reproduction and minimal correction | Focused result and boundary |
+|---|---|---|
+| [4000820530](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000820530), source [36ec84b27c934a25484b0a5391af0a20c7643912](https://github.com/1XP-AI/gh-runnerd/commit/36ec84b27c934a25484b0a5391af0a20c7643912) | The immutable prior wrapper had no `-toolexec` guard; the synthetic red probe records its first Go child as `go env GOFLAGS`. The current wrapper rejects both separated and equals-form tool hooks before any Go child. | No tool hook, metadata query, test body or result recording ran in the focused current regression. |
+| [4000820538](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000820538), source [22a2923033c875ddd4f755774f79f60b94649449](https://github.com/1XP-AI/gh-runnerd/commit/22a2923033c875ddd4f755774f79f60b94649449) | The exact prior guard scanned only `func init`; the correction derives names from `go list -json -test` source metadata and never starts `go test -list`, so package-variable and imported init paths cannot execute during validation. | Synthetic effectful package-variable and imported-init source was parsed only; no initializer or Go test body ran. |
+| [4000935440](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000935440), source [22a2923033c875ddd4f755774f79f60b94649449](https://github.com/1XP-AI/gh-runnerd/commit/22a2923033c875ddd4f755774f79f60b94649449) | The immutable starting wrapper rejected only selected single-dash forms, and the red `--overlay` probe reached `go env GOFLAGS`. The correction rejects every `--...` Go spelling before the first Go child, including tool/module/overlay/timeout/exec/args, benchmark, selector and build overrides. | Twenty current synthetic separated/equals forms rejected with empty output and zero Go children; no test body, live operation, credential or private path was used. |
+| [4000935441](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000935441), source [22a2923033c875ddd4f755774f79f60b94649449](https://github.com/1XP-AI/gh-runnerd/commit/22a2923033c875ddd4f755774f79f60b94649449) | The prior source parser required an uppercase fifth character and omitted valid `Test`, `Test1` and `Test_Foo` declarations. The corrected parser uses Go's `isTest` condition that accepts an empty suffix or any first suffix rune that is not lowercase. | Focused source-only regression retained all three names; no package execution or `go test -list` ran. |
+| [4000935444](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000935444), source [22a2923033c875ddd4f755774f79f60b94649449](https://github.com/1XP-AI/gh-runnerd/commit/22a2923033c875ddd4f755774f79f60b94649449) | The prior wrapper accepted benchmark-enabling `-bench` and test-binary `-test.bench` overrides while validating only `Test*` events. The correction rejects both benchmark families and all equivalent double-dash forms before metadata. | Synthetic `-bench=.` and `-test.bench=.` cases rejected before source derivation; no benchmark or test body ran. |
+| [4000935445](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000935445), source [22a2923033c875ddd4f755774f79f60b94649449](https://github.com/1XP-AI/gh-runnerd/commit/22a2923033c875ddd4f755774f79f60b94649449) | The prior build identity omitted effective cgo mode. The wrapper now pins `CGO_ENABLED=1` before metadata, rejects a conflicting command value, passes the same environment to metadata and execution and binds `cgo1` into every prescription build identity. | Inherited `CGO_ENABLED=0` was overridden on both direct metadata probes; conflicting command input rejected before any Go child. |
+| [4000935448](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000935448), source [22a2923033c875ddd4f755774f79f60b94649449](https://github.com/1XP-AI/gh-runnerd/commit/22a2923033c875ddd4f755774f79f60b94649449) | The prior wrapper accepted `-cpu=1,2`, while set-based event validation could collapse repeated run/pass events. The correction rejects `-cpu` and every equivalent double-dash spelling before metadata. | Synthetic CPU multiplicity input rejected before source derivation; no repeated execution or event stream was accepted. |
+| [4000935449](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000935449), source [22a2923033c875ddd4f755774f79f60b94649449](https://github.com/1XP-AI/gh-runnerd/commit/22a2923033c875ddd4f755774f79f60b94649449) | The prior package scan counted only `.` and `./...`, allowing an extra module-qualified import path. The correction parses every non-flag positional argument, requires exactly one package argument before metadata and retains exact `-C` and package identity checks. | Synthetic relative-plus-import-path targeting rejected before `go env` or `go list`; no second package initialized or ran. |
+| [4000964602](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000964602), source [22a2923033c875ddd4f755774f79f60b94649449](https://github.com/1XP-AI/gh-runnerd/commit/22a2923033c875ddd4f755774f79f60b94649449) | The prior source set omitted executable `Example` functions even though an unfiltered prescription executes them. The conservative correction rejects any top-level `Example` declaration before claiming a set digest. | Focused synthetic `ExampleWidget` declaration rejected before a digest or result was recorded; no example body ran. |
