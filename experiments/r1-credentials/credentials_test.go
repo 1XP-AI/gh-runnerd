@@ -303,6 +303,42 @@ func TestValidationReportsCancellationAfterCommitCallback(t *testing.T) {
 	}
 }
 
+func TestValidationCommitUsesCredentialExpiryDeadlineAndAbortsAtBoundary(t *testing.T) {
+	pemBytes := fixturePEM(t)
+	expiresAt := time.Now().Add(300 * time.Millisecond)
+	source := NewManualSourceWithExpiry(fixtureAppID, pemBytes, expiresAt)
+	api := fixtureAPIValue()
+	var callbackDeadline time.Time
+	var callbackErr error
+	commitApplied := false
+
+	got, err := Validate(context.Background(), fixtureConfig(), source, api, func(callbackCtx context.Context, _ ValidatedBinding) error {
+		var ok bool
+		callbackDeadline, ok = callbackCtx.Deadline()
+		if !ok {
+			return errors.New("commit context has no expiry deadline")
+		}
+		if !callbackDeadline.Equal(expiresAt) {
+			return errors.New("commit context deadline does not match credential expiry")
+		}
+		<-callbackCtx.Done()
+		callbackErr = callbackCtx.Err()
+		if !errors.Is(callbackErr, context.DeadlineExceeded) {
+			return errors.New("commit context ended for an unexpected reason")
+		}
+		if callbackCtx.Err() == nil {
+			commitApplied = true
+		}
+		return callbackErr
+	})
+	if !errors.Is(err, ErrExpired) || !reflect.DeepEqual(got, ValidatedBinding{}) {
+		t.Fatalf("expiry during commit was not terminal: binding=%+v err=%v", got, err)
+	}
+	if !callbackDeadline.Equal(expiresAt) || !errors.Is(callbackErr, context.DeadlineExceeded) || commitApplied {
+		t.Fatalf("commit callback did not abort transactionally at expiry: deadline=%v want=%v callbackErr=%v applied=%t", callbackDeadline, expiresAt, callbackErr, commitApplied)
+	}
+}
+
 func TestValidationRejectsTypedNilSourceAndAdapter(t *testing.T) {
 	var nilSource *sourceFixture
 	var source CredentialSource = nilSource
