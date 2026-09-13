@@ -190,19 +190,28 @@ the pre-`-skip` candidates, so the wrapper removes either `-skip REGEXP` or
 the names matched by that skip expression, and subtracts those names before
 count and digest validation; slash-delimited subtest skip expressions are
 rejected because top-level `-list` output cannot prove their subtest set. Each
-prescription also carries an expected
-package identity (`module-directory:package`) and build configuration (tag set,
-race mode and `GOTOOLCHAIN`); the wrapper queries the effective `go env
-GOFLAGS`, including GOENV/configuration, rejects non-empty output, and then
-pins `GOFLAGS=` for both list probes and the original command. The wrapper
-recomputes both from the original command and fails closed before listing if
-either differs. It rejects non-positive `-count` values and inherited or
-command-supplied fixture child-mode variables before either list probe or the
-original command. A command failure, unexpected list output, zero expected
-names, invalid Go/RE2 syntax, count mismatch or set mismatch stops before any
-test body runs; the set digest and metadata are recorded beside each
-prescription so renamed, removed, build-tagged, newly unskipped or
-cross-package tests fail closed.
+prescription also carries an expected package identity
+(`module-directory:package`) and build configuration (tag set, race mode and
+`GOTOOLCHAIN`). Before either list probe, the wrapper resolves the active
+package and test source files with `go list -json -test`, requires the
+reviewed immutable `experiments/g01-scaleset` source tree, and fails closed if
+any active file declares `func init`; the separate `TestMain` source audit
+below covers the one package-level test initializer. This is the explicit
+package-initialization guard: a source-tree or build-tag change requires a new
+review before list validation can proceed. The wrapper queries the effective
+`go env GOFLAGS`, including GOENV/configuration, rejects non-empty output, and
+then pins `GOFLAGS=` for both list probes and the original command. Race-mode
+prescriptions reject inherited or command-supplied `GORACE` before either list
+probe or test execution. Exactly one `-count=1` and one positive bounded
+`-timeout` (at most 300 seconds) are required; `-args` and test-binary
+selector/count/timeout overrides are rejected. The execution command adds a
+wrapper-controlled `-json` stream and fails closed on malformed output,
+non-empty stderr or any Go test `Action` of `skip`, including skipped
+subtests. A command failure, unexpected list output, zero expected names,
+invalid Go/RE2 syntax, count/timeout mismatch, skipped test, or set mismatch
+stops before an unvalidated result is recorded; the set digest and metadata
+are recorded beside each prescription so renamed, removed, build-tagged,
+newly unskipped or cross-package tests fail closed.
 
 ```sh
 set -euo pipefail
@@ -211,14 +220,17 @@ set -euo pipefail
 # Invocation metadata is: package ID module-dir:package, then build ID
 # tags+race-mode+toolchain (for example,
 # experiments/g01-scaleset:./livecanary default+race+go1.26.8).
-# The wrapper lists with the same build flags before it runs the original command.
+# The wrapper checks package initialization/build state, lists with the same
+# build flags, then runs the original command with its own JSON stream.
 go_test_checked() {
   python3 - "$@" <<'PY'
 import hashlib
+import json
 import os
 import re
 import subprocess
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 if len(sys.argv) < 7:
@@ -357,6 +369,117 @@ if actual_build != expected_build:
     raise SystemExit(
         f"{label}: expected build {expected_build}, observed {actual_build}"
     )
+if race_identity == "race" and "GORACE" in env:
+    raise SystemExit(
+        f"{label}: inherited or command-supplied GORACE is not allowed in race mode"
+    )
+
+reviewed_module_tree = "08c7830de7bc5120d1302d7ba6df162abd582315"
+
+
+def json_objects(raw, phase):
+    decoder = json.JSONDecoder()
+    position = 0
+    objects = []
+    while position < len(raw):
+        while position < len(raw) and raw[position].isspace():
+            position += 1
+        if position >= len(raw):
+            break
+        try:
+            value, position = decoder.raw_decode(raw, position)
+        except json.JSONDecodeError:
+            raise SystemExit(f"{label}: {phase} emitted invalid JSON")
+        if not isinstance(value, dict):
+            raise SystemExit(f"{label}: {phase} emitted a non-object JSON value")
+        objects.append(value)
+    if not objects:
+        raise SystemExit(f"{label}: {phase} emitted no package metadata")
+    return objects
+
+
+def package_initialization_guard():
+    source_tree = subprocess.run(
+        ["git", "rev-parse", f"HEAD:{module_dir}"],
+        cwd=repo_root,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if source_tree.returncode != 0 or source_tree.stderr.strip():
+        raise SystemExit(f"{label}: reviewed source-tree query failed")
+    if source_tree.stdout.strip() != reviewed_module_tree:
+        raise SystemExit(
+            f"{label}: package-initialization guard requires reviewed source tree"
+        )
+    source_status = subprocess.run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all", "--", module_dir],
+        cwd=repo_root,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if source_status.returncode != 0 or source_status.stderr.strip():
+        raise SystemExit(f"{label}: package source status query failed")
+    if source_status.stdout.strip():
+        raise SystemExit(
+            f"{label}: package-initialization guard requires a clean source tree"
+        )
+    list_command = ["go", "list", "-C", module_dir, "-json", "-test"]
+    if race_identity == "race":
+        list_command.append("-race")
+    if expected_tags != "default":
+        list_command.append("-tags=" + expected_tags)
+    list_command.append(package_value)
+    metadata = subprocess.run(
+        list_command,
+        cwd=repo_root,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if metadata.returncode != 0 or metadata.stderr.strip():
+        raise SystemExit(f"{label}: package-initialization metadata query failed")
+    packages = [
+        item
+        for item in json_objects(metadata.stdout, "package-initialization metadata")
+        if item.get("ForTest") is None
+        and not item.get("ImportPath", "").endswith(".test")
+    ]
+    if len(packages) != 1:
+        raise SystemExit(
+            f"{label}: package-initialization metadata was ambiguous"
+        )
+    package = packages[0]
+    package_dir = Path(package.get("Dir", "")).resolve()
+    try:
+        package_dir.relative_to(repo_root / module_dir)
+    except ValueError:
+        raise SystemExit(f"{label}: package source escaped the reviewed module")
+    source_files = []
+    for key in ("GoFiles", "CgoFiles", "TestGoFiles", "XTestGoFiles"):
+        values = package.get(key, [])
+        if not isinstance(values, list):
+            raise SystemExit(f"{label}: package file metadata was malformed")
+        source_files.extend(values)
+    if not source_files:
+        raise SystemExit(f"{label}: package-initialization source set was empty")
+    for name in source_files:
+        source_path = (package_dir / name).resolve()
+        try:
+            source_path.relative_to(package_dir)
+        except ValueError:
+            raise SystemExit(f"{label}: package source file escaped its directory")
+        if not source_path.is_file():
+            raise SystemExit(f"{label}: package source file was missing")
+        source = source_path.read_text(encoding="utf-8")
+        if re.search(r"(?m)^\s*func\s+init\s*\(", source):
+            raise SystemExit(
+                f"{label}: active package init requires a new reviewed guard"
+            )
 
 skip_patterns = []
 list_base_args = []
@@ -384,11 +507,55 @@ if skip_patterns and "/" in skip_patterns[0]:
     )
 
 count_values = flag_values(test_args, "-count")
-if len(count_values) > 1:
-    raise SystemExit(f"{label}: expected at most one -count flag")
-if count_values:
-    if not re.fullmatch(r"[0-9]+", count_values[0]) or int(count_values[0]) <= 0:
-        raise SystemExit(f"{label}: -count must be a positive integer")
+if len(count_values) != 1 or count_values[0] != "1":
+    raise SystemExit(f"{label}: exactly one -count=1 is required")
+
+timeout_values = flag_values(test_args, "-timeout")
+if len(timeout_values) != 1:
+    raise SystemExit(f"{label}: exactly one -timeout value is required")
+duration_token = re.compile(r"(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:ns|us|µs|ms|s|m|h)")
+duration_units = {
+    "ns": Decimal("1"),
+    "us": Decimal("1000"),
+    "µs": Decimal("1000"),
+    "ms": Decimal("1000000"),
+    "s": Decimal("1000000000"),
+    "m": Decimal("60000000000"),
+    "h": Decimal("3600000000000"),
+}
+timeout_text = timeout_values[0]
+if timeout_text == "0" or timeout_text.startswith("-"):
+    raise SystemExit(f"{label}: -timeout must be positive and at most 300s")
+timeout_matches = list(duration_token.finditer(timeout_text))
+if not timeout_matches or "".join(match.group(0) for match in timeout_matches) != timeout_text:
+    raise SystemExit(f"{label}: invalid -timeout duration")
+timeout_nanos = Decimal("0")
+for match in timeout_matches:
+    number = match.group(0)
+    unit = next(suffix for suffix in duration_units if number.endswith(suffix))
+    timeout_nanos += Decimal(number[:-len(unit)]) * duration_units[unit]
+if timeout_nanos <= 0 or timeout_nanos > Decimal("300000000000"):
+    raise SystemExit(f"{label}: -timeout must be positive and at most 300s")
+
+if any(value == "-args" or value.startswith("-args=") for value in test_args):
+    raise SystemExit(f"{label}: -args is not allowed in a guarded rerun")
+test_binary_overrides = (
+    "-test.run",
+    "-test.skip",
+    "-test.count",
+    "-test.timeout",
+    "-test.list",
+)
+if any(
+    value == override or value.startswith(override + "=")
+    for value in test_args
+    for override in test_binary_overrides
+):
+    raise SystemExit(
+        f"{label}: test-binary selector/count/timeout overrides are not allowed"
+    )
+if any(value == "-json" or value.startswith("-json=") for value in test_args):
+    raise SystemExit(f"{label}: wrapper controls the test JSON stream")
 
 package_value_flags = {"-C", "-tags", "-run", "-list", "-count", "-timeout"}
 package_indices = []
@@ -408,7 +575,8 @@ while index < len(list_base_args):
     index += 1
 if len(package_indices) != 1:
     raise SystemExit(f"{label}: expected one package argument")
-actual_package = f"{module_dir}:{list_base_args[package_indices[0]]}"
+package_value = list_base_args[package_indices[0]]
+actual_package = f"{module_dir}:{package_value}"
 if actual_package != expected_package:
     raise SystemExit(
         f"{label}: expected package {expected_package}, observed {actual_package}"
@@ -422,6 +590,8 @@ if len(run_indices) > 1:
     raise SystemExit(f"{label}: expected at most one -run flag")
 if flag_values(test_args, "-list"):
     raise SystemExit(f"{label}: original command must not contain -list")
+
+package_initialization_guard()
 
 def list_args_for(pattern):
     args = list_base_args[:]
@@ -463,6 +633,8 @@ test_name = re.compile(r"Test[A-Za-z0-9_]+$")
 go_status = re.compile(r"ok\s+\S+\s+[0-9.]+s(?:\s+\(cached\))?$")
 
 def listed_names(result, phase):
+    if result.stderr.strip():
+        raise SystemExit(f"{label}: {phase} emitted stderr")
     output = [line for line in result.stdout.splitlines() if line]
     if any(not test_name.fullmatch(line) and not go_status.fullmatch(line) for line in output):
         raise SystemExit(f"{label}: {phase} emitted unexpected output")
@@ -504,9 +676,33 @@ print(
     f"set-sha256 {actual_digest}"
 )
 
-run_result = subprocess.run(command, cwd=repo_root, env=env, check=False)
+def validate_test_stream(stdout, stderr):
+    if stderr.strip():
+        raise SystemExit(f"{label}: test execution emitted stderr")
+    for line in stdout.splitlines():
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            raise SystemExit(f"{label}: test execution emitted invalid JSON")
+        if not isinstance(event, dict):
+            raise SystemExit(f"{label}: test execution emitted a non-object JSON value")
+        if event.get("Action") == "skip":
+            raise SystemExit(f"{label}: test execution contained a skipped test")
+
+run_command = command + ["-json"]
+run_result = subprocess.run(
+    run_command,
+    cwd=repo_root,
+    env=env,
+    text=True,
+    capture_output=True,
+    check=False,
+)
 if run_result.returncode:
     raise SystemExit(run_result.returncode)
+validate_test_stream(run_result.stdout, run_result.stderr)
 PY
 }
 
@@ -793,6 +989,28 @@ for index, line in enumerate(lines):
     if len(race_flags) > 1:
         raise SystemExit(f"line {index + 2}: duplicate -race flag")
     race_identity = "race" if race_flags and race_flags[0] != "-race=false" else "norace"
+    counts = values("-count")
+    if counts != ["1"]:
+        raise SystemExit(f"line {index + 2}: exactly one -count=1 is required")
+    timeouts = values("-timeout")
+    if len(timeouts) != 1:
+        raise SystemExit(f"line {index + 2}: exactly one -timeout is required")
+    timeout_match = re.fullmatch(r"([1-9][0-9]*)(ms|s|m)", timeouts[0])
+    if not timeout_match:
+        raise SystemExit(f"line {index + 2}: timeout must be positive and bounded")
+    timeout_value, timeout_unit = timeout_match.groups()
+    timeout_seconds = int(timeout_value) / {"ms": 1000, "s": 1, "m": 1 / 60}[timeout_unit]
+    if timeout_seconds > 300:
+        raise SystemExit(f"line {index + 2}: timeout exceeds 300 seconds")
+    if any(value == "-args" or value.startswith("-args=") for value in args):
+        raise SystemExit(f"line {index + 2}: -args is not allowed")
+    test_override_prefixes = ("-test.run", "-test.skip", "-test.count", "-test.timeout", "-test.list")
+    if any(
+        value == prefix or value.startswith(prefix + "=")
+        for value in args
+        for prefix in test_override_prefixes
+    ):
+        raise SystemExit(f"line {index + 2}: test-binary override is not allowed")
     actual_build = f"{tag_identity}+{race_identity}+{env.get('GOTOOLCHAIN', '')}"
     if actual_package != fields[4] or actual_build != fields[5]:
         raise SystemExit(
@@ -805,33 +1023,39 @@ if len(seen) != 28 or len(set(seen)) != len(seen):
 print(
     f"package/build metadata audit: passed; {len(seen)} wrapper prescriptions "
     "matched one package identity and explicit GOTOOLCHAIN/tag/race build "
-    "configuration; duplicate package candidates fail closed"
+    "configuration, exactly one count/timeout, and no test-binary overrides; "
+    "duplicate package candidates fail closed"
 )
 PY
 ```
 
 The package/build metadata audit exited 0 with 28 unique records. Every
 package identity matched its `-C` directory and sole package argument, every
-record carried explicit `GOTOOLCHAIN` metadata, and every build identity
-matched its tag set, race mode and toolchain; a duplicate
-`./livecanary`/`./liveworker` package list is rejected before the list probe.
+record carried explicit `GOTOOLCHAIN` metadata, exactly one `-count=1` and one
+positive timeout no greater than 300 seconds, and every build identity matched
+its tag set, race mode and toolchain; `-args`, test-binary overrides and a
+duplicate `./livecanary`/`./liveworker` package list are rejected before the
+list probe.
 The recorded metadata-audit output was:
 
 ```text
-package/build metadata audit: passed; 28 wrapper prescriptions matched one package identity and explicit GOTOOLCHAIN/tag/race build configuration; duplicate package candidates fail closed
+package/build metadata audit: passed; 28 wrapper prescriptions matched one package identity and explicit GOTOOLCHAIN/tag/race build configuration, exactly one count/timeout, and no test-binary overrides; duplicate package candidates fail closed
 ```
 
 The wrapper's selector edge cases were then exercised with a trimmed copy of
 the documented Python body that stops before the original test subprocess. Its
-only child processes are the effective `go env GOFLAGS` and corresponding `go
-test -list` probes; the second list probe uses Go's own regexp implementation
-for `-skip` matching:
+only Go child processes are the effective `go env GOFLAGS`, package metadata
+(`go list -json -test`) and corresponding `go test -list` probes; the second
+list probe uses Go's own regexp implementation for `-skip` matching. Git source
+status/tree queries are read-only. The probe also feeds a synthetic `Action:
+skip` subtest event to the execution-stream guard without starting a test body:
 
 ```sh
 set -euo pipefail
 python3 - <<'PY'
 import hashlib
 import io
+import json
 import os
 import sys
 import tempfile
@@ -852,6 +1076,11 @@ common = [
     "-race", "-count=1", "-timeout=45s",
 ]
 count_zero_common = ["-count=0" if value == "-count=1" else value for value in common]
+count_two_common = ["-count=2" if value == "-count=1" else value for value in common]
+timeout_zero_common = ["-timeout=0s" if value == "-timeout=45s" else value for value in common]
+timeout_large_common = ["-timeout=301s" if value == "-timeout=45s" else value for value in common]
+no_timeout_common = [value for value in common if value != "-timeout=45s"]
+gorace_common = ["GORACE=halt_on_error=1", *common]
 cases = [
     (
         "equals-run",
@@ -908,6 +1137,69 @@ cases = [
         False,
     ),
     (
+        "count-two",
+        "1", one_digest, "experiments/g01-scaleset:./livecanary",
+        "default+race+go1.26.8",
+        count_two_common + ["./livecanary", "-run=^" + one_name + "$"],
+        False,
+    ),
+    (
+        "timeout-zero",
+        "1", one_digest, "experiments/g01-scaleset:./livecanary",
+        "default+race+go1.26.8",
+        timeout_zero_common + ["./livecanary", "-run=^" + one_name + "$"],
+        False,
+    ),
+    (
+        "timeout-too-large",
+        "1", one_digest, "experiments/g01-scaleset:./livecanary",
+        "default+race+go1.26.8",
+        timeout_large_common + ["./livecanary", "-run=^" + one_name + "$"],
+        False,
+    ),
+    (
+        "timeout-missing",
+        "1", one_digest, "experiments/g01-scaleset:./livecanary",
+        "default+race+go1.26.8",
+        no_timeout_common + ["./livecanary", "-run=^" + one_name + "$"],
+        False,
+    ),
+    (
+        "timeout-duplicate",
+        "1", one_digest, "experiments/g01-scaleset:./livecanary",
+        "default+race+go1.26.8",
+        common + ["./livecanary", "-timeout=30s", "-run=^" + one_name + "$"],
+        False,
+    ),
+    (
+        "inherited-gorace",
+        "1", one_digest, "experiments/g01-scaleset:./livecanary",
+        "default+race+go1.26.8",
+        gorace_common + ["./livecanary", "-run=^" + one_name + "$"],
+        False,
+    ),
+    (
+        "args-test-selector",
+        "1", one_digest, "experiments/g01-scaleset:./livecanary",
+        "default+race+go1.26.8",
+        common + ["./livecanary", "-run=^" + one_name + "$", "-args", "-test.run=^Other$"],
+        False,
+    ),
+    (
+        "direct-test-selector",
+        "1", one_digest, "experiments/g01-scaleset:./livecanary",
+        "default+race+go1.26.8",
+        common + ["./livecanary", "-run=^" + one_name + "$", "-test.run=^Other$"],
+        False,
+    ),
+    (
+        "active-package-init",
+        "1", one_digest, "experiments/g01-scaleset:./livecanary",
+        "g01_pair_fixture,g01_pair_real_cadence+race+go1.26.8",
+        common + ["-tags=g01_pair_fixture,g01_pair_real_cadence", "./livecanary", "-run=^" + one_name + "$"],
+        False,
+    ),
+    (
         "package-mismatch",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
         "default+race+go1.26.8",
@@ -942,12 +1234,13 @@ with tempfile.TemporaryDirectory() as goenv_dir:
             False,
         )
     )
+    namespace = {"__name__": "__main__"}
     for label, count, digest, package, build, command, should_pass in cases:
         sys.argv = ["wrapper-probe", count, digest, label, package, build, *command]
         output = io.StringIO()
         try:
             with redirect_stdout(output):
-                exec(compile(wrapper, "<wrapper>", "exec"), {"__name__": "__main__"})
+                exec(compile(wrapper, "<wrapper>", "exec"), namespace)
         except SystemExit as error:
             if should_pass:
                 raise SystemExit(f"{label}: unexpected rejection: {error}")
@@ -958,6 +1251,15 @@ with tempfile.TemporaryDirectory() as goenv_dir:
             if "list validation passed" not in output.getvalue():
                 raise SystemExit(f"{label}: missing list-validation result")
             print(f"{label}: accepted list-only selector")
+skip_stream = json.dumps({"Action": "skip", "Test": "TestSynthetic/subtest"}) + "\n"
+namespace["label"] = "skip-probe"
+validator = namespace.get("validate_test_stream")
+try:
+    validator(skip_stream, "")
+except SystemExit as error:
+    print(f"skipped-subtest-event: rejected before result recording: {error}")
+else:
+    raise SystemExit("skipped-subtest-event: skip event was accepted")
 inherited_previous = os.environ.get("G01_INPUT_CHILD")
 os.environ["G01_INPUT_CHILD"] = "blocked"
 sys.argv = [
@@ -969,7 +1271,7 @@ sys.argv = [
 try:
     try:
         with redirect_stdout(io.StringIO()):
-            exec(compile(wrapper, "<wrapper>", "exec"), {"__name__": "__main__"})
+            exec(compile(wrapper, "<wrapper>", "exec"), namespace)
     except SystemExit as error:
         print(f"inherited-child-mode: rejected before test body: {error}")
     else:
@@ -989,15 +1291,22 @@ no-match and equals-form skip-all cases were rejected with 0 observed executed
 names before any test body; a livecanary/liveworker package mismatch, tag/build
 mismatch and temporary GOENV-persisted non-empty `GOFLAGS` were rejected before
 listing; duplicate package targeting was rejected before listing; slash-
-delimited subtest `-skip`, `-count=0`, and inherited `G01_INPUT_CHILD=blocked`
-were each rejected before listing. No test body, live operation or
-secret-bearing input was run.
+delimited subtest `-skip`, `-count=0`, `-count=2`, missing/duplicate/zero/
+overlarge `-timeout`, inherited `GORACE`, `-args`, direct test-binary selector,
+active package `init`, and inherited `G01_INPUT_CHILD=blocked` were each
+rejected before listing. No test body, live operation or secret-bearing input
+was run.
 
 The added wrapper-regression output was:
 
 ```text
 slash-subtest-skip: rejected before test body: slash-subtest-skip: slash-delimited -skip selectors are rejected because top-level -list cannot validate subtest names
-count-zero: rejected before test body: count-zero: -count must be a positive integer
+count-zero: rejected before test body: count-zero: exactly one -count=1 is required
+timeout-missing: rejected before test body: timeout-missing: exactly one -timeout value is required
+inherited-gorace: rejected before test body: inherited-gorace: inherited or command-supplied GORACE is not allowed in race mode
+args-test-selector: rejected before test body: args-test-selector: -args is not allowed in a guarded rerun
+active-package-init: rejected before test body: active-package-init: active package init requires a new reviewed guard
+skipped-subtest-event: rejected before result recording: wrapper-probe: test execution contained a skipped test
 inherited-child-mode: rejected before test body: inherited-child-mode: fixture child-mode environment is not allowed: G01_INPUT_CHILD
 ```
 
@@ -1760,6 +2069,104 @@ setup call is reachable on the normal path while permitting preparation work
 inside those branches. The synthetic unconditional-post-branch setup fixture
 was rejected before execution. The existing livecanary selector audits remain
 `go test -list` only, so no test body or live resource was run.
+
+The package-level initialization guard also resolves the effective source set
+for every package/build combination used by the wrapper. It pins the reviewed
+module subtree, requires a clean source path, includes ordinary and test Go
+files selected by the exact build tags, and rejects any active `func init` before
+`go test -list`; package-variable initializer changes therefore require a new
+source-tree review rather than being silently treated as list-only-safe. The
+guard audit was read-only and did not run test bodies or live resources:
+
+```sh
+set -euo pipefail
+python3 - <<'PY'
+import json
+import os
+import re
+import subprocess
+from pathlib import Path
+
+repo_root = Path.cwd().resolve()
+module_dir = "experiments/g01-scaleset"
+reviewed_tree = "08c7830de7bc5120d1302d7ba6df162abd582315"
+if subprocess.check_output(
+    ["git", "rev-parse", f"HEAD:{module_dir}"], text=True
+).strip() != reviewed_tree:
+    raise SystemExit("package-init guard: reviewed module tree changed")
+if subprocess.check_output(
+    ["git", "status", "--porcelain=v1", "--untracked-files=all", "--", module_dir],
+    text=True,
+):
+    raise SystemExit("package-init guard: package source is not clean")
+
+cases = [
+    ("root", ".", ""),
+    ("livecanary-default", "./livecanary", ""),
+    ("livecanary-osusergo", "./livecanary", "osusergo"),
+    ("liveworker-default", "./liveworker", ""),
+    ("worker-command", "./cmd/g01-worker", "g01_worker"),
+    ("live-command", "./cmd/g01-live", "g01_live"),
+    ("paired-livecanary", "./livecanary", "g01_pair_fixture"),
+]
+for label, package, tags in cases:
+    env = {**os.environ, "GOFLAGS": "", "GOTOOLCHAIN": "go1.26.8"}
+    command = ["go", "list", "-C", module_dir, "-json", "-test", "-race"]
+    if tags:
+        command.append("-tags=" + tags)
+    command.append(package)
+    result = subprocess.run(
+        command, cwd=repo_root, env=env, text=True,
+        capture_output=True, check=False,
+    )
+    if result.returncode != 0 or result.stderr.strip():
+        raise SystemExit(f"{label}: go list metadata query failed")
+    decoder = json.JSONDecoder()
+    position = 0
+    objects = []
+    while position < len(result.stdout):
+        while position < len(result.stdout) and result.stdout[position].isspace():
+            position += 1
+        if position >= len(result.stdout):
+            break
+        item, position = decoder.raw_decode(result.stdout, position)
+        if isinstance(item, dict):
+            objects.append(item)
+    packages = [
+        item for item in objects
+        if item.get("ForTest") is None
+        and not item.get("ImportPath", "").endswith(".test")
+    ]
+    if len(packages) != 1:
+        raise SystemExit(f"{label}: package metadata was ambiguous")
+    package_dir = Path(packages[0]["Dir"]).resolve()
+    package_files = []
+    for key in ("GoFiles", "CgoFiles", "TestGoFiles", "XTestGoFiles"):
+        package_files.extend(packages[0].get(key, []))
+    if not package_files:
+        raise SystemExit(f"{label}: package file set was empty")
+    for name in package_files:
+        source_path = (package_dir / name).resolve()
+        try:
+            source_path.relative_to(package_dir)
+        except ValueError:
+            raise SystemExit(f"{label}: package file escaped its directory")
+        if not source_path.is_file():
+            raise SystemExit(f"{label}: package file was missing")
+        source = source_path.read_text(encoding="utf-8")
+        if re.search(r"(?m)^\s*func\s+init\s*\(", source):
+            raise SystemExit(f"{label}: active package init was not reviewed")
+    print(f"{label}: passed; active source/test files contain no package init")
+print("package-initialization guard audit: passed; 7 reviewed package/build sets; source tree pinned and no active init effects")
+PY
+```
+
+The package-initialization guard audit passed for all seven package/build sets
+(root, default and tagged controller/worker packages); the source subtree was
+unchanged from the reviewed tree and no active package `init` function was
+selected. The wrapper regression probe separately enabled the reviewed
+`g01_pair_real_cadence` tag and rejected its active `init` before listing,
+demonstrating the fail-closed path without executing it.
 
 ### Diff and staged secret/private-path scan
 
