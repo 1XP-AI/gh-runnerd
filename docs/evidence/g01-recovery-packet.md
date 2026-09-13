@@ -162,5 +162,5 @@ markdown link/anchor checker reported all local targets present (external URLs
 were syntax-skipped), `jq empty docs/backlog.json` exited 0, `git diff --check`
 and `git diff --cached --check` exited 0, and the staged added-line
 secret/private-path scan reported no matches. The staged diff was inspected as
-three documentation files (172 insertions, 2 deletions); no issue, Project, PR
+three documentation files (173 insertions, 2 deletions); no issue, Project, PR
 or Goal state is changed.
