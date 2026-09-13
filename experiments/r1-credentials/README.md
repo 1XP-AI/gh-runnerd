@@ -12,7 +12,14 @@ private key, JWT, token, installation token or worker bootstrap value. Source
 errors, adapter errors and commit errors are normalized so their details cannot
 reach callers. Only the package-created manual source capability is accepted;
 the exported source shape and `SourceManual` value alone do not authorize a
-caller-provided implementation.
+caller-provided implementation. Constructors copy at most the 32 KiB credential
+bound; oversized input is retained only as an invalid marker and returns
+`ErrCredential` before `Read` copies or exposes key bytes.
+
+Validation derives one context bounded by both the caller's deadline and a
+non-zero credential `ExpiresAt`, then shares that context across App,
+installation, repository and commit operations. A caller deadline earlier than
+credential expiry remains authoritative.
 
 Run the candidate checks from this module directory:
 
@@ -66,6 +73,18 @@ normalized `ErrCommit` instead of observing credential expiry. Fix commit
 non-zero credential `ExpiresAt`, preserves an `ErrExpired` terminal result for
 a late nil callback, and passed the module normal, race and vet checks plus
 `bash scripts/check-offline-experiments.sh` (three offline modules).
+
+Fresh Codex P2 regressions were added in red commit `f46bb57`. The focused
+command
+`GOTOOLCHAIN=go1.26.8 go test -count=1 -run 'TestValidationAbortsBlockingVerificationAtCredentialExpiry|TestValidationUsesOneBoundedContextForVerificationAndCommit|TestNewManualSourceRejectsOversizedInputBeforeCopying' ./...`
+failed because verification saw only the parent deadline, remained blocked until
+test cleanup, commit used a distinct context, and a 64 KiB constructor input was
+retained. Fix commit `8edc5d2` shares one expiry-bounded context across all three
+identity calls and commit while retaining an earlier parent deadline, and
+rejects oversized constructor input before copying it; the focused command and
+the module normal, race and vet checks passed afterward. The repository
+`bash scripts/check-offline-experiments.sh` gate also passed on the resulting
+source (3 offline modules).
 
 ## Ownership, ACL limits and live gap
 
