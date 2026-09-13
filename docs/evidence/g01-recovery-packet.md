@@ -217,8 +217,9 @@ syntax are rejected because source declarations cannot prove their subtest
 set or semantics. The selector preflight also rejects Go Perl classes and
 boundaries (`\\b`, `\\B`, `\\w`, `\\W`, `\\d`, `\\D`, `\\s`, `\\S`) whose
 ASCII Go semantics differ from Python's Unicode defaults, while preserving
-escaped literal backslashes and the reviewed POSIX-class subset. The guarded
-command shape accepts optional leading
+escaped literal backslashes and the explicit translated POSIX-class table;
+every other nested POSIX class is rejected before Python compilation or package
+metadata. The guarded command shape accepts optional leading
 `NAME=VALUE` assignments
 followed directly by `go test`; standard `env NAME=VALUE ... go test` and
 shell `command [options] go test` wrappers are discovered by the static audit
@@ -251,6 +252,8 @@ because the paired-all-except prescription has no `-run` and Go could execute
 fuzz seed work that is absent from the source-derived expected set. Executable
 `Example` declarations are likewise rejected before a set digest is claimed
 because examples are otherwise outside the source-derived test-name set. The
+source scanner consumes consecutive whitespace and line/block comments between
+declaration tokens, so comments cannot hide a valid top-level test name. The
 wrapper queries the effective
 `go env GOFLAGS`, including GOENV/configuration, rejects non-empty output, and
 then pins `GOFLAGS=` for metadata and the original command. After
@@ -932,8 +935,56 @@ def reject_python_semantic_regexp_constructs(pattern, phase):
             position += 1
 
 
+go_posix_class_translations = {
+    # These are the reviewed class contents; the scanner only permits names
+    # present in this explicit table.
+    "alnum": "A-Za-z0-9",
+    "alpha": "A-Za-z",
+    "digit": "0-9",
+    "lower": "a-z",
+    "upper": "A-Z",
+    "space": r"\t\n\r\f ",
+    "word": "A-Za-z0-9_",
+}
+
+
+def translate_go_posix_classes(pattern, phase):
+    translated = []
+    position = 0
+    in_class = False
+    while position < len(pattern):
+        if pattern[position] == "\\":
+            translated.append(pattern[position:position + 2])
+            position += 2
+            continue
+        if in_class and pattern.startswith("[:", position):
+            close = pattern.find(":]", position + 2)
+            if close >= 0:
+                class_name = pattern[position + 2:close]
+                replacement = go_posix_class_translations.get(class_name)
+                if replacement is None:
+                    raise SystemExit(
+                        f"{label}: {phase} uses unsupported POSIX regexp class "
+                        f"[:{class_name}:]"
+                    )
+                translated.append(replacement)
+                position = close + 2
+                continue
+        if pattern[position] == "[":
+            in_class = True
+            translated.append(pattern[position])
+            position += 1
+            continue
+        if pattern[position] == "]" and in_class:
+            in_class = False
+        translated.append(pattern[position])
+        position += 1
+    return "".join(translated)
+
+
 def reject_unsupported_regexp_syntax(pattern, phase):
     reject_python_semantic_regexp_constructs(pattern, phase)
+    translate_go_posix_classes(pattern, phase)
     if "(?" in pattern or re.search(r"\\[1-9]", pattern):
         raise SystemExit(f"{label}: {phase} uses regexp syntax outside the reviewed Go subset")
 
@@ -975,7 +1026,8 @@ def skip_source_ignored(source, position):
             continue
         if source.startswith("//", position):
             newline = source.find("\n", position + 2)
-            return len(source) if newline < 0 else newline + 1
+            position = len(source) if newline < 0 else newline + 1
+            continue
         if source.startswith("/*", position):
             close = source.find("*/", position + 2)
             if close < 0:
@@ -1067,16 +1119,7 @@ def go_compatible_regexp(pattern, phase):
     # the POSIX classes used by the reviewed selectors and reject constructs
     # that Python might accept but Go RE2 does not.
     reject_unsupported_regexp_syntax(pattern, phase)
-    for source_class, python_class in {
-        "[[:alnum:]]": "[A-Za-z0-9]",
-        "[[:alpha:]]": "[A-Za-z]",
-        "[[:digit:]]": "[0-9]",
-        "[[:lower:]]": "[a-z]",
-        "[[:upper:]]": "[A-Z]",
-        "[[:space:]]": r"[\t\n\r\f ]",
-        "[[:word:]]": r"[A-Za-z0-9_]",
-    }.items():
-        pattern = pattern.replace(source_class, python_class)
+    pattern = translate_go_posix_classes(pattern, phase)
     try:
         return re.compile(pattern)
     except re.error as error:
@@ -4517,13 +4560,305 @@ resolution.
 
 | Finding and immutable source | Red reproduction, correction and final evidence |
 |---|---|
-| [4001124039](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4001124039), source [3bc8445567fe68cc355cf3f88f0c962a41e9cad5 lines 858-914](https://github.com/1XP-AI/gh-runnerd/blob/3bc8445567fe68cc355cf3f88f0c962a41e9cad5/docs/evidence/g01-recovery-packet.md#L858-L914) | Reproduced: the immutable source-name helper omitted top-level `Fuzz*`, while `paired-all-except` has no `-run`; an unrepresented fuzz seed could therefore execute. Corrected: the wrapper's pre-Go-child `source_fuzz_guard` scans package test declarations and `source_test_names` rejects `Fuzz*` before digest derivation. Immutable red/current-green evidence is at packet lines 2834-2954; final wrapper anchors are `source_fuzz_declarations`/`source_fuzz_guard` at lines 814-916 and the defense-in-depth `Fuzz*` rejection at lines 1047-1049. |
-| [4001124042](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4001124042), source [3bc8445567fe68cc355cf3f88f0c962a41e9cad5 lines 917-936](https://github.com/1XP-AI/gh-runnerd/blob/3bc8445567fe68cc355cf3f88f0c962a41e9cad5/docs/evidence/g01-recovery-packet.md#L917-L936) | Reproduced: the immutable helper passed Go `\\w` to Python, where Unicode `é` matched despite Go's ASCII Perl-class semantics. Corrected: preflight rejects unescaped `\\b`, `\\B`, `\\w`, `\\W`, `\\d`, `\\D`, `\\s`, `\\S` before Python compilation/metadata, while escaped literal backslashes remain supported. Immutable red/current-green evidence is at packet lines 2958-3071; final anchors are `reject_python_semantic_regexp_constructs`/`reject_unsupported_regexp_syntax` at lines 917-937 and preflight ordering at lines 952-967. |
+| [4001124039](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4001124039), source [3bc8445567fe68cc355cf3f88f0c962a41e9cad5 lines 858-914](https://github.com/1XP-AI/gh-runnerd/blob/3bc8445567fe68cc355cf3f88f0c962a41e9cad5/docs/evidence/g01-recovery-packet.md#L858-L914) | Reproduced: the immutable source-name helper omitted top-level `Fuzz*`, while `paired-all-except` has no `-run`; an unrepresented fuzz seed could therefore execute. Corrected: the wrapper's pre-Go-child `source_fuzz_guard` scans package test declarations and `source_test_names` rejects `Fuzz*` before digest derivation. Immutable red/current-green evidence is at packet lines 2834-2954; final wrapper anchors are `source_fuzz_declarations`/`source_fuzz_guard` at lines 814-916 and the defense-in-depth `Fuzz*` rejection at lines 1096-1098. |
+| [4001124042](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4001124042), source [3bc8445567fe68cc355cf3f88f0c962a41e9cad5 lines 917-936](https://github.com/1XP-AI/gh-runnerd/blob/3bc8445567fe68cc355cf3f88f0c962a41e9cad5/docs/evidence/g01-recovery-packet.md#L917-L936) | Reproduced: the immutable helper passed Go `\\w` to Python, where Unicode `é` matched despite Go's ASCII Perl-class semantics. Corrected: preflight rejects unescaped `\\b`, `\\B`, `\\w`, `\\W`, `\\d`, `\\D`, `\\s`, `\\S` before Python compilation/metadata, while escaped literal backslashes remain supported. Immutable red/current-green evidence is at packet lines 2958-3071; final anchors are `reject_python_semantic_regexp_constructs` at lines 917-932, `translate_go_posix_classes`/`reject_unsupported_regexp_syntax` at lines 935-986 and preflight ordering at lines 1013-1017. |
 | [4001124048](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4001124048), source [3bc8445567fe68cc355cf3f88f0c962a41e9cad5 lines 3726-3750](https://github.com/1XP-AI/gh-runnerd/blob/3bc8445567fe68cc355cf3f88f0c962a41e9cad5/docs/evidence/g01-recovery-packet.md#L3726-L3750) | Reproduced: the immutable anchored scan missed curl/wget and `env gh`/`command docker` wrappers. Corrected: the current scanner inspects only executable shell fences, joins continuations, skips Python heredocs/comments/prose/URLs/fixtures and strips assignment/env/command wrappers before checking curl/wget, Docker, Lima, Keychain, launchd and gh API/workflow forms. Static synthetic probes and the current scan are at packet lines 4164-4310. |
+
+### Current exact-head P2 findings at `423d4fc501120a014e63f77d3ef6652606d0326a`
+
+These two fresh Codex P2 findings from review `5192699095` were observed on
+the immutable packet head at task start. Each red witness reads only that
+prior packet blob; each current green probe is source-only or static and
+proves the no-Go-child boundary without running a test body or live operation.
+
+#### Root 4001254021: consecutive source comments
+
+The immutable red witness shows that the prior source-name helper returned
+after the first line comment. A valid top-level `TestHidden` declaration
+following consecutive line/block comments was therefore omitted:
+
+```sh
+set -euo pipefail
+python3 - <<'PY'
+import subprocess
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+starting_head = "423d4fc501120a014e63f77d3ef6652606d0326a"
+previous = subprocess.check_output(
+    [
+        "git",
+        "show",
+        f"{starting_head}:docs/evidence/g01-recovery-packet.md",
+    ],
+    text=True,
+)
+wrapper_start = previous.index("\nimport hashlib\n", previous.index("go_test_checked()")) + 1
+wrapper_end = previous.index("\nPY\n}", wrapper_start)
+previous_wrapper = previous[wrapper_start:wrapper_end]
+helper_start = previous_wrapper.index("def skip_source_ignored")
+helper_end = previous_wrapper.index("\nall_test_names = []", helper_start)
+namespace = {"label": "prior-comment-red"}
+exec(compile(previous_wrapper[helper_start:helper_end], "<prior-source-name>", "exec"), namespace)
+source_names = namespace["source_test_names"]
+with TemporaryDirectory() as directory:
+    source_path = Path(directory) / "comments_test.go"
+    source_path.write_text(
+        "package p\n"
+        "import \"testing\"\n"
+        "func\n"
+        "// first line\n"
+        "/* middle block */\n"
+        "// second line\n"
+        "TestHidden(t *testing.T) {}\n",
+        encoding="utf-8",
+    )
+    if source_names(source_path) != []:
+        raise SystemExit(
+            "red reproduction setup changed: prior parser no longer omitted TestHidden"
+        )
+print(
+    f"RED source-name comment gap: prior {starting_head} omitted TestHidden "
+    "after consecutive line/block comments"
+)
+PY
+```
+
+Recorded red output:
+
+```text
+RED source-name comment gap: prior 423d4fc501120a014e63f77d3ef6652606d0326a omitted TestHidden after consecutive line/block comments
+```
+
+The current source-only regression proves that the helper consumes all
+consecutive ignored tokens and discovers `TestHidden`; it patches any attempted
+Go child to fail, so discovery cannot silently expand into execution:
+
+```sh
+set -euo pipefail
+python3 - <<'PY'
+import subprocess
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
+wrapper_start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
+wrapper_end = packet.index("\nPY\n}", wrapper_start)
+wrapper = packet[wrapper_start:wrapper_end]
+helper_start = wrapper.index("def skip_source_ignored")
+helper_end = wrapper.index("\nall_test_names = []", helper_start)
+namespace = {"label": "comment-green"}
+exec(compile(wrapper[helper_start:helper_end], "<source-name>", "exec"), namespace)
+source_names = namespace["source_test_names"]
+real_run = subprocess.run
+go_children = []
+
+def reject_go_child(*args, **kwargs):
+    command = args[0] if args else kwargs.get("args", [])
+    if command and command[0] == "go":
+        go_children.append(tuple(command))
+        raise AssertionError("source-name helper started a Go child")
+    return real_run(*args, **kwargs)
+
+subprocess.run = reject_go_child
+try:
+    with TemporaryDirectory() as directory:
+        source_path = Path(directory) / "comments_test.go"
+        source_path.write_text(
+            "package p\n"
+            "import \"testing\"\n"
+            "func\n"
+            "// first line\n"
+            "/* middle block */\n"
+            "// second line\n"
+            "TestHidden(t *testing.T) {}\n",
+            encoding="utf-8",
+        )
+        names = source_names(source_path)
+finally:
+    subprocess.run = real_run
+if names != ["TestHidden"]:
+    raise SystemExit(f"source-name comment regression discovered {names!r}")
+if go_children:
+    raise SystemExit(f"source-name helper started Go child(ren): {go_children!r}")
+print(
+    "source-name comment regression: passed; TestHidden discovered after "
+    "consecutive line/block comments with no Go child"
+)
+PY
+```
+
+#### Root 4001254025: unsupported POSIX regexp classes
+
+The immutable red witness demonstrates a set mismatch for `[[:xdigit:]]`.
+The prior helper left this nested class untranslated; Python consequently
+derived a set unlike Go's ASCII `[0-9A-Fa-f]` class:
+
+```sh
+set -euo pipefail
+python3 - <<'PY'
+import re
+import subprocess
+import warnings
+
+starting_head = "423d4fc501120a014e63f77d3ef6652606d0326a"
+previous = subprocess.check_output(
+    [
+        "git",
+        "show",
+        f"{starting_head}:docs/evidence/g01-recovery-packet.md",
+    ],
+    text=True,
+)
+wrapper_start = previous.index("\nimport hashlib\n", previous.index("go_test_checked()")) + 1
+wrapper_end = previous.index("\nPY\n}", wrapper_start)
+previous_wrapper = previous[wrapper_start:wrapper_end]
+helper_start = previous_wrapper.index("def reject_python_semantic_regexp_constructs")
+guard_call = previous_wrapper.index("\nsource_fuzz_guard()", helper_start)
+go_start = previous_wrapper.index("def go_compatible_regexp", helper_start)
+go_end = previous_wrapper.index("\nall_test_names = []", go_start)
+namespace = {"label": "prior-posix-red", "re": re}
+exec(
+    compile(
+        previous_wrapper[helper_start:guard_call] + previous_wrapper[go_start:go_end],
+        "<prior-regexp>",
+        "exec",
+    ),
+    namespace,
+)
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", FutureWarning)
+    go_regexp = namespace["go_compatible_regexp"]
+    compiled = go_regexp(r"[[:xdigit:]]", "-run")
+python_matches = [value for value in ["A", "g"] if compiled.search(value)]
+go_expected = ["A"]
+if python_matches == go_expected:
+    raise SystemExit("red reproduction setup changed: prior POSIX helper matched Go xdigit")
+print(
+    f"RED regexp POSIX mismatch: prior {starting_head} left [[:xdigit:]] "
+    f"untranslated; Python matched {python_matches!r}, while Go xdigit expects "
+    f"{go_expected!r}"
+)
+PY
+```
+
+Recorded red output:
+
+```text
+RED regexp POSIX mismatch: prior 423d4fc501120a014e63f77d3ef6652606d0326a left [[:xdigit:]] untranslated; Python matched [], while Go xdigit expects ['A']
+```
+
+The current regexp preflight rejects every standard POSIX class outside the
+explicit translated table before Python compilation and before package
+metadata. The focused no-Go-child probe covers all six currently unsupported
+classes, verifies each reviewed translation remains exact, and preserves both
+escaped POSIX text and the previously reviewed literal backslash behavior:
+
+```sh
+set -euo pipefail
+python3 - <<'PY'
+import re
+import subprocess
+from pathlib import Path
+
+packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
+wrapper_start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
+wrapper_end = packet.index("\nPY\n}", wrapper_start)
+wrapper = packet[wrapper_start:wrapper_end]
+preflight = wrapper.index("reject_unsupported_regexp_syntax(original_run_pattern")
+metadata_guard = wrapper.index("test_source_paths = package_initialization_guard()")
+if preflight > metadata_guard:
+    raise SystemExit("POSIX regexp preflight moved after package metadata")
+helper_start = wrapper.index("def reject_python_semantic_regexp_constructs")
+guard_call = wrapper.index("\nsource_fuzz_guard()", helper_start)
+go_start = wrapper.index("def go_compatible_regexp", helper_start)
+go_end = wrapper.index("\nall_test_names = []", go_start)
+namespace = {"label": "posix-green", "re": re}
+exec(
+    compile(
+        wrapper[helper_start:guard_call] + wrapper[go_start:go_end],
+        "<regexp-guard>",
+        "exec",
+    ),
+    namespace,
+)
+go_regexp = namespace["go_compatible_regexp"]
+real_compile = re.compile
+compile_calls = []
+
+def recording_compile(pattern, *args, **kwargs):
+    compile_calls.append(pattern)
+    return real_compile(pattern, *args, **kwargs)
+
+real_run = subprocess.run
+go_children = []
+
+def reject_go_child(*args, **kwargs):
+    command = args[0] if args else kwargs.get("args", [])
+    if command and command[0] == "go":
+        go_children.append(tuple(command))
+        raise AssertionError("regexp preflight started a Go child")
+    return real_run(*args, **kwargs)
+
+re.compile = recording_compile
+subprocess.run = reject_go_child
+try:
+    unsupported = [
+        r"[[:blank:]]",
+        r"[[:cntrl:]]",
+        r"[[:graph:]]",
+        r"[[:print:]]",
+        r"[[:punct:]]",
+        r"[[:xdigit:]]",
+    ]
+    for pattern in unsupported:
+        try:
+            go_regexp(pattern, "-run")
+        except SystemExit as error:
+            if "unsupported POSIX regexp class" not in str(error):
+                raise
+        else:
+            raise SystemExit(f"unsupported POSIX class was accepted: {pattern!r}")
+    if compile_calls:
+        raise SystemExit(f"unsupported POSIX class reached Python compile: {compile_calls!r}")
+
+    reviewed = {
+        r"[[:alnum:]]": "[A-Za-z0-9]",
+        r"[[:alpha:]]": "[A-Za-z]",
+        r"[[:digit:]]": "[0-9]",
+        r"[[:lower:]]": "[a-z]",
+        r"[[:upper:]]": "[A-Z]",
+        r"[[:space:]]": r"[\t\n\r\f ]",
+        r"[[:word:]]": "[A-Za-z0-9_]",
+    }
+    for pattern, expected in reviewed.items():
+        compiled = go_regexp(pattern, "-run")
+        if compiled.pattern != expected:
+            raise SystemExit(
+                f"reviewed POSIX translation changed for {pattern!r}: "
+                f"{compiled.pattern!r}"
+            )
+    literal_posix = go_regexp(r"\[\[:xdigit:\]\]", "-run")
+    if not literal_posix.fullmatch("[[:xdigit:]]"):
+        raise SystemExit("escaped literal POSIX text was not preserved")
+    literal_backslash = go_regexp(r"\\b", "-run")
+    if not literal_backslash.fullmatch(r"\b"):
+        raise SystemExit("escaped literal backslash was not preserved")
+finally:
+    re.compile = real_compile
+    subprocess.run = real_run
+if go_children:
+    raise SystemExit(f"regexp preflight started Go child(ren): {go_children!r}")
+print(
+    "regexp POSIX preflight regression: passed; 6 unsupported classes rejected "
+    "before Python compile/Go child, reviewed translations and escaped literals preserved"
+)
+PY
+```
 
 ### Current exact-head Luna/Codex finding ledger
 
-These nine actionable roots were reproduced against immutable prior packet
+These eleven actionable roots were reproduced against immutable prior packet
 heads and are carried with their discussion URL and exact source commit. The
 rows describe only offline/static or wrapper evidence; they do not resolve the
 GitHub discussions or claim a live result.
@@ -4539,3 +4874,5 @@ GitHub discussions or claim a live result.
 | [4000935448](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000935448), source [22a2923033c875ddd4f755774f79f60b94649449](https://github.com/1XP-AI/gh-runnerd/commit/22a2923033c875ddd4f755774f79f60b94649449) | The prior wrapper accepted `-cpu=1,2`, while set-based event validation could collapse repeated run/pass events. The correction rejects `-cpu` and every equivalent double-dash spelling before metadata. | Synthetic CPU multiplicity input rejected before source derivation; no repeated execution or event stream was accepted. |
 | [4000935449](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000935449), source [22a2923033c875ddd4f755774f79f60b94649449](https://github.com/1XP-AI/gh-runnerd/commit/22a2923033c875ddd4f755774f79f60b94649449) | The prior package scan counted only `.` and `./...`, allowing an extra module-qualified import path. The correction parses every non-flag positional argument, requires exactly one package argument before metadata and retains exact `-C` and package identity checks. | Synthetic relative-plus-import-path targeting rejected before `go env` or `go list`; no second package initialized or ran. |
 | [4000964602](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000964602), source [22a2923033c875ddd4f755774f79f60b94649449](https://github.com/1XP-AI/gh-runnerd/commit/22a2923033c875ddd4f755774f79f60b94649449) | The prior source set omitted executable `Example` functions even though an unfiltered prescription executes them. The conservative correction rejects any top-level `Example` declaration before claiming a set digest. | Focused synthetic `ExampleWidget` declaration rejected before a digest or result was recorded; no example body ran. |
+| [4001254021](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4001254021), source [423d4fc501120a014e63f77d3ef6652606d0326a lines 971-1062](https://github.com/1XP-AI/gh-runnerd/blob/423d4fc501120a014e63f77d3ef6652606d0326a/docs/evidence/g01-recovery-packet.md#L971-L1062) | Reproduced: the immutable source-name helper returned after its first `//` line, so consecutive line/block comments between `func` and `TestHidden` caused the valid declaration to be omitted. Corrected: `skip_source_ignored` now consumes whitespace and consecutive line/block comments until the next token; final source-name anchors are lines 1019-1111. | Immutable red/current-green source-only evidence is recorded at packet lines 4574-4688; the current probe discovers `TestHidden` and observed zero Go children. |
+| [4001254025](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4001254025), source [423d4fc501120a014e63f77d3ef6652606d0326a lines 1065-1083](https://github.com/1XP-AI/gh-runnerd/blob/423d4fc501120a014e63f77d3ef6652606d0326a/docs/evidence/g01-recovery-packet.md#L1065-L1083) | Reproduced: the immutable helper left `[[:xdigit:]]` untranslated, so Python derived a set different from Go's ASCII xdigit class. Corrected: preflight now scans nested POSIX classes against the explicit seven-name translation table and rejects all other classes before compile or metadata, while preserving reviewed translations and escaped literals; final regexp anchors are lines 935-986 and 1114-1123. | Immutable red/current-green mismatch and no-Go-child evidence is recorded at packet lines 4691-4856; six unsupported classes were rejected before Python compile and zero Go children were observed. |
