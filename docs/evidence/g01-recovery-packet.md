@@ -224,9 +224,14 @@ package-initialization guard: a source-tree or build-tag change, including an
 ignored Go or test file, requires a new review before list validation can
 proceed. The wrapper queries the effective
 `go env GOFLAGS`, including GOENV/configuration, rejects non-empty output, and
-then pins `GOFLAGS=` for both list probes and the original command. Race-mode
-prescriptions reject inherited or command-supplied `GORACE` before either list
-probe or test execution. Exactly one `-count=1` and one positive bounded
+then pins `GOFLAGS=` for both list probes and the original command. After
+parsing command-prefix assignments, it creates the Go-child environment with
+`GOWORK=off` and passes that exact environment to every Go metadata, list and
+test subprocess; inherited or command-supplied workspace paths are therefore
+ignored before package metadata can be selected. The reviewed behavior is
+force-off, not validation or reuse of a caller-provided `go.work` file.
+Race-mode prescriptions reject inherited or command-supplied `GORACE` before
+either list probe or test execution. Exactly one `-count=1` and one positive bounded
 `-timeout` (at most 300 seconds) are required; `-args` and test-binary
 selector/count/timeout overrides and `-exec` execution wrappers are rejected.
 The execution command adds a wrapper-controlled `-json` stream and fails closed
@@ -319,10 +324,17 @@ if inherited_child_env:
 if len(command) < 3 or command[:2] != ["go", "test"]:
     raise SystemExit(f"{label}: expected a go test command")
 
+# Pin the environment after parsing command-prefix assignments. This overrides
+# both inherited and command-supplied GOWORK values before the first Go child.
+env["GOWORK"] = "off"
+go_env = dict(env)
+if go_env.get("GOWORK") != "off":
+    raise SystemExit(f"{label}: Go child environment did not pin GOWORK=off")
+
 effective_goflags = subprocess.run(
     ["go", "env", "GOFLAGS"],
     cwd=repo_root,
-    env=env,
+    env=go_env,
     text=True,
     capture_output=True,
     check=False,
@@ -334,7 +346,7 @@ if len(effective_lines) > 1:
     raise SystemExit(f"{label}: effective GOFLAGS query was not single-line")
 if effective_lines and effective_lines[0].strip():
     raise SystemExit(f"{label}: effective GOFLAGS must be empty")
-env["GOFLAGS"] = ""
+go_env["GOFLAGS"] = ""
 
 test_args = command[2:]
 
@@ -479,7 +491,7 @@ def package_initialization_guard():
     metadata = subprocess.run(
         list_command,
         cwd=repo_root,
-        env=env,
+        env=go_env,
         text=True,
         capture_output=True,
         check=False,
@@ -667,7 +679,7 @@ list_args = list_args_for(original_run_pattern)
 list_result = subprocess.run(
     ["go", "test", *list_args],
     cwd=repo_root,
-    env=env,
+    env=go_env,
     text=True,
     capture_output=True,
     check=False,
@@ -694,7 +706,7 @@ if skip_patterns:
     skip_result = subprocess.run(
         ["go", "test", *list_args_for(skip_patterns[0])],
         cwd=repo_root,
-        env=env,
+        env=go_env,
         text=True,
         capture_output=True,
         check=False,
@@ -716,7 +728,7 @@ if actual_digest != expected_digest:
     )
 print(
     f"{label}: list validation passed; package {actual_package}; "
-    f"build {actual_build}; raw listed {len(listed)}; "
+    f"build {actual_build}; GOWORK={go_env['GOWORK']}; raw listed {len(listed)}; "
     f"filtered executed {expected_count} names; "
     f"set-sha256 {actual_digest}"
 )
@@ -762,7 +774,7 @@ run_command = command + ["-json"]
 run_result = subprocess.run(
     run_command,
     cwd=repo_root,
-    env=env,
+    env=go_env,
     text=True,
     capture_output=True,
     check=False,
@@ -1128,10 +1140,14 @@ The wrapper's selector edge cases were then exercised with a trimmed copy of
 the documented Python body that stops before the original test subprocess. Its
 only Go child processes are the effective `go env GOFLAGS`, package metadata
 (`go list -json -test`) and corresponding `go test -list` probes; the second
-list probe uses Go's own regexp implementation for `-skip` matching. Git source
-status/tree queries are read-only. The probe also feeds synthetic skipped and
-output-only/no-`run`/`pass` streams to the execution-stream guard without
-starting a test body:
+list probe uses Go's own regexp implementation for `-skip` matching. Every Go
+child receives `GOWORK=off` after inherited and command-prefix environment
+parsing, so an external or auto-discovered workspace cannot alter metadata or
+test selection. Git source status/tree queries are read-only. The probe also
+feeds synthetic skipped and output-only/no-`run`/`pass` streams to the
+execution-stream guard without starting a test body, and includes a synthetic
+inherited-workspace probe that verifies the force-off environment on every
+direct Go child:
 
 ```sh
 set -euo pipefail
@@ -1140,6 +1156,7 @@ import hashlib
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 from contextlib import redirect_stdout
@@ -1341,6 +1358,58 @@ with tempfile.TemporaryDirectory() as goenv_dir:
             if "list validation passed" not in output.getvalue():
                 raise SystemExit(f"{label}: missing list-validation result")
             print(f"{label}: accepted list-only selector")
+inherited_gowork_previous = os.environ.get("GOWORK")
+gowork_observed = []
+real_run = subprocess.run
+
+def observe_go_child(*args, **kwargs):
+    command = args[0] if args else kwargs.get("args", [])
+    if command and command[0] == "go":
+        child_env = kwargs.get("env")
+        if child_env is None or child_env.get("GOWORK") != "off":
+            raise SystemExit(
+                "inherited-gowork: a direct Go child did not receive GOWORK=off"
+            )
+        gowork_observed.append(tuple(command[:3]))
+    return real_run(*args, **kwargs)
+
+os.environ["GOWORK"] = "/synthetic/external/workspace/go.work"
+subprocess.run = observe_go_child
+try:
+    sys.argv = [
+        "wrapper-probe", "1", one_digest, "inherited-gowork",
+        "experiments/g01-scaleset:./livecanary", "default+race+go1.26.8", *(
+            common + ["./livecanary", "-run=^" + one_name + "$"]
+        ),
+    ]
+    output = io.StringIO()
+    try:
+        with redirect_stdout(output):
+            exec(compile(wrapper, "<wrapper>", "exec"), namespace)
+    except SystemExit as error:
+        raise SystemExit(f"inherited-gowork: unexpected rejection: {error}")
+    expected_go_commands = [
+        ("go", "env", "GOFLAGS"),
+        ("go", "list", "-C"),
+        ("go", "test", "-C"),
+    ]
+    if gowork_observed != expected_go_commands:
+        raise SystemExit(
+            "inherited-gowork: expected direct Go metadata/list probes "
+            f"{expected_go_commands}, observed {gowork_observed}"
+        )
+    if "GOWORK=off" not in output.getvalue():
+        raise SystemExit("inherited-gowork: force-off behavior was not recorded")
+    print(
+        "inherited-gowork: passed; synthetic external workspace was overridden; "
+        "all 3 direct Go metadata/list probes received GOWORK=off before execution"
+    )
+finally:
+    subprocess.run = real_run
+    if inherited_gowork_previous is None:
+        os.environ.pop("GOWORK", None)
+    else:
+        os.environ["GOWORK"] = inherited_gowork_previous
 skip_stream = json.dumps({"Action": "skip", "Test": "TestSynthetic/subtest"}) + "\n"
 namespace["label"] = "skip-probe"
 validator = namespace.get("validate_test_stream")
@@ -1388,7 +1457,9 @@ the POSIX-class `[[:upper:]]` skip probe preserved the exact 1/1 set; the
 no-match and equals-form skip-all cases were rejected with 0 observed executed
 names before any test body; a livecanary/liveworker package mismatch, tag/build
 mismatch and temporary GOENV-persisted non-empty `GOFLAGS` were rejected before
-listing; duplicate package targeting was rejected before listing; slash-
+listing; duplicate package targeting was rejected before listing; the synthetic
+inherited-workspace probe observed the force-off environment on all three direct
+Go metadata/list probes before listing; slash-
 delimited subtest `-skip`, `-count=0`, `-count=2`, missing/duplicate/zero/
 overlarge `-timeout`, inherited `GORACE`, `-args`, direct test-binary selector,
 `-exec`, active package `init`, and inherited `G01_INPUT_CHILD=blocked` were
@@ -1408,7 +1479,27 @@ exec-wrapper: rejected before test body: exec-wrapper: -exec execution wrappers 
 active-package-init: rejected before test body: active-package-init: active package init requires a new reviewed guard
 skipped-subtest-event: rejected before result recording: wrapper-probe: test execution contained a skipped test
 missing-run-pass-events: rejected before result recording: wrapper-probe: test execution was missing expected event(s): run=TestSupportedListenerBarriersAndReservation; pass=TestSupportedListenerBarriersAndReservation
+inherited-gowork: passed; synthetic external workspace was overridden; all 3 direct Go metadata/list probes received GOWORK=off before execution
 inherited-child-mode: rejected before test body: inherited-child-mode: fixture child-mode environment is not allowed: G01_INPUT_CHILD
+```
+
+The exact wrapper replay was then run in list-only mode with a synthetic
+inherited external workspace. On the PR #78 packet head
+`c550adcb2ca6532e2c69cbb6ad8d2aafd5e352ae`, records 01--20 reached list
+validation with `GOWORK=off`; record 21 correctly stopped at the PR #72
+source-tree guard before `go list`, rather than silently using the PR #78
+module tree (`08c7830de7bc5120d1302d7ba6df162abd582315`) when the reviewed
+PR #72 tree was `9b30ef1b69c6375cb264c759d366fc5a52a5439f`. The separate
+existing PR #72 checkout at `f5560ba950f77343e57034cc1cf85dc67f5ac922` was
+then used for the two PR #72 records, proving that their reviewed module-tree
+pin is selected by actual metadata/list execution; no test body or live
+resource ran:
+
+```text
+c550 exact replay: records 01-20 list-only validation passed with GOWORK=off; record 21 drain-pr72: rejected before test body: drain-pr72: package-initialization guard requires reviewed source tree; direct Go child GOWORK checks=1
+record 21 drain-pr72: list validation passed; package experiments/g01-scaleset:./livecanary; build default+norace+go1.26.8; GOWORK=off; raw listed 34; filtered executed 34 names; set-sha256 a79b7fa367d8eb1e7fe4ee4ef637696518946dab6f2f25410f6e04bfba137298
+record 22 drain-pr72-race: list validation passed; package experiments/g01-scaleset:./livecanary; build default+race+go1.26.8; GOWORK=off; raw listed 34; filtered executed 34 names; set-sha256 a79b7fa367d8eb1e7fe4ee4ef637696518946dab6f2f25410f6e04bfba137298
+PR72 exact replay: both records reached list-only validation; direct Go child environments checked for GOWORK=off
 ```
 
 The tagged worker command is a complete `./liveworker` `^TestPaired` partition
@@ -1783,7 +1874,7 @@ repo_root = Path(
 if invocation_root != repo_root:
     raise SystemExit("run this selector audit from the repository root")
 
-env = {**os.environ, "GOTOOLCHAIN": "go1.26.8"}
+env = {**os.environ, "GOTOOLCHAIN": "go1.26.8", "GOWORK": "off"}
 effective_goflags = subprocess.run(
     ["go", "env", "GOFLAGS"], cwd=repo_root, env=env, text=True,
     capture_output=True, check=False,
@@ -1929,7 +2020,8 @@ under comparison parent ee8df8b7e00204c74a892b27f8b4c0ab278751ba: exact sets mat
 25/25 `liveworker` runtime names, 4/4 preparation names, 1/1 `osusergo`
 build-tag name and 26/26 reconciliation names. Every invocation used
 `go test -list` after the effective `go env GOFLAGS` check and explicit
-`GOFLAGS=` pin; no test body ran.
+`GOFLAGS=` and `GOWORK=off` pins; no inherited or auto-discovered workspace
+could affect the list, and no test body ran.
 
 The declaration consistency check also avoids self-referential line numbers and
 uses immutable source/tree assertions plus quiet presence/absence checks:
@@ -2174,11 +2266,12 @@ was rejected before execution. The existing livecanary selector audits remain
 The package-level initialization guard also resolves the effective source set
 for every package/build combination used by the wrapper. It pins the reviewed
 module subtree, requires a clean source path with no tracked, untracked or
-ignored paths (the status probe uses `--ignored=matching`), includes ordinary
-and test Go files selected by the exact build tags, and rejects any active `func init` before
-`go test -list`; package-variable initializer changes therefore require a new
-source-tree review rather than being silently treated as list-only-safe. The
-guard audit was read-only and did not run test bodies or live resources:
+ignored paths (the status probe uses `--ignored=matching`), pins `GOWORK=off`
+before each `go list -json -test` metadata query, includes ordinary and test
+Go files selected by the exact build tags, and rejects any active `func init`
+before `go test -list`; package-variable initializer changes therefore require
+a new source-tree review rather than being silently treated as list-only-safe.
+The guard audit was read-only and did not run test bodies or live resources:
 
 ```sh
 set -euo pipefail
@@ -2220,7 +2313,12 @@ cases = [
     ("paired-livecanary", "./livecanary", "g01_pair_fixture"),
 ]
 for label, package, tags in cases:
-    env = {**os.environ, "GOFLAGS": "", "GOTOOLCHAIN": "go1.26.8"}
+    env = {
+        **os.environ,
+        "GOFLAGS": "",
+        "GOTOOLCHAIN": "go1.26.8",
+        "GOWORK": "off",
+    }
     command = ["go", "list", "-C", module_dir, "-json", "-test", "-race"]
     if tags:
         command.append("-tags=" + tags)
@@ -2274,7 +2372,8 @@ PY
 The package-initialization guard audit passed for all seven package/build sets
 (root, default and tagged controller/worker packages); the source subtree was
 unchanged from the reviewed tree, the `--ignored=matching` status output was
-empty, and no active package `init` function was selected. The wrapper regression
+empty, each `go list -json -test` metadata query received `GOWORK=off`, and no
+active package `init` function was selected. The wrapper regression
 probe separately enabled the reviewed
 `g01_pair_real_cadence` tag and rejected its active `init` before listing,
 demonstrating the fail-closed path without executing it.
@@ -2386,6 +2485,18 @@ and its correction, rather than relying on staleness alone.
 | [3999140797](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999140797), source [65071cfb1e8ad0f47ab7e09dd119f1c98beaaefc](https://github.com/1XP-AI/gh-runnerd/commit/65071cfb1e8ad0f47ab7e09dd119f1c98beaaefc) | Reproduced: journal/authority selectors omitted strict duplicate-field, failed-sync, unrecorded-authority and renewed-approval contracts. The packet now includes the named livecanary and liveworker journal/authority cases in the reconciliation partitions and audits their exact sets. |
 | [3999140800](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999140800), source [65071cfb1e8ad0f47ab7e09dd119f1c98beaaefc](https://github.com/1XP-AI/gh-runnerd/commit/65071cfb1e8ad0f47ab7e09dd119f1c98beaaefc) | Reproduced: the tagged controller command did not exercise the livecanary credential-attestation and plaintext/off-host transport refusals. The packet now includes `TestCredentialAttestationMismatchAndExpiredTokenRejected` and `TestTransportRejectsPlaintextOffHostAndProxyBeforeNetwork` in the live-transport selector. |
 | [3999140806](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999140806), source [9b94ff9f3114e5546abbe741b96486c3bc13626c](https://github.com/1XP-AI/gh-runnerd/commit/9b94ff9f3114e5546abbe741b96486c3bc13626c) | Reproduced against the immutable source: `docs/reviews/team-review.md` already marks the Astra assignments historical-only and routes current work through `docs/EXECUTION.md`; the correction was made by `f59a30532bfdc62876065dcf8b4997520606e6a6`. This stale finding is outside packet-only ownership, so no other file is changed here. |
+
+### Current exact-head GOWORK findings
+
+The two Codex findings on the exact prior packet head
+[`c550adcb2ca6532e2c69cbb6ad8d2aafd5e352ae`](https://github.com/1XP-AI/gh-runnerd/commit/c550adcb2ca6532e2c69cbb6ad8d2aafd5e352ae)
+were reproduced and corrected here; neither is treated as resolved by
+staleness alone:
+
+| Finding and immutable source | Reproduction and disposition |
+|---|---|
+| [4000590180](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000590180), source [c550adcb2ca6532e2c69cbb6ad8d2aafd5e352ae](https://github.com/1XP-AI/gh-runnerd/commit/c550adcb2ca6532e2c69cbb6ad8d2aafd5e352ae) | Reproduced: inherited `GOWORK` could select an external workspace/replacement while the wrapper was resolving package metadata. Corrected: after parsing environment assignments, the wrapper forces `GOWORK=off` in one Go-child environment before `go env`, `go list`, either `go test -list` probe or the JSON test subprocess, so caller workspaces are ignored before metadata selection. |
+| [4000590184](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000590184), source [c550adcb2ca6532e2c69cbb6ad8d2aafd5e352ae](https://github.com/1XP-AI/gh-runnerd/commit/c550adcb2ca6532e2c69cbb6ad8d2aafd5e352ae) | Reproduced: inherited `GOWORK` could alter list or execution behavior after metadata validation. Corrected: the independent selector and package-init audits also pin `GOWORK=off`; a read-only synthetic inherited-workspace probe injected an external sentinel and observed `GOWORK=off` on all three direct metadata/list children before accepting the list-only result. No test body, live resource or external workspace was used. |
 
 The two new exact-head findings
 on `95cd9210620c54e098ecbe0df1217af1659f0c74`—[3999634756](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999634756)
