@@ -20,14 +20,15 @@ const fixtureAppID int64 = 71
 var fixtureNow = time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 
 type fixtureAPI struct {
-	app           AppIdentity
-	installation  Installation
-	repository    Repository
-	appErr        error
-	installErr    error
-	repositoryErr error
-	calls         []string
-	fingerprints  [][32]byte
+	app                 AppIdentity
+	installation        Installation
+	repository          Repository
+	appErr              error
+	installErr          error
+	repositoryErr       error
+	calls               []string
+	fingerprints        [][32]byte
+	expectedFingerprint [32]byte
 }
 
 func (f *fixtureAPI) VerifyApp(_ context.Context, credential CredentialRef) (AppIdentity, error) {
@@ -67,6 +68,47 @@ type sourceFixture struct {
 	onRead    func()
 	reads     int
 }
+
+type spoofedManualSource struct {
+	appID     int64
+	expiresAt time.Time
+	pem       []byte
+	reads     int
+}
+
+func (s *spoofedManualSource) Kind() SourceKind     { return SourceManual }
+func (s *spoofedManualSource) AppID() int64         { return s.appID }
+func (s *spoofedManualSource) ExpiresAt() time.Time { return s.expiresAt }
+func (s *spoofedManualSource) Read(context.Context) ([]byte, error) {
+	s.reads++
+	return append([]byte(nil), s.pem...), nil
+}
+
+type cancelOnErrContext struct {
+	context.Context
+	cancelAt int
+	checks   int
+	done     chan struct{}
+	canceled bool
+}
+
+func newCancelOnErrContext(parent context.Context, cancelAt int) *cancelOnErrContext {
+	return &cancelOnErrContext{Context: parent, cancelAt: cancelAt, done: make(chan struct{})}
+}
+
+func (c *cancelOnErrContext) Err() error {
+	c.checks++
+	if c.checks >= c.cancelAt {
+		if !c.canceled {
+			close(c.done)
+			c.canceled = true
+		}
+		return context.Canceled
+	}
+	return nil
+}
+
+func (c *cancelOnErrContext) Done() <-chan struct{} { return c.done }
 
 func (s *sourceFixture) Kind() SourceKind     { return s.kind }
 func (s *sourceFixture) AppID() int64         { return s.appID }
@@ -154,6 +196,76 @@ func TestValidateManualSingleOrganizationBindsIdentityBeforeCommit(t *testing.T)
 	}
 	if strings.Contains(string(data), "PRIVATE KEY") {
 		t.Fatal("validated binding serialized private key material")
+	}
+}
+
+func TestValidationRejectsWrongValidKeyForBoundIdentity(t *testing.T) {
+	trustedPEM := fixturePEM(t)
+	wantFingerprint, err := fingerprintPrivateKey(trustedPEM)
+	if err != nil {
+		t.Fatal("trusted fixture key fingerprint failed")
+	}
+	api := fixtureAPIValue()
+	api.expectedFingerprint = wantFingerprint
+	wrongPEM := fixturePEM(t)
+	_, err = ValidateAt(context.Background(), fixtureNow, fixtureConfig(), NewManualSource(fixtureAppID, wrongPEM), api, nil)
+	if !errors.Is(err, ErrAppIdentity) || !reflect.DeepEqual(api.calls, []string{"app"}) {
+		t.Fatalf("unrelated valid key was accepted: err=%v calls=%v", err, api.calls)
+	}
+}
+
+func TestValidationRejectsUnmarkedManualSource(t *testing.T) {
+	source := &spoofedManualSource{appID: fixtureAppID, pem: fixturePEM(t)}
+	api := fixtureAPIValue()
+	_, err := ValidateAt(context.Background(), fixtureNow, fixtureConfig(), source, api, nil)
+	if !errors.Is(err, ErrSource) || source.reads != 0 || len(api.calls) != 0 {
+		t.Fatalf("unmarked manual source crossed boundary: err=%v reads=%d calls=%v", err, source.reads, api.calls)
+	}
+}
+
+func TestValidationRejectsSourceThatExpiresDuringRead(t *testing.T) {
+	var source *sourceFixture
+	source = &sourceFixture{
+		kind:      SourceManual,
+		appID:     fixtureAppID,
+		expiresAt: fixtureNow.Add(time.Hour),
+		pem:       fixturePEM(t),
+		onRead: func() {
+			source.expiresAt = fixtureNow.Add(-time.Nanosecond)
+		},
+	}
+	api := fixtureAPIValue()
+	_, err := ValidateAt(context.Background(), fixtureNow, fixtureConfig(), source, api, nil)
+	if !errors.Is(err, ErrExpired) || source.reads != 1 || len(api.calls) != 0 {
+		t.Fatalf("late-expiring source crossed boundary: err=%v reads=%d calls=%v", err, source.reads, api.calls)
+	}
+}
+
+func TestValidationChecksCancellationImmediatelyBeforeAppBoundary(t *testing.T) {
+	ctx := newCancelOnErrContext(context.Background(), 4)
+	source := &sourceFixture{kind: SourceManual, appID: fixtureAppID, pem: fixturePEM(t)}
+	api := fixtureAPIValue()
+	_, err := ValidateAt(ctx, fixtureNow, fixtureConfig(), source, api, nil)
+	if !errors.Is(err, ErrCanceled) || len(api.calls) != 0 {
+		t.Fatalf("canceled API boundary crossed remote effect: err=%v calls=%v", err, api.calls)
+	}
+}
+
+func TestValidationRejectsTypedNilSourceAndAdapter(t *testing.T) {
+	var nilSource *sourceFixture
+	var source CredentialSource = nilSource
+	api := fixtureAPIValue()
+	_, err := ValidateAt(context.Background(), fixtureNow, fixtureConfig(), source, api, nil)
+	if !errors.Is(err, ErrSource) || len(api.calls) != 0 {
+		t.Fatalf("typed-nil source crossed validation boundary: err=%v calls=%v", err, api.calls)
+	}
+
+	var nilAPI *fixtureAPI
+	var typedNilAPI API = nilAPI
+	source = &sourceFixture{kind: SourceManual, appID: fixtureAppID, pem: fixturePEM(t)}
+	_, err = ValidateAt(context.Background(), fixtureNow, fixtureConfig(), source, typedNilAPI, nil)
+	if !errors.Is(err, ErrConfig) {
+		t.Fatalf("typed-nil adapter crossed validation boundary: err=%v", err)
 	}
 }
 
