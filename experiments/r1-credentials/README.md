@@ -103,11 +103,12 @@ dispatch is still required for any real Mac or self-hosted runner test.
 
 The metadata commit callback receives a context bounded by the earlier caller
 deadline and non-zero credential `ExpiresAt`; it must observe cancellation or
-expiry before applying state and perform the write transactionally. This
-boundary checks cancellation and expiry before and after the callback and
-returns `ErrExpired` with no binding when a callback returns after expiry, but
-it cannot roll back an external side effect. On commit failure, cancellation
-or expiry, the caller should discard any partial or unknown local state,
-revalidate the credential and identities, and retry only through an
-independently reviewed transactional adapter. No automatic workflow replay or
-live rollback is performed here.
+expiry before applying state, perform the write transactionally and return nil
+only after the binding is durably committed. A nil callback result is terminal
+success even if cancellation or expiry is observed immediately afterward, so
+the validated binding is returned instead of inviting a retry of unknown state.
+On callback failure, this boundary preserves the cancellation/expiry error
+precedence and cannot roll back an external side effect. The caller should
+discard any partial or unknown local state, revalidate the credential and
+identities, and retry only through an independently reviewed transactional
+adapter. No automatic workflow replay or live rollback is performed here.

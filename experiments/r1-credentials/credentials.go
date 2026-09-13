@@ -220,12 +220,15 @@ type ValidatedBinding struct {
 
 // Commit receives an all-or-nothing metadata binding after every identity
 // check succeeds. The callback must honor ctx before and during its operation
-// and apply the metadata transactionally: it must not expose a partial binding
-// if it returns an error or observes cancellation. For a non-expiring source,
-// ctx retains the caller's cancellation and deadline. For an expiring source,
-// ctx has the earlier of the caller's deadline and the source expiry, so a
-// callback can stop before applying state at the credential boundary. A
-// callback may perform an external side effect, but this boundary does not
+// and apply the metadata transactionally: it must return nil only after the
+// binding is durably committed, and must return an error when no committed
+// binding is known. For a non-expiring source, ctx retains the caller's
+// cancellation and deadline. For an expiring source, ctx has the earlier of
+// the caller's deadline and the source expiry, so a callback can stop before
+// applying state at the credential boundary. A nil callback result is
+// terminal success; if ctx ends after the callback has committed, Validate
+// still returns the binding rather than inviting a retry of an unknown state.
+// A callback may perform an external side effect, but this boundary does not
 // claim that such a side effect can be rolled back. A nil callback performs
 // validation only; this is the offline fixture mode and does not persist
 // credentials.
@@ -326,9 +329,6 @@ func validateWithClock(ctx context.Context, now func() time.Time, config Config,
 				return ValidatedBinding{}, boundaryErr
 			}
 			return ValidatedBinding{}, ErrCommit
-		}
-		if err := commitBoundaryStatus(ctx, now, validationCtx, expiresAt); err != nil {
-			return ValidatedBinding{}, err
 		}
 	}
 	return binding, nil
