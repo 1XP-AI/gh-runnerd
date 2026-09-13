@@ -209,10 +209,14 @@ type ValidatedBinding struct {
 // Commit receives an all-or-nothing metadata binding after every identity
 // check succeeds. The callback must honor ctx before and during its operation
 // and apply the metadata transactionally: it must not expose a partial binding
-// if it returns an error or observes cancellation. A callback may perform an
-// external side effect, but this boundary does not claim that such a side
-// effect can be rolled back. A nil callback performs validation only; this is
-// the offline fixture mode and does not persist credentials.
+// if it returns an error or observes cancellation. For a non-expiring source,
+// ctx retains the caller's cancellation and deadline. For an expiring source,
+// ctx has the earlier of the caller's deadline and the source expiry, so a
+// callback can stop before applying state at the credential boundary. A
+// callback may perform an external side effect, but this boundary does not
+// claim that such a side effect can be rolled back. A nil callback performs
+// validation only; this is the offline fixture mode and does not persist
+// credentials.
 type Commit func(context.Context, ValidatedBinding) error
 
 // Validate checks one manually supplied credential source and verifies the
@@ -303,13 +307,15 @@ func validateWithClock(ctx context.Context, now func() time.Time, config Config,
 		if err := boundaryStatus(ctx, now, expiresAt); err != nil {
 			return ValidatedBinding{}, err
 		}
-		if err := commit(ctx, commitBinding); err != nil {
-			if boundaryErr := boundaryStatus(ctx, now, expiresAt); boundaryErr != nil {
+		commitCtx, cancelCommit := contextWithExpiry(ctx, expiresAt)
+		defer cancelCommit()
+		if err := commit(commitCtx, commitBinding); err != nil {
+			if boundaryErr := commitBoundaryStatus(ctx, now, commitCtx, expiresAt); boundaryErr != nil {
 				return ValidatedBinding{}, boundaryErr
 			}
 			return ValidatedBinding{}, ErrCommit
 		}
-		if err := boundaryStatus(ctx, now, expiresAt); err != nil {
+		if err := commitBoundaryStatus(ctx, now, commitCtx, expiresAt); err != nil {
 			return ValidatedBinding{}, err
 		}
 	}
@@ -363,6 +369,23 @@ func boundaryStatus(ctx context.Context, now func() time.Time, expiresAt time.Ti
 		return err
 	}
 	if sourceExpired(now(), expiresAt) {
+		return ErrExpired
+	}
+	return nil
+}
+
+func contextWithExpiry(parent context.Context, expiresAt time.Time) (context.Context, context.CancelFunc) {
+	if expiresAt.IsZero() {
+		return parent, func() {}
+	}
+	return context.WithDeadline(parent, expiresAt)
+}
+
+func commitBoundaryStatus(ctx context.Context, now func() time.Time, commitCtx context.Context, expiresAt time.Time) error {
+	if err := boundaryStatus(ctx, now, expiresAt); err != nil {
+		return err
+	}
+	if !expiresAt.IsZero() && errors.Is(commitCtx.Err(), context.DeadlineExceeded) {
 		return ErrExpired
 	}
 	return nil

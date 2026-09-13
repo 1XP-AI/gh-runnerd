@@ -326,16 +326,64 @@ func TestValidationCommitUsesCredentialExpiryDeadlineAndAbortsAtBoundary(t *test
 		if !errors.Is(callbackErr, context.DeadlineExceeded) {
 			return errors.New("commit context ended for an unexpected reason")
 		}
-		if callbackCtx.Err() == nil {
-			commitApplied = true
+		if callbackCtx.Err() != nil {
+			return callbackErr
 		}
-		return callbackErr
+		commitApplied = true
+		return nil
 	})
 	if !errors.Is(err, ErrExpired) || !reflect.DeepEqual(got, ValidatedBinding{}) {
 		t.Fatalf("expiry during commit was not terminal: binding=%+v err=%v", got, err)
 	}
 	if !callbackDeadline.Equal(expiresAt) || !errors.Is(callbackErr, context.DeadlineExceeded) || commitApplied {
 		t.Fatalf("commit callback did not abort transactionally at expiry: deadline=%v want=%v callbackErr=%v applied=%t", callbackDeadline, expiresAt, callbackErr, commitApplied)
+	}
+}
+
+func TestValidationCommitContextKeepsEarlierParentDeadline(t *testing.T) {
+	parentDeadline := time.Now().Add(300 * time.Millisecond)
+	ctx, cancel := context.WithDeadline(context.Background(), parentDeadline)
+	defer cancel()
+	expiresAt := time.Now().Add(time.Second)
+	source := NewManualSourceWithExpiry(fixtureAppID, fixturePEM(t), expiresAt)
+	api := fixtureAPIValue()
+	var callbackDeadline time.Time
+	var callbackErr error
+
+	got, err := Validate(ctx, fixtureConfig(), source, api, func(callbackCtx context.Context, _ ValidatedBinding) error {
+		var ok bool
+		callbackDeadline, ok = callbackCtx.Deadline()
+		if !ok || !callbackDeadline.Equal(parentDeadline) {
+			return errors.New("commit context did not retain earlier parent deadline")
+		}
+		<-callbackCtx.Done()
+		callbackErr = callbackCtx.Err()
+		return callbackErr
+	})
+	if !errors.Is(err, ErrCanceled) || !reflect.DeepEqual(got, ValidatedBinding{}) {
+		t.Fatalf("parent cancellation was not terminal: binding=%+v err=%v", got, err)
+	}
+	if !callbackDeadline.Equal(parentDeadline) || !errors.Is(callbackErr, context.DeadlineExceeded) {
+		t.Fatalf("commit context did not preserve parent deadline: deadline=%v want=%v callbackErr=%v", callbackDeadline, parentDeadline, callbackErr)
+	}
+}
+
+func TestValidationKeepsExpiryTerminalWhenCommitReturnsNilAfterDeadline(t *testing.T) {
+	expiresAt := time.Now().Add(300 * time.Millisecond)
+	source := NewManualSourceWithExpiry(fixtureAppID, fixturePEM(t), expiresAt)
+	api := fixtureAPIValue()
+	callbackReturnedAfterDeadline := false
+
+	got, err := Validate(context.Background(), fixtureConfig(), source, api, func(callbackCtx context.Context, _ ValidatedBinding) error {
+		if deadline, ok := callbackCtx.Deadline(); !ok || !deadline.Equal(expiresAt) {
+			return errors.New("commit context has the wrong expiry deadline")
+		}
+		<-callbackCtx.Done()
+		callbackReturnedAfterDeadline = true
+		return nil
+	})
+	if !errors.Is(err, ErrExpired) || !reflect.DeepEqual(got, ValidatedBinding{}) || !callbackReturnedAfterDeadline {
+		t.Fatalf("successful late commit was not rejected at terminal boundary: binding=%+v err=%v late=%t", got, err, callbackReturnedAfterDeadline)
 	}
 }
 
