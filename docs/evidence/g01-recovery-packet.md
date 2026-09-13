@@ -16,9 +16,10 @@ The active G01 Goal is:
 ## Selected path
 
 Pin `github.com/actions/scaleset v0.4.0` at source commit
-`6ce025902cd964747a078c2aabe7340ebc667eca` behind an adapter. Use the released
-high-level listener with independent reconciliation, keep one serialized
-session owner per pool, and preserve the upstream message order:
+`6ce025902cd964747a078c2aabe7340ebc667eca` behind an adapter. The selected path
+is a future production contract: use the released high-level listener with
+independent reconciliation, keep one serialized session owner per pool, and
+preserve the upstream message order:
 
 ```text
 statistics observation -> message ACK (DeleteMessage) -> available-job acquisition -> lifecycle callbacks
@@ -27,11 +28,16 @@ statistics observation -> message ACK (DeleteMessage) -> available-job acquisiti
 The packet records the SDK's order; it does **not** reorder ACK after callbacks
 or acquisition, and it does not claim exactly-once delivery, idempotent
 acquisition/JIT, durable execution, linearizability or server-side receipt.
-Callbacks are observations. Reconciliation reads
+Callbacks are observations. The future production recovery contract is to read
 `TotalAssignedJobs` at startup, after listener failure/session replacement and
 on a bounded schedule, with session-generation fencing and conservative
-ownership/quarantine rules. A later zero or absent observation cannot erase an
-earlier work-bearing or uncertain observation.
+ownership/quarantine rules. The current offline experiment does not implement
+that full path: `recovery.go` performs one synthetic read and explicitly defers
+persistence, freshness fencing, caps and provider ownership validation to later
+gates, while rehydration and general session replacement remain unimplemented
+in the driver. Bounded fixture rules preserve a later zero or absent
+observation from erasing an earlier work-bearing or uncertain observation; that
+is not a live or production reconciliation result.
 
 ## Classification and evidence index
 
@@ -96,7 +102,7 @@ version pin alone does not prove the running binary or disable runner updates.
 | Idle assignment and drain | [idle-drain evidence at PR #72 head](https://github.com/1XP-AI/gh-runnerd/blob/f5560ba950f77343e57034cc1cf85dc67f5ac922/docs/evidence/g01-idle-drain.md); [live-canary drain phases](g01-live-canary.md#minimal-execution-phases). | Source + fixture + live gap | Offline hook uses the released listener's `SetMaxRunners(0)` and retains ACK-before-acquisition; client-side request markers do not prove server receipt or an atomic drain. Real old-poll acquisition/idle assignment and busy-safe removal remain unverified. |
 | Terminal identity and completion | [identity reconciliation](g01-identity-reconciliation.md), [exact observations](g01-exact-observations.md), [paired baseline](g01-paired-baseline.md) and [terminal path](g01-paired-terminal.md). | Source + fixture | Keep SDK request/job IDs, REST job/runner IDs, run attempt, runner identity and local exit distinct; bind an exact tuple before classifying. No live job eligibility, successful execution, per-request release or cleanup proof is claimed. |
 | Secret and error boundary | Contract runner/JIT section, [worker harness](g01-worker-harness.md), and driver redaction rules. | Source + fixture | No secrets, JIT values, raw bodies or raw SDK errors belong in this packet. Environment transport remains exposed to trusted same-user/process/container surfaces; modes and same-user ownership are not hostile-code isolation. |
-| Rollback and preservation | ADR 0002 and [live-canary exit/cleanup](g01-live-canary.md#exit-evidence-and-cleanup). | Source + plan | Documentation rollback is a reviewed revert of this packet/correction commit. For any future live run: stop new admission, let owned busy work finish, quarantine uncertainty, and remove only individually verified disposable resources; preserve manual runners and never force-kill, prune or replay. |
+| Rollback and preservation | ADR 0002 and [live-canary exit/cleanup](g01-live-canary.md#exit-evidence-and-cleanup). | Source + plan | Documentation rollback is a reviewed, file-scoped restore of `docs/evidence/g01-recovery-packet.md` only (for example, `git restore --source=<reviewed-parent> -- docs/evidence/g01-recovery-packet.md`); preserve independent corrections in `g01-live-driver.md` and `docs/reviews/team-review.md`. For any future live run: stop new admission, let owned busy work finish, quarantine uncertainty, and remove only individually verified disposable resources; preserve manual runners and never force-kill, prune or replay. |
 
 No row above is a live result. In particular, this packet makes no exactly-once
 or idempotency claim.
@@ -141,13 +147,14 @@ wording/link correction does not invalidate an unchanged offline boundary.
 | Boundary | Reuse unchanged evidence when | Exact focused rerun | Class/result to record |
 |---|---|---|---|
 | ACK, callback loss and acquisition order | SDK commit, listener source, adapter call order and root protocol fixtures are unchanged. | See the exact ACK/callback selector in the command block below, including `TestNoMessageDoesNotCountAsCompletedBarrier`. | Fixture: record ACK-before-acquisition and reservation/quarantine behavior; do not add server or exactly-once claims. |
-| Baseline listener/admission | listener, strict source reader, journal/lease, caps and selectors are unchanged. | See the exact baseline and admission selectors in the command block below, including `TestAuditPR25DistinctStateDirectoriesMustShareCap`. | Fixture: record actual test result and pinned SDK; no live/worker result. |
+| Baseline listener/admission | listener, strict source reader, journal/lease, caps and selectors are unchanged. | See the exact baseline and admission selectors in the command block below, including `TestAuditPR25DistinctStateDirectoriesMustShareCap`, `TestWorkerAdmissionCapsIndependentDirectories` and `TestWorkerAdmissionRetainsSlotAfterOutcomeAndClose`. | Fixture: record actual test result and pinned SDK; no live result or production worker claim. |
 | JIT causality and transport | runner source/parser, JIT transport, causal fixture and response-loss controls are unchanged. | Root-package and livecanary selectors are in the command blocks below; tagged worker input/refusal and worker transport selectors are also recorded there. | Fixture/source: record one-request controls and quarantine; never print or retain JIT. |
-| Reconciliation, inventory/identity/quarantine | statistics readers, paged inventory normalization, generation fences, ownership checks and journal/authority schema are unchanged. | Retain the prior reconciliation selector and add the exact focused inventory/quarantine and journal/authority selectors in the command block below, including the four `TestInventory*` cases, `TestDemandStatisticsAllowControlledProbeButNeverCleanup`, and the named journal/authority contracts in both `./livecanary` and `./liveworker`. | Fixture: record normalized facts and retained uncertainty; no live equality/absence claim. |
-| Secret and error handling | SDK error sentinels, HTTP body/debug redaction and shared response-budget controls are unchanged. | See the exact root and livecanary selectors in the secret/error command block below, including the decoded-body truncation and gzip-budget tests. | Fixture: record normalized sentinel/error and body-budget behavior; no secret-bearing output or live result is claimed. |
+| Controller update policy | pinned SDK update-setting request, confirmation and drift guards are unchanged. | See the exact `./livecanary` update-policy selectors in the worker/runtime command block below: `TestCreateRequestsDisabledRunnerUpdate`, `TestUnconfirmedUpdateSettingQuarantinesCreate`, `TestUpdateSettingDriftStopsBeforeSessionOrJIT` and `TestUpdateSettingDriftDoesNotBlockSafeEmptyCleanup`. | Source + fixture: record request/confirmation and pre-session/JIT refusal; no live service-setting result. |
+| Reconciliation, inventory/identity/quarantine | statistics readers, paged inventory normalization, generation fences, ownership checks and journal/authority schema are unchanged. | Retain the prior reconciliation selector and add the exact focused `TestObservation*` and `TestRoster*` families, inventory/quarantine and journal/authority selectors in the command block below, including the four `TestInventory*` cases, `TestDemandStatisticsAllowControlledProbeButNeverCleanup`, and the named journal/authority contracts in both `./livecanary` and `./liveworker`. | Fixture: record normalized facts and retained uncertainty; no live equality/absence claim. |
+| Secret and error handling | SDK error sentinels, HTTP body/debug redaction and shared response-budget controls are unchanged. | See the exact root, livecanary and liveworker selectors in the secret/error command block below, including decoded-body truncation, gzip-budget, uncertain-start and bounded Unix-response/redirect tests. | Fixture: record normalized sentinel/error and body-budget behavior; no secret-bearing output or live result is claimed. |
 | Tagged controller/JIT input and credential transport boundary | `g01_live` source, input reader, credential attestation and transport refusal tests are unchanged. | Run the tagged command below plus the livecanary credential/transport selector below, including `TestCredentialAttestationMismatchAndExpiredTokenRejected` and `TestTransportRejectsPlaintextOffHostAndProxyBeforeNetwork`. | Fixture: record no-secret/no-echo/refusal result; no credential or live phase. |
 | Idle drain and withdrawal | Only reuse the authoritative current PR #72 head `f5560ba950f77343e57034cc1cf85dc67f5ac922` and its unchanged fixture/source. | On that authoritative current PR #72 checkout: see the exact command in the block below; repeat with `go test -race` for the same selector. | Fixture/source: record physical-write markers as client facts and inconclusive server receipt; never reuse as live assignment/drain evidence. |
-| Paired terminal/worker support | paired journal/lease, worker profile, image/runtime pins and terminal selectors are unchanged. | See the exact tagged partition commands below; all retain `go1.26.8`, `-race`, `-count=1` and `-timeout=120s`, and the terminal groups remain exhaustive/disjoint. | Fixture: record receipt/identity checks only; no live worker or terminal success claim. |
+| Paired terminal/worker support | paired journal/lease, worker profile, `liveworker` runtime source/implementation, image/runtime pins and terminal selectors are unchanged. | See the exact controller update-policy and worker runtime commands plus the tagged partition commands below; the tagged partition commands retain `go1.26.8`, `-race`, `-count=1` and `-timeout=120s`, and the terminal groups remain exhaustive/disjoint. | Fixture: record receipt/identity checks only; no live worker or terminal success claim. |
 | Actual live canary | There is no live evidence to reuse today. A future result is reusable only for the same immutable workflow/run attempt, source/head, resources, authority scope and approved observation boundary. | Rebuild/plan the exact reviewed tagged binary, then run only the explicitly authorized phase from [the driver](g01-live-driver.md); never substitute fixture commands or broaden phases. | Live: record sanitized server observations, authorization and unresolved outcomes; any changed target or boundary requires a fresh approval/rerun. |
 
 The exact focused commands referenced above are recorded here. They are
@@ -155,43 +162,46 @@ prescriptions for future reruns, not completed results. None of these
 prescriptions reports a completed test or live server success/receipt.
 
 ```sh
-cd experiments/g01-scaleset && GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s -run '^(TestSDKACKBoundaries|TestSDKDemandAboveFiftyAndPartialAcquisition|TestSDKRepeatedStatisticsAnd202ReuseLastObservation|TestRecoveryAfterACKCallbackCrash|TestRecoveryMissingLifecycleCallback|TestRecoveryErrorsHoldReservationsAndRedact|TestSDKAcquisitionResponseLossAfterACK|TestSDKCapacityWithdrawalDoesNotFenceInFlightAcquisition|TestSDKHTTPFailuresAndSessionRefresh)$' .
-cd experiments/g01-scaleset && GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s ./livecanary -run '^(TestSupportedListenerBarriersAndReservation|TestDriverBarriersThroughPinnedSDK|TestForeignIdentityAndUnreviewedWorkNeverACKOrDelete|TestAuditPR25MultiJobAcquisitionMustRefuseBeforeACK|TestNoMessageDoesNotCountAsCompletedBarrier)$'
+GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s -run '^(TestSDKACKBoundaries|TestSDKDemandAboveFiftyAndPartialAcquisition|TestSDKRepeatedStatisticsAnd202ReuseLastObservation|TestRecoveryAfterACKCallbackCrash|TestRecoveryMissingLifecycleCallback|TestRecoveryErrorsHoldReservationsAndRedact|TestSDKAcquisitionResponseLossAfterACK|TestSDKCapacityWithdrawalDoesNotFenceInFlightAcquisition|TestSDKHTTPFailuresAndSessionRefresh)$' .
+GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestSupportedListenerBarriersAndReservation|TestDriverBarriersThroughPinnedSDK|TestForeignIdentityAndUnreviewedWorkNeverACKOrDelete|TestAuditPR25MultiJobAcquisitionMustRefuseBeforeACK|TestNoMessageDoesNotCountAsCompletedBarrier)$'
 ```
 
 ```sh
-cd experiments/g01-scaleset && GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=180s ./livecanary -run '^TestBaseline'
-cd experiments/g01-scaleset && GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=180s ./livecanary -run '^(TestAdmission.*|TestAuditPR25DistinctStateDirectoriesMustShareCap)$'
+GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=180s ./livecanary -run '^TestBaseline'
+GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=180s ./livecanary -run '^(TestAdmission.*|TestAuditPR25DistinctStateDirectoriesMustShareCap)$'
+GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=180s ./liveworker -run '^(TestWorkerAdmissionCapsIndependentDirectories|TestWorkerAdmissionRetainsSlotAfterOutcomeAndClose)$'
 ```
 
 ```sh
-cd experiments/g01-scaleset && GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s -run '^(TestSDKJITLookupBeforeCreationDoesNotDiscoverIdentity|TestSDKJITResponseLossWithoutCommitDoesNotDiscoverIdentity|TestSDKJITResponseLossDiscoversIdentityWithoutReissuing)$' .
-cd experiments/g01-scaleset && GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s ./livecanary -run '^(TestJITLostResponseIsSecretSafeAndNeverReissued|TestDriverBarriersThroughPinnedSDK)$'
+GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s -run '^(TestSDKJITLookupBeforeCreationDoesNotDiscoverIdentity|TestSDKJITResponseLossWithoutCommitDoesNotDiscoverIdentity|TestSDKJITResponseLossDiscoversIdentityWithoutReissuing)$' .
+GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestJITLostResponseIsSecretSafeAndNeverReissued|TestDriverBarriersThroughPinnedSDK)$'
 ```
 
 ```sh
-cd experiments/g01-scaleset && GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s ./liveworker -run '^(TestOneWorkerNeverRecreatedAndOnlyJITAddedToEnvironment|TestEveryRuntimeBoundaryRejectsProfileAndOwnershipMismatch|TestUnverifiedRunnerUpdatePolicyRefusesBeforeRuntime|TestSocketReplacementAfterPreflightCannotReceiveAnyMutation|TestUnixRuntimeRejectsWrongIdentityImagesAndUnsupportedLimits)$'
-cd experiments/g01-scaleset && GOTOOLCHAIN=go1.26.8 go test -race -tags=g01_worker -count=1 -timeout=45s ./cmd/g01-worker -run '^(TestBlockedJITInputHonorsDeadline|TestOfflinePlanAndRefusalDoNotReadSecretsOrEchoInput)$'
+GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./liveworker -run '^(TestOneWorkerNeverRecreatedAndOnlyJITAddedToEnvironment|TestUncertainStartNeverRetriesAndCannotCleanup|TestEveryRuntimeBoundaryRejectsProfileAndOwnershipMismatch|TestUnverifiedRunnerUpdatePolicyRefusesBeforeRuntime|TestSocketReplacementAfterPreflightCannotReceiveAnyMutation|TestUnixRuntimeRejectsWrongIdentityImagesAndUnsupportedLimits|TestAuditPR28MissingBridgeMustNotStart|TestCleanupRetainsActiveAndUnknownWorkers|TestOwnedTerminalCleanupAndRunningRemovalRace)$'
+GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestCreateRequestsDisabledRunnerUpdate|TestUnconfirmedUpdateSettingQuarantinesCreate|TestUpdateSettingDriftStopsBeforeSessionOrJIT|TestUpdateSettingDriftDoesNotBlockSafeEmptyCleanup)$'
+GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -tags=g01_worker -count=1 -timeout=45s ./cmd/g01-worker -run '^(TestBlockedJITInputHonorsDeadline|TestOfflinePlanAndRefusalDoNotReadSecretsOrEchoInput)$'
 ```
 
 ```sh
-cd experiments/g01-scaleset && GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s ./livecanary -run '^(TestObserve|TestStatistics|TestDemandStatisticsAllowControlledProbeButNeverCleanup|TestInvalidOwnedProof|TestJournal|TestAuthority|TestInventoryStrictPages|TestInventoryMalformedStopsLegacyEffects|TestInventoryTransportRefusalIsBoundedAndSanitized|TestInventoryImpossibleTotalStopsBeforeNextPage|TestStrictJSONRejectsDecoderEquivalentDuplicateFields|TestStrictJSONRejectsDuplicateAuthorityFields|TestFailedDirectorySyncMustBeRetried|TestFileJournalRejectsUnrecordedAuthorityBeforeRawDriverEffect|TestRenewedRecoveryApprovalRetainsOwnedState)'
-cd experiments/g01-scaleset && GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s ./liveworker -run '^(TestStrictJSONRejectsDecoderEquivalentDuplicateFields|TestStrictInputRejectsAmbiguousOrExtraAuthorityFields|TestFailedDirectorySyncMustBeRetried|TestFileJournalRejectsUnrecordedAuthorityBeforeRawDriverEffect|TestRenewedRecoveryApprovalRetainsOwnedState)$'
-cd experiments/g01-scaleset && GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s ./livecanary -run '^(TestDemandStatisticsAllowControlledProbeButNeverCleanup|TestUnsafeStatisticsStopNewEffectsBeforeControlledMessage|TestEmptyAvailableWithWorkStatisticsStaysQuarantined|TestOlderPendingIntentSurvivesSuccessfulZeroInspection|TestUnownedDiscoveryEvidenceCannotAuthorizeCreationAfterAbsence|TestAuditPR25ObservedJobsMustBlockCleanup|TestUnexpectedWorkMessageQuarantinesBeforeSafeClose|TestObservedRunnerSurvivesLaterAbsenceAndFirstCleanup|TestObservationResultFailureSurvivesFileReopenAndInspection)$'
+GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestObserve|TestObservationIntentFailureStopsBeforeRead|TestObservationResponseCaptureIsLocalAndRejectsOtherOperations|TestStatistics|TestDemandStatisticsAllowControlledProbeButNeverCleanup|TestInvalidOwnedProof|TestJournal|TestAuthority|TestInventoryStrictPages|TestInventoryMalformedStopsLegacyEffects|TestInventoryTransportRefusalIsBoundedAndSanitized|TestInventoryImpossibleTotalStopsBeforeNextPage|TestRosterActualTLSCompleteObservation|TestRosterPreservesOnlyAcceptedPagePrefix|TestRosterFinalPublicationGuardAfterDigest|TestRosterRefusesInvalidEntryWithoutNetwork|TestStrictJSONRejectsDecoderEquivalentDuplicateFields|TestStrictJSONRejectsDuplicateAuthorityFields|TestFailedDirectorySyncMustBeRetried|TestFileJournalRejectsUnrecordedAuthorityBeforeRawDriverEffect|TestRenewedRecoveryApprovalRetainsOwnedState)$'
+GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./liveworker -run '^(TestStrictJSONRejectsDecoderEquivalentDuplicateFields|TestStrictInputRejectsAmbiguousOrExtraAuthorityFields|TestFailedDirectorySyncMustBeRetried|TestFileJournalRejectsUnrecordedAuthorityBeforeRawDriverEffect|TestRenewedRecoveryApprovalRetainsOwnedState)$'
+GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestDemandStatisticsAllowControlledProbeButNeverCleanup|TestUnsafeStatisticsStopNewEffectsBeforeControlledMessage|TestEmptyAvailableWithWorkStatisticsStaysQuarantined|TestOlderPendingIntentSurvivesSuccessfulZeroInspection|TestUnownedDiscoveryEvidenceCannotAuthorizeCreationAfterAbsence|TestAuditPR25ObservedJobsMustBlockCleanup|TestUnexpectedWorkMessageQuarantinesBeforeSafeClose|TestObservedRunnerSurvivesLaterAbsenceAndFirstCleanup|TestObservationResultFailureSurvivesFileReopenAndInspection)$'
 ```
 
 ```sh
-cd experiments/g01-scaleset && GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s -run '^TestSDKBusyRemovalSentinelAndRawErrorExposure$' .
-cd experiments/g01-scaleset && GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s ./livecanary -run '^(TestHTTPErrorsDoNotReturnSecretResponseBody|TestSDKHTTPDebugDoesNotLogCredentials|TestSharedTransportRejectsOversizeSuccessAndErrorBodies|TestResponseReaderConsumesOnlyBudgetPlusOneAndRejectsTruncation|TestResponseBudgetAppliesAfterGzipDecompression)$'
+GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s -run '^TestSDKBusyRemovalSentinelAndRawErrorExposure$' .
+GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestHTTPErrorsDoNotReturnSecretResponseBody|TestSDKHTTPDebugDoesNotLogCredentials|TestSharedTransportRejectsOversizeSuccessAndErrorBodies|TestResponseReaderConsumesOnlyBudgetPlusOneAndRejectsTruncation|TestResponseBudgetAppliesAfterGzipDecompression)$'
+GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./liveworker -run '^(TestUncertainStartNeverRetriesAndCannotCleanup|TestUnixResponsesAreBoundedAndRedirectsNeverFollowed)$'
 ```
 
 ```sh
-cd experiments/g01-scaleset && GOTOOLCHAIN=go1.26.8 go test -race -tags=g01_live -count=1 -timeout=45s ./cmd/g01-live -run '^(TestPlanAndRefusalsNeverReadCredentialsOrEchoInputs|TestPreparationCommandNeverReadsCredentialsOrRunsRemotePhase|TestPairedTerminalModeReadsControllerInputAfterAllGates|TestPairedTerminalModeRejectsUnusedPhaseAndControllerFlagsBeforeInput|TestPairedTerminalModeRequiresWorkflowVerificationAuthorityBeforeInput|TestInheritedNamedCredentialFIFODelayedEOF|TestInheritedCredentialPipeStopsAtDeadline|TestCredentialInputRejectsNonPipeDescriptor|TestBlockedCredentialPipeStopsAtDeadline|TestCredentialInputAcceptsCompleteAndRejectsOversize)$'
-cd experiments/g01-scaleset && GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s ./livecanary -run '^(TestCredentialAttestationMismatchAndExpiredTokenRejected|TestTransportRejectsPlaintextOffHostAndProxyBeforeNetwork)$'
+GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -tags=g01_live -count=1 -timeout=45s ./cmd/g01-live -run '^(TestPlanAndRefusalsNeverReadCredentialsOrEchoInputs|TestPreparationCommandNeverReadsCredentialsOrRunsRemotePhase|TestPairedTerminalModeReadsControllerInputAfterAllGates|TestPairedTerminalModeRejectsUnusedPhaseAndControllerFlagsBeforeInput|TestPairedTerminalModeRequiresWorkflowVerificationAuthorityBeforeInput|TestInheritedNamedCredentialFIFODelayedEOF|TestInheritedCredentialPipeStopsAtDeadline|TestCredentialInputRejectsNonPipeDescriptor|TestBlockedCredentialPipeStopsAtDeadline|TestCredentialInputAcceptsCompleteAndRejectsOversize)$'
+GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -tags=g01_live -count=1 -timeout=45s ./livecanary -run '^(TestCredentialAttestationMismatchAndExpiredTokenRejected|TestTransportRejectsPlaintextOffHostAndProxyBeforeNetwork)$'
 ```
 
 ```sh
-cd experiments/g01-scaleset && GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^(TestBaselineAcquireTargetIsActionsOnly|TestPinnedSDKDrain.*|TestDriverDrainThroughPinnedSDKAndPollHook|TestDrainListenerWithdrawsWhilePollResponseIsHeld|TestDrainCancellationStopsBeforeReleasingHeldResponse)$' -count=1 -v -timeout=180s
+GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset ./livecanary -run '^(TestBaselineAcquireTargetIsActionsOnly|TestPinnedSDKDrain.*|TestDriverDrainThroughPinnedSDKAndPollHook|TestDrainListenerWithdrawsWhilePollResponseIsHeld|TestDrainCancellationStopsBeforeReleasingHeldResponse)$' -count=1 -v -timeout=180s
 ```
 
 ```sh
@@ -223,10 +233,10 @@ green test is created for documentation changes. On this correction candidate,
 the local markdown link/anchor checker reported all local targets present
 (external URLs were syntax-skipped), `jq empty docs/backlog.json` exited 0,
 `git diff --check` and `git diff --cached --check` exited 0, and the staged
-added-line secret/private-path scan reported no matches. Five offline
-`go test -list` commands listed the exact tagged controller input/refusal/no-echo,
-tagged worker JIT input/refusal, livecanary credential/transport, and both
-livecanary/liveworker journal/authority selectors in their owning packages;
+added-line secret/private-path scan reported no matches. Five focused offline
+`go test -list` commands for the added worker admission, controller update
+policy, worker start/cleanup/one-bridge, worker response/error, and
+observation/roster selectors each exited 0 and listed every requested name;
 this was list-only source matching and did not execute test bodies. The staged
 diff was inspected as one packet file containing only the focused selector and
 ledger corrections. The historical [secret/error finding
