@@ -56,6 +56,7 @@ Use these classifications throughout the packet:
 |---|---|---|
 | [ADR 0002](../decisions/0002-scaleset-integration.md) | Source-backed decision and future recovery contract; G01 remains provisional. | [d0afc56d471e8d63d153f6d26aeb95915d141d87](https://github.com/1XP-AI/gh-runnerd/blob/d0afc56d471e8d63d153f6d26aeb95915d141d87/docs/decisions/0002-scaleset-integration.md) |
 | [G01 contract](g01-contract.md) | Source + fixture: ACK/acquisition/statistics/error/JIT boundaries, SDK and runner pins. | [ba113977d03fc209ca147edbe10b766eed2c0fe3](https://github.com/1XP-AI/gh-runnerd/blob/ba113977d03fc209ca147edbe10b766eed2c0fe3/docs/evidence/g01-contract.md) |
+| [G01 red evidence at historical commit `1396e201d905be204c3ac697be43723820581314`](https://github.com/1XP-AI/gh-runnerd/blob/1396e201d905be204c3ac697be43723820581314/docs/evidence/g01-red.md) | Fixture: pre-fix ACK/callback-loss failures; no live result. | Immutable file blob `c36e0af0c8e9b301f4889a02454c83ece8d5942f`. |
 | [JIT causality follow-up](g01-jit-causality.md) | Fixture: committed-vs-requested synthetic JIT creation and response-loss controls; no live bug claim. | [ba113977d03fc209ca147edbe10b766eed2c0fe3](https://github.com/1XP-AI/gh-runnerd/blob/ba113977d03fc209ca147edbe10b766eed2c0fe3/docs/evidence/g01-jit-causality.md); causal fix [7079b255d09ce0456b5843a8695277689d52e54e](https://github.com/1XP-AI/gh-runnerd/commit/7079b255d09ce0456b5843a8695277689d52e54e) |
 | [Live-canary plan](g01-live-canary.md) | Live plan and authorization checklist; every phase remains unchecked/not run. | [d0afc56d471e8d63d153f6d26aeb95915d141d87](https://github.com/1XP-AI/gh-runnerd/blob/d0afc56d471e8d63d153f6d26aeb95915d141d87/docs/evidence/g01-live-canary.md) |
 | [Controller phase driver](g01-live-driver.md) | Fixture/source: bounded tagged controller operations; no worker launch or live result. | [candidate head `0e08ce8285846e26a94fb6fcb33bbeede662bf14`](https://github.com/1XP-AI/gh-runnerd/blob/0e08ce8285846e26a94fb6fcb33bbeede662bf14/docs/evidence/g01-live-driver.md) |
@@ -111,7 +112,7 @@ version pin alone does not prove the running binary or disable runner updates.
 | Requirement / boundary | Reusable evidence | Classification | Current disposition and limit |
 |---|---|---|---|
 | Message acknowledgement order | `g01-contract.md`: `TestSDKACKBoundaries`, `TestRecoveryAfterACKCallbackCrash`; pinned listener source above. | Source + fixture | Offline evidence observes ACK before callback and before acquisition. Preserve this order; do not infer GitHub redelivery/retention, server receipt or durable exactly-once behavior. Live pre/post-ACK and session-restart behavior require authorization. |
-| ACK/callback loss recovery | `g01-contract.md` and `g01-red.md` recovery rows; ADR 0002 recovery contract. | Fixture + source | Independent statistics reads can restore aggregate demand; missing callback/request identity remains quarantined. No process-kill/restart or durable production journal result is claimed. |
+| ACK/callback loss recovery | `g01-contract.md` and [G01 red evidence at historical commit `1396e201d905be204c3ac697be43723820581314`](https://github.com/1XP-AI/gh-runnerd/blob/1396e201d905be204c3ac697be43723820581314/docs/evidence/g01-red.md) (immutable blob `c36e0af0c8e9b301f4889a02454c83ece8d5942f`); ADR 0002 recovery contract. | Fixture + source | Independent statistics reads can restore aggregate demand; missing callback/request identity remains quarantined. No process-kill/restart or durable production journal result is claimed. |
 | Acquisition intent and response loss | `TestSDKAcquisitionResponseLossAfterACK`; driver `before-acquire`/`acquire-loss`; [live-canary acquisition phase](g01-live-canary.md#minimal-execution-phases). | Source + fixture + live plan | ACK precedes exactly one `AcquireJobs` request; a suppressed response retains reservation and quarantines. No retry, server reoffer, accepted-request read-back or idempotency claim. A live disposable acquisition observation is still gated. |
 | JIT intent and response loss | [JIT causality follow-up](g01-jit-causality.md), `TestSDKJITLookupBeforeCreationDoesNotDiscoverIdentity`, `TestSDKJITResponseLossWithoutCommitDoesNotDiscoverIdentity` and committed response-loss control. | Fixture + source | Synthetic lookup is causally tied to fixture-side commit; JIT value/result identity is discarded and reservation quarantined. No JIT-secret recovery, duplicate-name guarantee, idempotency or real runner launch is claimed. |
 | Reconciliation | ADR 0002; [identity evidence](g01-identity-reconciliation.md); exact observation and baseline listener records. | Source + fixture | Read `TotalAssignedJobs` at bounded recovery points, fence session generations, and keep counts as snapshots. A matching ID is only a candidate; no revision, atomic cross-service snapshot or linearizability is established. |
@@ -119,7 +120,7 @@ version pin alone does not prove the running binary or disable runner updates.
 | Idle assignment and drain | [idle-drain evidence at PR #72 head](https://github.com/1XP-AI/gh-runnerd/blob/f5560ba950f77343e57034cc1cf85dc67f5ac922/docs/evidence/g01-idle-drain.md); [live-canary drain phases](g01-live-canary.md#minimal-execution-phases). | Source + fixture + live gap | Offline hook uses the released listener's `SetMaxRunners(0)` and retains ACK-before-acquisition; client-side request markers do not prove server receipt or an atomic drain. Real old-poll acquisition/idle assignment and busy-safe removal remain unverified. |
 | Terminal identity and completion | [identity reconciliation](g01-identity-reconciliation.md), [exact observations](g01-exact-observations.md), [paired baseline](g01-paired-baseline.md) and [terminal path](g01-paired-terminal.md). | Source + fixture | Keep SDK request/job IDs, REST job/runner IDs, run attempt, runner identity and local exit distinct; bind an exact tuple before classifying. No live job eligibility, successful execution, per-request release or cleanup proof is claimed. |
 | Secret and error boundary | Contract runner/JIT section, [worker harness](g01-worker-harness.md), and driver redaction rules. | Source + fixture | No secrets, JIT values, raw bodies or raw SDK errors belong in this packet. Environment transport remains exposed to trusted same-user/process/container surfaces; modes and same-user ownership are not hostile-code isolation. |
-| Rollback and preservation | ADR 0002 and [live-canary exit/cleanup](g01-live-canary.md#exit-evidence-and-cleanup). | Source + plan | Documentation rollback is a reviewed, file-scoped restore of `docs/evidence/g01-recovery-packet.md` only (for example, `git restore --source=<reviewed-parent> -- docs/evidence/g01-recovery-packet.md`); preserve independent corrections in `g01-live-driver.md` and `docs/reviews/team-review.md`. For any future live run: stop new admission, let owned busy work finish, quarantine uncertainty, and remove only individually verified disposable resources; preserve manual runners and never force-kill, prune or replay. |
+| Rollback and preservation | ADR 0002 and [live-canary exit/cleanup](g01-live-canary.md#exit-evidence-and-cleanup). | Source + plan | Base `dce795a871865a8a2ee728151cb161e55081c8b7` lacks this added packet path, so rollback is to close/delete the unmerged correction or run `git rm -- docs/evidence/g01-recovery-packet.md` in a review branch. Reserve `git restore --source=<reviewed-parent> -- docs/evidence/g01-recovery-packet.md` for restoring an existing parent file; preserve independent corrections in `g01-live-driver.md` and `docs/reviews/team-review.md`. For any future live run: stop new admission, let owned busy work finish, quarantine uncertainty, and remove only individually verified disposable resources; preserve manual runners and never force-kill, prune or replay. |
 
 No row above is a live result. In particular, this packet makes no exactly-once
 or idempotency claim.
@@ -160,6 +161,8 @@ the selected SDK/source, Go toolchain/module, listener/adapter, journal or
 authority code, fixture endpoint/decoder, test tags/selectors, runner/parser,
 JIT transport/image, or live target/approval changes. A documentation-only
 wording/link correction does not invalidate an unchanged offline boundary.
+The current table contains **10 data rows** (header and separator excluded);
+the count includes the actual live-canary gate row.
 
 | Boundary | Reuse unchanged evidence when | Exact focused rerun | Class/result to record |
 |---|---|---|---|
@@ -251,11 +254,14 @@ skipped, unavailable or unauthorized live phase into “passed.”
 
 ## Documentation-only validation
 
-This packet correction requires markdown/link-target, JSON syntax, diff, and
-secret/private-path checks only. No artificial Go red or green test is created
-for documentation changes. The selector audit is anchored to the immutable
-exact-head source commit `95cd9210620c54e098ecbe0df1217af1659f0c74` and tree
-`d8b79cd1ddc6993792a44a8e8ae88985ce7466c0`; the audited default-build
+This packet correction requires markdown/link-target, JSON syntax, ledger/table,
+fragment, selector, diff, and secret/private-path checks only. No artificial Go
+red or green test is created for documentation changes. The stable working
+directory and source boundary were checked against target head
+`ee8df8b7e00204c74a892b27f8b4c0ab278751ba`; the selector declaration audit is
+anchored to immutable source commit
+`95cd9210620c54e098ecbe0df1217af1659f0c74` and tree
+`d8b79cd1ddc6993792a44a8e8ae88985ce7466c0`. The audited default-build
 declarations are in `./liveworker` (`docker_observation_test.go`,
 `docker_test.go`, `worker_test.go`, and `journal_test.go`) and `./livecanary`
 (`driver_test.go`, `observer*.go`, `statistics_fence_test.go`,
@@ -265,9 +271,116 @@ tests with no file build constraint; the only tag-sensitive test is
 `TestUnsupportedAccountLookupRefusesBeforeJournal`, duplicated in both
 packages and guarded by `//go:build !cgo || osusergo || android`, so the added
 livecanary invocation forces `-tags=osusergo`; `TestZeroStatisticsAndOptionalAbsencePermitEmptyCleanup`
-remains a default-build `./livecanary` test in `statistics_fence_test.go`. The
-focused offline `go test -list` checks below were run against that exact source
-head and listed every requested new name; they did not execute test bodies.
+remains a default-build `./livecanary` test in `statistics_fence_test.go`.
+
+The following commands are the exact documentation/static checks used for this
+correction. Their results are recorded immediately after each check; no command
+below runs a test body or performs a live App, runner, Docker, Lima, Keychain,
+launchd or workflow operation.
+
+### Markdown links, JSON, and ledger shape
+
+```sh
+set -euo pipefail
+python3 - <<'PY'
+import re
+import subprocess
+import unicodedata
+from pathlib import Path
+from urllib.parse import unquote
+
+files = subprocess.check_output(["git", "ls-files", "*.md"], text=True).splitlines()
+link = re.compile(r"(?<!!)" + re.escape("[") + r"[^]]*" + re.escape("]") + re.escape("(") + r"([^)]+)" + re.escape(")"))
+heading = re.compile(r"^#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$")
+
+def slug(value):
+    value = re.sub(r"[\`*_~]", "", unquote(value).strip().lower())
+    value = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode()
+    return re.sub(r"[^\w\s-]", "", value).replace(" ", "-").strip("-")
+
+def anchors(path):
+    return {slug(m.group(1)) for m in map(heading.match, path.read_text(encoding="utf-8").splitlines()) if m}
+
+errors = []
+checked = 0
+for name in files:
+    source = Path(name)
+    for match in link.finditer(source.read_text(encoding="utf-8")):
+        target = match.group(1).strip().strip("<>")
+        if target.startswith(("http://", "https://", "mailto:")):
+            continue
+        if target.startswith("#"):
+            path, fragment = source, target[1:]
+        else:
+            target, separator, fragment = target.partition("#")
+            path, fragment = (source.parent / target).resolve(), fragment if separator else None
+        checked += 1
+        if not path.is_file():
+            errors.append(f"{name}: missing target {target}")
+        elif fragment and slug(fragment) not in anchors(path):
+            errors.append(f"{name}: missing anchor {path}#{fragment}")
+if errors:
+    raise SystemExit("\n".join(errors))
+print(f"local markdown link/anchor check: passed; {checked} local targets checked; external URLs syntax-skipped")
+PY
+jq empty docs/backlog.json
+ledger_rows=$(awk '
+  /^\| Boundary \| Reuse unchanged evidence when \| Exact focused rerun \| Class\/result to record \|$/ { in_table=1; next }
+  in_table && /^\|---/ { next }
+  in_table && /^\|/ { rows++; next }
+  in_table && !/^\|/ { exit }
+  END { print rows + 0 }
+' docs/evidence/g01-recovery-packet.md)
+test "$ledger_rows" -eq 10
+awk '
+  /^\| Boundary \| Reuse unchanged evidence when \| Exact focused rerun \| Class\/result to record \|$/ { in_table=1; next }
+  in_table && /^\|---/ { next }
+  in_table && /^\|/ {
+    if (split($0, fields, "\\|") != 6) { exit 1 }
+    next
+  }
+  in_table && !/^\|/ { exit }
+' docs/evidence/g01-recovery-packet.md
+printf 'JSON and changed-boundary ledger checks: passed; backlog JSON valid, 10 data rows, and 4 columns in every ledger row\n'
+```
+
+The link/anchor checker reported 119 local targets with all targets present and
+skipped external URLs after syntax recognition. `jq` exited 0, and the ledger
+check exited 0 with 10 data rows and four columns in every row.
+
+The packet's controller-side paired-terminal command fragment is compared with
+the independently maintained fragment in `g01-paired-terminal.md`; the worker
+partition and worker vet command are intentionally packet-only additions.
+
+```sh
+set -euo pipefail
+diff -u \
+  <(awk '/^terminal_heavy_tests=/{capture=1} capture { print; if ($0 ~ /^GOTOOLCHAIN=.*go vet -C experiments\/g01-scaleset -tags=g01_pair_fixture \.\/livecanary$/) exit }' docs/evidence/g01-paired-terminal.md) \
+  <(awk '/^terminal_heavy_tests=/{capture=1} capture { print; if ($0 ~ /^GOTOOLCHAIN=.*go vet -C experiments\/g01-scaleset -tags=g01_pair_fixture \.\/livecanary$/) exit }' docs/evidence/g01-recovery-packet.md | grep -v 'liveworker')
+printf 'paired-terminal command fragment comparison: passed; packet controller fragment matches g01-paired-terminal.md\n'
+```
+
+The paired-terminal fragment comparison exited 0 with no diff and printed the
+pass message above.
+
+### Stable checkout and selector audit
+
+```sh
+set -euo pipefail
+test "$(git rev-parse --show-toplevel)" = "$(pwd -P)"
+test -d experiments/g01-scaleset
+test "$(git rev-parse --verify ee8df8b7e00204c74a892b27f8b4c0ab278751ba)" = "ee8df8b7e00204c74a892b27f8b4c0ab278751ba"
+git diff --quiet ee8df8b7e00204c74a892b27f8b4c0ab278751ba -- experiments/g01-scaleset
+test "$(git rev-parse 1396e201d905be204c3ac697be43723820581314:docs/evidence/g01-red.md)" = "c36e0af0c8e9b301f4889a02454c83ece8d5942f"
+printf 'stable checkout audit: passed; repo root is current directory, experiments/g01-scaleset exists, target source is unchanged, and g01-red.md resolves to its pinned blob\n'
+```
+
+The stable checkout audit exited 0. It confirmed the target head, unchanged
+`experiments/g01-scaleset` source, and the `g01-red.md` commit/blob pin; it did
+not inspect or execute any live system.
+
+The focused offline selector checks are list-only source checks. They were run
+against the unchanged exact source tree above and did not execute test bodies.
 
 ```sh
 GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./liveworker -list '^(TestSocketModesAndControllerOwnership|TestSocketPostConnectRecheckClosesBeforeHTTP|TestNoCreateBeforeDurableIntent|TestUnknownCreateNeverRetriesAfterRestart|TestCreationWarningsPreserveKnownIDWithoutAuthorizingStart|TestWorkerPreparationReturnsCanonicalSnapshotAndRejectsPriorEffect|TestUnixInspectRequiresStateFlagsBeforeMutation|TestDockerInspectExact(KnownStatesAndSerializableFacts|StatePresenceAndLegacyRequirements|RejectsMalformedOrAmbiguousBodiesBeforeMutation|NotFoundReportsOnlyTheExactGET|RejectsOtherResponsesAndInvalidTargets|RequiresSupported404Body|CancellationNeverReportsPresenceOrAbsence|RejectsReplacedSocket|EOFCancellationKeepsUnknownOutcome)|TestDockerInspectLegacyCleanupKeepsSignedAndAbsentExitPolicy|TestDockerInspectMapsPreserveCaseSensitiveKeysAndProfile|TestDockerCompletedMutationResponseSurvivesEOFCancellation|TestDockerInspectUnknownOrAbsentStatusCannotAuthorizeMutation|TestPrivateJournalLocksAndRetainsReservationAcrossRestart|TestJournalRejectsChangedApprovalTornTailAndUnsafeFiles|TestAuthorityLeaseRefusesConcurrentRunsAndFencesClose|TestAuthorityRejectsReplacedJournalOrDirectory|TestChangedDaemonCannotCreate)$'
@@ -276,49 +389,63 @@ GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -tags=osusergo -c
 GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -list '^(TestAmbiguousCreateNeverRetriesAfterRestart|TestObserve.*|TestStatistics.*|TestInvalidOwnedProof.*|TestJournal.*|TestAuthority.*)$'
 ```
 
-All four commands exited 0 and listed every requested name and suffixed
-reconciliation family; these were list-only source checks, not test-body
-execution.
+All four commands exited 0 and listed, respectively, 25 `liveworker` names,
+4 preparation names, 1 `osusergo` name and 26 reconciliation names; no test
+body ran.
 
-The local source/declaration consistency check below exited 0: it confirmed the
-immutable exact-head commit/tree, all added declarations, and both unsupported
-account build-tag guards. It did not inspect upstream Runner sources; no Runner
-source audit or Runner-level fixture result is claimed.
+The declaration consistency check also avoids self-referential line numbers and
+uses immutable source/tree assertions plus quiet presence/absence checks:
 
 ```sh
-test "$(git rev-parse HEAD)" = "95cd9210620c54e098ecbe0df1217af1659f0c74"
-test "$(git rev-parse 'HEAD^{tree}')" = "d8b79cd1ddc6993792a44a8e8ae88985ce7466c0"
-rg -n 'func TestAmbiguousCreateNeverRetriesAfterRestart' experiments/g01-scaleset/livecanary/driver_test.go
-rg -n 'func (TestSocketModesAndControllerOwnership|TestSocketPostConnectRecheckClosesBeforeHTTP)' experiments/g01-scaleset/liveworker/docker_test.go
-rg -n 'func (TestNoCreateBeforeDurableIntent|TestUnknownCreateNeverRetriesAfterRestart)' experiments/g01-scaleset/liveworker/worker_test.go
-rg -n 'func (TestWorkerPreparationReturnsCanonicalSnapshotAndRejectsPriorEffect|TestCreationWarningsPreserveKnownIDWithoutAuthorizingStart)' experiments/g01-scaleset/liveworker/journal_test.go
-rg -n 'func (TestDockerInspectExactRejectsMalformedOrAmbiguousBodiesBeforeMutation|TestDockerInspectExactNotFoundReportsOnlyTheExactGET|TestDockerInspectExactRejectsOtherResponsesAndInvalidTargets|TestDockerInspectExactRequiresSupported404Body|TestDockerInspectExactCancellationNeverReportsPresenceOrAbsence|TestDockerInspectExactEOFCancellationKeepsUnknownOutcome)' experiments/g01-scaleset/liveworker/docker_observation_test.go
-rg -n 'func (TestDockerInspectExactKnownStatesAndSerializableFacts|TestDockerInspectExactStatePresenceAndLegacyRequirements|TestDockerInspectLegacyCleanupKeepsSignedAndAbsentExitPolicy|TestDockerInspectMapsPreserveCaseSensitiveKeysAndProfile|TestDockerInspectExactRejectsReplacedSocket|TestDockerCompletedMutationResponseSurvivesEOFCancellation)' experiments/g01-scaleset/liveworker/docker_observation_test.go
-rg -n 'func TestChangedDaemonCannotCreate' experiments/g01-scaleset/liveworker/worker_test.go
-rg -n 'func (TestCanonicalPreparationRecordsNoPhaseOrRemoteIntent|TestCanonicalPreparationRefusesInvalidJournalAndPhase|TestCanonicalPreparationRecoveryAndDriverShareLocalGate)' experiments/g01-scaleset/livecanary/preparation_test.go
-rg -n '^package livecanary$' experiments/g01-scaleset/livecanary/driver_test.go
-rg -n '^package liveworker$' experiments/g01-scaleset/liveworker/docker_observation_test.go experiments/g01-scaleset/liveworker/worker_test.go
-! rg -n '^//go:build|^// \+build' experiments/g01-scaleset/livecanary/driver_test.go experiments/g01-scaleset/liveworker/docker_observation_test.go experiments/g01-scaleset/liveworker/worker_test.go
-rg -n '^func Test(Observe|Statistics|InvalidOwnedProof|Journal|Authority)' experiments/g01-scaleset/livecanary --glob '*_test.go'
-rg -n '^//go:build !cgo \|\| osusergo \|\| android$|func TestUnsupportedAccountLookupRefusesBeforeJournal' experiments/g01-scaleset/liveworker/admission_lookup_unsupported_test.go experiments/g01-scaleset/livecanary/admission_lookup_unsupported_test.go
+set -euo pipefail
+test "$(git rev-parse 95cd9210620c54e098ecbe0df1217af1659f0c74)" = "95cd9210620c54e098ecbe0df1217af1659f0c74"
+test "$(git rev-parse '95cd9210620c54e098ecbe0df1217af1659f0c74^{tree}')" = "d8b79cd1ddc6993792a44a8e8ae88985ce7466c0"
+rg -q 'func TestAmbiguousCreateNeverRetriesAfterRestart' experiments/g01-scaleset/livecanary/driver_test.go
+rg -q 'func (TestSocketModesAndControllerOwnership|TestSocketPostConnectRecheckClosesBeforeHTTP)' experiments/g01-scaleset/liveworker/docker_test.go
+rg -q 'func (TestNoCreateBeforeDurableIntent|TestUnknownCreateNeverRetriesAfterRestart)' experiments/g01-scaleset/liveworker/worker_test.go
+rg -q 'func (TestWorkerPreparationReturnsCanonicalSnapshotAndRejectsPriorEffect|TestCreationWarningsPreserveKnownIDWithoutAuthorizingStart)' experiments/g01-scaleset/liveworker/journal_test.go
+rg -q 'func (TestDockerInspectExactRejectsMalformedOrAmbiguousBodiesBeforeMutation|TestDockerInspectExactNotFoundReportsOnlyTheExactGET|TestDockerInspectExactRejectsOtherResponsesAndInvalidTargets|TestDockerInspectExactRequiresSupported404Body|TestDockerInspectExactCancellationNeverReportsPresenceOrAbsence|TestDockerInspectExactEOFCancellationKeepsUnknownOutcome)' experiments/g01-scaleset/liveworker/docker_observation_test.go
+rg -q 'func (TestDockerInspectExactKnownStatesAndSerializableFacts|TestDockerInspectExactStatePresenceAndLegacyRequirements|TestDockerInspectLegacyCleanupKeepsSignedAndAbsentExitPolicy|TestDockerInspectMapsPreserveCaseSensitiveKeysAndProfile|TestDockerInspectExactRejectsReplacedSocket|TestDockerCompletedMutationResponseSurvivesEOFCancellation)' experiments/g01-scaleset/liveworker/docker_observation_test.go
+rg -q 'func TestChangedDaemonCannotCreate' experiments/g01-scaleset/liveworker/worker_test.go
+rg -q 'func (TestCanonicalPreparationRecordsNoPhaseOrRemoteIntent|TestCanonicalPreparationRefusesInvalidJournalAndPhase|TestCanonicalPreparationRecoveryAndDriverShareLocalGate)' experiments/g01-scaleset/livecanary/preparation_test.go
+rg -q '^package livecanary$' experiments/g01-scaleset/livecanary/driver_test.go
+rg -q '^package liveworker$' experiments/g01-scaleset/liveworker/docker_observation_test.go experiments/g01-scaleset/liveworker/worker_test.go
+! rg -q '^//go:build|^// \+build' experiments/g01-scaleset/livecanary/driver_test.go experiments/g01-scaleset/liveworker/docker_observation_test.go experiments/g01-scaleset/liveworker/worker_test.go
+rg -q '^func Test(Observe|Statistics|InvalidOwnedProof|Journal|Authority)' experiments/g01-scaleset/livecanary --glob '*_test.go'
+rg -q '^//go:build !cgo \|\| osusergo \|\| android$|func TestUnsupportedAccountLookupRefusesBeforeJournal' experiments/g01-scaleset/liveworker/admission_lookup_unsupported_test.go experiments/g01-scaleset/livecanary/admission_lookup_unsupported_test.go
+printf 'selector declaration audit: passed; immutable source/tree, requested declarations, package names, and build constraints matched; no test bodies executed\n'
 ```
 
-The local markdown link/anchor checker reported all local targets present
-(external URLs were syntax-skipped), `jq empty docs/backlog.json` exited 0,
-`git diff --check` and `git diff --cached --check` exited 0, and the staged
-added-line secret/private-path scan reported no matches. The stable checkout
-root matched this packet worktree, `experiments/g01-scaleset` was present, and
-the staged path set was exactly this packet file.
+### Diff and staged secret/private-path scan
 
-The staged correction diff was inspected as one packet-only file. It is
-distinct from the cumulative PR #78 diff. At that exact head,
-`origin/main...95cd9210620c54e098ecbe0df1217af1659f0c74` contains
-`docs/evidence/g01-recovery-packet.md` plus the independent
-driver correction from `7ce053380003c9260f46bf93ea118893b95f01e7` in
-`docs/evidence/g01-live-driver.md` and the independent team-review routing
-corrections from `f59a30532bfdc62876065dcf8b4997520606e6a6` in
-`docs/reviews/team-review.md`; those files are outside this staged change.
-No check is claimed against an unrecorded SHA. The two new exact-head findings
+After staging only this packet file, the final local checks were:
+
+```sh
+set -euo pipefail
+test "$(git diff --cached --name-only)" = "docs/evidence/g01-recovery-packet.md"
+test "$(git diff --cached --name-only | wc -l | tr -d ' ')" -eq 1
+git diff --check
+git diff --cached --check
+private_user_root='/'"Users/"
+private_home_root='/'"home/"
+private_var_root='/'"private/var/"
+secret_private_pattern='^\+.*(-----BEGIN[[:space:]]+[A-Z0-9 ]*PRIVATE KEY|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]+|'"${private_user_root}"'|'"${private_home_root}"'|'"${private_var_root}"')'
+if git diff --cached --unified=0 -- docs/evidence/g01-recovery-packet.md | rg -q "$secret_private_pattern"; then
+  printf 'staged secret/private-path scan: FAILED\n'
+  exit 1
+fi
+printf 'diff and staged secret/private-path checks: passed; working/staged diff checks exited 0, one staged packet path, and no added-line matches\n'
+```
+
+The staged diff check exited 0, the staged path set was exactly this packet
+file, and the added-line secret/private-path scan found no matches. No check is
+claimed against an unrecorded SHA. The staged correction diff is distinct from
+the cumulative PR #78 diff; the cumulative history still includes the
+independent driver correction from `7ce053380003c9260f46bf93ea118893b95f01e7`
+and team-review routing corrections from
+`f59a30532bfdc62876065dcf8b4997520606e6a6`, which remain outside this staged
+change.
+The two new exact-head findings
 on `95cd9210620c54e098ecbe0df1217af1659f0c74`—[3999634756](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999634756)
 and [3999634759](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999634759)—are
 covered by the controller-side `TestAmbiguousCreateNeverRetriesAfterRestart`
