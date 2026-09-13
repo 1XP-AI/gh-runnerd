@@ -173,7 +173,7 @@ the count includes the actual live-canary gate row.
 | Reconciliation, inventory/identity/quarantine | statistics readers, paged inventory normalization, generation fences, ownership checks and journal/authority schema are unchanged. | Retain the prior reconciliation selector and add the exact focused `TestObservation*` and `TestRoster*` families, inventory/quarantine and journal/authority selectors in the command block below, including controller-side `TestAmbiguousCreateNeverRetriesAfterRestart`, the four `TestInventory*` cases, `TestDemandStatisticsAllowControlledProbeButNeverCleanup`, `TestCleanupOnlyForNeverIssuedWorkerWithExactReceipt`, `TestWorkerPreparationReturnsCanonicalSnapshotAndRejectsPriorEffect`, and the named journal/authority contracts in both `./livecanary` and `./liveworker`. | Fixture: record normalized facts and retained uncertainty; no live equality/absence claim. |
 | Secret and error handling | SDK error sentinels, HTTP body/debug redaction and shared response-budget controls are unchanged. | See the exact root, livecanary and liveworker selectors in the secret/error command block below, including decoded-body truncation, gzip-budget, uncertain-start, bounded Unix-response/redirect, journal-create-failure and raw-runtime-status tests. | Fixture: record normalized sentinel/error and body-budget behavior; no secret-bearing output or live result is claimed. |
 | Tagged controller/JIT input and credential transport boundary | `g01_live` source, input reader, credential attestation and transport refusal tests are unchanged. | Run the tagged command below plus the livecanary credential/transport selector below, including `TestAuthoritySplitAndPolicyRejection`, `TestSDKTransportOwnership`, `TestCredentialAttestationMismatchAndExpiredTokenRejected` and `TestTransportRejectsPlaintextOffHostAndProxyBeforeNetwork`. | Fixture: record no-secret/no-echo/refusal result; no credential or live phase. |
-| Idle drain and withdrawal | Only reuse the authoritative current PR #72 head `f5560ba950f77343e57034cc1cf85dc67f5ac922` and its unchanged fixture/source. | On that authoritative current PR #72 checkout: see the exact command in the block below; repeat with `go test -race` for the same selector. | Fixture/source: record physical-write markers as client facts and inconclusive server receipt; never reuse as live assignment/drain evidence. |
+| Idle drain and withdrawal | Only reuse the authoritative current PR #72 head `f5560ba950f77343e57034cc1cf85dc67f5ac922` and its unchanged fixture/source. | On that authoritative current PR #72 checkout, run the guarded `drain-pr72` and `drain-pr72-race` commands below; both carry the same exact selector/package digest, with `default+norace+go1.26.8` and `default+race+go1.26.8` metadata respectively. | Fixture/source: record physical-write markers as client facts and inconclusive server receipt; never reuse as live assignment/drain evidence. |
 | Paired terminal/worker support | paired journal/lease, worker profile, `liveworker` runtime source/implementation, image/runtime pins and terminal selectors are unchanged. | See the exact controller update-policy and worker runtime commands plus the tagged partition commands below; the worker runtime selector includes the direct Docker state/inspection, mutation-EOF and changed-daemon contracts, while tagged partition commands retain `go1.26.8`, `-race`, `-count=1` and `-timeout=120s`, the complete worker `^TestPaired` partition is included, and the controller-side terminal groups remain exhaustive/disjoint. | Fixture: record receipt/identity checks only; no live worker or terminal success claim. |
 | Actual live canary | There is no live evidence to reuse today. A future result is reusable only for the same immutable workflow/run attempt, source/head, resources, authority scope and approved observation boundary. | Rebuild/plan the exact reviewed tagged binary, then run only the explicitly authorized phase from [the driver](g01-live-driver.md); never substitute fixture commands or broaden phases. | Live: record sanitized server observations, authorization and unresolved outcomes; any changed target or boundary requires a fresh approval/rerun. |
 
@@ -186,16 +186,19 @@ block. It derives a list-only command from the same package, build flags and
 selector, then compares the observed count and SHA-256 of the sorted executed
 test-name set before it invokes the original command. Go's `-list` mode reports
 the pre-`-skip` candidates, so the wrapper removes either `-skip REGEXP` or
-`-skip=REGEXP` from the list probe and applies that exact expression locally
-before count and digest validation. Each prescription also carries an expected
+`-skip=REGEXP` from the first list probe, asks Go's own RE2 regexp engine for
+the names matched by that skip expression, and subtracts those names before
+count and digest validation. Each prescription also carries an expected
 package identity (`module-directory:package`) and build configuration (tag set,
-race mode and `GOTOOLCHAIN`); inherited non-empty `GOFLAGS` is rejected as
-hidden build configuration. The wrapper recomputes both from the original
-command and fails closed before listing if either differs. A command failure,
-unexpected list output, zero expected names, count mismatch or set mismatch
-stops before any test body runs; the set digest and metadata are recorded beside
-each prescription so renamed, removed, build-tagged, newly unskipped or
-cross-package tests fail closed.
+race mode and `GOTOOLCHAIN`); the wrapper queries the effective `go env
+GOFLAGS`, including GOENV/configuration, rejects non-empty output, and then
+pins `GOFLAGS=` for both list probes and the original command. The wrapper
+recomputes both from the original command and fails closed before listing if
+either differs. A command failure, unexpected list output, zero expected names,
+invalid Go/RE2 syntax, count mismatch or set mismatch stops before any test body
+runs; the set digest and metadata are recorded beside each prescription so
+renamed, removed, build-tagged, newly unskipped or cross-package tests fail
+closed.
 
 ```sh
 set -euo pipefail
@@ -260,10 +263,25 @@ env = dict(os.environ)
 while command and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", command[0]):
     key, value = command.pop(0).split("=", 1)
     env[key] = value
-if env.get("GOFLAGS", "").strip():
-    raise SystemExit(f"{label}: GOFLAGS must be empty for explicit build metadata")
 if len(command) < 3 or command[:2] != ["go", "test"]:
     raise SystemExit(f"{label}: expected a go test command")
+
+effective_goflags = subprocess.run(
+    ["go", "env", "GOFLAGS"],
+    cwd=repo_root,
+    env=env,
+    text=True,
+    capture_output=True,
+    check=False,
+)
+if effective_goflags.returncode != 0 or effective_goflags.stderr.strip():
+    raise SystemExit(f"{label}: effective GOFLAGS query failed")
+effective_lines = effective_goflags.stdout.splitlines()
+if len(effective_lines) > 1:
+    raise SystemExit(f"{label}: effective GOFLAGS query was not single-line")
+if effective_lines and effective_lines[0].strip():
+    raise SystemExit(f"{label}: effective GOFLAGS must be empty")
+env["GOFLAGS"] = ""
 
 test_args = command[2:]
 
@@ -344,12 +362,6 @@ while index < len(test_args):
     index += 1
 if len(skip_patterns) > 1:
     raise SystemExit(f"{label}: expected at most one -skip flag")
-skip_re = None
-if skip_patterns:
-    try:
-        skip_re = re.compile(skip_patterns[0])
-    except re.error as error:
-        raise SystemExit(f"{label}: invalid -skip expression") from error
 
 package_value_flags = {"-C", "-tags", "-run", "-list", "-count", "-timeout"}
 package_indices = []
@@ -381,19 +393,34 @@ run_indices = [
 ]
 if len(run_indices) > 1:
     raise SystemExit(f"{label}: expected at most one -run flag")
-if run_indices:
-    list_args = list_base_args[:]
-    run_index = run_indices[0]
-    if list_args[run_index] == "-run":
-        if run_index + 1 >= len(list_args):
-            raise SystemExit(f"{label}: -run requires an expression")
-        list_args[run_index] = "-list"
+if flag_values(test_args, "-list"):
+    raise SystemExit(f"{label}: original command must not contain -list")
+
+def list_args_for(pattern):
+    args = list_base_args[:]
+    if run_indices:
+        run_index = run_indices[0]
+        if args[run_index] == "-run":
+            if run_index + 1 >= len(args):
+                raise SystemExit(f"{label}: -run requires an expression")
+            args[run_index] = "-list"
+            args[run_index + 1] = pattern
+        else:
+            args[run_index] = "-list=" + pattern
     else:
-        list_args[run_index] = "-list=" + list_args[run_index][len("-run="):]
-else:
-    list_args = list_base_args[:]
-    package_index = package_indices[0]
-    list_args[package_index + 1:package_index + 1] = ["-list", "."]
+        package_index = package_indices[0]
+        args[package_index:package_index] = ["-list", pattern]
+    return args
+
+original_run_pattern = "."
+if run_indices:
+    run_index = run_indices[0]
+    original_run_pattern = (
+        list_base_args[run_index + 1]
+        if list_base_args[run_index] == "-run"
+        else list_base_args[run_index][len("-run="):]
+    )
+list_args = list_args_for(original_run_pattern)
 
 list_result = subprocess.run(
     ["go", "test", *list_args],
@@ -407,13 +434,31 @@ if list_result.returncode != 0:
     raise SystemExit(f"{label}: list validation exited {list_result.returncode}")
 test_name = re.compile(r"Test[A-Za-z0-9_]+$")
 go_status = re.compile(r"ok\s+\S+\s+[0-9.]+s(?:\s+\(cached\))?$")
-output = [line for line in list_result.stdout.splitlines() if line]
-if any(not test_name.fullmatch(line) and not go_status.fullmatch(line) for line in output):
-    raise SystemExit(f"{label}: list validation emitted unexpected output")
-listed = [line for line in output if test_name.fullmatch(line)]
-if len(listed) != len(set(listed)):
-    raise SystemExit(f"{label}: list validation emitted duplicate test names")
-actual = listed if skip_re is None else [name for name in listed if not skip_re.search(name)]
+
+def listed_names(result, phase):
+    output = [line for line in result.stdout.splitlines() if line]
+    if any(not test_name.fullmatch(line) and not go_status.fullmatch(line) for line in output):
+        raise SystemExit(f"{label}: {phase} emitted unexpected output")
+    names = [line for line in output if test_name.fullmatch(line)]
+    if len(names) != len(set(names)):
+        raise SystemExit(f"{label}: {phase} emitted duplicate test names")
+    return names
+
+listed = listed_names(list_result, "list validation")
+skipped = set()
+if skip_patterns:
+    skip_result = subprocess.run(
+        ["go", "test", *list_args_for(skip_patterns[0])],
+        cwd=repo_root,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if skip_result.returncode != 0:
+        raise SystemExit(f"{label}: Go/RE2 skip validation exited {skip_result.returncode}")
+    skipped = set(listed_names(skip_result, "skip validation"))
+actual = [name for name in listed if name not in skipped]
 actual_digest = hashlib.sha256(
     ("\n".join(sorted(actual)) + "\n").encode()
 ).hexdigest()
@@ -487,6 +532,8 @@ go_test_checked 4 a751c8b1a6a22d2f4ce76d90d6d79c48ab377355deed0f3bf189496c22b549
 
 go_test_checked 34 a79b7fa367d8eb1e7fe4ee4ef637696518946dab6f2f25410f6e04bfba137298 drain-pr72 experiments/g01-scaleset:./livecanary default+norace+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset ./livecanary -run '^(TestBaselineAcquireTargetIsActionsOnly|TestPinnedSDKDrain.*|TestDriverDrainThroughPinnedSDKAndPollHook|TestDrainListenerWithdrawsWhilePollResponseIsHeld|TestDrainCancellationStopsBeforeReleasingHeldResponse)$' -count=1 -v -timeout=180s
+go_test_checked 34 a79b7fa367d8eb1e7fe4ee4ef637696518946dab6f2f25410f6e04bfba137298 drain-pr72-race experiments/g01-scaleset:./livecanary default+race+go1.26.8 \
+  GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race ./livecanary -run '^(TestBaselineAcquireTargetIsActionsOnly|TestPinnedSDKDrain.*|TestDriverDrainThroughPinnedSDKAndPollHook|TestDrainListenerWithdrawsWhilePollResponseIsHeld|TestDrainCancellationStopsBeforeReleasingHeldResponse)$' -count=1 -v -timeout=180s
 
 terminal_heavy_tests='^TestPairedTerminal(FinalResultCapacity|PendingChildCapacity|EligibilityUsesFreshExactFacts|CapturedAcknowledgementCancellation|MissingAcknowledgementsAndPostchecks)$'
 terminal_remainder_skip='^TestPairedTerminal(FinalResultCapacity|PendingChildCapacity|EligibilityUsesFreshExactFacts|CapturedAcknowledgementCancellation|MissingAcknowledgementsAndPostchecks|Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$'
@@ -518,10 +565,10 @@ is a separate gate: every guarded prescription must still carry explicit
 
 ```sh
 set -euo pipefail
-selector_pattern='^[[:space:]]+(?:[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]+[[:space:]]+)*go test .*[[:space:]]-(run|skip)(=|[[:space:]])'
+selector_pattern='^[[:space:]]*(?:[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]+[[:space:]]+)*go test .*[[:space:]]-(run|skip)(=|[[:space:]])'
 selector_lines="$(rg -n "$selector_pattern" docs/evidence/g01-recovery-packet.md)"
 test -n "$selector_lines"
-selector_probe=$'  GOTOOLCHAIN=go1.26.8 go test ./livecanary -run=^TestProbe$\n  GOTOOLCHAIN=go1.26.8 go test ./livecanary -skip ^TestProbe$'
+selector_probe=$'GOTOOLCHAIN=go1.26.8 go test ./livecanary -run=^TestProbe$\n  GOTOOLCHAIN=go1.26.8 go test ./livecanary -skip ^TestProbe$'
 rg -q "$selector_pattern" <<< "$selector_probe"
 python3 - <<'PY'
 from pathlib import Path
@@ -530,10 +577,12 @@ import tempfile
 
 lines = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8").splitlines()
 selector_command = re.compile(
-    r"^\s+(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+)\s+)*go test .*\s-(?:run|skip)(?:=|\s)"
+    r"^\s*(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+)\s+)*go test .*\s-(?:run|skip)(?:=|\s)"
 )
 guarded = 0
 for index, line in enumerate(lines):
+    if line.lstrip().startswith("selector_probe="):
+        continue
     if not selector_command.search(line):
         continue
     if index == 0 or not lines[index - 1].lstrip().startswith("go_test_checked "):
@@ -544,7 +593,7 @@ if guarded == 0:
 with tempfile.NamedTemporaryFile("w+", encoding="utf-8", suffix=".md") as probe:
     probe.write(
         Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
-        + "\n  go test ./livecanary -run ^TestNoPrefixProbe$\n"
+        + "\ngo test ./livecanary -run ^TestZeroIndentProbe$\n"
     )
     probe.flush()
     try:
@@ -558,25 +607,26 @@ with tempfile.NamedTemporaryFile("w+", encoding="utf-8", suffix=".md") as probe:
         if "unguarded future selector" not in str(error):
             raise
         print(
-            "no-prefix selector probe: passed; an unguarded `go test -run` "
-            "without GOTOOLCHAIN was discovered and rejected"
+            "zero-indent selector probe: passed; an unguarded column-zero "
+            "`go test -run` without GOTOOLCHAIN was discovered and rejected"
         )
     else:
-        raise SystemExit("no-prefix selector probe: unguarded command was accepted")
+        raise SystemExit("zero-indent selector probe: unguarded command was accepted")
 print(
     f"future selector guard audit: passed; {guarded} go test selector "
-    "prescriptions are wrapper-guarded; prefixed and no-prefix discovery "
-    "forms recognized"
+    "prescriptions are wrapper-guarded; column-zero, prefixed and indented "
+    "discovery forms recognized"
 )
 PY
 ```
 
-The selector guard audit exited 0 and found 27 future `go test` selector
+The selector guard audit exited 0 and found 28 future `go test` selector
 prescriptions containing `-run` or `-skip`, each immediately preceded by
-`go_test_checked`; the focused no-prefix probe discovered and rejected an
-unguarded selector without a leading `GOTOOLCHAIN=` assignment, while the
-explicit read-only samples cover both separated and equals spellings. No test
-body was run by this grep/audit. For the paired partitions, the wrapper validates
+`go_test_checked`; the focused zero-indent probe discovered and rejected an
+unguarded column-zero selector without a leading `GOTOOLCHAIN=` assignment,
+while the explicit read-only samples cover both separated and equals spellings
+and both zero-indent and indented shell forms. No test body was run by this
+grep/audit. For the paired partitions, the wrapper validates
 the filtered executed sets: collection
 22/22 (raw list 48), all-except 106/106 (raw list 154), worker 24/24, heavy
 5/5, terminal remainder 15/15 (raw list 26), and storage 6/6; their recorded
@@ -586,8 +636,8 @@ prescription lines above.
 The recorded selector-audit output was:
 
 ```text
-no-prefix selector probe: passed; an unguarded `go test -run` without GOTOOLCHAIN was discovered and rejected
-future selector guard audit: passed; 27 go test selector prescriptions are wrapper-guarded; prefixed and no-prefix discovery forms recognized
+zero-indent selector probe: passed; an unguarded column-zero `go test -run` without GOTOOLCHAIN was discovered and rejected
+future selector guard audit: passed; 28 go test selector prescriptions are wrapper-guarded; column-zero, prefixed and indented discovery forms recognized
 ```
 
 The wrapper metadata is independently checked against each command's literal
@@ -663,8 +713,8 @@ for index, line in enumerate(lines):
             f"observed {actual_package}/{actual_build}"
         )
     seen.append(fields[3])
-if len(seen) != 27 or len(set(seen)) != len(seen):
-    raise SystemExit(f"expected 27 unique wrapper metadata records, observed {len(seen)}")
+if len(seen) != 28 or len(set(seen)) != len(seen):
+    raise SystemExit(f"expected 28 unique wrapper metadata records, observed {len(seen)}")
 print(
     f"package/build metadata audit: passed; {len(seen)} wrapper prescriptions "
     "matched one package identity and explicit GOTOOLCHAIN/tag/race build "
@@ -673,7 +723,7 @@ print(
 PY
 ```
 
-The package/build metadata audit exited 0 with 27 unique records. Every
+The package/build metadata audit exited 0 with 28 unique records. Every
 package identity matched its `-C` directory and sole package argument, every
 record carried explicit `GOTOOLCHAIN` metadata, and every build identity
 matched its tag set, race mode and toolchain; a duplicate
@@ -681,12 +731,14 @@ matched its tag set, race mode and toolchain; a duplicate
 The recorded metadata-audit output was:
 
 ```text
-package/build metadata audit: passed; 27 wrapper prescriptions matched one package identity and explicit GOTOOLCHAIN/tag/race build configuration; duplicate package candidates fail closed
+package/build metadata audit: passed; 28 wrapper prescriptions matched one package identity and explicit GOTOOLCHAIN/tag/race build configuration; duplicate package candidates fail closed
 ```
 
 The wrapper's selector edge cases were then exercised with a trimmed copy of
 the documented Python body that stops before the original test subprocess. Its
-only child process is the corresponding `go test -list` probe:
+only child processes are the effective `go env GOFLAGS` and corresponding `go
+test -list` probes; the second list probe uses Go's own regexp implementation
+for `-skip` matching:
 
 ```sh
 set -euo pipefail
@@ -694,6 +746,7 @@ python3 - <<'PY'
 import hashlib
 import io
 import sys
+import tempfile
 from contextlib import redirect_stdout
 from pathlib import Path
 
@@ -704,6 +757,8 @@ wrapper = packet[start:end]
 wrapper = wrapper[:wrapper.index("run_result = subprocess.run")]
 one_name = "TestNoMessageDoesNotCountAsCompletedBarrier"
 one_digest = hashlib.sha256((one_name + "\n").encode()).hexdigest()
+supported_name = "TestSupportedListenerBarriersAndReservation"
+supported_digest = hashlib.sha256((supported_name + "\n").encode()).hexdigest()
 common = [
     "GOTOOLCHAIN=go1.26.8", "go", "test", "-C", "experiments/g01-scaleset",
     "-race", "-count=1", "-timeout=45s",
@@ -740,6 +795,15 @@ cases = [
         False,
     ),
     (
+        "posix-class-skip",
+        "1", supported_digest, "experiments/g01-scaleset:./livecanary",
+        "default+race+go1.26.8",
+        common + ["./livecanary", "-run",
+                  "^(TestSupportedListenerBarriersAndReservation|TestNoMessageDoesNotCountAsCompletedBarrier)$",
+                  "-skip", "[[:upper:]]o"],
+        True,
+    ),
+    (
         "package-mismatch",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
         "default+race+go1.26.8",
@@ -761,32 +825,46 @@ cases = [
         False,
     ),
 ]
-for label, count, digest, package, build, command, should_pass in cases:
-    sys.argv = ["wrapper-probe", count, digest, label, package, build, *command]
-    output = io.StringIO()
-    try:
-        with redirect_stdout(output):
-            exec(compile(wrapper, "<wrapper>", "exec"), {"__name__": "__main__"})
-    except SystemExit as error:
-        if should_pass:
-            raise SystemExit(f"{label}: unexpected rejection: {error}")
-        print(f"{label}: rejected before test body: {error}")
-    else:
-        if not should_pass:
-            raise SystemExit(f"{label}: unexpectedly accepted")
-        if "list validation passed" not in output.getvalue():
-            raise SystemExit(f"{label}: missing list-validation result")
-        print(f"{label}: accepted list-only selector")
+with tempfile.TemporaryDirectory() as goenv_dir:
+    goenv = Path(goenv_dir) / "env"
+    goenv.write_text("GOFLAGS=-run=^PersistedConfigProbe$\n", encoding="utf-8")
+    cases.append(
+        (
+            "persisted-goflags",
+            "1", one_digest, "experiments/g01-scaleset:./livecanary",
+            "default+race+go1.26.8",
+            [f"GOENV={goenv}", *common, "./livecanary",
+             "-run=^" + one_name + "$"],
+            False,
+        )
+    )
+    for label, count, digest, package, build, command, should_pass in cases:
+        sys.argv = ["wrapper-probe", count, digest, label, package, build, *command]
+        output = io.StringIO()
+        try:
+            with redirect_stdout(output):
+                exec(compile(wrapper, "<wrapper>", "exec"), {"__name__": "__main__"})
+        except SystemExit as error:
+            if should_pass:
+                raise SystemExit(f"{label}: unexpected rejection: {error}")
+            print(f"{label}: rejected before test body: {error}")
+        else:
+            if not should_pass:
+                raise SystemExit(f"{label}: unexpectedly accepted")
+            if "list validation passed" not in output.getvalue():
+                raise SystemExit(f"{label}: missing list-validation result")
+            print(f"{label}: accepted list-only selector")
 PY
 ```
 
 The focused list-only probes passed: equals-form `-run=` selected 1/1;
 separated `-run` plus `-skip` preserved the filtered 22/22 set (raw list 48);
-the no-match and equals-form skip-all cases were rejected with 0 observed
-executed names before any test body; a livecanary/liveworker package mismatch
-and a tag/build mismatch were rejected before listing; and duplicate package
-targeting was rejected before listing. No test body, live operation or
-secret-bearing input was run.
+the POSIX-class `[[:upper:]]` skip probe preserved the exact 1/1 set; the
+no-match and equals-form skip-all cases were rejected with 0 observed executed
+names before any test body; a livecanary/liveworker package mismatch, tag/build
+mismatch and temporary GOENV-persisted non-empty `GOFLAGS` were rejected before
+listing; and duplicate package targeting was rejected before listing. No test
+body, live operation or secret-bearing input was run.
 
 The tagged worker command is a complete `./liveworker` `^TestPaired` partition
 using the same fixture tag, toolchain, race detector, count and timeout as the
@@ -831,6 +909,15 @@ tests with no file build constraint; the only tag-sensitive test is
 packages and guarded by `//go:build !cgo || osusergo || android`, so the added
 livecanary invocation forces `-tags=osusergo`; `TestZeroStatisticsAndOptionalAbsencePermitEmptyCleanup`
 remains a default-build `./livecanary` test in `statistics_fence_test.go`.
+
+The `./livecanary` test binary has a `TestMain` in
+`preparation_fixture_test.go`, so Go starts that function before processing a
+`-list` request. The source audit below verifies that the normal list path
+matches neither of the two explicit `--prepare-approved-*` branches and falls
+through to `os.Exit(m.Run())`; those branches are the only paths that read
+approval/state inputs or prepare a journal. Accordingly, the livecanary
+`go test -list` checks are treated as TestMain initialization checks as well as
+selector checks: they use no live endpoint or credentials and run no test body.
 
 The following commands are the exact documentation/static checks used for this
 correction. Their results are recorded immediately after each check; no command
@@ -939,6 +1026,42 @@ The paired-terminal normalized fragment comparison exited 0 with no diff and
 printed the pass message above; wrapper metadata is intentionally excluded, but
 the underlying package, tag, selector, skip, toolchain, race, count and timeout
 arguments remain compared exactly.
+
+The terminal remainder skip expression is also compared as one exact
+assignment/value, independently of the broader fragment normalization. The
+paired-terminal record is stored at the repository path
+`docs/evidence/g01-paired-terminal.md`; missing, duplicated or changed
+assignments fail closed:
+
+```sh
+set -euo pipefail
+python3 - <<'PY'
+from pathlib import Path
+
+packet_path = Path("docs/evidence/g01-recovery-packet.md")
+paired_path = Path("docs/evidence/g01-paired-terminal.md")
+
+def assignment(path):
+    values = [
+        line.strip()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip().startswith("terminal_remainder_skip=")
+    ]
+    if len(values) != 1:
+        raise SystemExit(f"{path}: expected one terminal_remainder_skip assignment")
+    return values[0]
+
+packet_value = assignment(packet_path)
+paired_value = assignment(paired_path)
+if packet_value != paired_value:
+    raise SystemExit("terminal_remainder_skip assignment/value mismatch")
+print("terminal_remainder_skip assignment/value comparison: passed; packet and docs/evidence/g01-paired-terminal.md match exactly")
+PY
+```
+
+The exact `terminal_remainder_skip` assignment/value comparison exited 0; the
+packet and paired-terminal record matched, and the one-assignment guard would
+reject a missing, duplicate or changed value before any selector ran.
 
 ### Prior packet-correction exact-head record
 
@@ -1071,6 +1194,16 @@ if invocation_root != repo_root:
     raise SystemExit("run this selector audit from the repository root")
 
 env = {**os.environ, "GOTOOLCHAIN": "go1.26.8"}
+effective_goflags = subprocess.run(
+    ["go", "env", "GOFLAGS"], cwd=repo_root, env=env, text=True,
+    capture_output=True, check=False,
+)
+if effective_goflags.returncode != 0 or effective_goflags.stderr.strip():
+    raise SystemExit("selector audit: effective GOFLAGS query failed")
+effective_lines = effective_goflags.stdout.splitlines()
+if len(effective_lines) > 1 or (effective_lines and effective_lines[0].strip()):
+    raise SystemExit("selector audit: effective GOFLAGS must be empty")
+env["GOFLAGS"] = ""
 cases = [
     {
         "label": "liveworker runtime",
@@ -1205,7 +1338,8 @@ snapshot 5979b7d722f3bf8e24404912f9b1f3e888d0828d against the unchanged source
 under comparison parent ee8df8b7e00204c74a892b27f8b4c0ab278751ba: exact sets matched at
 25/25 `liveworker` runtime names, 4/4 preparation names, 1/1 `osusergo`
 build-tag name and 26/26 reconciliation names. Every invocation used
-`go test -list`; no test body ran.
+`go test -list` after the effective `go env GOFLAGS` check and explicit
+`GOFLAGS=` pin; no test body ran.
 
 The declaration consistency check also avoids self-referential line numbers and
 uses immutable source/tree assertions plus quiet presence/absence checks:
@@ -1227,8 +1361,41 @@ rg -q '^package liveworker$' experiments/g01-scaleset/liveworker/docker_observat
 ! rg -q '^//go:build|^// \+build' experiments/g01-scaleset/livecanary/driver_test.go experiments/g01-scaleset/liveworker/docker_observation_test.go experiments/g01-scaleset/liveworker/worker_test.go
 rg -q '^func Test(Observe|Statistics|InvalidOwnedProof|Journal|Authority)' experiments/g01-scaleset/livecanary --glob '*_test.go'
 rg -q '^//go:build !cgo \|\| osusergo \|\| android$|func TestUnsupportedAccountLookupRefusesBeforeJournal' experiments/g01-scaleset/liveworker/admission_lookup_unsupported_test.go experiments/g01-scaleset/livecanary/admission_lookup_unsupported_test.go
+rg -q '^func TestMain\(m \*testing\.M\)' experiments/g01-scaleset/livecanary/preparation_fixture_test.go
+python3 - <<'PY'
+from pathlib import Path
+
+source = Path("experiments/g01-scaleset/livecanary/preparation_fixture_test.go").read_text(encoding="utf-8")
+start = source.index("func TestMain(m *testing.M) {")
+main = source[start:]
+first_branch = 'if len(os.Args) > 1 && os.Args[1] == "--prepare-approved-paired-journal"'
+second_branch = 'if len(os.Args) > 1 && os.Args[1] == "--prepare-approved-journal"'
+if not main.startswith("func TestMain(m *testing.M) {\n"):
+    raise SystemExit("TestMain declaration is not in the expected form")
+first = main.index(first_branch)
+second = main.index(second_branch)
+normal = main.index("os.Exit(m.Run())")
+if not first < second < normal:
+    raise SystemExit("TestMain preparation branches do not precede normal m.Run")
+prefix = main[:first]
+prefix_lines = prefix.splitlines()
+if not prefix_lines or prefix_lines[0] != "func TestMain(m *testing.M) {" or any(
+    line.strip() for line in prefix_lines[1:]
+):
+    raise SystemExit("TestMain has work before its explicit preparation branches")
+for forbidden in ("http.", "net.", "exec.", "Driver.Run"):
+    if forbidden in prefix:
+        raise SystemExit(f"TestMain list prefix contains {forbidden}")
+print("livecanary TestMain list-path audit: passed; normal -list path reaches m.Run without preparation branch or live-resource call")
+PY
 printf 'selector declaration audit: passed; immutable source/tree, requested declarations, package names, and build constraints matched; no test bodies executed\n'
 ```
+
+The declaration audit also passed the `TestMain` list-path check: the normal
+`-list` path reaches `m.Run` before any preparation branch and has no
+live-resource call. The existing livecanary selector audits therefore exercise
+that initialization path only; every invocation remains `go test -list` and no
+test body or live resource was run.
 
 ### Diff and staged secret/private-path scan
 
