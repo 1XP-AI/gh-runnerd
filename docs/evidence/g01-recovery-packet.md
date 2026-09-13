@@ -188,17 +188,21 @@ test-name set before it invokes the original command. Go's `-list` mode reports
 the pre-`-skip` candidates, so the wrapper removes either `-skip REGEXP` or
 `-skip=REGEXP` from the first list probe, asks Go's own RE2 regexp engine for
 the names matched by that skip expression, and subtracts those names before
-count and digest validation. Each prescription also carries an expected
+count and digest validation; slash-delimited subtest skip expressions are
+rejected because top-level `-list` output cannot prove their subtest set. Each
+prescription also carries an expected
 package identity (`module-directory:package`) and build configuration (tag set,
 race mode and `GOTOOLCHAIN`); the wrapper queries the effective `go env
 GOFLAGS`, including GOENV/configuration, rejects non-empty output, and then
 pins `GOFLAGS=` for both list probes and the original command. The wrapper
 recomputes both from the original command and fails closed before listing if
-either differs. A command failure, unexpected list output, zero expected names,
-invalid Go/RE2 syntax, count mismatch or set mismatch stops before any test body
-runs; the set digest and metadata are recorded beside each prescription so
-renamed, removed, build-tagged, newly unskipped or cross-package tests fail
-closed.
+either differs. It rejects non-positive `-count` values and inherited or
+command-supplied fixture child-mode variables before either list probe or the
+original command. A command failure, unexpected list output, zero expected
+names, invalid Go/RE2 syntax, count mismatch or set mismatch stops before any
+test body runs; the set digest and metadata are recorded beside each
+prescription so renamed, removed, build-tagged, newly unskipped or
+cross-package tests fail closed.
 
 ```sh
 set -euo pipefail
@@ -263,6 +267,17 @@ env = dict(os.environ)
 while command and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", command[0]):
     key, value = command.pop(0).split("=", 1)
     env[key] = value
+fixture_child_env = {
+    "G01_INPUT_CHILD",
+    "G01_NAMED_FIFO_CHILD",
+    "G01_HTTP_DEBUG_CHILD",
+}
+inherited_child_env = sorted(key for key in fixture_child_env if key in env)
+if inherited_child_env:
+    raise SystemExit(
+        f"{label}: fixture child-mode environment is not allowed: "
+        + ", ".join(inherited_child_env)
+    )
 if len(command) < 3 or command[:2] != ["go", "test"]:
     raise SystemExit(f"{label}: expected a go test command")
 
@@ -362,6 +377,18 @@ while index < len(test_args):
     index += 1
 if len(skip_patterns) > 1:
     raise SystemExit(f"{label}: expected at most one -skip flag")
+if skip_patterns and "/" in skip_patterns[0]:
+    raise SystemExit(
+        f"{label}: slash-delimited -skip selectors are rejected because "
+        "top-level -list cannot validate subtest names"
+    )
+
+count_values = flag_values(test_args, "-count")
+if len(count_values) > 1:
+    raise SystemExit(f"{label}: expected at most one -count flag")
+if count_values:
+    if not re.fullmatch(r"[0-9]+", count_values[0]) or int(count_values[0]) <= 0:
+        raise SystemExit(f"{label}: -count must be a positive integer")
 
 package_value_flags = {"-C", "-tags", "-run", "-list", "-count", "-timeout"}
 package_indices = []
@@ -557,11 +584,12 @@ GOTOOLCHAIN=go1.26.8 go vet -C experiments/g01-scaleset -tags=g01_pair_fixture .
 The packet also audits every future shell `go test` selector prescription
 containing either spelling of `-run`/`-skip` (`-run REGEXP` or `-run=REGEXP`, and
 the corresponding `-skip` forms), whether or not the command starts with a
-`GOTOOLCHAIN=` assignment. The guard audit discovers all selector-bearing
-commands first and treats an unguarded line as an error rather than relying on
-a visual review of the selector block. The package/build metadata audit below
-is a separate gate: every guarded prescription must still carry explicit
-`GOTOOLCHAIN`, tag and race metadata.
+`GOTOOLCHAIN=` assignment. The guard audit joins shell backslash continuations,
+discovers all selector-bearing logical commands first, and treats an unguarded
+continued command as an error rather than relying on a visual review of the
+selector block. The package/build metadata audit below is a separate gate:
+every guarded prescription must still carry explicit `GOTOOLCHAIN`, tag and
+race metadata.
 
 ```sh
 set -euo pipefail
@@ -579,6 +607,64 @@ lines = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
 selector_command = re.compile(
     r"^\s*(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+)\s+)*go test .*\s-(?:run|skip)(?:=|\s)"
 )
+logical_selector_command = re.compile(
+    r"^\s*(?:go_test_checked\b.*\bgo test\b|"
+    r"(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+)\s+)*go test\b)"
+    r".*\s-(?:run|skip)(?:=|\s)",
+    re.DOTALL,
+)
+
+
+def logical_commands(source_lines):
+    """Join shell backslash continuations and retain their first line number."""
+    commands = []
+    index = 0
+    while index < len(source_lines):
+        first = index
+        command = source_lines[index].rstrip()
+        while command.endswith("\\"):
+            command = command[:-1].rstrip() + " "
+            index += 1
+            if index >= len(source_lines):
+                raise SystemExit(f"unterminated shell continuation at line {first + 1}")
+            command += source_lines[index].lstrip()
+        commands.append((first, command))
+        index += 1
+    return commands
+
+
+def audit_logical_selectors(source_lines):
+    guarded_count = 0
+    for first, command in logical_commands(source_lines):
+        if command.lstrip().startswith("selector_probe="):
+            continue
+        if not logical_selector_command.search(command):
+            continue
+        if not command.lstrip().startswith("go_test_checked "):
+            raise SystemExit(f"unguarded future selector at line {first + 1}")
+        guarded_count += 1
+    if guarded_count == 0:
+        raise SystemExit("no future go test selector prescriptions found")
+    return guarded_count
+
+
+logical_guarded = audit_logical_selectors(lines)
+continuation_probe = [
+    "go test ./livecanary \\",
+    "  -run ^TestContinuationProbe$",
+]
+try:
+    audit_logical_selectors(continuation_probe)
+except SystemExit as error:
+    if "unguarded future selector" not in str(error):
+        raise
+    print(
+        "line-continuation selector probe: passed; an unguarded continued "
+        "go test -run was discovered and rejected"
+    )
+else:
+    raise SystemExit("line-continuation selector probe: unguarded command was accepted")
+
 guarded = 0
 for index, line in enumerate(lines):
     if line.lstrip().startswith("selector_probe="):
@@ -622,8 +708,8 @@ PY
 
 The selector guard audit exited 0 and found 28 future `go test` selector
 prescriptions containing `-run` or `-skip`, each immediately preceded by
-`go_test_checked`; the focused zero-indent probe discovered and rejected an
-unguarded column-zero selector without a leading `GOTOOLCHAIN=` assignment,
+`go_test_checked`; the focused zero-indent and continued-command probes
+discovered and rejected unguarded selectors without relying on line layout,
 while the explicit read-only samples cover both separated and equals spellings
 and both zero-indent and indented shell forms. No test body was run by this
 grep/audit. For the paired partitions, the wrapper validates
@@ -636,6 +722,7 @@ prescription lines above.
 The recorded selector-audit output was:
 
 ```text
+line-continuation selector probe: passed; an unguarded continued go test -run was discovered and rejected
 zero-indent selector probe: passed; an unguarded column-zero `go test -run` without GOTOOLCHAIN was discovered and rejected
 future selector guard audit: passed; 28 go test selector prescriptions are wrapper-guarded; column-zero, prefixed and indented discovery forms recognized
 ```
@@ -745,6 +832,7 @@ set -euo pipefail
 python3 - <<'PY'
 import hashlib
 import io
+import os
 import sys
 import tempfile
 from contextlib import redirect_stdout
@@ -763,6 +851,7 @@ common = [
     "GOTOOLCHAIN=go1.26.8", "go", "test", "-C", "experiments/g01-scaleset",
     "-race", "-count=1", "-timeout=45s",
 ]
+count_zero_common = ["-count=0" if value == "-count=1" else value for value in common]
 cases = [
     (
         "equals-run",
@@ -802,6 +891,21 @@ cases = [
                   "^(TestSupportedListenerBarriersAndReservation|TestNoMessageDoesNotCountAsCompletedBarrier)$",
                   "-skip", "[[:upper:]]o"],
         True,
+    ),
+    (
+        "slash-subtest-skip",
+        "1", one_digest, "experiments/g01-scaleset:./livecanary",
+        "default+race+go1.26.8",
+        common + ["./livecanary", "-run", "^TestProbe$",
+                  "-skip", "^TestProbe/subtest$"],
+        False,
+    ),
+    (
+        "count-zero",
+        "1", one_digest, "experiments/g01-scaleset:./livecanary",
+        "default+race+go1.26.8",
+        count_zero_common + ["./livecanary", "-run=^" + one_name + "$"],
+        False,
     ),
     (
         "package-mismatch",
@@ -854,6 +958,27 @@ with tempfile.TemporaryDirectory() as goenv_dir:
             if "list validation passed" not in output.getvalue():
                 raise SystemExit(f"{label}: missing list-validation result")
             print(f"{label}: accepted list-only selector")
+inherited_previous = os.environ.get("G01_INPUT_CHILD")
+os.environ["G01_INPUT_CHILD"] = "blocked"
+sys.argv = [
+    "wrapper-probe", "1", one_digest, "inherited-child-mode",
+    "experiments/g01-scaleset:./livecanary", "default+race+go1.26.8", *(
+        common + ["./livecanary", "-run=^" + one_name + "$"]
+    ),
+]
+try:
+    try:
+        with redirect_stdout(io.StringIO()):
+            exec(compile(wrapper, "<wrapper>", "exec"), {"__name__": "__main__"})
+    except SystemExit as error:
+        print(f"inherited-child-mode: rejected before test body: {error}")
+    else:
+        raise SystemExit("inherited-child-mode: inherited fixture variable was accepted")
+finally:
+    if inherited_previous is None:
+        os.environ.pop("G01_INPUT_CHILD", None)
+    else:
+        os.environ["G01_INPUT_CHILD"] = inherited_previous
 PY
 ```
 
@@ -863,8 +988,18 @@ the POSIX-class `[[:upper:]]` skip probe preserved the exact 1/1 set; the
 no-match and equals-form skip-all cases were rejected with 0 observed executed
 names before any test body; a livecanary/liveworker package mismatch, tag/build
 mismatch and temporary GOENV-persisted non-empty `GOFLAGS` were rejected before
-listing; and duplicate package targeting was rejected before listing. No test
-body, live operation or secret-bearing input was run.
+listing; duplicate package targeting was rejected before listing; slash-
+delimited subtest `-skip`, `-count=0`, and inherited `G01_INPUT_CHILD=blocked`
+were each rejected before listing. No test body, live operation or
+secret-bearing input was run.
+
+The added wrapper-regression output was:
+
+```text
+slash-subtest-skip: rejected before test body: slash-subtest-skip: slash-delimited -skip selectors are rejected because top-level -list cannot validate subtest names
+count-zero: rejected before test body: count-zero: -count must be a positive integer
+inherited-child-mode: rejected before test body: inherited-child-mode: fixture child-mode environment is not allowed: G01_INPUT_CHILD
+```
 
 The tagged worker command is a complete `./liveworker` `^TestPaired` partition
 using the same fixture tag, toolchain, race detector, count and timeout as the
@@ -912,12 +1047,15 @@ remains a default-build `./livecanary` test in `statistics_fence_test.go`.
 
 The `./livecanary` test binary has a `TestMain` in
 `preparation_fixture_test.go`, so Go starts that function before processing a
-`-list` request. The source audit below verifies that the normal list path
-matches neither of the two explicit `--prepare-approved-*` branches and falls
-through to `os.Exit(m.Run())`; those branches are the only paths that read
-approval/state inputs or prepare a journal. Accordingly, the livecanary
-`go test -list` checks are treated as TestMain initialization checks as well as
-selector checks: they use no live endpoint or credentials and run no test body.
+`-list` request. The source audit below parses the complete function through
+the normal `os.Exit(m.Run())` terminal, requires exactly the two explicit
+`--prepare-approved-*` branches, and proves that the normal-path projection
+contains no other statement; those branches are the only paths that read
+approval/state inputs or prepare a journal. A synthetic unconditional
+post-branch setup fixture must be rejected before execution. Accordingly, the
+livecanary `go test -list` checks are treated as TestMain initialization checks
+as well as selector checks: they use no live endpoint or credentials and run no
+test body.
 
 The following commands are the exact documentation/static checks used for this
 correction. Their results are recorded immediately after each check; no command
@@ -1167,20 +1305,32 @@ post-correction current/remote head audit: passed; both returned 08ce02f7716c991
 
 The new packet-correction head that followed the `08ce` review was
 `201f5eed4d561a1255fbf5a2e930d676c23024c1`, committed at
-`2026-09-14T02:33:08+09:00`. Its literal current-final parity output was
-recorded after push and is kept separate from the historical `08ce` output:
+`2026-09-14T02:33:08+09:00`. Its literal parity output was recorded after
+push and is kept separate from the historical `08ce` output:
 
 ```text
 post-correction current/remote head audit: passed; both returned 201f5eed4d561a1255fbf5a2e930d676c23024c1
 ```
 
-These two output records are historical parity evidence only; the immutable
-`5979...`, `82ee...` and `6b153...` records above remain separate exact-head
-records and are not combined into one checkout or result.
+Before this follow-up, the exact current head was checked against the remote
+branch with the dynamic command below. Its literal result is retained only as
+the pre-follow-up parity record; it is not a claim about the head produced by
+this follow-up:
 
-The final head check is dynamic and is run only after the packet commit is
-pushed, so it remains internally runnable without adding a self-invalidating
-literal SHA to a later packet commit:
+```text
+post-correction current/remote head audit (pre-follow-up parity): passed; both returned 87fbad320d2f264200dc539a048d5704220fab3f
+```
+
+The `08ce`, `201f` and `87fb` output records are historical parity evidence
+only; the immutable `5979...`, `82ee...` and `6b153...` records above remain
+separate exact-head records and are not combined into one checkout or result.
+
+The following dynamic command is the live final-verification template. Run it
+only after the packet follow-up has been committed and pushed. It derives both
+heads at runtime and fails closed on a dirty worktree, an empty head or any
+local/remote mismatch; its actual output and exact pushed SHA belong in the
+focused PR handoff/review, not in a subsequent packet commit that would make a
+literal "final" SHA self-referential:
 
 ```sh
 set -euo pipefail
@@ -1192,9 +1342,10 @@ test "$final_head" = "$remote_head"
 printf 'post-correction current/remote head audit: passed; both returned %s\n' "$final_head"
 ```
 
-The post-correction current/remote head audit is a required final handoff
-check; its output is recorded with the exact pushed SHA after this packet-only
-commit.
+The focused PR handoff/review must record the exact SHA and output from this
+template after push. This packet intentionally records the template and the
+earlier historical parity records only; it does not claim that this follow-up's
+final output is already recorded here.
 
 The four focused offline selector checks below are list-only source checks. Each
 has a literal expected test-name set and an explicit count; the helper exits
@@ -1394,37 +1545,221 @@ rg -q '^func TestMain\(m \*testing\.M\)' experiments/g01-scaleset/livecanary/pre
 python3 - <<'PY'
 from pathlib import Path
 
+
+class AuditFailure(ValueError):
+    pass
+
+
+def skip_ignored(text, position):
+    """Advance over Go whitespace and comments without executing source."""
+    while position < len(text):
+        if text[position].isspace():
+            position += 1
+            continue
+        if text.startswith("//", position):
+            newline = text.find("\n", position + 2)
+            position = len(text) if newline < 0 else newline + 1
+            continue
+        if text.startswith("/*", position):
+            close = text.find("*/", position + 2)
+            if close < 0:
+                raise AuditFailure("unterminated Go block comment")
+            position = close + 2
+            continue
+        break
+    return position
+
+
+def matching_brace(text, opening):
+    """Find a Go brace pair while ignoring strings, runes and comments."""
+    depth = 0
+    position = opening
+    while position < len(text):
+        if text.startswith("//", position):
+            newline = text.find("\n", position + 2)
+            position = len(text) if newline < 0 else newline + 1
+            continue
+        if text.startswith("/*", position):
+            close = text.find("*/", position + 2)
+            if close < 0:
+                raise AuditFailure("unterminated Go block comment")
+            position = close + 2
+            continue
+        character = text[position]
+        if character in ('"', "'", chr(96)):
+            quote = character
+            position += 1
+            while position < len(text):
+                if quote != chr(96) and text[position] == "\\":
+                    position += 2
+                    continue
+                if text[position] == quote:
+                    position += 1
+                    break
+                position += 1
+            else:
+                raise AuditFailure("unterminated Go string, rune or raw literal")
+            continue
+        if character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                return position
+            if depth < 0:
+                raise AuditFailure("unbalanced Go braces")
+        position += 1
+    raise AuditFailure("TestMain body has no matching closing brace")
+
+
+def first_open_brace(text, position):
+    """Find the first statement block opener outside Go literals/comments."""
+    while position < len(text):
+        if text.startswith("//", position):
+            newline = text.find("\n", position + 2)
+            position = len(text) if newline < 0 else newline + 1
+            continue
+        if text.startswith("/*", position):
+            close = text.find("*/", position + 2)
+            if close < 0:
+                raise AuditFailure("unterminated Go block comment")
+            position = close + 2
+            continue
+        character = text[position]
+        if character in ('"', "'", chr(96)):
+            quote = character
+            position += 1
+            while position < len(text):
+                if quote != chr(96) and text[position] == "\\":
+                    position += 2
+                    continue
+                if text[position] == quote:
+                    position += 1
+                    break
+                position += 1
+            else:
+                raise AuditFailure("unterminated Go literal in TestMain header")
+            continue
+        if character == "{":
+            return position
+        position += 1
+    raise AuditFailure("TestMain preparation branch has no body")
+
+
+def significant(text):
+    """Return non-comment, non-whitespace source for fail-closed comparisons."""
+    result = []
+    position = 0
+    while position < len(text):
+        if text.startswith("//", position):
+            newline = text.find("\n", position + 2)
+            position = len(text) if newline < 0 else newline + 1
+            continue
+        if text.startswith("/*", position):
+            close = text.find("*/", position + 2)
+            if close < 0:
+                raise AuditFailure("unterminated Go block comment")
+            position = close + 2
+            continue
+        if text[position].isspace():
+            position += 1
+            continue
+        result.append(text[position])
+        position += 1
+    return "".join(result)
+
+
+def audit_testmain(source, label):
+    declaration = "func TestMain(m *testing.M) {"
+    function_start = source.index(declaration)
+    opening = function_start + len(declaration) - 1
+    function_end = matching_brace(source, opening)
+    if significant(source[function_end + 1:]):
+        raise AuditFailure(f"{label}: unexpected source after the complete TestMain")
+    body = source[opening + 1:function_end]
+    position = skip_ignored(body, 0)
+    if position == len(body):
+        raise AuditFailure(f"{label}: empty TestMain body")
+
+    expected_headers = [
+        'if len(os.Args) > 1 && os.Args[1] == "--prepare-approved-paired-journal"',
+        'if len(os.Args) > 1 && os.Args[1] == "--prepare-approved-journal"',
+    ]
+    branches = []
+    for index, expected_header in enumerate(expected_headers, start=1):
+        branch_start = position
+        branch_opening = first_open_brace(body, branch_start)
+        actual_header = body[branch_start:branch_opening].strip()
+        if actual_header != expected_header:
+            raise AuditFailure(
+                f"{label}: top-level statement {index} is not the explicit preparation branch"
+            )
+        branch_end = matching_brace(body, branch_opening) + 1
+        after_branch = skip_ignored(body, branch_end)
+        if body.startswith("else", after_branch):
+            raise AuditFailure(f"{label}: preparation branch unexpectedly has an else path")
+        branches.append((branch_start, branch_end))
+        position = after_branch
+
+    # This is the complete normal-path projection: remove only the two
+    # explicit preparation branches and require the sole remaining statement
+    # to be the normal test runner. Any unconditional setup before, between or
+    # after those branches remains in this projection and fails closed.
+    outside_branches = (
+        body[:branches[0][0]]
+        + body[branches[0][1]:branches[1][0]]
+        + body[branches[1][1]:]
+    )
+    if significant(outside_branches) != "os.Exit(m.Run())":
+        raise AuditFailure(
+            f"{label}: normal -list path contains a statement other than os.Exit(m.Run())"
+        )
+    if significant(body).count("os.Exit(m.Run())") != 1:
+        raise AuditFailure(f"{label}: expected exactly one normal os.Exit(m.Run()) terminal")
+    for branch_start, branch_end in branches:
+        if "os.Exit(" not in body[branch_start:branch_end]:
+            raise AuditFailure(f"{label}: preparation branch does not terminate explicitly")
+    return branches
+
+
 source = Path("experiments/g01-scaleset/livecanary/preparation_fixture_test.go").read_text(encoding="utf-8")
-start = source.index("func TestMain(m *testing.M) {")
-main = source[start:]
-first_branch = 'if len(os.Args) > 1 && os.Args[1] == "--prepare-approved-paired-journal"'
-second_branch = 'if len(os.Args) > 1 && os.Args[1] == "--prepare-approved-journal"'
-if not main.startswith("func TestMain(m *testing.M) {\n"):
-    raise SystemExit("TestMain declaration is not in the expected form")
-first = main.index(first_branch)
-second = main.index(second_branch)
-normal = main.index("os.Exit(m.Run())")
-if not first < second < normal:
-    raise SystemExit("TestMain preparation branches do not precede normal m.Run")
-prefix = main[:first]
-prefix_lines = prefix.splitlines()
-if not prefix_lines or prefix_lines[0] != "func TestMain(m *testing.M) {" or any(
-    line.strip() for line in prefix_lines[1:]
-):
-    raise SystemExit("TestMain has work before its explicit preparation branches")
-for forbidden in ("http.", "net.", "exec.", "Driver.Run"):
-    if forbidden in prefix:
-        raise SystemExit(f"TestMain list prefix contains {forbidden}")
-print("livecanary TestMain list-path audit: passed; normal -list path reaches m.Run without preparation branch or live-resource call")
+audit_testmain(source, "livecanary TestMain")
+
+# Safe static regression fixture: an unconditional call after the explicit
+# preparation branches must be rejected without compiling or running it.
+unconditional_setup_fixture = '''func TestMain(m *testing.M) {
+    if len(os.Args) > 1 && os.Args[1] == "--prepare-approved-paired-journal" {
+        os.Exit(0)
+    }
+    if len(os.Args) > 1 && os.Args[1] == "--prepare-approved-journal" {
+        os.Exit(0)
+    }
+    setupUnconditionally()
+    os.Exit(m.Run())
+}
+'''
+try:
+    audit_testmain(unconditional_setup_fixture, "unconditional post-branch setup regression probe")
+except AuditFailure as error:
+    if "normal -list path" not in str(error):
+        raise SystemExit(f"regression probe rejected for the wrong reason: {error}")
+else:
+    raise SystemExit("unconditional post-branch setup regression probe was not rejected")
+print("livecanary TestMain normal-path audit: passed; complete function control flow has only the two explicit preparation branches followed by os.Exit(m.Run()); normal -list projection contains no setup, resource, credential or live call")
+print("livecanary TestMain unconditional post-branch setup regression probe: passed; synthetic setup was rejected before execution")
 PY
 printf 'selector declaration audit: passed; immutable source/tree, requested declarations, package names, and build constraints matched; no test bodies executed\n'
 ```
 
-The declaration audit also passed the `TestMain` list-path check: the normal
-`-list` path reaches `m.Run` before any preparation branch and has no
-live-resource call. The existing livecanary selector audits therefore exercise
-that initialization path only; every invocation remains `go test -list` and no
-test body or live resource was run.
+The declaration audit now walks the complete `TestMain` function from its
+declaration through the normal `os.Exit(m.Run())` terminal. It requires exactly
+the two explicit preparation branches, projects the normal `-list` path by
+removing only those branches, and fails closed unless the remaining statement
+is exactly `os.Exit(m.Run())`; this proves that no live, resource, credential or
+setup call is reachable on the normal path while permitting preparation work
+inside those branches. The synthetic unconditional-post-branch setup fixture
+was rejected before execution. The existing livecanary selector audits remain
+`go test -list` only, so no test body or live resource was run.
 
 ### Diff and staged secret/private-path scan
 
