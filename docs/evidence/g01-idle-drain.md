@@ -2409,3 +2409,94 @@ commit. Rollback is recoverable with `git revert --no-edit
 separately if needed. No live App/runner/canary evidence is claimed; the
 unresolved live G01 gate, independent exact-head Codex review, CI and merge
 remain coordinator-owned.
+
+### Exact-head follow-up: terminal absence close failure and marked JIT wire tuple
+
+Date: 2026-09-13. This correction started from exact head
+`6e727bf5c0d276227878b5808ab0211ddb9f3e15` and addresses the two fresh Codex
+P1 findings on PR #72: [terminal-set-absence expected-404 response body close failure](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3998106046)
+and [marked JIT request origin/prefix/body mutation](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3998106048).
+No Issue, Project, goal, dependency, status or branch field was changed; no
+live App/runner/canary operation, workflow replay, Docker/Lima, Keychain,
+launchd, credential or cleanup operation was performed.
+
+#### Red-first reproduction
+
+Both regressions were added and run before the source correction against the
+unchanged exact starting head. This focused command exited 1 as expected:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^(TestGuardBaselineResponseRejectsTerminalSetAbsenceWhenBodyCloseFails|TestBaselineMarkedJITRequestRejectsPhysicalTupleMutationBeforeInner)$' -count=1 -v
+```
+
+The terminal absence test observed a non-nil 404 response with `err <nil>` and
+the capture still observed. The three JIT mutation cases (physical origin,
+tenant prefix and request body) each returned a successful response and
+reached the inner transport instead of rejecting before forwarding. The red
+tests retain only bounded status, error and observation state plus the
+synthetic `io.ErrClosedPipe`; no response body, Authorization value, token,
+URL or private log is recorded.
+
+#### Minimal correction and green evidence
+
+`guardBaselineResponse` now close-checks expected `terminal-set-absence` 404
+bodies before accepting absence evidence; a close failure marks the capture
+invalid and returns `ErrRemote`, while a clean 404 remains accepted. Marked
+JIT requests now require the already captured session origin, exact runtime
+tenant prefix, scale-set route and API-version query, and the bounded strict
+JSON body with the approved runner name and `_work` folder. The JIT capture is
+seeded from the listener-held session tuple without recursively taking its
+mutex; valid marked JIT and unmarked forwarding remain covered.
+
+The focused normal command exited 0 in 0.630s, and the focused race command
+exited 0 in 1.710s with no race diagnostics:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^(TestGuardBaselineResponseRejectsRunnerFactsWhenBodyCloseFails|TestGuardBaselineResponseRejectsTerminalCloseWhenBodyCloseFails|TestGuardBaselineResponseRejectsTerminalSetAbsenceWhenBodyCloseFails|TestGuardBaselineResponsePreservesTerminalSetAbsenceWhenBodyCloseSucceeds|TestGuardBaselineResponseRejectsEvidenceDeleteWhenBodyCloseFails|TestBaselineMarkedBoundariesRejectReplacementContextBeforeInner|TestBaselineWireMarkerIsRemovedBeforeInner|TestBaselineMarkedJITRequestRejectsPhysicalTupleMutationBeforeInner|TestBaselineJITPreservesValidMarkedAndUnmarkedForwarding|TestPinnedSDKDrainRejectsPollCloseErrorBeforeEffects|TestPinnedSDKDrainRejectsNonEOFPollReadError|TestPinnedSDKDrainRejectsAcquireTargetMutationBeforeFixture|TestPinnedSDKDrainBindsSessionCloseToPhysicalDelete|TestDriverDrainThroughPinnedSDKAndPollHook)$' -count=1 -timeout=300s
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -run '^(TestGuardBaselineResponseRejectsRunnerFactsWhenBodyCloseFails|TestGuardBaselineResponseRejectsTerminalCloseWhenBodyCloseFails|TestGuardBaselineResponseRejectsTerminalSetAbsenceWhenBodyCloseFails|TestGuardBaselineResponsePreservesTerminalSetAbsenceWhenBodyCloseSucceeds|TestGuardBaselineResponseRejectsEvidenceDeleteWhenBodyCloseFails|TestBaselineMarkedBoundariesRejectReplacementContextBeforeInner|TestBaselineWireMarkerIsRemovedBeforeInner|TestBaselineMarkedJITRequestRejectsPhysicalTupleMutationBeforeInner|TestBaselineJITPreservesValidMarkedAndUnmarkedForwarding|TestPinnedSDKDrainRejectsPollCloseErrorBeforeEffects|TestPinnedSDKDrainRejectsNonEOFPollReadError|TestPinnedSDKDrainRejectsAcquireTargetMutationBeforeFixture|TestPinnedSDKDrainBindsSessionCloseToPhysicalDelete|TestDriverDrainThroughPinnedSDKAndPollHook)$' -count=1 -timeout=300s
+```
+
+The full `livecanary` package normal run exited 0 in 25.467s and the full race
+run exited 0 in 36.955s, with no race diagnostics:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -count=1 -timeout=300s
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -count=1 -timeout=360s
+```
+
+The offline paired-terminal integration matrix, which exercises the listener
+seeded valid JIT path without live resources, exited 0 in 13.905s normally and
+41.479s under race:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -tags=g01_pair_fixture ./livecanary -run '^(TestPairedTerminalActualJournalsFinalize|TestPairedTerminalCompletionCadenceAndReceiptSeparation|TestPairedTerminalFinalResultCapacity|TestPairedTerminalPendingChildCapacity|TestPairedTerminalEligibilityUsesFreshExactFacts|TestPairedTerminalCapturedAcknowledgementCancellation|TestPairedTerminalMissingAcknowledgementsAndPostchecks)$' -count=1 -v -timeout=300s
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -tags=g01_pair_fixture -race ./livecanary -run '^(TestPairedTerminalActualJournalsFinalize|TestPairedTerminalCompletionCadenceAndReceiptSeparation|TestPairedTerminalFinalResultCapacity|TestPairedTerminalPendingChildCapacity|TestPairedTerminalEligibilityUsesFreshExactFacts|TestPairedTerminalCapturedAcknowledgementCancellation|TestPairedTerminalMissingAcknowledgementsAndPostchecks)$' -count=1 -timeout=360s
+```
+
+The required two-module offline/static gate exited 0 and printed
+`offline experiment checks passed: 2 module(s)`. The changed-boundary vet,
+format, diff and secret/private-path checks each exited 0; the final scan
+printed `diff secret/private-path scan passed`:
+
+```text
+GOWORK=off GOTOOLCHAIN=go1.26.8 bash scripts/check-offline-experiments.sh
+(cd experiments/g01-scaleset && GOWORK=off GOTOOLCHAIN=go1.26.8 go vet ./livecanary)
+GOTOOLCHAIN=go1.26.8 bash scripts/gofmt.sh check
+git diff --check
+set -e
+if git diff --text d2a2be896844d95c61dfd955bd027469b315d36e^ d2a2be896844d95c61dfd955bd027469b315d36e -- experiments/g01-scaleset/livecanary/baseline_wire.go experiments/g01-scaleset/livecanary/baseline_execution.go experiments/g01-scaleset/livecanary/baseline_wire_p1_test.go | rg -n -i '(/Users/|/home/|-----BEGIN (RSA|OPENSSH|EC|PRIVATE)|github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9_]{20,}|Authorization[^\n]{0,20}Bearer[[:space:]]+[A-Za-z0-9._-]{20,})'; then exit 1; fi
+printf '%s\n' 'diff secret/private-path scan passed'
+```
+
+The exact implementation source/test head is
+`d2a2be896844d95c61dfd955bd027469b315d36e` (`fix(g01): bind JIT wire and
+terminal absence evidence`); this evidence append is a separate
+documentation-only commit. Source rollback is recoverable with
+`git revert --no-edit d2a2be896844d95c61dfd955bd027469b315d36e`; revert this
+documentation append separately if needed. No live App/runner/canary evidence
+is claimed; the unresolved live G01 gate, independent exact-head Codex review,
+CI and merge remain coordinator-owned.
