@@ -8,6 +8,10 @@ Reviewed 2026-09-07. This summarizes independent research and code/document insp
 | Authentication and security | gpt-6-astra / xhigh | Manifest loopback unproven, App install permission checks, launchd Keychain identity, same-user risk, SDK error-body leakage, owned cleanup |
 | TDD and delivery | gpt-5.6-luna / max | Deterministic reducer/fake clock, fault barriers, real SQLite and DB-service tests, public-PR isolation, bootstrap independence, evidence gates |
 
+The Astra entries above are historical authorship and historical review scope;
+they do not assign current work or current review ownership. New work follows
+the routing in [EXECUTION](../EXECUTION.md).
+
 ## Resolutions by the integrator
 
 - Choose Go based on integration/operational complexity; acknowledge Rust's stronger compile-time concurrency guarantees and require race/fuzz/fault tests. No performance benchmark is claimed.
@@ -20,8 +24,8 @@ Reviewed 2026-09-07. This summarizes independent research and code/document insp
 - Existing Docker Desktop or Lima engines remain selectable. Runtime ownership/migration is separate from runner management; no current infrastructure changes are necessary to plan this product.
 - Optional VM isolation and multiple hosts remain a later research gate, not a feature implied by the first-release CLI.
 
-The resulting backlog contains 21 bounded goals with primary model, risk, dependencies, TDD evidence and acceptance criteria. Astra reviews security/protocol/lifecycle boundaries, including Luna changes that touch them.
+The resulting backlog contains 21 bounded goals with primary model, risk, dependencies, TDD evidence and acceptance criteria. Historical Astra reviews covered security/protocol/lifecycle boundaries, including Luna changes that touched them; current review ownership follows [EXECUTION](../EXECUTION.md).
 
 Final read-only review corrections: runner freshness policy now has provider and soak acceptance coverage; quarantined workers retain reservations; Docker daemon privilege is described accurately; browser redirects do not incorrectly require Origin; external IDs are recorded after creation/discovery, following durable intent; bootstrap invariants distinguish management credentials from approved per-worker JIT transport; executable G04 contracts depend on the G03 Go bootstrap.
 
-TDD publication review: G03 validates tooling without ceremonial application tests; first behavior contracts begin in G04. G08 enrollment and G15 launchd lifecycle are Astra-owned; Luna G12 is limited to pure versioned proposals and Astra G05/G13 owns atomic live admission. Every backlog entry carries initial status and test profiles.
+TDD publication review: G03 validates tooling without ceremonial application tests; first behavior contracts begin in G04. Historical planning notes assigned G08 enrollment and G15 launchd lifecycle to Astra and placed atomic live admission for G05/G13 with Astra; those assignments are historical only. Current implementation and review routing follows [EXECUTION](../EXECUTION.md): new work defaults to `gpt-luna-max`, with only an explicit `grok-high` override, while Luna G12 remains limited to pure versioned proposals. Every backlog entry carries initial status and test profiles.
