@@ -58,6 +58,15 @@ keep key bytes in memory; only the regression fixture uses a temporary file,
 while the production package performs no filesystem, environment, Keychain,
 process, GitHub, runner, Docker or Lima operation.
 
+The expiry-aware commit regression was added in red commit `9705b76`:
+`GOTOOLCHAIN=go1.26.8 go test -count=1 -run '^TestValidationCommitUsesCredentialExpiryDeadlineAndAbortsAtBoundary$' ./...`
+failed because the callback received the original context and returned the
+normalized `ErrCommit` instead of observing credential expiry. Fix commit
+`bce9307` passes a callback context bounded by the earlier parent deadline and
+non-zero credential `ExpiresAt`, preserves an `ErrExpired` terminal result for
+a late nil callback, and passed the module normal, race and vet checks plus
+`bash scripts/check-offline-experiments.sh` (three offline modules).
+
 ## Ownership, ACL limits and live gap
 
 The caller owns the manually supplied key bytes and is responsible for keeping
@@ -73,10 +82,13 @@ App/installation/repository verification, and does not satisfy the broader G02
 Manifest, multi-organization or launchd evidence gate. A reviewed maintainer
 dispatch is still required for any real Mac or self-hosted runner test.
 
-The metadata commit callback receives a context and must be context-aware and
-transactional; this boundary checks cancellation and expiry before and after
-the callback but cannot roll back an external side effect. On commit failure or
-cancellation, the caller should discard any partial local state, revalidate the
-credential and identities, and retry only through an independently reviewed
-transactional adapter. No automatic workflow replay or live rollback is
-performed here.
+The metadata commit callback receives a context bounded by the earlier caller
+deadline and non-zero credential `ExpiresAt`; it must observe cancellation or
+expiry before applying state and perform the write transactionally. This
+boundary checks cancellation and expiry before and after the callback and
+returns `ErrExpired` with no binding when a callback returns after expiry, but
+it cannot roll back an external side effect. On commit failure, cancellation
+or expiry, the caller should discard any partial or unknown local state,
+revalidate the credential and identities, and retry only through an
+independently reviewed transactional adapter. No automatic workflow replay or
+live rollback is performed here.
