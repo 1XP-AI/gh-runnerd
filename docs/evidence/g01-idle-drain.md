@@ -2324,3 +2324,88 @@ Rollback is recoverable with `git revert --no-edit
 documentation-only commit and can be reverted independently. No live
 App/runner/canary evidence is claimed; the unresolved live G01 gate,
 independent exact-head Codex review, CI and merge remain coordinator-owned.
+
+### Exact-head follow-up: expected-204 evidence DELETE close failure
+
+Date: 2026-09-13. This correction started from exact head
+`c2ebdafecbf5f8e01040a89279e7bc3766ba1a7e` and addresses the fresh Codex P1
+[successful expected-204 ACK/session-close response body close failure finding](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3998020455).
+No Project, Issue, goal, dependency, status or branch field was changed; no
+review request, live App/runner/canary operation, workflow replay, Docker/Lima,
+Keychain, launchd, credential or cleanup operation was performed.
+
+#### Red-first reproduction
+
+The terminal session-close regression was added before the source correction
+and run against the unchanged starting implementation. This focused command
+exited 1 as expected:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^TestGuardBaselineResponseRejectsTerminalCloseWhenBodyCloseFails$' -count=1 -v
+```
+
+The test reported a non-nil 204 response with `err <nil>` instead of
+`ErrRemote`; the capture consequently remained observed. The regression only
+retains bounded status/error/observation state and the synthetic
+`io.ErrClosedPipe`; it records no response body, Authorization value, token,
+URL or private log.
+
+#### Minimal correction and green evidence
+
+`guardBaselineResponse` now validates `response.Body.Close()` for successful
+204 evidence DELETE stages (`ack`, `terminal-session-close` and
+`terminal-set-delete`) before allowing the response to remain usable. A close
+failure marks the capture invalid and returns `ErrRemote`, so `wire.observed`
+cannot publish evidence; clean 204 bodies remain accepted. The 202 poll path,
+unmarked forwarding and existing live-operation restrictions remain
+unchanged. The boundary matrix covers ACK, terminal session close and terminal
+scale-set deletion, alongside the existing runner close-error regression.
+
+The focused normal command exited 0 in 0.478s:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^(TestGuardBaselineResponseRejectsRunnerFactsWhenBodyCloseFails|TestGuardBaselineResponseRejectsTerminalCloseWhenBodyCloseFails|TestGuardBaselineResponseRejectsEvidenceDeleteWhenBodyCloseFails|TestBaselineMarkedBoundariesRejectReplacementContextBeforeInner|TestBaselineWireMarkerIsRemovedBeforeInner|TestPinnedSDKDrainRejectsPollCloseErrorBeforeEffects|TestPinnedSDKDrainRejectsNonEOFPollReadError|TestPinnedSDKDrainRejectsAcquireTargetMutationBeforeFixture|TestPinnedSDKDrainBindsSessionCloseToPhysicalDelete|TestDriverDrainThroughPinnedSDKAndPollHook)$' -count=1 -v -timeout=300s
+```
+
+The corresponding focused race command exited 0 in 1.794s with no race
+diagnostics:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -run '^(TestGuardBaselineResponseRejectsRunnerFactsWhenBodyCloseFails|TestGuardBaselineResponseRejectsTerminalCloseWhenBodyCloseFails|TestGuardBaselineResponseRejectsEvidenceDeleteWhenBodyCloseFails|TestBaselineMarkedBoundariesRejectReplacementContextBeforeInner|TestBaselineWireMarkerIsRemovedBeforeInner|TestPinnedSDKDrainRejectsPollCloseErrorBeforeEffects|TestPinnedSDKDrainRejectsNonEOFPollReadError|TestPinnedSDKDrainRejectsAcquireTargetMutationBeforeFixture|TestPinnedSDKDrainBindsSessionCloseToPhysicalDelete|TestDriverDrainThroughPinnedSDKAndPollHook)$' -count=1 -timeout=300s
+```
+
+The full `livecanary` package normal run exited 0 in 26.951s and the full race
+run exited 0 in 38.174s, with no race diagnostics:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -count=1 -timeout=300s
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -count=1 -timeout=360s
+```
+
+The offline/static checks all exited 0: the two-module offline gate printed
+`offline experiment checks passed: 2 module(s)`, `go vet ./livecanary`,
+`gofmt.sh check`, `git diff --check`, and the diff secret/private-path scan
+printed `diff secret/private-path scan passed`.
+
+```text
+GOTOOLCHAIN=go1.26.8 bash scripts/check-offline-experiments.sh
+(cd experiments/g01-scaleset && GOWORK=off GOTOOLCHAIN=go1.26.8 go vet ./livecanary)
+GOTOOLCHAIN=go1.26.8 bash scripts/gofmt.sh check
+git diff --check
+set -e
+if git diff --text 6b025bc1d07f67b2acb4c6ad9ad14429f195490a^ 6b025bc1d07f67b2acb4c6ad9ad14429f195490a -- experiments/g01-scaleset/livecanary/baseline_wire.go experiments/g01-scaleset/livecanary/baseline_wire_p1_test.go | rg -n -i '(/Users/|/home/|-----BEGIN (RSA|OPENSSH|EC|PRIVATE)|github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9_]{20,}|Authorization[^\n]{0,20}Bearer[[:space:]]+[A-Za-z0-9._-]{20,})'; then exit 1; fi
+printf '%s\n' 'diff secret/private-path scan passed'
+```
+
+The exact implementation source head is
+`6b025bc1d07f67b2acb4c6ad9ad14429f195490a` (`fix(g01): reject evidence delete
+close failures`); this evidence append is a separate documentation-only
+commit. Rollback is recoverable with `git revert --no-edit
+6b025bc1d07f67b2acb4c6ad9ad14429f195490a`; revert this documentation append
+separately if needed. No live App/runner/canary evidence is claimed; the
+unresolved live G01 gate, independent exact-head Codex review, CI and merge
+remain coordinator-owned.
