@@ -140,12 +140,12 @@ wording/link correction does not invalidate an unchanged offline boundary.
 
 | Boundary | Reuse unchanged evidence when | Exact focused rerun | Class/result to record |
 |---|---|---|---|
-| ACK, callback loss and acquisition order | SDK commit, listener source, adapter call order and root protocol fixtures are unchanged. | See the exact ACK/callback selector in the command block below. | Fixture: record ACK-before-acquisition and reservation/quarantine behavior; do not add server or exactly-once claims. |
+| ACK, callback loss and acquisition order | SDK commit, listener source, adapter call order and root protocol fixtures are unchanged. | See the exact ACK/callback selector in the command block below, including `TestNoMessageDoesNotCountAsCompletedBarrier`. | Fixture: record ACK-before-acquisition and reservation/quarantine behavior; do not add server or exactly-once claims. |
 | Baseline listener/admission | listener, strict source reader, journal/lease, caps and selectors are unchanged. | See the exact baseline and admission selectors in the command block below, including `TestAuditPR25DistinctStateDirectoriesMustShareCap`. | Fixture: record actual test result and pinned SDK; no live/worker result. |
 | JIT causality and transport | runner source/parser, JIT transport, causal fixture and response-loss controls are unchanged. | Root-package and livecanary selectors are in the command blocks below; worker transport: `cd experiments/g01-scaleset && GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s ./liveworker -run '^TestOneWorkerNeverRecreatedAndOnlyJITAddedToEnvironment$'`. | Fixture/source: record one-request controls and quarantine; never print or retain JIT. |
-| Reconciliation/identity/quarantine | statistics readers, generation fences, ownership checks and journal schema are unchanged. | Retain the prior reconciliation selector and add the exact focused quarantine selector in the command block below, including `TestDemandStatisticsAllowControlledProbeButNeverCleanup`. | Fixture: record normalized facts and retained uncertainty; no live equality/absence claim. |
-| Secret and error handling | SDK error sentinels, HTTP body/debug redaction and shared response-budget controls are unchanged. | See the exact root and livecanary selectors in the secret/error command block below. | Fixture: record normalized sentinel/error and body-budget behavior; no secret-bearing output or live result is claimed. |
-| Tagged controller/JIT input boundary | `g01_live` source, input reader and refusal tests are unchanged. | `cd experiments/g01-scaleset && GOTOOLCHAIN=go1.26.8 go test -race -tags=g01_live -count=1 -timeout=180s ./cmd/g01-live` | Fixture: record no-secret/no-echo/refusal result; no credential or live phase. |
+| Reconciliation, inventory/identity/quarantine | statistics readers, paged inventory normalization, generation fences, ownership checks and journal/authority schema are unchanged. | Retain the prior reconciliation selector and add the exact focused inventory/quarantine and journal/authority selectors in the command block below, including the four `TestInventory*` cases, `TestDemandStatisticsAllowControlledProbeButNeverCleanup`, and the named journal/authority contracts. | Fixture: record normalized facts and retained uncertainty; no live equality/absence claim. |
+| Secret and error handling | SDK error sentinels, HTTP body/debug redaction and shared response-budget controls are unchanged. | See the exact root and livecanary selectors in the secret/error command block below, including the decoded-body truncation and gzip-budget tests. | Fixture: record normalized sentinel/error and body-budget behavior; no secret-bearing output or live result is claimed. |
+| Tagged controller/JIT input and credential transport boundary | `g01_live` source, input reader, credential attestation and transport refusal tests are unchanged. | Run the tagged command below plus the livecanary credential/transport selector below, including `TestCredentialAttestationMismatchAndExpiredTokenRejected` and `TestTransportRejectsPlaintextOffHostAndProxyBeforeNetwork`. | Fixture: record no-secret/no-echo/refusal result; no credential or live phase. |
 | Idle drain and withdrawal | Only reuse the authoritative current PR #72 head `f5560ba950f77343e57034cc1cf85dc67f5ac922` and its unchanged fixture/source. | On that authoritative current PR #72 checkout: see the exact command in the block below; repeat with `go test -race` for the same selector. | Fixture/source: record physical-write markers as client facts and inconclusive server receipt; never reuse as live assignment/drain evidence. |
 | Paired terminal/worker support | paired journal/lease, worker profile, image/runtime pins and terminal selectors are unchanged. | See the exact tagged partition commands below; all retain `go1.26.8`, `-race`, `-count=1` and `-timeout=120s`, and the terminal groups remain exhaustive/disjoint. | Fixture: record receipt/identity checks only; no live worker or terminal success claim. |
 | Actual live canary | There is no live evidence to reuse today. A future result is reusable only for the same immutable workflow/run attempt, source/head, resources, authority scope and approved observation boundary. | Rebuild/plan the exact reviewed tagged binary, then run only the explicitly authorized phase from [the driver](g01-live-driver.md); never substitute fixture commands or broaden phases. | Live: record sanitized server observations, authorization and unresolved outcomes; any changed target or boundary requires a fresh approval/rerun. |
@@ -156,7 +156,7 @@ prescriptions reports a completed test or live server success/receipt.
 
 ```sh
 cd experiments/g01-scaleset && GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s -run '^(TestSDKACKBoundaries|TestSDKDemandAboveFiftyAndPartialAcquisition|TestSDKRepeatedStatisticsAnd202ReuseLastObservation|TestRecoveryAfterACKCallbackCrash|TestRecoveryMissingLifecycleCallback|TestRecoveryErrorsHoldReservationsAndRedact|TestSDKAcquisitionResponseLossAfterACK|TestSDKCapacityWithdrawalDoesNotFenceInFlightAcquisition|TestSDKHTTPFailuresAndSessionRefresh)$' .
-cd experiments/g01-scaleset && GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s ./livecanary -run '^(TestSupportedListenerBarriersAndReservation|TestDriverBarriersThroughPinnedSDK|TestForeignIdentityAndUnreviewedWorkNeverACKOrDelete|TestAuditPR25MultiJobAcquisitionMustRefuseBeforeACK)$'
+cd experiments/g01-scaleset && GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s ./livecanary -run '^(TestSupportedListenerBarriersAndReservation|TestDriverBarriersThroughPinnedSDK|TestForeignIdentityAndUnreviewedWorkNeverACKOrDelete|TestAuditPR25MultiJobAcquisitionMustRefuseBeforeACK|TestNoMessageDoesNotCountAsCompletedBarrier)$'
 ```
 
 ```sh
@@ -174,13 +174,17 @@ cd experiments/g01-scaleset && GOTOOLCHAIN=go1.26.8 go test -race -count=1 -time
 ```
 
 ```sh
-cd experiments/g01-scaleset && GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s ./livecanary -run '^(TestObserve|TestStatistics|TestDemandStatisticsAllowControlledProbeButNeverCleanup|TestInvalidOwnedProof|TestJournal|TestAuthority)'
+cd experiments/g01-scaleset && GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s ./livecanary -run '^(TestObserve|TestStatistics|TestDemandStatisticsAllowControlledProbeButNeverCleanup|TestInvalidOwnedProof|TestJournal|TestAuthority|TestInventoryStrictPages|TestInventoryMalformedStopsLegacyEffects|TestInventoryTransportRefusalIsBoundedAndSanitized|TestInventoryImpossibleTotalStopsBeforeNextPage|TestStrictJSONRejectsDecoderEquivalentDuplicateFields|TestStrictJSONRejectsDuplicateAuthorityFields|TestFailedDirectorySyncMustBeRetried|TestFileJournalRejectsUnrecordedAuthorityBeforeRawDriverEffect|TestRenewedRecoveryApprovalRetainsOwnedState)'
 cd experiments/g01-scaleset && GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s ./livecanary -run '^(TestDemandStatisticsAllowControlledProbeButNeverCleanup|TestUnsafeStatisticsStopNewEffectsBeforeControlledMessage|TestEmptyAvailableWithWorkStatisticsStaysQuarantined|TestOlderPendingIntentSurvivesSuccessfulZeroInspection|TestUnownedDiscoveryEvidenceCannotAuthorizeCreationAfterAbsence|TestAuditPR25ObservedJobsMustBlockCleanup|TestUnexpectedWorkMessageQuarantinesBeforeSafeClose|TestObservedRunnerSurvivesLaterAbsenceAndFirstCleanup|TestObservationResultFailureSurvivesFileReopenAndInspection)$'
 ```
 
 ```sh
 cd experiments/g01-scaleset && GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s -run '^TestSDKBusyRemovalSentinelAndRawErrorExposure$' .
-cd experiments/g01-scaleset && GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s ./livecanary -run '^(TestHTTPErrorsDoNotReturnSecretResponseBody|TestSDKHTTPDebugDoesNotLogCredentials|TestSharedTransportRejectsOversizeSuccessAndErrorBodies)$'
+cd experiments/g01-scaleset && GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s ./livecanary -run '^(TestHTTPErrorsDoNotReturnSecretResponseBody|TestSDKHTTPDebugDoesNotLogCredentials|TestSharedTransportRejectsOversizeSuccessAndErrorBodies|TestResponseReaderConsumesOnlyBudgetPlusOneAndRejectsTruncation|TestResponseBudgetAppliesAfterGzipDecompression)$'
+```
+
+```sh
+cd experiments/g01-scaleset && GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s ./livecanary -run '^(TestCredentialAttestationMismatchAndExpiredTokenRejected|TestTransportRejectsPlaintextOffHostAndProxyBeforeNetwork)$'
 ```
 
 ```sh
@@ -216,6 +220,8 @@ green test is created for documentation changes. On this candidate, the local
 markdown link/anchor checker reported all local targets present (external URLs
 were syntax-skipped), `jq empty docs/backlog.json` exited 0, `git diff --check`
 and `git diff --cached --check` exited 0, and the staged added-line
-secret/private-path scan reported no matches. The staged diff was inspected as
-three documentation files (228 insertions, 2 deletions); no issue, Project, PR
-or Goal state is changed.
+secret/private-path scan reported no matches. Four offline `go test -list`
+commands listed every newly named `livecanary` test in its owning selector;
+this was list-only source matching and did not execute test bodies. The staged
+diff was inspected as three documentation files (235 insertions, 3 deletions);
+no issue, Project, PR or Goal state is changed.
