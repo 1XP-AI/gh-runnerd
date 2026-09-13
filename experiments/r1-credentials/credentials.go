@@ -67,13 +67,23 @@ type manualCredentialSource interface {
 	credentialSourceMarker()
 }
 
-// ManualSource is an in-memory source intended for explicit operator input and
-// fixture tests. It never reads or writes a path, environment variable or
-// Keychain item.
+// ManualSource is the exported in-memory source shape used by the manual
+// source constructor. It intentionally has no capability marker: embedding
+// this shape in another package must not authorize the embedded type as a
+// package-created manual source. Use NewManualSource or
+// NewManualSourceWithExpiry to obtain a CredentialSource accepted by Validate.
+// It never reads or writes a path, environment variable or Keychain item.
 type ManualSource struct {
 	appID     int64
 	expiresAt time.Time
 	pem       []byte
+}
+
+// manualSource is the package-created capability returned by the constructors.
+// Keeping the marker on this unexported concrete type prevents an external
+// package from promoting it through embedding and replacing its behavior.
+type manualSource struct {
+	ManualSource
 }
 
 // NewManualSource copies pemBytes into memory and returns an explicitly manual
@@ -85,10 +95,10 @@ func NewManualSource(appID int64, pemBytes []byte) CredentialSource {
 
 // NewManualSourceWithExpiry is NewManualSource with an explicit source expiry.
 func NewManualSourceWithExpiry(appID int64, pemBytes []byte, expiresAt time.Time) CredentialSource {
-	return ManualSource{appID: appID, expiresAt: expiresAt, pem: append([]byte(nil), pemBytes...)}
+	return manualSource{ManualSource: ManualSource{appID: appID, expiresAt: expiresAt, pem: append([]byte(nil), pemBytes...)}}
 }
 
-func (ManualSource) credentialSourceMarker() {}
+func (manualSource) credentialSourceMarker() {}
 
 func (s ManualSource) Kind() SourceKind     { return SourceManual }
 func (s ManualSource) AppID() int64         { return s.appID }
