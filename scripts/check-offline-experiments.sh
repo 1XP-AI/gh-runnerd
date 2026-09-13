@@ -14,11 +14,12 @@ paired_prep_regex='^TestPairedBrokerPrepareReviewedG01LiveBinary$'
 paired_prep_or_cadence_regex='^TestPairedBroker(PrepareReviewedG01LiveBinary|RealCadenceChildExceedsThirtySeconds)$'
 paired_broker_regex='^TestPaired'
 
-# These are the two established offline gate modules. Keep this list explicit so
+# These are the established offline gate modules. Keep this list explicit so
 # a new or unreviewed experiment cannot enter public CI by directory naming.
 offline_modules=(
 	experiments/g01-scaleset
 	experiments/g02-auth
+	experiments/r1-credentials
 )
 
 # Check the complete inventory before running any suite. A deleted/moved module
@@ -44,7 +45,7 @@ for module_dir in "${offline_modules[@]}"; do
 			# Keep the remainder unfiltered so examples and fuzz seeds execute;
 			# the exact heavy name is the only member of the first partition.
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -skip "${default_heavy_test_regex}" ./...
-		else
+		elif [[ "${module_dir}" == "experiments/g02-auth" ]]; then
 			# Bounded fixture clone/build is a separate 45-second process so the
 			# cadence partition keeps the production seven-times-five-second wait
 			# without hiding preparation in an unbounded helper. Then isolate the
@@ -66,6 +67,11 @@ for module_dir in "${offline_modules[@]}"; do
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -run "${paired_broker_regex}" -skip "${paired_prep_or_cadence_regex}" ./...
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -skip "${paired_broker_regex}" ./...
 			unset G01_PAIR_BRIDGE_PREP_DIR
+		else
+			# R1 credentials is a standalone fixture-backed module. Keep its
+			# package discovery and race run explicit so nested-module coverage is
+			# part of the same public offline gate without enabling live effects.
+			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s ./...
 		fi
 		GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" vet ./...
 		if [[ "${module_dir}" == "experiments/g01-scaleset" ]]; then
