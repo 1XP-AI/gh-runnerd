@@ -204,54 +204,62 @@ prescriptions for future reruns, not completed results. None of these
 prescriptions reports a completed test or live server success/receipt.
 
 Every runnable test prescription below uses the reusable wrapper in this first
-block. It derives a list-only command from the same package, build flags and
-selector, then compares the observed count and SHA-256 of the sorted executed
-test-name set before it invokes the original command. Go's `-list` mode reports
-the pre-`-skip` candidates, so the wrapper removes either `-skip REGEXP` or
-`-skip=REGEXP` from the first list probe, asks Go's own RE2 regexp engine for
-the names matched by that skip expression, and subtracts those names before
-count and digest validation; slash-delimited subtest skip expressions are
-rejected because top-level `-list` output cannot prove their subtest set. The
-guarded command shape accepts optional leading `NAME=VALUE` assignments
+block. It derives the candidate top-level test names from the exact active
+`*_test.go` source files selected by a non-executing `go list -json -test`
+metadata query, applies a fail-closed Go-RE2-compatible selector subset, and
+compares the resulting count and SHA-256 before it invokes the original
+command. It deliberately does not invoke `go test -list`: that command starts
+the test binary and can run package-level variable initializers, `init` paths,
+imported initialization paths and `TestMain` before printing names. The source
+derivation therefore validates selectors without executing package code;
+slash-delimited `-run`/`-skip` subtest expressions and unsupported regexp
+syntax are rejected because source declarations cannot prove their subtest
+set or semantics. The guarded command shape accepts optional leading
+`NAME=VALUE` assignments
 followed directly by `go test`; a standard `env NAME=VALUE ... go test`
 wrapper is discovered by the static audit but explicitly rejected before any
 Go child starts. Go's equivalent double-dash selector spellings
 `--run`/`--run=REGEXP` and `--skip`/`--skip=REGEXP` are likewise rejected
-before list validation, so the audit and wrapper never disagree about the
-effective selector. Each prescription also carries an expected package identity
+before source validation, so the audit and wrapper never disagree about the
+effective selector. Go's `-toolexec FILE`/`-toolexec=FILE`, `-overlay FILE`/
+`-overlay=FILE` and `-modfile FILE`/`-modfile=FILE` build/module overrides are
+also rejected before the first Go child. Each prescription also carries an
+expected package identity
 (`module-directory:package`) and build configuration (tag set, race mode and
-`GOTOOLCHAIN`). Before either list probe, the wrapper resolves the active
-package and test source files with `go list -json -test`, requires the
+`GOTOOLCHAIN`). Before source-derived selector validation, the wrapper resolves the active
+package and test source files with the non-executing metadata query, requires the
 reviewed immutable `experiments/g01-scaleset` source tree, rejects tracked,
 untracked or ignored paths under that module, and fails closed if any active
-file declares `func init`; the separate `TestMain` source audit below covers
-the one package-level test initializer. This is the explicit
+file declares `func init`; the source derivation itself does not execute that
+initializer or any imported package initializer. The separate `TestMain` source
+audit below covers the one package-level test initializer. This is the explicit
 package-initialization guard: a source-tree or build-tag change, including an
-ignored Go or test file, requires a new review before list validation can
-proceed. The wrapper queries the effective
+ignored Go or test file, requires a new review before selector validation can
+proceed, while effectful package-level variables and applicable imported init
+paths cannot run during the derivation. The wrapper queries the effective
 `go env GOFLAGS`, including GOENV/configuration, rejects non-empty output, and
-then pins `GOFLAGS=` for both list probes and the original command. After
+then pins `GOFLAGS=` for metadata and the original command. After
 parsing command-prefix assignments, it creates the Go-child environment with
-`GOWORK=off` and passes that exact environment to every Go metadata, list and
-test subprocess; inherited or command-supplied workspace paths are therefore
+`GOWORK=off` and passes that exact environment to every Go metadata and test
+subprocess; inherited or command-supplied workspace paths are therefore
 ignored before package metadata can be selected. The reviewed behavior is
 force-off, not validation or reuse of a caller-provided `go.work` file.
 Race-mode prescriptions reject inherited or command-supplied `GORACE` before
-either list probe or test execution. Exactly one `-count=1` and one positive bounded
+either source derivation or test execution. Exactly one `-count=1` and one positive bounded
 `-timeout` (at most 300 seconds) are required; `-args` and test-binary
 selector/count/timeout overrides, Go `-modfile FILE`/`-modfile=FILE`
 alternate-module-file overrides, Go `-overlay FILE`/`-overlay=FILE` build
-overrides, `env` command wrappers, double-dash `--run`/`--skip` selectors,
-and `-exec` execution wrappers are rejected.
+overrides, `-toolexec` execution hooks, `env` command wrappers, double-dash
+`--run`/`--skip` selectors, and `-exec` execution wrappers are rejected.
 The execution command adds a wrapper-controlled `-json` stream and fails closed
 on malformed output, non-empty stderr or any Go test `Action` of `skip`,
 including skipped subtests; it also requires a top-level `run` and `pass` event
-for every expected test name. A command failure, unexpected list output, zero
-expected names, invalid Go/RE2 syntax, count/timeout mismatch, skipped test,
+for every expected test name. A command failure, unexpected source metadata, zero
+expected names, invalid Go/RE2-compatible syntax, count/timeout mismatch, skipped test,
 missing run/pass event, or set mismatch stops before an unvalidated result is
 recorded; the set digest and metadata are recorded beside each prescription so
 renamed, removed, build-tagged, newly unskipped or cross-package tests fail
-closed. A list-only helper therefore cannot produce a green rerun record.
+closed. A non-executing source helper therefore cannot produce a green rerun record.
 
 ```sh
 set -euo pipefail
@@ -260,8 +268,9 @@ set -euo pipefail
 # Invocation metadata is: package ID module-dir:package, then build ID
 # tags+race-mode+toolchain (for example,
 # experiments/g01-scaleset:./livecanary default+race+go1.26.8).
-# The wrapper checks package initialization/build state, lists with the same
-# build flags, then runs the original command with its own JSON stream.
+# The wrapper checks package initialization/build state, derives test names from
+# the same source/build selection without starting a test binary, then runs the
+# original command with its own JSON stream.
 go_test_checked() {
   python3 - "$@" <<'PY'
 import hashlib
@@ -338,11 +347,20 @@ if command and command[0] == "env":
 if len(command) < 3 or command[:2] != ["go", "test"]:
     raise SystemExit(f"{label}: expected a go test command")
 
+# Reject Go tool-execution hooks before any Go child is started. Both the
+# separated `-toolexec FILE` and equals-form `-toolexec=FILE` spellings can
+# replace compiler/linker/tool subprocesses and therefore cannot be part of a
+# reviewed selector rerun.
+test_args = command[2:]
+if any(value == "-toolexec" or value.startswith("-toolexec=") for value in test_args):
+    raise SystemExit(
+        f"{label}: Go -toolexec execution hooks are not allowed in a guarded rerun"
+    )
+
 # Reject Go overlay build overrides before any Go child is started. Both the
 # separated `-overlay FILE` and equals-form `-overlay=FILE` spellings can
 # redirect the package's source/build inputs and therefore require a separate
 # reviewed source-tree decision.
-test_args = command[2:]
 if any(value == "-overlay" or value.startswith("-overlay=") for value in test_args):
     raise SystemExit(
         f"{label}: Go -overlay build overrides are not allowed in a guarded rerun"
@@ -358,7 +376,7 @@ if any(value == "-modfile" or value.startswith("-modfile=") for value in test_ar
     )
 
 # Go accepts one or two leading dashes for flags. Reject the double-dash
-# selector spellings before list validation so the wrapper cannot validate one
+# selector spellings before source validation so the wrapper cannot validate one
 # selector while the actual test command uses a later equivalent selector.
 if any(
     value == "--run"
@@ -560,13 +578,19 @@ def package_initialization_guard():
     except ValueError:
         raise SystemExit(f"{label}: package source escaped the reviewed module")
     source_files = []
+    test_source_files = []
     for key in ("GoFiles", "CgoFiles", "TestGoFiles", "XTestGoFiles"):
         values = package.get(key, [])
         if not isinstance(values, list):
             raise SystemExit(f"{label}: package file metadata was malformed")
         source_files.extend(values)
+        if key in {"TestGoFiles", "XTestGoFiles"}:
+            test_source_files.extend(values)
     if not source_files:
         raise SystemExit(f"{label}: package-initialization source set was empty")
+    if not test_source_files:
+        raise SystemExit(f"{label}: package test source set was empty")
+    resolved_test_sources = []
     for name in source_files:
         source_path = (package_dir / name).resolve()
         try:
@@ -580,6 +604,9 @@ def package_initialization_guard():
             raise SystemExit(
                 f"{label}: active package init requires a new reviewed guard"
             )
+        if name in test_source_files:
+            resolved_test_sources.append(source_path)
+    return resolved_test_sources
 
 skip_patterns = []
 list_base_args = []
@@ -603,7 +630,7 @@ if len(skip_patterns) > 1:
 if skip_patterns and "/" in skip_patterns[0]:
     raise SystemExit(
         f"{label}: slash-delimited -skip selectors are rejected because "
-        "top-level -list cannot validate subtest names"
+        "source declarations cannot validate subtest names"
     )
 
 count_values = flag_values(test_args, "-count")
@@ -693,23 +720,7 @@ if len(run_indices) > 1:
 if flag_values(test_args, "-list"):
     raise SystemExit(f"{label}: original command must not contain -list")
 
-package_initialization_guard()
-
-def list_args_for(pattern):
-    args = list_base_args[:]
-    if run_indices:
-        run_index = run_indices[0]
-        if args[run_index] == "-run":
-            if run_index + 1 >= len(args):
-                raise SystemExit(f"{label}: -run requires an expression")
-            args[run_index] = "-list"
-            args[run_index + 1] = pattern
-        else:
-            args[run_index] = "-list=" + pattern
-    else:
-        package_index = package_indices[0]
-        args[package_index:package_index] = ["-list", pattern]
-    return args
+test_source_paths = package_initialization_guard()
 
 original_run_pattern = "."
 if run_indices:
@@ -719,46 +730,131 @@ if run_indices:
         if list_base_args[run_index] == "-run"
         else list_base_args[run_index][len("-run="):]
     )
-list_args = list_args_for(original_run_pattern)
 
-list_result = subprocess.run(
-    ["go", "test", *list_args],
-    cwd=repo_root,
-    env=go_env,
-    text=True,
-    capture_output=True,
-    check=False,
-)
-if list_result.returncode != 0:
-    raise SystemExit(f"{label}: list validation exited {list_result.returncode}")
-test_name = re.compile(r"Test[A-Za-z0-9_]+$")
-go_status = re.compile(r"ok\s+\S+\s+[0-9.]+s(?:\s+\(cached\))?$")
+def skip_source_ignored(source, position):
+    while position < len(source):
+        if source[position].isspace():
+            position += 1
+            continue
+        if source.startswith("//", position):
+            newline = source.find("\n", position + 2)
+            return len(source) if newline < 0 else newline + 1
+        if source.startswith("/*", position):
+            close = source.find("*/", position + 2)
+            if close < 0:
+                raise SystemExit(f"{label}: unterminated Go block comment")
+            position = close + 2
+            continue
+        break
+    return position
 
-def listed_names(result, phase):
-    if result.stderr.strip():
-        raise SystemExit(f"{label}: {phase} emitted stderr")
-    output = [line for line in result.stdout.splitlines() if line]
-    if any(not test_name.fullmatch(line) and not go_status.fullmatch(line) for line in output):
-        raise SystemExit(f"{label}: {phase} emitted unexpected output")
-    names = [line for line in output if test_name.fullmatch(line)]
-    if len(names) != len(set(names)):
-        raise SystemExit(f"{label}: {phase} emitted duplicate test names")
+
+def skip_source_literal(source, position):
+    quote = source[position]
+    position += 1
+    while position < len(source):
+        if quote != "`" and source[position] == "\\":
+            position += 2
+            continue
+        if source[position] == quote:
+            return position + 1
+        position += 1
+    raise SystemExit(f"{label}: unterminated Go literal")
+
+
+def source_test_names(source_path):
+    source = source_path.read_text(encoding="utf-8")
+    names = []
+    position = 0
+    brace_depth = 0
+    while position < len(source):
+        ignored = skip_source_ignored(source, position)
+        if ignored != position:
+            position = ignored
+            continue
+        if source[position] in ('"', "'", "`"):
+            position = skip_source_literal(source, position)
+            continue
+        if source[position] == "{":
+            brace_depth += 1
+            position += 1
+            continue
+        if source[position] == "}":
+            if brace_depth == 0:
+                raise SystemExit(f"{label}: unbalanced Go source braces")
+            brace_depth -= 1
+            position += 1
+            continue
+        if brace_depth != 0 or not source.startswith("func", position):
+            position += 1
+            continue
+        before = source[position - 1] if position else " "
+        after = source[position + 4] if position + 4 < len(source) else " "
+        if (before.isalnum() or before == "_") or (after.isalnum() or after == "_"):
+            position += 1
+            continue
+        cursor = skip_source_ignored(source, position + 4)
+        if cursor >= len(source) or source[cursor] == "(":
+            position += 4
+            continue
+        name_start = cursor
+        if not (source[cursor].isalpha() or source[cursor] == "_"):
+            position += 4
+            continue
+        cursor += 1
+        while cursor < len(source) and (source[cursor].isalnum() or source[cursor] == "_"):
+            cursor += 1
+        name = source[name_start:cursor]
+        cursor = skip_source_ignored(source, cursor)
+        if cursor < len(source) and source[cursor] == "(" and name != "TestMain":
+            if name.startswith("Test") and len(name) > len("Test") and name[4].isupper():
+                names.append(name)
+        position = cursor
+    if brace_depth:
+        raise SystemExit(f"{label}: unbalanced Go source braces")
     return names
 
-listed = listed_names(list_result, "list validation")
+
+def go_compatible_regexp(pattern, phase):
+    # Python's engine is used only for this non-executing derivation. Translate
+    # the POSIX classes used by the reviewed selectors and reject constructs
+    # that Python might accept but Go RE2 does not.
+    for source_class, python_class in {
+        "[[:alnum:]]": "[A-Za-z0-9]",
+        "[[:alpha:]]": "[A-Za-z]",
+        "[[:digit:]]": "[0-9]",
+        "[[:lower:]]": "[a-z]",
+        "[[:upper:]]": "[A-Z]",
+        "[[:space:]]": r"[\t\n\r\f ]",
+        "[[:word:]]": r"[A-Za-z0-9_]",
+    }.items():
+        pattern = pattern.replace(source_class, python_class)
+    if "(?" in pattern or re.search(r"\\[1-9]", pattern):
+        raise SystemExit(f"{label}: {phase} uses regexp syntax outside the reviewed Go subset")
+    try:
+        return re.compile(pattern)
+    except re.error as error:
+        raise SystemExit(f"{label}: {phase} has invalid Go-compatible regexp: {error}")
+
+
+all_test_names = []
+for source_path in test_source_paths:
+    all_test_names.extend(source_test_names(source_path))
+if not all_test_names or len(all_test_names) != len(set(all_test_names)):
+    raise SystemExit(f"{label}: source-derived test names were empty or duplicated")
+run_regexp = go_compatible_regexp(original_run_pattern, "-run")
+if "/" in original_run_pattern:
+    raise SystemExit(
+        f"{label}: slash-delimited -run selectors are rejected because "
+        "source declarations cannot validate subtest names"
+    )
+listed = sorted(name for name in all_test_names if run_regexp.search(name))
 skipped = set()
 if skip_patterns:
-    skip_result = subprocess.run(
-        ["go", "test", *list_args_for(skip_patterns[0])],
-        cwd=repo_root,
-        env=go_env,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if skip_result.returncode != 0:
-        raise SystemExit(f"{label}: Go/RE2 skip validation exited {skip_result.returncode}")
-    skipped = set(listed_names(skip_result, "skip validation"))
+    skip_regexp = go_compatible_regexp(skip_patterns[0], "-skip")
+    skipped = {
+        name for name in all_test_names if skip_regexp.search(name)
+    }
 actual = [name for name in listed if name not in skipped]
 actual_digest = hashlib.sha256(
     ("\n".join(sorted(actual)) + "\n").encode()
@@ -772,8 +868,8 @@ if actual_digest != expected_digest:
         f"{label}: expected set {expected_digest}, observed {actual_digest}"
     )
 print(
-    f"{label}: list validation passed; package {actual_package}; "
-    f"build {actual_build}; GOWORK={go_env['GOWORK']}; raw listed {len(listed)}; "
+    f"{label}: source selector validation passed; package {actual_package}; "
+    f"build {actual_build}; GOWORK={go_env['GOWORK']}; source-derived candidates {len(listed)}; "
     f"filtered executed {expected_count} names; "
     f"set-sha256 {actual_digest}"
 )
@@ -961,7 +1057,7 @@ def logical_commands(source_lines):
 def audit_logical_selectors(source_lines):
     guarded_count = 0
     for first, command in logical_commands(source_lines):
-        if command.lstrip().startswith("selector_probe="):
+        if command.lstrip().startswith("selector_probe=$'"):
             continue
         if not logical_selector_command.search(command):
             continue
@@ -974,6 +1070,20 @@ def audit_logical_selectors(source_lines):
 
 
 logical_guarded = audit_logical_selectors(lines)
+selector_fixture_lines = [
+    line for line in lines if line.lstrip().startswith("selector_probe=$'")
+]
+if len(selector_fixture_lines) != 1:
+    raise SystemExit(
+        f"expected one explicit non-prescription selector fixture, observed {len(selector_fixture_lines)}"
+    )
+wrapper_records = sum(
+    line.lstrip().startswith("go_test_checked ") for line in lines
+)
+if logical_guarded != wrapper_records:
+    raise SystemExit(
+        f"logical selector count {logical_guarded} does not equal wrapper record count {wrapper_records}"
+    )
 continuation_probes = [
     [
         "go test ./livecanary \\",
@@ -1016,9 +1126,28 @@ print(
     "discovered and rejected when unguarded"
 )
 
+assignment_selector_probes = [
+    "GOTOOLCHAIN=go1.26.8 go test ./livecanary -run ^TestAssignmentProbe$",
+    "GOTOOLCHAIN=go1.26.8 go test ./livecanary -skip=^TestAssignmentProbe$",
+]
+for assignment_selector_probe in assignment_selector_probes:
+    try:
+        audit_logical_selectors([assignment_selector_probe])
+    except SystemExit as error:
+        if "unguarded future selector" not in str(error):
+            raise
+    else:
+        raise SystemExit(
+            "assignment-prefixed selector probe: unguarded command was accepted"
+        )
+print(
+    "assignment-prefixed selector probe: passed; standard GOTOOLCHAIN=... "
+    "go test selector forms were discovered and rejected when unguarded"
+)
+
 guarded = 0
 for index, line in enumerate(lines):
-    if line.lstrip().startswith("selector_probe="):
+    if line.lstrip().startswith("selector_probe=$'"):
         continue
     if not selector_command.search(line):
         continue
@@ -1031,6 +1160,7 @@ with tempfile.NamedTemporaryFile("w+", encoding="utf-8", suffix=".md") as probe:
     probe.write(
         Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
         + "\ngo test ./livecanary -run ^TestZeroIndentProbe$\n"
+        + "GOTOOLCHAIN=go1.26.8 go test ./livecanary -run ^TestAssignmentProbe$\n"
         + "env GOTOOLCHAIN=go1.26.8 go test ./livecanary --skip ^TestZeroIndentProbe$\n"
     )
     probe.flush()
@@ -1052,23 +1182,23 @@ with tempfile.NamedTemporaryFile("w+", encoding="utf-8", suffix=".md") as probe:
         raise SystemExit("zero-indent selector probe: unguarded command was accepted")
 print(
     f"future selector guard audit: passed; {guarded} go test selector "
-    "prescriptions are wrapper-guarded; column-zero, prefixed, env-wrapped, "
-    "double-dash and indented discovery forms recognized"
+    "prescriptions are wrapper-guarded and equal the logical wrapper count; "
+    "column-zero, assignment-prefixed, env-wrapped, double-dash and indented "
+    "discovery forms recognized"
 )
 PY
 ```
 
 The selector guard audit exited 0 and found 28 future `go test` selector
 prescriptions containing `-run` or `-skip`, each immediately preceded by
-`go_test_checked`; the focused zero-indent, env-wrapped and continued-command
+`go_test_checked`; the focused zero-indent, assignment-prefixed, env-wrapped and continued-command
 probes discovered and rejected unguarded selectors without relying on line
 layout, while the explicit read-only samples cover separated and equals
 spellings, both dash widths, standard `env` prefixes and both zero-indent and
 indented shell forms. No test body was run by this grep/audit. For the paired
 partitions, the wrapper validates
-the filtered executed sets: collection
-22/22 (raw list 48), all-except 106/106 (raw list 154), worker 24/24, heavy
-5/5, terminal remainder 15/15 (raw list 26), and storage 6/6; their recorded
+the filtered executed sets: collection 22/22, all-except 106/106, worker 24/24,
+heavy 5/5, terminal remainder 15/15, and storage 6/6; their recorded
 SHA-256 values are the sorted filtered-name digests on the corresponding
 prescription lines above.
 
@@ -1077,8 +1207,9 @@ The recorded selector-audit output was:
 ```text
 line-continuation selector probe: passed; unguarded continued single- and double-dash/env-wrapped selectors were discovered and rejected
 env-wrapped selector probe: passed; standard env command prefixes were discovered and rejected when unguarded
+assignment-prefixed selector probe: passed; standard GOTOOLCHAIN=... go test selector forms were discovered and rejected when unguarded
 zero-indent selector probe: passed; an unguarded column-zero `go test -run` without GOTOOLCHAIN was discovered and rejected
-future selector guard audit: passed; 28 go test selector prescriptions are wrapper-guarded; column-zero, prefixed, env-wrapped, double-dash and indented discovery forms recognized
+future selector guard audit: passed; 28 go test selector prescriptions equal the logical wrapper count; column-zero, assignment-prefixed, env-wrapped, double-dash and indented discovery forms recognized
 ```
 
 The wrapper metadata is independently checked against each command's literal
@@ -1133,6 +1264,10 @@ for index, line in enumerate(lines):
     ):
         raise SystemExit(
             f"line {index + 2}: double-dash --run/--skip selectors are not allowed"
+        )
+    if any(value == "-toolexec" or value.startswith("-toolexec=") for value in args):
+        raise SystemExit(
+            f"line {index + 2}: -toolexec execution hooks are not allowed"
         )
     if not env.get("GOTOOLCHAIN", "").strip():
         raise SystemExit(f"line {index + 2}: missing explicit GOTOOLCHAIN metadata")
@@ -1221,9 +1356,10 @@ positive timeout no greater than 300 seconds, and every build identity matched
 its tag set, race mode and toolchain. The two drain labels selected the exact
 PR #72 module tree `9b30ef1b69c6375cb264c759d366fc5a52a5439f`; all other labels
 selected the PR #78 module tree `08c7830de7bc5120d1302d7ba6df162abd582315`.
-`-args`, test-binary overrides, standard `env` wrappers, double-dash
-`--run`/`--skip` selectors and a duplicate `./livecanary`/`./liveworker`
-package list are rejected before the list probe.
+`-args`, test-binary overrides, `-toolexec` hooks, standard `env` wrappers,
+double-dash `--run`/`--skip` selectors and a duplicate
+`./livecanary`/`./liveworker` package list are rejected before source-derived
+selector validation.
 The recorded metadata-audit output was:
 
 ```text
@@ -1232,12 +1368,12 @@ package/build metadata audit: passed; 28 wrapper prescriptions matched one packa
 
 The wrapper's selector edge cases were then exercised with a trimmed copy of
 the documented Python body that stops before the original test subprocess. Its
-only Go child processes are the effective `go env GOFLAGS`, package metadata
-(`go list -json -test`) and corresponding `go test -list` probes; the second
-list probe uses Go's own regexp implementation for `-skip` matching. Every Go
-child receives `GOWORK=off` after inherited and command-prefix environment
-parsing, so an external or auto-discovered workspace cannot alter metadata or
-test selection. Git source status/tree queries are read-only. The probe also
+only Go child processes are the effective `go env GOFLAGS` and package metadata
+(`go list -json -test`) query; no `go test -list` child is allowed because that
+would start package and imported initialization paths. Every Go child receives
+`GOWORK=off` after inherited and command-prefix environment parsing, so an
+external or auto-discovered workspace cannot alter metadata or test selection.
+Git source status/tree queries are read-only. The probe also
 feeds synthetic skipped and output-only/no-`run`/`pass` streams to the
 execution-stream guard without starting a test body, and includes a synthetic
 inherited-workspace probe that verifies the force-off environment on every
@@ -1449,12 +1585,70 @@ with tempfile.TemporaryDirectory() as goenv_dir:
         else:
             if not should_pass:
                 raise SystemExit(f"{label}: unexpectedly accepted")
-            if "list validation passed" not in output.getvalue():
-                raise SystemExit(f"{label}: missing list-validation result")
-            print(f"{label}: accepted list-only selector")
+            if "source selector validation passed" not in output.getvalue():
+                raise SystemExit(f"{label}: missing source-selector result")
+            print(f"{label}: accepted non-executing source selector")
 inherited_gowork_previous = os.environ.get("GOWORK")
 gowork_observed = []
 real_run = subprocess.run
+
+toolexec_cases = [
+    (
+        "toolexec-separated",
+        common + ["-toolexec", "/synthetic/toolexec", "./livecanary",
+                  "-run=^" + one_name + "$"],
+    ),
+    (
+        "toolexec-equals",
+        common + ["-toolexec=/synthetic/toolexec", "./livecanary",
+                  "-run=^" + one_name + "$"],
+    ),
+]
+toolexec_go_children = []
+
+def reject_toolexec_go_child(*args, **kwargs):
+    command = args[0] if args else kwargs.get("args", [])
+    if command and command[0] == "go":
+        toolexec_go_children.append(tuple(command))
+        raise AssertionError("toolexec guard started a Go child")
+    return real_run(*args, **kwargs)
+
+subprocess.run = reject_toolexec_go_child
+try:
+    for toolexec_label, toolexec_command in toolexec_cases:
+        sys.argv = [
+            "wrapper-probe", "1", one_digest, toolexec_label,
+            "experiments/g01-scaleset:./livecanary", "default+race+go1.26.8",
+            *toolexec_command,
+        ]
+        output = io.StringIO()
+        try:
+            with redirect_stdout(output):
+                exec(compile(wrapper, "<wrapper>", "exec"), namespace)
+        except SystemExit as error:
+            if output.getvalue():
+                raise SystemExit(
+                    f"{toolexec_label}: rejection emitted a result before the guard"
+                )
+            print(
+                f"{toolexec_label}: rejected before test body/result recording: "
+                f"{error}"
+            )
+        else:
+            raise SystemExit(
+                f"{toolexec_label}: -toolexec was unexpectedly accepted"
+            )
+finally:
+    subprocess.run = real_run
+if toolexec_go_children:
+    raise SystemExit(
+        "toolexec regression: a Go child started before -toolexec rejection: "
+        + repr(toolexec_go_children)
+    )
+print(
+    "toolexec regression: both separated and equals-form -toolexec rejected "
+    "before any Go child or result recording"
+)
 
 overlay_cases = [
     (
@@ -1675,7 +1869,6 @@ try:
     expected_go_commands = [
         ("go", "env", "GOFLAGS"),
         ("go", "list", "-C"),
-        ("go", "test", "-C"),
     ]
     if gowork_observed != expected_go_commands:
         raise SystemExit(
@@ -1686,7 +1879,7 @@ try:
         raise SystemExit("inherited-gowork: force-off behavior was not recorded")
     print(
         "inherited-gowork: passed; synthetic external workspace was overridden; "
-        "all 3 direct Go metadata/list probes received GOWORK=off before execution"
+        "both direct Go metadata probes received GOWORK=off before source derivation"
     )
 finally:
     subprocess.run = real_run
@@ -1735,24 +1928,23 @@ finally:
 PY
 ```
 
-The focused list-only probes passed: equals-form `-run=` selected 1/1;
-separated `-run` plus `-skip` preserved the filtered 22/22 set (raw list 48);
+The focused non-executing source-derivation probes passed: equals-form `-run=`
+selected 1/1; separated `-run` plus `-skip` preserved the filtered 22/22 set;
 the POSIX-class `[[:upper:]]` skip probe preserved the exact 1/1 set; the
 no-match and equals-form skip-all cases were rejected with 0 observed executed
 names before any test body; a livecanary/liveworker package mismatch, tag/build
 mismatch and temporary GOENV-persisted non-empty `GOFLAGS` were rejected before
-listing; duplicate package targeting was rejected before listing; the synthetic
-inherited-workspace probe observed the force-off environment on all three direct
-Go metadata/list probes before listing; slash-
-delimited subtest `-skip`, `-count=0`, `-count=2`, missing/duplicate/zero/
-overlarge `-timeout`, inherited `GORACE`, `-args`, direct test-binary selector,
-`-exec`, both separated and equals-form `-modfile` alternate-module-file
-overrides, both separated and equals-form `-overlay` build overrides, standard
-`env` assignment/option wrappers, all separated and equals-form double-dash
-`--run`/`--skip` selectors, active package `init`, and inherited
-`G01_INPUT_CHILD=blocked` were each rejected before listing. The focused
-no-Go-child regressions patched direct Go-child launches and required both
-`-modfile` forms, both `-overlay` forms, both `env` forms and all four
+source derivation; duplicate package targeting was rejected before derivation;
+the synthetic inherited-workspace probe observed the force-off environment on
+both direct Go metadata probes before derivation; slash-delimited subtest
+selectors, `-count=0`, `-count=2`, missing/duplicate/zero/overlarge
+`-timeout`, inherited `GORACE`, `-args`, direct test-binary selector, `-exec`,
+both separated and equals-form `-toolexec`, `-modfile` and `-overlay` overrides,
+standard `env` assignment/option wrappers, all separated and equals-form
+double-dash `--run`/`--skip` selectors, active package `init`, and inherited
+`G01_INPUT_CHILD=blocked` were each rejected before source derivation. The
+focused no-Go-child regressions patched direct Go-child launches and required
+both `-toolexec`, `-modfile` and `-overlay` forms, both `env` forms and all four
 double-dash selector forms to reject with no pre-guard result output; the
 output-only stream without expected `run` and `pass` events was rejected before
 result recording. No test body, live operation or secret-bearing input was run.
@@ -1760,6 +1952,9 @@ result recording. No test body, live operation or secret-bearing input was run.
 The added wrapper-regression output was:
 
 ```text
+toolexec-separated: rejected before test body/result recording: toolexec-separated: Go -toolexec execution hooks are not allowed in a guarded rerun
+toolexec-equals: rejected before test body/result recording: toolexec-equals: Go -toolexec execution hooks are not allowed in a guarded rerun
+toolexec regression: both separated and equals-form -toolexec rejected before any Go child or result recording
 modfile-separated: rejected before test body/result recording: modfile-separated: Go -modfile alternate module files are not allowed in a guarded rerun
 modfile-equals: rejected before test body/result recording: modfile-equals: Go -modfile alternate module files are not allowed in a guarded rerun
 modfile regression: both separated and equals-form -modfile rejected before any Go child or result recording
@@ -1782,11 +1977,11 @@ exec-wrapper: rejected before test body: exec-wrapper: -exec execution wrappers 
 active-package-init: rejected before test body: active-package-init: active package init requires a new reviewed guard
 skipped-subtest-event: rejected before result recording: wrapper-probe: test execution contained a skipped test
 missing-run-pass-events: rejected before result recording: wrapper-probe: test execution was missing expected event(s): run=TestSupportedListenerBarriersAndReservation; pass=TestSupportedListenerBarriersAndReservation
-inherited-gowork: passed; synthetic external workspace was overridden; all 3 direct Go metadata/list probes received GOWORK=off before execution
+inherited-gowork: passed; synthetic external workspace was overridden; both direct Go metadata probes received GOWORK=off before source derivation
 inherited-child-mode: rejected before test body: inherited-child-mode: fixture child-mode environment is not allowed: G01_INPUT_CHILD
 ```
 
-The exact wrapper replay was then run in list-only mode with a synthetic
+The exact wrapper replay at the prior packet head was then run in list-only mode with a synthetic
 inherited external workspace. On the PR #78 packet head
 `c550adcb2ca6532e2c69cbb6ad8d2aafd5e352ae`, records 01--20 reached list
 validation with `GOWORK=off`; record 21 correctly stopped at the PR #72
@@ -1799,10 +1994,21 @@ pin is selected by actual metadata/list execution; no test body or live
 resource ran:
 
 ```text
-c550 exact replay: records 01-20 list-only validation passed with GOWORK=off; record 21 drain-pr72: rejected before test body: drain-pr72: package-initialization guard requires reviewed source tree; direct Go child GOWORK checks=1
+c550 historical exact replay (pre-source-derivation wrapper): records 01-20 list-only validation passed with GOWORK=off; record 21 drain-pr72: rejected before test body: drain-pr72: package-initialization guard requires reviewed source tree; direct Go child GOWORK checks=1
 record 21 drain-pr72: list validation passed; package experiments/g01-scaleset:./livecanary; build default+norace+go1.26.8; GOWORK=off; raw listed 34; filtered executed 34 names; set-sha256 a79b7fa367d8eb1e7fe4ee4ef637696518946dab6f2f25410f6e04bfba137298
 record 22 drain-pr72-race: list validation passed; package experiments/g01-scaleset:./livecanary; build default+race+go1.26.8; GOWORK=off; raw listed 34; filtered executed 34 names; set-sha256 a79b7fa367d8eb1e7fe4ee4ef637696518946dab6f2f25410f6e04bfba137298
-PR72 exact replay: both records reached list-only validation; direct Go child environments checked for GOWORK=off
+PR72 historical exact replay: both records reached list-only validation; direct Go child environments checked for GOWORK=off
+```
+
+The working-tree source-derived replay then exercised the 26 non-PR72 wrapper
+records (including every paired partition) against their literal counts and
+SHA-256 sets. It invoked only the effective `go env GOFLAGS` and
+`go list -json -test` metadata children; the wrapper body was truncated before
+the original JSON test subprocess, and the two PR #72 records remained
+correctly gated by their separate reviewed source-tree pin:
+
+```text
+source-derived prescription replay: passed; 26 non-PR72 wrapper records validated without go test -list or test-body execution
 ```
 
 The tagged worker command is a complete `./liveworker` `^TestPaired` partition
@@ -1850,21 +2056,69 @@ livecanary invocation forces `-tags=osusergo`; `TestZeroStatisticsAndOptionalAbs
 remains a default-build `./livecanary` test in `statistics_fence_test.go`.
 
 The `./livecanary` test binary has a `TestMain` in
-`preparation_fixture_test.go`, so Go starts that function before processing a
-`-list` request. The source audit below parses the complete function through
-the normal `os.Exit(m.Run())` terminal, requires exactly the two explicit
-`--prepare-approved-*` branches, and proves that the normal-path projection
-contains no other statement; those branches are the only paths that read
-approval/state inputs or prepare a journal. A synthetic unconditional
-post-branch setup fixture must be rejected before execution. Accordingly, the
-livecanary `go test -list` checks are treated as TestMain initialization checks
-as well as selector checks: they use no live endpoint or credentials and run no
-test body.
+`preparation_fixture_test.go`. A historical `go test -list` audit therefore
+could start that function before printing names; the current wrapper never
+starts that binary for selector validation. The source audit below still parses
+the complete function through the normal `os.Exit(m.Run())` terminal, requires
+exactly the two explicit `--prepare-approved-*` branches, and proves that the
+normal-path projection contains no other statement; those branches are the
+only paths that read approval/state inputs or prepare a journal. A synthetic
+unconditional post-branch setup fixture must be rejected before execution.
+Current selector validation derives names from source and therefore cannot run
+TestMain, package-level variable initializers or imported initialization paths
+before the expected set is checked.
 
 The following commands are the exact documentation/static checks used for this
 correction. Their results are recorded immediately after each check; no command
 below runs a test body or performs a live App, runner, Docker, Lima, Keychain,
 launchd or workflow operation.
+
+The three fresh findings first had explicit red/static reproductions against the
+immutable starting packet head `36ec84b27c934a25484b0a5391af0a20c7643912`:
+
+```sh
+set -euo pipefail
+python3 - <<'PY'
+import subprocess
+
+previous = subprocess.check_output(
+    [
+        "git", "show",
+        "36ec84b27c934a25484b0a5391af0a20c7643912:docs/evidence/g01-recovery-packet.md",
+    ],
+    text=True,
+)
+wrapper_start = previous.index("\nimport hashlib\n", previous.index("go_test_checked()")) + 1
+wrapper_end = previous.index("\nPY\n}", wrapper_start)
+previous_wrapper = previous[wrapper_start:wrapper_end]
+if "-toolexec" in previous_wrapper:
+    raise SystemExit("red reproduction setup changed: starting wrapper already mentions -toolexec")
+print("RED toolexec: starting wrapper had no separated/equals-form -toolexec guard")
+
+lines = previous.splitlines()
+wrapper_count = sum(line.lstrip().startswith("go_test_checked ") for line in lines)
+synthetic_assignment_selector = "GOTOOLCHAIN=go1.26.8 go test ./livecanary -run ^TestRedProbe$"
+naive_wrapper_only_count = sum(
+    line.lstrip().startswith("go_test_checked ")
+    for line in lines + [synthetic_assignment_selector]
+)
+if naive_wrapper_only_count != wrapper_count:
+    raise SystemExit("red reproduction setup changed: wrapper-only count already saw the synthetic command")
+print("RED prescription audit: wrapper-only count stayed at 28 after an unguarded assignment-prefixed go test selector")
+
+if "[\"go\", \"test\", *list_args]" not in previous_wrapper:
+    raise SystemExit("red reproduction setup changed: starting wrapper no longer invokes go test -list")
+if "package-variable" in previous_wrapper:
+    raise SystemExit("red reproduction setup changed: starting wrapper already named package-variable safety")
+print("RED source/init: starting wrapper invoked go test -list and did not guard effectful package-variable/imported init paths")
+PY
+```
+
+The red reproduction exited through all three expected failure witnesses: the
+starting wrapper lacked both `-toolexec` forms, a naive wrapper-only selector
+count ignored the synthetic assignment-prefixed command, and the starting
+wrapper still invoked `go test -list` without package-variable/imported-init
+coverage. The focused green corrections and boundary checks follow below.
 
 ### Markdown links, JSON, and ledger shape
 
@@ -2151,7 +2405,9 @@ template after push. This packet intentionally records the template and the
 earlier historical parity records only; it does not claim that this follow-up's
 final output is already recorded here.
 
-The four focused offline selector checks below are list-only source checks. Each
+The four focused offline selector checks below are historical list-only source
+checks retained as pre-correction evidence; current wrapper validation uses
+non-executing source derivation. Each
 has a literal expected test-name set and an explicit count; the helper exits
 nonzero on a command failure, unexpected output, count mismatch or set
 mismatch. It runs from the repository root with literal subprocess arguments,
@@ -2317,7 +2573,7 @@ for case in cases:
 PY
 ```
 
-The fail-closed selector audit was actually run from immutable validation
+The historical fail-closed selector audit was actually run from immutable validation
 snapshot 5979b7d722f3bf8e24404912f9b1f3e888d0828d against the unchanged source
 under comparison parent ee8df8b7e00204c74a892b27f8b4c0ab278751ba: exact sets matched at
 25/25 `liveworker` runtime names, 4/4 preparation names, 1/1 `osusergo`
@@ -2563,8 +2819,10 @@ removing only those branches, and fails closed unless the remaining statement
 is exactly `os.Exit(m.Run())`; this proves that no live, resource, credential or
 setup call is reachable on the normal path while permitting preparation work
 inside those branches. The synthetic unconditional-post-branch setup fixture
-was rejected before execution. The existing livecanary selector audits remain
-`go test -list` only, so no test body or live resource was run.
+was rejected before execution. The historical livecanary selector audit used
+`go test -list` and is retained only as pre-correction evidence; the current
+wrapper's source derivation uses no test binary, so no test body, package
+initializer or live resource was run.
 
 The package-level initialization guard also resolves the effective source set
 for every package/build combination used by the wrapper. It pins the reviewed
@@ -2572,9 +2830,11 @@ module subtree, requires a clean source path with no tracked, untracked or
 ignored paths (the status probe uses `--ignored=matching`), pins `GOWORK=off`
 before each `go list -json -test` metadata query, includes ordinary and test
 Go files selected by the exact build tags, and rejects any active `func init`
-before `go test -list`; package-variable initializer changes therefore require
-a new source-tree review rather than being silently treated as list-only-safe.
-The guard audit was read-only and did not run test bodies or live resources:
+before source derivation. Because selector validation parses those source files
+instead of invoking `go test -list`, effectful package-level variable
+initializers and imported initialization paths cannot run before validation;
+package-source changes still require a new source-tree review. The guard audit
+was read-only and did not run test bodies or live resources:
 
 ```sh
 set -euo pipefail
@@ -2678,8 +2938,59 @@ unchanged from the reviewed tree, the `--ignored=matching` status output was
 empty, each `go list -json -test` metadata query received `GOWORK=off`, and no
 active package `init` function was selected. The wrapper regression
 probe separately enabled the reviewed
-`g01_pair_real_cadence` tag and rejected its active `init` before listing,
+`g01_pair_real_cadence` tag and rejected its active `init` before source derivation,
 demonstrating the fail-closed path without executing it.
+
+The source-derived selector boundary was separately regression-tested with a
+synthetic package-level effect and an imported `init` path. The parser only
+reads declarations, and the extracted wrapper body contains no `go test -list`
+child; therefore neither synthetic initializer can run before the expected set
+is checked:
+
+```sh
+set -euo pipefail
+python3 - <<'PY'
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
+wrapper_start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
+wrapper_end = packet.index("\nPY\n}", wrapper_start)
+wrapper = packet[wrapper_start:wrapper_end]
+if "go test -list" in wrapper or 'subprocess.run(\n    ["go", "test"' in wrapper:
+    raise SystemExit("source-derived selector guard still starts a Go test-list child")
+helper_start = wrapper.index("def skip_source_ignored")
+helper_end = wrapper.index("\nall_test_names = []", helper_start)
+namespace = {"label": "synthetic-init-boundary"}
+exec(compile(wrapper[helper_start:helper_end], "<source-derivation>", "exec"), namespace)
+with TemporaryDirectory() as directory:
+    root = Path(directory) / "root_test.go"
+    imported = Path(directory) / "imported.go"
+    root.write_text(
+        "package p\n"
+        "var effect = importedEffect()\n"
+        "func importedEffect() int { return 1 }\n"
+        "func TestSynthetic(t *testing.T) {}\n",
+        encoding="utf-8",
+    )
+    imported.write_text(
+        "package imported\n"
+        "func init() { panic(\"must not execute\") }\n",
+        encoding="utf-8",
+    )
+    if namespace.get("source_test_names")(root) != ["TestSynthetic"]:
+        raise SystemExit("synthetic effectful initializer source derivation failed")
+    if namespace.get("source_test_names")(imported):
+        raise SystemExit("synthetic imported init unexpectedly looked like a test")
+print("source-init boundary regression: passed; effectful package var and imported init were parsed only; wrapper contains no go test -list child")
+PY
+```
+
+The source-init boundary regression exited 0: an effectful package-level
+initializer and an imported `init` function were present only as source text,
+the parser derived the top-level test name, and the wrapper contained no
+`go test -list` child. No synthetic initializer, Go test body or live
+operation executed.
 
 ### Diff and staged secret/private-path scan
 
@@ -2873,3 +3184,23 @@ root-safe invocation, and the scoped tracked/untracked source audit above.
 The historical [secret/error finding 3999010986](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999010986)
 remains addressed by the dedicated Secret and error handling row and its root
 and livecanary commands above; no issue, Project, or Goal state is changed.
+
+### Current exact-head P2 findings at `36ec84b27c934a25484b0a5391af0a20c7643912`
+
+The three fresh Codex P2 findings on the exact PR #78 head named in this
+correction were reproduced before editing and are addressed below. Their
+reproductions and focused checks are packet-local static/wrapper evidence; no
+GitHub review metadata is edited here, and no finding is marked resolved by
+head movement alone.
+
+| Finding | Red reproduction and minimal correction | Focused result and boundary |
+|---|---|---|
+| Pre-Go-child selector guard omitted Go `-toolexec` separated and equals forms. | Before the correction, the wrapper had no `-toolexec` rejection, so synthetic `-toolexec FILE` and `-toolexec=FILE` inputs could reach the first Go metadata child. The wrapper now rejects both forms immediately after command-shape parsing, before `go env`, metadata, source derivation or execution. | The direct-child monkeypatch regression rejected both forms with empty pre-guard output; no Go test body, live operation or tool hook ran. |
+| Prescription audit could fail to account for standard assignment-prefixed `go test` selector commands. | A synthetic `GOTOOLCHAIN=go1.26.8 go test ... -run`/`-skip` pair was the red audit case: a wrapper-only count could remain 28 while an unguarded standard command was present. The logical audit now discovers assignment-prefixed, `env`-wrapped, continued and double-dash forms first, rejects every unguarded candidate, and asserts the 28 logical selector count equals the 28 `go_test_checked` records. | Assignment-prefixed probes were rejected as unguarded and the documented selector count remained exact; no command body or live operation ran. |
+| Source/init gate did not account for effectful package variables or imported init paths before `go test -list`. | The prior `go test -list` validation could start the test binary before the expected set was proven, while the source gate only checked active-package `func init`. The minimal safe correction replaces both `go test -list` probes with source-derived top-level test names from the exact `go list -json -test` file set, applies a fail-closed Go-RE2-compatible selector subset, and retains the reviewed source/init gate. | A synthetic package-level effect and imported `init` were parsed without execution; the wrapper contains no `go test -list` child. No initializer, Go test body or live operation ran. |
+
+The exact wrapper-replay, selector-audit and source-init-boundary outputs above
+are the TDD-like red-before-green record for this head correction. The old
+`go test -list` records remain explicitly historical/pre-correction evidence;
+the current prescription boundary is non-executing source derivation followed
+by the guarded original command only after count/set validation.
