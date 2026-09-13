@@ -59,7 +59,7 @@ Use these classifications throughout the packet:
 | [G01 red evidence at historical commit `1396e201d905be204c3ac697be43723820581314`](https://github.com/1XP-AI/gh-runnerd/blob/1396e201d905be204c3ac697be43723820581314/docs/evidence/g01-red.md) | Fixture: pre-fix ACK/callback-loss failures; no live result. | Immutable file blob `c36e0af0c8e9b301f4889a02454c83ece8d5942f`. |
 | [JIT causality follow-up](g01-jit-causality.md) | Fixture: committed-vs-requested synthetic JIT creation and response-loss controls; no live bug claim. | [ba113977d03fc209ca147edbe10b766eed2c0fe3](https://github.com/1XP-AI/gh-runnerd/blob/ba113977d03fc209ca147edbe10b766eed2c0fe3/docs/evidence/g01-jit-causality.md); causal fix [7079b255d09ce0456b5843a8695277689d52e54e](https://github.com/1XP-AI/gh-runnerd/commit/7079b255d09ce0456b5843a8695277689d52e54e) |
 | [Live-canary plan](g01-live-canary.md) | Live plan and authorization checklist; every phase remains unchecked/not run. | [d0afc56d471e8d63d153f6d26aeb95915d141d87](https://github.com/1XP-AI/gh-runnerd/blob/d0afc56d471e8d63d153f6d26aeb95915d141d87/docs/evidence/g01-live-canary.md) |
-| [Controller phase driver](g01-live-driver.md) | Fixture/source: bounded tagged controller operations; no worker launch or live result. | [candidate head `0e08ce8285846e26a94fb6fcb33bbeede662bf14`](https://github.com/1XP-AI/gh-runnerd/blob/0e08ce8285846e26a94fb6fcb33bbeede662bf14/docs/evidence/g01-live-driver.md) |
+| [Controller phase driver](g01-live-driver.md) | Fixture/source: bounded tagged controller operations; no worker launch or live result. | [controller driver evidence revision `0e08ce8285846e26a94fb6fcb33bbeede662bf14`](https://github.com/1XP-AI/gh-runnerd/blob/0e08ce8285846e26a94fb6fcb33bbeede662bf14/docs/evidence/g01-live-driver.md) |
 | [Idle-drain observation](https://github.com/1XP-AI/gh-runnerd/blob/f5560ba950f77343e57034cc1cf85dc67f5ac922/docs/evidence/g01-idle-drain.md) | Fixture + source at the authoritative current PR #72 head; PR #72 is open with no checks reported, and this is offline evidence only. | [PR #72 head `f5560ba950f77343e57034cc1cf85dc67f5ac922`](https://github.com/1XP-AI/gh-runnerd/commit/f5560ba950f77343e57034cc1cf85dc67f5ac922) |
 | [Identity/reconciliation](g01-identity-reconciliation.md) | Source + fixture limits for runner, request, job, REST and terminal identity; no live equality claim. | [9fe1b43cceb10c3ce92b26f8262c72148ded6c60](https://github.com/1XP-AI/gh-runnerd/blob/9fe1b43cceb10c3ce92b26f8262c72148ded6c60/docs/evidence/g01-identity-reconciliation.md) |
 | [Exact observation adapter](g01-exact-observations.md) | Fixture: bounded exact-ID/status/provenance readers; no affirmative live recovery or cleanup. | [d62242b07b779ff6f7414e97096d2c8828634a5d](https://github.com/1XP-AI/gh-runnerd/blob/d62242b07b779ff6f7414e97096d2c8828634a5d/docs/evidence/g01-exact-observations.md) |
@@ -401,7 +401,7 @@ skipped, unavailable or unauthorized live phase into “passed.”
 This packet correction requires markdown/link-target, JSON syntax, ledger/table,
 fragment, selector, diff, and secret/private-path checks only. No artificial Go
 red or green test is created for documentation changes. The stable working
-directory and source boundary were checked at exact reviewed PR #78 candidate
+directory and source boundary were checked at the exact reviewed PR #78 packet
 head d4f03dd9d3e251025462845ec288f4afc72a5295; ee8df8b7e00204c74a892b27f8b4c0ab278751ba
 is only the unchanged experiments/g01-scaleset source-comparison parent. The selector declaration audit is
 anchored to immutable source commit
@@ -530,9 +530,10 @@ arguments remain compared exactly.
 
 ```sh
 set -euo pipefail
+test "$(git rev-parse HEAD)" = "d4f03dd9d3e251025462845ec288f4afc72a5295"
+test "$(git rev-parse --verify HEAD^{commit})" = "d4f03dd9d3e251025462845ec288f4afc72a5295"
+test "$(git show -s --format=%H HEAD)" = "d4f03dd9d3e251025462845ec288f4afc72a5295"
 current_head="$(git rev-parse HEAD)"
-test "$current_head" = "$(git rev-parse --verify HEAD^{commit})"
-test "$current_head" = "$(git show -s --format=%H HEAD)"
 test "$(git rev-parse --show-toplevel)" = "$(pwd -P)"
 test -d experiments/g01-scaleset
 test "$(git rev-parse --verify ee8df8b7e00204c74a892b27f8b4c0ab278751ba)" = "ee8df8b7e00204c74a892b27f8b4c0ab278751ba"
@@ -543,10 +544,11 @@ test "$(git rev-parse 1396e201d905be204c3ac697be43723820581314:docs/evidence/g01
 printf 'stable checkout audit: passed; current HEAD is %s, repo root is current directory, experiments/g01-scaleset exists, source comparison parent is unchanged, scoped tracked/untracked status is empty, and g01-red.md resolves to its pinned blob\n' "$current_head"
 ```
 
-The stable checkout audit exited 0. At the prior exact-head validation point,
-git rev-parse HEAD returned d4f03dd9d3e251025462845ec288f4afc72a5295; the
-current-head assertion remains in the command for each rerun. It confirmed the
-unchanged experiments/g01-scaleset source relative to comparison parent
+The stable checkout audit exited 0 at the exact reviewed PR #78 packet head:
+each literal d4f03dd9d3e251025462845ec288f4afc72a5295 assertion and the scoped
+source checks passed. The follow-up packet commit intentionally advances this
+branch, so rerunning the block from a different head fails closed rather than
+accepting drift. It confirmed the unchanged experiments/g01-scaleset source relative to comparison parent
 ee8df8b7e00204c74a892b27f8b4c0ab278751ba and the g01-red.md commit/blob pin. The
 scoped `git status --porcelain=v1 --untracked-files=all --
 experiments/g01-scaleset` output was empty (zero lines), so no tracked or
@@ -711,7 +713,7 @@ PY
 
 The fail-closed selector audit exited 0 against the unchanged source under
 comparison parent ee8df8b7e00204c74a892b27f8b4c0ab278751ba (the exact reviewed
-packet candidate was d4f03dd9d3e251025462845ec288f4afc72a5295): exact sets matched at
+PR #78 packet head at validation was d4f03dd9d3e251025462845ec288f4afc72a5295): exact sets matched at
 25/25 `liveworker` runtime names, 4/4 preparation names, 1/1 `osusergo`
 build-tag name and 26/26 reconciliation names. Every invocation used
 `go test -list`; no test body ran.
