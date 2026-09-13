@@ -312,6 +312,12 @@ func (t replacingContextRoundTripper) RoundTrip(req *http.Request) (*http.Respon
 	return t.inner.RoundTrip(req.Clone(context.Background()))
 }
 
+type preservingContextRoundTripper struct{ inner http.RoundTripper }
+
+func (t preservingContextRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return t.inner.RoundTrip(req.Clone(req.Context()))
+}
+
 func TestBaselineMarkedBoundariesRejectReplacementContextBeforeInner(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -476,7 +482,7 @@ func TestBaselineWireMarkerIsRemovedBeforeInner(t *testing.T) {
 	innerCalls := 0
 	inner := drainRoundTripper(func(req *http.Request) (*http.Response, error) {
 		innerCalls++
-		if values := baselineWireMarkerValues(req); len(values) != 0 {
+		if values, keyCount := baselineWireMarkerValues(req); keyCount != 0 || len(values) != 0 {
 			t.Fatalf("private marker reached inner transport: %v", values)
 		}
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"count":1,"value":[41]}`)), Request: req}, nil
@@ -491,5 +497,103 @@ func TestBaselineWireMarkerIsRemovedBeforeInner(t *testing.T) {
 	}
 	if innerCalls != 1 || !capture.observed() {
 		t.Fatalf("valid marked acquisition calls=%d observed=%v, want one accepted request", innerCalls, capture.observed())
+	}
+}
+
+func rekeyBaselineWireMarker(req *http.Request) {
+	if req == nil || req.Header == nil {
+		return
+	}
+	var values []string
+	found := false
+	for key, keyValues := range req.Header {
+		if !strings.EqualFold(key, baselineWireMarkerHeader) {
+			continue
+		}
+		found = true
+		values = append(values, keyValues...)
+		delete(req.Header, key)
+	}
+	if !found {
+		return
+	}
+	rekeyed := strings.ToLower(baselineWireMarkerHeader)
+	req.Header[rekeyed] = values
+}
+
+func TestBaselineMarkedCaseFoldedMarkerWithReplacementContextRejectsBeforeInner(t *testing.T) {
+	capture := &baselineWireCapture{
+		stage: "acquire", setID: 7, requestIDs: []int64{41}, origin: "https://api.example:443",
+		runtimePathPrefix: "/tenant/v2", runtimePathPrefixSet: true, allowedHosts: []string{"api.example"},
+	}
+	innerCalls := 0
+	inner := drainRoundTripper(func(req *http.Request) (*http.Response, error) {
+		innerCalls++
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}, nil
+	})
+	transport := responseBudgetTransport{inner: baselineRequestMutationRoundTripper{
+		inner:  replacingContextRoundTripper{inner: baselineRequestCaptureTransport{inner: inner}},
+		mutate: rekeyBaselineWireMarker,
+	}}
+	req, err := http.NewRequestWithContext(capture.context(context.Background()), http.MethodPost, "https://other.example/foreign", strings.NewReader("[99]"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := transport.RoundTrip(req)
+	if !errors.Is(err, ErrRemote) || response != nil {
+		t.Fatalf("case-folded marker with replacement context = response %v err %v, want remote rejection", response, err)
+	}
+	if innerCalls != 0 {
+		t.Fatalf("case-folded marker with replacement context reached inner transport: calls=%d", innerCalls)
+	}
+	if capture.requestObserved() || capture.observed() {
+		t.Fatalf("case-folded marker with replacement context published evidence: requestObserved=%v observed=%v", capture.requestObserved(), capture.observed())
+	}
+}
+
+func TestBaselineMarkedCaseFoldedMarkerPreservesContextAndRemovesBeforeInner(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*http.Request)
+		wantOK bool
+	}{
+		{name: "single alias", mutate: rekeyBaselineWireMarker, wantOK: true},
+		{name: "duplicate aliases", mutate: func(req *http.Request) {
+			rekeyBaselineWireMarker(req)
+			req.Header[strings.ToUpper(baselineWireMarkerHeader)] = []string{baselineWireMarkerValue}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capture := &baselineWireCapture{
+				stage: "acquire", setID: 7, requestIDs: []int64{41}, origin: "https://api.example:443",
+				runtimePathPrefix: "/tenant/v2", runtimePathPrefixSet: true, allowedHosts: []string{"api.example"},
+			}
+			innerCalls := 0
+			markerKeysAtInner := 0
+			inner := drainRoundTripper(func(req *http.Request) (*http.Response, error) {
+				innerCalls++
+				for key := range req.Header {
+					if strings.EqualFold(key, baselineWireMarkerHeader) {
+						markerKeysAtInner++
+					}
+				}
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"count":1,"value":[41]}`)), Request: req}, nil
+			})
+			transport := responseBudgetTransport{inner: baselineRequestMutationRoundTripper{inner: preservingContextRoundTripper{inner: baselineRequestCaptureTransport{inner: inner}}, mutate: tc.mutate}}
+			req, err := http.NewRequestWithContext(capture.context(context.Background()), http.MethodPost, "https://api.example/tenant/v2/_apis/runtime/runnerscalesets/7/acquirejobs?api-version=6.0-preview", strings.NewReader("[41]"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := transport.RoundTrip(req)
+			if tc.wantOK {
+				if err != nil || response == nil || response.StatusCode != http.StatusOK || innerCalls != 1 || markerKeysAtInner != 0 || !capture.requestObserved() || !capture.observed() {
+					t.Fatalf("case-folded marker with preserved context = response %v err %v inner calls=%d marker keys=%d requestObserved=%v observed=%v, want one clean forward", response, err, innerCalls, markerKeysAtInner, capture.requestObserved(), capture.observed())
+				}
+				return
+			}
+			if !errors.Is(err, ErrRemote) || response != nil || innerCalls != 0 || markerKeysAtInner != 0 || capture.requestObserved() || capture.observed() {
+				t.Fatalf("duplicate case-folded marker = response %v err %v inner calls=%d marker keys=%d requestObserved=%v observed=%v, want rejection before inner", response, err, innerCalls, markerKeysAtInner, capture.requestObserved(), capture.observed())
+			}
+		})
 	}
 }

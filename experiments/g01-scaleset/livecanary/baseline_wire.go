@@ -384,11 +384,28 @@ func (c *baselineWireCapture) authorizationMatches(req *http.Request) bool {
 const baselineWireMarkerHeader = "X-GH-Runnerd-Baseline-Wire"
 const baselineWireMarkerValue = "1"
 
-func baselineWireMarkerValues(req *http.Request) []string {
+func baselineWireMarkerValues(req *http.Request) (values []string, keyCount int) {
 	if req == nil || req.Header == nil {
-		return nil
+		return nil, 0
 	}
-	return req.Header.Values(baselineWireMarkerHeader)
+	for key, keyValues := range req.Header {
+		if strings.EqualFold(key, baselineWireMarkerHeader) {
+			keyCount++
+			values = append(values, keyValues...)
+		}
+	}
+	return values, keyCount
+}
+
+func removeBaselineWireMarker(req *http.Request) {
+	if req == nil || req.Header == nil {
+		return
+	}
+	for key := range req.Header {
+		if strings.EqualFold(key, baselineWireMarkerHeader) {
+			delete(req.Header, key)
+		}
+	}
 }
 
 func markBaselineWireRequest(req *http.Request) *http.Request {
@@ -421,20 +438,20 @@ func (t baselineRequestCaptureTransport) RoundTrip(req *http.Request) (*http.Res
 		return nil, ErrRemote
 	}
 	c, _ := req.Context().Value(baselineWireKey{}).(*baselineWireCapture)
-	markerValues := baselineWireMarkerValues(req)
-	if c == nil && len(markerValues) > 0 {
+	markerValues, markerKeyCount := baselineWireMarkerValues(req)
+	if c == nil && markerKeyCount != 0 {
 		if req.Body != nil {
 			_ = req.Body.Close()
 		}
 		return nil, ErrRemote
 	}
 	if c != nil {
-		if len(markerValues) > 0 {
-			if len(markerValues) != 1 || markerValues[0] != baselineWireMarkerValue {
+		if markerKeyCount != 0 {
+			if markerKeyCount != 1 || len(markerValues) != 1 || markerValues[0] != baselineWireMarkerValue {
 				return nil, c.rejectRequest(req)
 			}
 			// Never expose the private marker to the physical transport.
-			req.Header.Del(baselineWireMarkerHeader)
+			removeBaselineWireMarker(req)
 		}
 		if !baselineRequestHostMatchesURL(req) {
 			return nil, c.rejectRequest(req)
