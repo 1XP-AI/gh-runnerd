@@ -371,27 +371,180 @@ test "$(git rev-parse --show-toplevel)" = "$(pwd -P)"
 test -d experiments/g01-scaleset
 test "$(git rev-parse --verify ee8df8b7e00204c74a892b27f8b4c0ab278751ba)" = "ee8df8b7e00204c74a892b27f8b4c0ab278751ba"
 git diff --quiet ee8df8b7e00204c74a892b27f8b4c0ab278751ba -- experiments/g01-scaleset
+source_status="$(git status --porcelain=v1 --untracked-files=all -- experiments/g01-scaleset)"
+test -z "$source_status"
 test "$(git rev-parse 1396e201d905be204c3ac697be43723820581314:docs/evidence/g01-red.md)" = "c36e0af0c8e9b301f4889a02454c83ece8d5942f"
-printf 'stable checkout audit: passed; repo root is current directory, experiments/g01-scaleset exists, target source is unchanged, and g01-red.md resolves to its pinned blob\n'
+printf 'stable checkout audit: passed; repo root is current directory, experiments/g01-scaleset exists, target source is unchanged, scoped tracked/untracked status is empty, and g01-red.md resolves to its pinned blob\n'
 ```
 
 The stable checkout audit exited 0. It confirmed the target head, unchanged
-`experiments/g01-scaleset` source, and the `g01-red.md` commit/blob pin; it did
-not inspect or execute any live system.
+`experiments/g01-scaleset` source, and the `g01-red.md` commit/blob pin. The
+scoped `git status --porcelain=v1 --untracked-files=all --
+experiments/g01-scaleset` output was empty (zero lines), so no tracked or
+untracked source file could contaminate declaration or list results. It did not
+inspect or execute any live system.
 
-The focused offline selector checks are list-only source checks. They were run
-against the unchanged exact source tree above and did not execute test bodies.
+The four focused offline selector checks below are list-only source checks. Each
+has a literal expected test-name set and an explicit count; the helper exits
+nonzero on a command failure, unexpected output, count mismatch or set
+mismatch. It runs from the repository root with literal subprocess arguments,
+so a missing or renamed build-tagged alternative cannot produce a false green.
+The `-tags=osusergo` case is intentionally included in that fail-closed set.
 
 ```sh
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./liveworker -list '^(TestSocketModesAndControllerOwnership|TestSocketPostConnectRecheckClosesBeforeHTTP|TestNoCreateBeforeDurableIntent|TestUnknownCreateNeverRetriesAfterRestart|TestCreationWarningsPreserveKnownIDWithoutAuthorizingStart|TestWorkerPreparationReturnsCanonicalSnapshotAndRejectsPriorEffect|TestUnixInspectRequiresStateFlagsBeforeMutation|TestDockerInspectExact(KnownStatesAndSerializableFacts|StatePresenceAndLegacyRequirements|RejectsMalformedOrAmbiguousBodiesBeforeMutation|NotFoundReportsOnlyTheExactGET|RejectsOtherResponsesAndInvalidTargets|RequiresSupported404Body|CancellationNeverReportsPresenceOrAbsence|RejectsReplacedSocket|EOFCancellationKeepsUnknownOutcome)|TestDockerInspectLegacyCleanupKeepsSignedAndAbsentExitPolicy|TestDockerInspectMapsPreserveCaseSensitiveKeysAndProfile|TestDockerCompletedMutationResponseSurvivesEOFCancellation|TestDockerInspectUnknownOrAbsentStatusCannotAuthorizeMutation|TestPrivateJournalLocksAndRetainsReservationAcrossRestart|TestJournalRejectsChangedApprovalTornTailAndUnsafeFiles|TestAuthorityLeaseRefusesConcurrentRunsAndFencesClose|TestAuthorityRejectsReplacedJournalOrDirectory|TestChangedDaemonCannotCreate)$'
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -list '^(TestCanonicalPreparationRecordsNoPhaseOrRemoteIntent|TestCanonicalPreparationRefusesInvalidJournalAndPhase|TestCanonicalPreparationRecoveryAndDriverShareLocalGate|TestZeroStatisticsAndOptionalAbsencePermitEmptyCleanup)$'
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -tags=osusergo -count=1 -timeout=45s ./livecanary -list '^TestUnsupportedAccountLookupRefusesBeforeJournal$'
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -list '^(TestAmbiguousCreateNeverRetriesAfterRestart|TestObserve.*|TestStatistics.*|TestInvalidOwnedProof.*|TestJournal.*|TestAuthority.*)$'
+set -euo pipefail
+python3 - <<'PY'
+import os
+import re
+import subprocess
+from pathlib import Path
+
+invocation_root = Path.cwd().resolve()
+repo_root = Path(
+    subprocess.check_output(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=invocation_root,
+        text=True,
+    ).strip()
+).resolve()
+if invocation_root != repo_root:
+    raise SystemExit("run this selector audit from the repository root")
+
+env = {**os.environ, "GOTOOLCHAIN": "go1.26.8"}
+cases = [
+    {
+        "label": "liveworker runtime",
+        "args": [
+            "go", "test", "-C", "experiments/g01-scaleset", "-race",
+            "-count=1", "-timeout=45s", "./liveworker", "-list",
+            r"^(TestSocketModesAndControllerOwnership|TestSocketPostConnectRecheckClosesBeforeHTTP|TestNoCreateBeforeDurableIntent|TestUnknownCreateNeverRetriesAfterRestart|TestCreationWarningsPreserveKnownIDWithoutAuthorizingStart|TestWorkerPreparationReturnsCanonicalSnapshotAndRejectsPriorEffect|TestUnixInspectRequiresStateFlagsBeforeMutation|TestDockerInspectExact(KnownStatesAndSerializableFacts|StatePresenceAndLegacyRequirements|RejectsMalformedOrAmbiguousBodiesBeforeMutation|NotFoundReportsOnlyTheExactGET|RejectsOtherResponsesAndInvalidTargets|RequiresSupported404Body|CancellationNeverReportsPresenceOrAbsence|RejectsReplacedSocket|EOFCancellationKeepsUnknownOutcome)|TestDockerInspectLegacyCleanupKeepsSignedAndAbsentExitPolicy|TestDockerInspectMapsPreserveCaseSensitiveKeysAndProfile|TestDockerCompletedMutationResponseSurvivesEOFCancellation|TestDockerInspectUnknownOrAbsentStatusCannotAuthorizeMutation|TestPrivateJournalLocksAndRetainsReservationAcrossRestart|TestJournalRejectsChangedApprovalTornTailAndUnsafeFiles|TestAuthorityLeaseRefusesConcurrentRunsAndFencesClose|TestAuthorityRejectsReplacedJournalOrDirectory|TestChangedDaemonCannotCreate)$",
+        ],
+        "expected_count": 25,
+        "expected": [
+            "TestUnixInspectRequiresStateFlagsBeforeMutation",
+            "TestDockerInspectExactKnownStatesAndSerializableFacts",
+            "TestDockerInspectExactStatePresenceAndLegacyRequirements",
+            "TestDockerInspectLegacyCleanupKeepsSignedAndAbsentExitPolicy",
+            "TestDockerInspectExactRejectsMalformedOrAmbiguousBodiesBeforeMutation",
+            "TestDockerInspectUnknownOrAbsentStatusCannotAuthorizeMutation",
+            "TestDockerInspectMapsPreserveCaseSensitiveKeysAndProfile",
+            "TestDockerInspectExactNotFoundReportsOnlyTheExactGET",
+            "TestDockerInspectExactRejectsOtherResponsesAndInvalidTargets",
+            "TestDockerInspectExactRequiresSupported404Body",
+            "TestDockerInspectExactCancellationNeverReportsPresenceOrAbsence",
+            "TestDockerInspectExactRejectsReplacedSocket",
+            "TestDockerCompletedMutationResponseSurvivesEOFCancellation",
+            "TestDockerInspectExactEOFCancellationKeepsUnknownOutcome",
+            "TestSocketModesAndControllerOwnership",
+            "TestSocketPostConnectRecheckClosesBeforeHTTP",
+            "TestAuthorityLeaseRefusesConcurrentRunsAndFencesClose",
+            "TestAuthorityRejectsReplacedJournalOrDirectory",
+            "TestPrivateJournalLocksAndRetainsReservationAcrossRestart",
+            "TestWorkerPreparationReturnsCanonicalSnapshotAndRejectsPriorEffect",
+            "TestJournalRejectsChangedApprovalTornTailAndUnsafeFiles",
+            "TestCreationWarningsPreserveKnownIDWithoutAuthorizingStart",
+            "TestNoCreateBeforeDurableIntent",
+            "TestUnknownCreateNeverRetriesAfterRestart",
+            "TestChangedDaemonCannotCreate",
+        ],
+    },
+    {
+        "label": "livecanary preparation",
+        "args": [
+            "go", "test", "-C", "experiments/g01-scaleset", "-race",
+            "-count=1", "-timeout=45s", "./livecanary", "-list",
+            r"^(TestCanonicalPreparationRecordsNoPhaseOrRemoteIntent|TestCanonicalPreparationRefusesInvalidJournalAndPhase|TestCanonicalPreparationRecoveryAndDriverShareLocalGate|TestZeroStatisticsAndOptionalAbsencePermitEmptyCleanup)$",
+        ],
+        "expected_count": 4,
+        "expected": [
+            "TestCanonicalPreparationRecordsNoPhaseOrRemoteIntent",
+            "TestCanonicalPreparationRefusesInvalidJournalAndPhase",
+            "TestCanonicalPreparationRecoveryAndDriverShareLocalGate",
+            "TestZeroStatisticsAndOptionalAbsencePermitEmptyCleanup",
+        ],
+    },
+    {
+        "label": "livecanary unsupported-account build tag",
+        "args": [
+            "go", "test", "-C", "experiments/g01-scaleset", "-race",
+            "-tags=osusergo", "-count=1", "-timeout=45s", "./livecanary",
+            "-list", r"^TestUnsupportedAccountLookupRefusesBeforeJournal$",
+        ],
+        "expected_count": 1,
+        "expected": ["TestUnsupportedAccountLookupRefusesBeforeJournal"],
+    },
+    {
+        "label": "livecanary reconciliation",
+        "args": [
+            "go", "test", "-C", "experiments/g01-scaleset", "-race",
+            "-count=1", "-timeout=45s", "./livecanary", "-list",
+            r"^(TestAmbiguousCreateNeverRetriesAfterRestart|TestObserve.*|TestStatistics.*|TestInvalidOwnedProof.*|TestJournal.*|TestAuthority.*)$",
+        ],
+        "expected_count": 26,
+        "expected": [
+            "TestJournalFailureStopsBeforeCreate",
+            "TestAmbiguousCreateNeverRetriesAfterRestart",
+            "TestAuthorityMismatchStopsBeforeCreate",
+            "TestAuthorityLeaseRefusesConcurrentRunsAndFencesClose",
+            "TestAuthorityRejectsReplacedJournalOrDirectory",
+            "TestJournalLocksBindsApprovalAndRetainsIncompleteIntent",
+            "TestJournalRejectsTornTailSymlinksAndSharedModes",
+            "TestObserveRESTRunnerRejectsIncompleteOrAmbiguousFields",
+            "TestObserveRESTJobRejectsSourceAndAttemptAmbiguity",
+            "TestObserveInvalidAuthorityAndInputsNeverReachNetwork",
+            "TestObserveStatusAndResponseBudget",
+            "TestObserveSampleKeepsOneDeadlineAcrossSourceListDetail",
+            "TestObserveCancellationAndApprovalExpiry",
+            "TestObserveSDKBootstrapFailureCannotReportRunnerAbsent",
+            "TestObserveCancellationReachesSDKBootstrapAndRESTDetail",
+            "TestObserveJobStatusProgressionWithinOneSample",
+            "TestObserveRejectsIndependentBaseFork",
+            "TestObserveJobAttemptRequiresDetailCorroboration",
+            "TestObserveSDKRunnerIdentityAndProvenance",
+            "TestObserveRESTExactFacts",
+            "TestInvalidOwnedProofCannotBeClearedBeforeFirstCleanup",
+            "TestAuthoritySplitAndPolicyRejection",
+            "TestStatisticsAtEverySourceSurviveLaterZeroAndFreshDriver",
+            "TestStatisticsFenceSurvivesFileJournalReopen",
+            "TestStatisticsResultWriteFailureRetainsFenceAcrossRestart",
+            "TestObservedRunnerSurvivesLaterAbsenceAndFirstCleanup",
+        ],
+    },
+]
+test_name = re.compile(r"Test[A-Za-z0-9_]+$")
+go_status = re.compile(r"ok\s+\S+\s+[0-9.]+s(?:\s+\(cached\))?$")
+for case in cases:
+    expected = case["expected"]
+    if len(expected) != case["expected_count"] or len(set(expected)) != case["expected_count"]:
+        raise SystemExit(f"{case['label']}: invalid expected set/count in audit")
+    if case["args"].count("-list") != 1 or "-run" in case["args"]:
+        raise SystemExit(f"{case['label']}: selector audit must remain list-only")
+    result = subprocess.run(
+        case["args"], cwd=repo_root, env=env, text=True,
+        capture_output=True, check=False,
+    )
+    if result.returncode != 0:
+        raise SystemExit(f"{case['label']}: go test -list exited {result.returncode}")
+    output = [line for line in result.stdout.splitlines() if line]
+    if any(not test_name.fullmatch(line) and not go_status.fullmatch(line) for line in output):
+        raise SystemExit(f"{case['label']}: unexpected non-test output")
+    actual = [line for line in output if test_name.fullmatch(line)]
+    if len(actual) != case["expected_count"] or sorted(actual) != sorted(expected):
+        raise SystemExit(
+            f"{case['label']}: expected {case['expected_count']} names, observed {len(actual)}"
+        )
+    print(
+        f"{case['label']}: passed; expected/observed {case['expected_count']} names; "
+        "exact set matched; list-only"
+    )
+PY
 ```
 
-All four commands exited 0 and listed, respectively, 25 `liveworker` names,
-4 preparation names, 1 `osusergo` name and 26 reconciliation names; no test
-body ran.
+The fail-closed selector audit exited 0 against the unchanged source under
+target head `ee8df8b7e00204c74a892b27f8b4c0ab278751ba`: exact sets matched at
+25/25 `liveworker` runtime names, 4/4 preparation names, 1/1 `osusergo`
+build-tag name and 26/26 reconciliation names. Every invocation used
+`go test -list`; no test body ran.
 
 The declaration consistency check also avoids self-referential line numbers and
 uses immutable source/tree assertions plus quiet presence/absence checks:
@@ -476,6 +629,12 @@ The prior six exact-head findings [3999486217](https://github.com/1XP-AI/gh-runn
 [3999486236](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999486236),
 and [3999486239](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999486239)
 remain covered by the existing selector and partition corrections. The
-historical [secret/error finding 3999010986](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999010986)
+three exact-head findings on `c4b73c75db9556f96491fb8a10a8257408a7d11b`—
+[3999807788](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999807788),
+[3999807790](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999807790),
+and [3999807791](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999807791)—are
+addressed by the literal selector expected-set/count audit, its list-only
+root-safe invocation, and the scoped tracked/untracked source audit above.
+The historical [secret/error finding 3999010986](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999010986)
 remains addressed by the dedicated Secret and error handling row and its root
 and livecanary commands above; no issue, Project, or Goal state is changed.
