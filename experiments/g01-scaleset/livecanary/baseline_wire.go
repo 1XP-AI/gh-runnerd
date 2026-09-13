@@ -165,7 +165,6 @@ func (c *baselineWireCapture) target(r *http.Request) bool {
 		u.Path += "/" + strconv.Itoa(c.cursor)
 		return r.Method == http.MethodDelete && r.URL.String() == u.String()
 	}
-	suffix := "/runnerscalesets/" + strconv.Itoa(c.setID) + "/"
 	if c.stage == "set-observe" || c.stage == "terminal-set" || c.stage == "terminal-set-recheck" || c.stage == "terminal-set-absence" || c.stage == "terminal-set-delete" {
 		if !c.snapshotOriginAllowed(r) {
 			return false
@@ -195,11 +194,10 @@ func (c *baselineWireCapture) target(r *http.Request) bool {
 		}
 		return r.Method == "POST" && c.runtimeRequestTarget(r, "acquirejobs") && baselineExactAPIVersionQuery(r.URL.RawQuery)
 	} else if c.stage == "jit" {
-		suffix += "generatejitconfig"
+		return c.origin != "" && c.runtimePathPrefixSet && c.runtimePathPrefix != "" && c.snapshotOriginAllowed(r) && r.Method == http.MethodPost && c.runtimeRequestTarget(r, "generatejitconfig") && baselineExactAPIVersionQuery(r.URL.RawQuery)
 	} else {
 		return false
 	}
-	return r.Method == "POST" && strings.HasSuffix(r.URL.Path, suffix) && baselineExactAPIVersionQuery(r.URL.RawQuery)
 }
 
 // markedDeleteIdentityReady requires the private identity captured by the
@@ -544,6 +542,22 @@ func (c *baselineWireCapture) captureRequest(req *http.Request) error {
 		c.mu.Unlock()
 		return nil
 	}
+	if c.stage == "jit" {
+		if !c.target(req) {
+			return c.rejectRequest(req)
+		}
+		if err := c.reserveOneShot(req); err != nil {
+			return err
+		}
+		data, err := readBaselineRequestBody(req.Body)
+		req.Body = nil
+		if err != nil || !validBaselineJITBody(data, c.runnerName) {
+			clear(data)
+			return c.rejectReservedRequest(req)
+		}
+		installBaselineRequestBody(req, data)
+		return nil
+	}
 	if c.stage == "set-observe" || c.stage == "runner-observe" || strings.HasPrefix(c.stage, "terminal-set") {
 		if !snapshotRequestCandidate(req) {
 			if c.sessionOpenBootstrapTarget(req) {
@@ -634,6 +648,17 @@ func validBaselineSessionOpenBody(data []byte, owner string) bool {
 		Owner     *string `json:"ownerName"`
 	}
 	return DecodeStrict(data, &body) == nil && body.SessionID != nil && *body.SessionID == "00000000-0000-0000-0000-000000000000" && body.Owner != nil && *body.Owner == owner
+}
+
+func validBaselineJITBody(data []byte, runnerName string) bool {
+	if runnerName == "" {
+		return false
+	}
+	var body struct {
+		Name       *string `json:"name"`
+		WorkFolder *string `json:"workFolder"`
+	}
+	return DecodeStrict(data, &body) == nil && body.Name != nil && *body.Name == runnerName && body.WorkFolder != nil && *body.WorkFolder == "_work"
 }
 
 func installBaselineRequestBody(req *http.Request, data []byte) {
@@ -740,8 +765,10 @@ func guardBaselineResponse(req *http.Request, response *http.Response) (*http.Re
 		return nil, ErrRemote
 	}
 	if response.StatusCode != http.StatusOK {
-		if response.StatusCode == http.StatusNoContent && (c.stage == "ack" || c.stage == "terminal-session-close" || c.stage == "terminal-set-delete") {
-			if closeErr := response.Body.Close(); closeErr != nil {
+		expectedEmptyBody := response.StatusCode == http.StatusNoContent && (c.stage == "ack" || c.stage == "terminal-session-close" || c.stage == "terminal-set-delete")
+		expectedAbsentBody := response.StatusCode == http.StatusNotFound && c.stage == "terminal-set-absence"
+		if expectedEmptyBody || expectedAbsentBody {
+			if response.Body == nil || response.Body.Close() != nil {
 				c.invalid = true
 				return nil, ErrRemote
 			}

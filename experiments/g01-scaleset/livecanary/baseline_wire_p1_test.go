@@ -125,6 +125,187 @@ func TestGuardBaselineResponseRejectsEvidenceDeleteWhenBodyCloseFails(t *testing
 	}
 }
 
+func TestGuardBaselineResponseRejectsTerminalSetAbsenceWhenBodyCloseFails(t *testing.T) {
+	capture := &baselineWireCapture{
+		stage:                "terminal-set-absence",
+		setID:                7,
+		origin:               "https://api.example:443",
+		runtimePathPrefix:    "/tenant/v2",
+		runtimePathPrefixSet: true,
+		allowedHosts:         []string{"api.example"},
+	}
+	req, err := http.NewRequestWithContext(capture.context(context.Background()), http.MethodGet, "https://api.example/tenant/v2/_apis/runtime/runnerscalesets/7?api-version=6.0-preview", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := guardBaselineResponse(req, &http.Response{
+		StatusCode: http.StatusNotFound,
+		Body:       &baselineCloseErrorBody{Reader: strings.NewReader(""), err: io.ErrClosedPipe},
+	})
+	if !errors.Is(err, ErrRemote) || response != nil {
+		t.Fatalf("terminal set absence body with close error = response %v err %v, want remote rejection", response, err)
+	}
+	_, _, _, status := capture.facts()
+	if status != http.StatusNotFound || capture.observed() {
+		t.Fatalf("terminal set absence close error published evidence: status=%d observed=%v", status, capture.observed())
+	}
+}
+
+func TestGuardBaselineResponsePreservesTerminalSetAbsenceWhenBodyCloseSucceeds(t *testing.T) {
+	capture := &baselineWireCapture{
+		stage:                "terminal-set-absence",
+		setID:                7,
+		origin:               "https://api.example:443",
+		runtimePathPrefix:    "/tenant/v2",
+		runtimePathPrefixSet: true,
+		allowedHosts:         []string{"api.example"},
+	}
+	req, err := http.NewRequestWithContext(capture.context(context.Background()), http.MethodGet, "https://api.example/tenant/v2/_apis/runtime/runnerscalesets/7?api-version=6.0-preview", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := guardBaselineResponse(req, &http.Response{
+		StatusCode: http.StatusNotFound,
+		Body:       &baselineCloseErrorBody{Reader: strings.NewReader(""), err: nil},
+	})
+	if err != nil || response == nil || response.StatusCode != http.StatusNotFound || !capture.observed() {
+		t.Fatalf("valid terminal set absence = response %v err %v observed=%v, want retained 404 evidence", response, err, capture.observed())
+	}
+}
+
+type baselineRequestMutationRoundTripper struct {
+	inner  http.RoundTripper
+	mutate func(*http.Request)
+}
+
+func (t baselineRequestMutationRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.mutate != nil {
+		t.mutate(req)
+	}
+	return t.inner.RoundTrip(req)
+}
+
+type baselineJITRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f baselineJITRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestBaselineMarkedJITRequestRejectsPhysicalTupleMutationBeforeInner(t *testing.T) {
+	const (
+		origin      = "https://api.example:443"
+		prefix      = "/tenant/v2"
+		runnerName  = "g01-test-worker-1"
+		target      = "https://api.example/tenant/v2/_apis/runtime/runnerscalesets/7/generatejitconfig?api-version=6.0-preview"
+		requestBody = `{"name":"g01-test-worker-1","workFolder":"_work"}`
+		foreignBody = `{"name":"foreign-worker","workFolder":"_work"}`
+	)
+	for _, tc := range []struct {
+		name   string
+		mutate func(*http.Request)
+	}{
+		{
+			name: "wrong physical origin",
+			mutate: func(req *http.Request) {
+				req.URL.Host = "other.example"
+				req.Host = req.URL.Host
+				req.URL.RawPath = ""
+			},
+		},
+		{
+			name: "wrong runtime tenant prefix",
+			mutate: func(req *http.Request) {
+				req.URL.Path = "/tenant/foreign/_apis/runtime/runnerscalesets/7/generatejitconfig"
+				req.URL.RawPath = ""
+			},
+		},
+		{
+			name: "wrong request body",
+			mutate: func(req *http.Request) {
+				req.Body = io.NopCloser(strings.NewReader(foreignBody))
+				req.ContentLength = int64(len(foreignBody))
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capture := &baselineWireCapture{
+				stage:                "jit",
+				setID:                7,
+				runnerName:           runnerName,
+				origin:               origin,
+				runtimePathPrefix:    prefix,
+				runtimePathPrefixSet: true,
+				allowedHosts:         []string{"api.example", "other.example"},
+			}
+			innerCalls := 0
+			inner := baselineJITRoundTripper(func(req *http.Request) (*http.Response, error) {
+				innerCalls++
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"encodedJITConfig":"AAAAAAAAAAAAAAAAAAAAAA=="}`)), Request: req}, nil
+			})
+			transport := responseBudgetTransport{inner: baselineRequestMutationRoundTripper{
+				inner:  baselineRequestCaptureTransport{inner: inner},
+				mutate: tc.mutate,
+			}}
+			req, err := http.NewRequestWithContext(capture.context(context.Background()), http.MethodPost, target, strings.NewReader(requestBody))
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := transport.RoundTrip(req)
+			if !errors.Is(err, ErrRemote) || response != nil {
+				t.Fatalf("mutated marked JIT = response %v err %v, want remote rejection", response, err)
+			}
+			if innerCalls != 0 {
+				t.Fatalf("mutated marked JIT reached inner transport: calls=%d", innerCalls)
+			}
+			if capture.requestObserved() || capture.observed() {
+				t.Fatalf("mutated marked JIT published evidence: requestObserved=%v observed=%v", capture.requestObserved(), capture.observed())
+			}
+		})
+	}
+}
+
+func TestBaselineJITPreservesValidMarkedAndUnmarkedForwarding(t *testing.T) {
+	const (
+		origin      = "https://api.example:443"
+		prefix      = "/tenant/v2"
+		runnerName  = "g01-test-worker-1"
+		target      = "https://api.example/tenant/v2/_apis/runtime/runnerscalesets/7/generatejitconfig?api-version=6.0-preview"
+		requestBody = `{"name":"g01-test-worker-1","workFolder":"_work"}`
+	)
+	capture := &baselineWireCapture{
+		stage:                "jit",
+		setID:                7,
+		runnerName:           runnerName,
+		origin:               origin,
+		runtimePathPrefix:    prefix,
+		runtimePathPrefixSet: true,
+		allowedHosts:         []string{"api.example"},
+	}
+	innerCalls := 0
+	inner := baselineJITRoundTripper(func(req *http.Request) (*http.Response, error) {
+		innerCalls++
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"encodedJITConfig":"AAAAAAAAAAAAAAAAAAAAAA=="}`)), Request: req}, nil
+	})
+	transport := responseBudgetTransport{inner: baselineRequestCaptureTransport{inner: inner}}
+	marked, err := http.NewRequestWithContext(capture.context(context.Background()), http.MethodPost, target, strings.NewReader(requestBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := transport.RoundTrip(marked)
+	if err != nil || response == nil || response.StatusCode != http.StatusOK || innerCalls != 1 || !capture.observed() {
+		t.Fatalf("valid marked JIT = response %v err %v inner calls=%d observed=%v, want one accepted request", response, err, innerCalls, capture.observed())
+	}
+
+	unmarked, err := http.NewRequest(http.MethodPost, "https://other.example/rewritten", strings.NewReader(`{"name":"foreign-worker","workFolder":"foreign"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err = transport.RoundTrip(unmarked)
+	if err != nil || response == nil || response.StatusCode != http.StatusOK || innerCalls != 2 {
+		t.Fatalf("unmarked forwarding = response %v err %v inner calls=%d, want forwarding", response, err, innerCalls)
+	}
+}
+
 type replacingContextRoundTripper struct{ inner http.RoundTripper }
 
 func (t replacingContextRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
