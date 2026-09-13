@@ -233,7 +233,8 @@ force-off, not validation or reuse of a caller-provided `go.work` file.
 Race-mode prescriptions reject inherited or command-supplied `GORACE` before
 either list probe or test execution. Exactly one `-count=1` and one positive bounded
 `-timeout` (at most 300 seconds) are required; `-args` and test-binary
-selector/count/timeout overrides, Go `-overlay FILE`/`-overlay=FILE` build
+selector/count/timeout overrides, Go `-modfile FILE`/`-modfile=FILE`
+alternate-module-file overrides, Go `-overlay FILE`/`-overlay=FILE` build
 overrides, and `-exec` execution wrappers are rejected.
 The execution command adds a wrapper-controlled `-json` stream and fails closed
 on malformed output, non-empty stderr or any Go test `Action` of `skip`,
@@ -333,6 +334,15 @@ test_args = command[2:]
 if any(value == "-overlay" or value.startswith("-overlay=") for value in test_args):
     raise SystemExit(
         f"{label}: Go -overlay build overrides are not allowed in a guarded rerun"
+    )
+
+# Reject Go alternate module-file overrides before any Go child is started.
+# Both the separated `-modfile FILE` and equals-form `-modfile=FILE` spellings
+# can substitute a different module graph and therefore require a separate
+# reviewed module-file decision.
+if any(value == "-modfile" or value.startswith("-modfile=") for value in test_args):
+    raise SystemExit(
+        f"{label}: Go -modfile alternate module files are not allowed in a guarded rerun"
     )
 
 # Pin the environment after parsing command-prefix assignments. This overrides
@@ -1427,6 +1437,64 @@ print(
     "any Go child or result recording"
 )
 
+modfile_cases = [
+    (
+        "modfile-separated",
+        common + ["-modfile", "/synthetic/alternate.mod", "./livecanary",
+                  "-run=^" + one_name + "$"],
+    ),
+    (
+        "modfile-equals",
+        common + ["-modfile=/synthetic/alternate.mod", "./livecanary",
+                  "-run=^" + one_name + "$"],
+    ),
+]
+modfile_go_children = []
+
+def reject_modfile_go_child(*args, **kwargs):
+    command = args[0] if args else kwargs.get("args", [])
+    if command and command[0] == "go":
+        modfile_go_children.append(tuple(command))
+        raise AssertionError("modfile guard started a Go child")
+    return real_run(*args, **kwargs)
+
+subprocess.run = reject_modfile_go_child
+try:
+    for modfile_label, modfile_command in modfile_cases:
+        sys.argv = [
+            "wrapper-probe", "1", one_digest, modfile_label,
+            "experiments/g01-scaleset:./livecanary", "default+race+go1.26.8",
+            *modfile_command,
+        ]
+        output = io.StringIO()
+        try:
+            with redirect_stdout(output):
+                exec(compile(wrapper, "<wrapper>", "exec"), namespace)
+        except SystemExit as error:
+            if output.getvalue():
+                raise SystemExit(
+                    f"{modfile_label}: rejection emitted a result before the guard"
+                )
+            print(
+                f"{modfile_label}: rejected before test body/result recording: "
+                f"{error}"
+            )
+        else:
+            raise SystemExit(
+                f"{modfile_label}: -modfile was unexpectedly accepted"
+            )
+finally:
+    subprocess.run = real_run
+if modfile_go_children:
+    raise SystemExit(
+        "modfile regression: a Go child started before -modfile rejection: "
+        + repr(modfile_go_children)
+    )
+print(
+    "modfile regression: both separated and equals-form -modfile rejected before "
+    "any Go child or result recording"
+)
+
 def observe_go_child(*args, **kwargs):
     command = args[0] if args else kwargs.get("args", [])
     if command and command[0] == "go":
@@ -1527,16 +1595,21 @@ inherited-workspace probe observed the force-off environment on all three direct
 Go metadata/list probes before listing; slash-
 delimited subtest `-skip`, `-count=0`, `-count=2`, missing/duplicate/zero/
 overlarge `-timeout`, inherited `GORACE`, `-args`, direct test-binary selector,
-`-exec`, both separated and equals-form `-overlay` build overrides, active
+`-exec`, both separated and equals-form `-modfile` alternate-module-file
+overrides, both separated and equals-form `-overlay` build overrides, active
 package `init`, and inherited `G01_INPUT_CHILD=blocked` were each rejected
-before listing. The focused overlay regression patched direct Go-child launches
-and required both forms to reject with no pre-guard result output; the
-output-only stream without expected `run` and `pass` events was rejected before
-result recording. No test body, live operation or secret-bearing input was run.
+before listing. The focused no-Go-child regressions patched direct Go-child
+launches and required both `-modfile` forms and both `-overlay` forms to reject
+with no pre-guard result output; the output-only stream without expected `run`
+and `pass` events was rejected before result recording. No test body, live
+operation or secret-bearing input was run.
 
 The added wrapper-regression output was:
 
 ```text
+modfile-separated: rejected before test body/result recording: modfile-separated: Go -modfile alternate module files are not allowed in a guarded rerun
+modfile-equals: rejected before test body/result recording: modfile-equals: Go -modfile alternate module files are not allowed in a guarded rerun
+modfile regression: both separated and equals-form -modfile rejected before any Go child or result recording
 overlay-separated: rejected before test body/result recording: overlay-separated: Go -overlay build overrides are not allowed in a guarded rerun
 overlay-equals: rejected before test body/result recording: overlay-equals: Go -overlay build overrides are not allowed in a guarded rerun
 overlay regression: both separated and equals-form -overlay rejected before any Go child or result recording
@@ -2576,6 +2649,15 @@ The Codex finding on the exact prior packet head
 | Finding and immutable source | Reproduction and disposition |
 |---|---|
 | [4000667752](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000667752), source [44a2142adab39bba73fc93965fa003ed17506d92](https://github.com/1XP-AI/gh-runnerd/commit/44a2142adab39bba73fc93965fa003ed17506d92) | Reproduced: the guarded wrapper accepted Go `-overlay` build overrides, allowing a caller-supplied overlay to change the source/build inputs after the wrapper's reviewed-tree assumptions. Corrected: immediately after parsing command-prefix assignments and validating `go test`, the wrapper rejects both separated `-overlay FILE` and equals-form `-overlay=FILE` before the first `go env`, metadata, list or test child. The focused synthetic regression patched direct Go-child launches, required both forms to reject with empty pre-guard output, and therefore recorded no test body or result; no live operation, secret, private path or overlay file was used. |
+
+### Current exact-head Go alternate-module-file finding
+
+The Codex finding on the exact prior packet head
+[`5a5a4e97e0fbd2a9dca0d9f085003d7ce7e65038`](https://github.com/1XP-AI/gh-runnerd/commit/5a5a4e97e0fbd2a9dca0d9f085003d7ce7e65038)—[4000712999](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000712999)—was reproduced and corrected here; it is not treated as resolved by a new head or staleness alone:
+
+| Finding and immutable source | Reproduction and disposition |
+|---|---|
+| [4000712999](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000712999), source [5a5a4e97e0fbd2a9dca0d9f085003d7ce7e65038](https://github.com/1XP-AI/gh-runnerd/commit/5a5a4e97e0fbd2a9dca0d9f085003d7ce7e65038) | Reproduced: the guarded wrapper rejected Go `-overlay` overrides but still accepted `-modfile`, allowing a caller-supplied alternate module file to change the module graph and dependency/build inputs after the wrapper's reviewed-tree assumptions. Corrected: immediately after parsing command-prefix assignments and validating `go test`, the wrapper rejects both separated `-modfile FILE` and equals-form `-modfile=FILE` before the first `go env`, metadata, list or test child. The focused synthetic no-Go-child regression patched direct Go-child launches, required both forms to reject with empty pre-guard output, and therefore recorded no test body or result; no live operation, secret, private path or alternate module file was used. |
 
 The two new exact-head findings
 on `95cd9210620c54e098ecbe0df1217af1659f0c74`—[3999634756](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999634756)
