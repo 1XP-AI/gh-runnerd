@@ -14,8 +14,14 @@ var errResponseBudget = errors.New("response body budget exceeded")
 // when it constructs session clients. Standard RegisterProtocol permits a shared
 // response wrapper without replacing that required type or patching the SDK.
 // The inner clone preserves the already configured TLS/host/proxy restrictions.
-func withResponseBudget(transport *http.Transport) *http.Transport {
-	wrapped := responseBudgetTransport{inner: transport}
+func withResponseBudget(transport *http.Transport, wrappers ...func(http.RoundTripper) http.RoundTripper) *http.Transport {
+	var inner http.RoundTripper = baselineRequestCaptureTransport{inner: transport}
+	for _, wrap := range wrappers {
+		if wrap != nil {
+			inner = wrap(inner)
+		}
+	}
+	wrapped := responseBudgetTransport{inner: inner}
 	outer := transport.Clone()
 	// The outer transport only dispatches to the wrapper. Disable its own HTTP/2
 	// setup so it cannot register a competing HTTPS handler; the inner transport
@@ -30,22 +36,31 @@ func withResponseBudget(transport *http.Transport) *http.Transport {
 type responseBudgetTransport struct{ inner http.RoundTripper }
 
 func (t responseBudgetTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	wireReq := req
+	if req != nil {
+		if c, _ := req.Context().Value(baselineWireKey{}).(*baselineWireCapture); c != nil {
+			wireReq = markBaselineWireRequest(req)
+		}
+	}
 	// No phase intentionally PATCHes. In particular, stop SDK 401 refresh BEFORE
 	// it can replace the session/queue and retry an ACK under a different owner.
-	if req.Method == http.MethodPatch {
+	if wireReq == nil {
+		return nil, ErrRemote
+	}
+	if wireReq.Method == http.MethodPatch {
 		return nil, ErrQuarantine
 	}
-	response, err := t.inner.RoundTrip(req)
+	response, err := t.inner.RoundTrip(wireReq)
 	if err != nil {
 		return nil, err
 	}
-	captureRunnerResponse(req, response.StatusCode)
+	captureRunnerResponse(wireReq, response.StatusCode)
 	if response.ContentLength > responseBodyLimit {
 		_ = response.Body.Close()
 		return nil, errResponseBudget
 	}
 	response.Body = &responseBudgetBody{source: response.Body, remaining: responseBodyLimit}
-	return guardBaselineResponse(req, response)
+	return guardBaselineResponse(wireReq, response)
 }
 
 // Read at most the budget plus one detection byte, including decoded gzip and

@@ -5,10 +5,16 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,6 +28,16 @@ type fixtureSDK struct{ *SDKAPI }
 func (f fixtureSDK) Preflight(context.Context, Approval) error        { return nil } // Authority HTTP tested separately.
 func (f fixtureSDK) Inventory(context.Context) (string, error)        { return strings.Repeat("0", 64), nil }
 func (f fixtureSDK) VerifyRun(context.Context, Approval, int64) error { return nil }
+
+type countingFixtureSDK struct {
+	fixtureSDK
+	verifyCalls atomic.Int32
+}
+
+func (f *countingFixtureSDK) VerifyRun(context.Context, Approval, int64) error {
+	f.verifyCalls.Add(1)
+	return nil
+}
 
 // Exercise the new live driver through the actual pinned SDK. This synthetic
 // transport is permanently fenced to its own loopback server, like the original
@@ -174,4 +190,1372 @@ func TestDriverBarriersThroughPinnedSDK(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDriverDrainThroughPinnedSDKAndPollHook(t *testing.T) {
+	a := approval()
+	a.Phases = append(a.Phases, "drain")
+	set := &scaleset.RunnerScaleSet{
+		ID: 7, Name: a.setName(), RunnerGroupID: a.RunnerGroupID,
+		Labels:        []scaleset.Label{{Name: a.setName()}},
+		RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true},
+		Statistics:    &scaleset.RunnerScaleSetStatistic{TotalRegisteredRunners: 1, TotalIdleRunners: 1},
+	}
+	var polls, acks, acquires, closes, snapshotReads int
+	var server *httptest.Server
+	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/actions/runners/registration-token") && r.Method == http.MethodPost:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]string{"token": "fixture-admin"})
+		case strings.HasSuffix(r.URL.Path, "/actions/runner-registration") && r.Method == http.MethodPost:
+			claims, _ := json.Marshal(map[string]int64{"exp": time.Now().Add(time.Hour).Unix()})
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{"url": server.URL, "token": "eyJhbGciOiJub25lIn0." + base64.RawURLEncoding.EncodeToString(claims) + "."})
+		case strings.HasSuffix(r.URL.Path, "/sessions") && r.Method == http.MethodPost:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(scaleset.RunnerScaleSetSession{
+				SessionID: uuid.MustParse("00000000-0000-4000-8000-000000000011"), OwnerName: a.setName(),
+				MessageQueueURL: server.URL + "/queue", MessageQueueAccessToken: "fixture-queue",
+				RunnerScaleSet: set, Statistics: set.Statistics,
+			})
+		case r.URL.Path == "/queue" && r.Method == http.MethodGet:
+			if polls == 0 {
+				if r.Header.Get(scaleset.HeaderScaleSetMaxCapacity) != "1" {
+					t.Errorf("first poll capacity = %q, want 1", r.Header.Get(scaleset.HeaderScaleSetMaxCapacity))
+				}
+				polls++
+				jobs, _ := json.Marshal([]any{map[string]any{"messageType": "JobAvailable", "runnerRequestId": 41, "workflowRunId": a.WorkflowRunID, "ownerName": a.Organization, "repositoryName": a.Repository}})
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"messageId": 17, "messageType": "RunnerScaleSetJobMessages", "body": string(jobs),
+					"statistics": map[string]int{"totalAvailableJobs": 1, "totalAcquiredJobs": 0, "totalAssignedJobs": 1, "totalRunningJobs": 0, "totalRegisteredRunners": 1, "totalBusyRunners": 0, "totalIdleRunners": 1},
+				})
+				return
+			}
+			if r.Header.Get(scaleset.HeaderScaleSetMaxCapacity) != "0" {
+				t.Errorf("next poll capacity = %q, want 0", r.Header.Get(scaleset.HeaderScaleSetMaxCapacity))
+			}
+			polls++
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"statistics": map[string]int{"totalAvailableJobs": 0, "totalAcquiredJobs": 0, "totalAssignedJobs": 0, "totalRunningJobs": 0, "totalRegisteredRunners": 1, "totalBusyRunners": 0, "totalIdleRunners": 1},
+			})
+		case r.URL.Path == "/queue/17" && r.Method == http.MethodDelete:
+			acks++
+			w.WriteHeader(http.StatusNoContent)
+		case strings.HasSuffix(r.URL.Path, "/acquirejobs") && r.Method == http.MethodPost:
+			acquires++
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"count": 1, "value": []int64{41}})
+		case strings.Contains(r.URL.Path, "/sessions/") && r.Method == http.MethodDelete:
+			closes++
+			w.WriteHeader(http.StatusNoContent)
+		case strings.HasSuffix(r.URL.Path, "/runnerscalesets/7") && r.Method == http.MethodGet:
+			snapshotReads++
+			snapshot := *set
+			if snapshotReads == 2 {
+				stats := *set.Statistics
+				stats.TotalAcquiredJobs = 1
+				snapshot.Statistics = &stats
+			}
+			_ = json.NewEncoder(w).Encode(&snapshot)
+		case strings.HasSuffix(r.URL.Path, "/agents") && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]any{"count": 1, "value": []any{map[string]any{"id": 19, "name": a.workerName(), "runnerScaleSetId": 7}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	fixtureApproval := a
+	fixtureApproval.ActionsHosts = []string{server.Listener.Addr().String()}
+
+	buildAPI := func(hook *drainPollHook) (*SDKAPI, error) {
+		retry := retryablehttp.NewClient()
+		retry.RetryMax = 0
+		retry.Logger = nil
+		retry.HTTPClient.Timeout = time.Second
+		fixtureTransport, ok := server.Client().Transport.(*http.Transport)
+		if !ok {
+			return nil, errors.New("TLS fixture transport is not an HTTP transport")
+		}
+		transport := fixtureTransport.Clone()
+		transport.Proxy = nil
+		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			if address != server.Listener.Addr().String() {
+				return nil, errors.New("non-fixture address denied")
+			}
+			return (&net.Dialer{}).DialContext(ctx, network, address)
+		}
+		wrappers := []func(http.RoundTripper) http.RoundTripper(nil)
+		if hook != nil {
+			wrappers = append(wrappers, func(inner http.RoundTripper) http.RoundTripper {
+				hook.inner = inner
+				return hook
+			})
+		}
+		retry.HTTPClient.Transport = withResponseBudget(transport, wrappers...)
+		options := []scaleset.HTTPOption{scaleset.WithRetryableHTTPClint(retry), scaleset.WithLogger(slog.New(slog.DiscardHandler))}
+		client, err := scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{GitHubConfigURL: server.URL + "/fixture-org", PersonalAccessToken: "synthetic-installation"}, options...)
+		if err != nil {
+			return nil, err
+		}
+		return &SDKAPI{client: client, rest: retry.HTTPClient, baseURL: server.URL + "/api/v3", approval: fixtureApproval, credentials: credentials(fixtureApproval), options: options}, nil
+	}
+	base, err := buildAPI(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.drainClientFactory = buildAPI
+	api := fixtureSDK{base}
+	directory := privateDir(t)
+	j, err := openTestJournal(t, directory, a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range drainReplayPrefix()[:3] {
+		if err := j.Append(event); err != nil {
+			_ = j.Close()
+			t.Fatalf("append create prefix: %v", err)
+		}
+	}
+	d := Driver{Approval: a, Journal: j, API: api}
+	if err := d.Run(context.Background(), "drain"); err != nil {
+		t.Fatalf("pinned SDK drain: %v", err)
+	}
+	if polls != 2 || acks != 1 || acquires != 1 || closes != 1 || snapshotReads != 2 {
+		t.Fatalf("pinned SDK effects polls=%d ack=%d acquire=%d close=%d snapshots=%d", polls, acks, acquires, closes, snapshotReads)
+	}
+	var observed bool
+	var drainPhaseSequence, drainPhaseSetID, observationSequence int
+	var snapshotStages []string
+	for _, event := range j.Events() {
+		if event.Kind == "phase" && event.Operation == "drain" {
+			drainPhaseSequence = event.Sequence
+			drainPhaseSetID = event.ID
+		}
+		if event.DrainSnapshot != nil {
+			snapshotStages = append(snapshotStages, event.DrainSnapshotStage)
+		}
+		if event.Kind == "observation" && event.Operation == "drain" && event.Drain != nil && event.Drain.Outcome == drainOutcomeObserved {
+			observed = true
+			observationSequence = event.Drain.Sequence
+			if !sameDrainRunnerPartition(event.Drain.NextPoll.Statistics, event.Drain.Before.Statistics) {
+				t.Fatal("pinned SDK drain accepted a withdrawn-poll runner partition mismatch")
+			}
+		}
+	}
+	if !observed {
+		t.Fatal("pinned SDK drain did not retain observed outcome")
+	}
+	if drainPhaseSequence <= 0 || drainPhaseSetID != set.ID || observationSequence != drainPhaseSequence {
+		t.Fatalf("pinned SDK drain binding = phase sequence %d SetID %d, observation %d; want exact phase sequence and SetID %d", drainPhaseSequence, drainPhaseSetID, observationSequence, set.ID)
+	}
+	if len(snapshotStages) != 2 || snapshotStages[0] != "before" || snapshotStages[1] != "after" {
+		t.Fatalf("pinned SDK drain snapshot stages = %v, want before/after", snapshotStages)
+	}
+	if err := j.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := openTestJournal(t, directory, a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if state := replayWithApproval(reopened.Events(), &a); state.uncertain {
+		t.Fatalf("legitimate after job-counter change retained replay uncertainty: %+v", state)
+	}
+}
+
+func TestPinnedSDKDrainRejectsSnapshotOriginMismatchBeforeEffects(t *testing.T) {
+	a := approval()
+	a.Phases = append(a.Phases, "drain")
+	var snapshotRequests atomic.Int32
+	fixture, base, _, _ := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{
+		wrongCloseOrigin:  false,
+		extraActionsHosts: []string{"other.example.com"},
+		mutateRequest: func(req *http.Request) {
+			if req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/runnerscalesets/7") && snapshotRequests.Add(1) == 2 {
+				req.URL.Host = "other.example.com"
+				req.URL.RawPath = ""
+			}
+		},
+	})
+	j := &memoryJournal{}
+	for _, event := range drainReplayPrefix()[:3] {
+		if err := j.Append(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d := &Driver{Approval: a, Journal: j, API: fixtureSDK{base}}
+	runErr := d.Run(context.Background(), "drain")
+	if !errors.Is(runErr, ErrQuarantine) {
+		t.Fatalf("snapshot origin mismatch = %v, want quarantine", runErr)
+	}
+	if got := fixture.snapshotReads.Load(); got != 1 {
+		t.Fatalf("mismatched after snapshot reached fixture: reads=%d, want before only", got)
+	}
+	for _, event := range j.Events() {
+		if event.Kind == "observation" && event.Operation == "drain" && event.Drain != nil && event.Drain.Outcome == drainOutcomeObserved {
+			t.Fatal("mismatched snapshot origin produced an observed drain")
+		}
+	}
+}
+
+func TestPinnedSDKDrainRejectsSnapshotTenantPrefixMismatchBeforeEffects(t *testing.T) {
+	a := approval()
+	a.Phases = append(a.Phases, "drain")
+	var snapshotRequests atomic.Int32
+	fixture, base, _, _ := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{
+		runtimeActionsBasePath: "/tenant/approved/",
+		mutateRequest: func(req *http.Request) {
+			if req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/runnerscalesets/7") && snapshotRequests.Add(1) == 2 {
+				req.URL.Path = "/tenant/foreign/_apis/runtime/runnerscalesets/7"
+				req.URL.RawPath = ""
+			}
+		},
+	})
+	j := &memoryJournal{}
+	for _, event := range drainReplayPrefix()[:3] {
+		if err := j.Append(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d := &Driver{Approval: a, Journal: j, API: fixtureSDK{base}}
+	if err := d.Run(context.Background(), "drain"); !errors.Is(err, ErrQuarantine) {
+		t.Fatalf("snapshot tenant-prefix mismatch = %v, want quarantine", err)
+	}
+	if got := fixture.snapshotReads.Load(); got != 1 {
+		t.Fatalf("mismatched after snapshot reached fixture: reads=%d, want before only", got)
+	}
+}
+
+func TestPinnedSDKDrainRejectsSessionOriginMismatchBeforeListener(t *testing.T) {
+	a := approval()
+	a.Phases = append(a.Phases, "drain")
+	var sessionAttempts atomic.Int32
+	fixture, base, _, _ := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{
+		extraActionsHosts: []string{"other.example.com"},
+		mutateRequest: func(req *http.Request) {
+			if req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/sessions") && sessionAttempts.Add(1) == 2 {
+				req.URL.Host = "other.example.com"
+				req.URL.RawPath = ""
+			}
+		},
+	})
+	j := &memoryJournal{}
+	for _, event := range drainReplayPrefix()[:3] {
+		if err := j.Append(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d := &Driver{Approval: a, Journal: j, API: fixtureSDK{base}}
+	if err := d.Run(context.Background(), "drain"); !errors.Is(err, ErrQuarantine) {
+		t.Fatalf("session-open origin mismatch = %v, want quarantine", err)
+	}
+	if got := fixture.polls.Load(); got != 0 {
+		t.Fatalf("session-open origin mismatch started listener polls: polls=%d", got)
+	}
+	if got := fixture.sessionOpens.Load(); got != 1 {
+		t.Fatalf("session-open origin mismatch reached fixture: opens=%d, want setup open only", got)
+	}
+	for _, event := range j.Events() {
+		if event.Kind == "observation" && event.Operation == "drain" && event.Drain != nil && event.Drain.Outcome == drainOutcomeObserved {
+			t.Fatal("session-open origin mismatch produced an observed drain")
+		}
+	}
+}
+
+func TestPinnedSDKDrainRejectsSessionTenantPrefixMismatchBeforeListener(t *testing.T) {
+	a := approval()
+	a.Phases = append(a.Phases, "drain")
+	fixture, base, _, _ := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{
+		runtimeActionsBasePath: "/tenant/approved/",
+		mutateRequest: func(req *http.Request) {
+			if req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/sessions") {
+				req.URL.Path = "/tenant/foreign/_apis/runtime/runnerscalesets/7/sessions"
+				req.URL.RawPath = ""
+			}
+		},
+	})
+	fixture.sessionOpens.Store(0)
+	j := &memoryJournal{}
+	for _, event := range drainReplayPrefix()[:3] {
+		if err := j.Append(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d := &Driver{Approval: a, Journal: j, API: fixtureSDK{base}}
+	if err := d.Run(context.Background(), "drain"); !errors.Is(err, ErrQuarantine) {
+		t.Fatalf("session tenant-prefix mismatch = %v, want quarantine", err)
+	}
+	if got := fixture.sessionOpens.Load(); got != 0 {
+		t.Fatalf("mismatched session-open reached fixture: opens=%d", got)
+	}
+	if got := fixture.polls.Load(); got != 0 {
+		t.Fatalf("session tenant-prefix mismatch started listener polls: polls=%d", got)
+	}
+}
+
+func TestPinnedSDKDrainRejectsRunnerSnapshotOriginMismatchBeforeListener(t *testing.T) {
+	a := approval()
+	a.Phases = append(a.Phases, "drain")
+	var runnerRequests atomic.Int32
+	fixture, base, _, _ := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{
+		extraActionsHosts: []string{"other.example.com"},
+		mutateRequest: func(req *http.Request) {
+			if req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/agents") && runnerRequests.Add(1) == 1 {
+				req.URL.Host = "other.example.com"
+				req.URL.RawPath = ""
+			}
+		},
+	})
+	j := &memoryJournal{}
+	for _, event := range drainReplayPrefix()[:3] {
+		if err := j.Append(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d := &Driver{Approval: a, Journal: j, API: fixtureSDK{base}}
+	if err := d.Run(context.Background(), "drain"); !errors.Is(err, ErrQuarantine) {
+		t.Fatalf("runner snapshot origin mismatch = %v, want quarantine", err)
+	}
+	if got := fixture.polls.Load(); got != 0 {
+		t.Fatalf("mismatched runner snapshot reached listener effects: polls=%d", got)
+	}
+	for _, event := range j.Events() {
+		if event.Kind == "observation" && event.Operation == "drain" && event.Drain != nil && event.Drain.Outcome == drainOutcomeObserved {
+			t.Fatal("mismatched runner snapshot origin produced an observed drain")
+		}
+	}
+}
+
+func TestPinnedSDKDrainRejectsAmbiguousEmbeddedJobIdentityBeforeEffects(t *testing.T) {
+	a := approval()
+	for _, test := range []struct {
+		name       string
+		body       string
+		wantReject bool
+	}{
+		// The pinned SDK's ordinary decoder accepts the case-folded duplicate
+		// and keeps the later value. The adapter must reject that ambiguous wire
+		// before the listener can ACK or acquire the message.
+		{name: "casefolded identity", body: `[{"messageType":"JobAvailable","runnerRequestId":41,"workflowRunId":5,"ownerName":"foreign-owner","OwnerName":"fixture-org","repositoryName":"canary"}]`, wantReject: true},
+		{name: "duplicate identity", body: `[{"messageType":"JobAvailable","runnerRequestId":41,"workflowRunId":5,"ownerName":"fixture-org","ownerName":"fixture-org","repositoryName":"canary"}]`, wantReject: true},
+		{name: "malformed body", body: `[{"messageType":"JobAvailable","runnerRequestId":41`, wantReject: true},
+		{name: "legitimate SDK body", body: pinnedDrainJobBody(a)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture, _, session, hook := newPinnedDrainSession(t, a, test.body)
+			observation, err := runDrainListener(context.Background(), session, 7, hook)
+			if test.wantReject {
+				if !errors.Is(err, ErrQuarantine) || observation.Outcome == drainOutcomeObserved {
+					t.Fatalf("ambiguous embedded job identity was accepted: observation=%+v err=%v", observation, err)
+				}
+				if fixture.acks.Load() != 0 || fixture.acquires.Load() != 0 {
+					t.Fatalf("ambiguous embedded job identity reached effects: polls=%d acks=%d acquires=%d", fixture.polls.Load(), fixture.acks.Load(), fixture.acquires.Load())
+				}
+				return
+			}
+			if err != nil || observation.Outcome != drainOutcomeObserved || fixture.acks.Load() != 1 || fixture.acquires.Load() != 1 {
+				t.Fatalf("legitimate embedded job path failed: observation=%+v err=%v polls=%d acks=%d acquires=%d", observation, err, fixture.polls.Load(), fixture.acks.Load(), fixture.acquires.Load())
+			}
+		})
+	}
+}
+
+func TestPinnedSDKDrainBindsPollCursorBeforeInnerCall(t *testing.T) {
+	t.Run("first poll requires zero cursor", func(t *testing.T) {
+		a := approval()
+		fixture, _, session, hook := newPinnedDrainSession(t, a, pinnedDrainJobBody(a))
+		c := newPinnedDrainClient(session, hook)
+		hook.releaseResponse()
+
+		if _, err := c.GetMessage(context.Background(), 9, drainInitialCapacity); !errors.Is(err, ErrQuarantine) {
+			t.Fatalf("wrong first cursor = %v, want quarantine", err)
+		}
+		if fixture.polls.Load() != 0 {
+			t.Fatalf("wrong first cursor reached inner SDK: polls=%d", fixture.polls.Load())
+		}
+	})
+
+	t.Run("second poll requires acknowledged message cursor", func(t *testing.T) {
+		a := approval()
+		fixture, _, session, hook := newPinnedDrainSession(t, a, pinnedDrainJobBody(a))
+		c := newPinnedDrainClient(session, hook)
+		hook.releaseResponse()
+
+		if _, err := c.GetMessage(context.Background(), 0, drainInitialCapacity); err != nil {
+			t.Fatalf("valid first poll: %v", err)
+		}
+		if _, err := c.GetMessage(context.Background(), 0, drainWithdrawnCapacity); !errors.Is(err, ErrQuarantine) {
+			t.Fatalf("wrong second cursor = %v, want quarantine", err)
+		}
+		if fixture.polls.Load() != 1 {
+			t.Fatalf("wrong second cursor reached inner SDK: polls=%d cursors=%v", fixture.polls.Load(), fixture.cursorsSnapshot())
+		}
+	})
+
+	t.Run("legitimate SDK cursor path remains bounded", func(t *testing.T) {
+		a := approval()
+		fixture, _, session, hook := newPinnedDrainSession(t, a, pinnedDrainJobBody(a))
+		c := newPinnedDrainClient(session, hook)
+		hook.releaseResponse()
+
+		message, err := c.GetMessage(context.Background(), 0, drainInitialCapacity)
+		if err != nil || message == nil {
+			t.Fatalf("valid first poll = message %v err %v", message, err)
+		}
+		if err := c.DeleteMessage(context.Background(), message.MessageID); err != nil {
+			t.Fatalf("valid ACK: %v", err)
+		}
+		if _, err := c.AcquireJobs(context.Background(), []int64{41}); err != nil {
+			t.Fatalf("valid acquisition: %v", err)
+		}
+		if message, err = c.GetMessage(context.Background(), 17, drainWithdrawnCapacity); err != nil || message != nil {
+			t.Fatalf("valid second poll = message %v err %v", message, err)
+		}
+		if fixture.polls.Load() != 2 || fixture.acks.Load() != 1 || fixture.acquires.Load() != 1 {
+			t.Fatalf("legitimate SDK effects polls=%d acks=%d acquires=%d cursors=%v capacities=%v", fixture.polls.Load(), fixture.acks.Load(), fixture.acquires.Load(), fixture.cursorsSnapshot(), fixture.capacitiesSnapshot())
+		}
+	})
+}
+
+func TestPinnedSDKDrainMatchesWireBeforeVerifyRun(t *testing.T) {
+	a := approval()
+	body := `[{"messageType":"JobAvailable","runnerRequestId":41,"workflowRunId":5,"ownerName":"foreign-owner","OwnerName":"fixture-org","repositoryName":"canary"}]`
+	fixture, base, session, hook := newPinnedDrainSession(t, a, body)
+	api := &countingFixtureSDK{fixtureSDK: fixtureSDK{base}}
+	d := &Driver{Approval: a, Journal: &memoryJournal{}, API: api}
+	c := &journaledDrainClient{d: d, inner: session, sessionID: session.Session().SessionID.String(), hook: hook}
+	hook.releaseResponse()
+
+	if _, err := c.GetMessage(context.Background(), 0, drainInitialCapacity); !errors.Is(err, ErrQuarantine) {
+		t.Fatalf("ambiguous embedded job identity = %v, want quarantine", err)
+	}
+	if api.verifyCalls.Load() != 0 {
+		t.Fatalf("wire mismatch reached VerifyRun: calls=%d", api.verifyCalls.Load())
+	}
+	if fixture.acks.Load() != 0 || fixture.acquires.Load() != 0 {
+		t.Fatalf("wire mismatch reached effects: acks=%d acquires=%d", fixture.acks.Load(), fixture.acquires.Load())
+	}
+}
+
+func TestPinnedSDKDrainRejectsNonEOFPollReadError(t *testing.T) {
+	a := approval()
+	fixture, _, session, hook := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{pollReadError: io.ErrUnexpectedEOF})
+	hook.releaseResponse()
+	if _, err := session.GetMessage(context.Background(), 0, drainInitialCapacity); err == nil {
+		t.Fatal("non-EOF poll read error was accepted by the pinned SDK")
+	}
+	if _, known := hook.pollStatistics(1); known {
+		t.Fatalf("non-EOF poll read error became known wire facts: fixture polls=%d", fixture.polls.Load())
+	}
+	if fixture.acks.Load() != 0 || fixture.acquires.Load() != 0 {
+		t.Fatalf("non-EOF poll read error reached effects: ack=%d acquire=%d", fixture.acks.Load(), fixture.acquires.Load())
+	}
+}
+
+func TestPinnedSDKDrainRejectsPollCloseErrorBeforeEffects(t *testing.T) {
+	a := approval()
+	fixture, base, session, hook := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{pollCloseError: io.ErrClosedPipe})
+	hook.releaseResponse()
+	j := &memoryJournal{}
+	d := &Driver{Approval: a, Journal: j, API: fixtureSDK{base}}
+	client := &journaledDrainClient{d: d, inner: session, sessionID: session.Session().SessionID.String(), setID: 7, hook: hook}
+
+	message, err := client.GetMessage(context.Background(), 0, drainInitialCapacity)
+	if err == nil || message != nil {
+		t.Fatalf("poll close error = message %v err %v, want rejection", message, err)
+	}
+	if _, known := hook.pollStatistics(1); known {
+		t.Fatal("poll close error published known statistics")
+	}
+	if _, known := hook.pollBatch(1); known {
+		t.Fatal("poll close error published a known batch")
+	}
+	if present, absent := hook.pollMessageState(1); present || absent {
+		t.Fatalf("poll close error published message state: present=%v absent=%v", present, absent)
+	}
+	if fixture.acks.Load() != 0 || fixture.acquires.Load() != 0 {
+		t.Fatalf("poll close error reached effects: ack=%d acquire=%d", fixture.acks.Load(), fixture.acquires.Load())
+	}
+	for _, event := range j.Events() {
+		if event.Kind == "result" && (event.Operation == "ack" || event.Operation == "acquire" || event.Operation == "drain") {
+			t.Fatalf("poll close error recorded an observed effect: operation=%s", event.Operation)
+		}
+	}
+}
+
+func TestPinnedSDKDrainRejectsVerifyRunCloseErrorBeforeEffects(t *testing.T) {
+	a := approval()
+	fixture, base, session, hook := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{verifyCloseError: io.ErrClosedPipe})
+	hook.releaseResponse()
+	j := &memoryJournal{}
+	d := &Driver{Approval: a, Journal: j, API: base}
+	client := &journaledDrainClient{d: d, inner: session, sessionID: session.Session().SessionID.String(), setID: 7, hook: hook}
+
+	message, err := client.GetMessage(context.Background(), 0, drainInitialCapacity)
+	if !errors.Is(err, ErrQuarantine) || message != nil {
+		t.Fatalf("workflow verification close error = message %v err %v, want quarantine", message, err)
+	}
+	if fixture.verifyCalls.Load() != 1 {
+		t.Fatalf("workflow verification calls = %d, want one", fixture.verifyCalls.Load())
+	}
+	if fixture.acks.Load() != 0 || fixture.acquires.Load() != 0 {
+		t.Fatalf("workflow verification close error reached effects: ack=%d acquire=%d", fixture.acks.Load(), fixture.acquires.Load())
+	}
+}
+
+func TestPinnedSDKDrainRejectsSubstitutedSessionAuthorizationBeforeEffects(t *testing.T) {
+	a := approval()
+	fixture, base, session, hook := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{
+		mutateRequest: func(req *http.Request) {
+			if req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/acquirejobs") {
+				req.Header.Set("Authorization", "Bearer "+strings.Repeat("x", 24))
+			}
+		},
+	})
+	hook.releaseResponse()
+	j := &memoryJournal{}
+	d := &Driver{Approval: a, Journal: j, API: fixtureSDK{base}}
+	client := &journaledDrainClient{d: d, inner: session, sessionID: session.Session().SessionID.String(), setID: 7, hook: hook}
+	message, err := client.GetMessage(context.Background(), 0, drainInitialCapacity)
+	if err != nil || message == nil {
+		t.Fatalf("valid setup poll = message %v err %v", message, err)
+	}
+	if err := client.DeleteMessage(context.Background(), message.MessageID); err != nil {
+		t.Fatalf("valid setup ACK = %v", err)
+	}
+	got, err := client.AcquireJobs(context.Background(), []int64{41})
+	if !errors.Is(err, ErrQuarantine) || got != nil {
+		t.Fatalf("substituted session authorization = got %v err %v, want pre-inner quarantine", got, err)
+	}
+	if fixture.acquires.Load() != 0 {
+		t.Fatalf("substituted session authorization reached acquisition endpoint: acquires=%d", fixture.acquires.Load())
+	}
+	if state := replay(j.Events()); !state.uncertain {
+		t.Fatal("substituted session authorization did not retain uncertainty")
+	}
+}
+
+func TestPinnedSDKDrainRejectsSubstitutedSessionCloseAuthorizationBeforeEffects(t *testing.T) {
+	a := approval()
+	a.Phases = append(a.Phases, "drain")
+	fixture, base, _, _ := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{
+		mutateRequest: func(req *http.Request) {
+			if req.Method == http.MethodDelete && strings.Contains(req.URL.Path, "/sessions/") {
+				req.Header.Set("Authorization", "Bearer "+strings.Repeat("x", 24))
+			}
+		},
+	})
+	j := &memoryJournal{}
+	for _, event := range drainReplayPrefix()[:3] {
+		if err := j.Append(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d := &Driver{Approval: a, Journal: j, API: fixtureSDK{base}}
+	err := d.Run(context.Background(), "drain")
+	if !errors.Is(err, ErrQuarantine) {
+		t.Fatalf("substituted session-close authorization = %v, want quarantine", err)
+	}
+	if fixture.closeRequests.Load() != 0 {
+		t.Fatalf("substituted session-close authorization reached close endpoint: closes=%d", fixture.closeRequests.Load())
+	}
+	for _, event := range j.Events() {
+		if event.Kind == "observation" && event.Operation == "drain" && event.Drain != nil && event.Drain.Outcome == drainOutcomeObserved {
+			t.Fatal("substituted session-close authorization produced an observed drain")
+		}
+	}
+}
+
+func TestPinnedSDKDrainBindsACKToPhysicalDelete(t *testing.T) {
+	a := approval()
+	fixture, base, session, hook := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{
+		acceptAnyACK: true,
+		mutateRequest: func(req *http.Request) {
+			if req.Method == http.MethodDelete && strings.HasPrefix(req.URL.Path, "/queue/") {
+				req.URL.Path = "/queue/999"
+				req.URL.RawPath = ""
+			}
+		},
+	})
+	hook.releaseResponse()
+	j := &memoryJournal{}
+	api := &countingFixtureSDK{fixtureSDK: fixtureSDK{base}}
+	d := &Driver{Approval: a, Journal: j, API: api}
+	client := &journaledDrainClient{d: d, inner: session, sessionID: session.Session().SessionID.String(), setID: 7, hook: hook}
+	message, err := client.GetMessage(context.Background(), 0, drainInitialCapacity)
+	if err != nil || message == nil {
+		t.Fatalf("pinned SDK setup poll = message %v err %v", message, err)
+	}
+	if err := client.DeleteMessage(context.Background(), message.MessageID); !errors.Is(err, ErrQuarantine) {
+		t.Fatalf("wrong physical ACK = %v, want quarantine", err)
+	}
+	if fixture.acks.Load() != 0 {
+		t.Fatalf("wrong physical ACK reached fixture endpoint: ack=%d", fixture.acks.Load())
+	}
+}
+
+func TestPinnedSDKDrainBindsAcquireToPhysicalRequestBody(t *testing.T) {
+	a := approval()
+	tests := []struct {
+		name       string
+		mutateBody func(*http.Request)
+		good       bool
+	}{
+		{name: "valid pinned SDK array", good: true},
+		{name: "mismatched ID", mutateBody: replaceSDKRequestBody(`[99]`)},
+		{name: "duplicate ID", mutateBody: replaceSDKRequestBody(`[41,41]`)},
+		{name: "case-folded duplicate field", mutateBody: replaceSDKRequestBody(`{"RequestIDs":[99],"requestids":[41]}`)},
+		{name: "malformed JSON", mutateBody: replaceSDKRequestBody(`[41`)},
+		{name: "oversized body", mutateBody: replaceSDKRequestBody(strings.Repeat("0", int(responseBodyLimit)+1))},
+		{name: "read error", mutateBody: func(req *http.Request) {
+			req.Body = &sdkRequestBodyFault{data: []byte(`[41]`), err: io.ErrUnexpectedEOF}
+			req.ContentLength = -1
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			options := pinnedDrainOptions{runtimeActionsBasePath: "/tenant/v2/", mutateRequest: func(req *http.Request) {
+				if tc.mutateBody != nil && req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/acquirejobs") {
+					tc.mutateBody(req)
+				}
+			}}
+			fixture, base, session, hook := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), options)
+			journal := &memoryJournal{}
+			d := &Driver{Approval: a, Journal: journal, API: base}
+			client := &journaledDrainClient{d: d, inner: session, sessionID: session.Session().SessionID.String(), setID: 7, hook: hook}
+			hook.releaseResponse()
+			message, err := client.GetMessage(context.Background(), 0, drainInitialCapacity)
+			if err != nil || message == nil {
+				t.Fatalf("pinned SDK setup poll = message %v err %v", message, err)
+			}
+			if err := client.DeleteMessage(context.Background(), message.MessageID); err != nil {
+				t.Fatalf("pinned SDK setup ACK = %v", err)
+			}
+			got, err := client.AcquireJobs(context.Background(), []int64{41})
+			if tc.good {
+				if err != nil || !slices.Equal(got, []int64{41}) {
+					t.Fatalf("valid pinned SDK acquisition = %v, got %v", err, got)
+				}
+				if fixture.acquires.Load() != 1 || fixture.acquireRequestBody() != "[41]" {
+					t.Fatalf("valid pinned SDK request = acquires %d body %q", fixture.acquires.Load(), fixture.acquireRequestBody())
+				}
+				return
+			}
+			if !errors.Is(err, ErrQuarantine) || got != nil {
+				t.Fatalf("invalid acquisition body = got %v err %v, want quarantine before forwarding", got, err)
+			}
+			if fixture.acquires.Load() != 0 {
+				t.Fatalf("invalid acquisition body reached loopback endpoint: acquires=%d", fixture.acquires.Load())
+			}
+			if state := replay(journal.Events()); !state.uncertain {
+				t.Fatal("invalid acquisition body did not retain uncertainty")
+			}
+		})
+	}
+}
+
+func TestPinnedSDKDrainRejectsAcquireTargetMutationBeforeFixture(t *testing.T) {
+	a := approval()
+	for _, tc := range []struct {
+		name   string
+		mutate func(*http.Request)
+	}{
+		{
+			name: "wrong allowed host",
+			mutate: func(req *http.Request) {
+				req.URL.Host = "other.example.com"
+			},
+		},
+		{
+			name: "wrong scale set",
+			mutate: func(req *http.Request) {
+				req.URL.Path = strings.Replace(req.URL.Path, "/runnerscalesets/7/", "/runnerscalesets/8/", 1)
+				req.URL.RawPath = ""
+			},
+		},
+		{
+			name: "wrong query",
+			mutate: func(req *http.Request) {
+				query := req.URL.Query()
+				query.Set("unexpected", "1")
+				req.URL.RawQuery = query.Encode()
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture, base, session, hook := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{
+				wrongCloseOrigin:  true,
+				extraActionsHosts: []string{"other.example.com"},
+				mutateRequest: func(req *http.Request) {
+					if req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/acquirejobs") {
+						tc.mutate(req)
+					}
+				},
+			})
+			journal := &memoryJournal{}
+			d := &Driver{Approval: a, Journal: journal, API: base}
+			client := &journaledDrainClient{d: d, inner: session, sessionID: session.Session().SessionID.String(), setID: 7, hook: hook}
+			hook.releaseResponse()
+			message, err := client.GetMessage(context.Background(), 0, drainInitialCapacity)
+			if err != nil || message == nil {
+				t.Fatalf("pinned SDK setup poll = message %v err %v", message, err)
+			}
+			if err := client.DeleteMessage(context.Background(), message.MessageID); err != nil {
+				t.Fatalf("pinned SDK setup ACK = %v", err)
+			}
+			if got, err := client.AcquireJobs(context.Background(), []int64{41}); !errors.Is(err, ErrQuarantine) || got != nil {
+				t.Fatalf("mutated acquisition target = got %v err %v, want quarantine", got, err)
+			}
+			if fixture.acquires.Load() != 0 {
+				t.Fatalf("mutated acquisition target reached loopback endpoint: acquires=%d", fixture.acquires.Load())
+			}
+			if state := replay(journal.Events()); !state.uncertain {
+				t.Fatal("mutated acquisition target did not retain uncertainty")
+			}
+		})
+	}
+}
+
+func TestPinnedSDKDrainBindsSessionCloseToPhysicalDelete(t *testing.T) {
+	a := approval()
+	a.Phases = append(a.Phases, "drain")
+	for _, tc := range []struct {
+		name   string
+		mutate func(*http.Request)
+	}{
+		{
+			name: "wrong session",
+			mutate: func(req *http.Request) {
+				if req.Method == http.MethodDelete && strings.Contains(req.URL.Path, "/sessions/") {
+					req.URL.Path = strings.TrimSuffix(req.URL.Path, "/00000000-0000-0000-0000-000000000021") + "/00000000-0000-0000-0000-000000000099"
+					req.URL.RawPath = ""
+				}
+			},
+		},
+		{
+			name: "wrong scale set",
+			mutate: func(req *http.Request) {
+				if req.Method == http.MethodDelete && strings.Contains(req.URL.Path, "/sessions/") {
+					req.URL.Path = strings.Replace(req.URL.Path, "/runnerscalesets/7/", "/runnerscalesets/8/", 1)
+					req.URL.RawPath = ""
+				}
+			},
+		},
+		{
+			name: "route family omitted",
+			mutate: func(req *http.Request) {
+				if req.Method == http.MethodDelete && strings.Contains(req.URL.Path, "/sessions/") {
+					req.URL.Path = strings.Replace(req.URL.Path, "/runnerscalesets/7", "", 1)
+					req.URL.RawPath = ""
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture, base, _, _ := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{mutateRequest: tc.mutate})
+			journal := &memoryJournal{}
+			for _, event := range drainReplayPrefix()[:3] {
+				if err := journal.Append(event); err != nil {
+					t.Fatal(err)
+				}
+			}
+			d := &Driver{Approval: a, Journal: journal, API: fixtureSDK{base}}
+			if err := d.Run(context.Background(), "drain"); !errors.Is(err, ErrQuarantine) {
+				t.Fatalf("wrong session-close target = %v, want quarantine", err)
+			}
+			if fixture.closeRequests.Load() != 0 {
+				t.Fatalf("wrong session-close target requests = %d, want pre-inner rejection", fixture.closeRequests.Load())
+			}
+			for _, event := range journal.Events() {
+				if event.Kind == "result" && event.Operation == "session-close" {
+					t.Fatal("wrong session-close target recorded a successful result")
+				}
+			}
+			if state := replay(journal.Events()); !state.uncertain {
+				t.Fatal("wrong session-close target did not retain uncertainty")
+			}
+		})
+	}
+}
+
+func TestPinnedSDKDrainBindsSessionCloseToSessionOpenOrigin(t *testing.T) {
+	a := approval()
+	a.Phases = append(a.Phases, "drain")
+	fixture, base, _, _ := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{
+		wrongCloseOrigin:       true,
+		extraActionsHosts:      []string{"other.example.com"},
+		runtimeActionsBasePath: "/tenant/v2/",
+	})
+	j := &memoryJournal{}
+	for _, event := range drainReplayPrefix()[:3] {
+		if err := j.Append(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d := &Driver{Approval: a, Journal: j, API: fixtureSDK{base}}
+	if err := d.Run(context.Background(), "drain"); !errors.Is(err, ErrQuarantine) {
+		t.Fatalf("wrong session-close origin = %v, want quarantine", err)
+	}
+	if fixture.closeRequests.Load() != 0 {
+		t.Fatalf("wrong session-close origin requests = %d, want pre-inner rejection", fixture.closeRequests.Load())
+	}
+	for _, event := range j.Events() {
+		if event.Kind == "result" && event.Operation == "session-close" {
+			t.Fatal("wrong session-close origin recorded a successful result")
+		}
+	}
+	if state := replay(j.Events()); !state.uncertain {
+		t.Fatal("wrong session-close origin did not retain uncertainty")
+	}
+}
+
+func TestPinnedSDKDrainRejectsAmbiguousRunnerSnapshot(t *testing.T) {
+	a := approval()
+	runnerBody := `{"count":1,"value":[{"id":19,"name":"` + a.workerName() + `","runnerScaleSetId":7,"RunnerScaleSetId":7}]}`
+	fixture, base, _, _ := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{runnerBody: runnerBody})
+	j := &memoryJournal{}
+	d := &Driver{Approval: a, Journal: j, API: fixtureSDK{base}}
+	if _, err := d.drainSnapshot(context.Background(), 7, "before"); !errors.Is(err, ErrQuarantine) {
+		t.Fatalf("ambiguous runner snapshot = %v, want quarantine (fixture polls=%d)", err, fixture.polls.Load())
+	}
+}
+
+func TestPinnedSDKDrainRejectsAmbiguousSessionResponse(t *testing.T) {
+	a := approval()
+	name := a.setName()
+	sessionBody := `{"sessionId":"00000000-0000-4000-8000-000000000021","SessionID":"00000000-0000-4000-8000-000000000021","ownerName":"` + name + `","runnerScaleSet":{"id":7,"name":"` + name + `","runnerGroupId":3,"labels":[{"name":"` + name + `","type":"System"}],"RunnerSetting":{"disableUpdate":true},"statistics":{"totalAvailableJobs":0,"totalAcquiredJobs":0,"totalAssignedJobs":0,"totalRunningJobs":0,"totalRegisteredRunners":1,"totalBusyRunners":0,"totalIdleRunners":1}},"messageQueueUrl":"QUEUE_URL","MessageQueueURL":"QUEUE_URL","messageQueueAccessToken":"fixture-queue","statistics":{"totalAvailableJobs":0,"totalAcquiredJobs":0,"totalAssignedJobs":0,"totalRunningJobs":0,"totalRegisteredRunners":1,"totalBusyRunners":0,"totalIdleRunners":1}}`
+	fixture, _, session, _ := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{sessionBody: sessionBody, allowOpenError: true})
+	if fixture.openErr == nil || session != nil {
+		t.Fatalf("ambiguous session response accepted: err=%v session=%v", fixture.openErr, session)
+	}
+}
+
+func TestPinnedSDKDrainRejectsAmbiguousSessionRequestBeforeFixture(t *testing.T) {
+	a := approval()
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "wrong owner", body: `{"ownerName":"foreign-owner"}`},
+		{name: "case-fold duplicate owner", body: `{"ownerName":"` + a.setName() + `","OwnerName":"foreign-owner"}`},
+		{name: "unknown field", body: `{"ownerName":"` + a.setName() + `","unexpected":1}`},
+		{name: "malformed", body: `{"ownerName":"` + a.setName() + `"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture, _, session, _ := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{
+				allowOpenError: true,
+				mutateRequest: func(req *http.Request) {
+					if req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/sessions") {
+						replaceSDKRequestBody(tc.body)(req)
+					}
+				},
+			})
+			if fixture.openErr == nil || session != nil {
+				t.Fatalf("ambiguous session-open request accepted: err=%v session=%v", fixture.openErr, session)
+			}
+			if got := fixture.sessionOpens.Load(); got != 0 {
+				t.Fatalf("ambiguous session-open request reached fixture: opens=%d", got)
+			}
+		})
+	}
+}
+
+func TestPinnedSDKDrainRequiresApprovedHTTPSQueueHost(t *testing.T) {
+	a := approval()
+	for _, tc := range []struct {
+		name     string
+		queueURL string
+		wantOpen bool
+	}{
+		{name: "approved fixture host", queueURL: "QUEUE_URL", wantOpen: true},
+		{name: "control plane API host", queueURL: "https://api.github.com/_apis/messages/queue", wantOpen: false},
+		{name: "unapproved Actions host", queueURL: "https://fixture.actions.githubusercontent.com/_apis/messages/queue", wantOpen: false},
+		{name: "plain HTTP", queueURL: "http://fixture.actions.githubusercontent.com/_apis/messages/queue", wantOpen: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture, _, session, hook := newPinnedDrainSessionOptions(t, a, pinnedDrainJobBody(a), pinnedDrainOptions{
+				sessionBody:    pinnedDrainSessionBody(a, tc.queueURL),
+				allowOpenError: !tc.wantOpen,
+			})
+			if tc.wantOpen {
+				if fixture.openErr != nil || session == nil {
+					t.Fatalf("approved HTTPS queue rejected: err=%v session=%v", fixture.openErr, session)
+				}
+				hook.mu.Lock()
+				target := hook.target
+				hook.mu.Unlock()
+				if target != fixture.server.URL+"/queue" {
+					t.Fatalf("approved queue target = %q, want fixture queue", target)
+				}
+				return
+			}
+			if fixture.openErr == nil || session != nil {
+				t.Fatalf("unapproved queue accepted: err=%v session=%v", fixture.openErr, session)
+			}
+			hook.mu.Lock()
+			target := hook.target
+			hook.mu.Unlock()
+			if target != "" {
+				t.Fatalf("rejected queue assigned poll target %q", target)
+			}
+		})
+	}
+}
+
+func TestValidDrainQueueURLRequiresExactApprovedHostPort(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		queueURL string
+		approved []string
+		want     bool
+	}{
+		{name: "implicit HTTPS port", queueURL: "https://fixture.actions.githubusercontent.com/queue", approved: []string{"fixture.actions.githubusercontent.com"}, want: true},
+		{name: "explicit default HTTPS port", queueURL: "https://fixture.actions.githubusercontent.com:443/queue", approved: []string{"fixture.actions.githubusercontent.com"}, want: true},
+		{name: "wrong approved port", queueURL: "https://fixture.actions.githubusercontent.com:8443/queue", approved: []string{"fixture.actions.githubusercontent.com:9443"}, want: false},
+		{name: "wrong queue port", queueURL: "https://fixture.actions.githubusercontent.com:8443/queue", approved: []string{"fixture.actions.githubusercontent.com:8443"}, want: true},
+		{name: "API control plane", queueURL: "https://api.github.com/queue", approved: []string{"fixture.actions.githubusercontent.com"}, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := validDrainQueueURL(tc.queueURL, tc.approved); got != tc.want {
+				t.Fatalf("queue URL validity = %v, want %v for %q and %v", got, tc.want, tc.queueURL, tc.approved)
+			}
+		})
+	}
+}
+
+func pinnedDrainSessionBody(a Approval, queueURL string) string {
+	data, _ := json.Marshal(map[string]any{
+		"sessionId":               "00000000-0000-4000-8000-000000000021",
+		"ownerName":               a.setName(),
+		"runnerScaleSet":          pinnedDrainScaleSet(a),
+		"messageQueueUrl":         queueURL,
+		"messageQueueAccessToken": "fixture-queue",
+		"statistics":              &scaleset.RunnerScaleSetStatistic{TotalRegisteredRunners: 1, TotalIdleRunners: 1},
+	})
+	return string(data)
+}
+
+func pinnedDrainJobBody(a Approval) string {
+	data, _ := json.Marshal([]map[string]any{{
+		"messageType":     "JobAvailable",
+		"runnerRequestId": int64(41),
+		"workflowRunId":   a.WorkflowRunID,
+		"ownerName":       a.Organization,
+		"repositoryName":  a.Repository,
+	}})
+	return string(data)
+}
+
+type pinnedDrainOptions struct {
+	firstPollBody          string
+	withdrawnBody          string
+	acquireBody            string
+	verifyBody             string
+	sessionBody            string
+	runnerBody             string
+	allowOpenError         bool
+	acceptAnyACK           bool
+	pollReadError          error
+	pollCloseError         error
+	verifyCloseError       error
+	snapshotBodies         []string
+	mutateRequest          func(*http.Request)
+	wrongCloseOrigin       bool
+	extraActionsHosts      []string
+	runtimeActionsBasePath string
+}
+
+type pinnedDrainFixture struct {
+	server         *httptest.Server
+	body           string
+	firstPollBody  string
+	withdrawnBody  string
+	acquireBody    string
+	verifyBody     string
+	runnerBody     string
+	openErr        error
+	snapshotBodies []string
+	polls          atomic.Int32
+	acks           atomic.Int32
+	acquires       atomic.Int32
+	closeRequests  atomic.Int32
+	sessionOpens   atomic.Int32
+	verifyCalls    atomic.Int32
+	snapshotReads  atomic.Int32
+	mu             sync.Mutex
+	cursors        []string
+	capacity       []string
+	acquireBodies  []string
+	closePaths     []string
+}
+
+func newPinnedDrainSession(t *testing.T, a Approval, body string) (*pinnedDrainFixture, *SDKAPI, Session, *drainPollHook) {
+	return newPinnedDrainSessionOptions(t, a, body, pinnedDrainOptions{})
+}
+
+func newPinnedDrainSessionOptions(t *testing.T, a Approval, body string, options pinnedDrainOptions) (*pinnedDrainFixture, *SDKAPI, Session, *drainPollHook) {
+	t.Helper()
+	fixture := &pinnedDrainFixture{
+		body: body, firstPollBody: options.firstPollBody, withdrawnBody: options.withdrawnBody,
+		acquireBody: options.acquireBody, verifyBody: options.verifyBody,
+		runnerBody:     options.runnerBody,
+		snapshotBodies: append([]string(nil), options.snapshotBodies...),
+	}
+	fixture.server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/actions/runners/registration-token") && r.Method == http.MethodPost:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]string{"token": "fixture-registration"})
+		case strings.HasSuffix(r.URL.Path, "/actions/runner-registration") && r.Method == http.MethodPost:
+			claims, _ := json.Marshal(map[string]int64{"exp": time.Now().Add(time.Hour).Unix()})
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"url":   fixture.server.URL + options.runtimeActionsBasePath,
+				"token": "eyJhbGciOiJub25lIn0." + base64.RawURLEncoding.EncodeToString(claims) + ".",
+			})
+		case strings.HasSuffix(r.URL.Path, "/sessions") && r.Method == http.MethodPost:
+			fixture.sessionOpens.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			if options.sessionBody != "" {
+				_, _ = io.WriteString(w, strings.ReplaceAll(options.sessionBody, "QUEUE_URL", fixture.server.URL+"/queue"))
+				return
+			}
+			_ = json.NewEncoder(w).Encode(scaleset.RunnerScaleSetSession{
+				SessionID: uuid.MustParse("00000000-0000-4000-8000-000000000021"), OwnerName: a.setName(),
+				MessageQueueURL: fixture.server.URL + "/queue", MessageQueueAccessToken: "fixture-queue",
+				RunnerScaleSet: pinnedDrainScaleSet(a),
+				Statistics:     &scaleset.RunnerScaleSetStatistic{TotalRegisteredRunners: 1, TotalIdleRunners: 1},
+			})
+		case strings.HasSuffix(r.URL.Path, "/actions/runs/5") && r.Method == http.MethodGet:
+			fixture.verifyCalls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			if fixture.verifyBody != "" {
+				_, _ = io.WriteString(w, fixture.verifyBody)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(pinnedDrainRun(a))
+		case r.URL.Path == "/queue" && r.Method == http.MethodGet:
+			fixture.polls.Add(1)
+			fixture.mu.Lock()
+			fixture.cursors = append(fixture.cursors, r.URL.Query().Get("lastMessageId"))
+			fixture.capacity = append(fixture.capacity, r.Header.Get(scaleset.HeaderScaleSetMaxCapacity))
+			fixture.mu.Unlock()
+			if fixture.polls.Load() == 1 {
+				if fixture.firstPollBody != "" {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, fixture.firstPollBody)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"messageId": 17, "messageType": "RunnerScaleSetJobMessages", "body": fixture.body,
+					"statistics": pinnedDrainStatistics(1, 1),
+				})
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			if fixture.withdrawnBody != "" {
+				_, _ = io.WriteString(w, fixture.withdrawnBody)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"statistics": pinnedDrainStatistics(0, 0)})
+		case options.acceptAnyACK && strings.HasPrefix(r.URL.Path, "/queue/") && r.Method == http.MethodDelete:
+			fixture.acks.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		case r.URL.Path == "/queue/17" && r.Method == http.MethodDelete:
+			fixture.acks.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		case strings.HasSuffix(r.URL.Path, "/acquirejobs") && r.Method == http.MethodPost:
+			fixture.acquires.Add(1)
+			requestBody, readErr := io.ReadAll(r.Body)
+			if readErr == nil {
+				fixture.mu.Lock()
+				fixture.acquireBodies = append(fixture.acquireBodies, string(requestBody))
+				fixture.mu.Unlock()
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if fixture.acquireBody != "" {
+				_, _ = io.WriteString(w, fixture.acquireBody)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"count": 1, "value": []int64{41}})
+		case strings.Contains(r.URL.Path, "/sessions/") && r.Method == http.MethodDelete:
+			fixture.closeRequests.Add(1)
+			fixture.mu.Lock()
+			fixture.closePaths = append(fixture.closePaths, r.URL.Path)
+			fixture.mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		case strings.HasSuffix(r.URL.Path, "/runnerscalesets/7") && r.Method == http.MethodGet:
+			read := int(fixture.snapshotReads.Add(1))
+			if read <= len(fixture.snapshotBodies) && fixture.snapshotBodies[read-1] != "" {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, fixture.snapshotBodies[read-1])
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(pinnedDrainSnapshot(a))
+		case strings.HasSuffix(r.URL.Path, "/agents") && r.Method == http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			if fixture.runnerBody != "" {
+				_, _ = io.WriteString(w, fixture.runnerBody)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"count": 1, "value": []any{map[string]any{"id": 19, "name": a.workerName(), "runnerScaleSetId": 7}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(fixture.server.Close)
+	fixtureApproval := a
+	// The offline TLS fixture's loopback host is explicitly approved for this
+	// test-only SDK factory; production Approval validation still permits only
+	// the provider's Actions hostnames.
+	fixtureApproval.ActionsHosts = append([]string{fixture.server.Listener.Addr().String()}, options.extraActionsHosts...)
+
+	buildAPI := func(hook *drainPollHook) (*SDKAPI, error) {
+		retry := retryablehttp.NewClient()
+		retry.RetryMax = 0
+		retry.Logger = nil
+		retry.HTTPClient.Timeout = time.Second
+		fixtureTransport, ok := fixture.server.Client().Transport.(*http.Transport)
+		if !ok {
+			return nil, errors.New("TLS fixture transport is not an HTTP transport")
+		}
+		transport := fixtureTransport.Clone()
+		transport.Proxy = nil
+		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			aliasAllowed := options.wrongCloseOrigin && address == "other.example.com:443"
+			if !aliasAllowed {
+				for _, host := range options.extraActionsHosts {
+					if address == host+":443" {
+						aliasAllowed = true
+						break
+					}
+				}
+			}
+			if address != fixture.server.Listener.Addr().String() && !aliasAllowed {
+				return nil, errors.New("non-fixture address denied")
+			}
+			dialAddress := address
+			if aliasAllowed {
+				dialAddress = fixture.server.Listener.Addr().String()
+			}
+			return (&net.Dialer{}).DialContext(ctx, network, dialAddress)
+		}
+		wrappers := []func(http.RoundTripper) http.RoundTripper(nil)
+		if hook != nil {
+			if options.pollReadError != nil || options.pollCloseError != nil {
+				wrappers = append(wrappers, func(inner http.RoundTripper) http.RoundTripper {
+					return sdkResponseBodyFaultRoundTripper{inner: inner, path: "/queue", err: options.pollReadError, closeErr: options.pollCloseError}
+				})
+			}
+			wrappers = append(wrappers, func(inner http.RoundTripper) http.RoundTripper {
+				hook.inner = inner
+				return hook
+			})
+		}
+		if options.verifyCloseError != nil {
+			verifyPath := "/api/v3/repos/" + fixtureApproval.Organization + "/" + fixtureApproval.Repository + "/actions/runs/" + strconv.FormatInt(fixtureApproval.WorkflowRunID, 10)
+			wrappers = append(wrappers, func(inner http.RoundTripper) http.RoundTripper {
+				return sdkResponseBodyFaultRoundTripper{inner: inner, path: verifyPath, closeErr: options.verifyCloseError}
+			})
+		}
+		if options.wrongCloseOrigin {
+			wrappers = append(wrappers, func(inner http.RoundTripper) http.RoundTripper {
+				return sdkRequestMutationRoundTripper{inner: inner, mutate: func(req *http.Request) {
+					if req.Method == http.MethodDelete && strings.Contains(req.URL.Path, "/sessions/") {
+						req.URL.Host = "other.example.com"
+						req.URL.RawPath = ""
+					}
+				}}
+			})
+		}
+		if options.mutateRequest != nil {
+			wrappers = append(wrappers, func(inner http.RoundTripper) http.RoundTripper {
+				return sdkRequestMutationRoundTripper{inner: inner, mutate: options.mutateRequest}
+			})
+		}
+		retry.HTTPClient.Transport = withResponseBudget(transport, wrappers...)
+		options := []scaleset.HTTPOption{scaleset.WithRetryableHTTPClint(retry), scaleset.WithLogger(slog.New(slog.DiscardHandler))}
+		client, err := scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{GitHubConfigURL: fixture.server.URL + "/fixture-org", PersonalAccessToken: "synthetic-installation"}, options...)
+		if err != nil {
+			return nil, err
+		}
+		return &SDKAPI{client: client, rest: retry.HTTPClient, baseURL: fixture.server.URL + "/api/v3", approval: fixtureApproval, credentials: credentials(fixtureApproval), options: options}, nil
+	}
+	base, err := buildAPI(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.drainClientFactory = buildAPI
+	hook := newDrainPollHook("")
+	session, err := base.OpenDrainSession(context.Background(), 7, a.setName(), hook)
+	if err != nil {
+		fixture.openErr = err
+		if !options.allowOpenError {
+			t.Fatal(err)
+		}
+		return fixture, base, nil, hook
+	}
+	return fixture, base, session, hook
+}
+
+func replaceSDKRequestBody(body string) func(*http.Request) {
+	return func(req *http.Request) {
+		data := []byte(body)
+		req.Body = io.NopCloser(strings.NewReader(body))
+		req.ContentLength = int64(len(data))
+	}
+}
+
+type sdkRequestBodyFault struct {
+	data   []byte
+	offset int
+	err    error
+}
+
+func (b *sdkRequestBodyFault) Read(p []byte) (int, error) {
+	if b.offset >= len(b.data) {
+		return 0, b.err
+	}
+	n := copy(p, b.data[b.offset:])
+	b.offset += n
+	if b.offset == len(b.data) {
+		return n, b.err
+	}
+	return n, nil
+}
+
+func (b *sdkRequestBodyFault) Close() error { return nil }
+
+func (f *pinnedDrainFixture) acquireRequestBody() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.acquireBodies) == 0 {
+		return ""
+	}
+	return f.acquireBodies[len(f.acquireBodies)-1]
+}
+
+type sdkResponseBodyFaultRoundTripper struct {
+	inner    http.RoundTripper
+	path     string
+	err      error
+	closeErr error
+}
+
+func (t sdkResponseBodyFaultRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	response, err := t.inner.RoundTrip(req)
+	if err != nil || response == nil || req.URL == nil || req.URL.Path != t.path || response.Body == nil {
+		return response, err
+	}
+	response.Body = &sdkResponseBodyFault{source: response.Body, err: t.err, closeErr: t.closeErr}
+	return response, nil
+}
+
+type sdkResponseBodyFault struct {
+	source   io.ReadCloser
+	err      error
+	closeErr error
+	injected bool
+	pending  bool
+}
+
+func (b *sdkResponseBodyFault) Read(p []byte) (int, error) {
+	if b.pending {
+		b.pending = false
+		return 0, b.err
+	}
+	n, err := b.source.Read(p)
+	if err == io.EOF && !b.injected {
+		b.injected = true
+		if n > 0 {
+			b.pending = true
+			return n, nil
+		}
+		return 0, b.err
+	}
+	return n, err
+}
+
+func (b *sdkResponseBodyFault) Close() error {
+	if err := b.source.Close(); err != nil {
+		return err
+	}
+	return b.closeErr
+}
+
+type sdkRequestMutationRoundTripper struct {
+	inner  http.RoundTripper
+	mutate func(*http.Request)
+}
+
+func (t sdkRequestMutationRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.mutate != nil {
+		t.mutate(req)
+	}
+	return t.inner.RoundTrip(req)
+}
+
+func pinnedDrainRun(a Approval) map[string]any {
+	repository := map[string]any{"id": a.RepositoryID, "private": true, "fork": false}
+	return map[string]any{
+		"id": a.WorkflowRunID, "head_sha": a.WorkflowSHA, "event": "workflow_dispatch",
+		"path": a.WorkflowPath, "run_attempt": 1, "repository": repository,
+		"head_repository": repository,
+	}
+}
+
+func newPinnedDrainClient(session Session, hook *drainPollHook) *drainClient {
+	initial := session.Session()
+	stats, _ := newDrainStatistics(initial.Statistics)
+	return &drainClient{
+		inner: session, hook: hook, phaseCtx: context.Background(),
+		obs: &drainObservation{Poll: drainPollObservation{Message: drainMessageUnknown}, NextPoll: drainPollObservation{Message: drainMessageUnknown}}, ownedRunnerStats: stats, ownedRunnerStatsKnown: true,
+	}
+}
+
+func pinnedDrainStatistics(available, assigned int) map[string]int {
+	return map[string]int{
+		"totalAvailableJobs": available, "totalAcquiredJobs": 0, "totalAssignedJobs": assigned,
+		"totalRunningJobs": 0, "totalRegisteredRunners": 1, "totalBusyRunners": 0, "totalIdleRunners": 1,
+	}
+}
+
+func pinnedDrainScaleSet(a Approval) *scaleset.RunnerScaleSet {
+	return &scaleset.RunnerScaleSet{
+		ID: 7, Name: a.setName(), RunnerGroupID: a.RunnerGroupID,
+		Labels:        []scaleset.Label{{Name: a.setName(), Type: "System"}},
+		RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true},
+		Statistics:    &scaleset.RunnerScaleSetStatistic{TotalRegisteredRunners: 1, TotalIdleRunners: 1},
+	}
+}
+
+func pinnedDrainSnapshot(a Approval) map[string]any {
+	return map[string]any{
+		"id": 7, "name": a.setName(), "runnerGroupId": a.RunnerGroupID,
+		"labels":        []map[string]string{{"name": a.setName(), "type": "System"}},
+		"RunnerSetting": map[string]any{"disableUpdate": true},
+		"statistics":    pinnedDrainStatistics(0, 0),
+	}
+}
+
+func (f *pinnedDrainFixture) cursorsSnapshot() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.cursors...)
+}
+
+func (f *pinnedDrainFixture) capacitiesSnapshot() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.capacity...)
 }

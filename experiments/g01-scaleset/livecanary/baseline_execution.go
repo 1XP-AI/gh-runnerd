@@ -20,7 +20,17 @@ func (s *pairedBaselineScope) afterAcquire(ctx context.Context, acquisition base
 	if err != nil {
 		return err
 	}
-	capture := &baselineWireCapture{stage: "jit", setID: s.setID}
+	if s.listener == nil {
+		return ErrQuarantine
+	}
+	// AcquireJobs invokes this continuation while the listener mutex is held.
+	// wire reads the already-captured session tuple directly for this handoff;
+	// taking the listener accessors here would recursively lock that mutex.
+	capture := s.listener.wire("jit")
+	capture.runnerName = s.approval.workerName()
+	if capture.origin == "" || !capture.runtimePathPrefixSet || capture.runtimePathPrefix == "" || capture.runnerName == "" {
+		return ErrQuarantine
+	}
 	request, cancel := context.WithTimeout(ctx, operationTimeout)
 	got, callErr := s.captured.GenerateJIT(capture.context(request), s.setID, s.approval.workerName())
 	cancel()

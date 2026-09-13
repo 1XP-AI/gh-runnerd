@@ -259,6 +259,14 @@ func openJournalAtAdmission(directory string, a Approval, admissionDirectory str
 }
 
 func validEvent(e Event) bool {
+	if e.Operation == "observe-poll" && len(e.RequestIDs) > 1 {
+		return false
+	}
+	for _, id := range e.RequestIDs {
+		if id <= 0 {
+			return false
+		}
+	}
 	if e.Baseline != nil || e.Kind == "baseline" {
 		return validBaselineShape(e)
 	}
@@ -272,14 +280,41 @@ func validEvent(e Event) bool {
 			return false
 		}
 	}
+	if e.DrainSnapshot != nil {
+		if !validDrainSnapshotEventIdentity(e) || e.Kind != "result" || e.Operation != "observe-runner" || !validDrainSnapshot(*e.DrainSnapshot, e.DrainSnapshot.Set) {
+			return false
+		}
+	}
+	if e.DrainSnapshotStage != "" && e.DrainSnapshotStage != "before" && e.DrainSnapshotStage != "after" {
+		return false
+	}
+	if e.DrainSnapshotStage != "" && e.DrainSnapshot == nil {
+		return false
+	}
+	if e.DrainMarker != "" {
+		if e.Kind != "observation" || e.Operation != "drain-marker" {
+			return false
+		}
+		switch e.DrainMarker {
+		case drainMarkerPrerequisiteFailed, drainMarkerCancelled, drainMarkerDeadline, drainMarkerQuarantine:
+		default:
+			return false
+		}
+	}
 	switch e.Kind {
 	case "authority":
 		return e.Authority != nil
 	case "phase":
-		return e.Operation != "" && e.Digest == ""
+		return e.Operation != "" && e.Digest == "" && (e.Operation != "drain" || e.ID > 0)
 	case "inventory":
 		return len(e.Digest) == 64
 	case "observation":
+		if e.Operation == "drain" {
+			return validDrainObservation(e.Drain)
+		}
+		if e.Operation == "drain-marker" {
+			return e.DrainMarker != ""
+		}
 		return e.Operation == "poll" || e.Operation == "inspect" || e.Operation == "inventory"
 	case "response":
 		return e.Operation == "jit" || e.Operation == "acquire"

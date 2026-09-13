@@ -175,7 +175,7 @@ func newBaselineFixtureWithApproval(t *testing.T, change func(string, any) any, 
 	t.Cleanup(transport.CloseIdleConnections)
 	outer := transport.Clone()
 	outer.RegisterProtocol("https", baselineRoundTrip(func(r *http.Request) (*http.Response, error) {
-		response, err := (responseBudgetTransport{inner: transport}).RoundTrip(r)
+		response, err := (responseBudgetTransport{inner: baselineRequestCaptureTransport{inner: transport}}).RoundTrip(r)
 		if err == nil && f.afterResponse != nil {
 			f.afterResponse(r, response)
 		}

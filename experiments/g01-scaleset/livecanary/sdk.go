@@ -42,7 +42,7 @@ func (c Credentials) validate(a Approval, now time.Time) error {
 		return ErrApproval
 	}
 	needsVerification := slices.ContainsFunc(a.Phases, func(p string) bool {
-		return p == "before-ack" || p == "after-ack" || p == "before-acquire" || p == "acquire-loss"
+		return p == "before-ack" || p == "after-ack" || p == "before-acquire" || p == "acquire-loss" || p == "drain"
 	})
 	if needsVerification && (len(c.VerificationToken) < 20 || len(c.VerificationToken) > 1024 || c.VerificationToken == c.InstallationToken || strings.ContainsAny(c.VerificationToken, "\r\n\x00")) {
 		return ErrApproval
@@ -57,12 +57,20 @@ type SDKAPI struct {
 	approval    Approval
 	credentials Credentials
 	options     []scaleset.HTTPOption
+	// drainClientFactory is nil in production. Tests use it only to bind the
+	// pinned SDK client to an offline loopback transport while still exercising
+	// OpenDrainSession and MessageSessionClient together.
+	drainClientFactory func(*drainPollHook) (*SDKAPI, error)
 }
 
 // NewSDKAPI is network-lazy. It permits only api.github.com and exact approved
 // Actions hosts over direct TLS. No proxy, redirect, retry logger, automatic HTTP
 // retry, credential environment read or worker process is configured here.
 func NewSDKAPI(a Approval, c Credentials) (*SDKAPI, error) {
+	return newSDKAPIWithPollHook(a, c, nil)
+}
+
+func newSDKAPIWithPollHook(a Approval, c Credentials, hook *drainPollHook) (*SDKAPI, error) {
 	if a.Validate(time.Now()) != nil || c.validate(a, time.Now()) != nil {
 		return nil, ErrApproval
 	}
@@ -70,7 +78,14 @@ func NewSDKAPI(a Approval, c Credentials) (*SDKAPI, error) {
 	retry := retryablehttp.NewClient()
 	retry.RetryMax = 0
 	retry.Logger = nil
-	retry.HTTPClient = &http.Client{Transport: withResponseBudget(transport), Timeout: operationTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	wrappers := []func(http.RoundTripper) http.RoundTripper(nil)
+	if hook != nil {
+		wrappers = append(wrappers, func(inner http.RoundTripper) http.RoundTripper {
+			hook.inner = inner
+			return hook
+		})
+	}
+	retry.HTTPClient = &http.Client{Transport: withResponseBudget(transport, wrappers...), Timeout: operationTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	options := []scaleset.HTTPOption{scaleset.WithRetryableHTTPClint(retry), scaleset.WithLogger(slog.New(slog.DiscardHandler))}
 	client, err := scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{GitHubConfigURL: "https://github.com/" + a.Organization, PersonalAccessToken: c.InstallationToken}, options...)
 	if err != nil {
@@ -202,11 +217,8 @@ func (a *SDKAPI) VerifyRun(ctx context.Context, approval Approval, id int64) err
 	if id <= 0 || id != approval.WorkflowRunID {
 		return ErrApproval
 	}
-	var run workflowRun
-	if a.get(ctx, "/repos/"+approval.Organization+"/"+approval.Repository+"/actions/runs/"+strconv.FormatInt(id, 10), a.credentials.VerificationToken, &run) != nil {
-		return ErrApproval
-	}
-	if !matchesApprovedRun(approval, id, run) {
+	out, err := a.observeApprovedRunFor(ctx, approval, id)
+	if err != nil || out.Outcome == observationNotFound {
 		return ErrApproval
 	}
 	return nil
@@ -270,6 +282,87 @@ func (a *SDKAPI) FindScaleSet(c context.Context, name string, group int) (*scale
 func (a *SDKAPI) GetScaleSet(c context.Context, id int) (*scaleset.RunnerScaleSet, error) {
 	return a.client.GetRunnerScaleSetByID(c, id)
 }
+
+func (a *SDKAPI) drainEndpointHost() string {
+	if a == nil {
+		return ""
+	}
+	u, err := url.Parse(a.baseURL)
+	if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil || u.Fragment != "" {
+		return ""
+	}
+	return u.Host
+}
+
+func (a *SDKAPI) drainGetScaleSet(c context.Context, id int, wire *baselineWireCapture) (*scaleset.RunnerScaleSet, error) {
+	if wire == nil {
+		return nil, ErrQuarantine
+	}
+	return a.GetScaleSet(wire.context(c), id)
+}
+
+func (a *SDKAPI) drainFindRunner(c context.Context, name string, wire *baselineWireCapture) (*scaleset.RunnerReference, error) {
+	if a == nil || a.client == nil || wire == nil || name == "" {
+		return nil, ErrQuarantine
+	}
+	wire.runnerName = name
+	return a.client.GetRunnerByName(wire.context(c), name)
+}
+
+func validDrainQueueURL(value string, approvedHosts []string) bool {
+	if value == "" || !baselineText(value, 4096) {
+		return false
+	}
+	u, err := url.Parse(value)
+	if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil || u.Fragment != "" || u.EscapedPath() != u.Path || !strings.EqualFold(u.Scheme, "https") || u.Hostname() == "" {
+		return false
+	}
+	queuePort := u.Port()
+	if queuePort == "" {
+		queuePort = "443"
+	}
+	if port, err := strconv.Atoi(queuePort); err != nil || port <= 0 || port > 65535 {
+		return false
+	}
+	for _, approved := range approvedHosts {
+		approvedHost, approvedPort, ok := drainApprovedHostPort(approved)
+		if ok && strings.EqualFold(u.Hostname(), approvedHost) && queuePort == approvedPort {
+			return true
+		}
+	}
+	return false
+}
+
+func drainApprovedHostPort(value string) (string, string, bool) {
+	if value == "" || strings.ContainsAny(value, "/?#@") {
+		return "", "", false
+	}
+	host, port := value, "443"
+	if strings.Contains(value, ":") {
+		var err error
+		host, port, err = net.SplitHostPort(value)
+		if err != nil {
+			return "", "", false
+		}
+		parsed, err := strconv.Atoi(port)
+		if host == "" || err != nil || parsed <= 0 || parsed > 65535 {
+			return "", "", false
+		}
+	}
+	return host, port, true
+}
+
+func validDrainSessionWire(a Approval, id int, owner string, wire *baselineSessionFacts, session scaleset.RunnerScaleSetSession) bool {
+	if wire == nil || session.SessionID == [16]byte{} || wire.SessionID != session.SessionID.String() || wire.Owner != owner || session.OwnerName != owner || !validDrainQueueURL(wire.queueURL, a.ActionsHosts) || wire.queueURL != session.MessageQueueURL || !validDrainAuthorizationToken(wire.authorization) || wire.authorization != session.MessageQueueAccessToken || !wire.Statistics.completeDrain() || !wire.NestedSet || wire.SetID != id || wire.SetName != owner || wire.GroupID != a.RunnerGroupID || !wire.NestedStatistics.completeDrain() || !wire.Statistics.matches(session.Statistics) {
+		return false
+	}
+	set := session.RunnerScaleSet
+	if set == nil || set.ID != id || set.Name != owner || set.RunnerGroupID != a.RunnerGroupID || !set.RunnerSetting.DisableUpdate || !slices.ContainsFunc(set.Labels, func(label scaleset.Label) bool { return label.Name == owner }) || set.Statistics == nil || !wire.NestedStatistics.matches(set.Statistics) {
+		return false
+	}
+	return true
+}
+
 func (a *SDKAPI) CreateScaleSet(c context.Context, s *scaleset.RunnerScaleSet) (*scaleset.RunnerScaleSet, error) {
 	return a.client.CreateRunnerScaleSet(c, s)
 }
@@ -278,6 +371,56 @@ func (a *SDKAPI) DeleteScaleSet(c context.Context, id int) error {
 }
 func (a *SDKAPI) OpenSession(c context.Context, id int, owner string) (Session, error) {
 	return a.client.MessageSessionClient(c, id, owner, a.options...)
+}
+
+func (a *SDKAPI) OpenDrainSession(c context.Context, id int, owner string, hook *drainPollHook) (Session, error) {
+	if a == nil || hook == nil {
+		return nil, ErrApproval
+	}
+	var configured *SDKAPI
+	var err error
+	if a.drainClientFactory != nil {
+		configured, err = a.drainClientFactory(hook)
+	} else {
+		configured, err = newSDKAPIWithPollHook(a.approval, a.credentials, hook)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if configured == nil || configured.client == nil {
+		return nil, ErrRemote
+	}
+	hook.mu.Lock()
+	expectedOrigin := hook.origin
+	expectedRuntimePathPrefix := hook.runtimePathPrefix
+	expectedRuntimePathPrefixSet := hook.runtimePathPrefixSet
+	hook.mu.Unlock()
+	wire := &baselineWireCapture{stage: "session-open", setID: id, organization: configured.approval.Organization, owner: owner, origin: expectedOrigin, runtimePathPrefix: expectedRuntimePathPrefix, runtimePathPrefixSet: expectedRuntimePathPrefixSet, allowedHosts: baselineWireAllowedHosts(configured.approval, configured.drainEndpointHost())}
+	session, err := configured.client.MessageSessionClient(wire.context(c), id, owner, configured.options...)
+	if err != nil {
+		return nil, ErrRemote
+	}
+	sessionFacts, _, _, status := wire.facts()
+	sessionOrigin := wire.requestOrigin()
+	sessionRuntimePathPrefix, prefixKnown := wire.requestRuntimePathPrefix()
+	sessionAuthorization, authorizationKnown := wire.requestAuthorizationValue()
+	if session == nil || !wire.observed() || status != http.StatusOK || sessionOrigin == "" || !prefixKnown || !authorizationKnown || !validDrainSessionWire(configured.approval, id, owner, sessionFacts, session.Session()) {
+		return nil, ErrQuarantine
+	}
+	hook.mu.Lock()
+	if (hook.origin != "" && hook.origin != sessionOrigin) || (hook.runtimePathPrefixSet && hook.runtimePathPrefix != sessionRuntimePathPrefix) {
+		hook.invalid = true
+		hook.mu.Unlock()
+		return nil, ErrQuarantine
+	}
+	hook.target = sessionFacts.queueURL
+	hook.origin = sessionOrigin
+	hook.runtimePathPrefix = sessionRuntimePathPrefix
+	hook.runtimePathPrefixSet = true
+	hook.authorization = sessionFacts.authorization
+	hook.closeAuthorization = sessionAuthorization
+	hook.mu.Unlock()
+	return session, nil
 }
 func (a *SDKAPI) FindRunner(c context.Context, name string) (*scaleset.RunnerReference, error) {
 	return a.client.GetRunnerByName(c, name)
