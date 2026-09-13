@@ -83,7 +83,7 @@ func toolingFixture(t *testing.T) string {
 		toolingFile(t, root, name, string(data), 0600)
 	}
 	toolingFile(t, root, "cmd/gh-runnerd/main.go", "package main\n\nfunc main() {}\n", 0600)
-	for _, module := range []string{"g01-scaleset", "g02-auth"} {
+	for _, module := range []string{"g01-scaleset", "g02-auth", "r1-credentials"} {
 		base := "experiments/" + module
 		toolingFile(t, root, base+"/go.mod", "module example.test/"+module+"\n\ngo 1.26.8\n", 0600)
 		toolingFile(t, root, base+"/fixture.go", "package fixture\n", 0600)
@@ -1181,7 +1181,7 @@ func toolingWorkflowRunScript(t *testing.T, job string) string {
 }
 
 func TestToolingEstablishedModulesAreRequired(t *testing.T) {
-	for _, module := range []string{"g01-scaleset", "g02-auth"} {
+	for _, module := range []string{"g01-scaleset", "g02-auth", "r1-credentials"} {
 		root := toolingFixture(t)
 		if err := os.Rename(filepath.Join(root, "experiments", module, "go.mod"), filepath.Join(root, "experiments", module, "absent.mod")); err != nil {
 			t.Fatal(err)
@@ -1903,15 +1903,15 @@ func FuzzDefaultG01Fixture(f *testing.F) {
 			t.Fatalf("default G01 partition invocation %q ran %d times; wrapper log:\n%s", invocation, count, log)
 		}
 	}
-	legacyInvocation := "go1.26.8\ttest -race -count=1 -timeout=45s ./..."
-	legacyCount := 0
+	r1Invocation := "go1.26.8\ttest -race -count=1 -timeout=45s ./..."
+	r1Count := 0
 	for _, line := range lines {
-		if line == legacyInvocation {
-			legacyCount++
+		if line == r1Invocation {
+			r1Count++
 		}
 	}
-	if legacyCount != 0 {
-		t.Fatalf("offline gate retained %d unsplit G02 invocations; wrapper log:\n%s", legacyCount, log)
+	if r1Count != 1 {
+		t.Fatalf("offline gate ran the R1 fixture invocation %d times; wrapper log:\n%s", r1Count, log)
 	}
 	for _, invocation := range []string{
 		"go1.26.8\ttest -race -count=1 -timeout=45s -run ^TestPaired -skip ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
@@ -2192,7 +2192,6 @@ func FuzzG02Fixture(f *testing.F) {
 		}
 	}
 	for _, invocation := range []string{
-		"go1.26.8\ttest -race -count=1 -timeout=45s ./...",
 		"go1.26.8\ttest -race -count=1 -timeout=45s -run ^TestPaired -skip ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
 		"go1.26.8\ttest -race -count=1 -timeout=45s -skip ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
 		"go1.26.8\ttest -race -count=1 -timeout=120s -run ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
@@ -2203,6 +2202,16 @@ func FuzzG02Fixture(f *testing.F) {
 				t.Fatalf("offline gate retained forbidden G02 invocation %q; wrapper log:\n%s", invocation, log)
 			}
 		}
+	}
+	r1Invocation := "go1.26.8\ttest -race -count=1 -timeout=45s ./..."
+	r1Count := 0
+	for _, line := range lines {
+		if line == r1Invocation {
+			r1Count++
+		}
+	}
+	if r1Count != 1 {
+		t.Fatalf("offline gate ran the R1 fixture invocation %d times; wrapper log:\n%s", r1Count, log)
 	}
 	for _, tc := range fixtures {
 		toolingFile(t, root, tc.path, tc.failureSource, 0600)
