@@ -1149,6 +1149,35 @@ the worktree and remote branch returned
 `82eeef99f9bb5ec85c8cb3bea7a9a5947e8df26a`; it is a historical check and is
 expected to fail after the correction push.
 
+### Recorded post-correction head audits
+
+The exact `08ce02f7716c991d088eebf1f7311628e7991f9e` post-correction audit is
+recorded below as historical read-only Git worktree/remote-ref output. Its exact
+time context is the `08ce` commit timestamp
+`2026-09-14T01:58:23+09:00`; the audit belongs after that push and before the
+subsequent packet-only corrections. It is not a current-checkout assertion and
+does not claim live App, runner, Docker, Lima, Keychain, launchd or workflow
+success.
+
+Recorded output for the historical exact-`08ce` head/remote audit:
+
+```text
+post-correction current/remote head audit: passed; both returned 08ce02f7716c991d088eebf1f7311628e7991f9e
+```
+
+The new packet-correction head that followed the `08ce` review was
+`201f5eed4d561a1255fbf5a2e930d676c23024c1`, committed at
+`2026-09-14T02:33:08+09:00`. Its literal current-final parity output was
+recorded after push and is kept separate from the historical `08ce` output:
+
+```text
+post-correction current/remote head audit: passed; both returned 201f5eed4d561a1255fbf5a2e930d676c23024c1
+```
+
+These two output records are historical parity evidence only; the immutable
+`5979...`, `82ee...` and `6b153...` records above remain separate exact-head
+records and are not combined into one checkout or result.
+
 The final head check is dynamic and is run only after the packet commit is
 pushed, so it remains internally runnable without adding a self-invalidating
 literal SHA to a later packet commit:
