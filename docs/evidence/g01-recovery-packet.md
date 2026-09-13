@@ -155,7 +155,7 @@ prescriptions for future reruns, not completed results. None of these
 prescriptions reports a completed test or live server success/receipt.
 
 ```sh
-cd experiments/g01-scaleset && GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s -run '^(TestSDKACKBoundaries|TestRecoveryAfterACKCallbackCrash|TestRecoveryMissingLifecycleCallback|TestRecoveryErrorsHoldReservationsAndRedact|TestSDKAcquisitionResponseLossAfterACK|TestSDKCapacityWithdrawalDoesNotFenceInFlightAcquisition|TestSDKHTTPFailuresAndSessionRefresh)$' .
+cd experiments/g01-scaleset && GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s -run '^(TestSDKACKBoundaries|TestSDKDemandAboveFiftyAndPartialAcquisition|TestSDKRepeatedStatisticsAnd202ReuseLastObservation|TestRecoveryAfterACKCallbackCrash|TestRecoveryMissingLifecycleCallback|TestRecoveryErrorsHoldReservationsAndRedact|TestSDKAcquisitionResponseLossAfterACK|TestSDKCapacityWithdrawalDoesNotFenceInFlightAcquisition|TestSDKHTTPFailuresAndSessionRefresh)$' .
 cd experiments/g01-scaleset && GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s ./livecanary -run '^(TestSupportedListenerBarriersAndReservation|TestDriverBarriersThroughPinnedSDK|TestForeignIdentityAndUnreviewedWorkNeverACKOrDelete|TestAuditPR25MultiJobAcquisitionMustRefuseBeforeACK)$'
 ```
 
