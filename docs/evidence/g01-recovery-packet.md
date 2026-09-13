@@ -177,6 +177,28 @@ the count includes the actual live-canary gate row.
 | Paired terminal/worker support | paired journal/lease, worker profile, `liveworker` runtime source/implementation, image/runtime pins and terminal selectors are unchanged. | See the exact controller update-policy and worker runtime commands plus the tagged partition commands below; the worker runtime selector includes the direct Docker state/inspection, mutation-EOF and changed-daemon contracts, while tagged partition commands retain `go1.26.8`, `-race`, `-count=1` and `-timeout=120s`, the complete worker `^TestPaired` partition is included, and the controller-side terminal groups remain exhaustive/disjoint. | Fixture: record receipt/identity checks only; no live worker or terminal success claim. |
 | Actual live canary | There is no live evidence to reuse today. A future result is reusable only for the same immutable workflow/run attempt, source/head, resources, authority scope and approved observation boundary. | Rebuild/plan the exact reviewed tagged binary, then run only the explicitly authorized phase from [the driver](g01-live-driver.md); never substitute fixture commands or broaden phases. | Live: record sanitized server observations, authorization and unresolved outcomes; any changed target or boundary requires a fresh approval/rerun. |
 
+The two drain prescriptions intentionally bind a different reviewed source tree
+from the other packet commands. The default/root, tagged and paired commands
+remain pinned to the PR #78 module tree `08c7830de7bc5120d1302d7ba6df162abd582315`;
+only `drain-pr72` and `drain-pr72-race` bind the authoritative PR #72 head
+`f5560ba950f77343e57034cc1cf85dc67f5ac922` and its module tree
+`9b30ef1b69c6375cb264c759d366fc5a52a5439f`. Git-only evidence for that PR #72
+source selection, computed without compiling or running tests, is:
+
+```text
+git rev-parse f5560ba950f77343e57034cc1cf85dc67f5ac922:experiments/g01-scaleset
+9b30ef1b69c6375cb264c759d366fc5a52a5439f
+git rev-parse f5560ba950f77343e57034cc1cf85dc67f5ac922:experiments/g01-scaleset/go.mod
+46d148aeb4c2672b0ac6bc179273eca156204060
+git ls-tree -r --full-tree f5560ba950f77343e57034cc1cf85dc67f5ac922 -- experiments/g01-scaleset | wc -l
+126
+```
+
+The `go.mod` line above is retained as the reviewed module-file blob evidence;
+the module tree object is the binding source identity. The two commands below
+are therefore the only prescriptions that may pass the PR #72 tree guard; every
+other guarded command must pass the PR #78 tree guard.
+
 The exact focused commands referenced above are recorded here. They are
 prescriptions for future reruns, not completed results. None of these
 prescriptions reports a completed test or live server success/receipt.
@@ -194,24 +216,28 @@ prescription also carries an expected package identity
 (`module-directory:package`) and build configuration (tag set, race mode and
 `GOTOOLCHAIN`). Before either list probe, the wrapper resolves the active
 package and test source files with `go list -json -test`, requires the
-reviewed immutable `experiments/g01-scaleset` source tree, and fails closed if
-any active file declares `func init`; the separate `TestMain` source audit
-below covers the one package-level test initializer. This is the explicit
-package-initialization guard: a source-tree or build-tag change requires a new
-review before list validation can proceed. The wrapper queries the effective
+reviewed immutable `experiments/g01-scaleset` source tree, rejects tracked,
+untracked or ignored paths under that module, and fails closed if any active
+file declares `func init`; the separate `TestMain` source audit below covers
+the one package-level test initializer. This is the explicit
+package-initialization guard: a source-tree or build-tag change, including an
+ignored Go or test file, requires a new review before list validation can
+proceed. The wrapper queries the effective
 `go env GOFLAGS`, including GOENV/configuration, rejects non-empty output, and
 then pins `GOFLAGS=` for both list probes and the original command. Race-mode
 prescriptions reject inherited or command-supplied `GORACE` before either list
 probe or test execution. Exactly one `-count=1` and one positive bounded
 `-timeout` (at most 300 seconds) are required; `-args` and test-binary
-selector/count/timeout overrides are rejected. The execution command adds a
-wrapper-controlled `-json` stream and fails closed on malformed output,
-non-empty stderr or any Go test `Action` of `skip`, including skipped
-subtests. A command failure, unexpected list output, zero expected names,
-invalid Go/RE2 syntax, count/timeout mismatch, skipped test, or set mismatch
-stops before an unvalidated result is recorded; the set digest and metadata
-are recorded beside each prescription so renamed, removed, build-tagged,
-newly unskipped or cross-package tests fail closed.
+selector/count/timeout overrides and `-exec` execution wrappers are rejected.
+The execution command adds a wrapper-controlled `-json` stream and fails closed
+on malformed output, non-empty stderr or any Go test `Action` of `skip`,
+including skipped subtests; it also requires a top-level `run` and `pass` event
+for every expected test name. A command failure, unexpected list output, zero
+expected names, invalid Go/RE2 syntax, count/timeout mismatch, skipped test,
+missing run/pass event, or set mismatch stops before an unvalidated result is
+recorded; the set digest and metadata are recorded beside each prescription so
+renamed, removed, build-tagged, newly unskipped or cross-package tests fail
+closed. A list-only helper therefore cannot produce a green rerun record.
 
 ```sh
 set -euo pipefail
@@ -374,7 +400,15 @@ if race_identity == "race" and "GORACE" in env:
         f"{label}: inherited or command-supplied GORACE is not allowed in race mode"
     )
 
-reviewed_module_tree = "08c7830de7bc5120d1302d7ba6df162abd582315"
+reviewed_pr78_module_tree = "08c7830de7bc5120d1302d7ba6df162abd582315"
+reviewed_pr72_module_tree = "9b30ef1b69c6375cb264c759d366fc5a52a5439f"
+if label.startswith("drain-") and label not in {"drain-pr72", "drain-pr72-race"}:
+    raise SystemExit(f"{label}: unknown drain source pin")
+reviewed_module_tree = (
+    reviewed_pr72_module_tree
+    if label in {"drain-pr72", "drain-pr72-race"}
+    else reviewed_pr78_module_tree
+)
 
 
 def json_objects(raw, phase):
@@ -414,7 +448,15 @@ def package_initialization_guard():
             f"{label}: package-initialization guard requires reviewed source tree"
         )
     source_status = subprocess.run(
-        ["git", "status", "--porcelain=v1", "--untracked-files=all", "--", module_dir],
+        [
+            "git",
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--ignored=matching",
+            "--",
+            module_dir,
+        ],
         cwd=repo_root,
         env=env,
         text=True,
@@ -425,7 +467,8 @@ def package_initialization_guard():
         raise SystemExit(f"{label}: package source status query failed")
     if source_status.stdout.strip():
         raise SystemExit(
-            f"{label}: package-initialization guard requires a clean source tree"
+            f"{label}: package-initialization guard requires a clean source tree "
+            "with no tracked, untracked or ignored paths"
         )
     list_command = ["go", "list", "-C", module_dir, "-json", "-test"]
     if race_identity == "race":
@@ -539,6 +582,8 @@ if timeout_nanos <= 0 or timeout_nanos > Decimal("300000000000"):
 
 if any(value == "-args" or value.startswith("-args=") for value in test_args):
     raise SystemExit(f"{label}: -args is not allowed in a guarded rerun")
+if any(value == "-exec" or value.startswith("-exec=") for value in test_args):
+    raise SystemExit(f"{label}: -exec execution wrappers are not allowed")
 test_binary_overrides = (
     "-test.run",
     "-test.skip",
@@ -679,6 +724,9 @@ print(
 def validate_test_stream(stdout, stderr):
     if stderr.strip():
         raise SystemExit(f"{label}: test execution emitted stderr")
+    expected_names = set(actual)
+    run_names = set()
+    pass_names = set()
     for line in stdout.splitlines():
         if not line:
             continue
@@ -690,6 +738,25 @@ def validate_test_stream(stdout, stderr):
             raise SystemExit(f"{label}: test execution emitted a non-object JSON value")
         if event.get("Action") == "skip":
             raise SystemExit(f"{label}: test execution contained a skipped test")
+        test_name = event.get("Test")
+        if test_name not in expected_names:
+            continue
+        if event.get("Action") == "run":
+            run_names.add(test_name)
+        elif event.get("Action") == "pass":
+            pass_names.add(test_name)
+    missing_run = sorted(expected_names - run_names)
+    missing_pass = sorted(expected_names - pass_names)
+    if missing_run or missing_pass:
+        missing = []
+        if missing_run:
+            missing.append("run=" + ",".join(missing_run))
+        if missing_pass:
+            missing.append("pass=" + ",".join(missing_pass))
+        raise SystemExit(
+            f"{label}: test execution was missing expected event(s): "
+            + "; ".join(missing)
+        )
 
 run_command = command + ["-json"]
 run_result = subprocess.run(
@@ -936,6 +1003,12 @@ from pathlib import Path
 
 lines = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8").splitlines()
 seen = []
+pr78_module_tree = "08c7830de7bc5120d1302d7ba6df162abd582315"
+pr72_module_tree = "9b30ef1b69c6375cb264c759d366fc5a52a5439f"
+drain_source_pins = {
+    "drain-pr72": pr72_module_tree,
+    "drain-pr72-race": pr72_module_tree,
+}
 for index, line in enumerate(lines):
     fields = line.split()
     if (
@@ -1011,19 +1084,26 @@ for index, line in enumerate(lines):
         for prefix in test_override_prefixes
     ):
         raise SystemExit(f"line {index + 2}: test-binary override is not allowed")
+    label = fields[3]
+    if label.startswith("drain-") and label not in drain_source_pins:
+        raise SystemExit(f"{label}: unknown drain source pin")
+    expected_source_tree = drain_source_pins.get(label, pr78_module_tree)
     actual_build = f"{tag_identity}+{race_identity}+{env.get('GOTOOLCHAIN', '')}"
     if actual_package != fields[4] or actual_build != fields[5]:
         raise SystemExit(
             f"{fields[3]}: expected {fields[4]}/{fields[5]}, "
             f"observed {actual_package}/{actual_build}"
         )
-    seen.append(fields[3])
+    if not expected_source_tree:
+        raise SystemExit(f"{label}: missing reviewed source tree pin")
+    seen.append(label)
 if len(seen) != 28 or len(set(seen)) != len(seen):
     raise SystemExit(f"expected 28 unique wrapper metadata records, observed {len(seen)}")
 print(
     f"package/build metadata audit: passed; {len(seen)} wrapper prescriptions "
     "matched one package identity and explicit GOTOOLCHAIN/tag/race build "
-    "configuration, exactly one count/timeout, and no test-binary overrides; "
+    "configuration, exact PR #78/PR #72 source-tree family pins, exactly one "
+    "count/timeout, and no test-binary overrides; "
     "duplicate package candidates fail closed"
 )
 PY
@@ -1033,13 +1113,15 @@ The package/build metadata audit exited 0 with 28 unique records. Every
 package identity matched its `-C` directory and sole package argument, every
 record carried explicit `GOTOOLCHAIN` metadata, exactly one `-count=1` and one
 positive timeout no greater than 300 seconds, and every build identity matched
-its tag set, race mode and toolchain; `-args`, test-binary overrides and a
-duplicate `./livecanary`/`./liveworker` package list are rejected before the
-list probe.
+its tag set, race mode and toolchain. The two drain labels selected the exact
+PR #72 module tree `9b30ef1b69c6375cb264c759d366fc5a52a5439f`; all other labels
+selected the PR #78 module tree `08c7830de7bc5120d1302d7ba6df162abd582315`.
+`-args`, test-binary overrides and a duplicate `./livecanary`/`./liveworker`
+package list are rejected before the list probe.
 The recorded metadata-audit output was:
 
 ```text
-package/build metadata audit: passed; 28 wrapper prescriptions matched one package identity and explicit GOTOOLCHAIN/tag/race build configuration, exactly one count/timeout, and no test-binary overrides; duplicate package candidates fail closed
+package/build metadata audit: passed; 28 wrapper prescriptions matched one package identity, explicit GOTOOLCHAIN/tag/race build configuration, exact PR #78/PR #72 source-tree family pins, exactly one count/timeout, and no test-binary overrides; duplicate package candidates fail closed
 ```
 
 The wrapper's selector edge cases were then exercised with a trimmed copy of
@@ -1047,8 +1129,9 @@ the documented Python body that stops before the original test subprocess. Its
 only Go child processes are the effective `go env GOFLAGS`, package metadata
 (`go list -json -test`) and corresponding `go test -list` probes; the second
 list probe uses Go's own regexp implementation for `-skip` matching. Git source
-status/tree queries are read-only. The probe also feeds a synthetic `Action:
-skip` subtest event to the execution-stream guard without starting a test body:
+status/tree queries are read-only. The probe also feeds synthetic skipped and
+output-only/no-`run`/`pass` streams to the execution-stream guard without
+starting a test body:
 
 ```sh
 set -euo pipefail
@@ -1193,6 +1276,13 @@ cases = [
         False,
     ),
     (
+        "exec-wrapper",
+        "1", one_digest, "experiments/g01-scaleset:./livecanary",
+        "default+race+go1.26.8",
+        common + ["-exec", "true", "./livecanary", "-run=^" + one_name + "$"],
+        False,
+    ),
+    (
         "active-package-init",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
         "g01_pair_fixture,g01_pair_real_cadence+race+go1.26.8",
@@ -1260,6 +1350,14 @@ except SystemExit as error:
     print(f"skipped-subtest-event: rejected before result recording: {error}")
 else:
     raise SystemExit("skipped-subtest-event: skip event was accepted")
+empty_stream = json.dumps({"Action": "pass", "Package": "example.test"}) + "\n"
+namespace["label"] = "missing-run-pass-probe"
+try:
+    validator(empty_stream, "")
+except SystemExit as error:
+    print(f"missing-run-pass-events: rejected before result recording: {error}")
+else:
+    raise SystemExit("missing-run-pass-events: output-only stream was accepted")
 inherited_previous = os.environ.get("G01_INPUT_CHILD")
 os.environ["G01_INPUT_CHILD"] = "blocked"
 sys.argv = [
@@ -1293,9 +1391,10 @@ mismatch and temporary GOENV-persisted non-empty `GOFLAGS` were rejected before
 listing; duplicate package targeting was rejected before listing; slash-
 delimited subtest `-skip`, `-count=0`, `-count=2`, missing/duplicate/zero/
 overlarge `-timeout`, inherited `GORACE`, `-args`, direct test-binary selector,
-active package `init`, and inherited `G01_INPUT_CHILD=blocked` were each
-rejected before listing. No test body, live operation or secret-bearing input
-was run.
+`-exec`, active package `init`, and inherited `G01_INPUT_CHILD=blocked` were
+each rejected before listing. The output-only stream without expected `run`
+and `pass` events was rejected before result recording. No test body, live
+operation or secret-bearing input was run.
 
 The added wrapper-regression output was:
 
@@ -1305,8 +1404,10 @@ count-zero: rejected before test body: count-zero: exactly one -count=1 is requi
 timeout-missing: rejected before test body: timeout-missing: exactly one -timeout value is required
 inherited-gorace: rejected before test body: inherited-gorace: inherited or command-supplied GORACE is not allowed in race mode
 args-test-selector: rejected before test body: args-test-selector: -args is not allowed in a guarded rerun
+exec-wrapper: rejected before test body: exec-wrapper: -exec execution wrappers are not allowed
 active-package-init: rejected before test body: active-package-init: active package init requires a new reviewed guard
 skipped-subtest-event: rejected before result recording: wrapper-probe: test execution contained a skipped test
+missing-run-pass-events: rejected before result recording: wrapper-probe: test execution was missing expected event(s): run=TestSupportedListenerBarriersAndReservation; pass=TestSupportedListenerBarriersAndReservation
 inherited-child-mode: rejected before test body: inherited-child-mode: fixture child-mode environment is not allowed: G01_INPUT_CHILD
 ```
 
@@ -2072,8 +2173,9 @@ was rejected before execution. The existing livecanary selector audits remain
 
 The package-level initialization guard also resolves the effective source set
 for every package/build combination used by the wrapper. It pins the reviewed
-module subtree, requires a clean source path, includes ordinary and test Go
-files selected by the exact build tags, and rejects any active `func init` before
+module subtree, requires a clean source path with no tracked, untracked or
+ignored paths (the status probe uses `--ignored=matching`), includes ordinary
+and test Go files selected by the exact build tags, and rejects any active `func init` before
 `go test -list`; package-variable initializer changes therefore require a new
 source-tree review rather than being silently treated as list-only-safe. The
 guard audit was read-only and did not run test bodies or live resources:
@@ -2095,10 +2197,18 @@ if subprocess.check_output(
 ).strip() != reviewed_tree:
     raise SystemExit("package-init guard: reviewed module tree changed")
 if subprocess.check_output(
-    ["git", "status", "--porcelain=v1", "--untracked-files=all", "--", module_dir],
+    [
+        "git",
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+        "--ignored=matching",
+        "--",
+        module_dir,
+    ],
     text=True,
 ):
-    raise SystemExit("package-init guard: package source is not clean")
+    raise SystemExit("package-init guard: package source has tracked, untracked or ignored paths")
 
 cases = [
     ("root", ".", ""),
@@ -2163,8 +2273,9 @@ PY
 
 The package-initialization guard audit passed for all seven package/build sets
 (root, default and tagged controller/worker packages); the source subtree was
-unchanged from the reviewed tree and no active package `init` function was
-selected. The wrapper regression probe separately enabled the reviewed
+unchanged from the reviewed tree, the `--ignored=matching` status output was
+empty, and no active package `init` function was selected. The wrapper regression
+probe separately enabled the reviewed
 `g01_pair_real_cadence` tag and rejected its active `init` before listing,
 demonstrating the fail-closed path without executing it.
 
