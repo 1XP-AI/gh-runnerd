@@ -401,8 +401,8 @@ skipped, unavailable or unauthorized live phase into “passed.”
 This packet correction requires markdown/link-target, JSON syntax, ledger/table,
 fragment, selector, diff, and secret/private-path checks only. No artificial Go
 red or green test is created for documentation changes. The stable working
-directory and source boundary were checked at the exact reviewed PR #78 packet
-head d4f03dd9d3e251025462845ec288f4afc72a5295; ee8df8b7e00204c74a892b27f8b4c0ab278751ba
+directory and source boundary were checked at the final current PR #78 packet
+head 5979b7d722f3bf8e24404912f9b1f3e888d0828d; ee8df8b7e00204c74a892b27f8b4c0ab278751ba
 is only the unchanged experiments/g01-scaleset source-comparison parent. The selector declaration audit is
 anchored to immutable source commit
 `95cd9210620c54e098ecbe0df1217af1659f0c74` and tree
@@ -530,9 +530,9 @@ arguments remain compared exactly.
 
 ```sh
 set -euo pipefail
-test "$(git rev-parse HEAD)" = "d4f03dd9d3e251025462845ec288f4afc72a5295"
-test "$(git rev-parse --verify HEAD^{commit})" = "d4f03dd9d3e251025462845ec288f4afc72a5295"
-test "$(git show -s --format=%H HEAD)" = "d4f03dd9d3e251025462845ec288f4afc72a5295"
+test "$(git rev-parse HEAD)" = "5979b7d722f3bf8e24404912f9b1f3e888d0828d"
+test "$(git rev-parse --verify HEAD^{commit})" = "5979b7d722f3bf8e24404912f9b1f3e888d0828d"
+test "$(git show -s --format=%H HEAD)" = "5979b7d722f3bf8e24404912f9b1f3e888d0828d"
 current_head="$(git rev-parse HEAD)"
 test "$(git rev-parse --show-toplevel)" = "$(pwd -P)"
 test -d experiments/g01-scaleset
@@ -544,11 +544,12 @@ test "$(git rev-parse 1396e201d905be204c3ac697be43723820581314:docs/evidence/g01
 printf 'stable checkout audit: passed; current HEAD is %s, repo root is current directory, experiments/g01-scaleset exists, source comparison parent is unchanged, scoped tracked/untracked status is empty, and g01-red.md resolves to its pinned blob\n' "$current_head"
 ```
 
-The stable checkout audit exited 0 at the exact reviewed PR #78 packet head:
-each literal d4f03dd9d3e251025462845ec288f4afc72a5295 assertion and the scoped
-source checks passed. The follow-up packet commit intentionally advances this
-branch, so rerunning the block from a different head fails closed rather than
-accepting drift. It confirmed the unchanged experiments/g01-scaleset source relative to comparison parent
+The stable checkout audit exited 0 at the final current PR #78 packet head
+5979b7d722f3bf8e24404912f9b1f3e888d0828d: each literal 5979b7d722f3bf8e24404912f9b1f3e888d0828d
+assertion and the scoped source checks passed. The follow-up packet commit
+intentionally advances this branch, so rerunning the block from a different
+head fails closed rather than accepting drift. It confirmed the unchanged
+experiments/g01-scaleset source relative to comparison parent
 ee8df8b7e00204c74a892b27f8b4c0ab278751ba and the g01-red.md commit/blob pin. The
 scoped `git status --porcelain=v1 --untracked-files=all --
 experiments/g01-scaleset` output was empty (zero lines), so no tracked or
@@ -711,9 +712,9 @@ for case in cases:
 PY
 ```
 
-The fail-closed selector audit exited 0 against the unchanged source under
-comparison parent ee8df8b7e00204c74a892b27f8b4c0ab278751ba (the exact reviewed
-PR #78 packet head at validation was d4f03dd9d3e251025462845ec288f4afc72a5295): exact sets matched at
+The fail-closed selector audit exited 0 at final current PR #78 packet head
+5979b7d722f3bf8e24404912f9b1f3e888d0828d against the unchanged source under
+comparison parent ee8df8b7e00204c74a892b27f8b4c0ab278751ba: exact sets matched at
 25/25 `liveworker` runtime names, 4/4 preparation names, 1/1 `osusergo`
 build-tag name and 26/26 reconciliation names. Every invocation used
 `go test -list`; no test body ran.
