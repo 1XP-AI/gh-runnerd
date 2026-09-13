@@ -77,6 +77,7 @@ type ManualSource struct {
 	appID     int64
 	expiresAt time.Time
 	pem       []byte
+	oversized bool
 }
 
 // manualSource is the package-created capability returned by the constructors.
@@ -86,16 +87,24 @@ type manualSource struct {
 	ManualSource
 }
 
-// NewManualSource copies pemBytes into memory and returns an explicitly manual
-// source. A zero expiry denotes a static App key; a non-zero expiry is useful
-// for callers that wrap a short-lived credential envelope.
+// NewManualSource copies a bounded pemBytes value into memory and returns an
+// explicitly manual source. Oversized input is retained only as an invalid
+// marker and is rejected by Read before any key bytes are copied. A zero expiry
+// denotes a static App key; a non-zero expiry is useful for callers that wrap a
+// short-lived credential envelope.
 func NewManualSource(appID int64, pemBytes []byte) CredentialSource {
 	return NewManualSourceWithExpiry(appID, pemBytes, time.Time{})
 }
 
 // NewManualSourceWithExpiry is NewManualSource with an explicit source expiry.
 func NewManualSourceWithExpiry(appID int64, pemBytes []byte, expiresAt time.Time) CredentialSource {
-	return manualSource{ManualSource: ManualSource{appID: appID, expiresAt: expiresAt, pem: append([]byte(nil), pemBytes...)}}
+	source := ManualSource{appID: appID, expiresAt: expiresAt}
+	if len(pemBytes) > maxCredentialBytes {
+		source.oversized = true
+	} else {
+		source.pem = append([]byte(nil), pemBytes...)
+	}
+	return manualSource{ManualSource: source}
 }
 
 func (manualSource) credentialSourceMarker() {}
@@ -110,6 +119,9 @@ func (s ManualSource) Read(ctx context.Context) ([]byte, error) {
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if s.oversized {
+		return nil, ErrCredential
 	}
 	return append([]byte(nil), s.pem...), nil
 }
@@ -248,12 +260,14 @@ func validateWithClock(ctx context.Context, now func() time.Time, config Config,
 	if err != nil {
 		return ValidatedBinding{}, err
 	}
+	validationCtx, cancelValidation := contextWithExpiry(ctx, expiresAt)
+	defer cancelValidation()
 
-	if err := boundaryStatus(ctx, now, expiresAt); err != nil {
+	if err := boundedBoundaryStatus(ctx, validationCtx, now, expiresAt); err != nil {
 		return ValidatedBinding{}, err
 	}
-	app, err := api.VerifyApp(ctx, ref)
-	if boundaryErr := boundaryStatus(ctx, now, expiresAt); boundaryErr != nil {
+	app, err := api.VerifyApp(validationCtx, ref)
+	if boundaryErr := boundedBoundaryStatus(ctx, validationCtx, now, expiresAt); boundaryErr != nil {
 		return ValidatedBinding{}, boundaryErr
 	}
 	if err != nil {
@@ -263,11 +277,11 @@ func validateWithClock(ctx context.Context, now func() time.Time, config Config,
 		return ValidatedBinding{}, ErrAppIdentity
 	}
 
-	if err := boundaryStatus(ctx, now, expiresAt); err != nil {
+	if err := boundedBoundaryStatus(ctx, validationCtx, now, expiresAt); err != nil {
 		return ValidatedBinding{}, err
 	}
-	installation, err := api.VerifyInstallation(ctx, ref, config.Organization)
-	if boundaryErr := boundaryStatus(ctx, now, expiresAt); boundaryErr != nil {
+	installation, err := api.VerifyInstallation(validationCtx, ref, config.Organization)
+	if boundaryErr := boundedBoundaryStatus(ctx, validationCtx, now, expiresAt); boundaryErr != nil {
 		return ValidatedBinding{}, boundaryErr
 	}
 	if err != nil {
@@ -277,11 +291,11 @@ func validateWithClock(ctx context.Context, now func() time.Time, config Config,
 		return ValidatedBinding{}, ErrInstallation
 	}
 
-	if err := boundaryStatus(ctx, now, expiresAt); err != nil {
+	if err := boundedBoundaryStatus(ctx, validationCtx, now, expiresAt); err != nil {
 		return ValidatedBinding{}, err
 	}
-	repository, err := api.VerifyRepository(ctx, ref, config.Organization, config.Repository)
-	if boundaryErr := boundaryStatus(ctx, now, expiresAt); boundaryErr != nil {
+	repository, err := api.VerifyRepository(validationCtx, ref, config.Organization, config.Repository)
+	if boundaryErr := boundedBoundaryStatus(ctx, validationCtx, now, expiresAt); boundaryErr != nil {
 		return ValidatedBinding{}, boundaryErr
 	}
 	if err != nil {
@@ -298,24 +312,22 @@ func validateWithClock(ctx context.Context, now func() time.Time, config Config,
 		Repository:     config.Repository,
 		Permissions:    clonePermissions(installation.Permissions),
 	}
-	if err := boundaryStatus(ctx, now, expiresAt); err != nil {
+	if err := boundedBoundaryStatus(ctx, validationCtx, now, expiresAt); err != nil {
 		return ValidatedBinding{}, err
 	}
 	if commit != nil {
 		commitBinding := binding
 		commitBinding.Permissions = clonePermissions(binding.Permissions)
-		if err := boundaryStatus(ctx, now, expiresAt); err != nil {
+		if err := boundedBoundaryStatus(ctx, validationCtx, now, expiresAt); err != nil {
 			return ValidatedBinding{}, err
 		}
-		commitCtx, cancelCommit := contextWithExpiry(ctx, expiresAt)
-		defer cancelCommit()
-		if err := commit(commitCtx, commitBinding); err != nil {
-			if boundaryErr := commitBoundaryStatus(ctx, now, commitCtx, expiresAt); boundaryErr != nil {
+		if err := commit(validationCtx, commitBinding); err != nil {
+			if boundaryErr := commitBoundaryStatus(ctx, now, validationCtx, expiresAt); boundaryErr != nil {
 				return ValidatedBinding{}, boundaryErr
 			}
 			return ValidatedBinding{}, ErrCommit
 		}
-		if err := commitBoundaryStatus(ctx, now, commitCtx, expiresAt); err != nil {
+		if err := commitBoundaryStatus(ctx, now, validationCtx, expiresAt); err != nil {
 			return ValidatedBinding{}, err
 		}
 	}
@@ -344,6 +356,9 @@ func credentialReference(ctx context.Context, now func() time.Time, config Confi
 	if err != nil {
 		if contextStatus(ctx) != nil {
 			return CredentialRef{}, time.Time{}, ErrCanceled
+		}
+		if errors.Is(err, ErrCredential) {
+			return CredentialRef{}, time.Time{}, ErrCredential
 		}
 		return CredentialRef{}, time.Time{}, ErrSource
 	}
@@ -374,6 +389,16 @@ func boundaryStatus(ctx context.Context, now func() time.Time, expiresAt time.Ti
 	return nil
 }
 
+func boundedBoundaryStatus(parent context.Context, bounded context.Context, now func() time.Time, expiresAt time.Time) error {
+	if err := boundaryStatus(parent, now, expiresAt); err != nil {
+		return err
+	}
+	if !expiresAt.IsZero() && errors.Is(bounded.Err(), context.DeadlineExceeded) {
+		return ErrExpired
+	}
+	return nil
+}
+
 func contextWithExpiry(parent context.Context, expiresAt time.Time) (context.Context, context.CancelFunc) {
 	if expiresAt.IsZero() {
 		return parent, func() {}
@@ -382,13 +407,7 @@ func contextWithExpiry(parent context.Context, expiresAt time.Time) (context.Con
 }
 
 func commitBoundaryStatus(ctx context.Context, now func() time.Time, commitCtx context.Context, expiresAt time.Time) error {
-	if err := boundaryStatus(ctx, now, expiresAt); err != nil {
-		return err
-	}
-	if !expiresAt.IsZero() && errors.Is(commitCtx.Err(), context.DeadlineExceeded) {
-		return ErrExpired
-	}
-	return nil
+	return boundedBoundaryStatus(ctx, commitCtx, now, expiresAt)
 }
 
 func sourceExpired(now time.Time, expiresAt time.Time) bool {
