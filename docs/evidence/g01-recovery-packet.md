@@ -179,15 +179,15 @@ GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout
 ```
 
 ```sh
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./liveworker -run '^(TestOneWorkerNeverRecreatedAndOnlyJITAddedToEnvironment|TestUncertainStartNeverRetriesAndCannotCleanup|TestEveryRuntimeBoundaryRejectsProfileAndOwnershipMismatch|TestUnverifiedRunnerUpdatePolicyRefusesBeforeRuntime|TestSocketReplacementAfterPreflightCannotReceiveAnyMutation|TestUnixRuntimeRejectsWrongIdentityImagesAndUnsupportedLimits|TestUnixRuntimeOneShotCreateStartAndNonForceCleanup|TestUnixRuntimeAmbiguousEffectsNeverRetry|TestChangedDaemonOrAbsentContainerNeverMeansCleanupComplete|TestUnixTransportRejectsSymlinksAndInheritedTCPDestinations|TestAuditPR28MissingBridgeMustNotStart|TestCleanupRetainsActiveAndUnknownWorkers|TestOwnedTerminalCleanupAndRunningRemovalRace)$'
+GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./liveworker -run '^(TestOneWorkerNeverRecreatedAndOnlyJITAddedToEnvironment|TestUncertainStartNeverRetriesAndCannotCleanup|TestEveryRuntimeBoundaryRejectsProfileAndOwnershipMismatch|TestUnverifiedRunnerUpdatePolicyRefusesBeforeRuntime|TestSocketReplacementAfterPreflightCannotReceiveAnyMutation|TestUnixInspectRequiresStateFlagsBeforeMutation|TestDockerInspectExactRejectsMalformedOrAmbiguousBodiesBeforeMutation|TestDockerInspectUnknownOrAbsentStatusCannotAuthorizeMutation|TestUnixRuntimeRejectsWrongIdentityImagesAndUnsupportedLimits|TestUnixRuntimeOneShotCreateStartAndNonForceCleanup|TestUnixRuntimeAmbiguousEffectsNeverRetry|TestChangedDaemonOrAbsentContainerNeverMeansCleanupComplete|TestUnixTransportRejectsSymlinksAndInheritedTCPDestinations|TestAuditPR28MissingBridgeMustNotStart|TestCleanupRetainsActiveAndUnknownWorkers|TestOwnedTerminalCleanupAndRunningRemovalRace)$'
 GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestCreateRequestsDisabledRunnerUpdate|TestUnconfirmedUpdateSettingQuarantinesCreate|TestUpdateSettingDriftStopsBeforeSessionOrJIT|TestUpdateSettingDriftDoesNotBlockSafeEmptyCleanup)$'
 GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -tags=g01_worker -count=1 -timeout=45s ./cmd/g01-worker -run '^(TestBlockedJITInputHonorsDeadline|TestOfflinePlanAndRefusalDoNotReadSecretsOrEchoInput)$'
 ```
 
 ```sh
 GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestObserve|TestObservationIntentFailureStopsBeforeRead|TestObservationResponseCaptureIsLocalAndRejectsOtherOperations|TestStatistics|TestDemandStatisticsAllowControlledProbeButNeverCleanup|TestInvalidOwnedProof|TestJournal|TestAuthority|TestInventoryStrictPages|TestInventoryMalformedStopsLegacyEffects|TestInventoryTransportRefusalIsBoundedAndSanitized|TestInventoryImpossibleTotalStopsBeforeNextPage|TestRosterActualTLSCompleteObservation|TestRosterPreservesOnlyAcceptedPagePrefix|TestRosterFinalPublicationGuardAfterDigest|TestRosterRefusesInvalidEntryWithoutNetwork|TestStrictJSONRejectsDecoderEquivalentDuplicateFields|TestStrictJSONRejectsDuplicateAuthorityFields|TestFailedDirectorySyncMustBeRetried|TestFileJournalRejectsUnrecordedAuthorityBeforeRawDriverEffect|TestRenewedRecoveryApprovalRetainsOwnedState)$'
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./liveworker -run '^(TestStrictJSONRejectsDecoderEquivalentDuplicateFields|TestStrictInputRejectsAmbiguousOrExtraAuthorityFields|TestFailedDirectorySyncMustBeRetried|TestFileJournalRejectsUnrecordedAuthorityBeforeRawDriverEffect|TestRenewedRecoveryApprovalRetainsOwnedState)$'
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestDemandStatisticsAllowControlledProbeButNeverCleanup|TestCleanupOnlyForNeverIssuedWorkerWithExactReceipt|TestUnsafeStatisticsStopNewEffectsBeforeControlledMessage|TestEmptyAvailableWithWorkStatisticsStaysQuarantined|TestOlderPendingIntentSurvivesSuccessfulZeroInspection|TestUnownedDiscoveryEvidenceCannotAuthorizeCreationAfterAbsence|TestAuditPR25ObservedJobsMustBlockCleanup|TestUnexpectedWorkMessageQuarantinesBeforeSafeClose|TestObservedRunnerSurvivesLaterAbsenceAndFirstCleanup|TestObservationResultFailureSurvivesFileReopenAndInspection)$'
+GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./liveworker -run '^(TestPrivateJournalLocksAndRetainsReservationAcrossRestart|TestJournalRejectsChangedApprovalTornTailAndUnsafeFiles|TestAuthorityLeaseRefusesConcurrentRunsAndFencesClose|TestAuthorityRejectsReplacedJournalOrDirectory|TestStrictJSONRejectsDecoderEquivalentDuplicateFields|TestStrictInputRejectsAmbiguousOrExtraAuthorityFields|TestFailedDirectorySyncMustBeRetried|TestFileJournalRejectsUnrecordedAuthorityBeforeRawDriverEffect|TestRenewedRecoveryApprovalRetainsOwnedState)$'
+GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestDemandStatisticsAllowControlledProbeButNeverCleanup|TestCleanupOnlyForNeverIssuedWorkerWithExactReceipt|TestZeroStatisticsAndOptionalAbsencePermitEmptyCleanup|TestUnsafeStatisticsStopNewEffectsBeforeControlledMessage|TestEmptyAvailableWithWorkStatisticsStaysQuarantined|TestOlderPendingIntentSurvivesSuccessfulZeroInspection|TestUnownedDiscoveryEvidenceCannotAuthorizeCreationAfterAbsence|TestAuditPR25ObservedJobsMustBlockCleanup|TestUnexpectedWorkMessageQuarantinesBeforeSafeClose|TestObservedRunnerSurvivesLaterAbsenceAndFirstCleanup|TestObservationResultFailureSurvivesFileReopenAndInspection)$'
 ```
 
 ```sh
@@ -233,26 +233,53 @@ skipped, unavailable or unauthorized live phase into “passed.”
 
 ## Documentation-only validation
 
-This packet correction requires markdown/link-target,
-JSON syntax, diff, and secret/private-path checks only. No artificial Go red or
-green test is created for documentation changes. On this correction candidate,
-the local markdown link/anchor checker reported all local targets present
+This packet correction requires markdown/link-target, JSON syntax, diff, and
+secret/private-path checks only. No artificial Go red or green test is created
+for documentation changes. The selector audit is anchored to the immutable
+exact-head source commit `2d809800d26097c5cf6841978df8091c898bb01f` and tree
+`ea5593c039ad2ef4e907eef8090dfd206a7638f3`; the named declarations are
+default-build tests in `./liveworker` (`docker_observation_test.go`,
+`journal_test.go`, and `journal_authority_test.go`) except
+`TestZeroStatisticsAndOptionalAbsencePermitEmptyCleanup`, which is a
+default-build `./livecanary` test in `statistics_fence_test.go`. The focused
+offline `go test -list` checks below were run against that checked-out source
+head and listed every requested new name; they did not execute test bodies.
+
+```sh
+GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./liveworker -list '^(TestUnixInspectRequiresStateFlagsBeforeMutation|TestDockerInspectExactRejectsMalformedOrAmbiguousBodiesBeforeMutation|TestDockerInspectUnknownOrAbsentStatusCannotAuthorizeMutation|TestPrivateJournalLocksAndRetainsReservationAcrossRestart|TestJournalRejectsChangedApprovalTornTailAndUnsafeFiles|TestAuthorityLeaseRefusesConcurrentRunsAndFencesClose|TestAuthorityRejectsReplacedJournalOrDirectory)$'
+GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -list '^TestZeroStatisticsAndOptionalAbsencePermitEmptyCleanup$'
+```
+
+Both commands exited 0 and listed every requested name; these were list-only
+source checks, not test-body execution.
+
+The local markdown link/anchor checker reported all local targets present
 (external URLs were syntax-skipped), `jq empty docs/backlog.json` exited 0,
 `git diff --check` and `git diff --cached --check` exited 0, and the staged
-added-line secret/private-path scan reported no matches. Eight focused offline
-`go test -list` commands for every added name—worker admission plus the
-`osusergo` unsupported-account selector, direct worker runtime, authority and
-transport, positive cleanup, journal persistence, and tagged worker paired
-partitions—each exited 0 and listed every requested name; this was list-only
-source matching and did not execute test bodies. The staged diff was inspected
-as one packet file containing only the focused selector and ledger corrections.
-The six exact-head findings [3999486217](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999486217),
+added-line secret/private-path scan reported no matches. The stable checkout
+root matched this packet worktree, `experiments/g01-scaleset` was present, and
+the staged path set was exactly this packet file.
+
+The staged correction diff was inspected as one packet-only file. It is
+distinct from the cumulative PR #78 diff, whose `origin/main...2d809800d26097c5cf6841978df8091c898bb01f`
+scope contains `docs/evidence/g01-recovery-packet.md` plus the independent
+driver correction from `7ce053380003c9260f46bf93ea118893b95f01e7` in
+`docs/evidence/g01-live-driver.md` and the independent team-review routing
+corrections from `f59a30532bfdc62876065dcf8b4997520606e6a6` in
+`docs/reviews/team-review.md`; those files are outside this staged change.
+No check is claimed against an unrecorded SHA. The four new exact-head
+findings [3999532146](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999532146),
+[3999532149](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999532149),
+[3999532151](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999532151),
+and [3999532158](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999532158)
+are covered by these selector, partition, and validation-scope corrections.
+The prior six exact-head findings [3999486217](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999486217),
 [3999486223](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999486223),
 [3999486229](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999486229),
 [3999486231](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999486231),
 [3999486236](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999486236),
 and [3999486239](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999486239)
-are covered by these selector and partition corrections. The historical
-[secret/error finding 3999010986](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999010986)
+remain covered by the existing selector and partition corrections. The
+historical [secret/error finding 3999010986](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999010986)
 remains addressed by the dedicated Secret and error handling row and its root
 and livecanary commands above; no issue, Project, or Goal state is changed.
