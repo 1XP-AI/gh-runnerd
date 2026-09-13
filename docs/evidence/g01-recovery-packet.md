@@ -401,9 +401,14 @@ skipped, unavailable or unauthorized live phase into “passed.”
 This packet correction requires markdown/link-target, JSON syntax, ledger/table,
 fragment, selector, diff, and secret/private-path checks only. No artificial Go
 red or green test is created for documentation changes. The stable working
-directory and source boundary were checked at the final current PR #78 packet
-head 5979b7d722f3bf8e24404912f9b1f3e888d0828d; ee8df8b7e00204c74a892b27f8b4c0ab278751ba
-is only the unchanged experiments/g01-scaleset source-comparison parent. The selector declaration audit is
+directory and source boundary were checked from immutable validation snapshot
+5979b7d722f3bf8e24404912f9b1f3e888d0828d; that snapshot is not the current PR
+#78 head. The current PR #78 head at the validation point was
+9b94ff9f3114e5546abbe741b96486c3bc13626c and is verified separately by PR
+metadata, exact-head review and CI. This follow-up documentation commit changes
+only validation wording. The comparison parent
+ee8df8b7e00204c74a892b27f8b4c0ab278751ba is only the unchanged
+experiments/g01-scaleset source-comparison parent. The selector declaration audit is
 anchored to immutable source commit
 `95cd9210620c54e098ecbe0df1217af1659f0c74` and tree
 `d8b79cd1ddc6993792a44a8e8ae88985ce7466c0`. The audited default-build
@@ -544,11 +549,14 @@ test "$(git rev-parse 1396e201d905be204c3ac697be43723820581314:docs/evidence/g01
 printf 'stable checkout audit: passed; current HEAD is %s, repo root is current directory, experiments/g01-scaleset exists, source comparison parent is unchanged, scoped tracked/untracked status is empty, and g01-red.md resolves to its pinned blob\n' "$current_head"
 ```
 
-The stable checkout audit exited 0 at the final current PR #78 packet head
-5979b7d722f3bf8e24404912f9b1f3e888d0828d: each literal 5979b7d722f3bf8e24404912f9b1f3e888d0828d
-assertion and the scoped source checks passed. The follow-up packet commit
-intentionally advances this branch, so rerunning the block from a different
-head fails closed rather than accepting drift. It confirmed the unchanged
+The stable checkout commands were actually run from immutable validation
+snapshot 5979b7d722f3bf8e24404912f9b1f3e888d0828d, and the audit exited 0:
+each literal 5979b7d722f3bf8e24404912f9b1f3e888d0828d assertion and the scoped
+source checks passed. The same block intentionally fails closed when checked
+from the current-at-validation PR #78 head 9b94ff9f3114e5546abbe741b96486c3bc13626c,
+because its immutable snapshot assertion rejects that different head. The
+follow-up documentation commit changes only validation wording. It confirmed
+the unchanged
 experiments/g01-scaleset source relative to comparison parent
 ee8df8b7e00204c74a892b27f8b4c0ab278751ba and the g01-red.md commit/blob pin. The
 scoped `git status --porcelain=v1 --untracked-files=all --
@@ -712,9 +720,9 @@ for case in cases:
 PY
 ```
 
-The fail-closed selector audit exited 0 at final current PR #78 packet head
-5979b7d722f3bf8e24404912f9b1f3e888d0828d against the unchanged source under
-comparison parent ee8df8b7e00204c74a892b27f8b4c0ab278751ba: exact sets matched at
+The fail-closed selector audit was actually run from immutable validation
+snapshot 5979b7d722f3bf8e24404912f9b1f3e888d0828d against the unchanged source
+under comparison parent ee8df8b7e00204c74a892b27f8b4c0ab278751ba: exact sets matched at
 25/25 `liveworker` runtime names, 4/4 preparation names, 1/1 `osusergo`
 build-tag name and 26/26 reconciliation names. Every invocation used
 `go test -list`; no test body ran.
@@ -805,6 +813,24 @@ guards every runnable long selector before executing its original command.
 | [3999433331](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999433331), source [9dea03887cc530f742e705055064579121a84206](https://github.com/1XP-AI/gh-runnerd/commit/9dea03887cc530f742e705055064579121a84206) | Reproduced: uncertainty and cleanup contracts were omitted from the worker selector. The worker-runtime command now includes uncertain-start, active/unknown retention and terminal-removal cases. |
 | [3999433334](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999433334), source [9dea03887cc530f742e705055064579121a84206](https://github.com/1XP-AI/gh-runnerd/commit/9dea03887cc530f742e705055064579121a84206) | Reproduced: scheduled reconciliation was stated too much like implemented behavior. The packet now labels scheduling, fencing and rehydration as future production requirements and preserves the live gap. |
 | [3999433335](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999433335), source [9dea03887cc530f742e705055064579121a84206](https://github.com/1XP-AI/gh-runnerd/commit/9dea03887cc530f742e705055064579121a84206) | Reproduced: broad rollback could revert independent corrections. The rollback row now scopes removal/restoration to this packet and preserves driver and routing corrections. |
+
+### Supplemental stale/outdated root findings
+
+These eight root findings were received after the historical 22-row ledger was
+recorded. Each row retains the discussion URL and immutable source commit;
+disposition cites the packet selector or source text that reproduces the issue
+and its correction, rather than relying on staleness alone.
+
+| Finding and immutable source | Reproduction and disposition |
+|---|---|
+| [3999099702](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999099702), source [40daf0f074b9cc9559135adac1cafaad218275be](https://github.com/1XP-AI/gh-runnerd/commit/40daf0f074b9cc9559135adac1cafaad218275be) | Reproduced: the admission selector omitted `TestAuditPR25DistinctStateDirectoriesMustShareCap`. The packet's admission-livecanary selector now names that cross-directory cap regression, with wrapper list/set/count validation before execution. |
+| [3999099708](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999099708), source [40daf0f074b9cc9559135adac1cafaad218275be](https://github.com/1XP-AI/gh-runnerd/commit/40daf0f074b9cc9559135adac1cafaad218275be) | Reproduced: the reconciliation selectors omitted `TestDemandStatisticsAllowControlledProbeButNeverCleanup`. The packet now includes that demand-statistics quarantine contract in the reconciliation and quarantine selectors, with exact list/set/count validation. |
+| [3999140786](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999140786), source [65071cfb1e8ad0f47ab7e09dd119f1c98beaaefc](https://github.com/1XP-AI/gh-runnerd/commit/65071cfb1e8ad0f47ab7e09dd119f1c98beaaefc) | Reproduced: reconciliation selectors omitted the four `TestInventory*` contracts. The packet now names `TestInventoryStrictPages`, `TestInventoryMalformedStopsLegacyEffects`, `TestInventoryTransportRefusalIsBoundedAndSanitized` and `TestInventoryImpossibleTotalStopsBeforeNextPage` in the exact reconciliation selector and audit. |
+| [3999140787](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999140787), source [65071cfb1e8ad0f47ab7e09dd119f1c98beaaefc](https://github.com/1XP-AI/gh-runnerd/commit/65071cfb1e8ad0f47ab7e09dd119f1c98beaaefc) | Reproduced: the ACK selector omitted `TestNoMessageDoesNotCountAsCompletedBarrier`. The packet now includes this empty-poll barrier contract in the exact ACK/livecanary selector and list-only audit. |
+| [3999140792](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999140792), source [65071cfb1e8ad0f47ab7e09dd119f1c98beaaefc](https://github.com/1XP-AI/gh-runnerd/commit/65071cfb1e8ad0f47ab7e09dd119f1c98beaaefc) | Reproduced: the secret/error selector omitted decoded-body truncation and gzip-budget checks. The packet now includes `TestResponseReaderConsumesOnlyBudgetPlusOneAndRejectsTruncation` and `TestResponseBudgetAppliesAfterGzipDecompression` in the livecanary selector. |
+| [3999140797](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999140797), source [65071cfb1e8ad0f47ab7e09dd119f1c98beaaefc](https://github.com/1XP-AI/gh-runnerd/commit/65071cfb1e8ad0f47ab7e09dd119f1c98beaaefc) | Reproduced: journal/authority selectors omitted strict duplicate-field, failed-sync, unrecorded-authority and renewed-approval contracts. The packet now includes the named livecanary and liveworker journal/authority cases in the reconciliation partitions and audits their exact sets. |
+| [3999140800](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999140800), source [65071cfb1e8ad0f47ab7e09dd119f1c98beaaefc](https://github.com/1XP-AI/gh-runnerd/commit/65071cfb1e8ad0f47ab7e09dd119f1c98beaaefc) | Reproduced: the tagged controller command did not exercise the livecanary credential-attestation and plaintext/off-host transport refusals. The packet now includes `TestCredentialAttestationMismatchAndExpiredTokenRejected` and `TestTransportRejectsPlaintextOffHostAndProxyBeforeNetwork` in the live-transport selector. |
+| [3999140806](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999140806), source [9b94ff9f3114e5546abbe741b96486c3bc13626c](https://github.com/1XP-AI/gh-runnerd/commit/9b94ff9f3114e5546abbe741b96486c3bc13626c) | Reproduced against the immutable source: `docs/reviews/team-review.md` already marks the Astra assignments historical-only and routes current work through `docs/EXECUTION.md`; the correction was made by `f59a30532bfdc62876065dcf8b4997520606e6a6`. This stale finding is outside packet-only ownership, so no other file is changed here. |
 
 The two new exact-head findings
 on `95cd9210620c54e098ecbe0df1217af1659f0c74`—[3999634756](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999634756)
