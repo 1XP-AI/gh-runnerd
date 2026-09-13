@@ -2589,3 +2589,89 @@ documentation-only commit. Source rollback is recoverable with
 documentation append separately if needed. No live App/runner/canary test,
 Docker/Lima, Keychain, launchd or workflow replay was run; independent
 exact-head Codex review, CI and merge remain coordinator-owned.
+
+### Exact-head follow-up: case-folded baseline marker boundary
+
+Date: 2026-09-13. This correction started from exact PR #72 head
+`5b24636c04b036da238c03efe4e27f983e138251` and addresses the two fresh Codex
+P1 findings at [the replacement-context marker boundary](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3998274209)
+and [the context-preserved marker boundary](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3998274210).
+The findings identified that a request wrapper could rekey the private
+baseline marker to a noncanonical case spelling, after which canonical-only
+lookup and deletion could bypass the final marked-request boundary or expose
+the marker to the physical transport. No Issue, Project, goal, dependency,
+status or branch field was changed; no Codex review was requested, and no
+live App/runner/canary operation, workflow replay, Docker/Lima, Keychain,
+launchd, credential or cleanup operation was performed.
+
+#### Red-first reproduction
+
+The two case-folded marker regressions were added and run before the source
+correction. This focused command exited 1 as expected:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^(TestBaselineMarkedCaseFoldedMarkerWithReplacementContextRejectsBeforeInner|TestBaselineMarkedCaseFoldedMarkerPreservesContextAndRemovesBeforeInner)$' -count=1 -v -timeout=120s
+```
+
+The replacement-context control returned a successful synthetic response and
+reached the inner transport instead of rejecting the marked request. The
+context-preserved alias control also forwarded successfully and exposed one
+folded marker key at the inner transport; its duplicate-alias control exposed
+two folded marker keys instead of rejecting before forwarding. The regressions
+retain only bounded inner-call, marker-key, status, error and observation
+categories; no response body, authorization value, token, private path or raw
+transport log is recorded.
+
+#### Minimal correction and green evidence
+
+The final baseline boundary now scans request-header map keys
+case-insensitively, counts every matching marker key and aggregates their
+values. A marker-bearing request without its capture context is rejected;
+when the context is present, exactly one matching key and exactly one valid
+marker value are required. Every case-folded marker key is removed before the
+inner transport receives a valid request, while unmarked forwarding and the
+existing direct capture test seam remain unchanged. The prior target, body,
+authorization, Host/Opaque, capacity, origin, tenant-prefix, session identity
+and one-shot checks continue to run after marker validation.
+
+The focused changed-boundary normal command exited 0 in 21.152s, and the
+corresponding race command exited 0 in 33.676s with no race diagnostics:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^(TestBaseline|TestMarkedRequest|TestUnmarked)' -count=1 -timeout=300s
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -run '^(TestBaseline|TestMarkedRequest|TestUnmarked)' -count=1 -timeout=360s
+```
+
+The full `livecanary` package normal run exited 0 in 26.815s and the full
+race run exited 0 in 37.083s, with no race diagnostics:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -count=1 -timeout=300s
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -count=1 -timeout=360s
+```
+
+The changed-module vet and repository format checks exited 0; `git diff
+--check` exited 0; the source/test diff secret/private-path scan exited 0 and
+printed `diff secret/private-path scan passed`. The required two-module
+offline gate exited 0 and printed `offline experiment checks passed: 2
+module(s)`:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go vet ./livecanary
+cd ../..
+GOTOOLCHAIN=go1.26.8 bash scripts/gofmt.sh check
+git diff --check
+GOTOOLCHAIN=go1.26.8 bash scripts/check-offline-experiments.sh
+```
+
+The exact tested source/test head is
+`0f36583535a7f26644e6b58815c8dd0b85b45b8b` (`fix(g01): bind folded baseline
+wire markers`); the final source/evidence head is this source commit plus the
+separate documentation-only append. Source rollback is recoverable with
+`git revert --no-edit 0f36583535a7f26644e6b58815c8dd0b85b45b8b`; revert this
+documentation append separately if needed. No live App/runner/canary evidence
+is claimed; the unresolved live G01 gate, CI and merge remain coordinator-owned.
