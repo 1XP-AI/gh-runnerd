@@ -2500,3 +2500,92 @@ documentation-only commit. Source rollback is recoverable with
 documentation append separately if needed. No live App/runner/canary evidence
 is claimed; the unresolved live G01 gate, independent exact-head Codex review,
 CI and merge remain coordinator-owned.
+
+### Exact-head follow-up: workflow verification response body close failure
+
+Date: 2026-09-13. This correction started from exact PR #72 head
+`fe666a9dcfcab15ac3a95ebfe588374ba7695246` and addresses the fresh Codex P1
+finding at [issue comment 5649825382](https://github.com/1XP-AI/gh-runnerd/pull/72#issuecomment-5649825382).
+The finding identified that a complete matching workflow-run JSON response
+could still have a failing `response.Body.Close`; ignoring that error let
+`VerifyRun` authorize the drain poll before ACK/acquisition. No Issue, Project,
+goal, dependency, status or live-operation state was changed.
+
+#### Red-first reproduction
+
+The regression was run against the exact parent implementation before the
+source correction. This command exited 1 as expected:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^TestPinnedSDKDrainRejectsVerifyRunCloseErrorBeforeEffects$' -count=1
+```
+
+The failure was meaningful: the pinned drain listener received a non-nil
+message with `err <nil>` even though the synthetic verification body returned
+`io.ErrClosedPipe` from `Close`; the test expected quarantine. ACK and
+acquisition counters remained zero because the regression stops at the
+verification gate. The test retains only bounded counters/categories and the
+synthetic close-error category; no response body, token, URL, raw SDK error or
+private path is recorded.
+
+#### Minimal correction and green evidence
+
+`observationGET` now explicitly closes the response after reading it and
+requires both read and close success before accepting any observation,
+including a matching workflow-run response. It continues returning the
+existing opaque `ErrRemote` category, so `VerifyRun` cannot authorize a poll
+whose source body close failed; valid verification, clean 404 handling and
+unmarked forwarding remain covered by the existing tests. The new pinned SDK
+regression confirms the failure quarantines before ACK/acquisition.
+
+The focused normal command exited 0 in 0.483s; the focused race command exited
+0 in 1.795s with no race diagnostics:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^(TestPinnedSDKDrainRejectsVerifyRunCloseErrorBeforeEffects|TestPinnedSDKDrainVerifyRunRejectsAmbiguousWireFieldsBeforeEffects|TestPinnedSDKDrainRequiresCompletePollStatsBeforeVerifyRun|TestPinnedSDKDrainRejectsPollCloseErrorBeforeEffects|TestPinnedSDKDrainRejectsNonEOFPollReadError|TestPinnedSDKDrainMatchesWireBeforeVerifyRun|TestDriverDrainThroughPinnedSDKAndPollHook|TestDrainListenerWithdrawsWhilePollResponseIsHeld|TestObserveRejectsIndependentBaseFork|TestObserveJobAttemptRequiresDetailCorroboration)$' -count=1 -v -timeout=300s
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -run '^(TestPinnedSDKDrainRejectsVerifyRunCloseErrorBeforeEffects|TestPinnedSDKDrainVerifyRunRejectsAmbiguousWireFieldsBeforeEffects|TestPinnedSDKDrainRequiresCompletePollStatsBeforeVerifyRun|TestPinnedSDKDrainRejectsPollCloseErrorBeforeEffects|TestPinnedSDKDrainRejectsNonEOFPollReadError|TestPinnedSDKDrainMatchesWireBeforeVerifyRun|TestDriverDrainThroughPinnedSDKAndPollHook|TestDrainListenerWithdrawsWhilePollResponseIsHeld|TestObserveRejectsIndependentBaseFork|TestObserveJobAttemptRequiresDetailCorroboration)$' -count=1 -timeout=300s
+```
+
+The full `livecanary` package normal run exited 0 in 27.162s and the full race
+run exited 0 in 37.915s, with no race diagnostics:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -count=1 -timeout=300s
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -count=1 -timeout=360s
+```
+
+The relevant offline paired-terminal fixture matrix exited 0 in 14.588s
+normally and 42.410s under race:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -tags=g01_pair_fixture ./livecanary -run '^(TestPairedTerminalActualJournalsFinalize|TestPairedTerminalCompletionCadenceAndReceiptSeparation|TestPairedTerminalFinalResultCapacity|TestPairedTerminalPendingChildCapacity|TestPairedTerminalEligibilityUsesFreshExactFacts|TestPairedTerminalCapturedAcknowledgementCancellation|TestPairedTerminalMissingAcknowledgementsAndPostchecks)$' -count=1 -v -timeout=300s
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -tags=g01_pair_fixture -race ./livecanary -run '^(TestPairedTerminalActualJournalsFinalize|TestPairedTerminalCompletionCadenceAndReceiptSeparation|TestPairedTerminalFinalResultCapacity|TestPairedTerminalPendingChildCapacity|TestPairedTerminalEligibilityUsesFreshExactFacts|TestPairedTerminalCapturedAcknowledgementCancellation|TestPairedTerminalMissingAcknowledgementsAndPostchecks)$' -count=1 -timeout=360s
+```
+
+The repository's reviewed offline gate exited 0 and printed
+`offline experiment checks passed: 2 module(s)`. The changed-module vet,
+format, diff and secret/private-path scan each exited 0; the scan printed
+`diff secret/private-path scan passed`:
+
+```text
+GOTOOLCHAIN=go1.26.8 bash scripts/check-offline-experiments.sh
+(cd experiments/g01-scaleset && GOWORK=off GOTOOLCHAIN=go1.26.8 go vet ./livecanary)
+GOTOOLCHAIN=go1.26.8 bash scripts/gofmt.sh check
+git diff --check
+set -e
+if git diff --text 0aabf2bf65ef4e9c0a5e944ca8b56d76209aae0d^ 0aabf2bf65ef4e9c0a5e944ca8b56d76209aae0d -- experiments/g01-scaleset/livecanary/observer_http.go experiments/g01-scaleset/livecanary/sdk_integration_test.go | rg -n -i '(/Users/|/home/|-----BEGIN (RSA|OPENSSH|EC|PRIVATE)|github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9_]{20,}|Authorization[^\n]{0,20}Bearer[[:space:]]+[A-Za-z0-9._-]{20,})'; then exit 1; fi
+printf '%s\n' 'diff secret/private-path scan passed'
+```
+
+The exact implementation source/test head is
+`0aabf2bf65ef4e9c0a5e944ca8b56d76209aae0d` (`fix(g01): reject workflow
+verification close failures`); this evidence append is a separate
+documentation-only commit. Source rollback is recoverable with
+`git revert --no-edit 0aabf2bf65ef4e9c0a5e944ca8b56d76209aae0d`; revert this
+documentation append separately if needed. No live App/runner/canary test,
+Docker/Lima, Keychain, launchd or workflow replay was run; independent
+exact-head Codex review, CI and merge remain coordinator-owned.
