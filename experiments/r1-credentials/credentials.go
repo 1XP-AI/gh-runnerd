@@ -13,6 +13,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"reflect"
 	"regexp"
 	"strings"
 	"time"
@@ -58,6 +59,14 @@ type CredentialSource interface {
 	Read(context.Context) ([]byte, error)
 }
 
+// manualCredentialSource is an unexported capability marker. Kind is retained
+// as descriptive metadata, but a caller-provided implementation is not a
+// manual source unless it also has this package-private marker.
+type manualCredentialSource interface {
+	CredentialSource
+	credentialSourceMarker()
+}
+
 // ManualSource is an in-memory source intended for explicit operator input and
 // fixture tests. It never reads or writes a path, environment variable or
 // Keychain item.
@@ -78,6 +87,8 @@ func NewManualSource(appID int64, pemBytes []byte) CredentialSource {
 func NewManualSourceWithExpiry(appID int64, pemBytes []byte, expiresAt time.Time) CredentialSource {
 	return ManualSource{appID: appID, expiresAt: expiresAt, pem: append([]byte(nil), pemBytes...)}
 }
+
+func (ManualSource) credentialSourceMarker() {}
 
 func (s ManualSource) Kind() SourceKind     { return SourceManual }
 func (s ManualSource) AppID() int64         { return s.appID }
@@ -186,21 +197,29 @@ type ValidatedBinding struct {
 }
 
 // Commit receives an all-or-nothing metadata binding after every identity
-// check succeeds. A nil callback performs validation only; this is the offline
-// fixture mode and does not persist credentials.
+// check succeeds. The callback must honor ctx before and during its operation
+// and apply the metadata transactionally: it must not expose a partial binding
+// if it returns an error or observes cancellation. A callback may perform an
+// external side effect, but this boundary does not claim that such a side
+// effect can be rolled back. A nil callback performs validation only; this is
+// the offline fixture mode and does not persist credentials.
 type Commit func(context.Context, ValidatedBinding) error
 
 // Validate checks one manually supplied credential source and verifies the
 // configured App, organization installation and private repository in order.
 // No callback or external effect is reached until all checks succeed.
 func Validate(ctx context.Context, config Config, source CredentialSource, api API, commit Commit) (ValidatedBinding, error) {
-	return ValidateAt(ctx, time.Now(), config, source, api, commit)
+	return validateWithClock(ctx, time.Now, config, source, api, commit)
 }
 
-// ValidateAt is Validate with an injected clock for deterministic offline
-// tests. It does not contact GitHub; api is expected to be a fixture adapter
-// in this module.
-func ValidateAt(ctx context.Context, now time.Time, config Config, source CredentialSource, api API, commit Commit) (ValidatedBinding, error) {
+// validateAt is a package-private deterministic clock hook for offline tests.
+// Production callers must use Validate so each boundary reads the trusted
+// process clock instead of supplying an arbitrary stale time.
+func validateAt(ctx context.Context, now time.Time, config Config, source CredentialSource, api API, commit Commit) (ValidatedBinding, error) {
+	return validateWithClock(ctx, func() time.Time { return now }, config, source, api, commit)
+}
+
+func validateWithClock(ctx context.Context, now func() time.Time, config Config, source CredentialSource, api API, commit Commit) (ValidatedBinding, error) {
 	if err := contextStatus(ctx); err != nil {
 		return ValidatedBinding{}, err
 	}
@@ -208,51 +227,51 @@ func ValidateAt(ctx context.Context, now time.Time, config Config, source Creden
 	if err != nil {
 		return ValidatedBinding{}, ErrConfig
 	}
-	if api == nil {
+	if isNilInterface(api) {
 		return ValidatedBinding{}, ErrConfig
 	}
-	ref, err := credentialReference(ctx, now, config, source)
+	ref, expiresAt, err := credentialReference(ctx, now, config, source)
 	if err != nil {
 		return ValidatedBinding{}, err
 	}
 
-	app, err := api.VerifyApp(ctx, ref)
-	if err != nil {
-		if contextStatus(ctx) != nil {
-			return ValidatedBinding{}, ErrCanceled
-		}
-		return ValidatedBinding{}, ErrAppIdentity
-	}
-	if err := contextStatus(ctx); err != nil {
+	if err := boundaryStatus(ctx, now, expiresAt); err != nil {
 		return ValidatedBinding{}, err
+	}
+	app, err := api.VerifyApp(ctx, ref)
+	if boundaryErr := boundaryStatus(ctx, now, expiresAt); boundaryErr != nil {
+		return ValidatedBinding{}, boundaryErr
+	}
+	if err != nil {
+		return ValidatedBinding{}, ErrAppIdentity
 	}
 	if app.ID != config.AppID {
 		return ValidatedBinding{}, ErrAppIdentity
 	}
 
-	installation, err := api.VerifyInstallation(ctx, ref, config.Organization)
-	if err != nil {
-		if contextStatus(ctx) != nil {
-			return ValidatedBinding{}, ErrCanceled
-		}
-		return ValidatedBinding{}, ErrInstallation
-	}
-	if err := contextStatus(ctx); err != nil {
+	if err := boundaryStatus(ctx, now, expiresAt); err != nil {
 		return ValidatedBinding{}, err
+	}
+	installation, err := api.VerifyInstallation(ctx, ref, config.Organization)
+	if boundaryErr := boundaryStatus(ctx, now, expiresAt); boundaryErr != nil {
+		return ValidatedBinding{}, boundaryErr
+	}
+	if err != nil {
+		return ValidatedBinding{}, ErrInstallation
 	}
 	if !validInstallation(config, installation) {
 		return ValidatedBinding{}, ErrInstallation
 	}
 
-	repository, err := api.VerifyRepository(ctx, ref, config.Organization, config.Repository)
-	if err != nil {
-		if contextStatus(ctx) != nil {
-			return ValidatedBinding{}, ErrCanceled
-		}
-		return ValidatedBinding{}, ErrRepository
-	}
-	if err := contextStatus(ctx); err != nil {
+	if err := boundaryStatus(ctx, now, expiresAt); err != nil {
 		return ValidatedBinding{}, err
+	}
+	repository, err := api.VerifyRepository(ctx, ref, config.Organization, config.Repository)
+	if boundaryErr := boundaryStatus(ctx, now, expiresAt); boundaryErr != nil {
+		return ValidatedBinding{}, boundaryErr
+	}
+	if err != nil {
+		return ValidatedBinding{}, ErrRepository
 	}
 	if !validRepository(config, repository) {
 		return ValidatedBinding{}, ErrRepository
@@ -265,51 +284,95 @@ func ValidateAt(ctx context.Context, now time.Time, config Config, source Creden
 		Repository:     config.Repository,
 		Permissions:    clonePermissions(installation.Permissions),
 	}
-	if err := contextStatus(ctx); err != nil {
+	if err := boundaryStatus(ctx, now, expiresAt); err != nil {
 		return ValidatedBinding{}, err
 	}
 	if commit != nil {
 		commitBinding := binding
 		commitBinding.Permissions = clonePermissions(binding.Permissions)
+		if err := boundaryStatus(ctx, now, expiresAt); err != nil {
+			return ValidatedBinding{}, err
+		}
 		if err := commit(ctx, commitBinding); err != nil {
+			if boundaryErr := boundaryStatus(ctx, now, expiresAt); boundaryErr != nil {
+				return ValidatedBinding{}, boundaryErr
+			}
 			return ValidatedBinding{}, ErrCommit
 		}
-		if err := contextStatus(ctx); err != nil {
+		if err := boundaryStatus(ctx, now, expiresAt); err != nil {
 			return ValidatedBinding{}, err
 		}
 	}
 	return binding, nil
 }
 
-func credentialReference(ctx context.Context, now time.Time, config Config, source CredentialSource) (CredentialRef, error) {
-	if source == nil {
-		return CredentialRef{}, ErrSource
+func credentialReference(ctx context.Context, now func() time.Time, config Config, source CredentialSource) (CredentialRef, time.Time, error) {
+	if isNilInterface(source) {
+		return CredentialRef{}, time.Time{}, ErrSource
 	}
-	kind, appID, expiresAt := source.Kind(), source.AppID(), source.ExpiresAt()
+	manual, ok := source.(manualCredentialSource)
+	if !ok {
+		return CredentialRef{}, time.Time{}, ErrSource
+	}
+	kind, appID, expiresAt := manual.Kind(), manual.AppID(), manual.ExpiresAt()
 	if kind != SourceManual || appID != config.AppID || appID < 1 {
-		return CredentialRef{}, ErrSource
+		return CredentialRef{}, time.Time{}, ErrSource
 	}
-	if !expiresAt.IsZero() && !now.Before(expiresAt) {
-		return CredentialRef{}, ErrExpired
+	if sourceExpired(now(), expiresAt) {
+		return CredentialRef{}, time.Time{}, ErrExpired
 	}
 	if err := contextStatus(ctx); err != nil {
-		return CredentialRef{}, err
+		return CredentialRef{}, time.Time{}, err
 	}
-	pemBytes, err := source.Read(ctx)
+	pemBytes, err := manual.Read(ctx)
 	if err != nil {
 		if contextStatus(ctx) != nil {
-			return CredentialRef{}, ErrCanceled
+			return CredentialRef{}, time.Time{}, ErrCanceled
 		}
-		return CredentialRef{}, ErrSource
+		return CredentialRef{}, time.Time{}, ErrSource
 	}
 	if err := contextStatus(ctx); err != nil {
-		return CredentialRef{}, err
+		return CredentialRef{}, time.Time{}, err
+	}
+	// Read may cross the source's expiry boundary, and a same-package fixture
+	// can update its envelope metadata while reading. Re-read rather than
+	// relying on the pre-read snapshot before deriving the adapter reference.
+	expiresAt = manual.ExpiresAt()
+	if sourceExpired(now(), expiresAt) {
+		return CredentialRef{}, time.Time{}, ErrExpired
 	}
 	fingerprint, err := fingerprintPrivateKey(pemBytes)
 	if err != nil {
-		return CredentialRef{}, ErrCredential
+		return CredentialRef{}, time.Time{}, ErrCredential
 	}
-	return CredentialRef{appID: config.AppID, fingerprint: fingerprint}, nil
+	return CredentialRef{appID: config.AppID, fingerprint: fingerprint}, expiresAt, nil
+}
+
+func boundaryStatus(ctx context.Context, now func() time.Time, expiresAt time.Time) error {
+	if err := contextStatus(ctx); err != nil {
+		return err
+	}
+	if sourceExpired(now(), expiresAt) {
+		return ErrExpired
+	}
+	return nil
+}
+
+func sourceExpired(now time.Time, expiresAt time.Time) bool {
+	return !expiresAt.IsZero() && !now.Before(expiresAt)
+}
+
+func isNilInterface(value any) bool {
+	if value == nil {
+		return true
+	}
+	rv := reflect.ValueOf(value)
+	switch rv.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+		return rv.IsNil()
+	default:
+		return false
+	}
 }
 
 func contextStatus(ctx context.Context) error {

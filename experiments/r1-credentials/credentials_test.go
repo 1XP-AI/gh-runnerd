@@ -29,13 +29,13 @@ type fixtureAPI struct {
 	calls               []string
 	fingerprints        [][32]byte
 	expectedFingerprint [32]byte
+	boundFingerprint    [32]byte
 }
 
 func (f *fixtureAPI) VerifyApp(_ context.Context, credential CredentialRef) (AppIdentity, error) {
 	f.calls = append(f.calls, "app")
-	f.fingerprints = append(f.fingerprints, credential.PublicKeyFingerprint())
-	if credential.AppID() != fixtureAppID {
-		return AppIdentity{}, errors.New("fixture credential mismatch")
+	if err := f.checkCredential(credential); err != nil {
+		return AppIdentity{}, err
 	}
 	if f.appErr != nil {
 		return AppIdentity{}, f.appErr
@@ -43,20 +43,44 @@ func (f *fixtureAPI) VerifyApp(_ context.Context, credential CredentialRef) (App
 	return f.app, nil
 }
 
-func (f *fixtureAPI) VerifyInstallation(_ context.Context, _ CredentialRef, organization Organization) (Installation, error) {
+func (f *fixtureAPI) VerifyInstallation(_ context.Context, credential CredentialRef, organization Organization) (Installation, error) {
 	f.calls = append(f.calls, "installation:"+organization.Login)
+	if err := f.checkCredential(credential); err != nil {
+		return Installation{}, err
+	}
 	if f.installErr != nil {
 		return Installation{}, f.installErr
 	}
 	return f.installation, nil
 }
 
-func (f *fixtureAPI) VerifyRepository(_ context.Context, _ CredentialRef, organization Organization, repository Repository) (Repository, error) {
+func (f *fixtureAPI) VerifyRepository(_ context.Context, credential CredentialRef, organization Organization, repository Repository) (Repository, error) {
 	f.calls = append(f.calls, "repository:"+organization.Login+"/"+repository.Name)
+	if err := f.checkCredential(credential); err != nil {
+		return Repository{}, err
+	}
 	if f.repositoryErr != nil {
 		return Repository{}, f.repositoryErr
 	}
 	return f.repository, nil
+}
+
+func (f *fixtureAPI) checkCredential(credential CredentialRef) error {
+	fingerprints := credential.PublicKeyFingerprint()
+	f.fingerprints = append(f.fingerprints, fingerprints)
+	if credential.AppID() != fixtureAppID {
+		return errors.New("fixture credential mismatch")
+	}
+	if f.expectedFingerprint != ([32]byte{}) && fingerprints != f.expectedFingerprint {
+		return errors.New("fixture credential mismatch")
+	}
+	if f.boundFingerprint == ([32]byte{}) {
+		f.boundFingerprint = fingerprints
+	}
+	if fingerprints != f.boundFingerprint {
+		return errors.New("fixture credential mismatch")
+	}
+	return nil
 }
 
 type sourceFixture struct {
@@ -110,9 +134,10 @@ func (c *cancelOnErrContext) Err() error {
 
 func (c *cancelOnErrContext) Done() <-chan struct{} { return c.done }
 
-func (s *sourceFixture) Kind() SourceKind     { return s.kind }
-func (s *sourceFixture) AppID() int64         { return s.appID }
-func (s *sourceFixture) ExpiresAt() time.Time { return s.expiresAt }
+func (s *sourceFixture) Kind() SourceKind      { return s.kind }
+func (s *sourceFixture) AppID() int64          { return s.appID }
+func (s *sourceFixture) ExpiresAt() time.Time  { return s.expiresAt }
+func (*sourceFixture) credentialSourceMarker() {}
 func (s *sourceFixture) Read(context.Context) ([]byte, error) {
 	s.reads++
 	if s.onRead != nil {
@@ -166,7 +191,7 @@ func TestValidateManualSingleOrganizationBindsIdentityBeforeCommit(t *testing.T)
 	api := fixtureAPIValue()
 	var committed ValidatedBinding
 	commits := 0
-	got, err := ValidateAt(context.Background(), fixtureNow, fixtureConfig(), source, api, func(_ context.Context, binding ValidatedBinding) error {
+	got, err := validateAt(context.Background(), fixtureNow, fixtureConfig(), source, api, func(_ context.Context, binding ValidatedBinding) error {
 		commits++
 		committed = binding
 		return nil
@@ -208,7 +233,7 @@ func TestValidationRejectsWrongValidKeyForBoundIdentity(t *testing.T) {
 	api := fixtureAPIValue()
 	api.expectedFingerprint = wantFingerprint
 	wrongPEM := fixturePEM(t)
-	_, err = ValidateAt(context.Background(), fixtureNow, fixtureConfig(), NewManualSource(fixtureAppID, wrongPEM), api, nil)
+	_, err = validateAt(context.Background(), fixtureNow, fixtureConfig(), NewManualSource(fixtureAppID, wrongPEM), api, nil)
 	if !errors.Is(err, ErrAppIdentity) || !reflect.DeepEqual(api.calls, []string{"app"}) {
 		t.Fatalf("unrelated valid key was accepted: err=%v calls=%v", err, api.calls)
 	}
@@ -217,7 +242,7 @@ func TestValidationRejectsWrongValidKeyForBoundIdentity(t *testing.T) {
 func TestValidationRejectsUnmarkedManualSource(t *testing.T) {
 	source := &spoofedManualSource{appID: fixtureAppID, pem: fixturePEM(t)}
 	api := fixtureAPIValue()
-	_, err := ValidateAt(context.Background(), fixtureNow, fixtureConfig(), source, api, nil)
+	_, err := validateAt(context.Background(), fixtureNow, fixtureConfig(), source, api, nil)
 	if !errors.Is(err, ErrSource) || source.reads != 0 || len(api.calls) != 0 {
 		t.Fatalf("unmarked manual source crossed boundary: err=%v reads=%d calls=%v", err, source.reads, api.calls)
 	}
@@ -235,9 +260,18 @@ func TestValidationRejectsSourceThatExpiresDuringRead(t *testing.T) {
 		},
 	}
 	api := fixtureAPIValue()
-	_, err := ValidateAt(context.Background(), fixtureNow, fixtureConfig(), source, api, nil)
+	_, err := validateAt(context.Background(), fixtureNow, fixtureConfig(), source, api, nil)
 	if !errors.Is(err, ErrExpired) || source.reads != 1 || len(api.calls) != 0 {
 		t.Fatalf("late-expiring source crossed boundary: err=%v reads=%d calls=%v", err, source.reads, api.calls)
+	}
+}
+
+func TestValidateUsesTrustedCurrentClockForExpiry(t *testing.T) {
+	source := NewManualSourceWithExpiry(fixtureAppID, fixturePEM(t), time.Now().Add(-time.Second))
+	api := fixtureAPIValue()
+	_, err := Validate(context.Background(), fixtureConfig(), source, api, nil)
+	if !errors.Is(err, ErrExpired) || len(api.calls) != 0 {
+		t.Fatalf("production validation used a stale clock: err=%v calls=%v", err, api.calls)
 	}
 }
 
@@ -245,9 +279,27 @@ func TestValidationChecksCancellationImmediatelyBeforeAppBoundary(t *testing.T) 
 	ctx := newCancelOnErrContext(context.Background(), 4)
 	source := &sourceFixture{kind: SourceManual, appID: fixtureAppID, pem: fixturePEM(t)}
 	api := fixtureAPIValue()
-	_, err := ValidateAt(ctx, fixtureNow, fixtureConfig(), source, api, nil)
+	_, err := validateAt(ctx, fixtureNow, fixtureConfig(), source, api, nil)
 	if !errors.Is(err, ErrCanceled) || len(api.calls) != 0 {
 		t.Fatalf("canceled API boundary crossed remote effect: err=%v calls=%v", err, api.calls)
+	}
+}
+
+func TestValidationReportsCancellationAfterCommitCallback(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	api := fixtureAPIValue()
+	commitCalls := 0
+	_, err := validateAt(ctx, fixtureNow, fixtureConfig(), fixtureSource(t), api, func(callbackCtx context.Context, _ ValidatedBinding) error {
+		commitCalls++
+		if callbackCtx == nil {
+			t.Fatal("commit callback received a nil context")
+		}
+		cancel()
+		return nil
+	})
+	if !errors.Is(err, ErrCanceled) || commitCalls != 1 {
+		t.Fatalf("commit cancellation was not reported at boundary: err=%v calls=%d", err, commitCalls)
 	}
 }
 
@@ -255,7 +307,7 @@ func TestValidationRejectsTypedNilSourceAndAdapter(t *testing.T) {
 	var nilSource *sourceFixture
 	var source CredentialSource = nilSource
 	api := fixtureAPIValue()
-	_, err := ValidateAt(context.Background(), fixtureNow, fixtureConfig(), source, api, nil)
+	_, err := validateAt(context.Background(), fixtureNow, fixtureConfig(), source, api, nil)
 	if !errors.Is(err, ErrSource) || len(api.calls) != 0 {
 		t.Fatalf("typed-nil source crossed validation boundary: err=%v calls=%v", err, api.calls)
 	}
@@ -263,7 +315,7 @@ func TestValidationRejectsTypedNilSourceAndAdapter(t *testing.T) {
 	var nilAPI *fixtureAPI
 	var typedNilAPI API = nilAPI
 	source = &sourceFixture{kind: SourceManual, appID: fixtureAppID, pem: fixturePEM(t)}
-	_, err = ValidateAt(context.Background(), fixtureNow, fixtureConfig(), source, typedNilAPI, nil)
+	_, err = validateAt(context.Background(), fixtureNow, fixtureConfig(), source, typedNilAPI, nil)
 	if !errors.Is(err, ErrConfig) {
 		t.Fatalf("typed-nil adapter crossed validation boundary: err=%v", err)
 	}
@@ -287,7 +339,7 @@ func TestValidationRejectsInvalidSourceBeforeAnyRemoteEffect(t *testing.T) {
 			tc.mutate(&config, source)
 			api := fixtureAPIValue()
 			commits := 0
-			_, err := ValidateAt(context.Background(), fixtureNow, config, source, api, func(context.Context, ValidatedBinding) error {
+			_, err := validateAt(context.Background(), fixtureNow, config, source, api, func(context.Context, ValidatedBinding) error {
 				commits++
 				return nil
 			})
@@ -326,7 +378,7 @@ func TestValidationRejectsBadConfigurationBeforeReadingSource(t *testing.T) {
 			tc.mutate(&config)
 			source := &sourceFixture{kind: SourceManual, appID: fixtureAppID, pem: fixturePEM(t)}
 			api := fixtureAPIValue()
-			_, err := ValidateAt(context.Background(), fixtureNow, config, source, api, nil)
+			_, err := validateAt(context.Background(), fixtureNow, config, source, api, nil)
 			if !errors.Is(err, ErrConfig) || source.reads != 0 || len(api.calls) != 0 {
 				t.Fatalf("unsafe configuration crossed boundary: err=%v reads=%d calls=%v", err, source.reads, api.calls)
 			}
@@ -341,24 +393,29 @@ func TestValidationPassesOnlyFingerprintToFixtureAdapter(t *testing.T) {
 		t.Fatal("fixture key fingerprint failed")
 	}
 	api := fixtureAPIValue()
-	_, err = ValidateAt(context.Background(), fixtureNow, fixtureConfig(), NewManualSource(fixtureAppID, pemBytes), api, nil)
+	_, err = validateAt(context.Background(), fixtureNow, fixtureConfig(), NewManualSource(fixtureAppID, pemBytes), api, nil)
 	if err != nil {
 		t.Fatalf("manual fixture rejected: %v", err)
 	}
-	if len(api.fingerprints) != 1 || api.fingerprints[0] != wantFingerprint {
-		t.Fatalf("adapter did not receive the parsed key fingerprint: got=%v want=%v", api.fingerprints, wantFingerprint)
+	if len(api.fingerprints) != 3 {
+		t.Fatalf("adapter did not receive the credential fingerprint at every identity boundary: got=%v", api.fingerprints)
+	}
+	for _, fingerprint := range api.fingerprints {
+		if fingerprint != wantFingerprint {
+			t.Fatalf("adapter received an inconsistent key fingerprint: got=%v want=%v", api.fingerprints, wantFingerprint)
+		}
 	}
 }
 
 func TestValidationRejectsNilSourceAndAdapterBeforeBoundary(t *testing.T) {
 	api := fixtureAPIValue()
-	_, err := ValidateAt(context.Background(), fixtureNow, fixtureConfig(), nil, api, nil)
+	_, err := validateAt(context.Background(), fixtureNow, fixtureConfig(), nil, api, nil)
 	if !errors.Is(err, ErrSource) || len(api.calls) != 0 {
 		t.Fatalf("nil source crossed validation boundary: err=%v calls=%v", err, api.calls)
 	}
 
 	source := &sourceFixture{kind: SourceManual, appID: fixtureAppID, pem: fixturePEM(t)}
-	_, err = ValidateAt(context.Background(), fixtureNow, fixtureConfig(), source, nil, nil)
+	_, err = validateAt(context.Background(), fixtureNow, fixtureConfig(), source, nil, nil)
 	if !errors.Is(err, ErrConfig) || source.reads != 0 {
 		t.Fatalf("nil adapter crossed source boundary: err=%v reads=%d", err, source.reads)
 	}
@@ -367,7 +424,7 @@ func TestValidationRejectsNilSourceAndAdapterBeforeBoundary(t *testing.T) {
 func TestValidationRejectsOversizedCredentialBeforeFixture(t *testing.T) {
 	source := &sourceFixture{kind: SourceManual, appID: fixtureAppID, pem: make([]byte, maxCredentialBytes+1)}
 	api := fixtureAPIValue()
-	_, err := ValidateAt(context.Background(), fixtureNow, fixtureConfig(), source, api, nil)
+	_, err := validateAt(context.Background(), fixtureNow, fixtureConfig(), source, api, nil)
 	if !errors.Is(err, ErrCredential) || source.reads != 1 || len(api.calls) != 0 {
 		t.Fatalf("oversized credential crossed fixture boundary: err=%v reads=%d calls=%v", err, source.reads, api.calls)
 	}
@@ -395,7 +452,7 @@ func TestValidationRejectsIdentityAndPermissionDriftWithoutCommit(t *testing.T) 
 			api := fixtureAPIValue()
 			tc.mutate(api)
 			commits := 0
-			_, err := ValidateAt(context.Background(), fixtureNow, fixtureConfig(), fixtureSource(t), api, func(context.Context, ValidatedBinding) error {
+			_, err := validateAt(context.Background(), fixtureNow, fixtureConfig(), fixtureSource(t), api, func(context.Context, ValidatedBinding) error {
 				commits++
 				return nil
 			})
@@ -420,7 +477,7 @@ func TestValidationNormalizesEveryAdapterFailure(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			api := fixtureAPIValue()
 			tc.mutate(api)
-			_, err := ValidateAt(context.Background(), fixtureNow, fixtureConfig(), fixtureSource(t), api, nil)
+			_, err := validateAt(context.Background(), fixtureNow, fixtureConfig(), fixtureSource(t), api, nil)
 			if !errors.Is(err, tc.want) || !reflect.DeepEqual(api.calls, tc.wantCalls) {
 				t.Fatalf("adapter failure was not normalized: err=%v calls=%v", err, api.calls)
 			}
@@ -435,7 +492,7 @@ func TestValidationIsAtomicAndNormalizesBoundaryErrors(t *testing.T) {
 	api := fixtureAPIValue()
 	api.installErr = errors.New("fixture-private-key-api-body")
 	commits := 0
-	_, err := ValidateAt(context.Background(), fixtureNow, fixtureConfig(), fixtureSource(t), api, func(context.Context, ValidatedBinding) error {
+	_, err := validateAt(context.Background(), fixtureNow, fixtureConfig(), fixtureSource(t), api, func(context.Context, ValidatedBinding) error {
 		commits++
 		return nil
 	})
@@ -447,7 +504,7 @@ func TestValidationIsAtomicAndNormalizesBoundaryErrors(t *testing.T) {
 	}
 
 	api = fixtureAPIValue()
-	_, err = ValidateAt(context.Background(), fixtureNow, fixtureConfig(), fixtureSource(t), api, func(context.Context, ValidatedBinding) error {
+	_, err = validateAt(context.Background(), fixtureNow, fixtureConfig(), fixtureSource(t), api, func(context.Context, ValidatedBinding) error {
 		return errors.New("fixture-private-key-store-body")
 	})
 	if !errors.Is(err, ErrCommit) || strings.Contains(err.Error(), "fixture-private-key-store-body") {
@@ -457,7 +514,7 @@ func TestValidationIsAtomicAndNormalizesBoundaryErrors(t *testing.T) {
 
 func TestCommitReceivesIndependentMetadataSnapshot(t *testing.T) {
 	api := fixtureAPIValue()
-	got, err := ValidateAt(context.Background(), fixtureNow, fixtureConfig(), fixtureSource(t), api, func(_ context.Context, binding ValidatedBinding) error {
+	got, err := validateAt(context.Background(), fixtureNow, fixtureConfig(), fixtureSource(t), api, func(_ context.Context, binding ValidatedBinding) error {
 		binding.Permissions["metadata"] = "write"
 		return nil
 	})
@@ -474,7 +531,7 @@ func TestCanceledValidationDoesNotReadOrCallFixture(t *testing.T) {
 	cancel()
 	source := &sourceFixture{kind: SourceManual, appID: fixtureAppID, pem: fixturePEM(t)}
 	api := fixtureAPIValue()
-	_, err := ValidateAt(ctx, fixtureNow, fixtureConfig(), source, api, nil)
+	_, err := validateAt(ctx, fixtureNow, fixtureConfig(), source, api, nil)
 	if !errors.Is(err, ErrCanceled) || source.reads != 0 || len(api.calls) != 0 {
 		t.Fatalf("canceled validation crossed boundary: err=%v reads=%d calls=%v", err, source.reads, api.calls)
 	}
@@ -485,7 +542,7 @@ func TestCancellationAfterSourceReadStopsBeforeFixture(t *testing.T) {
 	source := &sourceFixture{kind: SourceManual, appID: fixtureAppID, pem: fixturePEM(t), onRead: cancel}
 	api := fixtureAPIValue()
 
-	_, err := ValidateAt(ctx, fixtureNow, fixtureConfig(), source, api, nil)
+	_, err := validateAt(ctx, fixtureNow, fixtureConfig(), source, api, nil)
 	if !errors.Is(err, ErrCanceled) || source.reads != 1 || len(api.calls) != 0 {
 		t.Fatalf("canceled source read crossed fixture boundary: err=%v reads=%d calls=%v", err, source.reads, api.calls)
 	}
