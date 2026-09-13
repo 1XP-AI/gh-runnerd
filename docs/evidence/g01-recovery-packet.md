@@ -233,7 +233,8 @@ force-off, not validation or reuse of a caller-provided `go.work` file.
 Race-mode prescriptions reject inherited or command-supplied `GORACE` before
 either list probe or test execution. Exactly one `-count=1` and one positive bounded
 `-timeout` (at most 300 seconds) are required; `-args` and test-binary
-selector/count/timeout overrides and `-exec` execution wrappers are rejected.
+selector/count/timeout overrides, Go `-overlay FILE`/`-overlay=FILE` build
+overrides, and `-exec` execution wrappers are rejected.
 The execution command adds a wrapper-controlled `-json` stream and fails closed
 on malformed output, non-empty stderr or any Go test `Action` of `skip`,
 including skipped subtests; it also requires a top-level `run` and `pass` event
@@ -324,6 +325,16 @@ if inherited_child_env:
 if len(command) < 3 or command[:2] != ["go", "test"]:
     raise SystemExit(f"{label}: expected a go test command")
 
+# Reject Go overlay build overrides before any Go child is started. Both the
+# separated `-overlay FILE` and equals-form `-overlay=FILE` spellings can
+# redirect the package's source/build inputs and therefore require a separate
+# reviewed source-tree decision.
+test_args = command[2:]
+if any(value == "-overlay" or value.startswith("-overlay=") for value in test_args):
+    raise SystemExit(
+        f"{label}: Go -overlay build overrides are not allowed in a guarded rerun"
+    )
+
 # Pin the environment after parsing command-prefix assignments. This overrides
 # both inherited and command-supplied GOWORK values before the first Go child.
 env["GOWORK"] = "off"
@@ -347,8 +358,6 @@ if len(effective_lines) > 1:
 if effective_lines and effective_lines[0].strip():
     raise SystemExit(f"{label}: effective GOFLAGS must be empty")
 go_env["GOFLAGS"] = ""
-
-test_args = command[2:]
 
 def flag_values(args, flag):
     values = []
@@ -1362,6 +1371,62 @@ inherited_gowork_previous = os.environ.get("GOWORK")
 gowork_observed = []
 real_run = subprocess.run
 
+overlay_cases = [
+    (
+        "overlay-separated",
+        common + ["-overlay", "/synthetic/overlay.json", "./livecanary",
+                  "-run=^" + one_name + "$"],
+    ),
+    (
+        "overlay-equals",
+        common + ["-overlay=/synthetic/overlay.json", "./livecanary",
+                  "-run=^" + one_name + "$"],
+    ),
+]
+overlay_go_children = []
+
+def reject_overlay_go_child(*args, **kwargs):
+    command = args[0] if args else kwargs.get("args", [])
+    if command and command[0] == "go":
+        overlay_go_children.append(tuple(command))
+        raise AssertionError("overlay guard started a Go child")
+    return real_run(*args, **kwargs)
+
+subprocess.run = reject_overlay_go_child
+try:
+    for overlay_label, overlay_command in overlay_cases:
+        sys.argv = [
+            "wrapper-probe", "1", one_digest, overlay_label,
+            "experiments/g01-scaleset:./livecanary", "default+race+go1.26.8",
+            *overlay_command,
+        ]
+        output = io.StringIO()
+        try:
+            with redirect_stdout(output):
+                exec(compile(wrapper, "<wrapper>", "exec"), namespace)
+        except SystemExit as error:
+            if output.getvalue():
+                raise SystemExit(
+                    f"{overlay_label}: rejection emitted a result before the guard"
+                )
+            print(
+                f"{overlay_label}: rejected before test body/result recording: "
+                f"{error}"
+            )
+        else:
+            raise SystemExit(f"{overlay_label}: -overlay was unexpectedly accepted")
+finally:
+    subprocess.run = real_run
+if overlay_go_children:
+    raise SystemExit(
+        "overlay regression: a Go child started before -overlay rejection: "
+        + repr(overlay_go_children)
+    )
+print(
+    "overlay regression: both separated and equals-form -overlay rejected before "
+    "any Go child or result recording"
+)
+
 def observe_go_child(*args, **kwargs):
     command = args[0] if args else kwargs.get("args", [])
     if command and command[0] == "go":
@@ -1462,14 +1527,19 @@ inherited-workspace probe observed the force-off environment on all three direct
 Go metadata/list probes before listing; slash-
 delimited subtest `-skip`, `-count=0`, `-count=2`, missing/duplicate/zero/
 overlarge `-timeout`, inherited `GORACE`, `-args`, direct test-binary selector,
-`-exec`, active package `init`, and inherited `G01_INPUT_CHILD=blocked` were
-each rejected before listing. The output-only stream without expected `run`
-and `pass` events was rejected before result recording. No test body, live
-operation or secret-bearing input was run.
+`-exec`, both separated and equals-form `-overlay` build overrides, active
+package `init`, and inherited `G01_INPUT_CHILD=blocked` were each rejected
+before listing. The focused overlay regression patched direct Go-child launches
+and required both forms to reject with no pre-guard result output; the
+output-only stream without expected `run` and `pass` events was rejected before
+result recording. No test body, live operation or secret-bearing input was run.
 
 The added wrapper-regression output was:
 
 ```text
+overlay-separated: rejected before test body/result recording: overlay-separated: Go -overlay build overrides are not allowed in a guarded rerun
+overlay-equals: rejected before test body/result recording: overlay-equals: Go -overlay build overrides are not allowed in a guarded rerun
+overlay regression: both separated and equals-form -overlay rejected before any Go child or result recording
 slash-subtest-skip: rejected before test body: slash-subtest-skip: slash-delimited -skip selectors are rejected because top-level -list cannot validate subtest names
 count-zero: rejected before test body: count-zero: exactly one -count=1 is required
 timeout-missing: rejected before test body: timeout-missing: exactly one -timeout value is required
@@ -2497,6 +2567,15 @@ staleness alone:
 |---|---|
 | [4000590180](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000590180), source [c550adcb2ca6532e2c69cbb6ad8d2aafd5e352ae](https://github.com/1XP-AI/gh-runnerd/commit/c550adcb2ca6532e2c69cbb6ad8d2aafd5e352ae) | Reproduced: inherited `GOWORK` could select an external workspace/replacement while the wrapper was resolving package metadata. Corrected: after parsing environment assignments, the wrapper forces `GOWORK=off` in one Go-child environment before `go env`, `go list`, either `go test -list` probe or the JSON test subprocess, so caller workspaces are ignored before metadata selection. |
 | [4000590184](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000590184), source [c550adcb2ca6532e2c69cbb6ad8d2aafd5e352ae](https://github.com/1XP-AI/gh-runnerd/commit/c550adcb2ca6532e2c69cbb6ad8d2aafd5e352ae) | Reproduced: inherited `GOWORK` could alter list or execution behavior after metadata validation. Corrected: the independent selector and package-init audits also pin `GOWORK=off`; a read-only synthetic inherited-workspace probe injected an external sentinel and observed `GOWORK=off` on all three direct metadata/list children before accepting the list-only result. No test body, live resource or external workspace was used. |
+
+### Current exact-head Go overlay finding
+
+The Codex finding on the exact prior packet head
+[`44a2142adab39bba73fc93965fa003ed17506d92`](https://github.com/1XP-AI/gh-runnerd/commit/44a2142adab39bba73fc93965fa003ed17506d92)—[4000667752](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000667752)—was reproduced and corrected here; it is not treated as resolved by a new head or staleness alone:
+
+| Finding and immutable source | Reproduction and disposition |
+|---|---|
+| [4000667752](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000667752), source [44a2142adab39bba73fc93965fa003ed17506d92](https://github.com/1XP-AI/gh-runnerd/commit/44a2142adab39bba73fc93965fa003ed17506d92) | Reproduced: the guarded wrapper accepted Go `-overlay` build overrides, allowing a caller-supplied overlay to change the source/build inputs after the wrapper's reviewed-tree assumptions. Corrected: immediately after parsing command-prefix assignments and validating `go test`, the wrapper rejects both separated `-overlay FILE` and equals-form `-overlay=FILE` before the first `go env`, metadata, list or test child. The focused synthetic regression patched direct Go-child launches, required both forms to reject with empty pre-guard output, and therefore recorded no test body or result; no live operation, secret, private path or overlay file was used. |
 
 The two new exact-head findings
 on `95cd9210620c54e098ecbe0df1217af1659f0c74`—[3999634756](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r3999634756)
