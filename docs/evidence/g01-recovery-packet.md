@@ -1091,7 +1091,7 @@ go_child_stream_chunk_bytes = 64 * 1024
 
 
 def close_go_child_streams(process):
-    for name in ("stdout", "stderr"):
+    for name in ("stdin", "stdout", "stderr"):
         stream = getattr(process, name, None)
         if stream is not None:
             try:
@@ -1447,11 +1447,12 @@ git_filter_guard_output_max_bytes = 64 * 1024
 git_filter_guard_stream_chunk_bytes = 4096
 
 
-def capture_git_filter_output(process, git_command, output_limit):
-    """Stream a Git filter-preflight child before applying the hard cap."""
+def capture_git_filter_output(process, git_command, output_limit, input_bytes=None):
+    """Stream a Git filter-preflight child, including bounded stdin."""
     if output_limit <= 0:
         raise SystemExit(f"{label}: Git path inventory exceeded the reviewed budget")
     captures = {"stdout": bytearray(), "stderr": bytearray()}
+    pending_input = memoryview(input_bytes) if input_bytes is not None else None
     selector = selectors.DefaultSelector()
     try:
         for name in captures:
@@ -1459,6 +1460,15 @@ def capture_git_filter_output(process, git_command, output_limit):
             if stream is not None:
                 os.set_blocking(stream.fileno(), False)
                 selector.register(stream, selectors.EVENT_READ, name)
+        if pending_input is not None:
+            stream = getattr(process, "stdin", None)
+            if stream is None:
+                raise SystemExit(f"{label}: Git filter query has no bounded stdin pipe")
+            os.set_blocking(stream.fileno(), False)
+            if len(pending_input):
+                selector.register(stream, selectors.EVENT_WRITE, "stdin")
+            else:
+                stream.close()
         deadline = time.monotonic() + git_filter_guard_deadline_seconds
         while selector.get_map():
             remaining = deadline - time.monotonic()
@@ -1473,6 +1483,18 @@ def capture_git_filter_output(process, git_command, output_limit):
                 )
             for key, _ in ready:
                 stream = key.fileobj
+                if key.data == "stdin":
+                    try:
+                        written = os.write(stream.fileno(), pending_input)
+                    except BlockingIOError:
+                        continue
+                    except (BrokenPipeError, OSError):
+                        raise SystemExit(f"{label}: Git filter query stdin failed closed")
+                    pending_input = pending_input[written:]
+                    if not pending_input:
+                        selector.unregister(stream)
+                        stream.close()
+                    continue
                 try:
                     chunk = os.read(stream.fileno(), git_filter_guard_stream_chunk_bytes)
                 except BlockingIOError:
@@ -1507,7 +1529,9 @@ def capture_git_filter_output(process, git_command, output_limit):
         selector.close()
 
 
-def run_bounded_git_filter_query(repo_root, arguments, env, output_limit):
+def run_bounded_git_filter_query(
+    repo_root, arguments, env, output_limit, input_bytes=None
+):
     """Run one path inventory in an owned session with bounded output/reap."""
     command = git_command(arguments)
     process = None
@@ -1516,6 +1540,7 @@ def run_bounded_git_filter_query(repo_root, arguments, env, output_limit):
             command,
             cwd=repo_root,
             env=env,
+            stdin=subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
@@ -1524,7 +1549,9 @@ def run_bounded_git_filter_query(repo_root, arguments, env, output_limit):
         raise SystemExit(f"{label}: Git path inventory query failed closed")
     try:
         try:
-            stdout, stderr = capture_git_filter_output(process, command, output_limit)
+            stdout, stderr = capture_git_filter_output(
+                process, command, output_limit, input_bytes
+            )
         except subprocess.TimeoutExpired:
             terminate_go_child_group(process)
             process = None
@@ -1571,23 +1598,16 @@ def git_filter_attribute_guard(repo_root, module_dir, env):
             raise SystemExit(f"{label}: Git path inventory query failed closed")
         remaining_inventory_budget -= len(paths.stdout) + len(paths.stderr)
         path_bytes.extend(paths.stdout)
-    try:
-        attributes = subprocess.run(
-            git_command(["check-attr", "filter", "--stdin", "-z"]),
-            cwd=repo_root,
-            env=env,
-            input=bytes(path_bytes),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=git_filter_guard_deadline_seconds,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        raise SystemExit(f"{label}: Git filter attribute query failed closed")
+    attributes = run_bounded_git_filter_query(
+        repo_root,
+        ["check-attr", "filter", "--stdin", "-z"],
+        env,
+        remaining_inventory_budget,
+        bytes(path_bytes),
+    )
     if attributes.returncode != 0 or attributes.stderr:
         raise SystemExit(f"{label}: Git filter attribute query failed closed")
-    if len(attributes.stdout) > git_filter_guard_output_max_bytes:
-        raise SystemExit(f"{label}: Git filter attribute output exceeded the reviewed budget")
+    remaining_inventory_budget -= len(attributes.stdout) + len(attributes.stderr)
     fields = attributes.stdout.split(b"\0")
     if fields[-1] != b"" or (len(fields) - 1) % 3:
         raise SystemExit(f"{label}: Git filter attribute output was malformed")
@@ -1597,18 +1617,12 @@ def git_filter_attribute_guard(repo_root, module_dir, env):
             raise SystemExit(
                 f"{label}: active Git filter attribute is not allowed before status"
             )
-    try:
-        configured = subprocess.run(
-            git_command(["config", "--local", "--get-regexp", r"^filter\."]),
-            cwd=repo_root,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=git_filter_guard_deadline_seconds,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        raise SystemExit(f"{label}: Git filter configuration query failed closed")
+    configured = run_bounded_git_filter_query(
+        repo_root,
+        ["config", "--local", "--get-regexp", r"^filter\."],
+        env,
+        remaining_inventory_budget,
+    )
     if configured.returncode not in {0, 1} or configured.stderr:
         raise SystemExit(f"{label}: Git filter configuration query failed closed")
     if configured.stdout:
@@ -5475,78 +5489,301 @@ export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/
 [ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import os
+import selectors
+import signal
 import subprocess
 import tempfile
+import time
+from pathlib import Path
+
+git_query_deadline_seconds = 30
+git_query_termination_grace_seconds = 5
+git_query_output_max_bytes = 64 * 1024
+git_query_stream_chunk_bytes = 4096
+
+
+def close_git_query_streams(process):
+    for name in ("stdin", "stdout", "stderr"):
+        stream = getattr(process, name, None)
+        if stream is not None:
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+
+def git_query_group_exists(process):
+    try:
+        os.killpg(process.pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def wait_for_git_query_group_exit(process, deadline):
+    while git_query_group_exists(process):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.05, remaining))
+    return True
+
+
+def terminate_git_query_group(process):
+    """Terminate and bounded-reap only this query's private process group."""
+    grace_deadline = time.monotonic() + git_query_termination_grace_seconds
+    try:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=max(0, grace_deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            pass
+        if not wait_for_git_query_group_exit(process, grace_deadline):
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            post_kill_deadline = (
+                time.monotonic() + git_query_termination_grace_seconds
+            )
+            try:
+                process.wait(timeout=max(0, post_kill_deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                raise SystemExit("Git query group was not reaped after SIGKILL")
+            if not wait_for_git_query_group_exit(process, post_kill_deadline):
+                raise SystemExit("Git query group remained after SIGKILL grace")
+    finally:
+        close_git_query_streams(process)
+
+
+def capture_git_query_output(process, git_command, output_limit, input_bytes=None):
+    """Stream bounded stdout/stderr and optional bounded stdin."""
+    if output_limit <= 0:
+        raise SystemExit("Git query output budget is exhausted")
+    captures = {"stdout": bytearray(), "stderr": bytearray()}
+    pending_input = memoryview(input_bytes) if input_bytes is not None else None
+    selector = selectors.DefaultSelector()
+    try:
+        for name in captures:
+            stream = getattr(process, name, None)
+            if stream is not None:
+                os.set_blocking(stream.fileno(), False)
+                selector.register(stream, selectors.EVENT_READ, name)
+        if pending_input is not None:
+            stream = getattr(process, "stdin", None)
+            if stream is None:
+                raise SystemExit("Git query stdin pipe is unavailable")
+            os.set_blocking(stream.fileno(), False)
+            if len(pending_input):
+                selector.register(stream, selectors.EVENT_WRITE, "stdin")
+            else:
+                stream.close()
+        deadline = time.monotonic() + git_query_deadline_seconds
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(
+                    git_command, git_query_deadline_seconds
+                )
+            ready = selector.select(remaining)
+            if not ready:
+                raise subprocess.TimeoutExpired(
+                    git_command, git_query_deadline_seconds
+                )
+            for key, _ in ready:
+                stream = key.fileobj
+                if key.data == "stdin":
+                    try:
+                        written = os.write(stream.fileno(), pending_input)
+                    except BlockingIOError:
+                        continue
+                    except (BrokenPipeError, OSError):
+                        raise SystemExit("Git query stdin failed closed")
+                    pending_input = pending_input[written:]
+                    if not pending_input:
+                        selector.unregister(stream)
+                        stream.close()
+                    continue
+                try:
+                    chunk = os.read(stream.fileno(), git_query_stream_chunk_bytes)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    selector.unregister(stream)
+                    stream.close()
+                    continue
+                if (
+                    len(captures["stdout"])
+                    + len(captures["stderr"])
+                    + len(chunk)
+                    > output_limit
+                ):
+                    raise SystemExit("Git query output exceeded the reviewed budget")
+                captures[key.data].extend(chunk)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(
+                git_command, git_query_deadline_seconds
+            )
+        process.wait(timeout=remaining)
+        return bytes(captures["stdout"]), bytes(captures["stderr"])
+    finally:
+        selector.close()
+
+
+def run_bounded_git_query(command, *, cwd, env, input_bytes=None):
+    process = None
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        try:
+            stdout, stderr = capture_git_query_output(
+                process, command, git_query_output_max_bytes, input_bytes
+            )
+        except subprocess.TimeoutExpired:
+            terminate_git_query_group(process)
+            process = None
+            raise SystemExit(
+                "Git query exceeded its independent deadline; process group terminated and reaped"
+            )
+        except BaseException:
+            terminate_git_query_group(process)
+            process = None
+            raise
+        returncode = process.returncode
+        terminate_git_query_group(process)
+        process = None
+        return subprocess.CompletedProcess(command, returncode, stdout, stderr)
+    finally:
+        if process is not None:
+            terminate_git_query_group(process)
+
+
+def git_query(arguments):
+    return [
+        "git",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+        *arguments,
+    ]
+
+
+git_transport_override_names = {
+    "GIT_EXEC_PATH",
+    "GIT_SSH",
+    "GIT_SSH_COMMAND",
+    "GIT_SSH_VARIANT",
+    "GIT_ASKPASS",
+    "GIT_SSH_ASKPASS",
+    "GIT_PROXY_COMMAND",
+}
+git_environment_override_names = {
+    "GIT_CONFIG",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_NOSYSTEM",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_SYSTEM",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_NAMESPACE",
+    *git_transport_override_names,
+}
+git_environment = {
+    key: value
+    for key, value in os.environ.items()
+    if key not in git_environment_override_names
+    and not key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))
+}
+git_environment.update(
+    {
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+    }
+)
 
 expected_origin_url = "https://github.com/1XP-AI/gh-runnerd.git"
-try:
-    origin_urls = subprocess.check_output(
-        ["git", "config", "--local", "--get-all", "remote.origin.url"],
-        text=True,
-        timeout=30,
-    ).splitlines()
-except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+origin_result = run_bounded_git_query(
+    git_query(["config", "--local", "--get-all", "remote.origin.url"]),
+    cwd=Path.cwd(),
+    env=git_environment,
+)
+if origin_result.returncode != 0 or origin_result.stderr:
     raise SystemExit("post-correction origin URL query failed")
+origin_urls = origin_result.stdout.decode("utf-8").splitlines()
 if origin_urls != [expected_origin_url]:
     raise SystemExit("post-correction origin URL is not the reviewed repository")
 
 def require_inventory(result, name):
     if result.returncode != 0 or result.stderr:
         raise SystemExit(f"post-correction {name} inventory query failed")
-    if len(result.stdout) > 64 * 1024:
+    if len(result.stdout) > git_query_output_max_bytes:
         raise SystemExit(f"post-correction {name} inventory exceeded the reviewed budget")
     return result.stdout
 
-filter_config = subprocess.run(
-    ["git", "config", "--local", "--get-regexp", r"^filter\."],
-    capture_output=True,
-    text=True,
-    timeout=30,
-    check=False,
+filter_config = run_bounded_git_query(
+    git_query(["config", "--local", "--get-regexp", r"^filter\."]),
+    cwd=Path.cwd(),
+    env=git_environment,
 )
 if filter_config.returncode not in {0, 1} or filter_config.stderr:
     raise SystemExit("post-correction Git filter configuration query failed")
 if filter_config.stdout:
     raise SystemExit("post-correction local Git filter configuration is not allowed")
 tracked = require_inventory(
-    subprocess.run(
-        ["git", "ls-files", "-z", "--cached", "--full-name"],
-        capture_output=True,
-        timeout=30,
-        check=False,
+    run_bounded_git_query(
+        git_query(["ls-files", "-z", "--cached", "--full-name"]),
+        cwd=Path.cwd(),
+        env=git_environment,
     ),
     "tracked-path",
 )
 untracked = require_inventory(
-    subprocess.run(
-        ["git", "ls-files", "-z", "--others", "--exclude-standard"],
-        capture_output=True,
-        timeout=30,
-        check=False,
+    run_bounded_git_query(
+        git_query(["ls-files", "-z", "--others", "--exclude-standard"]),
+        cwd=Path.cwd(),
+        env=git_environment,
     ),
     "untracked-path",
 )
 ignored = require_inventory(
-    subprocess.run(
-        ["git", "ls-files", "-z", "--others", "--ignored", "--exclude-standard"],
-        capture_output=True,
-        timeout=30,
-        check=False,
+    run_bounded_git_query(
+        git_query(["ls-files", "-z", "--others", "--ignored", "--exclude-standard"]),
+        cwd=Path.cwd(),
+        env=git_environment,
     ),
     "ignored-path",
 )
 paths = tracked + untracked + ignored
+if len(paths) > git_query_output_max_bytes:
+    raise SystemExit("post-correction path inventory exceeded the reviewed budget")
 if paths:
-    attributes = subprocess.run(
-        ["git", "check-attr", "filter", "--stdin", "-z"],
-        input=paths,
-        capture_output=True,
-        timeout=30,
-        check=False,
+    attributes = run_bounded_git_query(
+        git_query(["check-attr", "filter", "--stdin", "-z"]),
+        cwd=Path.cwd(),
+        env=git_environment,
+        input_bytes=paths,
     )
     if attributes.returncode != 0 or attributes.stderr:
         raise SystemExit("post-correction Git filter attribute query failed")
-    if len(attributes.stdout) > 64 * 1024:
+    if len(attributes.stdout) > git_query_output_max_bytes:
         raise SystemExit("post-correction Git filter attribute output exceeded the reviewed budget")
     fields = attributes.stdout.split(b"\0")
     if fields[-1] != b"" or (len(fields) - 1) % 3:
@@ -5555,54 +5792,44 @@ if paths:
         _path, attribute, value = fields[index:index + 3]
         if attribute != b"filter" or value != b"unspecified":
             raise SystemExit("post-correction active Git filter attribute is not allowed")
-status = subprocess.run(
-    ["git", "status", "--porcelain=v1", "--untracked-files=all"],
-    capture_output=True,
-    text=True,
-    timeout=30,
-    check=False,
+status = run_bounded_git_query(
+    git_query(["status", "--porcelain=v1", "--untracked-files=all"]),
+    cwd=Path.cwd(),
+    env=git_environment,
 )
-if status.returncode != 0 or status.stderr or status.stdout.strip():
+if status.returncode != 0 or status.stderr or status.stdout.decode("utf-8").strip():
     raise SystemExit("post-correction worktree is not clean")
-local = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+local_result = run_bounded_git_query(
+    git_query(["rev-parse", "HEAD"]),
+    cwd=Path.cwd(),
+    env=git_environment,
+)
+if local_result.returncode != 0 or local_result.stderr:
+    raise SystemExit("post-correction local head query failed")
+local = local_result.stdout.decode("utf-8").strip()
 remote_environment = {
     key: value
-    for key, value in os.environ.items()
-    if key not in {
-        "GIT_CONFIG",
-        "GIT_CONFIG_COUNT",
-        "GIT_CONFIG_GLOBAL",
-        "GIT_CONFIG_NOSYSTEM",
-        "GIT_CONFIG_PARAMETERS",
-        "GIT_CONFIG_SYSTEM",
-        "GIT_DIR",
-        "GIT_WORK_TREE",
-        "GIT_COMMON_DIR",
-        "GIT_INDEX_FILE",
-        "GIT_NAMESPACE",
-    }
-    and not key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))
+    for key, value in git_environment.items()
+    if key not in git_transport_override_names
 }
-remote_environment.update(
-    {
-        "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_CONFIG_GLOBAL": "/dev/null",
-        "GIT_CONFIG_SYSTEM": "/dev/null",
-    }
-)
 with tempfile.TemporaryDirectory() as isolated_cwd:
-    remote = subprocess.check_output(
-        [
-            "git",
-            "ls-remote",
-            "https://github.com/1XP-AI/gh-runnerd.git",
-            "refs/heads/orca/g01-evidence-packet",
-        ],
+    remote_result = run_bounded_git_query(
+        git_query(
+            [
+                "ls-remote",
+                "https://github.com/1XP-AI/gh-runnerd.git",
+                "refs/heads/orca/g01-evidence-packet",
+            ]
+        ),
         cwd=isolated_cwd,
         env=remote_environment,
-        text=True,
-        timeout=30,
-    ).split()[0]
+    )
+if remote_result.returncode != 0 or remote_result.stderr:
+    raise SystemExit("post-correction canonical remote query failed")
+try:
+    remote = remote_result.stdout.decode("utf-8").split()[0]
+except (UnicodeDecodeError, IndexError):
+    raise SystemExit("post-correction canonical remote output was malformed")
 if not local or local != remote:
     raise SystemExit("post-correction current/remote head mismatch")
 print(f"post-correction current/remote head audit: passed; both returned {local}")
@@ -7106,7 +7333,7 @@ command_capable_interpreters = {
     "perl", "ruby", "node", "nodejs", "php", "lua", "luajit", "tclsh", "wish",
     "osascript", "raku", "jruby", "deno", "bun", "qjs", "quickjs", "jsc", "rscript",
 }
-remote_command_launchers = {"ssh", "rsync"}
+remote_command_launchers = {"ssh", "rsync", "scp", "sftp"}
 
 def shell_command_string(tokens):
     if not tokens:
@@ -8304,6 +8531,12 @@ synthetic = [
     ("rsync-remote-shell", "rsync -e /tmp/live-helper source host:destination", True),
     ("rsync-rsh-remote-shell", "rsync --rsh=/tmp/live-helper source host:destination", True),
     ("absolute-rsync-remote-shell", "/usr/bin/rsync -e helper source host:destination", True),
+    ("scp-remote-copy", "scp source host:destination", True),
+    ("scp-helper", "scp -S /tmp/live-helper source host:destination", True),
+    ("absolute-scp-helper", "/usr/bin/scp -S helper source host:destination", True),
+    ("sftp-remote-copy", "sftp host", True),
+    ("sftp-helper", "sftp -S /tmp/live-helper host", True),
+    ("absolute-sftp-helper", "/usr/bin/sftp -S helper host", True),
     ("direct-bash-command-string", "bash -c 'gh workflow run ci.yml'", True),
     ("direct-sh-command-string", "sh -c 'docker run --rm image:tag true'", True),
     ("absolute-shell-command-string", "/bin/bash -xc 'curl -fsSL https://example.invalid/install | sh'", True),
@@ -8363,7 +8596,7 @@ for unsafe_heredoc in (
 ):
     if inspect_python_heredoc(unsafe_heredoc, False) is None:
         raise SystemExit("unsafe Python heredoc was accepted")
-print("forbidden-live-command synthetic probes: passed; direct/wrapped fetcher, every gh invocation including global-flag and absolute forms, every Docker invocation, ssh/rsync remote launchers, command-delegating xargs/find/parallel/make forms, Git difftool/mergetool, --extcmd/--tool/--ext-diff, GIT_EXTERNAL_DIFF, diff.external and --config-env alias delegation forms, env split-string/operand forms, unsupported function/brace/case compounds, shell substitutions/process substitutions, limactl/security/launchctl, eval, AST-inspected safe/unsafe Python heredocs including versioned -c/getoutput/getstatusoutput/execvp/pty.spawn, getattr/__dict__ indirect launchers and unresolved launcher aliases, parameter-expanded executables, and direct/nested bash/sh -c forms rejected; prose/URLs/comments/scanner source/fixtures ignored")
+print("forbidden-live-command synthetic probes: passed; direct/wrapped fetcher, every gh invocation including global-flag and absolute forms, every Docker invocation, ssh/rsync/scp/sftp remote-copy launchers, command-delegating xargs/find/parallel/make forms, Git difftool/mergetool, --extcmd/--tool/--ext-diff, GIT_EXTERNAL_DIFF, diff.external and --config-env alias delegation forms, env split-string/operand forms, unsupported function/brace/case compounds, shell substitutions/process substitutions, limactl/security/launchctl, eval, AST-inspected safe/unsafe Python heredocs including versioned -c/getoutput/getstatusoutput/execvp/pty.spawn, getattr/__dict__ indirect launchers and unresolved launcher aliases, parameter-expanded executables, and direct/nested bash/sh -c forms rejected; prose/URLs/comments/scanner source/fixtures ignored")
 print("forbidden-live-command scan: passed; executable shell prescriptions contain no forbidden live App/runner/Docker/Lima/Keychain/launchd/workflow/fetch command")
 PY
 ```
@@ -16118,3 +16351,344 @@ intentionally reserved for the post-push worker handoff):
 ```text
 GREEN packet certification: 336 Markdown fences balanced, 25 packet-local targets checked, backlog JSON valid, changed-boundary ledger valid with 10 data rows and 4 columns, embedded wrapper/scanner/filter/parity AST and compile valid, six current finding URLs and exact RED/GREEN/CURRENT transcripts present, changed scope is one packet path, added-line secret/private-path hygiene clean, and git diff --check passed
 ```
+
+## Current fix wave: PR #78 G01 packet
+
+Date: 2026-09-15. Review route: gpt-5.6-luna with max reasoning. This
+section records the exact-parent fix wave for Codex roots
+[4008765530](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4008765530),
+[4008765538](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4008765538),
+[4008765545](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4008765545)
+and
+[4008765552](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4008765552).
+The exact parent is ce417347aa100562722477ea1126a5cf6372ec3a; prior stale
+records and all live gaps remain preserved, and this correction changes only
+this packet file.
+
+### Exact-parent RED probes
+
+The RED probe loaded only the exact-parent packet with git show. It inspected
+the embedded wrapper/parity/scanner source and ran no candidate child, Go test,
+GitHub, runner, workflow, credential, Docker/Lima, Keychain, launchd or
+canary operation:
+
+~~~sh
+python3 - <<'PY'
+import ast
+import subprocess
+from pathlib import Path
+
+parent = "ce417347aa100562722477ea1126a5cf6372ec3a"
+packet = subprocess.check_output(
+    ["git", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    text=True,
+)
+wrapper_start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
+wrapper_end = packet.index("\nPY\n}", wrapper_start)
+tree = ast.parse(packet[wrapper_start:wrapper_end], filename="<exact-parent-wrapper>")
+guard = next(
+    node for node in tree.body
+    if isinstance(node, ast.FunctionDef) and node.name == "git_filter_attribute_guard"
+)
+run_calls = [
+    node for node in ast.walk(guard)
+    if isinstance(node, ast.Call)
+    and isinstance(node.func, ast.Attribute)
+    and isinstance(node.func.value, ast.Name)
+    and node.func.value.id == "subprocess"
+    and node.func.attr == "run"
+]
+if len(run_calls) >= 2:
+    print(
+        f"RED 4008765530: exact parent buffered {len(run_calls)} "
+        "filter-config/check-attr subprocess.run result(s) before any output cap"
+    )
+else:
+    raise SystemExit("red setup changed: exact parent filter guard is already streamed")
+
+remote_anchor = packet.index("expected_origin_url =")
+remote_block = packet[remote_anchor:packet.index("\nPY\n" + chr(96) * 3, remote_anchor)]
+if "GIT_EXEC_PATH" not in remote_block and "git_transport_override_names" not in remote_block:
+    print(
+        "RED 4008765538: exact parent remote parity preserved inherited "
+        "GIT_EXEC_PATH and transport/helper overrides"
+    )
+else:
+    raise SystemExit("red setup changed: exact parent remote parity already clears transport overrides")
+if (
+    'subprocess.check_output(\n        [\n            "git",\n            "ls-remote",' in remote_block
+    and "start_new_session=True" not in remote_block
+):
+    print(
+        "RED 4008765545: exact parent remote parity used direct "
+        "check_output(timeout=30) without an owned private process group or bounded group reap"
+    )
+else:
+    raise SystemExit("red setup changed: exact parent remote parity already owns the process group")
+
+scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
+scanner_start = packet.rfind("source = Path(", 0, scanner_anchor)
+scanner_end = packet.index("\nmatches = []", scanner_anchor)
+scanner_ns = {"Path": Path, "ast": ast, "re": __import__("re"), "shlex": __import__("shlex")}
+exec(compile(packet[scanner_start:scanner_end], "<exact-parent-scanner>", "exec"), scanner_ns)
+for command in (
+    "scp -S /tmp/live-helper source host:destination",
+    "sftp -S /tmp/live-helper host",
+):
+    if any(
+        scanner_ns["forbidden_command"](segment) is not None
+        for segment in scanner_ns["shell_token_segments"](command)
+    ):
+        raise SystemExit(f"red setup changed: exact parent already rejects {command}")
+print("RED 4008765552: exact parent accepted scp/sftp remote-copy launchers and helper options")
+PY
+~~~
+
+Recorded exact-parent RED output:
+
+~~~text
+RED 4008765530: exact parent buffered 2 filter-config/check-attr subprocess.run result(s) before any output cap
+RED 4008765538: exact parent remote parity preserved inherited GIT_EXEC_PATH and transport/helper overrides
+RED 4008765545: exact parent remote parity used direct check_output(timeout=30) without an owned private process group or bounded group reap
+RED 4008765552: exact parent accepted scp/sftp remote-copy launchers and helper options
+~~~
+
+### Minimal packet implementation
+
+The wrapper's existing owned Git-child helper now also owns the local
+filter-config and check-attr children: it streams optional bounded stdin and
+both output pipes with selector reads, enforces the remaining aggregate
+64 KiB budget before buffering, applies the 30-second deadline, and terminates
+and reaps the private process group on timeout, interruption, overflow or
+return. The final parity template uses a matching bounded Git-query helper,
+removes repository/config and all reviewed Git transport/helper overrides
+including GIT_EXEC_PATH, runs canonical ls-remote from an isolated temporary
+directory in a new session, and terminates/reaps that exact group within
+bounded grace. The command scanner's remote-copy launcher set is now ssh,
+rsync, scp and sftp, so direct, absolute and helper-option forms fail closed
+while safe read-only Git remains allowed.
+
+### Focused GREEN probes
+
+The focused probe extracted the candidate wrapper, final parity heredoc and
+scanner from this same file. It used synthetic pipes for normal, oversized and
+stdin-fed filter output, AST/source assertions for canonical URL, environment
+scrubbing and owned-group cleanup, and synthetic scp/sftp command strings.
+It performed no live remote query and started no child outside the in-memory
+probe objects:
+
+~~~sh
+python3 - <<'PY'
+import ast
+import os
+import re
+import selectors
+import shlex
+from pathlib import Path
+
+packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
+wrapper_start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
+wrapper_end = packet.index("\nPY\n}", wrapper_start)
+tree = ast.parse(packet[wrapper_start:wrapper_end], filename="<candidate-wrapper>")
+functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+guard = functions["git_filter_attribute_guard"]
+if any(
+    isinstance(node, ast.Call)
+    and isinstance(node.func, ast.Attribute)
+    and isinstance(node.func.value, ast.Name)
+    and node.func.value.id == "subprocess"
+    and node.func.attr == "run"
+    for node in ast.walk(guard)
+):
+    raise SystemExit("candidate filter guard still uses subprocess.run capture")
+runner = functions["run_bounded_git_filter_query"]
+popen = [
+    node for node in ast.walk(runner)
+    if isinstance(node, ast.Call)
+    and isinstance(node.func, ast.Attribute)
+    and isinstance(node.func.value, ast.Name)
+    and node.func.value.id == "subprocess"
+    and node.func.attr == "Popen"
+]
+if len(popen) != 1 or not any(
+    keyword.arg == "start_new_session"
+    and isinstance(keyword.value, ast.Constant)
+    and keyword.value.value is True
+    for keyword in popen[0].keywords
+):
+    raise SystemExit("candidate filter query is not an owned private child")
+
+ns = {
+    "os": os,
+    "selectors": selectors,
+    "subprocess": __import__("subprocess"),
+    "time": __import__("time"),
+    "label": "filter-probe",
+    "git_filter_guard_deadline_seconds": 0.5,
+    "git_filter_guard_stream_chunk_bytes": 4096,
+}
+exec(compile(ast.Module(body=[functions["capture_git_filter_output"]], type_ignores=[]), "<filter-capture>", "exec"), ns)
+
+class FakeProcess:
+    def __init__(self, stdout, stderr, stdin=None):
+        self.stdout, self.stderr, self.stdin = stdout, stderr, stdin
+        self.wait_calls = []
+    def wait(self, timeout=None):
+        self.wait_calls.append(timeout)
+        return 0
+
+def pipes(stdout_bytes, with_stdin=False):
+    stdout_read, stdout_write = os.pipe()
+    stderr_read, stderr_write = os.pipe()
+    os.write(stdout_write, stdout_bytes)
+    os.close(stdout_write)
+    os.close(stderr_write)
+    stdin = None
+    reader = None
+    if with_stdin:
+        reader, writer = os.pipe()
+        stdin = os.fdopen(writer, "wb", closefd=True)
+    return (
+        FakeProcess(
+            os.fdopen(stdout_read, "rb", closefd=True),
+            os.fdopen(stderr_read, "rb", closefd=True),
+            stdin,
+        ),
+        reader,
+    )
+
+overflow, reader = pipes(b"x" * 9)
+try:
+    ns["capture_git_filter_output"](overflow, ["git", "config"], 8)
+except SystemExit as error:
+    if "exceeded" not in str(error):
+        raise
+else:
+    raise SystemExit("oversized filter output was accepted")
+finally:
+    overflow.stdout.close()
+    overflow.stderr.close()
+
+bounded, reader = pipes(b"abc")
+try:
+    output = ns["capture_git_filter_output"](bounded, ["git", "config"], 8)
+    if output != (b"abc", b"") or not bounded.wait_calls or any(
+        call is None for call in bounded.wait_calls
+    ):
+        raise SystemExit("bounded filter output did not return/reap")
+finally:
+    bounded.stdout.close()
+    bounded.stderr.close()
+
+stdin_case, reader = pipes(b"attr\0", with_stdin=True)
+try:
+    output = ns["capture_git_filter_output"](
+        stdin_case, ["git", "check-attr"], 8, b"path\0"
+    )
+    if output != (b"attr\0", b"") or not stdin_case.wait_calls or any(
+        call is None for call in stdin_case.wait_calls
+    ):
+        raise SystemExit("bounded filter stdin/output did not return/reap")
+finally:
+    stdin_case.stdout.close()
+    stdin_case.stderr.close()
+    if stdin_case.stdin is not None:
+        stdin_case.stdin.close()
+    if reader is not None:
+        os.close(reader)
+
+remote_anchor = packet.index("expected_origin_url =")
+remote_start = packet.rfind("\nimport os\n", 0, remote_anchor) + 1
+remote_end = packet.index("\nPY\n" + chr(96) * 3, remote_anchor)
+remote_source = packet[remote_start:remote_end]
+ast.parse(remote_source, filename="<candidate-parity>")
+if (
+    "start_new_session=True" not in remote_source
+    or "os.killpg" not in remote_source
+    or "process.wait(timeout=" not in remote_source
+    or "subprocess.check_output" in remote_source
+):
+    raise SystemExit("candidate parity lacks bounded private-group remote cleanup")
+for name in (
+    "GIT_EXEC_PATH", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_SSH_VARIANT",
+    "GIT_ASKPASS", "GIT_SSH_ASKPASS", "GIT_PROXY_COMMAND",
+):
+    if name not in remote_source:
+        raise SystemExit(f"candidate parity does not clear {name}")
+if '"ls-remote"' not in remote_source or "https://github.com/1XP-AI/gh-runnerd.git" not in remote_source:
+    raise SystemExit("canonical remote target missing")
+
+scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
+scanner_start = packet.rfind("source = Path(", 0, scanner_anchor)
+scanner_end = packet.index("\nmatches = []", scanner_anchor)
+scanner_ns = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+exec(compile(packet[scanner_start:scanner_end], "<candidate-scanner>", "exec"), scanner_ns)
+def rejects(command):
+    return any(
+        scanner_ns["forbidden_command"](segment) is not None
+        for segment in scanner_ns["shell_token_segments"](command)
+    )
+for command in (
+    "scp source host:destination",
+    "scp -S /tmp/live-helper source host:destination",
+    "/usr/bin/scp -S helper source host:destination",
+    "sftp host",
+    "sftp -S /tmp/live-helper host",
+    "/usr/bin/sftp -S helper host",
+):
+    if not rejects(command):
+        raise SystemExit(f"remote-copy launcher escaped scanner: {command!r}")
+for command in ("printf safe", "git ls-files --cached"):
+    if rejects(command):
+        raise SystemExit(f"safe read-only command was rejected: {command!r}")
+print("GREEN 4008765530: filter-config and check-attr use the owned streaming/capped helper with bounded stdin/output and bounded reap; synthetic overflow/normal/input cases passed")
+print("GREEN 4008765538: canonical parity clears GIT_EXEC_PATH and all reviewed Git transport/helper overrides before the isolated query")
+print("GREEN 4008765545: canonical ls-remote uses a private session with bounded terminate/reap on timeout/interruption and no direct check_output")
+print("GREEN 4008765552: scp/sftp direct, absolute, and helper-option forms fail closed; safe read-only commands remain accepted")
+PY
+~~~
+
+Recorded focused GREEN output:
+
+~~~text
+GREEN 4008765530: filter-config and check-attr use the owned streaming/capped helper with bounded stdin/output and bounded reap; synthetic overflow/normal/input cases passed
+GREEN 4008765538: canonical parity clears GIT_EXEC_PATH and all reviewed Git transport/helper overrides before the isolated query
+GREEN 4008765545: canonical ls-remote uses a private session with bounded terminate/reap on timeout/interruption and no direct check_output
+GREEN 4008765552: scp/sftp direct, absolute, and helper-option forms fail closed; safe read-only commands remain accepted
+~~~
+
+### Current-finding ledger
+
+These four rows are the current exact-head dispositions for this fix wave.
+Older findings and the prior current ledger remain in the packet as historical
+evidence; no finding is treated as resolved by staleness or by an untimestamped
+reaction.
+
+| Finding and immutable source | Exact review URL | Current disposition and evidence |
+|---|---|---|
+| 4008765530, source ce417347aa100562722477ea1126a5cf6372ec3a | [discussion 4008765530](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4008765530) | Reproduced the exact-parent filter guard buffering both local filter-config and adjacent check-attr results before any cap. The candidate routes both through the owned streaming/capped helper with bounded stdin, aggregate 64 KiB output accounting, 30-second deadline and private-group terminate/reap; synthetic overflow, normal and stdin-fed probes passed. |
+| 4008765538, source ce417347aa100562722477ea1126a5cf6372ec3a | [discussion 4008765538](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4008765538) | Reproduced inherited GIT_EXEC_PATH and transport/helper overrides surviving the exact-parent parity environment. The candidate removes the reviewed repository/config and transport/helper override set, including GIT_EXEC_PATH, before the canonical URL query from isolated cwd; the focused source probe passed. |
+| 4008765545, source ce417347aa100562722477ea1126a5cf6372ec3a | [discussion 4008765545](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4008765545) | Reproduced the exact-parent direct check_output(timeout=30) remote query without a private process group or bounded descendant reap. The candidate launches canonical ls-remote with start_new_session=True, streams under a 64 KiB/30-second bound, and terminates/reaps only that group on timeout, interruption, overflow or return; the focused source probe passed. |
+| 4008765552, source ce417347aa100562722477ea1126a5cf6372ec3a | [discussion 4008765552](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4008765552) | Reproduced exact-parent acceptance of scp/sftp, including helper-option forms. The scanner now fail-closes direct and absolute scp/sftp remote-copy launchers while retaining safe read-only commands; focused synthetic scanner probes passed. |
+
+No live operation was run, and no PR body or review reply was posted or edited.
+The live canary, runner, Docker/Lima, Keychain/launchd, workflow and
+credential gaps above remain open. Rollback is packet-only to exact parent
+ce417347aa100562722477ea1126a5cf6372ec3a; preserve independent evidence and
+manual runners.
+
+### Current packet certification
+
+After the focused boundaries, packet-only certification checked Markdown
+fences, packet-local links and anchors, backlog JSON, the ten-row/four-column
+changed-boundary ledger, embedded wrapper/scanner/filter/parity AST and compile,
+all four current finding URLs and exact RED/GREEN transcripts, one-file scope,
+added-line secret/private-path hygiene and git diff --check. The literal final
+local/origin SHA is intentionally reserved for the post-push handoff so this
+packet does not become self-referential.
+
+Recorded current packet certification output:
+
+~~~text
+GREEN packet certification: 346 Markdown fences balanced, 63 packet-local targets checked with same-file fragments, backlog JSON valid, changed-boundary ledger valid with 10 data rows and 4 columns, embedded wrapper/scanner/filter/parity AST and compile valid, four current finding URLs and exact RED/GREEN transcripts present, changed scope is one packet path, added-line secret/private-path hygiene clean, and git diff --check passed
+~~~
