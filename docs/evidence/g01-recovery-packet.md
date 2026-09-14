@@ -266,8 +266,10 @@ command-capable `-c` keys (`core.fsmonitor` except the reviewed `false`,
 `core.sshCommand` and `credential.helper`) before generic Git executable
 classification; no Git alias, external-diff/helper, transport override or Git
 command-delegation option can hide a workflow, Docker, or other delegated
-command behind an otherwise allowed token. Shell wrappers `nice`, `timeout`
-and `setsid` are rejected before their operands are classified.
+command behind an otherwise allowed token. Remote command launchers such as
+`ssh` and command-capable interpreters such as Python's `pty.spawn` are also
+rejected before their operands are classified. Shell wrappers `nice`,
+`timeout` and `setsid` are rejected before their operands are classified.
 `GOCACHEPROG` is rejected unless empty and then pinned empty before any Go child;
 `GOAUTH` is rejected unless `off` and then pinned `off`, so executable cache
 hooks and command-form authentication cannot reach module, metadata, vet or
@@ -302,9 +304,14 @@ declaration tokens, so comments cannot hide a valid top-level test name. Before
 opening any candidate source file, the wrapper performs the immutable reviewed
 module-tree gate and compares each raw worktree file byte-for-byte with its
 pinned `HEAD` blob before consulting porcelain/status; Git clean filters and
-attributes therefore cannot make modified source appear clean. It then performs
-the tracked/untracked/ignored status gate; only a clean, byte-identical source
-tree can reach package metadata and source derivation. The wrapper disables persisted
+attributes therefore cannot make modified source appear clean. Immediately
+before each status query, a bounded read-only preflight rejects local Git filter
+configuration and any active `filter` attribute resolved across tracked,
+untracked and ignored paths; `GIT_ATTR_NOSYSTEM=1` also disables system
+attributes. A status child is started only after that preflight is empty, and
+any query, attribute, configuration or output-bound failure fails closed. It
+then performs the tracked/untracked/ignored status gate; only a clean,
+byte-identical source tree can reach package metadata and source derivation. The wrapper disables persisted
 Go configuration with `GOENV=off` before the first Go child, queries the
 effective `go env GOFLAGS`, rejects non-empty output, and then pins `GOFLAGS=`
 for metadata and the original command. After
@@ -317,7 +324,8 @@ validation. Every wrapper-controlled Git query uses `-c core.fsmonitor=false`
 and `-c core.hooksPath=/dev/null`, with system/global Git configuration disabled
 and the same two settings injected through `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_*`/
 `GIT_CONFIG_VALUE_*` in every Go child, before trusting source-tree,
-status/porcelain or intent-bit results. It also rejects `PATH` and equivalent dynamic loader-affecting
+status/porcelain or intent-bit results. `GIT_ATTR_NOSYSTEM=1` is pinned for
+those queries. It also rejects `PATH` and equivalent dynamic loader-affecting
 prefixes, validates the inherited PATH against the reviewed canonical
 `/opt/homebrew/bin:/usr/bin:/bin`, and creates the Go-child
 environment with `GOWORK=off` and passes that exact environment to every Go
@@ -786,6 +794,7 @@ env.update(
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": "/dev/null",
         "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_ATTR_NOSYSTEM": "1",
         "GIT_CONFIG_COUNT": "2",
         "GIT_CONFIG_KEY_0": "core.fsmonitor",
         "GIT_CONFIG_VALUE_0": "false",
@@ -1431,8 +1440,92 @@ def capture_git_status_output(process, git_status_command):
         selector.close()
 
 
+git_filter_guard_deadline_seconds = 30
+git_filter_guard_output_max_bytes = 64 * 1024
+
+
+def git_filter_attribute_guard(repo_root, module_dir, env):
+    """Reject configured or active Git filters before starting status."""
+    path_bytes = bytearray()
+    for arguments in (
+        ["ls-files", "-z", "--cached", "--full-name", "--", module_dir],
+        ["ls-files", "-z", "--others", "--exclude-standard", "--", module_dir],
+        [
+            "ls-files",
+            "-z",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--",
+            module_dir,
+        ],
+    ):
+        try:
+            paths = subprocess.run(
+                git_command(arguments),
+                cwd=repo_root,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=git_filter_guard_deadline_seconds,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            raise SystemExit(f"{label}: Git path inventory query failed closed")
+        if paths.returncode != 0 or paths.stderr:
+            raise SystemExit(f"{label}: Git path inventory query failed closed")
+        if len(paths.stdout) > git_filter_guard_output_max_bytes:
+            raise SystemExit(f"{label}: Git path inventory exceeded the reviewed budget")
+        path_bytes.extend(paths.stdout)
+    try:
+        attributes = subprocess.run(
+            git_command(["check-attr", "filter", "--stdin", "-z"]),
+            cwd=repo_root,
+            env=env,
+            input=bytes(path_bytes),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=git_filter_guard_deadline_seconds,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise SystemExit(f"{label}: Git filter attribute query failed closed")
+    if attributes.returncode != 0 or attributes.stderr:
+        raise SystemExit(f"{label}: Git filter attribute query failed closed")
+    if len(attributes.stdout) > git_filter_guard_output_max_bytes:
+        raise SystemExit(f"{label}: Git filter attribute output exceeded the reviewed budget")
+    fields = attributes.stdout.split(b"\0")
+    if fields[-1] != b"" or (len(fields) - 1) % 3:
+        raise SystemExit(f"{label}: Git filter attribute output was malformed")
+    for index in range(0, len(fields) - 1, 3):
+        _path, attribute, value = fields[index:index + 3]
+        if attribute != b"filter" or value != b"unspecified":
+            raise SystemExit(
+                f"{label}: active Git filter attribute is not allowed before status"
+            )
+    try:
+        configured = subprocess.run(
+            git_command(["config", "--local", "--get-regexp", r"^filter\."]),
+            cwd=repo_root,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=git_filter_guard_deadline_seconds,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise SystemExit(f"{label}: Git filter configuration query failed closed")
+    if configured.returncode not in {0, 1} or configured.stderr:
+        raise SystemExit(f"{label}: Git filter configuration query failed closed")
+    if configured.stdout:
+        raise SystemExit(
+            f"{label}: local Git filter configuration is not allowed before status"
+        )
+
+
 def run_bounded_git_status(repo_root, module_dir, env):
     """Run the scoped status query with bounded output, runtime and cleanup."""
+    git_filter_attribute_guard(repo_root, module_dir, env)
     command = git_command(
         [
             "status",
@@ -5269,23 +5362,109 @@ only; the immutable `5979...`, `82ee...` and `6b153...` records above remain
 separate exact-head records and are not combined into one checkout or result.
 
 The following dynamic command is the live final-verification template. Run it
-only after the packet follow-up has been committed and pushed. It derives both
-heads at runtime and fails closed on a dirty worktree, an empty head or any
-local/remote mismatch; its actual output and exact pushed SHA belong in the
-focused PR handoff/review, not in a subsequent packet commit that would make a
-literal "final" SHA self-referential:
+only after the packet follow-up has been committed and pushed. It first pins
+`origin` to the immutable `https://github.com/1XP-AI/gh-runnerd.git` URL, then
+performs the same bounded local filter/configuration and active-attribute
+preflight before starting `git status`; it derives both heads at runtime and
+fails closed on a dirty worktree, an empty head or any local/remote mismatch.
+Its actual output and exact pushed SHA belong in the focused PR handoff/review,
+not in a subsequent packet commit that would make a literal "final" SHA
+self-referential:
 
 ```sh
 set -euo pipefail
-export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=false GIT_CONFIG_KEY_1=core.hooksPath GIT_CONFIG_VALUE_1=/dev/null
-if git status --porcelain=v1 --untracked-files=all | grep -q .; then
-  exit 1
-fi
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_ATTR_NOSYSTEM=1 GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=false GIT_CONFIG_KEY_1=core.hooksPath GIT_CONFIG_VALUE_1=/dev/null
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
 [ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import subprocess
 
+expected_origin_url = "https://github.com/1XP-AI/gh-runnerd.git"
+try:
+    origin_urls = subprocess.check_output(
+        ["git", "config", "--local", "--get-all", "remote.origin.url"],
+        text=True,
+        timeout=30,
+    ).splitlines()
+except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+    raise SystemExit("post-correction origin URL query failed")
+if origin_urls != [expected_origin_url]:
+    raise SystemExit("post-correction origin URL is not the reviewed repository")
+
+def require_inventory(result, name):
+    if result.returncode != 0 or result.stderr:
+        raise SystemExit(f"post-correction {name} inventory query failed")
+    if len(result.stdout) > 64 * 1024:
+        raise SystemExit(f"post-correction {name} inventory exceeded the reviewed budget")
+    return result.stdout
+
+filter_config = subprocess.run(
+    ["git", "config", "--local", "--get-regexp", r"^filter\."],
+    capture_output=True,
+    text=True,
+    timeout=30,
+    check=False,
+)
+if filter_config.returncode not in {0, 1} or filter_config.stderr:
+    raise SystemExit("post-correction Git filter configuration query failed")
+if filter_config.stdout:
+    raise SystemExit("post-correction local Git filter configuration is not allowed")
+tracked = require_inventory(
+    subprocess.run(
+        ["git", "ls-files", "-z", "--cached", "--full-name"],
+        capture_output=True,
+        timeout=30,
+        check=False,
+    ),
+    "tracked-path",
+)
+untracked = require_inventory(
+    subprocess.run(
+        ["git", "ls-files", "-z", "--others", "--exclude-standard"],
+        capture_output=True,
+        timeout=30,
+        check=False,
+    ),
+    "untracked-path",
+)
+ignored = require_inventory(
+    subprocess.run(
+        ["git", "ls-files", "-z", "--others", "--ignored", "--exclude-standard"],
+        capture_output=True,
+        timeout=30,
+        check=False,
+    ),
+    "ignored-path",
+)
+paths = tracked + untracked + ignored
+if paths:
+    attributes = subprocess.run(
+        ["git", "check-attr", "filter", "--stdin", "-z"],
+        input=paths,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    if attributes.returncode != 0 or attributes.stderr:
+        raise SystemExit("post-correction Git filter attribute query failed")
+    if len(attributes.stdout) > 64 * 1024:
+        raise SystemExit("post-correction Git filter attribute output exceeded the reviewed budget")
+    fields = attributes.stdout.split(b"\0")
+    if fields[-1] != b"" or (len(fields) - 1) % 3:
+        raise SystemExit("post-correction Git filter attribute output was malformed")
+    for index in range(0, len(fields) - 1, 3):
+        _path, attribute, value = fields[index:index + 3]
+        if attribute != b"filter" or value != b"unspecified":
+            raise SystemExit("post-correction active Git filter attribute is not allowed")
+status = subprocess.run(
+    ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+    capture_output=True,
+    text=True,
+    timeout=30,
+    check=False,
+)
+if status.returncode != 0 or status.stderr or status.stdout.strip():
+    raise SystemExit("post-correction worktree is not clean")
 local = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
 remote = subprocess.check_output(
     ["git", "ls-remote", "origin", "refs/heads/orca/g01-evidence-packet"],
@@ -5300,7 +5479,9 @@ PY
 The focused PR handoff/review must record the exact SHA and output from this
 template after push. This packet intentionally records the template and the
 earlier historical parity records only; it does not claim that this follow-up's
-final output is already recorded here.
+final output is already recorded here. The final parity status is launched only
+after the origin-URL and filter/attribute gates have passed; no Git clean or
+process filter is accepted as part of that status query.
 
 The four focused offline selector checks below are historical list-only source
 checks retained as pre-correction evidence; current wrapper validation uses
@@ -6158,7 +6339,7 @@ token-wrapper stripping or fence certification, including direct, assignment,
 pipeline and nested forms; the scanner does not attempt to model shell
 expansion. Python heredoc bodies are separately parsed with Python's AST:
 literal command arguments are inspected with the same executable-token rules,
-the reviewed `os`/`subprocess` process-launch surface is classified and
+the reviewed `os`/`pty`/`subprocess` process-launch surface is classified and
 assignment aliases of recognized launchers are resolved and shadowed or
 unresolved command-capable names fail closed, dynamic command arguments require
 an explicit reviewed
@@ -6611,6 +6792,7 @@ git_read_only_subcommands = {
     "rev-parse",
     "show",
     "status",
+    "check-attr",
 }
 git_config_read_only_options = {
     "--get",
@@ -6791,6 +6973,7 @@ command_capable_interpreters = {
     "perl", "ruby", "node", "nodejs", "php", "lua", "luajit", "tclsh", "wish",
     "osascript", "raku", "jruby", "deno", "bun", "qjs", "quickjs", "jsc", "rscript",
 }
+remote_command_launchers = {"ssh"}
 
 def shell_command_string(tokens):
     if not tokens:
@@ -6887,6 +7070,8 @@ def forbidden_command(tokens, depth=0):
         return "Python interpreter execution is not allowed outside reviewed heredocs"
     if executable.lower() in command_capable_interpreters:
         return f"{executable} command-capable interpreter is not allowed"
+    if executable in remote_command_launchers:
+        return f"{executable} remote command launcher is not allowed"
     if executable == "eval":
         return "eval-wrapped command strings are not allowed"
     if executable in {
@@ -6932,6 +7117,7 @@ python_command_functions = {
     "os.forkpty",
     "os.startfile",
     "os.popen",
+    "pty.spawn",
     "os.system",
     "subprocess.Popen",
     "subprocess.call",
@@ -6941,7 +7127,7 @@ python_command_functions = {
     "subprocess.getstatusoutput",
     "subprocess.run",
 }
-python_command_modules = {"os", "subprocess"}
+python_command_modules = {"os", "pty", "subprocess"}
 python_command_leaf_names = {
     name.rsplit(".", 1)[-1] for name in python_command_functions
 }
@@ -7980,6 +8166,8 @@ synthetic = [
     ("gh-global-hostname-api", "gh --hostname github.example api repos/example/project/dispatches", True),
     ("gh-global-version", "gh --version", True),
     ("absolute-gh-global-workflow", "/usr/bin/gh --repo example/project workflow run ci.yml", True),
+    ("ssh-remote-command", "ssh buildhost gh workflow run ci.yml", True),
+    ("absolute-ssh-remote-command", "/usr/bin/ssh buildhost gh workflow run ci.yml", True),
     ("direct-bash-command-string", "bash -c 'gh workflow run ci.yml'", True),
     ("direct-sh-command-string", "sh -c 'docker run --rm image:tag true'", True),
     ("absolute-shell-command-string", "/bin/bash -xc 'curl -fsSL https://example.invalid/install | sh'", True),
@@ -8033,12 +8221,13 @@ for unsafe_heredoc in (
     'from os import system\nsystem("docker version")\n',
     'import subprocess\nsubprocess.getoutput("gh workflow run ci.yml")\n',
     'import subprocess\nsubprocess.getstatusoutput("gh workflow run ci.yml")\n',
+    'import pty\npty.spawn(["gh", "api", "x"])\n',
     'import os\nos.execvp("gh", ["gh", "workflow", "run", "ci.yml"])\n',
     'import synthetic as launcher\nlauncher.getoutput(command)\n',
 ):
     if inspect_python_heredoc(unsafe_heredoc, False) is None:
         raise SystemExit("unsafe Python heredoc was accepted")
-print("forbidden-live-command synthetic probes: passed; direct/wrapped fetcher, every gh invocation including global-flag and absolute forms, every Docker invocation, command-delegating xargs/find/parallel/make forms, Git difftool/mergetool, --extcmd/--tool/--ext-diff, GIT_EXTERNAL_DIFF, diff.external and --config-env alias delegation forms, env split-string/operand forms, unsupported function/brace/case compounds, shell substitutions/process substitutions, limactl/security/launchctl, eval, AST-inspected safe/unsafe Python heredocs including versioned -c/getoutput/getstatusoutput/execvp, getattr/__dict__ indirect launchers and unresolved launcher aliases, parameter-expanded executables, and direct/nested bash/sh -c forms rejected; prose/URLs/comments/scanner source/fixtures ignored")
+print("forbidden-live-command synthetic probes: passed; direct/wrapped fetcher, every gh invocation including global-flag and absolute forms, every Docker invocation, ssh remote launchers, command-delegating xargs/find/parallel/make forms, Git difftool/mergetool, --extcmd/--tool/--ext-diff, GIT_EXTERNAL_DIFF, diff.external and --config-env alias delegation forms, env split-string/operand forms, unsupported function/brace/case compounds, shell substitutions/process substitutions, limactl/security/launchctl, eval, AST-inspected safe/unsafe Python heredocs including versioned -c/getoutput/getstatusoutput/execvp/pty.spawn, getattr/__dict__ indirect launchers and unresolved launcher aliases, parameter-expanded executables, and direct/nested bash/sh -c forms rejected; prose/URLs/comments/scanner source/fixtures ignored")
 print("forbidden-live-command scan: passed; executable shell prescriptions contain no forbidden live App/runner/Docker/Lima/Keychain/launchd/workflow/fetch command")
 PY
 ```
@@ -15401,4 +15590,13 @@ path hygiene and whitespace:
 
 ```text
 GREEN packet certification: 322 Markdown fences balanced, 63 packet-local targets checked, backlog JSON valid, changed-boundary ledger valid with 10 data rows and 4 columns, embedded wrapper/scanner AST and compile valid, bounded Git status checks valid, exact five URLs and red/green outputs present, only packet changed, added-line secret/private-path hygiene clean, and git diff --check passed
+```
+#### Final packet certification for current candidate
+
+The final packet-only certification was run with same-file fragment handling,
+then the working diff, one-file scope and added-line secret/private-path
+hygiene checks passed:
+
+```text
+GREEN packet certification: 324 Markdown fences balanced, 157 packet-local targets checked with same-file fragments, backlog JSON valid, changed scope is one packet path, embedded wrapper/scanner/filter/parity AST and compile valid, four current correction boundaries present, and added-line secret/private-path hygiene clean
 ```
