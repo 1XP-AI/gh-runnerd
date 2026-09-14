@@ -174,7 +174,7 @@ the count includes the actual live-canary gate row.
 | Reconciliation, inventory/identity/quarantine | statistics readers, paged inventory normalization, generation fences, ownership checks and journal/authority schema are unchanged. | Retain the prior reconciliation selector and add the exact focused `TestObservation*` and `TestRoster*` families, inventory/quarantine and journal/authority selectors in the command block below, including controller-side `TestAmbiguousCreateNeverRetriesAfterRestart`, the four `TestInventory*` cases, `TestDemandStatisticsAllowControlledProbeButNeverCleanup`, `TestCleanupOnlyForNeverIssuedWorkerWithExactReceipt`, `TestWorkerPreparationReturnsCanonicalSnapshotAndRejectsPriorEffect`, and the named journal/authority contracts in both `./livecanary` and `./liveworker`. | Fixture: record normalized facts and retained uncertainty; no live equality/absence claim. |
 | Secret and error handling | SDK error sentinels, HTTP body/debug redaction and shared response-budget controls are unchanged. | See the exact root, livecanary and liveworker selectors in the secret/error command block below, including decoded-body truncation, gzip-budget, uncertain-start, bounded Unix-response/redirect, journal-create-failure and raw-runtime-status tests. | Fixture: record normalized sentinel/error and body-budget behavior; no secret-bearing output or live result is claimed. |
 | Tagged controller/JIT input and credential transport boundary | `g01_live` source, input reader, credential attestation and transport refusal tests are unchanged. | Run the tagged command below plus the livecanary credential/transport selector below, including `TestAuthoritySplitAndPolicyRejection`, `TestSDKTransportOwnership`, `TestCredentialAttestationMismatchAndExpiredTokenRejected` and `TestTransportRejectsPlaintextOffHostAndProxyBeforeNetwork`. | Fixture: record no-secret/no-echo/refusal result; no credential or live phase. |
-| Idle drain and withdrawal | Only reuse the authoritative current PR #72 head `f5560ba950f77343e57034cc1cf85dc67f5ac922` and its unchanged fixture/source. | On that authoritative current PR #72 checkout, run the guarded `drain-pr72` and `drain-pr72-race` commands below; both carry the same exact selector/package digest, with `default+norace+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8` and `default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8` metadata respectively. | Fixture/source: record physical-write markers as client facts and inconclusive server receipt; never reuse as live assignment/drain evidence. |
+| Idle drain and withdrawal | Only reuse the authoritative current PR #72 head `f5560ba950f77343e57034cc1cf85dc67f5ac922` and its unchanged fixture/source. | On that authoritative current PR #72 checkout, run the guarded `drain-pr72` and `drain-pr72-race` commands below; both carry the same exact selector/package digest, with `default+norace+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8` and `default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8` metadata respectively. | Fixture/source: record physical-write markers as client facts and inconclusive server receipt; never reuse as live assignment/drain evidence. |
 | Paired terminal/worker support | paired journal/lease, worker profile, `liveworker` runtime source/implementation, image/runtime pins and terminal selectors are unchanged. | See the exact controller update-policy and worker runtime commands plus the tagged partition commands below; the worker runtime selector includes the direct Docker state/inspection, mutation-EOF and changed-daemon contracts, while tagged partition commands retain `go1.26.8`, `-race`, `-count=1` and `-timeout=120s`, the complete worker `^TestPaired` partition is included, and the controller-side terminal groups remain exhaustive/disjoint. | Fixture: record receipt/identity checks only; no live worker or terminal success claim. |
 | Actual live canary | There is no live evidence to reuse today. A future result is reusable only for the same immutable workflow/run attempt, source/head, resources, authority scope and approved observation boundary. | Rebuild/plan the exact reviewed tagged binary, then run only the explicitly authorized phase from [the driver](g01-live-driver.md); never substitute fixture commands or broaden phases. | Live: record sanitized server observations, authorization and unresolved outcomes; any changed target or boundary requires a fresh approval/rerun. |
 
@@ -236,8 +236,8 @@ single-dash `-toolexec FILE`/`-toolexec=FILE`, `-overlay FILE`/
 also rejected before the first Go child. Each prescription also carries an
 expected package identity
 (`module-directory:package`) and build configuration (tag set, race mode,
-explicit reviewed `CGO_ENABLED=1` mode, the reviewed default cgo compiler/tool
-set, reviewed `GOEXPERIMENT=none` binding, reviewed `GOOS=darwin`,
+explicit reviewed `CGO_ENABLED=1` mode, the reviewed `/usr/bin/clang` command
+and exact Apple Clang version identity, reviewed `GOEXPERIMENT=none` binding, reviewed `GOOS=darwin`,
 `GOARCH=arm64`, `GOARM64=v8.0` target and the requested `GOTOOLCHAIN`). Compiler commands, cgo flags/linker controls, pkg-config
 selectors and other cgo tool overrides are rejected before any Go child; the
 effective default-tool, experiment and target identities are recorded in each
@@ -248,8 +248,10 @@ before any Go child; non-default inherited or command-supplied values fail
 closed, and `goroot-default`/`gofips140-off` are bound into every build
 identity. The reviewed `GOSUMDB=sum.golang.org` and
 `GOPROXY=https://proxy.golang.org,direct` trust settings are required before
-the first Go child and verified through effective `go env`; custom inherited or
-command-supplied values fail closed. The wrapper queries effective
+the first Go child and verified through effective `go env`; `GOPRIVATE`,
+`GONOPROXY` and `GONOSUMDB` are required empty before that child, so inherited
+private-module bypasses fail closed. Custom inherited or command-supplied
+values fail closed. The wrapper queries effective
 `GOVERSION` before metadata or tests and binds that verified toolchain identity,
 not merely the requested `GOTOOLCHAIN`, into every build identity. The reviewed
 canonical PATH is pinned before the first Git or Go executable lookup.
@@ -308,9 +310,10 @@ file. The same environment pins `GOOS=darwin`, `GOARCH=arm64` and
 Race-mode prescriptions reject inherited or command-supplied `GORACE` before
 either source derivation or test execution. The wrapper pins `CGO_ENABLED=1`
 after command-prefix parsing, rejects a command-supplied conflicting value,
-rejects inherited or command-prefix compiler/cgo-tool overrides, and binds the
-effective `cgo-tools-default` identity into every build identity before
-metadata. Exactly one `-count=1` and one positive bounded
+rejects inherited or command-prefix compiler/cgo-tool overrides, resolves the
+Go-selected `CC` through the reviewed canonical PATH, verifies the exact
+reviewed `/usr/bin/clang --version` line before metadata, and binds that actual
+identity into every build identity. Exactly one `-count=1` and one positive bounded
 `-timeout` (at most 300 seconds) are required; `-args` and test-binary
 selector/count/timeout overrides, Go `-modfile FILE`/`-modfile=FILE`
 alternate-module-file overrides, Go `-overlay FILE`/`-overlay=FILE` build
@@ -350,7 +353,7 @@ set -euo pipefail
 # Invocation metadata is: package ID module-dir:package, then build ID
 # tags+race-mode+cgo-mode+cgo-tool-identity+goexperiment+target+goroot+gofips140+toolchain (for
 # example, experiments/g01-scaleset:./livecanary
-# default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8).
+# default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8).
 # The wrapper checks package initialization/build state, derives test names from
 # the same source/build selection without starting a test binary, then runs the
 # original command with its own JSON stream.
@@ -364,6 +367,7 @@ import json
 import os
 import re
 import signal
+import shutil
 import stat
 import subprocess
 import sys
@@ -414,7 +418,7 @@ if expected_race not in {"race", "norace"}:
     raise SystemExit(f"{label}: invalid expected race mode")
 if expected_cgo != "cgo1":
     raise SystemExit(f"{label}: invalid expected CGO mode")
-if expected_cgo_tools != "cgo-tools-default":
+if expected_cgo_tools != "cgo-cc-clang-apple21.0.0":
     raise SystemExit(f"{label}: invalid expected cgo compiler/tool identity")
 if expected_goexperiment != "goexperiment-none":
     raise SystemExit(f"{label}: invalid expected GOEXPERIMENT identity")
@@ -504,6 +508,36 @@ for source, value in (
         )
 env["GOSUMDB"] = reviewed_gosumdb
 env["GOPROXY"] = reviewed_goproxy
+reviewed_private_module_overrides = {
+    "GOPRIVATE": "",
+    "GONOPROXY": "",
+    "GONOSUMDB": "",
+}
+for name, reviewed in reviewed_private_module_overrides.items():
+    for source, value in (
+        ("inherited", os.environ.get(name)),
+        ("command", command_assignments.get(name)),
+    ):
+        if value is not None and value != reviewed:
+            raise SystemExit(
+                f"{label}: {source} {name} must be empty; private-module trust overrides are not allowed"
+            )
+    env[name] = reviewed
+reviewed_cgo_command = "clang"
+reviewed_cgo_path = "/usr/bin/clang"
+reviewed_cgo_version = "Apple clang version 21.0.0 (clang-2100.1.1.101)"
+reviewed_cgo_identity = "cgo-cc-clang-apple21.0.0"
+
+def verified_cgo_compiler_identity(command, version_line):
+    if command != reviewed_cgo_command:
+        raise SystemExit(
+            f"{label}: Go-selected CC command is not the reviewed {reviewed_cgo_command!r}"
+        )
+    if version_line != reviewed_cgo_version:
+        raise SystemExit(
+            f"{label}: selected CC version does not match the reviewed compiler identity"
+        )
+    return reviewed_cgo_identity
 reviewed_gocacheprog = ""
 for source, value in (
     ("inherited", os.environ.get("GOCACHEPROG")),
@@ -897,6 +931,11 @@ if go_env.get("GOPROXY") != reviewed_goproxy:
     raise SystemExit(
         f"{label}: Go child environment did not pin the reviewed GOPROXY"
     )
+for name, expected in reviewed_private_module_overrides.items():
+    if go_env.get(name) != expected:
+        raise SystemExit(
+            f"{label}: Go child environment did not clear {name} private-module override"
+        )
 if go_env.get("GOCACHEPROG") != reviewed_gocacheprog:
     raise SystemExit(
         f"{label}: Go child environment did not pin GOCACHEPROG={reviewed_gocacheprog!r}"
@@ -967,7 +1006,10 @@ def run_go_child(go_command, **kwargs):
         raise
 
 effective_toolchain_result = run_go_child(
-    ["go", "env", "GOVERSION", "GOSUMDB", "GOPROXY"],
+    [
+        "go", "env", "GOVERSION", "GOSUMDB", "GOPROXY",
+        "GOPRIVATE", "GONOPROXY", "GONOSUMDB", "CC",
+    ],
     cwd=repo_root,
     env=go_env,
     text=True,
@@ -981,11 +1023,38 @@ if effective_toolchain_lines != [
     reviewed_toolchain,
     reviewed_gosumdb,
     reviewed_goproxy,
+    reviewed_private_module_overrides["GOPRIVATE"],
+    reviewed_private_module_overrides["GONOPROXY"],
+    reviewed_private_module_overrides["GONOSUMDB"],
+    reviewed_cgo_command,
 ]:
     raise SystemExit(
         f"{label}: effective toolchain/trust identity did not match the reviewed pin"
     )
 effective_toolchain_identity = effective_toolchain_lines[0]
+effective_cgo_command = effective_toolchain_lines[6]
+resolved_cgo_path = shutil.which(effective_cgo_command, path=reviewed_path)
+if resolved_cgo_path != reviewed_cgo_path:
+    raise SystemExit(
+        f"{label}: Go-selected CC did not resolve to the reviewed compiler path"
+    )
+cgo_version_result = subprocess.run(
+    [resolved_cgo_path, "--version"],
+    cwd=repo_root,
+    env=go_env,
+    text=True,
+    capture_output=True,
+    check=False,
+    timeout=30,
+)
+if cgo_version_result.returncode != 0 or cgo_version_result.stderr.strip():
+    raise SystemExit(f"{label}: reviewed cgo compiler version query failed")
+cgo_version_lines = cgo_version_result.stdout.splitlines()
+if len(cgo_version_lines) != 1 or len(cgo_version_lines[0]) > 256:
+    raise SystemExit(f"{label}: cgo compiler version output is not bounded and single-line")
+effective_cgo_compiler_identity = verified_cgo_compiler_identity(
+    effective_cgo_command, cgo_version_lines[0]
+)
 
 effective_goflags = run_go_child(
     ["go", "env", "GOFLAGS"],
@@ -1057,7 +1126,7 @@ if len(race_modes) > 1:
 race_identity = race_modes[0] if race_modes else "norace"
 toolchain_identity = effective_toolchain_identity
 cgo_identity = "cgo" + env.get("CGO_ENABLED", "")
-compiler_tool_identity = "cgo-tools-default"
+compiler_tool_identity = effective_cgo_compiler_identity
 goexperiment_identity = "goexperiment-" + reviewed_goexperiment
 target_identity = "darwin-arm64-goarm64-v8.0"
 goroot_identity = "goroot-default"
@@ -1921,76 +1990,76 @@ go_vet_checked() {
     "$label" "$package_id" "$build_id" "$@"
 }
 
-go_test_checked 9 9aef95c84ffd42ad632040498c628c78072ce94f5cc2f6af8493fcffc233b707 ack-root experiments/g01-scaleset:. default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
+go_test_checked 9 9aef95c84ffd42ad632040498c628c78072ce94f5cc2f6af8493fcffc233b707 ack-root experiments/g01-scaleset:. default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s -run '^(TestSDKACKBoundaries|TestSDKDemandAboveFiftyAndPartialAcquisition|TestSDKRepeatedStatisticsAnd202ReuseLastObservation|TestRecoveryAfterACKCallbackCrash|TestRecoveryMissingLifecycleCallback|TestRecoveryErrorsHoldReservationsAndRedact|TestSDKAcquisitionResponseLossAfterACK|TestSDKCapacityWithdrawalDoesNotFenceInFlightAcquisition|TestSDKHTTPFailuresAndSessionRefresh)$' .
-go_test_checked 5 f95a296947af0fb862e8b447d3e27b7ce9f01e726659f5f87393789b62b783c9 ack-livecanary experiments/g01-scaleset:./livecanary default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
+go_test_checked 5 f95a296947af0fb862e8b447d3e27b7ce9f01e726659f5f87393789b62b783c9 ack-livecanary experiments/g01-scaleset:./livecanary default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestSupportedListenerBarriersAndReservation|TestDriverBarriersThroughPinnedSDK|TestForeignIdentityAndUnreviewedWorkNeverACKOrDelete|TestAuditPR25MultiJobAcquisitionMustRefuseBeforeACK|TestNoMessageDoesNotCountAsCompletedBarrier)$'
 
-go_test_checked 24 eae489a7d743c942dca803c9b13cb618dcd87fbd9a53634f022bc5381c7d6436 baseline experiments/g01-scaleset:./livecanary default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
+go_test_checked 24 eae489a7d743c942dca803c9b13cb618dcd87fbd9a53634f022bc5381c7d6436 baseline experiments/g01-scaleset:./livecanary default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=180s ./livecanary -run '^TestBaseline'
-go_test_checked 9 b6a378d192ba2c614cd82c20eab7cffcdbbb00115a1bba4da803fc262a1c3d8f admission-livecanary experiments/g01-scaleset:./livecanary default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
+go_test_checked 9 b6a378d192ba2c614cd82c20eab7cffcdbbb00115a1bba4da803fc262a1c3d8f admission-livecanary experiments/g01-scaleset:./livecanary default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=180s ./livecanary -run '^(TestAdmission.*|TestAuditPR25DistinctStateDirectoriesMustShareCap)$'
-go_test_checked 8 4bce3c998c4f2e6806888de2ea9936c6dd9ea877c72b190d47f4f47e24cdb559 admission-liveworker experiments/g01-scaleset:./liveworker default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
+go_test_checked 8 4bce3c998c4f2e6806888de2ea9936c6dd9ea877c72b190d47f4f47e24cdb559 admission-liveworker experiments/g01-scaleset:./liveworker default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=180s ./liveworker -run '^(TestAdmissionDirectoryUsesOSAccountWithoutEnvironmentFallback|TestAdmissionAuthorityChecksTheCurrentClaim|TestWorkerAdmissionCapsIndependentDirectories|TestWorkerAdmissionRetainsSlotAfterOutcomeAndClose|TestAdmissionRejectsCopiedJournalInDifferentDirectory|TestAdmissionSyncFailureMustBeRetried|TestAdmissionRefusesMissingUnsafeOrUnknownRootState|TestAdmissionInitializationLockPrecedesClaimCreation)$'
-go_test_checked 1 e7cdff09074beb49efb17b8e68201798140ea6f0e83ad10f3fc096aed98823ce unsupported-liveworker experiments/g01-scaleset:./liveworker osusergo+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
+go_test_checked 1 e7cdff09074beb49efb17b8e68201798140ea6f0e83ad10f3fc096aed98823ce unsupported-liveworker experiments/g01-scaleset:./liveworker osusergo+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -tags=osusergo -count=1 -timeout=180s ./liveworker -run '^TestUnsupportedAccountLookupRefusesBeforeJournal$'
-go_test_checked 1 e7cdff09074beb49efb17b8e68201798140ea6f0e83ad10f3fc096aed98823ce unsupported-livecanary experiments/g01-scaleset:./livecanary osusergo+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
+go_test_checked 1 e7cdff09074beb49efb17b8e68201798140ea6f0e83ad10f3fc096aed98823ce unsupported-livecanary experiments/g01-scaleset:./livecanary osusergo+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -tags=osusergo -count=1 -timeout=180s ./livecanary -run '^TestUnsupportedAccountLookupRefusesBeforeJournal$'
 
-go_test_checked 3 0f5a8b0633982f8cc04a541cb396c46736c6eec486622354a6456554c52cfc75 jit-root experiments/g01-scaleset:. default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
+go_test_checked 3 0f5a8b0633982f8cc04a541cb396c46736c6eec486622354a6456554c52cfc75 jit-root experiments/g01-scaleset:. default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s -run '^(TestSDKJITLookupBeforeCreationDoesNotDiscoverIdentity|TestSDKJITResponseLossWithoutCommitDoesNotDiscoverIdentity|TestSDKJITResponseLossDiscoversIdentityWithoutReissuing)$' .
-go_test_checked 2 42eac255f830436a6fba9457bcb1964e8f9f596761fecfdb721c2d34b684f4cb jit-livecanary experiments/g01-scaleset:./livecanary default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
+go_test_checked 2 42eac255f830436a6fba9457bcb1964e8f9f596761fecfdb721c2d34b684f4cb jit-livecanary experiments/g01-scaleset:./livecanary default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestJITLostResponseIsSecretSafeAndNeverReissued|TestDriverBarriersThroughPinnedSDK)$'
 
-go_test_checked 34 fcdcde4fce2efa204fdb352c035329a010f7a41b4b9746bf748b2ebc22b4d330 worker-runtime experiments/g01-scaleset:./liveworker default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
+go_test_checked 34 fcdcde4fce2efa204fdb352c035329a010f7a41b4b9746bf748b2ebc22b4d330 worker-runtime experiments/g01-scaleset:./liveworker default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./liveworker -run '^(TestOneWorkerNeverRecreatedAndOnlyJITAddedToEnvironment|TestUncertainStartNeverRetriesAndCannotCleanup|TestEveryRuntimeBoundaryRejectsProfileAndOwnershipMismatch|TestUnverifiedRunnerUpdatePolicyRefusesBeforeRuntime|TestSocketReplacementAfterPreflightCannotReceiveAnyMutation|TestSocketModesAndControllerOwnership|TestSocketPostConnectRecheckClosesBeforeHTTP|TestNoCreateBeforeDurableIntent|TestUnknownCreateNeverRetriesAfterRestart|TestCreationWarningsPreserveKnownIDWithoutAuthorizingStart|TestWorkerPreparationReturnsCanonicalSnapshotAndRejectsPriorEffect|TestUnixInspectRequiresStateFlagsBeforeMutation|TestDockerInspectExact(KnownStatesAndSerializableFacts|StatePresenceAndLegacyRequirements|RejectsMalformedOrAmbiguousBodiesBeforeMutation|NotFoundReportsOnlyTheExactGET|RejectsOtherResponsesAndInvalidTargets|RequiresSupported404Body|CancellationNeverReportsPresenceOrAbsence|RejectsReplacedSocket|EOFCancellationKeepsUnknownOutcome)|TestDockerInspectLegacyCleanupKeepsSignedAndAbsentExitPolicy|TestDockerInspectMapsPreserveCaseSensitiveKeysAndProfile|TestDockerCompletedMutationResponseSurvivesEOFCancellation|TestDockerInspectUnknownOrAbsentStatusCannotAuthorizeMutation|TestUnixRuntimeRejectsWrongIdentityImagesAndUnsupportedLimits|TestUnixRuntimeOneShotCreateStartAndNonForceCleanup|TestUnixRuntimeAmbiguousEffectsNeverRetry|TestChangedDaemonCannotCreate|TestChangedDaemonOrAbsentContainerNeverMeansCleanupComplete|TestUnixTransportRejectsSymlinksAndInheritedTCPDestinations|TestAuditPR28MissingBridgeMustNotStart|TestCleanupRetainsActiveAndUnknownWorkers|TestOwnedTerminalCleanupAndRunningRemovalRace)$'
-go_test_checked 4 8a0a576036768baff9a9b7d53b3487ef84b2e95f502b3ca9dd453463f396cade update-policy experiments/g01-scaleset:./livecanary default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
+go_test_checked 4 8a0a576036768baff9a9b7d53b3487ef84b2e95f502b3ca9dd453463f396cade update-policy experiments/g01-scaleset:./livecanary default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestCreateRequestsDisabledRunnerUpdate|TestUnconfirmedUpdateSettingQuarantinesCreate|TestUpdateSettingDriftStopsBeforeSessionOrJIT|TestUpdateSettingDriftDoesNotBlockSafeEmptyCleanup)$'
-go_test_checked 2 2614438aa4873bd044d1f0d6247b929403e2225c2e5112c13787bf790af42413 worker-command experiments/g01-scaleset:./cmd/g01-worker g01_worker+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
+go_test_checked 2 2614438aa4873bd044d1f0d6247b929403e2225c2e5112c13787bf790af42413 worker-command experiments/g01-scaleset:./cmd/g01-worker g01_worker+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -tags=g01_worker -count=1 -timeout=45s ./cmd/g01-worker -run '^(TestBlockedJITInputHonorsDeadline|TestOfflinePlanAndRefusalDoNotReadSecretsOrEchoInput)$'
 
-go_test_checked 45 2e182d6aeb4c278eddbe272be1693e6bf0143759c23c03348435da59addfde53 reconciliation experiments/g01-scaleset:./livecanary default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
+go_test_checked 45 2e182d6aeb4c278eddbe272be1693e6bf0143759c23c03348435da59addfde53 reconciliation experiments/g01-scaleset:./livecanary default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestAmbiguousCreateNeverRetriesAfterRestart|TestObserve.*|TestObservationIntentFailureStopsBeforeRead|TestObservationResponseCaptureIsLocalAndRejectsOtherOperations|TestStatistics.*|TestDemandStatisticsAllowControlledProbeButNeverCleanup|TestInvalidOwnedProof.*|TestCanonicalPreparationRecordsNoPhaseOrRemoteIntent|TestCanonicalPreparationRefusesInvalidJournalAndPhase|TestCanonicalPreparationRecoveryAndDriverShareLocalGate|TestJournal.*|TestAuthority.*|TestInventoryStrictPages|TestInventoryMalformedStopsLegacyEffects|TestInventoryTransportRefusalIsBoundedAndSanitized|TestInventoryImpossibleTotalStopsBeforeNextPage|TestRosterActualTLSCompleteObservation|TestRosterPreservesOnlyAcceptedPagePrefix|TestRosterFinalPublicationGuardAfterDigest|TestRosterRefusesInvalidEntryWithoutNetwork|TestStrictJSONRejectsDecoderEquivalentDuplicateFields|TestStrictJSONRejectsDuplicateAuthorityFields|TestFailedDirectorySyncMustBeRetried|TestFileJournalRejectsUnrecordedAuthorityBeforeRawDriverEffect|TestRenewedRecoveryApprovalRetainsOwnedState)$'
-go_test_checked 9 47a97f1f9083abbe72dfc21a2477bd25580684506fbf71bf5aba9e7f6f1a40e8 reconciliation-worker experiments/g01-scaleset:./liveworker default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
+go_test_checked 9 47a97f1f9083abbe72dfc21a2477bd25580684506fbf71bf5aba9e7f6f1a40e8 reconciliation-worker experiments/g01-scaleset:./liveworker default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./liveworker -run '^(TestPrivateJournalLocksAndRetainsReservationAcrossRestart|TestJournalRejectsChangedApprovalTornTailAndUnsafeFiles|TestAuthorityLeaseRefusesConcurrentRunsAndFencesClose|TestAuthorityRejectsReplacedJournalOrDirectory|TestStrictJSONRejectsDecoderEquivalentDuplicateFields|TestStrictInputRejectsAmbiguousOrExtraAuthorityFields|TestFailedDirectorySyncMustBeRetried|TestFileJournalRejectsUnrecordedAuthorityBeforeRawDriverEffect|TestRenewedRecoveryApprovalRetainsOwnedState)$'
-go_test_checked 11 84b872130057cf2103feaa8f7c6cdb69a4d779e135eebf11cc04cb00590eacb9 reconciliation-quarantine experiments/g01-scaleset:./livecanary default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
+go_test_checked 11 84b872130057cf2103feaa8f7c6cdb69a4d779e135eebf11cc04cb00590eacb9 reconciliation-quarantine experiments/g01-scaleset:./livecanary default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestDemandStatisticsAllowControlledProbeButNeverCleanup|TestCleanupOnlyForNeverIssuedWorkerWithExactReceipt|TestZeroStatisticsAndOptionalAbsencePermitEmptyCleanup|TestUnsafeStatisticsStopNewEffectsBeforeControlledMessage|TestEmptyAvailableWithWorkStatisticsStaysQuarantined|TestOlderPendingIntentSurvivesSuccessfulZeroInspection|TestUnownedDiscoveryEvidenceCannotAuthorizeCreationAfterAbsence|TestAuditPR25ObservedJobsMustBlockCleanup|TestUnexpectedWorkMessageQuarantinesBeforeSafeClose|TestObservedRunnerSurvivesLaterAbsenceAndFirstCleanup|TestObservationResultFailureSurvivesFileReopenAndInspection)$'
 
-go_test_checked 1 be0f21a92ce13d75e85a1182706e84b84884a8cf0ec01172e14e5ac2e04b600f secret-root experiments/g01-scaleset:. default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
+go_test_checked 1 be0f21a92ce13d75e85a1182706e84b84884a8cf0ec01172e14e5ac2e04b600f secret-root experiments/g01-scaleset:. default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s -run '^TestSDKBusyRemovalSentinelAndRawErrorExposure$' .
-go_test_checked 6 6d0b3fc255928a6c7a5f7ae087d25715f96c0bad9f9298b5fb08ea7bc5fc34df secret-livecanary experiments/g01-scaleset:./livecanary default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
+go_test_checked 6 6d0b3fc255928a6c7a5f7ae087d25715f96c0bad9f9298b5fb08ea7bc5fc34df secret-livecanary experiments/g01-scaleset:./livecanary default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestHTTPErrorsDoNotReturnSecretResponseBody|TestSDKHTTPDebugDoesNotLogCredentials|TestSharedTransportRejectsOversizeSuccessAndErrorBodies|TestResponseReaderConsumesOnlyBudgetPlusOneAndRejectsTruncation|TestResponseBudgetAppliesAfterGzipDecompression|TestRealJournalCreateFailureBlocksRetryAndContainsNoErrorBody)$'
-go_test_checked 3 feda1bf98e323aef3e209cc4ea2765131ca7d17d70dfd7bb4828c0faab14dff4 secret-liveworker experiments/g01-scaleset:./liveworker default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
+go_test_checked 3 feda1bf98e323aef3e209cc4ea2765131ca7d17d70dfd7bb4828c0faab14dff4 secret-liveworker experiments/g01-scaleset:./liveworker default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./liveworker -run '^(TestUncertainStartNeverRetriesAndCannotCleanup|TestUnixResponsesAreBoundedAndRedirectsNeverFollowed|TestObservationDoesNotJournalRawRuntimeStatus)$'
 
-go_test_checked 10 7ced37498c6790e0a1276ffece4cf0bcb2cad09f39da3ebdd0e28694f752596c live-command experiments/g01-scaleset:./cmd/g01-live g01_live+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
+go_test_checked 10 7ced37498c6790e0a1276ffece4cf0bcb2cad09f39da3ebdd0e28694f752596c live-command experiments/g01-scaleset:./cmd/g01-live g01_live+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -tags=g01_live -count=1 -timeout=45s ./cmd/g01-live -run '^(TestPlanAndRefusalsNeverReadCredentialsOrEchoInputs|TestPreparationCommandNeverReadsCredentialsOrRunsRemotePhase|TestPairedTerminalModeReadsControllerInputAfterAllGates|TestPairedTerminalModeRejectsUnusedPhaseAndControllerFlagsBeforeInput|TestPairedTerminalModeRequiresWorkflowVerificationAuthorityBeforeInput|TestInheritedNamedCredentialFIFODelayedEOF|TestInheritedCredentialPipeStopsAtDeadline|TestCredentialInputRejectsNonPipeDescriptor|TestBlockedCredentialPipeStopsAtDeadline|TestCredentialInputAcceptsCompleteAndRejectsOversize)$'
-go_test_checked 4 a751c8b1a6a22d2f4ce76d90d6d79c48ab377355deed0f3bf189496c22b5492e live-transport experiments/g01-scaleset:./livecanary g01_live+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
+go_test_checked 4 a751c8b1a6a22d2f4ce76d90d6d79c48ab377355deed0f3bf189496c22b5492e live-transport experiments/g01-scaleset:./livecanary g01_live+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -tags=g01_live -count=1 -timeout=45s ./livecanary -run '^(TestAuthoritySplitAndPolicyRejection|TestSDKTransportOwnership|TestCredentialAttestationMismatchAndExpiredTokenRejected|TestTransportRejectsPlaintextOffHostAndProxyBeforeNetwork)$'
 
-go_test_checked 34 a79b7fa367d8eb1e7fe4ee4ef637696518946dab6f2f25410f6e04bfba137298 drain-pr72 experiments/g01-scaleset:./livecanary default+norace+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
+go_test_checked 34 a79b7fa367d8eb1e7fe4ee4ef637696518946dab6f2f25410f6e04bfba137298 drain-pr72 experiments/g01-scaleset:./livecanary default+norace+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset ./livecanary -run '^(TestBaselineAcquireTargetIsActionsOnly|TestPinnedSDKDrain.*|TestDriverDrainThroughPinnedSDKAndPollHook|TestDrainListenerWithdrawsWhilePollResponseIsHeld|TestDrainCancellationStopsBeforeReleasingHeldResponse)$' -count=1 -v -timeout=180s
-go_test_checked 34 a79b7fa367d8eb1e7fe4ee4ef637696518946dab6f2f25410f6e04bfba137298 drain-pr72-race experiments/g01-scaleset:./livecanary default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
+go_test_checked 34 a79b7fa367d8eb1e7fe4ee4ef637696518946dab6f2f25410f6e04bfba137298 drain-pr72-race experiments/g01-scaleset:./livecanary default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race ./livecanary -run '^(TestBaselineAcquireTargetIsActionsOnly|TestPinnedSDKDrain.*|TestDriverDrainThroughPinnedSDKAndPollHook|TestDrainListenerWithdrawsWhilePollResponseIsHeld|TestDrainCancellationStopsBeforeReleasingHeldResponse)$' -count=1 -v -timeout=180s
 
 terminal_heavy_tests='^TestPairedTerminal(FinalResultCapacity|PendingChildCapacity|EligibilityUsesFreshExactFacts|CapturedAcknowledgementCancellation|MissingAcknowledgementsAndPostchecks)$'
 terminal_remainder_skip='^TestPairedTerminal(FinalResultCapacity|PendingChildCapacity|EligibilityUsesFreshExactFacts|CapturedAcknowledgementCancellation|MissingAcknowledgementsAndPostchecks|Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$'
 terminal_storage_tests='^TestPairedTerminal(Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$'
-go_test_checked 22 f3efc29451112b27d2cb590763612790db48f05b54718b1e023196ead6625222 paired-collection experiments/g01-scaleset:./livecanary g01_pair_fixture+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
+go_test_checked 22 f3efc29451112b27d2cb590763612790db48f05b54718b1e023196ead6625222 paired-collection experiments/g01-scaleset:./livecanary g01_pair_fixture+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run '^TestPaired' -skip '^TestPairedTerminal'
-go_test_checked 106 bdeef850cfe820297e3896477219f0fcf90046bc30fb0bd454bfd0f8fe6db2ff paired-all-except experiments/g01-scaleset:./livecanary g01_pair_fixture+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
+go_test_checked 106 bdeef850cfe820297e3896477219f0fcf90046bc30fb0bd454bfd0f8fe6db2ff paired-all-except experiments/g01-scaleset:./livecanary g01_pair_fixture+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -skip '^TestPaired'
-go_test_checked 24 b7f253f33da157adba67fe4312eddb0ee90172e24f46d4f48502890ab5f080f5 paired-worker experiments/g01-scaleset:./liveworker g01_pair_fixture+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
+go_test_checked 24 b7f253f33da157adba67fe4312eddb0ee90172e24f46d4f48502890ab5f080f5 paired-worker experiments/g01-scaleset:./liveworker g01_pair_fixture+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./liveworker -run '^TestPaired'
-go_test_checked 5 9e1a2e099c0fc48bbbd83dd0dc798d3c954910cd150b210037741b2c70211952 paired-heavy experiments/g01-scaleset:./livecanary g01_pair_fixture+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
+go_test_checked 5 9e1a2e099c0fc48bbbd83dd0dc798d3c954910cd150b210037741b2c70211952 paired-heavy experiments/g01-scaleset:./livecanary g01_pair_fixture+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run "$terminal_heavy_tests"
-go_test_checked 15 5e5dd1ee80d3d303271ab17b17aed22d5084e15684bcbe9f31152c1092ec1f73 paired-remainder experiments/g01-scaleset:./livecanary g01_pair_fixture+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
+go_test_checked 15 5e5dd1ee80d3d303271ab17b17aed22d5084e15684bcbe9f31152c1092ec1f73 paired-remainder experiments/g01-scaleset:./livecanary g01_pair_fixture+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run '^TestPairedTerminal' -skip "$terminal_remainder_skip"
-go_test_checked 6 458f77f55209a59338a63bfc27697d85ebe5e0c3c7d1b959a0b56b2527f3ead5 paired-storage experiments/g01-scaleset:./livecanary g01_pair_fixture+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
+go_test_checked 6 458f77f55209a59338a63bfc27697d85ebe5e0c3c7d1b959a0b56b2527f3ead5 paired-storage experiments/g01-scaleset:./livecanary g01_pair_fixture+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run "$terminal_storage_tests"
-go_vet_checked vet-livecanary experiments/g01-scaleset:./livecanary g01_pair_fixture+norace+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
+go_vet_checked vet-livecanary experiments/g01-scaleset:./livecanary g01_pair_fixture+norace+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go vet -C experiments/g01-scaleset -tags=g01_pair_fixture ./livecanary
-go_vet_checked vet-liveworker experiments/g01-scaleset:./liveworker g01_pair_fixture+norace+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
+go_vet_checked vet-liveworker experiments/g01-scaleset:./liveworker g01_pair_fixture+norace+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go vet -C experiments/g01-scaleset -tags=g01_pair_fixture ./liveworker
 ```
 
@@ -2223,7 +2292,7 @@ if len(vet_commands) != 2:
 if any(not command.lstrip().startswith("go_vet_checked ") for command in vet_commands):
     raise SystemExit("an executable go vet prescription bypassed go_vet_checked")
 if any(
-    "g01_pair_fixture+norace+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+"
+    "g01_pair_fixture+norace+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+"
     not in command
     or "-tags=g01_pair_fixture" not in command
     or "+goroot-default+gofips140-off+go1.26.8" not in command
@@ -2292,15 +2361,14 @@ from pathlib import Path
 
 source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
 fence_languages = {"sh", "bash", "shell", "zsh"}
-heredoc = re.compile(
-    r"(?<![A-Za-z0-9_])(?:/[^ \t;&|]+/)?python(?:3(?:\.[0-9]+)?)?"
-    r"(?:[ \t]+[^;&|]*)?<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1"
+heredoc_operator = re.compile(
+    r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1"
 )
 
 
 def executable_shell_commands(markdown):
     in_shell = False
-    skip_until = None
+    pending_heredocs = []
     pending = []
     pending_numbers = []
     for number, line in enumerate(markdown.splitlines(), start=1):
@@ -2318,13 +2386,9 @@ def executable_shell_commands(markdown):
         if not in_shell:
             continue
         stripped = line.strip()
-        if skip_until is not None:
-            if stripped == skip_until:
-                skip_until = None
-            continue
-        heredoc_match = heredoc.search(stripped)
-        if heredoc_match:
-            skip_until = heredoc_match.group(2)
+        if pending_heredocs:
+            if stripped == pending_heredocs[0]:
+                pending_heredocs.pop(0)
             continue
         if not stripped or stripped.startswith("#"):
             continue
@@ -2332,9 +2396,18 @@ def executable_shell_commands(markdown):
         pending_numbers.append(number)
         if stripped.endswith("\\"):
             continue
-        yield " ".join(pending), pending_numbers[0]
+        command = " ".join(pending)
+        yield command, pending_numbers[0]
+        pending_heredocs.extend(
+            match.group(2) for match in heredoc_operator.finditer(command)
+        )
         pending = []
         pending_numbers = []
+    if pending_heredocs:
+        raise SystemExit(
+            "unterminated heredoc body for delimiter(s): "
+            + ", ".join(pending_heredocs)
+        )
 
 
 def strip_shell_quoted(command):
@@ -2622,6 +2695,17 @@ for index, line in enumerate(lines):
             f"line {index + 2}: compiler/cgo tool environment assignments are not allowed: "
             + ", ".join(compiler_tool_environment_overrides)
         )
+    private_module_trust_names = {
+        "GOSUMDB", "GOPROXY", "GOPRIVATE", "GONOPROXY", "GONOSUMDB",
+    }
+    private_module_trust_overrides = sorted(
+        key for key in env if key in private_module_trust_names
+    )
+    if private_module_trust_overrides:
+        raise SystemExit(
+            f"line {index + 2}: private-module trust assignments are not allowed: "
+            + ", ".join(private_module_trust_overrides)
+        )
     if command and command[0] == "env":
         raise SystemExit(
             f"line {index + 2}: standard env-wrapped go test command is not allowed"
@@ -2752,7 +2836,7 @@ for index, line in enumerate(lines):
     ):
         raise SystemExit(f"line {index + 2}: unreviewed target assignment")
     actual_build = (
-        f"{tag_identity}+{race_identity}+cgo1+cgo-tools-default+"
+        f"{tag_identity}+{race_identity}+cgo1+cgo-cc-clang-apple21.0.0+"
         f"goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+"
         f"gofips140-off+{env.get('GOTOOLCHAIN', '')}"
     )
@@ -2875,14 +2959,14 @@ cases = [
     (
         "equals-run",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+        "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         common + ["./livecanary", "-run=" + "^" + one_name + "$"],
         True,
     ),
     (
         "separated-filter",
         "22", "f3efc29451112b27d2cb590763612790db48f05b54718b1e023196ead6625222",
-        "experiments/g01-scaleset:./livecanary", "g01_pair_fixture+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+        "experiments/g01-scaleset:./livecanary", "g01_pair_fixture+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         common + ["-tags=g01_pair_fixture", "./livecanary", "-run", "^TestPaired",
                   "-skip", "^TestPairedTerminal"],
         True,
@@ -2890,14 +2974,14 @@ cases = [
     (
         "no-match",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+        "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         common + ["./livecanary", "-run=^TestNoSuchSelectorName$"],
         False,
     ),
     (
         "skip-all-equals",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+        "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         common + ["./livecanary", "-run=^" + one_name + "$",
                   "-skip=^" + one_name + "$"],
         False,
@@ -2905,7 +2989,7 @@ cases = [
     (
         "posix-class-skip",
         "1", supported_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+        "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         common + ["./livecanary", "-run",
                   "^(TestSupportedListenerBarriersAndReservation|TestNoMessageDoesNotCountAsCompletedBarrier)$",
                   "-skip", "[[:upper:]]o"],
@@ -2914,7 +2998,7 @@ cases = [
     (
         "slash-subtest-skip",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+        "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         common + ["./livecanary", "-run", "^TestProbe$",
                   "-skip", "^TestProbe/subtest$"],
         False,
@@ -2922,112 +3006,112 @@ cases = [
     (
         "count-zero",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+        "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         count_zero_common + ["./livecanary", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "count-two",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+        "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         count_two_common + ["./livecanary", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "timeout-zero",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+        "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         timeout_zero_common + ["./livecanary", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "timeout-too-large",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+        "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         timeout_large_common + ["./livecanary", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "timeout-missing",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+        "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         no_timeout_common + ["./livecanary", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "timeout-duplicate",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+        "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         common + ["./livecanary", "-timeout=30s", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "inherited-gorace",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+        "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         gorace_common + ["./livecanary", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "args-test-selector",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+        "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         common + ["./livecanary", "-run=^" + one_name + "$", "-args", "-test.run=^Other$"],
         False,
     ),
     (
         "direct-test-selector",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+        "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         common + ["./livecanary", "-run=^" + one_name + "$", "-test.run=^Other$"],
         False,
     ),
     (
         "test-list-discovery",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+        "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         common + ["./livecanary", "-list", ".", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "exec-wrapper",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+        "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         common + ["-exec", "true", "./livecanary", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "active-package-init",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "g01_pair_fixture,g01_pair_real_cadence+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+        "g01_pair_fixture,g01_pair_real_cadence+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         common + ["-tags=g01_pair_fixture,g01_pair_real_cadence", "./livecanary", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "package-mismatch",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+        "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         common + ["./liveworker", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "build-mismatch",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+        "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         common + ["-tags=g01_live", "./livecanary", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "duplicate-package-target",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+        "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         common + ["./livecanary", "./liveworker", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "extra-import-path-package",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+        "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         common + ["./livecanary",
                   "github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/liveworker",
                   "-run=^" + one_name + "$"],
@@ -3036,35 +3120,35 @@ cases = [
     (
         "benchmark-flag",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+        "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         common + ["./livecanary", "-bench=.", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "benchmark-test-binary-override",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+        "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         common + ["./livecanary", "-test.bench=.", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "cpu-multiplicity",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+        "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         common + ["./livecanary", "-cpu=1,2", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "conflicting-cgo",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+        "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         ["CGO_ENABLED=0", *common, "./livecanary", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "conflicting-goexperiment",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+        "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         ["GOEXPERIMENT=rangefunc", *common, "./livecanary", "-run=^" + one_name + "$"],
         False,
     ),
@@ -3076,7 +3160,7 @@ with tempfile.TemporaryDirectory() as goenv_dir:
         (
             "persisted-goflags",
             "1", one_digest, "experiments/g01-scaleset:./livecanary",
-            "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+            "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
             [f"GOENV={goenv}", *common, "./livecanary",
              "-run=^" + one_name + "$"],
             False,
@@ -3131,7 +3215,7 @@ try:
     for toolexec_label, toolexec_command in toolexec_cases:
         sys.argv = [
             "wrapper-probe", "1", one_digest, toolexec_label,
-            "experiments/g01-scaleset:./livecanary", "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+            "experiments/g01-scaleset:./livecanary", "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
             *toolexec_command,
         ]
         output = io.StringIO()
@@ -3189,7 +3273,7 @@ try:
     for overlay_label, overlay_command in overlay_cases:
         sys.argv = [
             "wrapper-probe", "1", one_digest, overlay_label,
-            "experiments/g01-scaleset:./livecanary", "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+            "experiments/g01-scaleset:./livecanary", "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
             *overlay_command,
         ]
         output = io.StringIO()
@@ -3245,7 +3329,7 @@ try:
     for modfile_label, modfile_command in modfile_cases:
         sys.argv = [
             "wrapper-probe", "1", one_digest, modfile_label,
-            "experiments/g01-scaleset:./livecanary", "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+            "experiments/g01-scaleset:./livecanary", "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
             *modfile_command,
         ]
         output = io.StringIO()
@@ -3333,7 +3417,7 @@ try:
     for selector_label, selector_command in selector_guard_cases:
         sys.argv = [
             "wrapper-probe", "1", one_digest, selector_label,
-            "experiments/g01-scaleset:./livecanary", "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+            "experiments/g01-scaleset:./livecanary", "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
             *selector_command,
         ]
         output = io.StringIO()
@@ -3412,7 +3496,7 @@ subprocess.run = observe_go_child
 try:
     sys.argv = [
         "wrapper-probe", "1", one_digest, "inherited-gowork",
-        "experiments/g01-scaleset:./livecanary", "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8", *(
+        "experiments/g01-scaleset:./livecanary", "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8", *(
             common + ["./livecanary", "-run=^" + one_name + "$"]
         ),
     ]
@@ -3481,7 +3565,7 @@ inherited_previous = os.environ.get("G01_INPUT_CHILD")
 os.environ["G01_INPUT_CHILD"] = "blocked"
 sys.argv = [
     "wrapper-probe", "1", one_digest, "inherited-child-mode",
-    "experiments/g01-scaleset:./livecanary", "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8", *(
+    "experiments/g01-scaleset:./livecanary", "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8", *(
         common + ["./livecanary", "-run=^" + one_name + "$"]
     ),
 ]
@@ -5558,42 +5642,60 @@ assignment = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
 heredoc = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 python_interpreter = re.compile(r"python(?:3(?:\.[0-9]+)?)?\Z")
 
+def python_interpreter_token(token):
+    return python_interpreter.fullmatch(executable_basename(token)) is not None
+
 def python_heredoc_invocation(stripped):
-    """Recognize every executable Python heredoc before trusting its body."""
-    heredoc_match = heredoc.search(stripped)
-    if heredoc_match is None:
-        return None
-    prefix = stripped[:heredoc_match.start()].rstrip()
-    segments = shell_token_segments(prefix)
-    for segment in segments:
-        tokens = executable_tokens(segment)
-        if not tokens or not python_interpreter.fullmatch(executable_basename(tokens[0])):
-            continue
-        arguments = tokens[1:]
-        try:
-            stdin_index = arguments.index("-")
-        except ValueError:
-            stdin_index = len(arguments)
-        option_arguments = arguments[:stdin_index]
-        isolated = any(
-            argument == "-I"
-            or (
-                argument.startswith("-")
-                and not argument.startswith("--")
-                and "I" in argument[1:]
+    """Return the first executable Python heredoc on a command line."""
+    invocations = python_heredoc_invocations(stripped)
+    return invocations[0] if invocations else None
+
+def heredoc_descriptors(stripped):
+    """Describe every heredoc operator in source order, including non-Python ones."""
+    descriptors = []
+    for heredoc_match in heredoc.finditer(stripped):
+        invocation = None
+        prefix = stripped[:heredoc_match.start()].rstrip()
+        for segment in shell_token_segments(prefix):
+            tokens = executable_tokens(segment)
+            if not tokens or not python_interpreter_token(tokens[0]):
+                continue
+            arguments = tokens[1:]
+            try:
+                stdin_index = arguments.index("-")
+            except ValueError:
+                stdin_index = len(arguments)
+            option_arguments = arguments[:stdin_index]
+            isolated = any(
+                argument == "-I"
+                or (
+                    argument.startswith("-")
+                    and not argument.startswith("--")
+                    and "I" in argument[1:]
+                )
+                for argument in option_arguments
             )
-            for argument in option_arguments
+            invocation = {
+                "delimiter": heredoc_match.group(2),
+                "interpreter": tokens[0],
+                "isolated": isolated,
+            }
+            break
+        descriptors.append(
+            {"delimiter": heredoc_match.group(2), "invocation": invocation}
         )
-        return {
-            "delimiter": heredoc_match.group(2),
-            "interpreter": tokens[0],
-            "isolated": isolated,
-        }
-    return None
+    return descriptors
+
+def python_heredoc_invocations(stripped):
+    return [
+        descriptor["invocation"]
+        for descriptor in heredoc_descriptors(stripped)
+        if descriptor["invocation"] is not None
+    ]
 
 def shell_commands(markdown):
     in_shell = False
-    skip_until = None
+    pending_heredocs = []
     pending = []
     pending_numbers = []
     for number, line in enumerate(markdown.splitlines(), start=1):
@@ -5611,13 +5713,9 @@ def shell_commands(markdown):
         if not in_shell:
             continue
         stripped = line.strip()
-        if skip_until is not None:
-            if stripped == skip_until:
-                skip_until = None
-            continue
-        invocation = python_heredoc_invocation(stripped)
-        if invocation:
-            skip_until = invocation["delimiter"]
+        if pending_heredocs:
+            if stripped == pending_heredocs[0]:
+                pending_heredocs.pop(0)
             continue
         if not stripped or stripped.startswith("#"):
             continue
@@ -5625,31 +5723,41 @@ def shell_commands(markdown):
         pending_numbers.append(number)
         if stripped.endswith("\\"):
             continue
-        yield " ".join(pending), pending_numbers[0]
+        command = " ".join(pending)
+        yield command, pending_numbers[0]
+        pending_heredocs.extend(
+            descriptor["delimiter"] for descriptor in heredoc_descriptors(command)
+        )
         pending = []
         pending_numbers = []
+    if pending_heredocs:
+        raise SystemExit(
+            "unterminated heredoc body for delimiter(s): "
+            + ", ".join(pending_heredocs)
+        )
 
 def python_heredoc_bodies(markdown):
-    """Extract executable Python bodies for AST inspection; never discard them."""
+    """Extract every executable Python body for AST inspection; never discard one."""
     in_shell = False
-    delimiter = None
-    body = []
-    start_number = None
+    pending_heredocs = []
     safe_marker = False
-    invocation = None
     marker = "g01-safe-python-heredoc"
     for number, line in enumerate(markdown.splitlines(), start=1):
         stripped = line.strip()
-        if delimiter is not None:
-            if stripped == delimiter:
-                yield start_number, "\n".join(body), safe_marker, invocation
-                delimiter = None
-                body = []
-                start_number = None
-                safe_marker = False
-                invocation = None
+        if pending_heredocs:
+            current = pending_heredocs[0]
+            if stripped == current["delimiter"]:
+                if current["invocation"] is not None:
+                    yield (
+                        current["start_number"],
+                        "\n".join(current["body"]),
+                        current["safe_marker"],
+                        current["invocation"],
+                    )
+                pending_heredocs.pop(0)
             else:
-                body.append(line)
+                if current["invocation"] is not None:
+                    current["body"].append(line)
             continue
         if line.startswith("```"):
             info = line[3:].strip().lower()
@@ -5671,16 +5779,28 @@ def python_heredoc_bodies(markdown):
             or stripped.startswith('[ -z "${LD_PRELOAD-}" ]')
         ):
             continue
-        invocation = python_heredoc_invocation(stripped)
-        if invocation:
-            delimiter = invocation["delimiter"]
-            body = []
-            start_number = number
+        descriptors = heredoc_descriptors(stripped)
+        if descriptors:
+            pending_heredocs.extend(
+                {
+                    "delimiter": descriptor["delimiter"],
+                    "invocation": descriptor["invocation"],
+                    "body": [],
+                    "start_number": number,
+                    "safe_marker": safe_marker,
+                }
+                for descriptor in descriptors
+            )
+            safe_marker = False
             continue
         if stripped and not stripped.startswith("#"):
             safe_marker = False
-    if delimiter is not None:
-        raise SystemExit(f"line {start_number}: unterminated executable Python heredoc")
+    if pending_heredocs:
+        raise SystemExit(
+            "line "
+            + str(pending_heredocs[0]["start_number"])
+            + ": unterminated heredoc body"
+        )
 
 def shell_token_segments(command):
     try:
@@ -5710,6 +5830,10 @@ def executable_basename(token):
         return token
     return token.rsplit("/", 1)[-1]
 
+def unresolved_executable(token):
+    """Reject executable names whose shell expansion cannot be proven statically."""
+    return any(marker in token for marker in ("$", "*", "?", "["))
+
 
 unsupported_shell_compound_words = {
     "case", "esac", "function", "select", "coproc", "for", "while", "until",
@@ -5734,7 +5858,7 @@ def shell_compound_syntax(tokens):
     return any(token.endswith("()") or token.endswith("(){") for token in tokens)
 
 def python_command_string(tokens):
-    if not tokens or executable_basename(tokens[0]) not in {"python", "python3"}:
+    if not tokens or not python_interpreter_token(tokens[0]):
         return False
     index = 1
     while index < len(tokens):
@@ -5860,6 +5984,8 @@ def forbidden_command(tokens, depth=0):
         return None
     if tokens[0] == unsupported_env_wrapper_token:
         return "env wrapper option/operand is not parsed safely"
+    if unresolved_executable(tokens[0]):
+        return "unresolved or parameter-expanded executable is not allowed"
     if python_command_string(tokens):
         return "python -c command strings are not allowed"
     shell_form = shell_command_string(tokens)
@@ -6125,7 +6251,9 @@ synthetic = [
     ("safe-preflight-brace", "{ printf safe; }", False),
     ("python-c-gh-command-string", "python3 -c 'import subprocess; subprocess.run([\\\"gh\\\", \\\"api\\\", \\\"x\\\"])'", True),
     ("absolute-python-c-docker-command-string", "/usr/bin/python -c 'import os; os.system(\\\"docker run image:tag true\\\")'", True),
+    ("versioned-python-c-gh-command-string", "/opt/homebrew/bin/python3.12 -c 'import os; os.system(\\\"gh workflow run ci.yml\\\"); pass'", True),
     ("env-python-c-command-string", "env python3 -c 'print(\\\"gh api x\\\")'", True),
+    ("parameter-expanded-executable", "runner=gh \\\"$runner\\\" workflow run ci.yml", True),
     ("prose-url", "https://example.invalid/docker run image:tag", False),
     ("comment", "# docker run --rm image:tag true", False),
     ("scanner-source", 'forbidden = re.compile("docker run")', False),
@@ -6154,7 +6282,7 @@ for unsafe_heredoc in (
 ):
     if inspect_python_heredoc(unsafe_heredoc, False) is None:
         raise SystemExit("unsafe Python heredoc was accepted")
-print("forbidden-live-command synthetic probes: passed; direct/wrapped fetcher, every gh invocation including global-flag and absolute forms, every Docker invocation, command-delegating xargs/find/parallel/make forms, env split-string/operand forms, unsupported function/brace/case compounds, shell substitutions/process substitutions, limactl/security/launchctl, eval, AST-inspected safe/unsafe Python heredocs including getoutput/getstatusoutput/execvp and unresolved launcher aliases, and direct/nested bash/sh -c forms rejected; prose/URLs/comments/scanner source/fixtures ignored")
+print("forbidden-live-command synthetic probes: passed; direct/wrapped fetcher, every gh invocation including global-flag and absolute forms, every Docker invocation, command-delegating xargs/find/parallel/make forms, env split-string/operand forms, unsupported function/brace/case compounds, shell substitutions/process substitutions, limactl/security/launchctl, eval, AST-inspected safe/unsafe Python heredocs including versioned -c/getoutput/getstatusoutput/execvp and unresolved launcher aliases, parameter-expanded executables, and direct/nested bash/sh -c forms rejected; prose/URLs/comments/scanner source/fixtures ignored")
 print("forbidden-live-command scan: passed; executable shell prescriptions contain no forbidden live App/runner/Docker/Lima/Keychain/launchd/workflow/fetch command")
 PY
 ```
@@ -10344,3 +10472,322 @@ resource.
 | 4003386586, source `5f42598b94ce5339c35f55be42eb108973850d24` | [discussion 4003386586](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003386586) | Reproduced both parenthesized subshell forms being certified. Parenthesized grouping now fails closed before executable classification while reviewed safe wrapper declarations and `printf` preflight remain accepted. No shell payload ran; rollback is packet-only parent restoration. |
 | 4003386592, source `5f42598b94ce5339c35f55be42eb108973850d24` | [discussion 4003386592](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003386592) | Reproduced local `filter.*.clean` plus `.git/info/attributes` making porcelain/status clean while worktree bytes differed from `HEAD`. The package gate now compares unfiltered worktree bytes with pinned raw blobs before status/metadata; no Go child or live operation ran. Rollback is packet-only parent restoration. |
 | 4003386595, source `5f42598b94ce5339c35f55be42eb108973850d24` | [discussion 4003386595](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003386595) | Reproduced absolute Python startup without inherited `DYLD_INSERT_LIBRARIES`/`LD_PRELOAD` preflight. Every reviewed `LD_*`/`DYLD_*` hook is rejected before Python startup and removed from Go-child environments; no loader or live child ran. Rollback is packet-only parent restoration. |
+
+### Fresh exact-head P2 corrections at `055a05bd9d5a9bb101e4400dd7a9236e3afd9f48`
+
+The [exact-head Codex review 5195848923](https://github.com/1XP-AI/gh-runnerd/pull/78#pullrequestreview-5195848923) identified five fresh P2 gaps against immutable parent `055a05bd9d5a9bb101e4400dd7a9236e3afd9f48`: versioned Python command-string matching ([4003658071](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003658071)), actual cgo compiler identity ([4003658074](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003658074)), shell parameter-expanded executables ([4003658080](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003658080)), inherited private-module trust overrides ([4003658086](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003658086)) and every heredoc operator ([4003658097](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003658097)). This packet-only correction preserves every prior ledger, exact-parent pin, TDD/rollback/live gap, no-secrets/private-path policy and the boundary that trusted same-user execution is not hostile-code isolation; no Go test, workflow, App/runner, Docker/Lima/Keychain/launchd or live operation is authorized or claimed.
+
+#### Exact-parent red reproduction
+
+The red probe ran first against the immutable parent. It read only the parent
+packet, extracted pure scanner/wrapper helpers, and used synthetic strings plus
+a temporary in-memory environment; it never executed the versioned Python body,
+the parameter-expanded `gh`, a compiler, a Go child or a live operation:
+
+```sh
+set -euo pipefail
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
+# g01-safe-python-heredoc: reviewed exact-parent fresh-P2 red probes
+/opt/homebrew/bin/python3 -I - <<'PROBE'
+import ast
+import io
+import os
+import re
+import shlex
+import subprocess
+import sys
+from contextlib import redirect_stdout
+from pathlib import Path
+
+parent = "055a05bd9d5a9bb101e4400dd7a9236e3afd9f48"
+packet = subprocess.check_output(["git", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"], text=True)
+scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
+scanner_start = packet.rfind("source = Path(", 0, scanner_anchor)
+scanner_end = packet.index("\nmatches = []", scanner_anchor)
+scanner_ns = {"Path": Path, "ast": ast, "os": os, "re": re, "shlex": shlex}
+exec(compile(packet[scanner_start:scanner_end], "<exact-parent-scanner>", "exec"), scanner_ns)
+
+versioned = '/opt/homebrew/bin/python3.12 -c \'import os; os.system("gh workflow run ci.yml"); pass\''
+if any(scanner_ns["forbidden_command"](segment) is not None for segment in scanner_ns["shell_token_segments"](versioned)):
+    raise SystemExit("red setup changed: exact parent already rejected versioned Python command string")
+print("RED 4003658071: exact parent accepted /opt/homebrew/bin/python3.12 -c with os.system(gh workflow run ci.yml)")
+
+parameterized = 'runner=gh "$runner" workflow run ci.yml'
+if any(scanner_ns["forbidden_command"](segment) is not None for segment in scanner_ns["shell_token_segments"](parameterized)):
+    raise SystemExit("red setup changed: exact parent already rejected parameter-expanded executable")
+print('RED 4003658080: exact parent certified runner=gh followed by "$runner" workflow run ci.yml as a literal-safe command')
+
+fixture = """```sh
+cat <<TEXT; python3 -I - <<PY
+safe cat body
+TEXT
+import subprocess
+subprocess.run(["gh", "workflow", "run", "ci.yml"])
+PY
+```"""
+if list(scanner_ns["python_heredoc_bodies"](fixture)):
+    raise SystemExit("red setup changed: exact parent already inspected Python heredoc after preceding cat heredoc")
+print("RED 4003658097: exact parent inspected only the first cat <<TEXT heredoc and skipped the later Python <<PY body")
+
+wrapper_start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
+wrapper_end = packet.index("\nPY\n}", wrapper_start)
+wrapper = packet[wrapper_start:wrapper_end]
+if "compiler_tool_identity = \"cgo-tools-default\"" not in wrapper:
+    raise SystemExit("red setup changed: exact parent no longer reuses constant cgo identity")
+print("RED 4003658074: exact parent reused cgo-tools-default for reviewed compiler changes /usr/bin/clang 17.0 -> /usr/bin/clang 18.0")
+
+if any(name in wrapper for name in ("GOPRIVATE", "GONOPROXY", "GONOSUMDB")):
+    raise SystemExit("red setup changed: exact parent already controls private-module trust overrides")
+base = [
+    "probe", "1", "0" * 64, "red-trust", "experiments/g01-scaleset:./livecanary",
+    "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+    "GOTOOLCHAIN=go1.26.8", "go", "test", "-C", "experiments/g01-scaleset", "./livecanary",
+]
+class StopAtChild(Exception):
+    pass
+saved_env, saved_argv = dict(os.environ), sys.argv
+saved_check_output = subprocess.check_output
+calls = []
+def stop(*args, **kwargs):
+    calls.append(args[0] if args else kwargs.get("args"))
+    raise StopAtChild
+try:
+    os.environ.clear()
+    os.environ.update({
+        "PATH": "/opt/homebrew/bin:/usr/bin:/bin", "LANG": "C",
+        "GOSUMDB": "sum.golang.org", "GOPROXY": "https://proxy.golang.org,direct",
+        "GOPRIVATE": "example.invalid/private", "GONOPROXY": "example.invalid/private",
+        "GONOSUMDB": "example.invalid/private",
+    })
+    sys.argv = base
+    subprocess.check_output = stop
+    try:
+        with redirect_stdout(io.StringIO()):
+            exec(compile(wrapper, "<exact-parent-wrapper>", "exec"), {"__name__": "__main__"})
+    except StopAtChild:
+        pass
+finally:
+    subprocess.check_output = saved_check_output
+    sys.argv = saved_argv
+    os.environ.clear()
+    os.environ.update(saved_env)
+if not calls:
+    raise SystemExit("red setup changed: exact parent refused private trust overrides before first child")
+print(f"RED 4003658086: exact parent forwarded GOPRIVATE/GONOPROXY/GONOSUMDB and reached first child {calls[0]!r}")
+PROBE
+```
+
+Recorded exact-parent red output:
+
+```text
+RED 4003658071: exact parent accepted /opt/homebrew/bin/python3.12 -c with os.system(gh workflow run ci.yml)
+RED 4003658080: exact parent certified runner=gh followed by "$runner" workflow run ci.yml as a literal-safe command
+RED 4003658097: exact parent inspected only the first cat <<TEXT heredoc and skipped the later Python <<PY body
+RED 4003658074: exact parent reused cgo-tools-default for reviewed compiler changes /usr/bin/clang 17.0 -> /usr/bin/clang 18.0
+RED 4003658086: exact parent forwarded GOPRIVATE/GONOPROXY/GONOSUMDB and reached first child ['git', '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', 'rev-parse', '--show-toplevel']
+```
+
+#### Minimal packet correction and focused green probe
+
+The minimal correction extends the Python interpreter predicate shared by
+heredoc and command-string inspection to absolute/versioned interpreters, so a
+versioned `python3.12 -c` is blocked before its string can be interpreted. The
+shell scanner now rejects unresolved or parameter-expanded executable tokens
+before denylist classification while retaining safe literal commands. Heredoc
+operators are queued in source order by both the executable-command audit and
+the Python-body extractor; a non-Python `cat <<TEXT` cannot hide a later Python
+`<<PY` body. The Go wrapper now requires empty `GOPRIVATE`, `GONOPROXY` and
+`GONOSUMDB` in inherited and command-prefix environments, pins those values
+empty in every Go child and verifies them through effective `go env`. Finally,
+the wrapper queries the Go-selected `CC`, resolves it through the reviewed
+canonical PATH to `/usr/bin/clang`, checks the exact reviewed
+`Apple clang version 21.0.0 (clang-2100.1.1.101)` line, and binds the verified
+`cgo-cc-clang-apple21.0.0` identity into every active build identity; compiler
+identity changes fail closed before metadata/build trust.
+
+The focused green probe reads only the candidate packet, executes pure
+scanner/AST helpers, executes the compiler-identity validator with synthetic
+values, and blocks every possible wrapper child. It does not run Go, the
+compiler, a test body, a workflow, an App/runner operation or any live command.
+
+```sh
+set -euo pipefail
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
+# g01-safe-python-heredoc: reviewed focused fresh-P2 green probes
+/opt/homebrew/bin/python3 -I - <<'PROBE'
+import ast
+import io
+import os
+import re
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+
+packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
+scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
+scanner_start = packet.rfind("source = Path(", 0, scanner_anchor)
+scanner_end = packet.index("\nmatches = []", scanner_anchor)
+scanner = {"Path": Path, "ast": ast, "os": os, "re": re, "shlex": shlex}
+exec(compile(packet[scanner_start:scanner_end], "<candidate-scanner>", "exec"), scanner)
+
+if not any(
+    scanner["forbidden_command"](segment) is not None
+    for segment in scanner["shell_token_segments"](
+        '/opt/homebrew/bin/python3.12 -c \'import os; os.system("gh workflow run ci.yml"); pass\''
+    )
+):
+    raise SystemExit("versioned Python command string was accepted")
+if not any(
+    scanner["forbidden_command"](segment) is not None
+    for segment in scanner["shell_token_segments"]('runner=gh "$runner" workflow run ci.yml')
+):
+    raise SystemExit("parameter-expanded executable was accepted")
+if any(
+    scanner["forbidden_command"](segment) is not None
+    for segment in scanner["shell_token_segments"]("printf safe")
+):
+    raise SystemExit("safe literal command was rejected")
+
+fixture = """```sh
+cat <<TEXT; python3 -I - <<PY
+safe cat body
+TEXT
+import subprocess
+subprocess.run(["gh", "workflow", "run", "ci.yml"])
+PY
+```"""
+records = list(scanner["python_heredoc_bodies"](fixture))
+if len(records) != 1 or records[0][3]["interpreter"] != "python3":
+    raise SystemExit(f"multi-heredoc Python body was not discovered: {records!r}")
+if "gh" not in records[0][1] or scanner["inspect_python_heredoc"](records[0][1], records[0][2]) is None:
+    raise SystemExit("discovered Python body was not AST-rejected")
+
+wrapper_start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
+wrapper_end = packet.index("\nPY\n}", wrapper_start)
+wrapper = packet[wrapper_start:wrapper_end]
+ast.parse(wrapper, filename="<candidate-wrapper>")
+for marker in (
+    'expected_cgo_tools != "cgo-cc-clang-apple21.0.0"',
+    'reviewed_cgo_command = "clang"',
+    'reviewed_cgo_path = "/usr/bin/clang"',
+    'reviewed_cgo_version = "Apple clang version 21.0.0 (clang-2100.1.1.101)"',
+    '"GOPRIVATE", "GONOPROXY", "GONOSUMDB", "CC",',
+    'effective_cgo_compiler_identity = verified_cgo_compiler_identity',
+    'compiler_tool_identity = effective_cgo_compiler_identity',
+):
+    if marker not in wrapper:
+        raise SystemExit(f"candidate wrapper marker missing: {marker}")
+if 'compiler_tool_identity = "cgo-tools-default"' in wrapper:
+    raise SystemExit("constant cgo identity still present")
+
+module = ast.parse(wrapper, filename="<candidate-wrapper>")
+selected_nodes = []
+for node in module.body:
+    if isinstance(node, ast.Assign) and any(
+        isinstance(target, ast.Name) and target.id in {
+            "reviewed_cgo_command", "reviewed_cgo_path", "reviewed_cgo_version", "reviewed_cgo_identity"
+        }
+        for target in node.targets
+    ):
+        selected_nodes.append(node)
+    if isinstance(node, ast.FunctionDef) and node.name == "verified_cgo_compiler_identity":
+        selected_nodes.append(node)
+ns = {"label": "cgo-probe"}
+exec(compile(ast.Module(body=selected_nodes, type_ignores=[]), "<cgo-helper>", "exec"), ns)
+if ns["verified_cgo_compiler_identity"]("clang", ns["reviewed_cgo_version"]) != "cgo-cc-clang-apple21.0.0":
+    raise SystemExit("reviewed compiler identity did not resolve")
+for args in (("clang", "Apple clang version 22.0.0 (clang-2200)"), ("gcc", ns["reviewed_cgo_version"])):
+    try:
+        ns["verified_cgo_compiler_identity"](*args)
+    except SystemExit:
+        pass
+    else:
+        raise SystemExit(f"compiler identity drift accepted: {args!r}")
+
+base = [
+    "probe", "1", "0" * 64, "green-trust", "experiments/g01-scaleset:./livecanary",
+    "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+    "GOTOOLCHAIN=go1.26.8", "go", "test", "-C", "experiments/g01-scaleset", "./livecanary",
+]
+class StopBeforeChild(Exception):
+    pass
+for name in ("GOPRIVATE", "GONOPROXY", "GONOSUMDB"):
+    saved_env, saved_argv = dict(os.environ), sys.argv
+    saved_check_output, saved_run = subprocess.check_output, subprocess.run
+    calls = []
+    def stop(*args, **kwargs):
+        calls.append(args[0] if args else kwargs.get("args"))
+        raise StopBeforeChild
+    try:
+        os.environ.clear()
+        os.environ.update({"PATH": "/opt/homebrew/bin:/usr/bin:/bin", "LANG": "C", name: "example.invalid/private"})
+        sys.argv = base
+        subprocess.check_output = stop
+        subprocess.run = stop
+        try:
+            exec(compile(wrapper, "<trust-wrapper>", "exec"), {"__name__": "__main__"})
+        except SystemExit as error:
+            if name not in str(error) or calls:
+                raise
+        except StopBeforeChild:
+            raise SystemExit(f"{name} reached a child before refusal")
+        else:
+            raise SystemExit(f"{name} override accepted")
+    finally:
+        subprocess.check_output, subprocess.run = saved_check_output, saved_run
+        sys.argv = saved_argv
+        os.environ.clear()
+        os.environ.update(saved_env)
+
+audit_anchor = packet.index("def executable_shell_commands(markdown):")
+audit_start = packet.rfind("source = Path(", 0, audit_anchor)
+audit_end = packet.index("\nguarded, fixtures =", audit_anchor)
+audit_ns = {"Path": Path, "re": re, "shlex": shlex}
+exec(compile(packet[audit_start:audit_end], "<command-audit>", "exec"), audit_ns)
+commands = list(audit_ns["executable_shell_commands"](fixture))
+if len(commands) != 1 or "python3" not in commands[0][0]:
+    raise SystemExit(f"executable command audit did not retain compound heredoc command: {commands!r}")
+
+print("GREEN 4003658071: versioned /opt/homebrew/bin/python3.12 -c command string rejected before AST/body trust; no command executed")
+print("GREEN 4003658074: wrapper derives effective cgo identity from Go-selected CC plus exact reviewed command/version; compiler changes fail closed before trust")
+print('GREEN 4003658080: runner=gh followed by "$runner" workflow run ci.yml rejected before denylist classification; literal printf remained safe')
+print("GREEN 4003658086: inherited GOPRIVATE/GONOPROXY/GONOSUMDB rejected before first Git/Go child; reviewed empty values are pinned and effective go env checks are present")
+print("GREEN 4003658097: every heredoc delimiter was queued by both scanners; later Python body was discovered and AST-rejected without execution")
+PROBE
+```
+
+Recorded focused green output:
+
+```text
+GREEN 4003658071: versioned /opt/homebrew/bin/python3.12 -c command string rejected before AST/body trust; no command executed
+GREEN 4003658074: wrapper derives effective cgo identity from Go-selected CC plus exact reviewed command/version; compiler changes fail closed before trust
+GREEN 4003658080: runner=gh followed by "$runner" workflow run ci.yml rejected before denylist classification; literal printf remained safe
+GREEN 4003658086: inherited GOPRIVATE/GONOPROXY/GONOSUMDB rejected before first Git/Go child; reviewed empty values are pinned and effective go env checks are present
+GREEN 4003658097: every heredoc delimiter was queued by both scanners; later Python body was discovered and AST-rejected without execution
+```
+
+The five probes are packet/static or synthetic-environment evidence only. No Go
+test/list/body command, compiler, workflow, App/runner operation, credential
+access, Docker/Lima/Keychain/launchd operation, or destructive cleanup ran.
+The cgo version line is a reviewed public tool identity, not a private machine
+path or a claim that a Go build ran. Exact-head Codex review of the final pushed
+head, CI and maintainer live authorization remain open.
+
+Rollback is narrow and packet-only: restore
+`docs/evidence/g01-recovery-packet.md` to immutable parent
+`055a05bd9d5a9bb101e4400dd7a9236e3afd9f48`; preserve independent driver,
+review and manual-runner state, and do not force-kill, prune or replay any live
+resource.
+
+#### Exact review URL ledger and dispositions
+
+| Finding and immutable source | Exact review URL | Disposition and rollback evidence |
+|---|---|---|
+| 4003658071, source `055a05bd9d5a9bb101e4400dd7a9236e3afd9f48` | [discussion 4003658071](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003658071) | Reproduced the exact parent's acceptance of absolute/versioned `/opt/homebrew/bin/python3.12 -c` command strings. The shared interpreter predicate now matches versioned paths and rejects `-c` before AST/body trust; no Python command body or forbidden command ran. Rollback is packet-only parent restoration. |
+| 4003658074, source `055a05bd9d5a9bb101e4400dd7a9236e3afd9f48` | [discussion 4003658074](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003658074) | Reproduced constant `cgo-tools-default` reuse across synthetic compiler changes. The wrapper now queries Go-selected `CC`, resolves the reviewed `/usr/bin/clang`, verifies its exact bounded version line and binds `cgo-cc-clang-apple21.0.0`; drift fails closed before metadata/build trust, with no Go/compiler child in the probe. Rollback is packet-only parent restoration. |
+| 4003658080, source `055a05bd9d5a9bb101e4400dd7a9236e3afd9f48` | [discussion 4003658080](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003658080) | Reproduced `runner=gh "$runner" workflow run ci.yml` being treated as a safe literal. Unresolved or parameter-expanded executable tokens now fail closed before denylist classification while literal `printf safe` remains accepted; no shell expansion or `gh` command ran. Rollback is packet-only parent restoration. |
+| 4003658086, source `055a05bd9d5a9bb101e4400dd7a9236e3afd9f48` | [discussion 4003658086](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003658086) | Reproduced inherited `GOPRIVATE`, `GONOPROXY` and `GONOSUMDB` reaching the first Git child. The wrapper rejects non-empty inherited/command-prefix values, pins all three empty and verifies the effective empty values alongside `GOPROXY`/`GOSUMDB`; no Go child ran. Rollback is packet-only parent restoration. |
+| 4003658097, source `055a05bd9d5a9bb101e4400dd7a9236e3afd9f48` | [discussion 4003658097](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003658097) | Reproduced the exact parent's first-heredoc-only behavior with `cat <<TEXT; python3 -I - <<PY`; both scanner paths now queue every heredoc delimiter and AST-check the later Python body. No body or command executed. Rollback is packet-only parent restoration. |
