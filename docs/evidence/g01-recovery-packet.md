@@ -259,8 +259,10 @@ transport helper overrides (`GIT_EXEC_PATH`, `GIT_SSH`, `GIT_SSH_COMMAND`,
 `GIT_SSH_VARIANT`, `GIT_ASKPASS`, `GIT_SSH_ASKPASS` and `GIT_PROXY_COMMAND`)
 are rejected when inherited or command-supplied before the first Git query.
 The static forbidden-command scanner also rejects `git -c alias.*=!…` shell
-aliases before generic Git executable classification; no Git alias can hide a
-workflow, Docker, or other delegated command behind an otherwise allowed token.
+aliases and Git external-tool delegation (`difftool`, `mergetool`,
+`--extcmd` and `--tool`) before generic Git executable classification; no Git
+alias or Git command-delegation option can hide a workflow, Docker, or other
+delegated command behind an otherwise allowed token.
 `GOCACHEPROG` is rejected unless empty and then pinned empty before any Go child;
 `GOAUTH` is rejected unless `off` and then pinned `off`, so executable cache
 hooks and command-form authentication cannot reach module, metadata, vet or
@@ -308,8 +310,9 @@ pathspec and replacement controls—before the first Git query or immutable-tree
 pathspec and replacement controls—before the first Git query or immutable-tree
 validation. Every wrapper-controlled Git query uses `-c core.fsmonitor=false`
 and `-c core.hooksPath=/dev/null`, with system/global Git configuration disabled
-in the child environment, before trusting source-tree, status/porcelain or
-intent-bit results. It also rejects `PATH` and equivalent dynamic loader-affecting
+and the same two settings injected through `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_*`/
+`GIT_CONFIG_VALUE_*` in every Go child, before trusting source-tree,
+status/porcelain or intent-bit results. It also rejects `PATH` and equivalent dynamic loader-affecting
 prefixes, validates the inherited PATH against the reviewed canonical
 `/opt/homebrew/bin:/usr/bin:/bin`, and creates the Go-child
 environment with `GOWORK=off` and passes that exact environment to every Go
@@ -763,14 +766,21 @@ if git_transport_environment_overrides:
         + ", ".join(git_transport_environment_overrides)
     )
 # Do not inherit user/system Git configuration, and force repository hooks and
-# fsmonitor off on every wrapper-controlled Git query. The command-line -c
-# settings override repository configuration; the fixed environment removes
-# user/system configuration before source status/tree/intent results are trusted.
+# fsmonitor off on every wrapper-controlled Git query and every Git subprocess
+# that a Go metadata child may start. The command-line -c settings override
+# repository configuration for wrapper-owned queries; the fixed environment
+# additionally injects the same settings into Go children, where no command-
+# line -c is available.
 env.update(
     {
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": "/dev/null",
         "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_CONFIG_COUNT": "2",
+        "GIT_CONFIG_KEY_0": "core.fsmonitor",
+        "GIT_CONFIG_VALUE_0": "false",
+        "GIT_CONFIG_KEY_1": "core.hooksPath",
+        "GIT_CONFIG_VALUE_1": "/dev/null",
     }
 )
 
@@ -2357,6 +2367,8 @@ carry explicit `GOTOOLCHAIN`, tag and race metadata.
 ```sh
 set -euo pipefail
 selector_pattern='^[[:space:]]*(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]+)[[:space:]]+)*(?:env[[:space:]]+.*[[:space:]]+)?(?:command(?:[[:space:]]+-[^[:space:]]+)*[[:space:]]+)?go test .*[[:space:]]--?(run|skip)(=|[[:space:]])'
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 rg -n "$selector_pattern" docs/evidence/g01-recovery-packet.md >/dev/null
 selector_probe=$'GOTOOLCHAIN=go1.26.8 go test ./livecanary -run=^TestProbe$\nenv GOTOOLCHAIN=go1.26.8 go test ./livecanary --run=^TestProbe$\nenv -i GOTOOLCHAIN=go1.26.8 go test ./livecanary --skip ^TestProbe$\n  GOTOOLCHAIN=go1.26.8 go test ./livecanary -skip ^TestProbe$\ncommand go test ./livecanary -run ^TestCommandProbe$\nGOTOOLCHAIN=go1.26.8 command go test ./livecanary -skip=^TestCommandProbe$'
 rg -n "$selector_pattern" <<< "$selector_probe" | wc -l | tr -d ' ' | grep -Fxq 6
@@ -5917,8 +5929,10 @@ prefixes, splits executable shell command chains and examines only each
 executable command token. `env` options that consume operands are parsed
 explicitly; `-S`/`--split-string` and unreviewed options fail closed rather
 than discarding their operand. Command-delegating executables (`xargs`, `find`,
-`parallel`, `make` and equivalent reviewed launchers) are rejected in their
-own right, before a delegated `gh`/live command can be hidden in an argument,
+`parallel`, `make` and equivalent reviewed launchers) and Git external-tool
+delegation (`difftool`, `mergetool`, `--extcmd` and `--tool`) are rejected in
+their own right, before a delegated `gh`/live command can be hidden in an
+argument,
 pipeline or generated command. Shell command-string forms (`bash`/`sh` and
 equivalent absolute, optioned or `busybox` forms with `-c`) are recursively
 inspected and rejected before any nested payload could execute. Shell command
@@ -6223,6 +6237,57 @@ def git_shell_alias(tokens):
     return None
 
 
+git_command_delegation_subcommands = {"difftool", "mergetool"}
+git_command_delegation_options = {"--extcmd", "--tool"}
+git_global_option_values = {
+    "-C",
+    "--git-dir",
+    "--work-tree",
+    "--namespace",
+    "--exec-path",
+    "--config-env",
+    "--super-prefix",
+}
+
+
+def git_command_delegation(tokens):
+    """Reject Git subcommands/options that launch configured external tools."""
+    tokens = list(tokens)
+    if not tokens or executable_basename(tokens[0]) != "git":
+        return None
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            return None
+        if token == "-c":
+            index += 2
+            continue
+        if token.startswith("-c=") or token.startswith("-c") and len(token) > 2:
+            index += 1
+            continue
+        if token in git_global_option_values:
+            index += 2
+            continue
+        if any(token.startswith(option + "=") for option in git_global_option_values):
+            index += 1
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        subcommand = executable_basename(token)
+        if subcommand in git_command_delegation_subcommands:
+            return f"Git {subcommand} external-tool delegation is not allowed"
+        break
+    if any(
+        token == option or token.startswith(option + "=")
+        for token in tokens[index:]
+        for option in git_command_delegation_options
+    ):
+        return "Git external-tool command-delegation option is not allowed"
+    return None
+
+
 unsupported_shell_compound_words = {
     "case", "esac", "function", "select", "coproc", "for", "while", "until",
 }
@@ -6377,6 +6442,9 @@ def forbidden_command(tokens, depth=0):
     git_alias_violation = git_shell_alias(tokens)
     if git_alias_violation:
         return git_alias_violation
+    git_delegation_violation = git_command_delegation(tokens)
+    if git_delegation_violation:
+        return git_delegation_violation
     if python_command_string(tokens):
         return "python -c command strings are not allowed"
     shell_form = shell_command_string(tokens)
@@ -6736,6 +6804,10 @@ synthetic = [
     ("find-exec", "find . -type f -exec gh api repos/example/project/dispatches {} +", True),
     ("parallel-gh", "parallel gh api repos/example/project/dispatches ::: one", True),
     ("make-delegation", "make -f /synthetic/Makefile gh", True),
+    ("git-difftool-extcmd", "git difftool --extcmd 'gh workflow run ci.yml'", True),
+    ("git-difftool-extcmd-equals", "git difftool --extcmd=gh workflow run ci.yml", True),
+    ("git-mergetool-tool", "git mergetool --tool=gh", True),
+    ("absolute-env-git-difftool", "env /usr/bin/git difftool --extcmd gh workflow run ci.yml", True),
     ("nested-xargs", "bash -c 'printf gh | xargs -n1 gh api repos/example/project/dispatches'", True),
     ("limactl", "limactl shell default true", True),
     ("absolute-limactl", "/opt/homebrew/bin/limactl shell default true", True),
@@ -6803,7 +6875,7 @@ for unsafe_heredoc in (
 ):
     if inspect_python_heredoc(unsafe_heredoc, False) is None:
         raise SystemExit("unsafe Python heredoc was accepted")
-print("forbidden-live-command synthetic probes: passed; direct/wrapped fetcher, every gh invocation including global-flag and absolute forms, every Docker invocation, command-delegating xargs/find/parallel/make forms, env split-string/operand forms, unsupported function/brace/case compounds, shell substitutions/process substitutions, limactl/security/launchctl, eval, AST-inspected safe/unsafe Python heredocs including versioned -c/getoutput/getstatusoutput/execvp and unresolved launcher aliases, parameter-expanded executables, and direct/nested bash/sh -c forms rejected; prose/URLs/comments/scanner source/fixtures ignored")
+print("forbidden-live-command synthetic probes: passed; direct/wrapped fetcher, every gh invocation including global-flag and absolute forms, every Docker invocation, command-delegating xargs/find/parallel/make forms, Git difftool/mergetool and --extcmd/--tool delegation forms, env split-string/operand forms, unsupported function/brace/case compounds, shell substitutions/process substitutions, limactl/security/launchctl, eval, AST-inspected safe/unsafe Python heredocs including versioned -c/getoutput/getstatusoutput/execvp and unresolved launcher aliases, parameter-expanded executables, and direct/nested bash/sh -c forms rejected; prose/URLs/comments/scanner source/fixtures ignored")
 print("forbidden-live-command scan: passed; executable shell prescriptions contain no forbidden live App/runner/Docker/Lima/Keychain/launchd/workflow/fetch command")
 PY
 ```
@@ -11052,7 +11124,7 @@ TEXT
 import subprocess
 subprocess.run(["gh", "workflow", "run", "ci.yml"])
 PY
-```"""
+ ```"""
 if list(scanner_ns["python_heredoc_bodies"](fixture)):
     raise SystemExit("red setup changed: exact parent already inspected Python heredoc after preceding cat heredoc")
 print("RED 4003658097: exact parent inspected only the first cat <<TEXT heredoc and skipped the later Python <<PY body")
@@ -11185,7 +11257,7 @@ TEXT
 import subprocess
 subprocess.run(["gh", "workflow", "run", "ci.yml"])
 PY
-```"""
+ ```"""
 records = list(scanner["python_heredoc_bodies"](fixture))
 if len(records) != 1 or records[0][3]["interpreter"] != "python3":
     raise SystemExit(f"multi-heredoc Python body was not discovered: {records!r}")
@@ -12355,4 +12427,396 @@ presence, packet-only scope and whitespace were all checked:
 
 ```text
 GREEN packet certification: 132 Markdown fences balanced, 63 rendered packet-local links/files checked, backlog JSON valid, embedded wrapper/scanner AST valid, 3 fresh probe bodies AST-valid, exact red/green outputs present, only packet changed, added-line secret/private-path hygiene clean, and git diff --check passed
+```
+
+### Fresh exact-head P2 corrections at `3f6de0b227e4b44aa3d5e259e937e7dc1f0856bb`
+
+The next exact-head Codex review identified three P2 findings against the
+immutable parent above: the static scanner treated Git command-delegation
+options such as `git difftool --extcmd` as harmless Git
+([discussion 4005546278](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4005546278)),
+Go metadata children could inherit repository-local Git configuration and
+fsmonitor behavior because their environment had no equivalent config override
+([discussion 4005546284](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4005546284)),
+and the selector audit invoked external `rg`/pipeline tools before validating
+the reviewed PATH and dynamic-loader state
+([discussion 4005546293](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4005546293)).
+This packet-only correction preserves all prior source/tree pins, ledgers,
+rollback/live gaps, no-secrets/private-path hygiene and trusted-same-user
+boundary. No Go, compiler, workflow, App/runner, Docker, Lima, Keychain,
+launchd or live operation is authorized or claimed.
+
+#### Exact-parent red reproductions
+
+The red probes ran first against immutable parent
+`3f6de0b227e4b44aa3d5e259e937e7dc1f0856bb` using `git show`, pure scanner/text
+checks, a fake Git metadata lookup and a temporary synthetic repository. The
+Git delegation strings were passed only to pure token functions; the parent
+wrapper's prospective Go-child environment was inspected without starting Go,
+and the temporary fsmonitor hook was the only synthetic external Git behavior.
+
+```sh
+set -euo pipefail
+# g01-safe-python-heredoc: reviewed immutable-parent fresh-P2 red probes
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import os
+import re
+import shlex
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+parent = "3f6de0b227e4b44aa3d5e259e937e7dc1f0856bb"
+packet = subprocess.check_output(
+    ["git", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    text=True,
+)
+
+# 4005546278: Git external-tool delegation reached harmless classification.
+scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
+scanner_start = packet.rfind("source = Path(", 0, scanner_anchor)
+scanner_end = packet.index("\nmatches = []", scanner_anchor)
+scanner_ns = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+exec(compile(packet[scanner_start:scanner_end], "<parent-scanner>", "exec"), scanner_ns)
+delegation_command = "git difftool --extcmd 'gh workflow run ci.yml'"
+segments = scanner_ns["shell_token_segments"](delegation_command)
+if not segments or scanner_ns["forbidden_command"](segments[0]) is not None:
+    raise SystemExit("red setup changed: parent already rejects Git difftool delegation")
+print(
+    "RED 4005546278: exact parent classified git difftool --extcmd 'gh workflow run ci.yml' "
+    "as harmless Git (violation=None)"
+)
+
+# 4005546284: Go children copied direct-Git config fences but lacked a local
+# repository override for core.fsmonitor/core.hooksPath.
+wrapper_start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
+wrapper_end = packet.index("\nPY\n}", wrapper_start)
+wrapper = packet[wrapper_start:wrapper_end]
+setup_end = wrapper.index("\ngo_env = dict(env)") + len("\ngo_env = dict(env)")
+setup = wrapper[:setup_end]
+base = [
+    "probe", "1", "0" * 64, "probe", "experiments/g01-scaleset:./livecanary",
+    "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+    "GOTOOLCHAIN=go1.26.8", "go", "test", "-C", "experiments/g01-scaleset",
+    "-race", "-count=1", "-timeout=45s", "./livecanary", "-run=^TestProbe$",
+]
+saved_env, saved_argv, saved_check = dict(os.environ), sys.argv, subprocess.check_output
+try:
+    os.environ.clear()
+    os.environ.update({
+        "PATH": "/opt/homebrew/bin:/usr/bin:/bin",
+        "HOME": "/synthetic/home",
+        "XDG_CONFIG_HOME": "/synthetic/config",
+        "GIT_TEST_FSMONITOR": "1",
+        "LANG": "C",
+    })
+    sys.argv = base
+    subprocess.check_output = lambda command, **kwargs: str(Path.cwd()) + "\n"
+    namespace = {"__name__": "__main__"}
+    exec(compile(setup, "<parent-go-env-red>", "exec"), namespace)
+    go_env = namespace["go_env"]
+    if "GIT_CONFIG_COUNT" in go_env or "GIT_CONFIG_KEY_0" in go_env:
+        raise SystemExit("red setup changed: parent already injected local Git config overrides")
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        marker = root / "marker"
+        hook = root / "fsmonitor-hook"
+        hook.write_text("#!/bin/sh\nprintf invoked > \"$G01_MARKER\"\n", encoding="utf-8")
+        hook.chmod(0o755)
+        child_env = {**go_env, "G01_MARKER": str(marker)}
+        for command in (
+            ["git", "init", "-q"],
+            ["git", "config", "core.fsmonitor", str(hook)],
+        ):
+            subprocess.run(
+                command,
+                cwd=root,
+                env={**child_env, "GIT_CONFIG_COUNT": "0"},
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        subprocess.run(
+            ["git", "status", "--porcelain=v1"],
+            cwd=root,
+            env=child_env,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if not marker.exists():
+            raise SystemExit("red setup changed: parent did not invoke synthetic local fsmonitor hook")
+        print(
+            "RED 4005546284: exact parent copied Go metadata env without a local-config override; "
+            "synthetic local core.fsmonitor hook was invoked"
+        )
+finally:
+    subprocess.check_output = saved_check
+    sys.argv = saved_argv
+    os.environ.clear()
+    os.environ.update(saved_env)
+
+# 4005546293: selector tooling preceded the shell preflight.
+selector_anchor = packet.index("The packet also audits every future shell")
+selector_start = packet.index("selector_pattern='", selector_anchor)
+selector_end = packet.index("\nPY\n```", selector_start)
+selector_block = packet[selector_start:selector_end]
+rg_pos = selector_block.index('rg -n "$selector_pattern"')
+path_pos = selector_block.index('[ "${PATH-}"')
+loader_pos = selector_block.index('[ -z "${LD_PRELOAD-}"')
+if not rg_pos < path_pos < loader_pos:
+    raise SystemExit("red setup changed: selector preflight ordering no longer precedes rg")
+print(
+    "RED 4005546293: exact parent ran external selector rg before canonical PATH and "
+    "dynamic-loader validation"
+)
+PY
+```
+
+Recorded exact-parent red output:
+
+```text
+RED 4005546278: exact parent classified git difftool --extcmd 'gh workflow run ci.yml' as harmless Git (violation=None)
+RED 4005546284: exact parent copied Go metadata env without a local-config override; synthetic local core.fsmonitor hook was invoked
+RED 4005546293: exact parent ran external selector rg before canonical PATH and dynamic-loader validation
+```
+
+#### Minimal packet correction and focused green probes
+
+The minimal correction adds a scanner predicate that rejects Git's
+external-tool subcommands (`difftool` and `mergetool`) and command-delegation
+options (`--extcmd` and `--tool`) before generic Git classification, including
+absolute, wrapped, equals-form and global-option variants while retaining safe
+Git status/config forms. The wrapper keeps system/global Git configuration
+disabled and injects `core.fsmonitor=false` and `core.hooksPath=/dev/null`
+through the reviewed `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_*`/
+`GIT_CONFIG_VALUE_*` environment into every Go metadata/test child; a local
+repository config therefore cannot re-enable a hook in a Go-spawned Git
+subprocess. The selector audit performs canonical PATH and complete reviewed
+dynamic-loader checks before its first external `rg`/`wc`/`tr`/`grep` lookup.
+
+The focused green probe is static, synthetic or Git-only. It uses the candidate
+packet, a fake first Git metadata response, a temporary repository and a
+synthetic fsmonitor hook; no Go, compiler, test body, workflow, App/runner,
+Docker, Lima, Keychain, launchd or live operation runs.
+
+```sh
+set -euo pipefail
+# g01-safe-python-heredoc: reviewed focused fresh-P2 green probes
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import os
+import re
+import shlex
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
+
+# 4005546278: pure scanner plus safe-form boundary.
+scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
+scanner_start = packet.rfind("source = Path(", 0, scanner_anchor)
+scanner_end = packet.index("\nmatches = []", scanner_anchor)
+scanner_ns = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+exec(compile(packet[scanner_start:scanner_end], "<candidate-scanner>", "exec"), scanner_ns)
+for command in (
+    "git difftool --extcmd 'gh workflow run ci.yml'",
+    "git difftool --extcmd=gh workflow run ci.yml",
+    "git mergetool --tool=gh",
+    "env /usr/bin/git difftool --extcmd gh workflow run ci.yml",
+    "git -C /synthetic/repository difftool",
+    "git --git-dir=/synthetic/repository mergetool",
+):
+    segments = scanner_ns["shell_token_segments"](command)
+    if not segments or scanner_ns["forbidden_command"](segments[0]) is None:
+        raise SystemExit(f"Git delegation escaped scanner: {command!r}")
+for command in ("git status", "git -c user.name=probe status", "git diff --stat"):
+    segments = scanner_ns["shell_token_segments"](command)
+    if not segments or scanner_ns["forbidden_command"](segments[0]) is not None:
+        raise SystemExit(f"safe Git form was rejected: {command!r}")
+print(
+    "GREEN 4005546278: direct/equals/wrapped/global-option Git difftool/mergetool "
+    "delegation rejected before generic classification; safe Git status/config/diff retained"
+)
+
+# 4005546284: execute only the wrapper setup through the first prospective
+# metadata boundary, with its first Git lookup replaced by a local response.
+wrapper_start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
+wrapper_end = packet.index("\nPY\n}", wrapper_start)
+wrapper = packet[wrapper_start:wrapper_end]
+setup_end = wrapper.index("\ngo_env = dict(env)") + len("\ngo_env = dict(env)")
+setup = wrapper[:setup_end]
+base = [
+    "probe", "1", "0" * 64, "probe", "experiments/g01-scaleset:./livecanary",
+    "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+    "GOTOOLCHAIN=go1.26.8", "go", "test", "-C", "experiments/g01-scaleset",
+    "-race", "-count=1", "-timeout=45s", "./livecanary", "-run=^TestProbe$",
+]
+saved_env, saved_argv, saved_check = dict(os.environ), sys.argv, subprocess.check_output
+try:
+    os.environ.clear()
+    os.environ.update({
+        "PATH": "/opt/homebrew/bin:/usr/bin:/bin",
+        "HOME": "/synthetic/home",
+        "XDG_CONFIG_HOME": "/synthetic/config",
+        "LANG": "C",
+    })
+    sys.argv = base
+    subprocess.check_output = lambda command, **kwargs: str(Path.cwd()) + "\n"
+    namespace = {"__name__": "__main__"}
+    exec(compile(setup, "<candidate-go-env-green>", "exec"), namespace)
+    go_env = namespace["go_env"]
+    expected = {
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_CONFIG_COUNT": "2",
+        "GIT_CONFIG_KEY_0": "core.fsmonitor",
+        "GIT_CONFIG_VALUE_0": "false",
+        "GIT_CONFIG_KEY_1": "core.hooksPath",
+        "GIT_CONFIG_VALUE_1": "/dev/null",
+    }
+    if {key: go_env.get(key) for key in expected} != expected:
+        raise SystemExit("Go metadata child Git-config environment did not match reviewed values")
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        marker = root / "marker"
+        hook = root / "fsmonitor-hook"
+        hook.write_text("#!/bin/sh\nprintf invoked > \"$G01_MARKER\"\n", encoding="utf-8")
+        hook.chmod(0o755)
+        child_env = {**go_env, "G01_MARKER": str(marker)}
+        for command in (
+            ["git", "init", "-q"],
+            ["git", "config", "core.fsmonitor", str(hook)],
+        ):
+            subprocess.run(
+                command,
+                cwd=root,
+                env={**child_env, "GIT_CONFIG_COUNT": "0"},
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        status = subprocess.run(
+            ["git", "status", "--porcelain=v1"],
+            cwd=root,
+            env=child_env,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if status.returncode != 0 or marker.exists():
+            raise SystemExit("Go metadata child Git-config isolation failed synthetic hook boundary")
+finally:
+    subprocess.check_output = saved_check
+    sys.argv = saved_argv
+    os.environ.clear()
+    os.environ.update(saved_env)
+print(
+    "GREEN 4005546284: Go metadata child environment carried exact system/global Git isolation "
+    "and core.fsmonitor=false/core.hooksPath=/dev/null overrides; synthetic local fsmonitor hook was not invoked"
+)
+
+# 4005546293: text-order fence before every selector tool lookup.
+selector_anchor = packet.index("The packet also audits every future shell")
+selector_start = packet.index("selector_pattern='", selector_anchor)
+selector_end = packet.index("\nPY\n```", selector_start)
+selector_block = packet[selector_start:selector_end]
+first_rg = selector_block.index('rg -n "$selector_pattern"')
+path_pos = selector_block.index('[ "${PATH-}"')
+loader_pos = selector_block.index('[ -z "${LD_PRELOAD-}"')
+if not path_pos < loader_pos < first_rg:
+    raise SystemExit("selector fence ordering regressed")
+for tool in ('rg -n "$selector_pattern"', 'wc -l', 'tr -d', 'grep -Fxq'):
+    if selector_block.index(tool) < loader_pos:
+        raise SystemExit(f"selector tool ran before loader fence: {tool}")
+preflight = "\n".join(selector_block.splitlines()[1:3])
+for label, extra_environment in (
+    ("PATH", {"PATH": "/synthetic/bin"}),
+    ("loader", {"LD_PRELOAD": "/synthetic/loader.dylib"}),
+):
+    with tempfile.TemporaryDirectory() as directory:
+        marker = Path(directory) / "selector-ran"
+        failure_probe = (
+            preflight
+            + "\nprintf selector-ran > "
+            + shlex.quote(str(marker))
+            + "\n"
+        )
+        child_environment = {
+            "PATH": "/opt/homebrew/bin:/usr/bin:/bin",
+            **extra_environment,
+        }
+        result = subprocess.run(
+            ["/bin/bash"],
+            input=failure_probe,
+            text=True,
+            env=child_environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if result.returncode == 0 or marker.exists():
+            raise SystemExit(
+                f"selector {label} failure boundary did not stop before external lookup"
+            )
+print(
+    "GREEN 4005546293 boundary checks: synthetic hostile PATH and loader state "
+    "were rejected before any selector marker could run"
+)
+print(
+    "GREEN 4005546293: canonical PATH and dynamic-loader checks preceded every selector "
+    "rg/wc/tr/grep lookup; no external selector ran before validation"
+)
+PY
+```
+
+Recorded focused green output:
+
+```text
+GREEN 4005546293 boundary checks: synthetic hostile PATH and loader state were rejected before any selector marker could run
+GREEN 4005546278: direct/equals/wrapped/global-option Git difftool/mergetool delegation rejected before generic classification; safe Git status/config/diff retained
+GREEN 4005546284: Go metadata child environment carried exact system/global Git isolation and core.fsmonitor=false/core.hooksPath=/dev/null overrides; synthetic local fsmonitor hook was not invoked
+GREEN 4005546293: canonical PATH and dynamic-loader checks preceded every selector rg/wc/tr/grep lookup; no external selector ran before validation
+```
+
+The probes are static, synthetic or Git-only boundary evidence. They do not
+qualify a compiler, Go test/list/body command, live runner, workflow, remote API
+or production operation. Exact-head Codex review of the final pushed head,
+required CI and maintainer live authorization remain open.
+
+Rollback is narrow and packet-only: restore
+`docs/evidence/g01-recovery-packet.md` to immutable parent
+`3f6de0b227e4b44aa3d5e259e937e7dc1f0856bb`; preserve independent driver,
+review and manual-runner state, and never force-kill, prune or replay a live
+resource.
+
+#### Exact review URL ledger and dispositions
+
+| Finding and immutable source | Exact review URL | Disposition and rollback evidence |
+|---|---|---|
+| 4005546278, source `3f6de0b227e4b44aa3d5e259e937e7dc1f0856bb` | [discussion 4005546278](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4005546278) | Reproduced the exact parent's harmless classification of `git difftool --extcmd` and wrapped/equals variants. The scanner now rejects `difftool`/`mergetool` and `--extcmd`/`--tool` external-tool delegation before generic Git classification while safe Git status/config/diff remain accepted; no delegated command ran. Rollback is packet-only parent restoration. |
+| 4005546284, source `3f6de0b227e4b44aa3d5e259e937e7dc1f0856bb` | [discussion 4005546284](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4005546284) | Reproduced inherited local Git `core.fsmonitor` reaching the exact parent's prospective Go-child environment and invoking a synthetic hook. Go children now receive system/global isolation plus exact `GIT_CONFIG_COUNT` settings for `core.fsmonitor=false` and `core.hooksPath=/dev/null`; the Git-only green probe suppressed the synthetic hook, with no Go child. Rollback is packet-only parent restoration. |
+| 4005546293, source `3f6de0b227e4b44aa3d5e259e937e7dc1f0856bb` | [discussion 4005546293](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4005546293) | Reproduced the exact selector audit invoking `rg` before PATH/loader preflight. The canonical PATH and complete dynamic-loader checks now precede every external selector lookup; no selector tool ran before validation. Rollback is packet-only parent restoration. |
+
+#### Packet body/link/fence/hygiene certification
+
+The final packet-only diff was checked after the three fresh exact-head P2
+corrections and without running any compiler, Go/vet child or live operation.
+Markdown fence parity, packet-local links/files, backlog JSON syntax,
+embedded-wrapper/scanner AST parsing, fresh probe-body AST parsing, exact
+red/green transcript presence, added-line secret/private-path hygiene, packet-
+only scope and whitespace were checked.
+
+```text
+GREEN packet certification: 137 Markdown fences balanced, 63 rendered packet-local links/files checked, backlog JSON valid, embedded wrapper/scanner AST valid, 2 fresh probe bodies AST-valid, exact red/green outputs present, only packet changed, added-line secret/private-path hygiene clean, and git diff --check passed
 ```
