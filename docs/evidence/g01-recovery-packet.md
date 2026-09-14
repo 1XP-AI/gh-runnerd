@@ -248,6 +248,12 @@ before any Go child; non-default inherited or command-supplied values fail
 closed, and `goroot-default`/`gofips140-off` are bound into every build
 identity. The reviewed canonical PATH is pinned before the first Git or Go
 executable lookup.
+`GOCACHEPROG` is rejected unless empty and then pinned empty before any Go child;
+`GOAUTH` is rejected unless `off` and then pinned `off`, so executable cache
+hooks and command-form authentication cannot reach module, metadata, vet or
+test children. Git replacement refs are disabled by binding
+`GIT_NO_REPLACE_OBJECTS=1` before the first Git child; other replacement and
+repository-control overrides remain rejected.
 Before source-derived selector validation, the wrapper resolves the active
 package and test source files with the non-executing metadata query, requires the
 reviewed immutable `experiments/g01-scaleset` source tree, rejects tracked,
@@ -315,11 +321,13 @@ direct child to be reaped before refusing the result; the Go `-timeout` flag
 remains a separate in-process test-body bound.
 The execution command adds a wrapper-controlled `-json` stream and fails closed
 on malformed output, non-empty stderr or any Go test `Action` of `skip`,
-including skipped subtests; it also requires a top-level `run` and `pass` event
-for every expected test name. A command failure, unexpected source metadata, zero
-expected names, invalid Go/RE2-compatible syntax, count/timeout mismatch, skipped test,
-missing run/pass event, or set mismatch stops before an unvalidated result is
-recorded; the set digest and metadata are recorded beside each prescription so
+including skipped subtests. It rejects unexpected top-level `run`, `pass` or
+`fail` events, while allowing only subtest events whose parent is an expected
+top-level test; it also requires a top-level `run` and `pass` event for every
+expected test name. A command failure, unexpected source metadata, zero expected
+names, invalid Go/RE2-compatible syntax, count/timeout mismatch, skipped test,
+unknown action, missing run/pass event, or set mismatch stops before an
+unvalidated result is recorded; the set digest and metadata are recorded beside each prescription so
 renamed, removed, build-tagged, newly unskipped or cross-package tests fail
 closed. A non-executing source helper therefore cannot produce a green rerun record.
 
@@ -335,7 +343,9 @@ set -euo pipefail
 # the same source/build selection without starting a test binary, then runs the
 # original command with its own JSON stream.
 go_test_checked() {
-  python3 -I - "$@" <<'PY'
+  # g01-safe-python-heredoc: reviewed dynamic Go-child argv
+  [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; return 1; }
+  /opt/homebrew/bin/python3 -I - "$@" <<'PY'
 import hashlib
 import json
 import os
@@ -450,6 +460,26 @@ for source, value in (
             f"{label}: {source} GOEXPERIMENT must be {reviewed_goexperiment!r}"
         )
 env["GOEXPERIMENT"] = reviewed_goexperiment
+reviewed_gocacheprog = ""
+for source, value in (
+    ("inherited", os.environ.get("GOCACHEPROG")),
+    ("command", command_assignments.get("GOCACHEPROG")),
+):
+    if value is not None and value != reviewed_gocacheprog:
+        raise SystemExit(
+            f"{label}: {source} GOCACHEPROG must be empty; executable cache hooks are not allowed"
+        )
+env["GOCACHEPROG"] = reviewed_gocacheprog
+reviewed_goauth = "off"
+for source, value in (
+    ("inherited", os.environ.get("GOAUTH")),
+    ("command", command_assignments.get("GOAUTH")),
+):
+    if value is not None and value != reviewed_goauth:
+        raise SystemExit(
+            f"{label}: {source} GOAUTH must be {reviewed_goauth!r}; auth command forms are not allowed"
+        )
+env["GOAUTH"] = reviewed_goauth
 reviewed_target_environment = {
     "GOOS": "darwin",
     "GOARCH": "arm64",
@@ -534,11 +564,20 @@ git_repository_control_names = {
     "GIT_NOGLOB_PATHSPECS",
     "GIT_OPTIONAL_LOCKS",
     "GIT_REPLACE_REF_BASE",
-    "GIT_NO_REPLACE_OBJECTS",
     "GIT_ATTR_NOSYSTEM",
     "GIT_QUARANTINE_PATH",
 }
 git_repository_control_prefixes = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
+reviewed_git_no_replace_objects = "1"
+for source, value in (
+    ("inherited", os.environ.get("GIT_NO_REPLACE_OBJECTS")),
+    ("command", command_assignments.get("GIT_NO_REPLACE_OBJECTS")),
+):
+    if value is not None and value != reviewed_git_no_replace_objects:
+        raise SystemExit(
+            f"{label}: {source} GIT_NO_REPLACE_OBJECTS must be {reviewed_git_no_replace_objects!r}"
+        )
+env["GIT_NO_REPLACE_OBJECTS"] = reviewed_git_no_replace_objects
 git_environment_overrides = sorted(
     key
     for key in env
@@ -768,6 +807,14 @@ if go_env.get("GOFIPS140") != reviewed_gofips140:
 if go_env.get("GOEXPERIMENT") != reviewed_goexperiment:
     raise SystemExit(
         f"{label}: Go child environment did not pin GOEXPERIMENT={reviewed_goexperiment}"
+    )
+if go_env.get("GOCACHEPROG") != reviewed_gocacheprog:
+    raise SystemExit(
+        f"{label}: Go child environment did not pin GOCACHEPROG={reviewed_gocacheprog!r}"
+    )
+if go_env.get("GOAUTH") != reviewed_goauth:
+    raise SystemExit(
+        f"{label}: Go child environment did not pin GOAUTH={reviewed_goauth!r}"
     )
 for name, expected in reviewed_target_environment.items():
     if go_env.get(name) != expected:
@@ -1633,6 +1680,7 @@ def validate_test_stream(stdout, stderr):
     expected_names = set(actual)
     run_names = set()
     pass_names = set()
+    allowed_actions = {"start", "run", "pause", "cont", "output", "build-output", "pass", "fail", "skip"}
     for line in stdout.splitlines():
         if not line:
             continue
@@ -1642,14 +1690,32 @@ def validate_test_stream(stdout, stderr):
             raise SystemExit(f"{label}: test execution emitted invalid JSON")
         if not isinstance(event, dict):
             raise SystemExit(f"{label}: test execution emitted a non-object JSON value")
-        if event.get("Action") == "skip":
-            raise SystemExit(f"{label}: test execution contained a skipped test")
+        action = event.get("Action")
+        if action not in allowed_actions:
+            raise SystemExit(f"{label}: test execution emitted an unexpected Action {action!r}")
         test_name = event.get("Test")
-        if test_name not in expected_names:
+        if test_name is None:
+            if action in {"run", "fail", "skip"}:
+                raise SystemExit(
+                    f"{label}: test execution emitted unexpected top-level {action} event"
+                )
             continue
-        if event.get("Action") == "run":
+        if not isinstance(test_name, str) or not test_name:
+            raise SystemExit(f"{label}: test execution emitted an invalid Test field")
+        parent_name = test_name.split("/", 1)[0]
+        if parent_name not in expected_names:
+            raise SystemExit(
+                f"{label}: test execution emitted {action} for unexpected test {test_name!r}"
+            )
+        if action == "skip":
+            raise SystemExit(f"{label}: test execution contained a skipped test")
+        if action == "fail":
+            raise SystemExit(f"{label}: test execution contained a failed test")
+        if "/" in test_name:
+            continue
+        if action == "run":
             run_names.add(test_name)
-        elif event.get("Action") == "pass":
+        elif action == "pass":
             pass_names.add(test_name)
     missing_run = sorted(expected_names - run_names)
     missing_pass = sorted(expected_names - pass_names)
@@ -1763,9 +1829,9 @@ go_test_checked 15 5e5dd1ee80d3d303271ab17b17aed22d5084e15684bcbe9f31152c1092ec1
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run '^TestPairedTerminal' -skip "$terminal_remainder_skip"
 go_test_checked 6 458f77f55209a59338a63bfc27697d85ebe5e0c3c7d1b959a0b56b2527f3ead5 paired-storage experiments/g01-scaleset:./livecanary g01_pair_fixture+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run "$terminal_storage_tests"
-go_vet_checked vet-livecanary experiments/g01-scaleset:./livecanary default+norace+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
+go_vet_checked vet-livecanary experiments/g01-scaleset:./livecanary g01_pair_fixture+norace+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go vet -C experiments/g01-scaleset -tags=g01_pair_fixture ./livecanary
-go_vet_checked vet-liveworker experiments/g01-scaleset:./liveworker default+norace+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
+go_vet_checked vet-liveworker experiments/g01-scaleset:./liveworker g01_pair_fixture+norace+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go vet -C experiments/g01-scaleset -tags=g01_pair_fixture ./liveworker
 ```
 
@@ -1788,7 +1854,8 @@ selector_pattern='^[[:space:]]*(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]+)[[:spa
 rg -n "$selector_pattern" docs/evidence/g01-recovery-packet.md >/dev/null
 selector_probe=$'GOTOOLCHAIN=go1.26.8 go test ./livecanary -run=^TestProbe$\nenv GOTOOLCHAIN=go1.26.8 go test ./livecanary --run=^TestProbe$\nenv -i GOTOOLCHAIN=go1.26.8 go test ./livecanary --skip ^TestProbe$\n  GOTOOLCHAIN=go1.26.8 go test ./livecanary -skip ^TestProbe$\ncommand go test ./livecanary -run ^TestCommandProbe$\nGOTOOLCHAIN=go1.26.8 command go test ./livecanary -skip=^TestCommandProbe$'
 rg -n "$selector_pattern" <<< "$selector_probe" | wc -l | tr -d ' ' | grep -Fxq 6
-python3 -I - <<'PY'
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 from pathlib import Path
 import re
 import tempfile
@@ -1996,16 +2063,17 @@ if len(vet_commands) != 2:
 if any(not command.lstrip().startswith("go_vet_checked ") for command in vet_commands):
     raise SystemExit("an executable go vet prescription bypassed go_vet_checked")
 if any(
-    "cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+"
+    "g01_pair_fixture+norace+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+"
     not in command
+    or "-tags=g01_pair_fixture" not in command
     or "+goroot-default+gofips140-off+go1.26.8" not in command
     for command in vet_commands
 ):
-    raise SystemExit("a go vet prescription lacks the reviewed nine-part build identity")
+    raise SystemExit("a go vet prescription lacks the reviewed tagged nine-part build identity")
 print(
     "go vet prescription audit: passed; 2/2 future go vet commands use "
-    "go_vet_checked and the shared bounded Go-child/environment/source-identity "
-    "wrapper"
+    "go_vet_checked with the g01_pair_fixture build identity and the shared "
+    "bounded Go-child/environment/source-identity wrapper"
 )
 print(
     f"future selector guard audit: passed; {guarded} go test selector "
@@ -2054,7 +2122,9 @@ stream guards.
 
 ```sh
 set -euo pipefail
-python3 -I - <<'PY'
+# g01-safe-python-heredoc: reviewed synthetic child argv
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 import re
 import shlex
 from pathlib import Path
@@ -2274,7 +2344,9 @@ different tag/race configuration:
 
 ```sh
 set -euo pipefail
-python3 -I - <<'PY'
+# g01-safe-python-heredoc: reviewed synthetic Go metadata argv
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 import re
 import shlex
 from pathlib import Path
@@ -2594,7 +2666,9 @@ direct Go child:
 
 ```sh
 set -euo pipefail
-python3 -I - <<'PY'
+# g01-safe-python-heredoc: reviewed isolated interpreter argv
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 import hashlib
 import io
 import json
@@ -3379,7 +3453,8 @@ requires empty output and zero direct Go children for every case.
 
 ```sh
 set -euo pipefail
-python3 -I - <<'PY'
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 import io
 import subprocess
 import sys
@@ -3531,7 +3606,8 @@ start:
 
 ```sh
 set -euo pipefail
-python3 -I - <<'PY'
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 import io
 import os
 import subprocess
@@ -3701,7 +3777,8 @@ immutable starting packet head `36ec84b27c934a25484b0a5391af0a20c7643912`:
 
 ```sh
 set -euo pipefail
-python3 -I - <<'PY'
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 import subprocess
 
 previous = subprocess.check_output(
@@ -3754,7 +3831,8 @@ prior packet and records those exact misses without starting any child:
 
 ```sh
 set -euo pipefail
-python3 -I - <<'PY'
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 import re
 import subprocess
 
@@ -3827,7 +3905,8 @@ omitted a synthetic `FuzzSeed` declaration and that `paired-all-except` had no
 
 ```sh
 set -euo pipefail
-python3 -I - <<'PY'
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -3886,7 +3965,8 @@ defense-in-depth check. The no-Go-child probe uses a temporary synthetic
 
 ```sh
 set -euo pipefail
-python3 -I - <<'PY'
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 import io
 import subprocess
 from contextlib import redirect_stdout
@@ -3952,7 +4032,8 @@ Go would not execute:
 
 ```sh
 set -euo pipefail
-python3 -I - <<'PY'
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 import re
 import subprocess
 from pathlib import Path
@@ -3997,7 +4078,8 @@ green probe records both properties and rejects any attempted Go child:
 
 ```sh
 set -euo pipefail
-python3 -I - <<'PY'
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 import re
 import subprocess
 from pathlib import Path
@@ -4070,7 +4152,8 @@ that contain scanner source or synthetic fixtures:
 
 ```sh
 set -euo pipefail
-python3 -I - <<'PY'
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 import re
 import subprocess
 
@@ -4118,7 +4201,8 @@ RED forbidden-command scan gap: prior 3bc8445567fe68cc355cf3f88f0c962a41e9cad5 m
 
 ```sh
 set -euo pipefail
-python3 -I - <<'PY'
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 import re
 import subprocess
 import unicodedata
@@ -4189,25 +4273,28 @@ partition and worker vet command are intentionally packet-only additions.
 
 ```sh
 set -euo pipefail
-diff -u \
-  <(awk '
-    /^terminal_heavy_tests=/{capture=1}
-    capture {
-      line=$0
-      sub(/^[[:space:]]+/, "", line)
-      if (line ~ /^(terminal_(heavy|remainder|storage)_tests=|GOTOOLCHAIN=.*go (test|vet) -C )/) print line
-      if (line ~ /^GOTOOLCHAIN=.*go vet -C experiments\/g01-scaleset -tags=g01_pair_fixture \.\/livecanary$/) exit
-    }
-  ' docs/evidence/g01-paired-terminal.md) \
-  <(awk '
-    /^terminal_heavy_tests=/{capture=1}
-    capture {
-      line=$0
-      sub(/^[[:space:]]+/, "", line)
-      if (line ~ /^(terminal_(heavy|remainder|storage)_tests=|GOTOOLCHAIN=.*go (test|vet) -C )/) print line
-      if (line ~ /^GOTOOLCHAIN=.*go vet -C experiments\/g01-scaleset -tags=g01_pair_fixture \.\/livecanary$/) exit
-    }
-  ' docs/evidence/g01-recovery-packet.md | grep -v 'liveworker')
+pair_fragment_tmp=/tmp/g01-paired-fragment.$$
+(umask 077 && mkdir "$pair_fragment_tmp")
+trap 'rm -rf "$pair_fragment_tmp"' EXIT
+awk '
+  /^terminal_heavy_tests=/{capture=1}
+  capture {
+    line=$0
+    sub(/^[[:space:]]+/, "", line)
+    if (line ~ /^(terminal_(heavy|remainder|storage)_tests=|GOTOOLCHAIN=.*go (test|vet) -C )/) print line
+    if (line ~ /^GOTOOLCHAIN=.*go vet -C experiments\/g01-scaleset -tags=g01_pair_fixture \.\/livecanary$/) exit
+  }
+' docs/evidence/g01-paired-terminal.md > "$pair_fragment_tmp/upstream"
+awk '
+  /^terminal_heavy_tests=/{capture=1}
+  capture {
+    line=$0
+    sub(/^[[:space:]]+/, "", line)
+    if (line ~ /^(terminal_(heavy|remainder|storage)_tests=|GOTOOLCHAIN=.*go (test|vet) -C )/) print line
+    if (line ~ /^GOTOOLCHAIN=.*go vet -C experiments\/g01-scaleset -tags=g01_pair_fixture \.\/livecanary$/) exit
+  }
+' docs/evidence/g01-recovery-packet.md | grep -v 'liveworker' > "$pair_fragment_tmp/packet"
+diff -u "$pair_fragment_tmp/upstream" "$pair_fragment_tmp/packet"
 printf 'paired-terminal normalized command fragment comparison: passed; packet controller commands match g01-paired-terminal.md\n'
 ```
 
@@ -4224,7 +4311,8 @@ assignments fail closed:
 
 ```sh
 set -euo pipefail
-python3 -I - <<'PY'
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 from pathlib import Path
 
 packet_path = Path("docs/evidence/g01-recovery-packet.md")
@@ -4388,7 +4476,8 @@ set -euo pipefail
 if git status --porcelain=v1 --untracked-files=all | grep -q .; then
   exit 1
 fi
-python3 -I - <<'PY'
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 import subprocess
 
 local = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
@@ -4418,7 +4507,9 @@ The `-tags=osusergo` case is intentionally included in that fail-closed set.
 
 ```sh
 set -euo pipefail
-python3 -I - <<'PY'
+# g01-safe-python-heredoc: reviewed synthetic Go test argv
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 import os
 import re
 import subprocess
@@ -4611,7 +4702,8 @@ rg -q '^package liveworker$' experiments/g01-scaleset/liveworker/docker_observat
 rg -q '^func Test(Observe|Statistics|InvalidOwnedProof|Journal|Authority)' experiments/g01-scaleset/livecanary --glob '*_test.go'
 rg -q '^//go:build !cgo \|\| osusergo \|\| android$|func TestUnsupportedAccountLookupRefusesBeforeJournal' experiments/g01-scaleset/liveworker/admission_lookup_unsupported_test.go experiments/g01-scaleset/livecanary/admission_lookup_unsupported_test.go
 rg -q '^func TestMain\(m \*testing\.M\)' experiments/g01-scaleset/livecanary/preparation_fixture_test.go
-python3 -I - <<'PY'
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 from pathlib import Path
 
 
@@ -4849,7 +4941,9 @@ was read-only and did not run test bodies or live resources:
 
 ```sh
 set -euo pipefail
-python3 -I - <<'PY'
+# g01-safe-python-heredoc: reviewed synthetic Go metadata argv
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 import json
 import os
 import re
@@ -4996,7 +5090,8 @@ probe therefore has no test-binary path on which those initializers could run.
 
 ```sh
 set -euo pipefail
-python3 -I - <<'PY'
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -5047,7 +5142,8 @@ is checked:
 
 ```sh
 set -euo pipefail
-python3 -I - <<'PY'
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -5159,7 +5255,8 @@ git diff --cached --name-only | grep -Fxq "docs/evidence/g01-recovery-packet.md"
 git diff --cached --name-only | wc -l | tr -d ' ' | grep -Fxq 1
 git diff --check
 git diff --cached --check
-python3 -I - <<'PY'
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 import re
 import subprocess
 
@@ -5234,15 +5331,22 @@ own right, before a delegated `gh`/live command can be hidden in an argument,
 pipeline or generated command. Shell command-string forms (`bash`/`sh` and
 equivalent absolute, optioned or `busybox` forms with `-c`) are recursively
 inspected and rejected before any nested payload could execute. Shell command
-substitutions (`$()` and backticks) are rejected before token-wrapper stripping
-or fence certification, including direct, assignment, pipeline and nested
-forms; the scanner does not attempt to model shell expansion. Markdown prose,
-URLs, comments, Python heredoc bodies, scanner source and synthetic fixtures
-are not executable prescriptions and are not scanned:
+substitutions (`$()`, backticks, `<(...)` and `>(...)`) are rejected before
+token-wrapper stripping or fence certification, including direct, assignment,
+pipeline and nested forms; the scanner does not attempt to model shell
+expansion. Python heredoc bodies are separately parsed with Python's AST:
+literal command arguments are inspected with the same executable-token rules,
+dynamic command arguments require an explicit reviewed
+`g01-safe-python-heredoc` marker, and malformed/unmarked command forms fail
+closed. Markdown prose, URLs, comments, scanner source and synthetic fixtures
+are not executable prescriptions:
 
 ```sh
 set -euo pipefail
-python3 -I - <<'PY'
+# g01-safe-python-heredoc: reviewed isolated interpreter argv
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
 import re
 import shlex
 from pathlib import Path
@@ -5290,6 +5394,54 @@ def shell_commands(markdown):
         pending = []
         pending_numbers = []
 
+def python_heredoc_bodies(markdown):
+    """Extract executable Python bodies for AST inspection; never discard them."""
+    in_shell = False
+    delimiter = None
+    body = []
+    start_number = None
+    safe_marker = False
+    marker = "g01-safe-python-heredoc"
+    for number, line in enumerate(markdown.splitlines(), start=1):
+        stripped = line.strip()
+        if delimiter is not None:
+            if stripped == delimiter:
+                yield start_number, "\n".join(body), safe_marker
+                delimiter = None
+                body = []
+                start_number = None
+                safe_marker = False
+            else:
+                body.append(line)
+            continue
+        if line.startswith("```"):
+            info = line[3:].strip().lower()
+            if in_shell:
+                if not info:
+                    in_shell = False
+            elif info in fence_languages:
+                in_shell = True
+            continue
+        if not in_shell:
+            continue
+        if marker in stripped and stripped.startswith("#"):
+            safe_marker = True
+            continue
+        if safe_marker and stripped.startswith(
+            '[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ]'
+        ):
+            continue
+        heredoc_match = heredoc.search(stripped)
+        if heredoc_match:
+            delimiter = heredoc_match.group(2)
+            body = []
+            start_number = number
+            continue
+        if stripped and not stripped.startswith("#"):
+            safe_marker = False
+    if delimiter is not None:
+        raise SystemExit(f"line {start_number}: unterminated executable Python heredoc")
+
 def shell_token_segments(command):
     try:
         lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
@@ -5308,6 +5460,10 @@ def shell_token_segments(command):
 def shell_command_substitution(tokens):
     """Fail closed before wrapper stripping or shell expansion semantics."""
     return any("$(" in token or "`" in token for token in tokens)
+
+def shell_process_substitution(command):
+    """Reject Bash process substitution before shell token classification."""
+    return re.search(r"(?<!\\)(?:<|>)\(", command) is not None
 
 def executable_basename(token):
     if "://" in token:
@@ -5415,6 +5571,8 @@ def forbidden_command(tokens, depth=0):
         return None
     if shell_command_substitution(tokens):
         return "shell command substitutions are not allowed"
+    if any(re.search(r"(?<!\\)(?:<|>)\(", token) for token in tokens):
+        return "shell process substitutions are not allowed"
     tokens = executable_tokens(tokens)
     if not tokens:
         return None
@@ -5454,12 +5612,89 @@ def forbidden_command(tokens, depth=0):
         return "gh command"
     return None
 
+python_command_functions = {
+    "os.popen",
+    "os.system",
+    "subprocess.Popen",
+    "subprocess.call",
+    "subprocess.check_call",
+    "subprocess.check_output",
+    "subprocess.run",
+}
+
+def python_dotted_name(node):
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+        return ".".join(reversed(parts))
+    return None
+
+def python_command_argument(call):
+    if call.args:
+        return call.args[0]
+    for keyword in call.keywords:
+        if keyword.arg in {"args", "cmd", "command"}:
+            return keyword.value
+    return None
+
+def python_literal_command(node):
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return "shell", node.value
+    if isinstance(node, (ast.List, ast.Tuple)) and node.elts:
+        values = []
+        for element in node.elts:
+            if not isinstance(element, ast.Constant) or not isinstance(element.value, str):
+                return ("argv", values) if values else None
+            values.append(element.value)
+        return "argv", values
+    return None
+
+def inspect_python_heredoc(body, safe_marker):
+    try:
+        tree = ast.parse(body, filename="<python-heredoc>")
+    except SyntaxError as error:
+        return f"Python heredoc is not parseable: {error}"
+    dynamic_calls = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if python_dotted_name(node.func) not in python_command_functions:
+            continue
+        argument = python_command_argument(node)
+        literal = python_literal_command(argument)
+        if literal is None:
+            dynamic_calls.append(node.lineno)
+            continue
+        kind, value = literal
+        segments = shell_token_segments(value) if kind == "shell" else [value]
+        for segment in segments:
+            violation = forbidden_command(executable_tokens(segment))
+            if violation:
+                return f"Python heredoc command: {violation}"
+    if dynamic_calls and not safe_marker:
+        return (
+            "Python heredoc contains a dynamic command argument on line(s) "
+            + ",".join(str(line) for line in dynamic_calls)
+            + "; add the reviewed safe marker"
+        )
+    return None
+
 matches = []
 for command, number in shell_commands(source):
+    if shell_process_substitution(command):
+        matches.append(f"line {number}: shell process substitutions are not allowed")
+        continue
     for segment in shell_token_segments(command):
         violation = forbidden_command(segment)
         if violation:
             matches.append(f"line {number}: {violation}")
+for number, body, safe_marker in python_heredoc_bodies(source):
+    violation = inspect_python_heredoc(body, safe_marker)
+    if violation:
+        matches.append(f"line {number}: {violation}")
 if matches:
     raise SystemExit("forbidden live command(s) found:\n" + "\n".join(matches))
 
@@ -5512,6 +5747,8 @@ synthetic = [
     ("dollar-pipeline-substitution", "printf safe | sed \"s/x/$(gh api repos/example/project)/\"", True),
     ("backtick-command-substitution", "printf \"`gh api repos/example/project`\"", True),
     ("nested-command-substitution", "bash -c \"printf \\\"$(gh api repos/example/project)\\\"\"", True),
+    ("input-process-substitution", "cat <(printf safe)", True),
+    ("output-process-substitution", "tee >(gh api repos/example/project)", True),
     ("python-c-gh-command-string", "python3 -c 'import subprocess; subprocess.run([\\\"gh\\\", \\\"api\\\", \\\"x\\\"])'", True),
     ("absolute-python-c-docker-command-string", "/usr/bin/python -c 'import os; os.system(\\\"docker run image:tag true\\\")'", True),
     ("env-python-c-command-string", "env python3 -c 'print(\\\"gh api x\\\")'", True),
@@ -5527,7 +5764,16 @@ for label, fixture, expected in synthetic:
     )
     if observed != expected:
         raise SystemExit(f"synthetic forbidden-command probe failed: {label}")
-print("forbidden-live-command synthetic probes: passed; direct/wrapped fetcher, every gh invocation including global-flag and absolute forms, every Docker invocation, command-delegating xargs/find/parallel/make forms, shell substitutions, limactl/security/launchctl, eval, python/python3 -c and direct/nested bash/sh -c forms rejected; prose/URLs/comments/scanner source/fixtures ignored")
+safe_heredoc = "import subprocess\nsubprocess.run(command)\n"
+if inspect_python_heredoc(safe_heredoc, True) is not None:
+    raise SystemExit("safe marked Python heredoc was rejected")
+for unsafe_heredoc in (
+    'import subprocess\nsubprocess.run(["gh", "api", "x"])\n',
+    'import os\nos.system("docker version")\n',
+):
+    if inspect_python_heredoc(unsafe_heredoc, False) is None:
+        raise SystemExit("unsafe Python heredoc was accepted")
+print("forbidden-live-command synthetic probes: passed; direct/wrapped fetcher, every gh invocation including global-flag and absolute forms, every Docker invocation, command-delegating xargs/find/parallel/make forms, shell substitutions/process substitutions, limactl/security/launchctl, eval, AST-inspected safe/unsafe Python heredocs and direct/nested bash/sh -c forms rejected; prose/URLs/comments/scanner source/fixtures ignored")
 print("forbidden-live-command scan: passed; executable shell prescriptions contain no forbidden live App/runner/Docker/Lima/Keychain/launchd/workflow/fetch command")
 PY
 ```
@@ -5741,7 +5987,8 @@ following consecutive line/block comments was therefore omitted:
 
 ```sh
 set -euo pipefail
-python3 -I - <<'PY'
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -5798,7 +6045,8 @@ Go child to fail, so discovery cannot silently expand into execution:
 
 ```sh
 set -euo pipefail
-python3 -I - <<'PY'
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -5858,7 +6106,8 @@ derived a set unlike Go's ASCII `[0-9A-Fa-f]` class:
 
 ```sh
 set -euo pipefail
-python3 -I - <<'PY'
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 import re
 import subprocess
 import warnings
@@ -5918,7 +6167,8 @@ escaped POSIX text and the previously reviewed literal backslash behavior:
 
 ```sh
 set -euo pipefail
-python3 -I - <<'PY'
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 import re
 import subprocess
 from pathlib import Path
@@ -6153,7 +6403,8 @@ discovery, pathspec and replacement controls unchecked.
 
 ```sh
 set -euo pipefail
-python3 -I - <<'PY'
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 import os
 import subprocess
 import sys
@@ -6250,7 +6501,8 @@ before any Git or Go child, output, immutable-tree check or source read:
 
 ```sh
 set -euo pipefail
-python3 -I - <<'PY'
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 import io
 import os
 import subprocess
@@ -6383,7 +6635,8 @@ The immutable red command was:
 
 ```sh
 set -euo pipefail
-python3 -I - <<'PY'
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 import io
 import os
 import subprocess
@@ -6489,7 +6742,8 @@ The immutable scanner red command was:
 
 ```sh
 set -euo pipefail
-python3 -I - <<'PY'
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 import re
 import shlex
 import subprocess
@@ -6557,7 +6811,8 @@ The immutable selector-audit red command was:
 
 ```sh
 set -euo pipefail
-python3 -I - <<'PY'
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 import re
 import subprocess
 
@@ -6629,7 +6884,8 @@ The immutable red command was:
 
 ```sh
 set -euo pipefail
-python3 -I - <<'PY'
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 import ast
 import shlex
 import subprocess
@@ -6708,7 +6964,8 @@ The focused offline AST/timeout/environment/scanner regression was:
 
 ```sh
 set -euo pipefail
-python3 -I - <<'PY'
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 import ast
 import os
 import shlex
@@ -7031,7 +7288,8 @@ below for reproducibility:
 
 ```sh
 set -euo pipefail
-python3 -I - <<'PY'
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 import ast
 import os
 import shlex
@@ -7179,7 +7437,9 @@ live command.
 
 ```sh
 set -euo pipefail
-python3 -I - <<'PY'
+# g01-safe-python-heredoc: reviewed isolated interpreter argv
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 import ast
 import os
 import re
@@ -7381,7 +7641,8 @@ that were not scoped to this follow-up:
 
 ```sh
 set -euo pipefail
-python3 -I - <<'PY'
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 import re
 import shlex
 import subprocess
@@ -7465,7 +7726,9 @@ count, and historical-output relabeling:
 
 ```sh
 set -euo pipefail
-python3 -I - <<'PY'
+# g01-safe-python-heredoc: reviewed isolated interpreter argv
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 import ast
 import os
 import re
@@ -7764,7 +8027,8 @@ command-launching fixture:
 
 ```sh
 set -euo pipefail
-python3 -I - <<'PY'
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 import ast
 import re
 import shlex
@@ -7868,7 +8132,8 @@ prescription count and a safe scanner boundary:
 
 ```sh
 set -euo pipefail
-python3 -I - <<'PY'
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
 import ast
 import os
 import re
@@ -8512,3 +8777,410 @@ GitHub discussions or claim a live result.
 | [4002447542](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002447542), source [09ecc1b581af8a3b955b8f44b817e064e9674abe](https://github.com/1XP-AI/gh-runnerd/commit/09ecc1b581af8a3b955b8f44b817e064e9674abe) | Reproduced: Docker was rejected only for a small subcommand list. Corrected: every Docker executable invocation now fails closed, including absolute and read-only forms. | [Fresh exact-head Docker correction](#root-4002447542-every-docker-invocation-is-forbidden): every focused Docker fixture rejected; no Docker operation ran; rollback is packet-only parent restoration. |
 | [4002447545](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002447545), source [09ecc1b581af8a3b955b8f44b817e064e9674abe](https://github.com/1XP-AI/gh-runnerd/commit/09ecc1b581af8a3b955b8f44b817e064e9674abe) | Reproduced: four named compiler search-path controls reached the first metadata child. Corrected: inherited/command-prefix values fail closed before the reviewed cgo/tool identity, with the identity retained in prescriptions. | [Fresh exact-head compiler correction](#root-4002447545-compiler-search-paths-precede-cgotool-identity): focused boundary probe rejected all named controls; no compiler or Go child ran; rollback is packet-only parent restoration. |
 | [4002447549](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002447549), source [09ecc1b581af8a3b955b8f44b817e064e9674abe](https://github.com/1XP-AI/gh-runnerd/commit/09ecc1b581af8a3b955b8f44b817e064e9674abe) | Reproduced: the staged private-path audit covered only one macOS private-var spelling. Corrected: separate reviewed roots cover both spellings before fence certification. | [Fresh exact-head private-path correction](#root-4002447549-both-macos-private-var-spellings-are-scanned): focused audit confirmed both roots; no private path/log was captured; rollback is packet-only parent restoration. |
+
+### Fresh exact-head P2 corrections at `81787b2e90df496a9c5a51fddc7607d3019834b7`
+
+The [exact-head Codex review 5194544866](https://github.com/1XP-AI/gh-runnerd/pull/78#pullrequestreview-5194544866) identified eight actionable packet gaps in the immutable parent above. The two executable-hook roots, [4002688105](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002688105) and [4002688110](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002688110), are separate contexts for one fail-closed `GOCACHEPROG`/`GOAUTH` boundary. This follow-up changes only this packet; it does not run Go test/list/body commands or any live App, runner, workflow, Docker, Lima, Keychain or launchd operation.
+
+#### Exact-parent red reproduction
+
+The following read-only probe ran first against the exact immutable parent. It
+extracts only packet text, patches child launches to stop before any child, and
+uses synthetic shell/Python/JSON fixtures; it does not invoke Go or a live
+operation:
+
+```sh
+set -euo pipefail
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+
+parent = "81787b2e90df496a9c5a51fddc7607d3019834b7"
+packet = subprocess.check_output(
+    ["git", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    text=True,
+)
+lines = packet.splitlines()
+vet = [
+    (index, lines[index], lines[index + 1])
+    for index in range(len(lines) - 1)
+    if lines[index].startswith("go_vet_checked ")
+]
+if len(vet) != 2:
+    raise SystemExit(f"red setup changed: expected two vet prescriptions, found {len(vet)}")
+for index, declaration, command in vet:
+    fields = declaration.split()
+    if "-tags=g01_pair_fixture" in command and fields[3].startswith("default+"):
+        print(
+            f"RED 4002688103: exact parent {parent} declares {fields[3]} while "
+            f"command line {index + 2} passes -tags=g01_pair_fixture"
+        )
+    else:
+        raise SystemExit("red setup changed: vet identity/tag mismatch absent")
+
+wrapper_start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
+wrapper_end = packet.index("\nPY\n}", wrapper_start)
+wrapper = packet[wrapper_start:wrapper_end]
+if "GOCACHEPROG" not in wrapper and "GOAUTH" not in wrapper:
+    print(
+        f"RED 4002688105/4002688110: exact parent {parent} has no GOCACHEPROG "
+        "or GOAUTH command-form guard before Go children"
+    )
+else:
+    raise SystemExit("red setup changed: cache/auth guard already present")
+
+base = [
+    "probe", "1", "0" * 64, "probe",
+    "experiments/g01-scaleset:./livecanary",
+    "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+    "go", "test", "-C", "experiments/g01-scaleset", "./livecanary",
+]
+class StopBeforeChild(Exception):
+    pass
+
+for finding, assignment in (
+    ("4002688105", "GOCACHEPROG=/synthetic/cache-hook"),
+    ("4002688110", "GOAUTH=command"),
+):
+    saved_env, saved_argv = dict(os.environ), sys.argv
+    saved_check_output, saved_run = subprocess.check_output, subprocess.run
+    calls = []
+    def stop(*args, **kwargs):
+        calls.append(args[0] if args else kwargs.get("args"))
+        raise StopBeforeChild
+    try:
+        os.environ.clear()
+        os.environ.update({"PATH": "/opt/homebrew/bin:/usr/bin:/bin", "LANG": "C"})
+        sys.argv = base[:6] + [assignment] + base[6:]
+        subprocess.check_output = stop
+        subprocess.run = stop
+        try:
+            exec(compile(wrapper, "<parent-wrapper>", "exec"), {"__name__": "__main__"})
+        except StopBeforeChild:
+            pass
+    finally:
+        subprocess.check_output, subprocess.run = saved_check_output, saved_run
+        sys.argv = saved_argv
+        os.environ.clear()
+        os.environ.update(saved_env)
+    if not calls:
+        raise SystemExit(f"red setup changed: {finding} assignment refused before child")
+    print(f"RED {finding}: exact parent accepted {assignment} and reached first child lookup")
+
+scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
+scanner_start = packet.rfind("source = Path(", 0, scanner_anchor)
+scanner_end = packet.index("\nmatches = []", scanner_anchor)
+scanner = {"Path": __import__("pathlib").Path, "re": re, "shlex": shlex}
+exec(compile(packet[scanner_start:scanner_end], "<parent-scanner>", "exec"), scanner)
+synthetic_heredoc = "```sh\npython3 -I - <<'PY'\nimport subprocess\nsubprocess.run([\"gh\", \"api\", \"x\"])\nPY\n```"
+if list(scanner["shell_commands"](synthetic_heredoc)):
+    raise SystemExit("red setup changed: parent unexpectedly emitted a heredoc body")
+print(
+    f"RED 4002688115: exact parent {parent} skipped an executable Python heredoc "
+    "body containing subprocess.run([gh, api, x])"
+)
+if "GIT_NO_REPLACE_OBJECTS" in wrapper and 'env["GIT_NO_REPLACE_OBJECTS"]' not in wrapper:
+    print(
+        f"RED 4002688120: exact parent {parent} rejects override names but does not "
+        "bind GIT_NO_REPLACE_OBJECTS=1 before Git validation"
+    )
+else:
+    raise SystemExit("red setup changed: replacement-ref binding already present")
+for form in ("cat <(printf safe)", "tee >(gh api repos/example/project)"):
+    tokens = scanner["executable_tokens"](scanner["shell_token_segments"](form)[0])
+    if scanner["forbidden_command"](tokens) is not None:
+        raise SystemExit("red setup changed: process substitution form already rejected")
+print(
+    f"RED 4002688125: exact parent {parent} accepted <(...) and >(...) "
+    "process-substitution forms before token classification"
+)
+python_lines = [line for line in lines if re.search(r"\bpython3\s+-I\b", line)]
+print(
+    f"RED 4002688128: exact parent launches {len(python_lines)} Python heredoc/"
+    "interpreter forms through PATH-resolved python3 -I without reviewed absolute PATH preflight"
+)
+
+validator_start = wrapper.index("def validate_test_stream(stdout, stderr):")
+validator_end = wrapper.index("\nrun_command = command + [\"-json\"]", validator_start)
+validator = ast.parse(wrapper[validator_start:validator_end])
+namespace = {"json": json, "label": "json-red", "actual": ["TestExpected"]}
+exec(compile(validator, "<parent-json-validator>", "exec"), namespace)
+stream = "\n".join(
+    json.dumps(event)
+    for event in (
+        {"Action": "run", "Test": "Unexpected"},
+        {"Action": "run", "Test": "TestExpected"},
+        {"Action": "pass", "Test": "TestExpected"},
+    )
+) + "\n"
+try:
+    namespace["validate_test_stream"](stream, "")
+except SystemExit:
+    pass
+else:
+    print(
+        "RED 4002688136: exact parent accepted unexpected top-level run event "
+        "{'Action': 'run', 'Test': 'Unexpected'}"
+    )
+PY
+```
+
+Recorded exact-parent red output:
+
+```text
+RED 4002688103: exact parent 81787b2e90df496a9c5a51fddc7607d3019834b7 declares default+norace+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 while command line 1767 passes -tags=g01_pair_fixture
+RED 4002688103: exact parent 81787b2e90df496a9c5a51fddc7607d3019834b7 declares default+norace+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 while command line 1769 passes -tags=g01_pair_fixture
+RED 4002688105/4002688110: exact parent 81787b2e90df496a9c5a51fddc7607d3019834b7 has no GOCACHEPROG or GOAUTH command-form guard before Go children
+RED 4002688105: exact parent accepted GOCACHEPROG=/synthetic/cache-hook and reached first child lookup
+RED 4002688110: exact parent accepted GOAUTH=command and reached first child lookup
+RED 4002688115: exact parent 81787b2e90df496a9c5a51fddc7607d3019834b7 skipped an executable Python heredoc body containing subprocess.run([gh, api, x])
+RED 4002688120: exact parent 81787b2e90df496a9c5a51fddc7607d3019834b7 rejects override names but does not bind GIT_NO_REPLACE_OBJECTS=1 before Git validation
+RED 4002688125: exact parent 81787b2e90df496a9c5a51fddc7607d3019834b7 accepted <(...) and >(...) process-substitution forms before token classification
+RED 4002688128: exact parent launches 47 Python heredoc/interpreter forms through PATH-resolved python3 -I without reviewed absolute PATH preflight
+RED 4002688136: exact parent accepted unexpected top-level run event {'Action': 'run', 'Test': 'Unexpected'}
+```
+
+#### Minimal packet correction and focused green probe
+
+The minimal correction aligns both future vet identities with their literal
+`g01_pair_fixture` command tag. The shared wrapper now pins empty
+`GOCACHEPROG` and `GOAUTH=off` before every bounded Go child, including module
+download/verify, effective flags, package metadata, vet and test paths; it
+binds `GIT_NO_REPLACE_OBJECTS=1` for every Git child before source validation.
+The forbidden-live-command audit now AST-inspects executable Python heredocs,
+requires the reviewed safe marker only for dynamic command arguments, rejects
+shell process substitutions before token classification, and validates the
+canonical PATH before invoking reviewed absolute `/opt/homebrew/bin/python3`.
+The JSON stream validator rejects unexpected top-level `run`/`pass`/`fail`
+events and permits subtests only below expected source-derived parents.
+
+The focused green probe below parses and executes only packet helper prefixes,
+AST validators and synthetic scanner/JSON fixtures. It patches every possible
+child launch, records no Go child, and performs no live operation:
+
+```sh
+set -euo pipefail
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+
+packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
+wrapper_start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
+wrapper_end = packet.index("\nPY\n}", wrapper_start)
+wrapper = packet[wrapper_start:wrapper_end]
+tree = ast.parse(wrapper)
+functions = {
+    node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)
+}
+for marker in (
+    "reviewed_gocacheprog", "reviewed_goauth", "reviewed_git_no_replace_objects",
+    "GIT_NO_REPLACE_OBJECTS", "GOCACHEPROG", "GOAUTH",
+):
+    if marker not in wrapper:
+        raise SystemExit(f"green wrapper marker missing: {marker}")
+if wrapper.index("reviewed_gocacheprog") > wrapper.index("repo_root = Path("):
+    raise SystemExit("GOCACHEPROG guard occurs after the first Git child")
+if wrapper.index("reviewed_goauth") > wrapper.index("repo_root = Path("):
+    raise SystemExit("GOAUTH guard occurs after the first Git child")
+if wrapper.index("reviewed_git_no_replace_objects") > wrapper.index("repo_root = Path("):
+    raise SystemExit("Git replacement-ref pin occurs after the first Git child")
+go_children = [
+    node for node in ast.walk(tree)
+    if isinstance(node, ast.Call)
+    and isinstance(node.func, ast.Name)
+    and node.func.id == "run_go_child"
+]
+if not go_children or any(
+    not any(keyword.arg == "env" and isinstance(keyword.value, ast.Name) and keyword.value.id == "go_env" for keyword in node.keywords)
+    for node in go_children
+):
+    raise SystemExit("a bounded Go child does not use the pinned go_env")
+
+build_prefix = "g01_pair_fixture+norace+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8"
+lines = packet.splitlines()
+vet = [
+    (lines[index], lines[index + 1])
+    for index in range(len(lines) - 1)
+    if lines[index].startswith("go_vet_checked ")
+]
+if len(vet) != 2 or any(
+    build_prefix not in declaration or "-tags=g01_pair_fixture" not in command
+    for declaration, command in vet
+):
+    raise SystemExit("future vet tag/build identity mismatch")
+
+original_check, original_run = subprocess.check_output, subprocess.run
+build = "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8"
+base = [
+    "probe", "1", "0" * 64, "probe", "experiments/g01-scaleset:./livecanary", build,
+    "go", "test", "-C", "experiments/g01-scaleset", "./livecanary",
+]
+class StopBeforeChild(Exception):
+    pass
+
+def prefix_probe(inherited=(), assignments=(), expected_error=None):
+    saved_env, saved_argv = dict(os.environ), sys.argv
+    calls = []
+    def stop(*args, **kwargs):
+        calls.append(args[0] if args else kwargs.get("args"))
+        raise StopBeforeChild
+    try:
+        os.environ.clear()
+        os.environ.update({"PATH": "/opt/homebrew/bin:/usr/bin:/bin", "LANG": "C"})
+        os.environ.update(dict(inherited))
+        sys.argv = base[:6] + list(assignments) + base[6:]
+        subprocess.check_output, subprocess.run = stop, stop
+        namespace = {"__name__": "__main__"}
+        try:
+            exec(compile(wrapper, "<green-wrapper>", "exec"), namespace)
+        except StopBeforeChild:
+            if expected_error is not None:
+                raise SystemExit(f"{expected_error}: child started")
+            return namespace
+        except SystemExit as error:
+            if expected_error is None or expected_error not in str(error):
+                raise
+            if calls:
+                raise SystemExit(f"{expected_error}: child started")
+            return namespace
+        if expected_error is not None:
+            raise SystemExit(f"{expected_error}: accepted")
+        return namespace
+    finally:
+        subprocess.check_output, subprocess.run = original_check, original_run
+        sys.argv = saved_argv
+        os.environ.clear()
+        os.environ.update(saved_env)
+
+safe = prefix_probe(assignments=("GOCACHEPROG=", "GOAUTH=off", "GIT_NO_REPLACE_OBJECTS=1"))
+if safe["env"].get("GOCACHEPROG") != "" or safe["env"].get("GOAUTH") != "off":
+    raise SystemExit("reviewed cache/auth settings were not pinned")
+if safe["env"].get("GIT_NO_REPLACE_OBJECTS") != "1":
+    raise SystemExit("Git replacement refs were not disabled")
+prefix_probe(inherited=(("GOCACHEPROG", "/synthetic/cache"),), expected_error="GOCACHEPROG")
+prefix_probe(assignments=("GOAUTH=command",), expected_error="GOAUTH")
+prefix_probe(inherited=(("GIT_NO_REPLACE_OBJECTS", "0"),), expected_error="GIT_NO_REPLACE_OBJECTS")
+
+validator = functions["validate_test_stream"]
+validator_ns = {"json": json, "label": "json-green", "actual": ["TestExpected"]}
+exec(compile(ast.Module(body=[validator], type_ignores=[]), "<green-json>", "exec"), validator_ns)
+allowed = [
+    {"Action": "start", "Package": "example.test"},
+    {"Action": "run", "Test": "TestExpected"},
+    {"Action": "run", "Test": "TestExpected/sub"},
+    {"Action": "output", "Test": "TestExpected/sub", "Output": "safe"},
+    {"Action": "pass", "Test": "TestExpected/sub"},
+    {"Action": "pass", "Test": "TestExpected"},
+    {"Action": "pass", "Package": "example.test"},
+]
+validator_ns["validate_test_stream"]("\n".join(json.dumps(item) for item in allowed) + "\n", "")
+for event in (
+    {"Action": "run", "Test": "Unexpected"},
+    {"Action": "pass", "Test": "Unexpected"},
+    {"Action": "fail", "Test": "Unexpected"},
+    {"Action": "run"},
+):
+    stream = "\n".join(json.dumps(item) for item in (event, {"Action": "run", "Test": "TestExpected"}, {"Action": "pass", "Test": "TestExpected"})) + "\n"
+    try:
+        validator_ns["validate_test_stream"](stream, "")
+    except SystemExit:
+        pass
+    else:
+        raise SystemExit(f"unexpected top-level event accepted: {event}")
+
+scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
+scanner_start = packet.rfind("source = Path(", 0, scanner_anchor)
+scanner_end = packet.index("\nmatches = []", scanner_anchor)
+scanner_ns = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+exec(compile(packet[scanner_start:scanner_end], "<green-scanner>", "exec"), scanner_ns)
+for form in ("cat <(printf safe)", "tee >(gh api repos/example/project)"):
+    tokens = scanner_ns["executable_tokens"](scanner_ns["shell_token_segments"](form)[0])
+    if scanner_ns["forbidden_command"](tokens) is None:
+        raise SystemExit(f"process substitution accepted: {form}")
+if scanner_ns["inspect_python_heredoc"]('print("gh api x")', False) is not None:
+    raise SystemExit("safe Python heredoc was rejected")
+for body in (
+    'import subprocess\nsubprocess.run(["gh", "api", "x"])',
+    'import os\nos.system("docker version")',
+):
+    if scanner_ns["inspect_python_heredoc"](body, False) is None:
+        raise SystemExit("unsafe Python heredoc was accepted")
+if scanner_ns["inspect_python_heredoc"]("import subprocess\nsubprocess.run(command)", True) is not None:
+    raise SystemExit("reviewed dynamic safe-marker heredoc was rejected")
+
+headers = []
+in_shell = False
+for number, line in enumerate(lines, start=1):
+    if line.startswith("```"):
+        info = line[3:].strip().lower()
+        if in_shell and not info:
+            in_shell = False
+        elif not in_shell and info in {"sh", "bash", "shell", "zsh"}:
+            in_shell = True
+        continue
+    if in_shell and re.search(r"\b(?:/opt/homebrew/bin/)?python3\s+-I\b[^\n]*<<", line):
+        headers.append((number, line))
+if len(headers) != 43:
+    raise SystemExit(f"expected 43 executable Python heredocs, observed {len(headers)}")
+for number, line in headers:
+    if "/opt/homebrew/bin/python3 -I" not in line:
+        raise SystemExit(f"non-absolute Python interpreter at line {number}")
+    before = "\n".join(lines[max(0, number - 3):number - 1])
+    if "PATH-}" not in before or "/opt/homebrew/bin/python3" not in before:
+        raise SystemExit(f"missing canonical PATH preflight at line {number}")
+print(
+    "GREEN focused packet regression: passed; vet identity/tag alignment, "
+    "GOCACHEPROG/GOAUTH rejection and pins, GIT_NO_REPLACE_OBJECTS=1 binding, "
+    "AST heredoc safe/unsafe probes, <(...)/>(...) rejection, absolute "
+    "Python+canonical PATH preflight (43/43), and JSON top-level/subtest "
+    "validation; no Go/live child started"
+)
+PY
+```
+
+Recorded focused green output:
+
+```text
+GREEN focused packet regression: passed; vet identity/tag alignment, GOCACHEPROG/GOAUTH rejection and pins, GIT_NO_REPLACE_OBJECTS=1 binding, AST heredoc safe/unsafe probes, <(...)/>(...) rejection, absolute Python+canonical PATH preflight (41/41), and JSON top-level/subtest validation; no Go/live child started
+```
+
+The 41/41 result covers the executable Python heredoc/path cases already in the
+packet before the two self-contained probe blocks above were added. Including
+those two static probe blocks, the packet-local rerun recorded:
+
+```text
+GREEN focused packet regression: passed; vet identity/tag alignment, GOCACHEPROG/GOAUTH rejection and pins, GIT_NO_REPLACE_OBJECTS=1 binding, AST heredoc safe/unsafe probes, <(...)/>(...) rejection, absolute Python+canonical PATH preflight (43/43), and JSON top-level/subtest validation; no Go/live child started
+```
+
+The corrections are packet-only and do not authorize a rerun. Rollback is
+narrow: remove this unmerged packet correction or restore only
+`docs/evidence/g01-recovery-packet.md` to immutable parent
+`81787b2e90df496a9c5a51fddc7607d3019834b7`; preserve the independent driver,
+review and manual-runner state, and do not force-kill, prune or replay any live
+resource.
+
+#### Exact review URL ledger and dispositions
+
+| Finding and immutable source | Exact review URL | Disposition and rollback evidence |
+|---|---|---|
+| 4002688103, source `81787b2e90df496a9c5a51fddc7607d3019834b7` | [discussion 4002688103](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002688103) | Reproduced the vet tag/identity mismatch; both `go_vet_checked` declarations now bind `g01_pair_fixture+norace+...` while commands pass `-tags=g01_pair_fixture`. Rollback is packet-only parent restoration. |
+| 4002688105, source `81787b2e90df496a9c5a51fddc7607d3019834b7` | [discussion 4002688105](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002688105) | Reproduced the cache-hook path reaching the first child; inherited/command `GOCACHEPROG` values must be empty and are pinned empty for module/download/metadata/test/vet children. Rollback is packet-only parent restoration. |
+| 4002688110, source `81787b2e90df496a9c5a51fddc7607d3019834b7` | [discussion 4002688110](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002688110) | Reproduced command-form `GOAUTH=command` reaching the first child; inherited/command `GOAUTH` values must be `off` and are pinned `off` for the same shared Go-child paths. Rollback is packet-only parent restoration. |
+| 4002688115, source `81787b2e90df496a9c5a51fddc7607d3019834b7` | [discussion 4002688115](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002688115) | Reproduced executable Python heredoc body omission; AST inspection now checks literal command APIs, requires a reviewed safe marker for dynamic command arguments and fails closed on malformed/unmarked forms. Safe/unsafe probes were static only. Rollback is packet-only parent restoration. |
+| 4002688120, source `81787b2e90df496a9c5a51fddc7607d3019834b7` | [discussion 4002688120](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002688120) | Reproduced replacement-ref ambiguity; every Git child receives `GIT_NO_REPLACE_OBJECTS=1`, while other replacement/repository-control overrides remain refused before source validation. Rollback is packet-only parent restoration. |
+| 4002688125, source `81787b2e90df496a9c5a51fddc7607d3019834b7` | [discussion 4002688125](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002688125) | Reproduced `<(...)`/`>(...)` acceptance; raw process-substitution syntax is rejected before shell token classification, with safe/unsafe static fixtures. Rollback is packet-only parent restoration. |
+| 4002688128, source `81787b2e90df496a9c5a51fddc7607d3019834b7` | [discussion 4002688128](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002688128) | Reproduced PATH-resolved Python launches; every executable heredoc now validates the reviewed canonical PATH and invokes absolute `/opt/homebrew/bin/python3 -I`. No live action ran. Rollback is packet-only parent restoration. |
+| 4002688136, source `81787b2e90df496a9c5a51fddc7607d3019834b7` | [discussion 4002688136](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002688136) | Reproduced unexpected top-level JSON `run`/`pass`/`fail` acceptance; validator now rejects unknown top-level events and allows subtests only beneath expected parents, retaining required expected-parent run/pass events. Rollback is packet-only parent restoration. |
