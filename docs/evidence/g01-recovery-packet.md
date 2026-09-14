@@ -4312,11 +4312,21 @@ def slug(value):
 def anchors(path):
     return {slug(m.group(1)) for m in map(heading.match, path.read_text(encoding="utf-8").splitlines()) if m}
 
+def markdown_outside_fences(markdown):
+    in_fence = False
+    for line in markdown.splitlines():
+        if line.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if not in_fence:
+            yield line
+
 errors = []
 checked = 0
 for name in files:
     source = Path(name)
-    for match in link.finditer(source.read_text(encoding="utf-8")):
+    markdown = "\n".join(markdown_outside_fences(source.read_text(encoding="utf-8")))
+    for match in link.finditer(markdown):
         target = match.group(1).strip().strip("<>")
         if target.startswith(("http://", "https://", "mailto:")):
             continue
@@ -4354,7 +4364,7 @@ awk '
 printf 'JSON and changed-boundary ledger checks: passed; backlog JSON valid, 10 data rows, and 4 columns in every ledger row\n'
 ```
 
-The link/anchor checker reported 136 local targets with all targets present and
+The link/anchor checker reported 157 local targets with all targets present and
 skipped external URLs after syntax recognition. `jq` exited 0, and the ledger
 check exited 0 with 10 data rows and four columns in every row.
 
@@ -5416,7 +5426,9 @@ to fail closed if a documentation correction accidentally adds a live App,
 runner, Docker, Lima, Keychain, launchd, workflow or remote-fetch operation.
 It joins shell continuations, strips assignment/`env`/`command`/`sudo`/`exec`
 prefixes, splits executable shell command chains and examines only each
-executable command token. Command-delegating executables (`xargs`, `find`,
+executable command token. `env` options that consume operands are parsed
+explicitly; `-S`/`--split-string` and unreviewed options fail closed rather
+than discarding their operand. Command-delegating executables (`xargs`, `find`,
 `parallel`, `make` and equivalent reviewed launchers) are rejected in their
 own right, before a delegated `gh`/live command can be hidden in an argument,
 pipeline or generated command. Shell command-string forms (`bash`/`sh` and
@@ -5427,10 +5439,14 @@ token-wrapper stripping or fence certification, including direct, assignment,
 pipeline and nested forms; the scanner does not attempt to model shell
 expansion. Python heredoc bodies are separately parsed with Python's AST:
 literal command arguments are inspected with the same executable-token rules,
-dynamic command arguments require an explicit reviewed
+the reviewed `os`/`subprocess` process-launch surface is classified and
+unresolved command-capable launcher names fail closed, dynamic command
+arguments require an explicit reviewed
 `g01-safe-python-heredoc` marker, and malformed/unmarked command forms fail
-closed. Markdown prose, URLs, comments, scanner source and synthetic fixtures
-are not executable prescriptions:
+closed. Unsupported shell function/brace/case compounds fail closed; only the
+two packet wrapper declarations and their safe `printf` preflight brace are
+recognized structural forms. Markdown prose, URLs, comments, scanner source
+and synthetic fixtures are not executable prescriptions:
 
 ```sh
 set -euo pipefail
@@ -5562,6 +5578,21 @@ def executable_basename(token):
     return token.rsplit("/", 1)[-1]
 
 
+unsupported_shell_compound_words = {
+    "case", "esac", "function", "select", "coproc", "for", "while", "until",
+}
+
+def shell_compound_syntax(tokens):
+    """Reject unsupported compound syntax before token-wrapper stripping."""
+    tokens = list(tokens)
+    if any(token in unsupported_shell_compound_words for token in tokens):
+        return True
+    if len(tokens) >= 2 and tokens[0] in {"go_test_checked()", "go_vet_checked()"} and tokens[1] == "{":
+        return False
+    if tokens[0] == "{":
+        return not (len(tokens) > 1 and tokens[1] == "printf")
+    return any(token.endswith("()") or token.endswith("(){") for token in tokens)
+
 def python_command_string(tokens):
     if not tokens or executable_basename(tokens[0]) not in {"python", "python3"}:
         return False
@@ -5581,6 +5612,8 @@ def python_command_string(tokens):
     return False
 
 
+unsupported_env_wrapper_token = "__g01_unsupported_env_wrapper_option__"
+
 def executable_tokens(tokens):
     tokens = list(tokens)
     while tokens and tokens[0] in {"if", "then", "else", "do", "while", "until", "!"}:
@@ -5594,11 +5627,27 @@ def executable_tokens(tokens):
             if assignment.fullmatch(tokens[0]):
                 tokens.pop(0)
                 continue
-            if wrapper == "env" and tokens[0] in {"-u", "--unset"}:
-                tokens.pop(0)
-                if tokens:
+            if wrapper == "env":
+                option = tokens[0]
+                if (
+                    option in {"-S", "--split-string"}
+                    or option.startswith("-S")
+                    or option.startswith("--split-string=")
+                ):
+                    return [unsupported_env_wrapper_token]
+                if option in {"-u", "--unset"}:
                     tokens.pop(0)
-                continue
+                    if tokens:
+                        tokens.pop(0)
+                    continue
+                if option in {"-i", "--ignore-environment", "-0", "--null"}:
+                    tokens.pop(0)
+                    continue
+                if option == "--":
+                    tokens.pop(0)
+                    break
+                if option.startswith("-"):
+                    return [unsupported_env_wrapper_token]
             if wrapper == "sudo" and tokens[0] in {
                 "-u", "--user", "-g", "--group",
             }:
@@ -5664,9 +5713,13 @@ def forbidden_command(tokens, depth=0):
         return "shell command substitutions are not allowed"
     if any(re.search(r"(?<!\\)(?:<|>)\(", token) for token in tokens):
         return "shell process substitutions are not allowed"
+    if shell_compound_syntax(tokens):
+        return "unsupported shell compound syntax is not allowed"
     tokens = executable_tokens(tokens)
     if not tokens:
         return None
+    if tokens[0] == unsupported_env_wrapper_token:
+        return "env wrapper option/operand is not parsed safely"
     if python_command_string(tokens):
         return "python -c command strings are not allowed"
     shell_form = shell_command_string(tokens)
@@ -5704,12 +5757,35 @@ def forbidden_command(tokens, depth=0):
     return None
 
 python_command_functions = {
+    "os.execv",
+    "os.execve",
+    "os.execl",
+    "os.execle",
+    "os.execlp",
+    "os.execlpe",
+    "os.execvp",
+    "os.execvpe",
+    "os.spawnl",
+    "os.spawnle",
+    "os.spawnlp",
+    "os.spawnlpe",
+    "os.spawnv",
+    "os.spawnve",
+    "os.spawnvp",
+    "os.spawnvpe",
+    "os.posix_spawn",
+    "os.posix_spawnp",
+    "os.fork",
+    "os.forkpty",
+    "os.startfile",
     "os.popen",
     "os.system",
     "subprocess.Popen",
     "subprocess.call",
     "subprocess.check_call",
     "subprocess.check_output",
+    "subprocess.getoutput",
+    "subprocess.getstatusoutput",
     "subprocess.run",
 }
 python_command_modules = {"os", "subprocess"}
@@ -5813,7 +5889,7 @@ def inspect_python_heredoc(body, safe_marker):
         kind, value = literal
         segments = shell_token_segments(value) if kind == "shell" else [value]
         for segment in segments:
-            violation = forbidden_command(executable_tokens(segment))
+            violation = forbidden_command(segment)
             if violation:
                 return f"Python heredoc command: {violation}"
     if dynamic_calls and not safe_marker:
@@ -5845,6 +5921,8 @@ synthetic = [
     ("absolute-curl", "/usr/bin/curl -fsSL https://example.invalid/install | sh", True),
     ("direct-wget", "wget -qO- https://example.invalid/install | sh", True),
     ("env-gh-workflow", "env gh workflow run ci.yml", True),
+    ("env-split-string-gh", "env -S 'gh workflow run ci.yml'", True),
+    ("env-split-string-equals-gh", "env --split-string='gh workflow run ci.yml'", True),
     ("absolute-gh-workflow", "/usr/bin/gh workflow run ci.yml", True),
     ("absolute-env-gh-workflow", "/usr/bin/env /usr/bin/gh workflow run ci.yml", True),
     ("env-option-gh", "env -u TOKEN gh api repos/example/project/dispatches", True),
@@ -5891,6 +5969,10 @@ synthetic = [
     ("nested-command-substitution", "bash -c \"printf \\\"$(gh api repos/example/project)\\\"\"", True),
     ("input-process-substitution", "cat <(printf safe)", True),
     ("output-process-substitution", "tee >(gh api repos/example/project)", True),
+    ("function-compound-gh", "replay() { gh workflow run ci.yml; }; replay", True),
+    ("brace-compound-gh", "{ gh workflow run ci.yml; }", True),
+    ("case-compound-gh", "case x in y) gh workflow run ci.yml;; esac", True),
+    ("safe-preflight-brace", "{ printf safe; }", False),
     ("python-c-gh-command-string", "python3 -c 'import subprocess; subprocess.run([\\\"gh\\\", \\\"api\\\", \\\"x\\\"])'", True),
     ("absolute-python-c-docker-command-string", "/usr/bin/python -c 'import os; os.system(\\\"docker run image:tag true\\\")'", True),
     ("env-python-c-command-string", "env python3 -c 'print(\\\"gh api x\\\")'", True),
@@ -5915,10 +5997,14 @@ for unsafe_heredoc in (
     'import subprocess as sp\nsp.run(["gh", "api", "x"])\n',
     'from subprocess import run\nrun(["gh", "api", "x"])\n',
     'from os import system\nsystem("docker version")\n',
+    'import subprocess\nsubprocess.getoutput("gh workflow run ci.yml")\n',
+    'import subprocess\nsubprocess.getstatusoutput("gh workflow run ci.yml")\n',
+    'import os\nos.execvp("gh", ["gh", "workflow", "run", "ci.yml"])\n',
+    'import synthetic as launcher\nlauncher.getoutput(command)\n',
 ):
     if inspect_python_heredoc(unsafe_heredoc, False) is None:
         raise SystemExit("unsafe Python heredoc was accepted")
-print("forbidden-live-command synthetic probes: passed; direct/wrapped fetcher, every gh invocation including global-flag and absolute forms, every Docker invocation, command-delegating xargs/find/parallel/make forms, shell substitutions/process substitutions, limactl/security/launchctl, eval, AST-inspected safe/unsafe Python heredocs and direct/nested bash/sh -c forms rejected; prose/URLs/comments/scanner source/fixtures ignored")
+print("forbidden-live-command synthetic probes: passed; direct/wrapped fetcher, every gh invocation including global-flag and absolute forms, every Docker invocation, command-delegating xargs/find/parallel/make forms, env split-string/operand forms, unsupported function/brace/case compounds, shell substitutions/process substitutions, limactl/security/launchctl, eval, AST-inspected safe/unsafe Python heredocs including getoutput/getstatusoutput/execvp and unresolved launcher aliases, and direct/nested bash/sh -c forms rejected; prose/URLs/comments/scanner source/fixtures ignored")
 print("forbidden-live-command scan: passed; executable shell prescriptions contain no forbidden live App/runner/Docker/Lima/Keychain/launchd/workflow/fetch command")
 PY
 ```
@@ -9278,8 +9364,8 @@ for number, line in enumerate(lines, start=1):
         continue
     if in_shell and re.search(r"\b(?:/opt/homebrew/bin/)?python3\s+-I\b[^\n]*<<", line):
         headers.append((number, line))
-if len(headers) != 47:
-    raise SystemExit(f"expected 47 executable Python heredocs, observed {len(headers)}")
+if len(headers) != 49:
+    raise SystemExit(f"expected 49 executable Python heredocs, observed {len(headers)}")
 for number, line in headers:
     if "/opt/homebrew/bin/python3 -I" not in line:
         raise SystemExit(f"non-absolute Python interpreter at line {number}")
@@ -9290,7 +9376,7 @@ print(
     "GREEN focused packet regression: passed; vet identity/tag alignment, "
     "GOCACHEPROG/GOAUTH rejection and pins, GIT_NO_REPLACE_OBJECTS=1 binding, "
     "AST heredoc safe/unsafe probes, <(...)/>(...) rejection, absolute "
-    "Python+canonical PATH preflight (47/47), and JSON top-level/subtest "
+    "Python+canonical PATH preflight (49/49), and JSON top-level/subtest "
     "validation; no Go/live child started"
 )
 PY
@@ -9631,3 +9717,204 @@ native macOS isolation claim.
 | 4002895109, source `6c55f5b67035fb1c7ac334984499cfe80d6bb86b` | [discussion 4002895109](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002895109) | Reproduced configured repository `core.fsmonitor` invocation before the guard. Every wrapper-controlled source-tree, porcelain-status and intent-bit Git query now uses `core.fsmonitor=false`, `core.hooksPath=/dev/null`, `GIT_CONFIG_NOSYSTEM=1` and `/dev/null` global/system config. No hostile-code or live qualification is claimed; rollback is packet-only parent restoration. |
 | 4002895114, source `6c55f5b67035fb1c7ac334984499cfe80d6bb86b` | [discussion 4002895114](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002895114) | Reproduced `subprocess as sp`, imported `run`, and imported `system` aliases accepted by the exact parent. The AST audit resolves reviewed aliases/functions and fails closed on unresolved command-capable calls/imports, while preserving the existing dynamic safe-marker rule for resolved calls. Static-only probes ran; no forbidden/live command ran. Rollback is packet-only parent restoration. |
 | 4002895117, source `6c55f5b67035fb1c7ac334984499cfe80d6bb86b` | [discussion 4002895117](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002895117) | Reproduced inherited custom `GOSUMDB`/`GOPROXY` reaching the first child and the old identity using requested `GOTOOLCHAIN` only. The wrapper now requires `GOSUMDB=sum.golang.org` and `GOPROXY=https://proxy.golang.org,direct`, verifies effective `GOVERSION`/trust via bounded `go env`, and binds effective toolchain identity; existing GOCACHEPROG/GOAUTH controls remain. No Go child or live qualification ran. Rollback is packet-only parent restoration. |
+
+### Fresh exact-head Codex P2 corrections at `13b463086a0e7aa710067cafb44dcd9aed118654`
+
+The [exact-head Codex review 5195066650](https://github.com/1XP-AI/gh-runnerd/pull/78#pullrequestreview-5195066650) identified three fresh P2 gaps against immutable parent `13b463086a0e7aa710067cafb44dcd9aed118654`: additional Python process-launch APIs ([4003073122](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003073122)), argument-consuming `env -S` shell-wrapper parsing ([4003073128](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003073128)), and unsupported shell compound/function/brace/case parsing ([4003073136](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003073136)). This packet-only correction preserves all prior exact-head ledgers, TDD evidence, rollback/live gaps, no-secrets/private-path policy and the explicit boundary that trusted same-user execution is not hostile-code isolation.
+
+#### Exact-parent red reproduction
+
+The red probe ran first against the exact immutable parent. It extracts only the
+parent scanner, calls only pure AST/token helpers and uses synthetic command
+strings; no forbidden/live command, Go child, workflow, runner, Docker, Lima,
+Keychain or launchd operation is executed:
+
+```sh
+set -euo pipefail
+export PATH=/opt/homebrew/bin:/usr/bin:/bin
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+# g01-safe-python-heredoc: reviewed exact-parent AST fixture
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import re
+import shlex
+import subprocess
+from pathlib import Path
+
+parent = "13b463086a0e7aa710067cafb44dcd9aed118654"
+packet = subprocess.check_output(
+    ["git", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    text=True,
+)
+scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
+scanner_start = packet.rfind("source = Path(", 0, scanner_anchor)
+scanner_end = packet.index("\nmatches = []", scanner_anchor)
+namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+exec(compile(packet[scanner_start:scanner_end], "<exact-parent-scanner>", "exec"), namespace)
+
+for label, body in (
+    ("subprocess.getoutput", 'import subprocess\nsubprocess.getoutput("gh workflow run ci.yml")'),
+    ("subprocess.getstatusoutput", 'import subprocess\nsubprocess.getstatusoutput("gh workflow run ci.yml")'),
+    ("os.execvp", 'import os\nos.execvp("gh", ["gh", "workflow", "run", "ci.yml"])'),
+    ("unresolved launcher alias", 'import synthetic as launcher\nlauncher.getoutput(command)'),
+):
+    violation = namespace["inspect_python_heredoc"](body, False)
+    if violation is not None:
+        raise SystemExit(f"red setup changed: exact parent already rejects {label}: {violation}")
+    print(f"RED 4003073122: exact parent accepted unresolved command-capable call {label}")
+
+env_s = "env -S 'gh workflow run ci.yml'"
+if any(
+    namespace["forbidden_command"](segment) is not None
+    for segment in namespace["shell_token_segments"](env_s)
+):
+    raise SystemExit("red setup changed: exact parent already rejects env -S")
+print("RED 4003073128: exact parent accepted env -S operand containing gh workflow run ci.yml")
+
+compound = "replay() { gh workflow run ci.yml; }; replay"
+if any(
+    namespace["forbidden_command"](segment) is not None
+    for segment in namespace["shell_token_segments"](compound)
+):
+    raise SystemExit("red setup changed: exact parent already rejects unsupported compound function body")
+print("RED 4003073136: exact parent certified prohibited gh nested in unsupported function/brace compound syntax")
+PY
+```
+
+Recorded exact-parent red output:
+
+```text
+RED 4003073122: exact parent accepted unresolved command-capable call subprocess.getoutput
+RED 4003073122: exact parent accepted unresolved command-capable call subprocess.getstatusoutput
+RED 4003073122: exact parent accepted unresolved command-capable call os.execvp
+RED 4003073122: exact parent accepted unresolved command-capable call unresolved launcher alias
+RED 4003073128: exact parent accepted env -S operand containing gh workflow run ci.yml
+RED 4003073136: exact parent certified prohibited gh nested in unsupported function/brace compound syntax
+```
+
+#### Minimal packet correction and focused green probe
+
+The minimal correction expands the Python command-function set to cover the
+reviewed `os`/`subprocess` process-launch surface, so unresolved aliases with a
+command-capable launcher leaf also fail closed. The shell wrapper parser now
+recognizes only reviewed `env` flags and `-u` operands; `-S`/`--split-string`,
+attached split-string spellings and unreviewed operand-bearing options return a
+fail-closed marker before wrapper stripping. The shell scanner rejects
+unsupported function/brace/case compounds while retaining the packet's two
+reviewed wrapper declarations and safe `printf` preflight brace; Python literal
+arguments use the same raw wrapper path, preserving substitutions,
+process-substitution and AST checks.
+
+The focused green probe below reads only the candidate packet and exercises pure
+AST/token helpers. It verifies the three corrected boundaries, direct/wrapped
+`env` safety, safe reviewed structural forms and existing substitution guards;
+it starts no Go/live child and executes no forbidden command:
+
+```sh
+set -euo pipefail
+export PATH=/opt/homebrew/bin:/usr/bin:/bin
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+# g01-safe-python-heredoc: reviewed focused synthetic scanner argv
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import re
+import shlex
+from pathlib import Path
+
+packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
+scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
+scanner_start = packet.rfind("source = Path(", 0, scanner_anchor)
+scanner_end = packet.index("\nmatches = []", scanner_anchor)
+namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+exec(compile(packet[scanner_start:scanner_end], "<candidate-scanner>", "exec"), namespace)
+inspect = namespace["inspect_python_heredoc"]
+
+for label, body in (
+    ("subprocess.getoutput", 'import subprocess\nsubprocess.getoutput("gh workflow run ci.yml")'),
+    ("subprocess.getstatusoutput", 'import subprocess\nsubprocess.getstatusoutput("gh workflow run ci.yml")'),
+    ("os.execvp", 'import os\nos.execvp("gh", ["gh", "workflow", "run", "ci.yml"])'),
+    ("unresolved launcher alias", 'import synthetic as launcher\nlauncher.getoutput(command)'),
+    ("unresolved imported launcher", 'from synthetic import getstatusoutput\ngetstatusoutput(command)'),
+):
+    violation = inspect(body, False)
+    if violation is None:
+        raise SystemExit(f"Python launcher regression: {label} was accepted")
+for body in (
+    'import subprocess\nsubprocess.getoutput(command)',
+    'import subprocess\nsubprocess.getstatusoutput(command)',
+    'import os\nos.execvp(file, argv)',
+):
+    if inspect(body, True) is not None:
+        raise SystemExit(f"reviewed dynamic launcher marker rejected: {body!r}")
+
+def rejects(command):
+    return any(
+        namespace["forbidden_command"](segment) is not None
+        for segment in namespace["shell_token_segments"](command)
+    )
+
+for label, command in (
+    ("env-split-string", "env -S 'gh workflow run ci.yml'"),
+    ("env-split-string-equals", "env --split-string='gh workflow run ci.yml'"),
+    ("env-split-string-short-attached", "env -Sgh workflow run ci.yml"),
+    ("function-compound", "replay() { gh workflow run ci.yml; }; replay"),
+    ("brace-compound", "{ gh workflow run ci.yml; }"),
+    ("case-compound", "case x in y) gh workflow run ci.yml;; esac"),
+):
+    if not rejects(command):
+        raise SystemExit(f"shell scanner regression: {label} was accepted")
+for label, command in (
+    ("direct-env-gh", "env gh workflow run ci.yml"),
+    ("wrapped-env-gh", "command env gh workflow run ci.yml"),
+    ("unset-env-gh", "env -u TOKEN gh workflow run ci.yml"),
+    ("command-env-unset-gh", "command env -u TOKEN gh workflow run ci.yml"),
+):
+    if not rejects(command):
+        raise SystemExit(f"existing env safety regression: {label} was accepted")
+for label, command in (
+    ("safe-direct", "printf safe"),
+    ("safe-env-assignment", "env GOTOOLCHAIN=go1.26.8 printf safe"),
+    ("safe-preflight-brace", "{ printf safe; }"),
+    ("safe-reviewed-function-declaration", "go_test_checked() {"),
+):
+    if rejects(command):
+        raise SystemExit(f"shell scanner regression: {label} was rejected")
+for label, command in (
+    ("dollar-substitution", "printf \\\"$(gh api repos/example/project)\\\""),
+    ("process-substitution", "cat <(printf safe)"),
+):
+    if not rejects(command):
+        raise SystemExit(f"existing substitution regression: {label} was accepted")
+print("GREEN focused scanner probe: passed; subprocess.getoutput/getstatusoutput, os.execvp, unresolved imported/qualified launcher names, env -S forms and function/brace/case compounds rejected; direct/wrapped/unset env safety and substitution/process-substitution guards retained; safe printf, reviewed preflight brace/function retained; no Go/live child started")
+PY
+```
+
+Recorded focused green output:
+
+```text
+GREEN focused scanner probe: passed; subprocess.getoutput/getstatusoutput, os.execvp, unresolved imported/qualified launcher names, env -S forms and function/brace/case compounds rejected; direct/wrapped/unset env safety and substitution/process-substitution guards retained; safe printf, reviewed preflight brace/function retained; no Go/live child started
+```
+
+The full existing forbidden-live-command audit was rerun after the focused
+probe and retained its direct/wrapped fetcher, gh/Docker, delegation,
+substitution, process-substitution and AST boundaries; its updated synthetic
+output includes the three new Python APIs, `env` split-string/operand forms and
+unsupported function/brace/case compounds. No Go test/list/body command, live
+App/runner/workflow operation, credential access, Docker/Lima/Keychain/launchd
+operation or destructive cleanup ran.
+
+Rollback is narrow and packet-only: restore only
+`docs/evidence/g01-recovery-packet.md` to immutable parent
+`13b463086a0e7aa710067cafb44dcd9aed118654`; preserve independent driver,
+review and manual-runner state, and do not force-kill, prune or replay any live
+resource. The correction makes no hostile-code, native macOS isolation,
+successful workflow, runner qualification or live cleanup claim; exact-head
+Codex/CI review and all previously listed authorization gates remain open.
+
+#### Exact review URL ledger and dispositions
+
+| Finding and immutable source | Exact review URL | Disposition and rollback evidence |
+|---|---|---|
+| 4003073122, source `13b463086a0e7aa710067cafb44dcd9aed118654` | [discussion 4003073122](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003073122) | Reproduced the exact parent's acceptance of `subprocess.getoutput`, `subprocess.getstatusoutput`, `os.execvp` and an unresolved launcher alias. The packet scanner now classifies the reviewed process-launch surface and fails closed for unresolved command-capable launcher leaves while preserving the reviewed dynamic safe-marker path. Static-only probes ran; no forbidden/live command ran. Rollback is packet-only parent restoration. |
+| 4003073128, source `13b463086a0e7aa710067cafb44dcd9aed118654` | [discussion 4003073128](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003073128) | Reproduced `env -S 'gh workflow run ci.yml'` passing as a harmless token. `env` now parses reviewed operand-consuming options, rejects split-string and unreviewed options before wrapper stripping, and preserves direct/wrapped/unset `env` rejection. No env or forbidden command executed. Rollback is packet-only parent restoration. |
+| 4003073136, source `13b463086a0e7aa710067cafb44dcd9aed118654` | [discussion 4003073136](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003073136) | Reproduced prohibited `gh` nested in `replay() { gh workflow run ci.yml; }; replay` being certified by the exact parent. Unsupported function/brace/case compounds now fail closed, while the two reviewed packet wrapper declarations, safe `printf` preflight brace, shell substitutions, process substitutions and AST checks remain covered. No live operation ran. Rollback is packet-only parent restoration. |
