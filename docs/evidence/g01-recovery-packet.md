@@ -308,8 +308,11 @@ missing checksum, missing source or verification failure; it does not print
 module paths or cache locations.
 Every Go child is launched through one wrapper-controlled subprocess helper with
 an independent 300-second deadline covering toolchain selection, toolchain
-downloads, compilation, `go env`, `go list` metadata and test execution; the
-Go `-timeout` flag remains a separate in-process test-body bound.
+downloads, compilation, `go env`, `go list` metadata and test execution. The
+helper starts a new session/process group, sends timeout termination to the full
+group, escalates to group kill after a bounded grace period, and waits for the
+direct child to be reaped before refusing the result; the Go `-timeout` flag
+remains a separate in-process test-body bound.
 The execution command adds a wrapper-controlled `-json` stream and fails closed
 on malformed output, non-empty stderr or any Go test `Action` of `skip`,
 including skipped subtests; it also requires a top-level `run` and `pass` event
@@ -337,6 +340,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 from decimal import Decimal
@@ -754,22 +758,59 @@ for name, expected in reviewed_target_environment.items():
         )
 
 go_child_deadline_seconds = 300
+go_child_termination_grace_seconds = 5
+
+
+def terminate_go_child_group(process):
+    """Terminate and reap a timed-out Go child session/process group."""
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.communicate(timeout=go_child_termination_grace_seconds)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.communicate()
+    process.wait()
 
 
 def run_go_child(go_command, **kwargs):
     if not go_command or go_command[0] != "go":
         raise SystemExit(f"{label}: non-Go command passed to Go child runner")
+    check = kwargs.pop("check", False)
+    if kwargs.pop("start_new_session", False):
+        raise SystemExit(f"{label}: Go child session ownership is wrapper-controlled")
+    if kwargs.pop("capture_output", False):
+        if "stdout" in kwargs or "stderr" in kwargs:
+            raise SystemExit(f"{label}: duplicate Go child output capture controls")
+        kwargs["stdout"] = subprocess.PIPE
+        kwargs["stderr"] = subprocess.PIPE
     try:
-        return subprocess.run(
+        process = subprocess.Popen(
             go_command,
-            timeout=go_child_deadline_seconds,
+            start_new_session=True,
             **kwargs,
         )
-    except subprocess.TimeoutExpired:
-        raise SystemExit(
-            f"{label}: Go child exceeded independent "
-            f"{go_child_deadline_seconds}s deadline"
-        )
+        try:
+            stdout, stderr = process.communicate(timeout=go_child_deadline_seconds)
+        except subprocess.TimeoutExpired:
+            terminate_go_child_group(process)
+            raise SystemExit(
+                f"{label}: Go child exceeded independent "
+                f"{go_child_deadline_seconds}s deadline; process group terminated and reaped"
+            )
+        result = subprocess.CompletedProcess(go_command, process.returncode, stdout, stderr)
+        if check and result.returncode:
+            raise subprocess.CalledProcessError(
+                result.returncode, go_command, output=stdout, stderr=stderr
+            )
+        return result
+    except SystemExit:
+        raise
 
 effective_goflags = run_go_child(
     ["go", "env", "GOFLAGS"],
@@ -1042,7 +1083,7 @@ def package_initialization_guard():
         if not source_path.is_file():
             raise SystemExit(f"{label}: package source file was missing")
         source = source_path.read_text(encoding="utf-8")
-        if re.search(r"(?m)^\s*func\s+init\s*\(", source):
+        if source_has_init_declaration(source):
             raise SystemExit(
                 f"{label}: active package init requires a new reviewed guard"
             )
@@ -1339,13 +1380,6 @@ reject_unsupported_regexp_syntax(original_run_pattern, "-run")
 for skip_pattern in skip_patterns:
     reject_unsupported_regexp_syntax(skip_pattern, "-skip")
 
-test_source_paths = package_initialization_guard()
-
-# The package tree/status gate above must complete before this broader source
-# scan opens any candidate *_test.go path. In particular, an ignored FIFO or
-# other special file is rejected by git status before this glob/read path.
-source_fuzz_guard()
-
 def skip_source_ignored(source, position):
     while position < len(source):
         if source[position].isspace():
@@ -1363,6 +1397,58 @@ def skip_source_ignored(source, position):
             continue
         break
     return position
+
+
+def source_has_init_declaration(source):
+    """Recognize top-level `func init()` with comments between Go tokens."""
+    position = 0
+    brace_depth = 0
+    while position < len(source):
+        ignored = skip_source_ignored(source, position)
+        if ignored != position:
+            position = ignored
+            continue
+        if source[position] in ('"', "'", "`"):
+            position = skip_source_literal(source, position)
+            continue
+        if source[position] == "{":
+            brace_depth += 1
+            position += 1
+            continue
+        if source[position] == "}":
+            if brace_depth == 0:
+                raise SystemExit(f"{label}: unbalanced Go source braces")
+            brace_depth -= 1
+            position += 1
+            continue
+        if brace_depth != 0 or not source.startswith("func", position):
+            position += 1
+            continue
+        before = source[position - 1] if position else " "
+        after = source[position + 4] if position + 4 < len(source) else " "
+        if (before.isalnum() or before == "_") or (after.isalnum() or after == "_"):
+            position += 1
+            continue
+        cursor = skip_source_ignored(source, position + 4)
+        if cursor >= len(source) or source[cursor] == "(":
+            position += 4
+            continue
+        if not source.startswith("init", cursor):
+            position += 4
+            continue
+        init_after = cursor + 4
+        if init_after < len(source) and (
+            source[init_after].isalnum() or source[init_after] == "_"
+        ):
+            position += 4
+            continue
+        cursor = skip_source_ignored(source, init_after)
+        if cursor < len(source) and source[cursor] == "(":
+            return True
+        position += 4
+    if brace_depth:
+        raise SystemExit(f"{label}: unbalanced Go source braces")
+    return False
 
 
 def skip_source_literal(source, position):
@@ -1461,6 +1547,12 @@ def go_compatible_regexp(pattern, phase):
     except re.error as error:
         raise SystemExit(f"{label}: {phase} has invalid Go-compatible regexp: {error}")
 
+
+# The package tree/status gate above must complete before this broader source
+# scan opens any candidate *_test.go path. In particular, an ignored FIFO or
+# other special file is rejected by git status before this glob/read path.
+test_source_paths = package_initialization_guard()
+source_fuzz_guard()
 
 all_test_names = []
 for source_path in test_source_paths:
@@ -2400,7 +2492,9 @@ initialization paths. Every Go child receives
 external or auto-discovered workspace cannot alter metadata or test selection;
 every Go child also receives the reviewed `GOEXPERIMENT=none` binding and an
 independent 300-second subprocess deadline covering toolchain selection,
-downloads, compilation, metadata and test execution.
+downloads, compilation, metadata and test execution. That helper owns a fresh
+session/process group and, on timeout, terminates the group, escalates after a
+bounded grace period and reaps the direct child before refusing the result.
 Git source status/tree queries are read-only. The probe also
 feeds synthetic skipped and output-only/no-`run`/`pass` streams to the
 execution-stream guard without starting a test body, and includes a synthetic
@@ -5010,7 +5104,10 @@ to fail closed if a documentation correction accidentally adds a live App,
 runner, Docker, Lima, Keychain, launchd, workflow or remote-fetch operation.
 It joins shell continuations, strips assignment/`env`/`command`/`sudo`/`exec`
 prefixes, splits executable shell command chains and examines only each
-executable command token. Shell command-string forms (`bash`/`sh` and
+executable command token. Command-delegating executables (`xargs`, `find`,
+`parallel`, `make` and equivalent reviewed launchers) are rejected in their
+own right, before a delegated `gh`/live command can be hidden in an argument,
+pipeline or generated command. Shell command-string forms (`bash`/`sh` and
 equivalent absolute, optioned or `busybox` forms with `-c`) are recursively
 inspected and rejected before any nested payload could execute. Markdown prose,
 URLs, comments, Python heredoc bodies, scanner source and synthetic fixtures
@@ -5205,6 +5302,11 @@ def forbidden_command(tokens, depth=0):
     executable = executable_basename(tokens[0])
     if executable == "eval":
         return "eval-wrapped command strings are not allowed"
+    if executable in {
+        "xargs", "find", "parallel", "gparallel", "make", "gmake",
+        "just", "task", "at", "batch", "watch", "entr", "chronic",
+    }:
+        return f"{executable} command delegation is not allowed"
     if executable in {"curl", "wget", "limactl", "security", "launchctl"}:
         return executable
     if executable == "docker" and len(tokens) > 1 and tokens[1] in {
@@ -5241,6 +5343,12 @@ synthetic = [
     ("absolute-command-docker", "/usr/bin/command /usr/local/bin/docker run --rm image:tag true", True),
     ("command-option-docker", "command -p docker run --rm image:tag true", True),
     ("chained-command", "printf ok; env gh workflow run ci.yml", True),
+    ("direct-xargs", "xargs -0 -n1 gh api repos/example/project/dispatches", True),
+    ("pipeline-xargs", "printf gh | xargs -n1 gh api repos/example/project/dispatches", True),
+    ("find-exec", "find . -type f -exec gh api repos/example/project/dispatches {} +", True),
+    ("parallel-gh", "parallel gh api repos/example/project/dispatches ::: one", True),
+    ("make-delegation", "make -f /synthetic/Makefile gh", True),
+    ("nested-xargs", "bash -c 'printf gh | xargs -n1 gh api repos/example/project/dispatches'", True),
     ("limactl", "limactl shell default true", True),
     ("absolute-limactl", "/opt/homebrew/bin/limactl shell default true", True),
     ("security", "security find-identity -v", True),
@@ -5277,16 +5385,17 @@ for label, fixture, expected in synthetic:
     )
     if observed != expected:
         raise SystemExit(f"synthetic forbidden-command probe failed: {label}")
-print("forbidden-live-command synthetic probes: passed; direct/wrapped fetcher, every gh invocation including global-flag and absolute forms, docker, limactl/security/launchctl, eval, python/python3 -c and direct/nested bash/sh -c forms rejected; prose/URLs/comments/scanner source/fixtures ignored")
+print("forbidden-live-command synthetic probes: passed; direct/wrapped fetcher, every gh invocation including global-flag and absolute forms, command-delegating xargs/find/parallel/make forms, docker, limactl/security/launchctl, eval, python/python3 -c and direct/nested bash/sh -c forms rejected; prose/URLs/comments/scanner source/fixtures ignored")
 print("forbidden-live-command scan: passed; executable shell prescriptions contain no forbidden live App/runner/Docker/Lima/Keychain/launchd/workflow/fetch command")
 PY
 ```
 
 The forbidden-live-command scan and its static synthetic probes exited 0; all
-direct and wrapped forbidden forms were rejected without execution, while
-prose, URLs, comments, scanner source and fixtures were ignored. No live
-operation, workflow replay, credential access or destructive cleanup command
-was introduced.
+direct, wrapped and command-delegating forms were rejected without execution,
+including xargs, find, parallel and make forms that could otherwise hide a
+downstream `gh`/live command, while prose, URLs, comments, scanner source and
+fixtures were ignored. No live operation, workflow replay, credential access
+or destructive cleanup command was introduced.
 
 No check is claimed against an unrecorded SHA. The staged correction diff is
 distinct from the cumulative PR #78 diff; the cumulative history still
@@ -6495,33 +6604,61 @@ go_child_calls = [
 if len(go_child_calls) != 5:
     raise SystemExit(f"deadline regression: expected 5 Go child helper calls, observed {len(go_child_calls)}")
 helper = functions["run_go_child"]
+if "terminate_go_child_group" not in functions:
+    raise SystemExit("deadline regression: process-group terminator missing")
 timeout_calls = [
     node
     for node in ast.walk(helper)
     if isinstance(node, ast.Call)
     and isinstance(node.func, ast.Attribute)
-    and node.func.attr == "run"
+    and node.func.attr == "communicate"
+    and any(
+        keyword.arg == "timeout"
+        and isinstance(keyword.value, ast.Name)
+        and keyword.value.id == "go_child_deadline_seconds"
+        for keyword in node.keywords
+    )
 ]
-if len(timeout_calls) != 1 or not any(
-    keyword.arg == "timeout"
-    and isinstance(keyword.value, ast.Name)
-    and keyword.value.id == "go_child_deadline_seconds"
-    for keyword in timeout_calls[0].keywords
-):
+if len(timeout_calls) != 1:
     raise SystemExit("deadline regression: Go helper does not pass the independent timeout")
+if "start_new_session=True" not in ast.unparse(helper):
+    raise SystemExit("deadline regression: Go helper does not own a new session")
+terminator = functions["terminate_go_child_group"]
+if not any(
+    isinstance(node, ast.Call)
+    and isinstance(node.func, ast.Attribute)
+    and node.func.attr == "killpg"
+    for node in ast.walk(terminator)
+):
+    raise SystemExit("deadline regression: timeout terminator does not kill the process group")
 helper_namespace = {
+    "os": os,
+    "signal": __import__("signal"),
     "subprocess": subprocess,
     "label": "deadline-probe",
     "go_child_deadline_seconds": 300,
+    "go_child_termination_grace_seconds": 5,
 }
-module = ast.Module(body=[helper], type_ignores=[])
+module = ast.Module(body=[terminator, helper], type_ignores=[])
 exec(compile(module, "<go-child-helper>", "exec"), helper_namespace)
-real_run = subprocess.run
+real_popen = subprocess.Popen
 observed_timeout = []
+session_values = []
+class TimeoutPopen:
+    pid = 99999999
+    returncode = -15
+    def communicate(self, *args, **kwargs):
+        if "timeout" in kwargs:
+            observed_timeout.append(kwargs["timeout"])
+        if kwargs:
+            raise subprocess.TimeoutExpired(["go", "env", "GOFLAGS"], kwargs["timeout"])
+        return "", ""
+    def wait(self):
+        return self.returncode
 def timeout_probe(*args, **kwargs):
-    observed_timeout.append(kwargs.get("timeout"))
-    raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
-subprocess.run = timeout_probe
+    session_values.append(kwargs.get("start_new_session"))
+    return TimeoutPopen()
+subprocess.Popen = timeout_probe
 run_go_child = helper_namespace["run_go_child"]
 try:
     try:
@@ -6535,9 +6672,11 @@ try:
     else:
         raise SystemExit("deadline regression: timeout was not converted to refusal")
 finally:
-    subprocess.run = real_run
-if observed_timeout != [300]:
+    subprocess.Popen = real_popen
+if observed_timeout != [300, 5]:
     raise SystemExit(f"deadline regression: observed timeout {observed_timeout}")
+if session_values != [True]:
+    raise SystemExit(f"deadline regression: observed session ownership {session_values}")
 
 record_builds = [
     line.split()[5]
@@ -7452,7 +7591,418 @@ the only current head/remote assertion. The packet's extracted static audits
 then provide the corresponding candidate-worktree counts and link/JSON/diff
 results.
 
+### Fresh exact-head P2 corrections at `5297b3c3b05afedf97723b7b58806cdd5519a2b6`
+
+The three fresh exact-head Codex P2 findings below were observed against the
+immutable packet parent `5297b3c3b05afedf97723b7b58806cdd5519a2b6`, with all
+three review anchors retaining that same source SHA: [delegation/xargs
+scanner](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002184738),
+[process-group timeout/reap](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002184745),
+and [commented init
+guard](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002184748).
+Each red probe below extracts only the parent packet blob with `git show`; the
+green probe reads only the candidate packet. The candidate head is not claimed
+until the post-push exact-head template is run and its SHA is reported in the
+worker handoff.
+
+The packet-only correction does not change any of the 28 current `go_test_checked`
+prescriptions. It changes only the reusable audit contract and its evidence:
+command-delegating forms now fail closed before any delegated `gh`/live command,
+every Go child owns a fresh session/process group and is terminated/reaped as a
+unit on timeout, and the package-init guard tokenizes ignored whitespace and
+consecutive comments between valid Go declaration tokens. No Go child, `go list`,
+test body, credential, private path, live GitHub/App/runner/workflow, Docker,
+Lima, Keychain or launchd operation is authorized or claimed here.
+
+#### Exact-parent red reproduction
+
+The following source-extracted red probe was run before this correction. It
+demonstrates the three gaps without starting a Go child or executing any
+command-launching fixture:
+
+```sh
+set -euo pipefail
+python3 -I - <<'PY'
+import ast
+import re
+import shlex
+import subprocess
+from pathlib import Path
+
+parent = "5297b3c3b05afedf97723b7b58806cdd5519a2b6"
+packet = subprocess.check_output(
+    ["git", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    text=True,
+)
+
+scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
+scanner_start = packet.rfind("source = Path(", 0, scanner_anchor)
+scanner_end = packet.index("\nmatches = []", scanner_anchor)
+scanner_namespace = {"Path": Path, "re": re, "shlex": shlex}
+exec(
+    compile(packet[scanner_start:scanner_end], "<parent-scanner>", "exec"),
+    scanner_namespace,
+)
+
+def scanner_result(command):
+    forbidden_command = scanner_namespace["forbidden_command"]
+    executable_tokens = scanner_namespace["executable_tokens"]
+    shell_token_segments = scanner_namespace["shell_token_segments"]
+    return [
+        forbidden_command(executable_tokens(segment))
+        for segment in shell_token_segments(command)
+    ]
+
+delegation_forms = {
+    "xargs-direct": "xargs -0 -n1 gh api repos/example/project/dispatches",
+    "xargs-pipeline": "printf gh | xargs -n1 gh api repos/example/project/dispatches",
+    "find-exec": "find . -type f -exec gh api repos/example/project/dispatches {} +",
+    "parallel": "parallel gh api repos/example/project/dispatches ::: one",
+}
+accepted = [
+    name for name, command in delegation_forms.items()
+    if not any(value is not None for value in scanner_result(command))
+]
+if not accepted:
+    raise SystemExit("red setup changed: parent already rejected delegation forms")
+print(
+    f"RED 4002184738: exact parent {parent} accepted {accepted!r} before any "
+    "delegated gh/live command could be classified"
+)
+
+wrapper_start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
+wrapper_end = packet.index("\nPY\n}", wrapper_start)
+wrapper = packet[wrapper_start:wrapper_end]
+ast.parse(wrapper, filename="<parent-wrapper>")
+if any(
+    marker in wrapper
+    for marker in ("start_new_session", "killpg", "terminate_go_child_group", "Popen")
+):
+    raise SystemExit("red setup changed: parent already has process-group timeout controls")
+print(
+    f"RED 4002184745: exact parent {parent} uses bare subprocess.run timeout "
+    "without a new session/process-group termination and reap"
+)
+
+commented_init = "package p\nfunc /* before */ init /* between */ () {}\n"
+legacy_guard = re.compile(r"(?m)^\s*func\s+init\s*\(")
+if legacy_guard.search(commented_init) is not None:
+    raise SystemExit("red setup changed: parent regex recognizes commented init")
+print(
+    f"RED 4002184748: exact parent {parent} missed valid func/init declaration "
+    "separated by whitespace and consecutive comments"
+)
+PY
+```
+
+Recorded red output:
+
+```text
+RED 4002184738: exact parent 5297b3c3b05afedf97723b7b58806cdd5519a2b6 accepted ['xargs-direct', 'xargs-pipeline', 'find-exec', 'parallel'] before any delegated gh/live command could be classified
+RED 4002184745: exact parent 5297b3c3b05afedf97723b7b58806cdd5519a2b6 uses bare subprocess.run timeout without a new session/process-group termination and reap
+RED 4002184748: exact parent 5297b3c3b05afedf97723b7b58806cdd5519a2b6 missed valid func/init declaration separated by whitespace and consecutive comments
+```
+
+#### Minimal correction and focused boundary/failure probes
+
+The minimal scanner correction rejects command-delegating executables in their
+own right, including direct, pipeline, wrapper-prefixed and nested forms. It
+does not attempt to model generated argv or shell expansion, and therefore
+retains a safe direct `printf` boundary while failing closed on `xargs`,
+`find`, `parallel`, `make` and equivalent launchers. The wrapper correction
+uses `start_new_session=True`, converts the existing captured-output contract
+to `Popen`, applies the independent 300-second deadline to `communicate`,
+terminates the whole process group with SIGTERM, escalates to SIGKILL after a
+five-second grace period, and waits/reaps the direct child before refusing the
+result. The package-init correction lexically skips whitespace and consecutive
+line/block comments, ignores literals, tracks top-level braces and recognizes
+only a valid top-level `func init()` declaration; it does not execute source or
+run `go test -list`.
+
+The focused candidate probe below checks all three boundaries, includes a
+synthetic descendant timeout tree, and verifies that the tree is terminated and
+reaped without starting a real Go child. It also retains the exact 28
+prescription count and a safe scanner boundary:
+
+```sh
+set -euo pipefail
+python3 -I - <<'PY'
+import ast
+import os
+import re
+import shlex
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+parent = "5297b3c3b05afedf97723b7b58806cdd5519a2b6"
+packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
+if parent not in packet:
+    raise SystemExit("exact-parent scope marker missing")
+
+wrapper_start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
+wrapper_end = packet.index("\nPY\n}", wrapper_start)
+wrapper = packet[wrapper_start:wrapper_end]
+tree = ast.parse(wrapper, filename="<candidate-wrapper>")
+functions = {
+    node.name: node
+    for node in tree.body
+    if isinstance(node, ast.FunctionDef)
+}
+required = {
+    "terminate_go_child_group",
+    "run_go_child",
+    "skip_source_ignored",
+    "skip_source_literal",
+    "source_has_init_declaration",
+}
+if required - functions.keys():
+    raise SystemExit(
+        f"candidate helper set is incomplete: {sorted(required - functions.keys())}"
+    )
+helper_text = ast.unparse(functions["run_go_child"])
+if "start_new_session=True" not in helper_text:
+    raise SystemExit("process-group guard does not own a new session")
+if not any(
+    isinstance(node, ast.Call)
+    and isinstance(node.func, ast.Attribute)
+    and node.func.attr == "killpg"
+    for node in ast.walk(functions["terminate_go_child_group"])
+):
+    raise SystemExit("process-group guard does not terminate the full group")
+if not any(
+    isinstance(node, ast.Call)
+    and isinstance(node.func, ast.Attribute)
+    and node.func.attr == "communicate"
+    and any(
+        keyword.arg == "timeout"
+        and isinstance(keyword.value, ast.Name)
+        and keyword.value.id == "go_child_deadline_seconds"
+        for keyword in node.keywords
+    )
+    for node in ast.walk(functions["run_go_child"])
+):
+    raise SystemExit("process-group guard does not apply the independent Go deadline")
+
+# Exercise only lexical init helpers; no package metadata or Go child runs.
+init_helpers = [
+    functions[name]
+    for name in (
+        "skip_source_ignored",
+        "skip_source_literal",
+        "source_has_init_declaration",
+    )
+]
+init_namespace = {"label": "init-probe"}
+exec(
+    compile(ast.Module(body=init_helpers, type_ignores=[]), "<init-helpers>", "exec"),
+    init_namespace,
+)
+has_init = init_namespace["source_has_init_declaration"]
+for source in (
+    "package p\nfunc /* first */ init /* second */ () {}\n",
+    "package p\nfunc\n// one\n/* two */\ninit() {}\n",
+    "package p\n/* before */ func /* one */ // two\n init /* three */ ( ) {}\n",
+):
+    if not has_init(source):
+        raise SystemExit(f"valid commented init was missed: {source!r}")
+for source in (
+    "package p\n// func init() {}\n",
+    "package p\nvar text = `func /* hidden */ init() {}`\n",
+    "package p\nfunc initx() {}\n",
+    "package p\nfunc (T) init() {}\n",
+):
+    if has_init(source):
+        raise SystemExit(f"non-init source was rejected: {source!r}")
+
+# Exercise only the pure command scanner; none of these strings runs.
+scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
+scanner_start = packet.rfind("source = Path(", 0, scanner_anchor)
+scanner_end = packet.index("\nmatches = []", scanner_anchor)
+scanner_namespace = {"Path": Path, "re": re, "shlex": shlex}
+exec(
+    compile(packet[scanner_start:scanner_end], "<candidate-scanner>", "exec"),
+    scanner_namespace,
+)
+
+def scanner_result(command):
+    forbidden_command = scanner_namespace["forbidden_command"]
+    executable_tokens = scanner_namespace["executable_tokens"]
+    shell_token_segments = scanner_namespace["shell_token_segments"]
+    return [
+        forbidden_command(executable_tokens(segment))
+        for segment in shell_token_segments(command)
+    ]
+
+delegation_cases = (
+    "xargs -0 -n1 gh api repos/example/project/dispatches",
+    "printf gh | xargs -n1 gh api repos/example/project/dispatches",
+    "env -i xargs -n1 gh api repos/example/project/dispatches",
+    "find . -type f -exec gh api repos/example/project/dispatches {} +",
+    "parallel gh api repos/example/project/dispatches ::: one",
+    "make -f /synthetic/Makefile gh",
+    "bash -c 'printf gh | xargs -n1 gh api repos/example/project/dispatches'",
+    "bash -c 'find . -exec gh api repos/example/project/dispatches {} +'",
+    "bash -c 'parallel gh api repos/example/project/dispatches ::: one'",
+)
+for command in delegation_cases:
+    if not any(value is not None for value in scanner_result(command)):
+        raise SystemExit(f"delegation scanner accepted unsafe form: {command}")
+if any(value is not None for value in scanner_result("printf safe")):
+    raise SystemExit("delegation scanner rejected safe direct printf")
+
+# Alias logical Go argv to a synthetic Python process tree. The wrapper's
+# Popen receives Go argv, but the real process started here is only Python.
+synthetic_tree = '''
+import os, signal, sys, time
+
+def stop_child(_signum, _frame):
+    os._exit(0)
+
+child = os.fork()
+if child == 0:
+    signal.signal(signal.SIGTERM, stop_child)
+    signal.signal(signal.SIGINT, stop_child)
+    with open(sys.argv[1], 'w', encoding='ascii') as marker:
+        marker.write(str(os.getpid()))
+        marker.flush()
+    while True:
+        time.sleep(1)
+
+def stop_parent(_signum, _frame):
+    try:
+        os.waitpid(child, 0)
+    except ChildProcessError:
+        pass
+    os._exit(0)
+
+signal.signal(signal.SIGTERM, stop_parent)
+signal.signal(signal.SIGINT, stop_parent)
+while True:
+    time.sleep(1)
+'''
+process_functions = ast.Module(
+    body=[functions["terminate_go_child_group"], functions["run_go_child"]],
+    type_ignores=[],
+)
+with tempfile.TemporaryDirectory() as directory:
+    marker = Path(directory) / "child.pid"
+    real_popen = subprocess.Popen
+    actual_launches = []
+    active_process = []
+
+    class GoAliasPopen:
+        def __init__(self, command, **kwargs):
+            if not command or command[0] != "go":
+                raise AssertionError("synthetic helper received a non-Go command")
+            if kwargs.get("start_new_session") is not True:
+                raise AssertionError("synthetic helper did not own a new session")
+            actual = [sys.executable, "-I", "-c", synthetic_tree, str(marker)]
+            actual_launches.append(actual)
+            self._process = real_popen(actual, **kwargs)
+            active_process.append(self._process)
+            self.pid = self._process.pid
+
+        @property
+        def returncode(self):
+            return self._process.returncode
+
+        def communicate(self, *args, **kwargs):
+            return self._process.communicate(*args, **kwargs)
+
+        def wait(self, *args, **kwargs):
+            return self._process.wait(*args, **kwargs)
+
+        def poll(self):
+            return self._process.poll()
+
+    subprocess.Popen = GoAliasPopen
+    helper_namespace = {
+        "os": os,
+        "signal": signal,
+        "subprocess": subprocess,
+        "label": "process-group-probe",
+        "go_child_deadline_seconds": 0.2,
+        "go_child_termination_grace_seconds": 1,
+    }
+    try:
+        exec(
+            compile(process_functions, "<process-group-helper>", "exec"),
+            helper_namespace,
+        )
+        try:
+            run_go_child = helper_namespace["run_go_child"]
+            run_go_child(
+                ["go", "env", "GOFLAGS"], cwd=".", env={}, text=True,
+                capture_output=True, check=False,
+            )
+        except SystemExit as error:
+            if "process group terminated and reaped" not in str(error):
+                raise SystemExit(f"wrong timeout refusal: {error}")
+        else:
+            raise SystemExit("synthetic timeout tree unexpectedly completed")
+    finally:
+        subprocess.Popen = real_popen
+        for process in active_process:
+            if process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+    if not actual_launches or any(command[0] == "go" for command in actual_launches):
+        raise SystemExit("synthetic probe started a real Go child")
+    if not marker.is_file():
+        raise SystemExit("synthetic descendant did not publish a pid")
+    child_pid = int(marker.read_text(encoding="ascii"))
+    for _ in range(40):
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        raise SystemExit("synthetic descendant remained alive after group termination")
+
+prescriptions = [
+    line for line in packet.splitlines()
+    if line.startswith("go_test_checked ")
+]
+if len(prescriptions) != 28:
+    raise SystemExit(f"current packet prescription count changed: {len(prescriptions)}")
+print(
+    "GREEN fresh P2 regression: passed; direct/pipeline/env/nested xargs and "
+    "find/parallel/make delegation forms rejected while printf remained safe; "
+    "synthetic descendant timeout terminated/reaped its process group without "
+    f"a real Go child; whitespace/comment-separated init declarations detected "
+    f"with unsafe boundaries rejected; {len(prescriptions)} prescriptions retained"
+)
+PY
+```
+
+Recorded focused output:
+
+```text
+GREEN fresh P2 regression: passed; direct/pipeline/env/nested xargs and find/parallel/make delegation forms rejected while printf remained safe; synthetic descendant timeout terminated/reaped its process group without a real Go child; whitespace/comment-separated init declarations detected with unsafe boundaries rejected; 28 prescriptions retained
+```
+
+#### Exact review URL ledger and dispositions
+
+| Finding and immutable source | Exact review URL | Disposition and rollback evidence |
+|---|---|---|
+| 4002184738, source `5297b3c3b05afedf97723b7b58806cdd5519a2b6` | [discussion 4002184738](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002184738) | Reproduced the direct/pipeline/nested delegation gap; scanner now rejects xargs, find, parallel, make and equivalent launchers before any delegated `gh`/live command. Rollback is packet-only: remove this correction commit or restore only `docs/evidence/g01-recovery-packet.md` to the immutable parent; preserve unrelated driver/review files and manual runners. |
+| 4002184745, source `5297b3c3b05afedf97723b7b58806cdd5519a2b6` | [discussion 4002184745](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002184745) | Reproduced the descendant timeout gap; the bounded Go-child helper now owns a new session/process group, terminates/escalates the full group and waits for the direct child before refusing. The synthetic timeout tree terminated/reaped without a Go child; rollback is the same packet-only parent restoration, with no live cleanup or force-kill claimed. |
+| 4002184748, source `5297b3c3b05afedf97723b7b58806cdd5519a2b6` | [discussion 4002184748](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002184748) | Reproduced the commented `func init` gap; lexical source scanning now consumes whitespace and consecutive line/block comments and detects only valid top-level init declarations, with comments/strings/receiver/name boundaries rejected safely. Rollback is packet-only parent restoration; no Go metadata/list/test execution or live state changed. |
+
+The three corrections are offline/static packet evidence only. The explicit live
+G01 gaps, manual-runner preservation, credential gates, trusted native-runtime
+gate and post-push exact-head Codex/CI gates remain unresolved and unchanged.
+
 ### Stable anchors for ledger-only roots
+
 
 The detailed ledger immediately below carries the immutable source and
 discussion URL for each row. These per-root headings make the current and
@@ -7629,9 +8179,33 @@ and existing paths without printing them, then runs bounded `go mod verify`;
 download, metadata and verification failures fail closed. No live or Go child
 was started by the focused probe.
 
+#### Root 4002184738: command-delegating live-command forms
+
+Disposition: the forbidden-command scanner rejects xargs, find, parallel, make
+and equivalent command-delegating launchers before a delegated `gh`/live command
+can be hidden in direct, pipeline, wrapper-prefixed or nested syntax. The
+focused synthetic probe rejected every listed form while retaining safe direct
+`printf`; no live command ran.
+
+#### Root 4002184745: descendant process-group timeout and reap
+
+Disposition: every Go child owns a fresh session/process group; timeout sends
+SIGTERM to the group, escalates to SIGKILL after the bounded grace period and
+waits for the direct child to be reaped before refusing the result. The
+synthetic descendant tree terminated/reaped without a real Go child; no live
+cleanup or force-kill was performed.
+
+#### Root 4002184748: commented package-init declarations
+
+Disposition: the package-init guard lexically skips whitespace and consecutive
+line/block comments between valid Go tokens, ignores literals and non-top-level
+functions, and fails closed on a valid top-level `func init()` declaration. The
+focused source-only probe detected valid commented declarations and rejected
+comment/string/receiver/name boundaries without Go metadata/list/test execution.
+
 ### Current exact-head Luna/Codex finding ledger
 
-These thirty-two actionable roots were reproduced against immutable packet
+These thirty-five actionable roots were reproduced against immutable packet
 heads and are carried with their discussion URL and exact source commit. The
 rows describe only offline/static or wrapper evidence; they do not resolve the
 GitHub discussions or claim a live result.
@@ -7670,3 +8244,6 @@ GitHub discussions or claim a live result.
 | [4002136391](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002136391), source [da1af0d041e37e5df9f3ed8028b51a69ec58ed8c](https://github.com/1XP-AI/gh-runnerd/commit/da1af0d041e37e5df9f3ed8028b51a69ec58ed8c) | Reproduced: the exact parent had 36 executable Python heredocs without `-I`. Corrected: all current executable heredocs use `python3 -I`, and executable audit regexes require that form. | [Python isolation boundary](#root-4002136391-isolated-python-guard-and-audit-imports): 37 isolated heredocs and a hostile cwd/PYTHONPATH module probe passed without importing the shadow module. |
 | [4002136393](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002136393), source [da1af0d041e37e5df9f3ed8028b51a69ec58ed8c](https://github.com/1XP-AI/gh-runnerd/commit/da1af0d041e37e5df9f3ed8028b51a69ec58ed8c) | Reproduced: the exact parent retained three literal head-output records from older packet heads. Corrected: those outputs are historical-only, the follow-up parent is explicit, and the post-push dynamic template is the only current-head assertion. | [Exact-head output boundary](#root-4002136393-stale-exact-head-output-records): the focused probe verified historical relabeling and did not reuse a stale result. |
 | [4002136395](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002136395), source [da1af0d041e37e5df9f3ed8028b51a69ec58ed8c](https://github.com/1XP-AI/gh-runnerd/commit/da1af0d041e37e5df9f3ed8028b51a69ec58ed8c) | Reproduced: the exact parent had no bounded module-source verification. Corrected: `go mod download -json all` and `go mod verify` run through the shared bounded Go-child helper, complete metadata/source paths are required and all failures fail closed. | [Module-source boundary](#root-4002136395-downloaded-module-source-verification): fake bounded download/verify success and incomplete-metadata failure probes passed without starting Go. |
+| [4002184738](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002184738), source [5297b3c3b05afedf97723b7b58806cdd5519a2b6](https://github.com/1XP-AI/gh-runnerd/commit/5297b3c3b05afedf97723b7b58806cdd5519a2b6) | Reproduced: the exact parent allowed xargs and other command-delegating forms to hide a downstream `gh`/live command. Corrected: the scanner rejects xargs, find, parallel, make and equivalent launchers before delegated command classification, across direct, pipeline, wrapper-prefixed and nested forms. | [Delegation boundary](#root-4002184738-command-delegating-live-command-forms): direct/pipeline/env/nested xargs and find/parallel/make fixtures failed closed; safe `printf` remained accepted and no live command ran. |
+| [4002184745](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002184745), source [5297b3c3b05afedf97723b7b58806cdd5519a2b6](https://github.com/1XP-AI/gh-runnerd/commit/5297b3c3b05afedf97723b7b58806cdd5519a2b6) | Reproduced: the exact parent applied a deadline to only the direct Go process, leaving descendants outside timeout termination/reap. Corrected: the wrapper owns a new session/process group, terminates/escalates the full group and waits for the direct child before refusal. | [Process-group boundary](#root-4002184745-descendant-process-group-timeout-and-reap): a synthetic descendant tree terminated/reaped under a shortened deadline without starting a real Go child; no live cleanup ran. |
+| [4002184748](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002184748), source [5297b3c3b05afedf97723b7b58806cdd5519a2b6](https://github.com/1XP-AI/gh-runnerd/commit/5297b3c3b05afedf97723b7b58806cdd5519a2b6) | Reproduced: the exact parent’s `^\s*func\s+init` check missed valid Go init declarations separated by whitespace and consecutive line/block comments. Corrected: lexical top-level scanning consumes ignored tokens and fails closed on valid `func init()` while preserving literal/receiver/name boundaries. | [Package-init boundary](#root-4002184748-commented-package-init-declarations): focused source-only red/green probe detected commented declarations and rejected unsafe boundaries; no Go metadata/list/test execution ran. |
