@@ -280,8 +280,11 @@ because examples are otherwise outside the source-derived test-name set. The
 source scanner consumes consecutive whitespace and line/block comments between
 declaration tokens, so comments cannot hide a valid top-level test name. Before
 opening any candidate source file, the wrapper performs the immutable reviewed
-module-tree and tracked/untracked/ignored status gate; only a clean source tree
-can reach package metadata and source derivation. The wrapper disables persisted
+module-tree gate and compares each raw worktree file byte-for-byte with its
+pinned `HEAD` blob before consulting porcelain/status; Git clean filters and
+attributes therefore cannot make modified source appear clean. It then performs
+the tracked/untracked/ignored status gate; only a clean, byte-identical source
+tree can reach package metadata and source derivation. The wrapper disables persisted
 Go configuration with `GOENV=off` before the first Go child, queries the
 effective `go env GOFLAGS`, rejects non-empty output, and then pins `GOFLAGS=`
 for metadata and the original command. After
@@ -354,12 +357,14 @@ set -euo pipefail
 go_test_checked() {
   # g01-safe-python-heredoc: reviewed dynamic Go-child argv
   [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; return 1; }
+  [ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; return 1; }
   /opt/homebrew/bin/python3 -I - "$@" <<'PY'
 import hashlib
 import json
 import os
 import re
 import signal
+import stat
 import subprocess
 import sys
 from decimal import Decimal
@@ -664,6 +669,15 @@ loader_assignment_names = {
     "DYLD_FALLBACK_FRAMEWORK_PATH",
     "DYLD_ROOT_PATH",
 }
+inherited_loader_assignments = sorted(
+    key for key in loader_assignment_names
+    if key != "PATH" and os.environ.get(key)
+)
+if inherited_loader_assignments:
+    raise SystemExit(
+        f"{label}: inherited executable-loader environment is not allowed: "
+        + ", ".join(inherited_loader_assignments)
+    )
 unsafe_loader_assignments = sorted(
     key for key in command_assignments if key in loader_assignment_names
 )
@@ -672,6 +686,10 @@ if unsafe_loader_assignments:
         f"{label}: executable-loader environment assignments are not allowed: "
         + ", ".join(unsafe_loader_assignments)
     )
+# The shell preflight rejects hooks before Python starts; remove every reviewed
+# loader name from the environment passed to Git/Go children as a second fence.
+for loader_name in loader_assignment_names:
+    env.pop(loader_name, None)
 reviewed_path = "/opt/homebrew/bin:/usr/bin:/bin"
 if os.pathsep != ":" or os.environ.get("PATH") != reviewed_path:
     raise SystemExit(
@@ -1141,6 +1159,55 @@ def git_source_control_entries(repo_root, module_dir, env):
     ]
 
 
+def git_worktree_matches_pinned_blobs(repo_root, module_dir, env):
+    """Compare raw worktree bytes with HEAD blobs without clean filters."""
+    source_tree = subprocess.run(
+        git_command(["ls-tree", "-r", "-z", "--full-tree", "HEAD", "--", module_dir]),
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        check=False,
+    )
+    if source_tree.returncode != 0 or source_tree.stderr:
+        raise SystemExit(f"{label}: pinned source-blob query failed")
+    records = [record for record in source_tree.stdout.split(b"\0") if record]
+    if not records:
+        raise SystemExit(f"{label}: pinned source-blob set was empty")
+    for record in records:
+        try:
+            header, path_bytes = record.split(b"\t", 1)
+            mode, kind, object_id = header.decode("ascii").split()
+        except (UnicodeDecodeError, ValueError):
+            raise SystemExit(f"{label}: pinned source-blob record was malformed")
+        if kind != "blob" or not re.fullmatch(r"[0-9a-f]{40}", object_id):
+            raise SystemExit(f"{label}: pinned source tree contains an unsupported entry")
+        relative_path = os.fsdecode(path_bytes)
+        worktree_path = repo_root / relative_path
+        try:
+            worktree_stat = worktree_path.lstat()
+        except OSError:
+            raise SystemExit(f"{label}: pinned source file was missing from the worktree")
+        if not stat.S_ISREG(worktree_stat.st_mode) or worktree_path.is_symlink():
+            raise SystemExit(f"{label}: pinned source file was not a regular worktree file")
+        pinned_blob = subprocess.run(
+            git_command(["cat-file", "blob", f"HEAD:{relative_path}" ]),
+            cwd=repo_root,
+            env=env,
+            capture_output=True,
+            check=False,
+        )
+        if pinned_blob.returncode != 0 or pinned_blob.stderr:
+            raise SystemExit(f"{label}: pinned source-blob read failed")
+        try:
+            worktree_bytes = worktree_path.read_bytes()
+        except OSError:
+            raise SystemExit(f"{label}: pinned source bytes could not be read")
+        if worktree_bytes != pinned_blob.stdout:
+            raise SystemExit(
+                f"{label}: raw worktree bytes differ from pinned source blob"
+            )
+
+
 def package_initialization_guard():
     source_tree = subprocess.run(
         git_command(["rev-parse", f"HEAD:{module_dir}"]),
@@ -1156,6 +1223,7 @@ def package_initialization_guard():
         raise SystemExit(
             f"{label}: package-initialization guard requires reviewed source tree"
         )
+    git_worktree_matches_pinned_blobs(repo_root, module_dir, env)
     source_status = subprocess.run(
         git_command([
             "status",
@@ -1946,6 +2014,7 @@ rg -n "$selector_pattern" docs/evidence/g01-recovery-packet.md >/dev/null
 selector_probe=$'GOTOOLCHAIN=go1.26.8 go test ./livecanary -run=^TestProbe$\nenv GOTOOLCHAIN=go1.26.8 go test ./livecanary --run=^TestProbe$\nenv -i GOTOOLCHAIN=go1.26.8 go test ./livecanary --skip ^TestProbe$\n  GOTOOLCHAIN=go1.26.8 go test ./livecanary -skip ^TestProbe$\ncommand go test ./livecanary -run ^TestCommandProbe$\nGOTOOLCHAIN=go1.26.8 command go test ./livecanary -skip=^TestCommandProbe$'
 rg -n "$selector_pattern" <<< "$selector_probe" | wc -l | tr -d ' ' | grep -Fxq 6
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 from pathlib import Path
 import re
@@ -2215,6 +2284,7 @@ stream guards.
 set -euo pipefail
 # g01-safe-python-heredoc: reviewed synthetic child argv
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import re
 import shlex
@@ -2222,7 +2292,10 @@ from pathlib import Path
 
 source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
 fence_languages = {"sh", "bash", "shell", "zsh"}
-heredoc = re.compile(r"\bpython3\s+-I\b[^\n]*<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+heredoc = re.compile(
+    r"(?<![A-Za-z0-9_])(?:/[^ \t;&|]+/)?python(?:3(?:\.[0-9]+)?)?"
+    r"(?:[ \t]+[^;&|]*)?<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1"
+)
 
 
 def executable_shell_commands(markdown):
@@ -2437,6 +2510,7 @@ different tag/race configuration:
 set -euo pipefail
 # g01-safe-python-heredoc: reviewed synthetic Go metadata argv
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import re
 import shlex
@@ -2759,6 +2833,7 @@ direct Go child:
 set -euo pipefail
 # g01-safe-python-heredoc: reviewed isolated interpreter argv
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import hashlib
 import io
@@ -3545,6 +3620,7 @@ requires empty output and zero direct Go children for every case.
 ```sh
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import io
 import subprocess
@@ -3698,6 +3774,7 @@ start:
 ```sh
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import io
 import os
@@ -3869,6 +3946,7 @@ immutable starting packet head `36ec84b27c934a25484b0a5391af0a20c7643912`:
 ```sh
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import subprocess
 
@@ -3923,6 +4001,7 @@ prior packet and records those exact misses without starting any child:
 ```sh
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import re
 import subprocess
@@ -3997,6 +4076,7 @@ omitted a synthetic `FuzzSeed` declaration and that `paired-all-except` had no
 ```sh
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import subprocess
 from pathlib import Path
@@ -4057,6 +4137,7 @@ defense-in-depth check. The no-Go-child probe uses a temporary synthetic
 ```sh
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import io
 import subprocess
@@ -4124,6 +4205,7 @@ Go would not execute:
 ```sh
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import re
 import subprocess
@@ -4170,6 +4252,7 @@ green probe records both properties and rejects any attempted Go child:
 ```sh
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import re
 import subprocess
@@ -4244,6 +4327,7 @@ that contain scanner source or synthetic fixtures:
 ```sh
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import re
 import subprocess
@@ -4293,6 +4377,7 @@ RED forbidden-command scan gap: prior 3bc8445567fe68cc355cf3f88f0c962a41e9cad5 m
 ```sh
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import re
 import subprocess
@@ -4413,6 +4498,7 @@ assignments fail closed:
 ```sh
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 from pathlib import Path
 
@@ -4578,6 +4664,7 @@ if git status --porcelain=v1 --untracked-files=all | grep -q .; then
   exit 1
 fi
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import subprocess
 
@@ -4610,6 +4697,7 @@ The `-tags=osusergo` case is intentionally included in that fail-closed set.
 set -euo pipefail
 # g01-safe-python-heredoc: reviewed synthetic Go test argv
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import os
 import re
@@ -4804,6 +4892,7 @@ rg -q '^func Test(Observe|Statistics|InvalidOwnedProof|Journal|Authority)' exper
 rg -q '^//go:build !cgo \|\| osusergo \|\| android$|func TestUnsupportedAccountLookupRefusesBeforeJournal' experiments/g01-scaleset/liveworker/admission_lookup_unsupported_test.go experiments/g01-scaleset/livecanary/admission_lookup_unsupported_test.go
 rg -q '^func TestMain\(m \*testing\.M\)' experiments/g01-scaleset/livecanary/preparation_fixture_test.go
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 from pathlib import Path
 
@@ -5044,6 +5133,7 @@ was read-only and did not run test bodies or live resources:
 set -euo pipefail
 # g01-safe-python-heredoc: reviewed synthetic Go metadata argv
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import json
 import os
@@ -5192,6 +5282,7 @@ probe therefore has no test-binary path on which those initializers could run.
 ```sh
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import subprocess
 from pathlib import Path
@@ -5244,6 +5335,7 @@ is checked:
 ```sh
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import subprocess
 from pathlib import Path
@@ -5357,6 +5449,7 @@ git diff --cached --name-only | wc -l | tr -d ' ' | grep -Fxq 1
 git diff --check
 git diff --cached --check
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import re
 import subprocess
@@ -5452,6 +5545,7 @@ and synthetic fixtures are not executable prescriptions:
 set -euo pipefail
 # g01-safe-python-heredoc: reviewed isolated interpreter argv
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import ast
 import re
@@ -5461,7 +5555,41 @@ from pathlib import Path
 source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
 fence_languages = {"sh", "bash", "shell", "zsh"}
 assignment = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
-heredoc = re.compile(r"\bpython3\s+-I\b[^\n]*<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+heredoc = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+python_interpreter = re.compile(r"python(?:3(?:\.[0-9]+)?)?\Z")
+
+def python_heredoc_invocation(stripped):
+    """Recognize every executable Python heredoc before trusting its body."""
+    heredoc_match = heredoc.search(stripped)
+    if heredoc_match is None:
+        return None
+    prefix = stripped[:heredoc_match.start()].rstrip()
+    segments = shell_token_segments(prefix)
+    for segment in segments:
+        tokens = executable_tokens(segment)
+        if not tokens or not python_interpreter.fullmatch(executable_basename(tokens[0])):
+            continue
+        arguments = tokens[1:]
+        try:
+            stdin_index = arguments.index("-")
+        except ValueError:
+            stdin_index = len(arguments)
+        option_arguments = arguments[:stdin_index]
+        isolated = any(
+            argument == "-I"
+            or (
+                argument.startswith("-")
+                and not argument.startswith("--")
+                and "I" in argument[1:]
+            )
+            for argument in option_arguments
+        )
+        return {
+            "delimiter": heredoc_match.group(2),
+            "interpreter": tokens[0],
+            "isolated": isolated,
+        }
+    return None
 
 def shell_commands(markdown):
     in_shell = False
@@ -5487,9 +5615,9 @@ def shell_commands(markdown):
             if stripped == skip_until:
                 skip_until = None
             continue
-        heredoc_match = heredoc.search(stripped)
-        if heredoc_match:
-            skip_until = heredoc_match.group(2)
+        invocation = python_heredoc_invocation(stripped)
+        if invocation:
+            skip_until = invocation["delimiter"]
             continue
         if not stripped or stripped.startswith("#"):
             continue
@@ -5508,16 +5636,18 @@ def python_heredoc_bodies(markdown):
     body = []
     start_number = None
     safe_marker = False
+    invocation = None
     marker = "g01-safe-python-heredoc"
     for number, line in enumerate(markdown.splitlines(), start=1):
         stripped = line.strip()
         if delimiter is not None:
             if stripped == delimiter:
-                yield start_number, "\n".join(body), safe_marker
+                yield start_number, "\n".join(body), safe_marker, invocation
                 delimiter = None
                 body = []
                 start_number = None
                 safe_marker = False
+                invocation = None
             else:
                 body.append(line)
             continue
@@ -5534,13 +5664,16 @@ def python_heredoc_bodies(markdown):
         if marker in stripped and stripped.startswith("#"):
             safe_marker = True
             continue
-        if safe_marker and stripped.startswith(
-            '[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ]'
+        if safe_marker and (
+            stripped.startswith(
+                '[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ]'
+            )
+            or stripped.startswith('[ -z "${LD_PRELOAD-}" ]')
         ):
             continue
-        heredoc_match = heredoc.search(stripped)
-        if heredoc_match:
-            delimiter = heredoc_match.group(2)
+        invocation = python_heredoc_invocation(stripped)
+        if invocation:
+            delimiter = invocation["delimiter"]
             body = []
             start_number = number
             continue
@@ -5589,6 +5722,13 @@ def shell_compound_syntax(tokens):
         return True
     if len(tokens) >= 2 and tokens[0] in {"go_test_checked()", "go_vet_checked()"} and tokens[1] == "{":
         return False
+    if any(
+        token in {"(", ")"}
+        or token.startswith("(")
+        or token.endswith(")")
+        for token in tokens
+    ):
+        return True
     if tokens[0] == "{":
         return not (len(tokens) > 1 and tokens[1] == "printf")
     return any(token.endswith("()") or token.endswith("(){") for token in tokens)
@@ -5909,7 +6049,17 @@ for command, number in shell_commands(source):
         violation = forbidden_command(segment)
         if violation:
             matches.append(f"line {number}: {violation}")
-for number, body, safe_marker in python_heredoc_bodies(source):
+for number, body, safe_marker, invocation in python_heredoc_bodies(source):
+    if not invocation["isolated"]:
+        matches.append(
+            f"line {number}: executable Python heredoc must use -I before body inspection"
+        )
+        continue
+    if invocation["interpreter"] != "/opt/homebrew/bin/python3":
+        matches.append(
+            f"line {number}: executable Python heredoc must use absolute /opt/homebrew/bin/python3"
+        )
+        continue
     violation = inspect_python_heredoc(body, safe_marker)
     if violation:
         matches.append(f"line {number}: {violation}")
@@ -6219,6 +6369,7 @@ following consecutive line/block comments was therefore omitted:
 ```sh
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import subprocess
 from pathlib import Path
@@ -6277,6 +6428,7 @@ Go child to fail, so discovery cannot silently expand into execution:
 ```sh
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import subprocess
 from pathlib import Path
@@ -6338,6 +6490,7 @@ derived a set unlike Go's ASCII `[0-9A-Fa-f]` class:
 ```sh
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import re
 import subprocess
@@ -6399,6 +6552,7 @@ escaped POSIX text and the previously reviewed literal backslash behavior:
 ```sh
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import re
 import subprocess
@@ -6635,6 +6789,7 @@ discovery, pathspec and replacement controls unchecked.
 ```sh
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import os
 import subprocess
@@ -6733,6 +6888,7 @@ before any Git or Go child, output, immutable-tree check or source read:
 ```sh
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import io
 import os
@@ -6867,6 +7023,7 @@ The immutable red command was:
 ```sh
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import io
 import os
@@ -6974,6 +7131,7 @@ The immutable scanner red command was:
 ```sh
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import re
 import shlex
@@ -7043,6 +7201,7 @@ The immutable selector-audit red command was:
 ```sh
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import re
 import subprocess
@@ -7116,6 +7275,7 @@ The immutable red command was:
 ```sh
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import ast
 import shlex
@@ -7196,6 +7356,7 @@ The focused offline AST/timeout/environment/scanner regression was:
 ```sh
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import ast
 import os
@@ -7520,6 +7681,7 @@ below for reproducibility:
 ```sh
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import ast
 import os
@@ -7670,6 +7832,7 @@ live command.
 set -euo pipefail
 # g01-safe-python-heredoc: reviewed isolated interpreter argv
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import ast
 import os
@@ -7873,6 +8036,7 @@ that were not scoped to this follow-up:
 ```sh
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import re
 import shlex
@@ -7959,6 +8123,7 @@ count, and historical-output relabeling:
 set -euo pipefail
 # g01-safe-python-heredoc: reviewed isolated interpreter argv
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import ast
 import os
@@ -8259,6 +8424,7 @@ command-launching fixture:
 ```sh
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import ast
 import re
@@ -8364,6 +8530,7 @@ prescription count and a safe scanner boundary:
 ```sh
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import ast
 import os
@@ -9023,6 +9190,7 @@ operation:
 ```sh
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import ast
 import json
@@ -9198,6 +9366,7 @@ child launch, records no Go child, and performs no live operation:
 ```sh
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
 import ast
 import json
@@ -9435,6 +9604,7 @@ No Go child, test body, live operation or credential-bearing process ran.
 set -euo pipefail
 export PATH=/opt/homebrew/bin:/usr/bin:/bin
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 # g01-safe-python-heredoc: reviewed exact-parent fsmonitor fixture
 /opt/homebrew/bin/python3 -I - <<'PY'
 import subprocess
@@ -9580,6 +9750,7 @@ not invoked by the guarded status command:
 set -euo pipefail
 export PATH=/opt/homebrew/bin:/usr/bin:/bin
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || exit 1
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 # g01-safe-python-heredoc: reviewed focused synthetic argv
 /opt/homebrew/bin/python3 -I - <<'PY'
 import ast
@@ -9733,6 +9904,7 @@ Keychain or launchd operation is executed:
 set -euo pipefail
 export PATH=/opt/homebrew/bin:/usr/bin:/bin
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 # g01-safe-python-heredoc: reviewed exact-parent AST fixture
 /opt/homebrew/bin/python3 -I - <<'PY'
 import ast
@@ -9814,6 +9986,7 @@ it starts no Go/live child and executes no forbidden command:
 set -euo pipefail
 export PATH=/opt/homebrew/bin:/usr/bin:/bin
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 # g01-safe-python-heredoc: reviewed focused synthetic scanner argv
 /opt/homebrew/bin/python3 -I - <<'PY'
 import ast
@@ -9918,3 +10091,256 @@ Codex/CI review and all previously listed authorization gates remain open.
 | 4003073122, source `13b463086a0e7aa710067cafb44dcd9aed118654` | [discussion 4003073122](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003073122) | Reproduced the exact parent's acceptance of `subprocess.getoutput`, `subprocess.getstatusoutput`, `os.execvp` and an unresolved launcher alias. The packet scanner now classifies the reviewed process-launch surface and fails closed for unresolved command-capable launcher leaves while preserving the reviewed dynamic safe-marker path. Static-only probes ran; no forbidden/live command ran. Rollback is packet-only parent restoration. |
 | 4003073128, source `13b463086a0e7aa710067cafb44dcd9aed118654` | [discussion 4003073128](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003073128) | Reproduced `env -S 'gh workflow run ci.yml'` passing as a harmless token. `env` now parses reviewed operand-consuming options, rejects split-string and unreviewed options before wrapper stripping, and preserves direct/wrapped/unset `env` rejection. No env or forbidden command executed. Rollback is packet-only parent restoration. |
 | 4003073136, source `13b463086a0e7aa710067cafb44dcd9aed118654` | [discussion 4003073136](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003073136) | Reproduced prohibited `gh` nested in `replay() { gh workflow run ci.yml; }; replay` being certified by the exact parent. Unsupported function/brace/case compounds now fail closed, while the two reviewed packet wrapper declarations, safe `printf` preflight brace, shell substitutions, process substitutions and AST checks remain covered. No live operation ran. Rollback is packet-only parent restoration. |
+
+### Fresh exact-head P2 corrections at `5f42598b94ce5339c35f55be42eb108973850d24`
+
+The [exact-head Codex review 5195446708](https://github.com/1XP-AI/gh-runnerd/pull/78#pullrequestreview-5195446708) identified four fresh P2 gaps against immutable parent `5f42598b94ce5339c35f55be42eb108973850d24`: executable Python heredoc discovery before body trust ([4003386579](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003386579)), parenthesized subshell grouping ([4003386586](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003386586)), Git clean-filter/attribute source-integrity trust ([4003386592](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003386592)), and inherited loader hooks before absolute Python startup ([4003386595](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003386595)). This packet-only correction preserves every prior ledger, exact-parent pin, TDD/rollback/live gap and no-secrets/private-path boundary; no Go, workflow, runner, Docker, Lima, Keychain, launchd or loader operation is authorized or claimed.
+
+#### Exact-parent red reproduction
+
+The red probe ran first against the exact immutable parent. It used only the
+parent's static scanner text, synthetic shell/AST inputs and a temporary Git
+repository; it did not execute the Python heredoc body, a forbidden command, a
+Go child or any live operation:
+
+```sh
+set -euo pipefail
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
+# g01-safe-python-heredoc: reviewed exact-parent static probes
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import re
+import shlex
+import subprocess
+import tempfile
+from pathlib import Path
+
+parent = "5f42598b94ce5339c35f55be42eb108973850d24"
+packet = subprocess.check_output(
+    ["git", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"], text=True
+)
+heredoc_pattern = re.compile(
+    r"\\bpython3\\s+-I\\b[^\\n]*<<-?\\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\\1"
+)
+fixture = "python3 - <<'PY'\nimport subprocess\nsubprocess.run([\"gh\", \"workflow\", \"run\", \"ci.yml\"])\nPY"
+if heredoc_pattern.search(fixture):
+    raise SystemExit("red setup changed: exact parent already recognized unisolated heredoc")
+print("RED 4003386579: exact parent skipped python3 - << heredoc body containing subprocess.run([gh workflow run ci.yml])")
+
+anchor = packet.index("def forbidden_command(tokens, depth=0):")
+start = packet.rfind("source = Path(", 0, anchor)
+end = packet.index("\nmatches = []", anchor)
+namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+exec(compile(packet[start:end], "<exact-parent-scanner>", "exec"), namespace)
+for command in ("(gh workflow run ci.yml)", "true && (gh workflow run ci.yml)"):
+    if any(
+        namespace["forbidden_command"](segment) is not None
+        for segment in namespace["shell_token_segments"](command)
+    ):
+        raise SystemExit(f"red setup changed: exact parent already rejects {command}")
+print("RED 4003386586: exact parent certified gh workflow run inside parenthesized subshells")
+
+def run(args, cwd, check=True):
+    return subprocess.run(args, cwd=cwd, text=True, capture_output=True, check=check)
+
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    run(["git", "init", "-q"], root)
+    run(["git", "config", "user.name", "probe"], root)
+    run(["git", "config", "user.email", "probe@example.invalid"], root)
+    run(["git", "config", "filter.synthetic.clean", "sed 's/package q/package p/'"], root)
+    run(["git", "config", "filter.synthetic.smudge", "cat"], root)
+    (root / ".git/info/attributes").write_text("source.go filter=synthetic\n", encoding="utf-8")
+    (root / "source.go").write_bytes(b"package p\n")
+    run(["git", "add", "source.go"], root)
+    run(["git", "commit", "-q", "-m", "source"], root)
+    (root / "source.go").write_bytes(b"package q\n")
+    status = run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching", "--", "."],
+        root,
+    )
+    pinned = subprocess.check_output(["git", "show", "HEAD:source.go"], cwd=root)
+    worktree = (root / "source.go").read_bytes()
+    if status.stdout.strip() or pinned == worktree:
+        raise SystemExit("red setup changed: filter fixture did not hide byte drift")
+print("RED 4003386592: exact parent status gate accepted clean filter/attributes while worktree bytes differed from pinned HEAD blob")
+
+launch = packet.index("/opt/homebrew/bin/python3 -I - <<'PY")
+fence = packet.rfind("```sh", 0, launch)
+preflight = packet[fence:launch]
+if "DYLD_INSERT_LIBRARIES" in preflight or "LD_PRELOAD" in preflight:
+    raise SystemExit("red setup changed: exact parent already has a loader preflight")
+print("RED 4003386595: exact parent launched absolute Python without rejecting inherited DYLD_INSERT_LIBRARIES/LD_PRELOAD")
+PY
+```
+
+Recorded exact-parent red output:
+
+```text
+RED 4003386579: exact parent skipped python3 - << heredoc body containing subprocess.run([gh workflow run ci.yml])
+RED 4003386586: exact parent certified gh workflow run inside parenthesized subshells
+RED 4003386592: exact parent status gate accepted clean filter/attributes while worktree bytes differed from pinned HEAD blob
+RED 4003386595: exact parent launched absolute Python without rejecting inherited DYLD_INSERT_LIBRARIES/LD_PRELOAD
+```
+
+#### Minimal packet correction and focused green probe
+
+The minimal correction makes heredoc discovery interpreter/option-aware before
+body inspection: every executable `python`, `python3` or versioned/absolute
+Python heredoc is recorded, missing `-I` is a distinct fail-closed result, and
+the reviewed absolute `/opt/homebrew/bin/python3` plus canonical PATH policy is
+retained. The shell scanner rejects `(` / `)` subshell grouping before wrapper
+stripping or executable classification while retaining the reviewed wrapper
+declarations and safe `printf` brace. Source trust now compares raw worktree
+bytes against `HEAD` blobs before porcelain/status, so local clean filters and
+`.git/info/attributes` cannot rewrite the trust decision. Every Python launch
+preflight rejects the reviewed `LD_*`/`DYLD_*` loader variables before startup,
+and the wrapper removes those names from all Go-child environments.
+
+The focused green probe reads only the candidate packet, exercises pure scanner
+helpers and the raw-blob helper against temporary repositories, and performs no
+Go, live, loader or forbidden-command execution:
+
+```sh
+set -euo pipefail
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
+# g01-safe-python-heredoc: reviewed focused static argv
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import os
+import re
+import shlex
+import stat
+import subprocess
+import tempfile
+from pathlib import Path
+
+packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
+scanner_anchor = packet.index("def python_heredoc_invocation(stripped):")
+scanner_start = packet.rfind("source = Path(", 0, scanner_anchor)
+scanner_end = packet.index("\nmatches = []", scanner_anchor)
+scanner = {"Path": Path, "ast": ast, "os": os, "re": re, "shlex": shlex}
+exec(compile(packet[scanner_start:scanner_end], "<candidate-scanner>", "exec"), scanner)
+
+fixture = (
+    "```" + "sh\n"
+    "# g01-safe-python-heredoc: synthetic unisolated body\n"
+    "python3 - <<'PY'\n"
+    "import subprocess\n"
+    "subprocess.run([\"gh\", \"workflow\", \"run\", \"ci.yml\"])\n"
+    "PY\n"
+    "```"
+)
+records = list(scanner["python_heredoc_bodies"](fixture))
+if len(records) != 1 or records[0][3]["isolated"]:
+    raise SystemExit("heredoc regression: unisolated Python body was not detected")
+if records[0][3]["interpreter"] != "python3":
+    raise SystemExit("heredoc regression: interpreter identity was not retained")
+print("GREEN 4003386579: python3 - << body discovered and rejected for missing -I before AST/body trust")
+
+def rejects(command):
+    return any(
+        scanner["forbidden_command"](segment) is not None
+        for segment in scanner["shell_token_segments"](command)
+    )
+
+for command in ("(gh workflow run ci.yml)", "true && (gh workflow run ci.yml)"):
+    if not rejects(command):
+        raise SystemExit(f"subshell regression: {command} was accepted")
+for command in ("printf safe", "go_test_checked() {"):
+    if rejects(command):
+        raise SystemExit(f"safe-wrapper regression: {command} was rejected")
+print("GREEN 4003386586: parenthesized subshell forms rejected before executable classification; safe printf/wrapper forms retained")
+
+helper_start = packet.index("def git_worktree_matches_pinned_blobs(repo_root, module_dir, env):")
+helper_end = packet.index("\ndef package_initialization_guard", helper_start)
+probe_env = {
+    "PATH": "/opt/homebrew/bin:/usr/bin:/bin",
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_SYSTEM": "/dev/null",
+}
+helper_ns = {
+    "Path": Path,
+    "os": os,
+    "re": re,
+    "stat": stat,
+    "subprocess": subprocess,
+    "label": "filter-probe",
+    "git_command": lambda args: ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", *args],
+}
+exec(compile(packet[helper_start:helper_end], "<raw-blob-helper>", "exec"), helper_ns)
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    def run(args, check=True):
+        return subprocess.run(args, cwd=root, env=probe_env, text=True, capture_output=True, check=check)
+    run(["git", "init", "-q"])
+    run(["git", "config", "user.name", "probe"])
+    run(["git", "config", "user.email", "probe@example.invalid"])
+    run(["git", "config", "filter.synthetic.clean", "sed 's/package q/package p/'"])
+    run(["git", "config", "filter.synthetic.smudge", "cat"])
+    (root / ".git/info/attributes").write_text("source.go filter=synthetic\n", encoding="utf-8")
+    (root / "source.go").write_bytes(b"package p\n")
+    run(["git", "add", "source.go"])
+    run(["git", "commit", "-q", "-m", "source"])
+    (root / "source.go").write_bytes(b"package q\n")
+    try:
+        helper_ns["git_worktree_matches_pinned_blobs"](root, ".", probe_env)
+    except SystemExit:
+        pass
+    else:
+        raise SystemExit("raw-blob regression: filter-hidden worktree drift was accepted")
+    (root / "source.go").write_bytes(b"package p\n")
+    helper_ns["git_worktree_matches_pinned_blobs"](root, ".", probe_env)
+print("GREEN 4003386592: raw worktree bytes were compared to pinned HEAD blobs; filter-hidden drift rejected and exact bytes accepted")
+
+loader_names = (
+    "LD_PRELOAD", "LD_PRELOAD_32", "LD_PRELOAD_64", "LD_LIBRARY_PATH",
+    "LD_LIBRARY_PATH_32", "LD_LIBRARY_PATH_64", "LD_AUDIT",
+    "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH",
+    "DYLD_FRAMEWORK_PATH", "DYLD_FALLBACK_FRAMEWORK_PATH", "DYLD_ROOT_PATH",
+)
+launch = packet.index("/opt/homebrew/bin/python3 -I - <<'PY")
+preflight = packet[packet.rfind("```sh", 0, launch):launch]
+if any(name not in preflight for name in loader_names):
+    raise SystemExit("loader regression: shell preflight omitted a reviewed loader variable")
+wrapper_start = packet.index("go_test_checked() {")
+wrapper_end = packet.index("\nPY\n}", wrapper_start)
+wrapper = packet[wrapper_start:wrapper_end]
+if "for loader_name in loader_assignment_names:" not in wrapper or "env.pop(loader_name, None)" not in wrapper:
+    raise SystemExit("loader regression: clean Go-child environment fence missing")
+print("GREEN 4003386595: all reviewed LD_/DYLD_ hooks are rejected before Python startup and removed from Go-child environment; no loader/live child started")
+PY
+```
+
+Recorded focused green output:
+
+```text
+GREEN 4003386579: python3 - << body discovered and rejected for missing -I before AST/body trust
+GREEN 4003386586: parenthesized subshell forms rejected before executable classification; safe printf/wrapper forms retained
+GREEN 4003386592: raw worktree bytes were compared to pinned HEAD blobs; filter-hidden drift rejected and exact bytes accepted
+GREEN 4003386595: all reviewed LD_/DYLD_ hooks are rejected before Python startup and removed from Go-child environment; no loader/live child started
+```
+
+The four probes are packet/static or temporary-repository evidence only. No Go
+test/list/body command, workflow, App/runner operation, credential access,
+Docker/Lima/Keychain/launchd operation, loader process or destructive cleanup
+ran. Exact-head Codex review of the final pushed head, CI and maintainer live
+authorization remain open.
+
+Rollback is narrow and packet-only: restore
+`docs/evidence/g01-recovery-packet.md` to immutable parent
+`5f42598b94ce5339c35f55be42eb108973850d24`; preserve independent driver,
+review and manual-runner state, and do not force-kill, prune or replay any live
+resource.
+
+#### Exact review URL ledger and dispositions
+
+| Finding and immutable source | Exact review URL | Disposition and rollback evidence |
+|---|---|---|
+| 4003386579, source `5f42598b94ce5339c35f55be42eb108973850d24` | [discussion 4003386579](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003386579) | Reproduced the exact parent's omission of `python3 - <<` and its `subprocess.run([gh workflow run ...])` body. The scanner now discovers every executable Python heredoc, rejects missing `-I` before body/AST trust, and retains the absolute interpreter/canonical PATH policy. No body or command executed; rollback is packet-only parent restoration. |
+| 4003386586, source `5f42598b94ce5339c35f55be42eb108973850d24` | [discussion 4003386586](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003386586) | Reproduced both parenthesized subshell forms being certified. Parenthesized grouping now fails closed before executable classification while reviewed safe wrapper declarations and `printf` preflight remain accepted. No shell payload ran; rollback is packet-only parent restoration. |
+| 4003386592, source `5f42598b94ce5339c35f55be42eb108973850d24` | [discussion 4003386592](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003386592) | Reproduced local `filter.*.clean` plus `.git/info/attributes` making porcelain/status clean while worktree bytes differed from `HEAD`. The package gate now compares unfiltered worktree bytes with pinned raw blobs before status/metadata; no Go child or live operation ran. Rollback is packet-only parent restoration. |
+| 4003386595, source `5f42598b94ce5339c35f55be42eb108973850d24` | [discussion 4003386595](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003386595) | Reproduced absolute Python startup without inherited `DYLD_INSERT_LIBRARIES`/`LD_PRELOAD` preflight. Every reviewed `LD_*`/`DYLD_*` hook is rejected before Python startup and removed from Go-child environments; no loader or live child ran. Rollback is packet-only parent restoration. |
