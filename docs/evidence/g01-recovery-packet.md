@@ -254,7 +254,10 @@ private-module bypasses fail closed. Custom inherited or command-supplied
 values fail closed. The wrapper queries effective
 `GOVERSION` before metadata or tests and binds that verified toolchain identity,
 not merely the requested `GOTOOLCHAIN`, into every build identity. The reviewed
-canonical PATH is pinned before the first Git or Go executable lookup.
+canonical PATH is pinned before the first Git or Go executable lookup. Git
+transport helper overrides (`GIT_EXEC_PATH`, `GIT_SSH`, `GIT_SSH_COMMAND`,
+`GIT_SSH_VARIANT`, `GIT_ASKPASS`, `GIT_SSH_ASKPASS` and `GIT_PROXY_COMMAND`)
+are rejected when inherited or command-supplied before the first Git query.
 `GOCACHEPROG` is rejected unless empty and then pinned empty before any Go child;
 `GOAUTH` is rejected unless `off` and then pinned `off`, so executable cache
 hooks and command-form authentication cannot reach module, metadata, vet or
@@ -311,9 +314,12 @@ Race-mode prescriptions reject inherited or command-supplied `GORACE` before
 either source derivation or test execution. The wrapper pins `CGO_ENABLED=1`
 after command-prefix parsing, rejects a command-supplied conflicting value,
 rejects inherited or command-prefix compiler/cgo-tool overrides, resolves the
-Go-selected `CC` through the reviewed canonical PATH, verifies the exact
-reviewed `/usr/bin/clang --version` line before metadata, and binds that actual
-identity into every build identity. Exactly one `-count=1` and one positive bounded
+Go-selected `CC` through the reviewed canonical PATH, and validates the complete
+`/usr/bin/clang --version` stdout before metadata: nonzero exit, any stderr,
+empty output, more than 4,096 UTF-8 bytes, more than 32 lines, or a line over
+256 UTF-8 bytes fails closed; the reviewed compiler identity must match the
+first line, while valid bounded multiline banners are accepted. That actual
+identity is bound into every build identity. Exactly one `-count=1` and one positive bounded
 `-timeout` (at most 300 seconds) are required; `-args` and test-binary
 selector/count/timeout overrides, Go `-modfile FILE`/`-modfile=FILE`
 alternate-module-file overrides, Go `-overlay FILE`/`-overlay=FILE` build
@@ -527,6 +533,9 @@ reviewed_cgo_command = "clang"
 reviewed_cgo_path = "/usr/bin/clang"
 reviewed_cgo_version = "Apple clang version 21.0.0 (clang-2100.1.1.101)"
 reviewed_cgo_identity = "cgo-cc-clang-apple21.0.0"
+reviewed_cgo_version_max_bytes = 4096
+reviewed_cgo_version_max_lines = 32
+reviewed_cgo_version_max_line_length = 256
 
 def verified_cgo_compiler_identity(command, version_line):
     if command != reviewed_cgo_command:
@@ -538,6 +547,31 @@ def verified_cgo_compiler_identity(command, version_line):
             f"{label}: selected CC version does not match the reviewed compiler identity"
         )
     return reviewed_cgo_identity
+
+def validate_cgo_version_output(command, returncode, stderr, stdout):
+    if returncode != 0:
+        raise SystemExit(f"{label}: reviewed cgo compiler version query failed")
+    if stderr:
+        raise SystemExit(f"{label}: reviewed cgo compiler version query emitted stderr")
+    if not isinstance(stdout, str):
+        raise SystemExit(f"{label}: reviewed cgo compiler version output was not text")
+    try:
+        stdout_bytes = len(stdout.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise SystemExit(f"{label}: reviewed cgo compiler version output was not UTF-8")
+    if stdout_bytes > reviewed_cgo_version_max_bytes:
+        raise SystemExit(f"{label}: cgo compiler version stdout exceeded the byte budget")
+    lines = stdout.splitlines()
+    if not lines or len(lines) > reviewed_cgo_version_max_lines:
+        raise SystemExit(f"{label}: cgo compiler version output had an invalid line count")
+    if any(
+        len(line.encode("utf-8")) > reviewed_cgo_version_max_line_length
+        for line in lines
+    ):
+        raise SystemExit(f"{label}: cgo compiler version output had an oversized line")
+    # The reviewed identity is the first line; later bounded banner details
+    # are accepted without becoming part of the identity comparison.
+    return verified_cgo_compiler_identity(command, lines[0])
 reviewed_gocacheprog = ""
 for source, value in (
     ("inherited", os.environ.get("GOCACHEPROG")),
@@ -666,6 +700,23 @@ if git_environment_overrides:
     raise SystemExit(
         f"{label}: Git repository-control environment overrides are not allowed: "
         + ", ".join(git_environment_overrides)
+    )
+git_transport_override_names = {
+    "GIT_EXEC_PATH",
+    "GIT_SSH",
+    "GIT_SSH_COMMAND",
+    "GIT_SSH_VARIANT",
+    "GIT_ASKPASS",
+    "GIT_SSH_ASKPASS",
+    "GIT_PROXY_COMMAND",
+}
+git_transport_environment_overrides = sorted(
+    key for key in env if key in git_transport_override_names
+)
+if git_transport_environment_overrides:
+    raise SystemExit(
+        f"{label}: Git transport environment overrides are not allowed before the first Git query: "
+        + ", ".join(git_transport_environment_overrides)
     )
 # Do not inherit user/system Git configuration, and force repository hooks and
 # fsmonitor off on every wrapper-controlled Git query. The command-line -c
@@ -1047,13 +1098,11 @@ cgo_version_result = subprocess.run(
     check=False,
     timeout=30,
 )
-if cgo_version_result.returncode != 0 or cgo_version_result.stderr.strip():
-    raise SystemExit(f"{label}: reviewed cgo compiler version query failed")
-cgo_version_lines = cgo_version_result.stdout.splitlines()
-if len(cgo_version_lines) != 1 or len(cgo_version_lines[0]) > 256:
-    raise SystemExit(f"{label}: cgo compiler version output is not bounded and single-line")
-effective_cgo_compiler_identity = verified_cgo_compiler_identity(
-    effective_cgo_command, cgo_version_lines[0]
+effective_cgo_compiler_identity = validate_cgo_version_output(
+    effective_cgo_command,
+    cgo_version_result.returncode,
+    cgo_version_result.stderr,
+    cgo_version_result.stdout,
 )
 
 effective_goflags = run_go_child(
@@ -2397,6 +2446,13 @@ def executable_shell_commands(markdown):
         if stripped.endswith("\\"):
             continue
         command = " ".join(pending)
+        unsafe_heredocs = non_python_heredoc_delimiters(command)
+        if unsafe_heredocs:
+            raise SystemExit(
+                f"line {pending_numbers[0]}: executable non-Python heredoc(s) "
+                "must be rejected before body certification: "
+                + ", ".join(unsafe_heredocs)
+            )
         yield command, pending_numbers[0]
         pending_heredocs.extend(
             match.group(2) for match in heredoc_operator.finditer(command)
@@ -2453,6 +2509,24 @@ def shell_token_segments(command):
 
 def executable_basename(token):
     return token.rsplit("/", 1)[-1]
+
+
+python_interpreter = re.compile(r"python(?:3(?:\.[0-9]+)?)?\Z")
+
+
+def non_python_heredoc_delimiters(command):
+    """Return heredoc delimiters whose executable is not reviewed Python."""
+    unsafe = []
+    for match in heredoc_operator.finditer(command):
+        prefix = command[:match.start()].rstrip()
+        python_found = any(
+            segment
+            and python_interpreter.fullmatch(executable_basename(segment[0]))
+            for segment in shell_token_segments(prefix)
+        )
+        if not python_found:
+            unsafe.append(match.group(2))
+    return unsafe
 
 
 shell_executables = {
@@ -3705,6 +3779,7 @@ requires empty output and zero direct Go children for every case.
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
 [ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
+# g01-safe-python-heredoc: reviewed legacy dynamic-argv probe
 /opt/homebrew/bin/python3 -I - <<'PY'
 import io
 import subprocess
@@ -3859,6 +3934,7 @@ start:
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
 [ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
+# g01-safe-python-heredoc: reviewed legacy dynamic-argv probe
 /opt/homebrew/bin/python3 -I - <<'PY'
 import io
 import os
@@ -4222,6 +4298,7 @@ defense-in-depth check. The no-Go-child probe uses a temporary synthetic
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
 [ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
+# g01-safe-python-heredoc: reviewed legacy dynamic-argv probe
 /opt/homebrew/bin/python3 -I - <<'PY'
 import io
 import subprocess
@@ -4337,6 +4414,7 @@ green probe records both properties and rejects any attempted Go child:
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
 [ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
+# g01-safe-python-heredoc: reviewed legacy dynamic-argv probe
 /opt/homebrew/bin/python3 -I - <<'PY'
 import re
 import subprocess
@@ -5617,11 +5695,14 @@ pipeline and nested forms; the scanner does not attempt to model shell
 expansion. Python heredoc bodies are separately parsed with Python's AST:
 literal command arguments are inspected with the same executable-token rules,
 the reviewed `os`/`subprocess` process-launch surface is classified and
-unresolved command-capable launcher names fail closed, dynamic command
-arguments require an explicit reviewed
+assignment aliases of recognized launchers are resolved and shadowed or
+unresolved command-capable names fail closed, dynamic command arguments require
+an explicit reviewed
 `g01-safe-python-heredoc` marker, and malformed/unmarked command forms fail
-closed. Unsupported shell function/brace/case compounds fail closed; only the
-two packet wrapper declarations and their safe `printf` preflight brace are
+closed. Executable non-Python heredocs fail closed before their bodies can be
+certified; only isolated reviewed Python heredocs are sent to AST inspection.
+Unsupported shell function/brace/case compounds fail closed; only the two
+packet wrapper declarations and their safe `printf` preflight brace are
 recognized structural forms. Markdown prose, URLs, comments, scanner source
 and synthetic fixtures are not executable prescriptions:
 
@@ -5686,6 +5767,14 @@ def heredoc_descriptors(stripped):
         )
     return descriptors
 
+def non_python_heredoc_delimiters(stripped):
+    """Return every executable heredoc that is not reviewed Python."""
+    return [
+        descriptor["delimiter"]
+        for descriptor in heredoc_descriptors(stripped)
+        if descriptor["invocation"] is None
+    ]
+
 def python_heredoc_invocations(stripped):
     return [
         descriptor["invocation"]
@@ -5724,6 +5813,13 @@ def shell_commands(markdown):
         if stripped.endswith("\\"):
             continue
         command = " ".join(pending)
+        unsafe_heredocs = non_python_heredoc_delimiters(command)
+        if unsafe_heredocs:
+            raise SystemExit(
+                f"line {pending_numbers[0]}: executable non-Python heredoc(s) "
+                "must be rejected before body certification: "
+                + ", ".join(unsafe_heredocs)
+            )
         yield command, pending_numbers[0]
         pending_heredocs.extend(
             descriptor["delimiter"] for descriptor in heredoc_descriptors(command)
@@ -6087,6 +6183,86 @@ def python_import_bindings(tree):
                 imported = f"{node.module}.{alias.name}"
                 if imported in python_command_functions:
                     functions[alias.asname or alias.name] = imported
+    assignments = [
+        node for node in ast.walk(tree)
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.NamedExpr))
+    ]
+
+    def assignment_parts(node):
+        if isinstance(node, ast.Assign):
+            return node.targets, node.value
+        if isinstance(node, ast.AnnAssign):
+            return [node.target], node.value
+        if isinstance(node, ast.NamedExpr):
+            return [node.target], node.value
+        return [node.target], None
+
+    # Only names that could denote a command-capable launcher are tracked.
+    # Ordinary callable assignments (for example `validator = namespace.get`)
+    # remain outside this map so the static pass does not reject unrelated
+    # helper calls.
+    candidate_aliases = set()
+    for _ in range(len(assignments) + 1):
+        changed = False
+        for node in assignments:
+            targets, value = assignment_parts(node)
+            dotted = python_dotted_name(value) if value is not None else None
+            commandish = bool(
+                dotted and dotted.rsplit(".", 1)[-1] in python_command_leaf_names
+            )
+            for target in targets:
+                if not isinstance(target, ast.Name):
+                    continue
+                if (
+                    commandish
+                    or target.id in modules
+                    or target.id in functions
+                    or (isinstance(value, ast.Name) and value.id in candidate_aliases)
+                    or (isinstance(value, ast.Name) and value.id in modules)
+                    or (isinstance(value, ast.Name) and value.id in functions)
+                ) and target.id not in candidate_aliases:
+                    candidate_aliases.add(target.id)
+                    changed = True
+        if not changed:
+            break
+    for alias in candidate_aliases:
+        modules.pop(alias, None)
+        functions[alias] = None
+
+    def resolve_binding(node):
+        dotted = python_dotted_name(node)
+        if dotted is None:
+            return None
+        if dotted in functions:
+            return functions[dotted]
+        parts = dotted.split(".")
+        module = modules.get(parts[0])
+        if module is not None and len(parts) > 1:
+            return ".".join([module, *parts[1:]])
+        if parts[0] in functions and functions[parts[0]] is None:
+            return None
+        return dotted
+
+    # Resolve alias chains such as `launch = subprocess.run` and
+    # `again = launch` without trusting their source order. Unknown or
+    # shadowed assignment targets remain mapped to None and are rejected when
+    # called below.
+    for node in sorted(assignments, key=lambda item: (item.lineno, item.col_offset)):
+        targets, value = assignment_parts(node)
+        if value is None:
+            continue
+        resolved = resolve_binding(value)
+        if resolved not in python_command_functions:
+            continue
+        for target in targets:
+            if (
+                isinstance(target, ast.Name)
+                and target.id in candidate_aliases
+                and functions.get(target.id) != resolved
+            ):
+                functions[target.id] = resolved
+    # A command-capable assignment that cannot be resolved remains mapped to
+    # None and is rejected when called below.
     return modules, functions, unresolved
 
 
@@ -6097,6 +6273,8 @@ def python_resolved_name(node, modules, functions):
     if dotted in functions:
         return functions[dotted]
     parts = dotted.split(".")
+    if parts[0] in functions and functions[parts[0]] is None:
+        return None
     module = modules.get(parts[0])
     if module is not None and len(parts) > 1:
         return ".".join([module, *parts[1:]])
@@ -6140,6 +6318,11 @@ def inspect_python_heredoc(body, safe_marker):
             continue
         resolved = python_resolved_name(node.func, modules, functions)
         dotted = python_dotted_name(node.func)
+        if dotted and dotted in functions and resolved is None:
+            return (
+                "Python heredoc contains an unresolved command-capable call "
+                f"{dotted!r} on line {node.lineno}"
+            )
         if resolved not in python_command_functions:
             if dotted and dotted.rsplit(".", 1)[-1] in python_command_leaf_names:
                 return (
@@ -6273,6 +6456,7 @@ for unsafe_heredoc in (
     'import subprocess\nsubprocess.run(["gh", "api", "x"])\n',
     'import os\nos.system("docker version")\n',
     'import subprocess as sp\nsp.run(["gh", "api", "x"])\n',
+    'import subprocess\nlaunch = subprocess.run\nlaunch(["gh", "api", "x"])\n',
     'from subprocess import run\nrun(["gh", "api", "x"])\n',
     'from os import system\nsystem("docker version")\n',
     'import subprocess\nsubprocess.getoutput("gh workflow run ci.yml")\n',
@@ -6557,6 +6741,7 @@ Go child to fail, so discovery cannot silently expand into execution:
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
 [ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
+# g01-safe-python-heredoc: reviewed legacy dynamic-argv probe
 /opt/homebrew/bin/python3 -I - <<'PY'
 import subprocess
 from pathlib import Path
@@ -6681,6 +6866,7 @@ escaped POSIX text and the previously reviewed literal backslash behavior:
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
 [ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
+# g01-safe-python-heredoc: reviewed legacy dynamic-argv probe
 /opt/homebrew/bin/python3 -I - <<'PY'
 import re
 import subprocess
@@ -6918,6 +7104,7 @@ discovery, pathspec and replacement controls unchecked.
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
 [ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
+# g01-safe-python-heredoc: reviewed legacy dynamic-argv probe
 /opt/homebrew/bin/python3 -I - <<'PY'
 import os
 import subprocess
@@ -7017,6 +7204,7 @@ before any Git or Go child, output, immutable-tree check or source read:
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
 [ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
+# g01-safe-python-heredoc: reviewed legacy dynamic-argv probe
 /opt/homebrew/bin/python3 -I - <<'PY'
 import io
 import os
@@ -7152,6 +7340,7 @@ The immutable red command was:
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
 [ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
+# g01-safe-python-heredoc: reviewed legacy dynamic-argv probe
 /opt/homebrew/bin/python3 -I - <<'PY'
 import io
 import os
@@ -8659,6 +8848,7 @@ prescription count and a safe scanner boundary:
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
 [ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
+# g01-safe-python-heredoc: reviewed legacy dynamic-argv probe
 /opt/homebrew/bin/python3 -I - <<'PY'
 import ast
 import os
@@ -10269,22 +10459,22 @@ for command in ("(gh workflow run ci.yml)", "true && (gh workflow run ci.yml)"):
         raise SystemExit(f"red setup changed: exact parent already rejects {command}")
 print("RED 4003386586: exact parent certified gh workflow run inside parenthesized subshells")
 
-def run(args, cwd, check=True):
+def run_git_probe(args, cwd, check=True):
     return subprocess.run(args, cwd=cwd, text=True, capture_output=True, check=check)
 
 with tempfile.TemporaryDirectory() as td:
     root = Path(td)
-    run(["git", "init", "-q"], root)
-    run(["git", "config", "user.name", "probe"], root)
-    run(["git", "config", "user.email", "probe@example.invalid"], root)
-    run(["git", "config", "filter.synthetic.clean", "sed 's/package q/package p/'"], root)
-    run(["git", "config", "filter.synthetic.smudge", "cat"], root)
+    run_git_probe(["git", "init", "-q"], root)
+    run_git_probe(["git", "config", "user.name", "probe"], root)
+    run_git_probe(["git", "config", "user.email", "probe@example.invalid"], root)
+    run_git_probe(["git", "config", "filter.synthetic.clean", "sed 's/package q/package p/'"], root)
+    run_git_probe(["git", "config", "filter.synthetic.smudge", "cat"], root)
     (root / ".git/info/attributes").write_text("source.go filter=synthetic\n", encoding="utf-8")
     (root / "source.go").write_bytes(b"package p\n")
-    run(["git", "add", "source.go"], root)
-    run(["git", "commit", "-q", "-m", "source"], root)
+    run_git_probe(["git", "add", "source.go"], root)
+    run_git_probe(["git", "commit", "-q", "-m", "source"], root)
     (root / "source.go").write_bytes(b"package q\n")
-    status = run(
+    status = run_git_probe(
         ["git", "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching", "--", "."],
         root,
     )
@@ -10402,17 +10592,17 @@ helper_ns = {
 exec(compile(packet[helper_start:helper_end], "<raw-blob-helper>", "exec"), helper_ns)
 with tempfile.TemporaryDirectory() as td:
     root = Path(td)
-    def run(args, check=True):
+    def run_git_probe(args, check=True):
         return subprocess.run(args, cwd=root, env=probe_env, text=True, capture_output=True, check=check)
-    run(["git", "init", "-q"])
-    run(["git", "config", "user.name", "probe"])
-    run(["git", "config", "user.email", "probe@example.invalid"])
-    run(["git", "config", "filter.synthetic.clean", "sed 's/package q/package p/'"])
-    run(["git", "config", "filter.synthetic.smudge", "cat"])
+    run_git_probe(["git", "init", "-q"])
+    run_git_probe(["git", "config", "user.name", "probe"])
+    run_git_probe(["git", "config", "user.email", "probe@example.invalid"])
+    run_git_probe(["git", "config", "filter.synthetic.clean", "sed 's/package q/package p/'"])
+    run_git_probe(["git", "config", "filter.synthetic.smudge", "cat"])
     (root / ".git/info/attributes").write_text("source.go filter=synthetic\n", encoding="utf-8")
     (root / "source.go").write_bytes(b"package p\n")
-    run(["git", "add", "source.go"])
-    run(["git", "commit", "-q", "-m", "source"])
+    run_git_probe(["git", "add", "source.go"])
+    run_git_probe(["git", "commit", "-q", "-m", "source"])
     (root / "source.go").write_bytes(b"package q\n")
     try:
         helper_ns["git_worktree_matches_pinned_blobs"](root, ".", probe_env)
@@ -10791,3 +10981,91 @@ resource.
 | 4003658080, source `055a05bd9d5a9bb101e4400dd7a9236e3afd9f48` | [discussion 4003658080](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003658080) | Reproduced `runner=gh "$runner" workflow run ci.yml` being treated as a safe literal. Unresolved or parameter-expanded executable tokens now fail closed before denylist classification while literal `printf safe` remains accepted; no shell expansion or `gh` command ran. Rollback is packet-only parent restoration. |
 | 4003658086, source `055a05bd9d5a9bb101e4400dd7a9236e3afd9f48` | [discussion 4003658086](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003658086) | Reproduced inherited `GOPRIVATE`, `GONOPROXY` and `GONOSUMDB` reaching the first Git child. The wrapper rejects non-empty inherited/command-prefix values, pins all three empty and verifies the effective empty values alongside `GOPROXY`/`GOSUMDB`; no Go child ran. Rollback is packet-only parent restoration. |
 | 4003658097, source `055a05bd9d5a9bb101e4400dd7a9236e3afd9f48` | [discussion 4003658097](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003658097) | Reproduced the exact parent's first-heredoc-only behavior with `cat <<TEXT; python3 -I - <<PY`; both scanner paths now queue every heredoc delimiter and AST-check the later Python body. No body or command executed. Rollback is packet-only parent restoration. |
+
+### Fresh exact-head P1/P2 corrections at `c90ebd61bc687b5e6ab0d336701b72c11140650f`
+
+The [exact-head Codex review 5196173009](https://github.com/1XP-AI/gh-runnerd/pull/78#pullrequestreview-5196173009)
+identified four fresh findings against immutable parent
+`c90ebd61bc687b5e6ab0d336701b72c11140650f`: valid multiline Apple Clang
+version output rejected by an exact-one-line guard
+([4003926159](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003926159), P1),
+executable non-Python heredoc bodies skipped before certification
+([4003926165](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003926165), P2),
+inherited executable Git transport overrides reaching the first Git query
+([4003926170](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003926170), P2),
+and assignment aliases of recognized Python launchers not tracked by the AST
+binding pass ([4003926177](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003926177), P2).
+This packet-only correction preserves prior ledgers, exact-parent/TDD records,
+rollback and live gaps, no-secrets/private-path hygiene and the
+trusted-same-user boundary; no compiler, Go, workflow, App/runner, Docker,
+Lima, Keychain, launchd or live operation is authorized or claimed.
+
+#### Red then green focused probes
+
+The red probe ran first against the immutable parent using `git show`, with
+synthetic inputs only and all potential child calls patched. The exact red
+fixtures were:
+
+| Finding | Exact red fixture and observed parent behavior |
+|---|---|
+| 4003926159 | `Apple clang version 21.0.0 (clang-2100.1.1.101)\nTarget: arm64-apple-darwin25.0.0\nThread model: posix\n`; the parent’s `len(cgo_version_lines) != 1` guard rejected this valid multiline banner. |
+| 4003926165 | `bash <<EOF\ngh workflow run ci.yml\nEOF` and `sh <<EOF\ndocker system prune --all --force\nEOF`; the parent yielded the command but skipped both executable non-Python bodies. |
+| 4003926170 | Inherited and command-prefix `GIT_EXEC_PATH=/synthetic/transport-helper`, `GIT_SSH_COMMAND=/synthetic/transport-helper` and `GIT_ASKPASS=/synthetic/transport-helper`; each reached the parent’s first Git lookup. |
+| 4003926177 | `import subprocess\nlaunch = subprocess.run\nlaunch(["gh", "workflow", "run", "ci.yml"])\n`; the parent AST pass accepted the assignment alias. |
+
+Recorded exact-parent red output:
+
+```text
+RED 4003926159: exact parent rejected valid multiline clang --version fixture because it required exactly one stdout line
+RED 4003926165: exact parent skipped executable bash/sh heredoc bodies containing gh workflow run and docker system prune
+RED 4003926170: exact parent forwarded inherited and command-prefix GIT_EXEC_PATH/GIT_SSH_COMMAND/GIT_ASKPASS to its first Git lookup
+RED 4003926177: exact parent accepted assignment alias launch = subprocess.run followed by launch([gh, workflow, run, ...])
+```
+
+The minimal correction adds `validate_cgo_version_output` (complete stdout
+<=4,096 UTF-8 bytes, <=32 lines, <=256 UTF-8 bytes per line; first-line
+identity comparison; nonzero/stderr/empty/oversize/drift refusal), makes both
+shell audits fail closed on every executable non-Python heredoc before body
+certification, rejects the reviewed Git transport-helper set
+(`GIT_EXEC_PATH`, `GIT_SSH`, `GIT_SSH_COMMAND`, `GIT_SSH_VARIANT`,
+`GIT_ASKPASS`, `GIT_SSH_ASKPASS`, `GIT_PROXY_COMMAND`) before the first
+Git query, and resolves assignment alias chains while leaving shadowed or
+unresolved names fail-closed. Reviewed isolated Python heredoc handling and
+the safe dynamic marker remain intact.
+
+The green probe read only the candidate packet, exercised pure compiler,
+scanner and AST helpers, and patched both subprocess APIs around the wrapper
+prefix. It ran via the reviewed isolated Python interpreter and started no
+compiler, Go, Git transport helper or other live child.
+
+Recorded focused green output:
+
+```text
+GREEN 4003926159: bounded multiline clang output accepted when first line matches reviewed identity; nonzero/stderr/empty/oversize/line-count/line-length/drift rejected; no compiler/Go child
+GREEN 4003926165: executable bash/sh heredocs rejected before body certification (gh workflow run/docker system prune fixtures); reviewed isolated Python heredoc retained for AST inspection; no body/command ran
+GREEN 4003926170: inherited and command-prefix Git transport helper overrides (GIT_EXEC_PATH/GIT_SSH/GIT_SSH_COMMAND/GIT_SSH_VARIANT/GIT_ASKPASS/GIT_SSH_ASKPASS/GIT_PROXY_COMMAND) rejected before first Git/Go child
+GREEN 4003926177: assignment aliases and alias chains of subprocess.run were AST-resolved and forbidden gh/docker launchers rejected; reviewed safe dynamic Python handling retained; no command ran
+```
+
+The four probes are packet/static or synthetic-environment evidence only. No
+compiler, Go test/list/body command, heredoc body, workflow, App/runner
+operation, credential access, Docker/Lima/Keychain/launchd operation or
+destructive cleanup ran. The multiline compiler banner is a reviewed public
+tool identity, not a claim that `/usr/bin/clang` or a Go build ran.
+Exact-head Codex review of the final pushed head, required CI and maintainer
+live authorization remain open.
+
+Rollback is narrow and packet-only: restore
+`docs/evidence/g01-recovery-packet.md` to immutable parent
+`c90ebd61bc687b5e6ab0d336701b72c11140650f`; preserve independent driver,
+review and manual-runner state, and do not force-kill, prune or replay any live
+resource.
+
+#### Exact review URL ledger and dispositions
+
+| Finding and immutable source | Exact review URL | Disposition and rollback evidence |
+|---|---|---|
+| 4003926159, source `c90ebd61bc687b5e6ab0d336701b72c11140650f` | [discussion 4003926159](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003926159) | Reproduced valid multiline clang output rejection. The bounded validator now compares reviewed identity to the first line and rejects nonzero/stderr/empty/oversize/line-count/line-length/drift; no compiler/Go child ran. Rollback is packet-only parent restoration. |
+| 4003926165, source `c90ebd61bc687b5e6ab0d336701b72c11140650f` | [discussion 4003926165](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003926165) | Reproduced skipped `bash <<EOF`/`sh <<EOF` bodies containing `gh workflow run` and `docker system prune`. Both shell audits now fail closed before body certification while isolated Python heredocs remain AST-inspected; no body/command ran. Rollback is packet-only parent restoration. |
+| 4003926170, source `c90ebd61bc687b5e6ab0d336701b72c11140650f` | [discussion 4003926170](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003926170) | Reproduced inherited and command-prefix transport-helper overrides reaching the first Git lookup. The wrapper now rejects the reviewed helper set before any Git/Go child; both subprocess APIs were patched in the static probe. Rollback is packet-only parent restoration. |
+| 4003926177, source `c90ebd61bc687b5e6ab0d336701b72c11140650f` | [discussion 4003926177](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003926177) | Reproduced assignment alias `launch = subprocess.run` passing the parent AST binding pass. Alias chains now resolve to the reviewed launcher set; shadowed/unresolved names fail closed and safe dynamic handling remains. No command ran; rollback is packet-only parent restoration. |
