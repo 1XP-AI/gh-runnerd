@@ -5213,9 +5213,18 @@ def anchors(path):
 
 def markdown_outside_fences(markdown):
     in_fence = False
+    fence_marker = None
     for line in markdown.splitlines():
-        if line.startswith("```"):
-            in_fence = not in_fence
+        if line.startswith(("```", "~~~")):
+            marker = line[:3]
+            info = line[3:].strip()
+            if in_fence:
+                if marker == fence_marker and not info:
+                    in_fence = False
+                    fence_marker = None
+            elif info:
+                in_fence = True
+                fence_marker = marker
             continue
         if not in_fence:
             yield line
@@ -5691,6 +5700,27 @@ git_transport_override_names = {
     "GIT_SSH_ASKPASS",
     "GIT_PROXY_COMMAND",
 }
+git_http_tls_override_names = {
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+    "GIT_SSL_NO_VERIFY",
+    "GIT_SSL_CIPHER_LIST",
+    "GIT_SSL_VERSION",
+    "GIT_SSL_CERT",
+    "GIT_SSL_KEY",
+    "GIT_SSL_CAPATH",
+    "GIT_SSL_CACERT",
+    "GIT_SSL_CAINFO",
+    "CURL_CA_BUNDLE",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+}
 git_environment_override_names = {
     "GIT_CONFIG",
     "GIT_CONFIG_COUNT",
@@ -5704,7 +5734,17 @@ git_environment_override_names = {
     "GIT_INDEX_FILE",
     "GIT_NAMESPACE",
     *git_transport_override_names,
+    *git_http_tls_override_names,
 }
+git_http_tls_environment_overrides = sorted(
+    key for key in os.environ if key in git_http_tls_override_names
+)
+if git_http_tls_environment_overrides:
+    raise SystemExit(
+        "post-correction HTTP/TLS/proxy environment overrides are not allowed "
+        "before authenticated remote parity: "
+        + ", ".join(git_http_tls_environment_overrides)
+    )
 git_environment = {
     key: value
     for key, value in os.environ.items()
@@ -6732,6 +6772,7 @@ from pathlib import Path
 
 source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
 fence_languages = {"sh", "bash", "shell", "zsh"}
+fence_prefixes = ("```", "~~~")
 assignment = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
 heredoc = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 python_interpreter = re.compile(r"python(?:3(?:\.[0-9]+)?)?\Z")
@@ -6824,20 +6865,24 @@ def reviewed_shell_preflight(stripped):
 
 def shell_commands(markdown):
     in_shell = False
+    shell_fence = None
     pending_heredocs = []
     pending = []
     pending_numbers = []
     for number, line in enumerate(markdown.splitlines(), start=1):
-        if line.startswith("```"):
+        if line.startswith(fence_prefixes):
+            marker = line[:3]
             info = line[3:].strip().lower()
             if in_shell:
-                if not info:
+                if marker == shell_fence and not info:
                     in_shell = False
+                    shell_fence = None
                     pending = []
                     pending_numbers = []
                 continue
             if info in fence_languages:
                 in_shell = True
+                shell_fence = marker
             continue
         if not in_shell:
             continue
@@ -6890,6 +6935,7 @@ def shell_commands(markdown):
 def python_heredoc_bodies(markdown):
     """Extract every executable Python body for AST inspection; never discard one."""
     in_shell = False
+    shell_fence = None
     pending_heredocs = []
     safe_marker = False
     marker = "g01-safe-python-heredoc"
@@ -6910,13 +6956,16 @@ def python_heredoc_bodies(markdown):
                 if current["invocation"] is not None:
                     current["body"].append(line)
             continue
-        if line.startswith("```"):
+        if line.startswith(fence_prefixes):
+            marker = line[:3]
             info = line[3:].strip().lower()
             if in_shell:
-                if not info:
+                if marker == shell_fence and not info:
                     in_shell = False
+                    shell_fence = None
             elif info in fence_languages:
                 in_shell = True
+                shell_fence = marker
             continue
         if not in_shell:
             continue
@@ -7434,6 +7483,8 @@ def forbidden_command(tokens, depth=0):
         return f"{executable} remote command launcher is not allowed"
     if executable == "eval":
         return "eval-wrapped command strings are not allowed"
+    if executable in {"source", "."}:
+        return f"{executable} sourced script launcher is not allowed"
     if executable in {
         "xargs", "find", "parallel", "gparallel", "make", "gmake",
         "just", "task", "at", "batch", "watch", "entr", "chronic",
@@ -16373,8 +16424,11 @@ GitHub, runner, workflow, credential, Docker/Lima, Keychain, launchd or
 canary operation:
 
 ~~~sh
-python3 - <<'PY'
+# g01-safe-python-heredoc: reviewed exact-parent packet boundary
+/opt/homebrew/bin/python3 -I - <<'PY'
 import ast
+import re
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -16429,7 +16483,7 @@ else:
 scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
 scanner_start = packet.rfind("source = Path(", 0, scanner_anchor)
 scanner_end = packet.index("\nmatches = []", scanner_anchor)
-scanner_ns = {"Path": Path, "ast": ast, "re": __import__("re"), "shlex": __import__("shlex")}
+scanner_ns = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
 exec(compile(packet[scanner_start:scanner_end], "<exact-parent-scanner>", "exec"), scanner_ns)
 for command in (
     "scp -S /tmp/live-helper source host:destination",
@@ -16478,12 +16532,15 @@ It performed no live remote query and started no child outside the in-memory
 probe objects:
 
 ~~~sh
-python3 - <<'PY'
+# g01-safe-python-heredoc: reviewed focused packet boundary probes
+/opt/homebrew/bin/python3 -I - <<'PY'
 import ast
 import os
 import re
 import selectors
 import shlex
+import subprocess
+import time
 from pathlib import Path
 
 packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
@@ -16521,8 +16578,8 @@ if len(popen) != 1 or not any(
 ns = {
     "os": os,
     "selectors": selectors,
-    "subprocess": __import__("subprocess"),
-    "time": __import__("time"),
+    "subprocess": subprocess,
+    "time": time,
     "label": "filter-probe",
     "git_filter_guard_deadline_seconds": 0.5,
     "git_filter_guard_stream_chunk_bytes": 4096,
@@ -16691,4 +16748,286 @@ Recorded current packet certification output:
 
 ~~~text
 GREEN packet certification: 346 Markdown fences balanced, 63 packet-local targets checked with same-file fragments, backlog JSON valid, changed-boundary ledger valid with 10 data rows and 4 columns, embedded wrapper/scanner/filter/parity AST and compile valid, four current finding URLs and exact RED/GREEN transcripts present, changed scope is one packet path, added-line secret/private-path hygiene clean, and git diff --check passed
+~~~
+
+## Current fix wave: exact-head Codex parity and packet scanner findings
+
+Date: 2026-09-15. Review route: gpt-5.6-luna with max reasoning. This
+packet-only correction addresses the exact-head Codex roots
+[4009116242](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4009116242),
+[4009116223](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4009116223)
+and
+[4009116235](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4009116235)
+against immutable parent `1fc2cede68f2692de0fad7a18d6faf7810544845`.
+The prior exact-parent RED/current GREEN evidence, stale-finding ledger,
+trusted-same-user boundary, rollback boundary and explicit live-not-authorized
+gaps remain preserved. No source code, workflow, App/runner, Docker/Lima,
+Keychain, launchd, credential or live GitHub operation is authorized or
+claimed.
+
+### Exact-parent RED probes
+
+The RED probe loaded only the exact parent packet with `git show`, extracted
+the parent scanner and parity source in memory, and used pure token/AST/source
+checks. It started no candidate child and performed no network or live
+operation:
+
+~~~sh
+# g01-safe-python-heredoc: reviewed exact-parent scanner/parity boundary
+set -euo pipefail
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import re
+import shlex
+import subprocess
+from pathlib import Path
+
+parent = "1fc2cede68f2692de0fad7a18d6faf7810544845"
+packet = subprocess.check_output(
+    ["git", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    text=True,
+)
+scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
+scanner_start = packet.rfind(
+    "source = Path(\"docs/evidence/g01-recovery-packet.md\").read_text(encoding=\"utf-8\")",
+    0,
+    scanner_anchor,
+)
+scanner_end = packet.index("\nmatches = []", scanner_anchor)
+scanner_namespace = {
+    "Path": Path,
+    "ast": ast,
+    "re": re,
+    "shlex": shlex,
+}
+exec(
+    compile(packet[scanner_start:scanner_end], "<exact-parent-scanner>", "exec"),
+    scanner_namespace,
+)
+
+tilde_fixture = "\n".join(("~~~sh", "docker run --rm image:tag true", "~~~"))
+if list(scanner_namespace["shell_commands"](tilde_fixture)) == []:
+    print("RED 4009116223: exact parent omitted valid tilde-fenced shell commands")
+else:
+    raise SystemExit("red setup changed: parent tilde fence is already scanned")
+for fixture in ("source ./live.sh", ". ./live.sh"):
+    violations = [
+        scanner_namespace["forbidden_command"](segment)
+        for segment in scanner_namespace["shell_token_segments"](fixture)
+    ]
+    if any(violation is not None for violation in violations):
+        raise SystemExit(f"red setup changed: parent already rejects {fixture!r}")
+    print(f"RED 4009116235: exact parent accepted {fixture!r} (violation=None)")
+
+parity_anchor = packet.index(
+    "git_transport_override_names = ", packet.index("def git_query")
+)
+parity_end = packet.index("git_environment = {", parity_anchor)
+parity_source = packet[parity_anchor:parity_end]
+required = (
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+    "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+    "GIT_SSL_NO_VERIFY", "GIT_SSL_CIPHER_LIST", "GIT_SSL_VERSION",
+    "GIT_SSL_CERT", "GIT_SSL_KEY", "GIT_SSL_CAPATH", "GIT_SSL_CACERT",
+    "GIT_SSL_CAINFO", "CURL_CA_BUNDLE", "SSL_CERT_FILE", "SSL_CERT_DIR",
+)
+missing = [name for name in required if name not in parity_source]
+if missing:
+    print(
+        "RED 4009116242: exact parent allowed inherited HTTP/TLS/proxy "
+        "overrides: " + ", ".join(missing)
+    )
+else:
+    raise SystemExit("red setup changed: parent already rejects all HTTP/TLS/proxy overrides")
+PY
+~~~
+
+Recorded exact-parent RED output:
+
+~~~text
+RED 4009116223: exact parent omitted valid tilde-fenced shell commands
+RED 4009116235: exact parent accepted 'source ./live.sh' (violation=None)
+RED 4009116235: exact parent accepted '. ./live.sh' (violation=None)
+RED 4009116242: exact parent allowed inherited HTTP/TLS/proxy overrides: HTTP_PROXY, HTTPS_PROXY, ALL_PROXY, NO_PROXY, http_proxy, https_proxy, all_proxy, no_proxy, GIT_SSL_NO_VERIFY, GIT_SSL_CIPHER_LIST, GIT_SSL_VERSION, GIT_SSL_CERT, GIT_SSL_KEY, GIT_SSL_CAPATH, GIT_SSL_CACERT, GIT_SSL_CAINFO, CURL_CA_BUNDLE, SSL_CERT_FILE, SSL_CERT_DIR
+~~~
+
+### Minimal packet correction and boundary GREEN probes
+
+The parity template now defines one reviewed HTTP/TLS/proxy override set,
+rejects any inherited member before constructing the Git environment or
+performing the canonical remote-head query, and excludes the same set as a
+defense-in-depth measure. The packet scanner now recognizes both three-byte
+backtick and tilde shell fences, requires matching-style closure, extracts
+Python heredocs from either style, and rejects the `source` and `.` sourced
+script launchers while retaining safe read-only commands. The separate
+Markdown link/body fence helper uses the same two fence styles so a tilde
+prescription cannot escape packet-local certification.
+
+The focused GREEN probe exercises both fence styles, mismatched-style closure,
+tilde Python heredoc extraction, sourced-launcher negatives, safe command
+boundaries, and every HTTP/TLS/proxy override through the in-memory parity
+guard. It performs no Git query, child launch, network, workflow, runner,
+credential, Docker/Lima, Keychain or launchd operation:
+
+~~~sh
+# g01-safe-python-heredoc: reviewed candidate scanner/parity boundary
+set -euo pipefail
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import re
+import shlex
+from pathlib import Path
+
+packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
+scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
+scanner_start = packet.rfind(
+    "source = Path(\"docs/evidence/g01-recovery-packet.md\").read_text(encoding=\"utf-8\")",
+    0,
+    scanner_anchor,
+)
+scanner_end = packet.index("\nmatches = []", scanner_anchor)
+scanner_namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+exec(
+    compile(packet[scanner_start:scanner_end], "<candidate-scanner>", "exec"),
+    scanner_namespace,
+)
+
+def violations(command):
+    return [
+        scanner_namespace["forbidden_command"](segment)
+        for segment in scanner_namespace["shell_token_segments"](command)
+    ]
+
+for fence in ("~~~", "```"):
+    fixture = "\n".join((f"{fence}sh", "docker run --rm image:tag true", fence))
+    if list(scanner_namespace["shell_commands"](fixture)) != [
+        ("docker run --rm image:tag true", 2)
+    ]:
+        raise SystemExit(f"{fence} shell fence was not scanned")
+mixed = "\n".join(
+    ("~~~sh", "docker run --rm image:tag true", "```", "printf safe", "~~~")
+)
+if list(scanner_namespace["shell_commands"](mixed)) != [
+    ("docker run --rm image:tag true", 2),
+    ("printf safe", 4),
+]:
+    raise SystemExit("mismatched fence style incorrectly closed shell scan")
+heredoc = "\n".join(
+    ("~~~sh", "python3 -I - <<'PY2'", "print(\"fixture\")", "PY2", "~~~")
+)
+bodies = list(scanner_namespace["python_heredoc_bodies"](heredoc))
+if len(bodies) != 1 or bodies[0][1].strip() != 'print("fixture")':
+    raise SystemExit("tilde Python heredoc was not extracted")
+print(
+    "GREEN 4009116223: backtick and tilde shell fences are scanned with "
+    "matching-style closure; tilde Python heredoc and forbidden command were observed"
+)
+
+for command in (
+    "source ./live.sh", ". ./live.sh", "source /tmp/live.sh", ". /tmp/live.sh"
+):
+    if not any(value is not None for value in violations(command)):
+        raise SystemExit(f"sourced launcher escaped scanner: {command!r}")
+for command in ("printf safe", "git ls-files --cached", "git status --porcelain=v1"):
+    if any(value is not None for value in violations(command)):
+        raise SystemExit(f"safe command rejected: {command!r}")
+print(
+    "GREEN 4009116235: source and dot sourced-script launchers fail closed; "
+    "safe printf/status/list commands remain accepted"
+)
+
+parity_anchor = packet.index(
+    "git_transport_override_names = ", packet.index("def git_query")
+)
+parity_end = packet.index("git_environment = {", parity_anchor)
+parity_prefix = packet[parity_anchor:parity_end]
+parity_tree = ast.parse(parity_prefix, filename="<candidate-parity-guard>")
+required = {
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+    "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+    "GIT_SSL_NO_VERIFY", "GIT_SSL_CIPHER_LIST", "GIT_SSL_VERSION",
+    "GIT_SSL_CERT", "GIT_SSL_KEY", "GIT_SSL_CAPATH", "GIT_SSL_CACERT",
+    "GIT_SSL_CAINFO", "CURL_CA_BUNDLE", "SSL_CERT_FILE", "SSL_CERT_DIR",
+}
+set_assign = next(
+    node for node in parity_tree.body
+    if isinstance(node, ast.Assign)
+    and any(
+        isinstance(target, ast.Name)
+        and target.id == "git_http_tls_override_names"
+        for target in node.targets
+    )
+)
+set_values = {
+    element.value for element in set_assign.value.elts
+    if isinstance(element, ast.Constant)
+}
+if set_values != required:
+    raise SystemExit("HTTP/TLS override set changed unexpectedly")
+for override in sorted(required):
+    fake_os = type("FakeOS", (), {"environ": {override: "fixture"}})
+    try:
+        exec(
+            compile(
+                packet[parity_anchor:parity_end],
+                "<candidate-parity-guard>",
+                "exec",
+            ),
+            {"os": fake_os},
+        )
+    except SystemExit as error:
+        if "HTTP/TLS/proxy" not in str(error):
+            raise
+    else:
+        raise SystemExit(f"parity guard accepted {override}")
+print(
+    "GREEN 4009116242: canonical parity fails closed for every reviewed "
+    "HTTP/TLS/proxy override before environment construction; no child/network started"
+)
+PY
+~~~
+
+Recorded focused GREEN output:
+
+~~~text
+GREEN 4009116223: backtick and tilde shell fences are scanned with matching-style closure; tilde Python heredoc and forbidden command were observed
+GREEN 4009116235: source and dot sourced-script launchers fail closed; safe printf/status/list commands remain accepted
+GREEN 4009116242: canonical parity fails closed for every reviewed HTTP/TLS/proxy override before environment construction; no child/network started
+~~~
+
+### Exact review URL ledger and dispositions
+
+These three roots are current exact-head findings. The earlier fix-wave rows,
+historical findings and no-direct-reply roots remain ledgered and dispositioned
+by current packet evidence; no finding is resolved by staleness alone.
+
+| Finding and immutable source | Exact review URL | Current disposition and evidence |
+|---|---|---|
+| 4009116242, source `1fc2cede68f2692de0fad7a18d6faf7810544845` | [discussion 4009116242](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4009116242) | Reproduced the exact-parent inherited HTTP/TLS/proxy override gap. The candidate enumerates proxy, CA, certificate, cipher and TLS-version overrides, fails closed before parity environment construction, and passes one synthetic rejection for every listed name without a child or network query. |
+| 4009116223, source `1fc2cede68f2692de0fad7a18d6faf7810544845` | [discussion 4009116223](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4009116223) | Reproduced exact-parent omission of valid `~~~sh` commands. The candidate scans matching-style backtick/tilde fences, covers tilde Python heredocs and mismatched closure, and observes the forbidden tilde command in the focused probe. |
+| 4009116235, source `1fc2cede68f2692de0fad7a18d6faf7810544845` | [discussion 4009116235](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4009116235) | Reproduced exact-parent acceptance of `source` and `.`, which could launch an uninspected script. The candidate rejects both sourced-script builtins, including absolute fixture paths, while safe `printf`, `git ls-files` and `git status` remain accepted. |
+
+No PR metadata or review reply was changed by this packet correction. The
+packet remains offline/source/fixture evidence only: live canary qualification,
+runner/App execution, Docker/Lima, Keychain/launchd, workflow dispatch and
+credential validation remain not authorized and unverified. Rollback is narrow
+and packet-only to exact parent `1fc2cede68f2692de0fad7a18d6faf7810544845`;
+preserve independent evidence and manually installed runner state, and never
+force-kill, prune or replay a live resource.
+
+### Current packet certification
+
+After the focused boundaries, packet-only certification checked Markdown fence
+parity including matching backtick/tilde closure, packet-local links and
+anchors, backlog JSON, the ten-row/four-column changed-boundary ledger,
+embedded wrapper/scanner/filter/parity AST and compile, all seven current
+finding URLs and exact RED/GREEN/CURRENT transcripts, one-file scope,
+added-line secret/private-path hygiene and `git diff --check`. The exact final
+local/origin SHA is reserved for the post-push worker handoff so this packet
+does not become self-referential.
+
+Recorded current packet certification output:
+
+~~~text
+GREEN packet certification: 356 Markdown fences balanced, 63 packet-local targets checked with matching-style fragments, backlog JSON valid, changed-boundary ledger valid with 10 data rows and 4 columns, embedded wrapper/scanner/filter/parity AST and compile valid, seven current finding URLs and exact RED/GREEN/CURRENT transcripts present, changed scope is one packet path, added-line secret/private-path hygiene clean, and git diff --check passed
 ~~~
