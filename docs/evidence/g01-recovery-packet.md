@@ -1123,9 +1123,9 @@ def terminate_go_child_group(process):
         try:
             process.wait(timeout=max(0, grace_deadline - time.monotonic()))
         except TypeError:
-            # Keep small synthetic process doubles usable in packet-only probes;
-            # real Popen objects support the bounded timeout form above.
-            process.wait()
+            raise SystemExit(
+                f"{label}: owned Go child does not support bounded reap"
+            )
         except subprocess.TimeoutExpired:
             pass
         if not wait_for_owned_go_process_group_exit(process, grace_deadline):
@@ -1133,12 +1133,24 @@ def terminate_go_child_group(process):
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            process.wait()
-            if not wait_for_owned_go_process_group_exit(
-                process, time.monotonic() + go_child_termination_grace_seconds
-            ):
+            post_kill_deadline = (
+                time.monotonic() + go_child_termination_grace_seconds
+            )
+            try:
+                process.wait(
+                    timeout=max(0, post_kill_deadline - time.monotonic())
+                )
+            except TypeError:
                 raise SystemExit(
-                    f"{label}: owned Go process group remained after SIGKILL"
+                    f"{label}: owned Go child does not support bounded SIGKILL reap"
+                )
+            except subprocess.TimeoutExpired:
+                raise SystemExit(
+                    f"{label}: owned Go child was not reaped after SIGKILL"
+                )
+            if not wait_for_owned_go_process_group_exit(process, post_kill_deadline):
+                raise SystemExit(
+                    f"{label}: owned Go process group remained after SIGKILL grace"
                 )
     finally:
         close_go_child_streams(process)
@@ -1185,7 +1197,9 @@ def capture_go_child_output(process, go_command):
         try:
             process.wait(timeout=remaining)
         except TypeError:
-            process.wait()
+            raise SystemExit(
+                f"{label}: Go child does not support bounded output reap"
+            )
         return bytes(captures["stdout"]), bytes(captures["stderr"])
     finally:
         selector.close()
@@ -1240,7 +1254,9 @@ def capture_cgo_version_output(process, compiler_command):
         try:
             process.wait(timeout=remaining)
         except TypeError:
-            process.wait()
+            raise SystemExit(
+                f"{label}: cgo compiler child does not support bounded output reap"
+            )
         return bytes(captures["stdout"]), bytes(captures["stderr"])
     finally:
         selector.close()
@@ -2530,9 +2546,9 @@ if len(selector_fixture_lines) != 1:
     raise SystemExit(
         f"expected one explicit non-prescription selector fixture, observed {len(selector_fixture_lines)}"
     )
-wrapper_records = sum(
-    line.lstrip().startswith("go_test_checked ") for line in lines
-)
+# Count only top-level prescriptions. The indented go_test_checked call inside
+# go_vet_checked is an implementation detail of the adapter, not a selector.
+wrapper_records = sum(line.startswith("go_test_checked ") for line in lines)
 if logical_guarded != wrapper_records:
     raise SystemExit(
         f"logical selector count {logical_guarded} does not equal wrapper record count {wrapper_records}"
@@ -6588,6 +6604,11 @@ shell_executables = {
     "sh", "bash", "dash", "zsh", "ksh", "mksh", "ash", "fish", "csh", "tcsh",
 }
 
+command_capable_interpreters = {
+    "perl", "ruby", "node", "nodejs", "php", "lua", "luajit", "tclsh", "wish",
+    "osascript", "raku", "jruby", "deno", "bun", "qjs", "quickjs", "jsc", "rscript",
+}
+
 def shell_command_string(tokens):
     if not tokens:
         return None
@@ -6674,6 +6695,10 @@ def forbidden_command(tokens, depth=0):
     # token. This covers absolute and relative executable paths without
     # changing shell argument semantics.
     executable = executable_basename(tokens[0])
+    if python_interpreter.fullmatch(executable):
+        return "Python interpreter execution is not allowed outside reviewed heredocs"
+    if executable.lower() in command_capable_interpreters:
+        return f"{executable} command-capable interpreter is not allowed"
     if executable == "eval":
         return "eval-wrapped command strings are not allowed"
     if executable in {
@@ -6732,6 +6757,10 @@ python_command_modules = {"os", "subprocess"}
 python_command_leaf_names = {
     name.rsplit(".", 1)[-1] for name in python_command_functions
 }
+python_dynamic_execution_names = {"eval", "exec", "__import__"}
+reviewed_python_import_modules = {
+    "pathlib", "re", "selectors", "signal", "stat", "tempfile", "time",
+}
 
 def python_dotted_name(node):
     parts = []
@@ -6742,6 +6771,120 @@ def python_dotted_name(node):
         parts.append(node.id)
         return ".".join(reversed(parts))
     return None
+
+
+def python_dynamic_execution_bindings(tree):
+    """Track aliases to built-in dynamic execution primitives conservatively."""
+    bindings = set(python_dynamic_execution_names)
+    unresolved = set()
+
+    def target_names(target):
+        if isinstance(target, ast.Name):
+            return [target.id]
+        if isinstance(target, (ast.Tuple, ast.List)):
+            names = []
+            for element in target.elts:
+                names.extend(target_names(element))
+            return names
+        return []
+
+    assignment_values = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module in {"builtins", "__builtin__"}:
+            for alias in node.names:
+                if alias.name in python_dynamic_execution_names:
+                    bindings.add(alias.asname or alias.name)
+        elif isinstance(node, ast.Assign):
+            assignment_values.extend((target, node.value) for target in node.targets)
+        elif isinstance(node, ast.AnnAssign):
+            assignment_values.append((node.target, node.value))
+        elif isinstance(node, ast.NamedExpr):
+            assignment_values.append((node.target, node.value))
+
+    for _ in range(len(assignment_values) + 1):
+        changed = False
+        for target, value in assignment_values:
+            dotted = python_dotted_name(value)
+            dynamic_getattr = (
+                isinstance(value, ast.Call)
+                and isinstance(value.func, ast.Name)
+                and value.func.id == "getattr"
+                and value.args
+                and python_dotted_name(value.args[0]) in {"builtins", "__builtins__"}
+            )
+            for name in target_names(target):
+                if (
+                    isinstance(value, ast.Name) and value.id in bindings
+                ) or (
+                    dotted is not None
+                    and dotted.rsplit(".", 1)[-1] in python_dynamic_execution_names
+                ):
+                    if name not in bindings:
+                        bindings.add(name)
+                        changed = True
+                elif dynamic_getattr and name not in unresolved:
+                    unresolved.add(name)
+                    changed = True
+        if not changed:
+            break
+    return bindings, unresolved
+
+
+def python_dynamic_execution_target(node, bindings, unresolved):
+    if isinstance(node, ast.Name):
+        if node.id in bindings:
+            return node.id
+        if node.id in unresolved:
+            return "unresolved dynamic Python execution alias"
+    dotted = python_dotted_name(node)
+    if dotted and dotted.rsplit(".", 1)[-1] in python_dynamic_execution_names:
+        return dotted.rsplit(".", 1)[-1]
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "getattr":
+        if node.args and python_dotted_name(node.args[0]) in {"builtins", "__builtins__"}:
+            if (
+                len(node.args) > 1
+                and isinstance(node.args[1], ast.Constant)
+                and node.args[1].value in python_dynamic_execution_names
+            ):
+                return node.args[1].value
+            return "unresolved dynamic Python execution primitive"
+    if isinstance(node, ast.Subscript) and python_dotted_name(node.value) in {
+        "builtins", "__builtins__",
+    }:
+        return "unresolved dynamic Python execution primitive"
+    return None
+
+
+def reviewed_python_exec_call(call, safe_marker):
+    """Allow only the packet's static compile/exec metaprogramming path."""
+    if not isinstance(call.func, ast.Name) or call.func.id != "exec":
+        return False
+    if not call.args or not isinstance(call.args[0], ast.Call):
+        return False
+    compiler = call.args[0]
+    if not isinstance(compiler.func, ast.Name) or compiler.func.id != "compile":
+        return False
+    if len(compiler.args) < 3:
+        return False
+    filename, mode = compiler.args[1:3]
+    return (
+        isinstance(filename, ast.Constant)
+        and isinstance(filename.value, str)
+        and filename.value.startswith("<")
+        and filename.value.endswith(">")
+        and isinstance(mode, ast.Constant)
+        and mode.value == "exec"
+    )
+
+
+def reviewed_python_import_call(call, safe_marker):
+    """Allow only literal imports used by packet-only probes."""
+    if not isinstance(call.func, ast.Name) or call.func.id != "__import__":
+        return False
+    if not call.args or not isinstance(call.args[0], ast.Constant):
+        return False
+    module = call.args[0].value
+    return isinstance(module, str) and module.split(".", 1)[0] in reviewed_python_import_modules
 
 
 def python_module_name(node, modules):
@@ -7182,10 +7325,23 @@ def inspect_python_heredoc(body, safe_marker):
             + ",".join(str(line) for line in unresolved_imports)
         )
     mappings = python_mapping_bindings(tree, modules, functions)
+    dynamic_bindings, unresolved_dynamic_bindings = python_dynamic_execution_bindings(tree)
     dynamic_calls = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
+        dynamic_target = python_dynamic_execution_target(
+            node.func, dynamic_bindings, unresolved_dynamic_bindings
+        )
+        if dynamic_target is not None:
+            if reviewed_python_exec_call(node, safe_marker):
+                continue
+            if reviewed_python_import_call(node, safe_marker):
+                continue
+            return (
+                "Python heredoc contains a dynamic execution primitive "
+                f"{dynamic_target!r} on line {node.lineno}"
+            )
         mapping = python_mapping_command(node.func, mappings, modules, functions)
         indirect = python_indirect_command(node.func, modules)
         if mapping is not None:
@@ -14318,4 +14474,356 @@ Recorded packet certification output:
 
 ```text
 GREEN packet certification: 302 Markdown fences balanced, 157 local Markdown targets checked, backlog JSON valid, changed-boundary ledger valid with 10 data rows and 4 columns, embedded wrapper/scanner AST and compile valid, 2 fresh probe bodies AST-valid, exact red/green outputs present, only packet changed, added-line secret/private-path hygiene clean, and git diff --check passed
+```
+
+### Fresh exact-head findings at `2abe394ee32f09888892c4adea5fc08121845d6b`
+
+The four fresh exact-head Codex findings below were reproduced against the
+immutable parent before editing. This correction changes only this packet and
+keeps the selected SDK/Runner/source pins, prior evidence, live gaps,
+trusted-same-user boundary and packet-only rollback unchanged. No Go, compiler,
+test body, workflow, App/runner, Docker/Lima, Keychain, launchd, credential or
+live GitHub operation is authorized or claimed.
+
+#### Exact-parent red reproductions
+
+The red probe reads only the exact parent blob with `git show`, extracts the
+parent scanner/wrapper in memory, and uses pure token/AST/count checks plus a
+synthetic process-group model. It does not start Perl/Python command payloads,
+Go/compiler children or live operations.
+
+```sh
+set -euo pipefail
+export PATH=/opt/homebrew/bin:/usr/bin:/bin
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
+# g01-safe-python-heredoc: reviewed exact-parent fresh-finding red probes
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import re
+import shlex
+import subprocess
+from pathlib import Path
+
+parent = "2abe394ee32f09888892c4adea5fc08121845d6b"
+packet = subprocess.check_output(
+    ["git", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    text=True,
+)
+
+scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
+scanner_start = packet.rfind("source = Path(", 0, scanner_anchor)
+scanner_end = packet.index("\nmatches = []", scanner_anchor)
+scanner_ns = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+exec(compile(packet[scanner_start:scanner_end], "<exact-parent-scanner>", "exec"), scanner_ns)
+
+perl = "perl -e 'system(\"gh workflow run ci.yml\")'"
+segments = scanner_ns["shell_token_segments"](perl)
+if not segments or scanner_ns["forbidden_command"](segments[0]) is not None:
+    raise SystemExit("red setup changed: exact parent already rejects Perl command interpreter")
+print("RED 4007243497: exact parent accepted perl -e system(\"gh workflow run ci.yml\") (violation=None)")
+for safe in ("git status", "printf safe"):
+    parts = scanner_ns["shell_token_segments"](safe)
+    if not parts or scanner_ns["forbidden_command"](parts[0]) is not None:
+        raise SystemExit(f"red setup changed: safe reviewed command rejected: {safe!r}")
+
+for body in (
+    'eval("print(\\"safe\\")")\n',
+    'exec("print(\\"safe\\")")\n',
+    '__import__("os").system("gh workflow run ci.yml")\n',
+):
+    if scanner_ns["inspect_python_heredoc"](body, True) is not None:
+        raise SystemExit(f"red setup changed: exact parent rejected dynamic Python primitive: {body!r}")
+print("RED 4007243507: exact parent accepted eval, exec and __import__ primitives even with the reviewed safe marker")
+
+lines = packet.splitlines()
+logical_selector_command = re.compile(
+    r"^\s*(?:go_test_checked\b.*\bgo test\b|"
+    r"(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+)\s+)*"
+    r"(?:env\s+.*\s+)?(?:command(?:\s+-[^\s]+)*\s+)?go test\b)"
+    r".*\s--?(?:run|skip)(?:=|\s)", re.DOTALL,
+)
+def logical_commands(source_lines):
+    commands = []
+    index = 0
+    while index < len(source_lines):
+        first = index
+        command = source_lines[index].rstrip()
+        while command.endswith("\\"):
+            command = command[:-1].rstrip() + " "
+            index += 1
+            if index >= len(source_lines):
+                raise SystemExit("red setup changed: unterminated continuation")
+            command += source_lines[index].lstrip()
+        commands.append((first, command))
+        index += 1
+    return commands
+logical = sum(
+    not command.lstrip().startswith("selector_probe=$'")
+    and logical_selector_command.search(command) is not None
+    for _, command in logical_commands(lines)
+)
+wrapper_records = sum(line.lstrip().startswith("go_test_checked ") for line in lines)
+if (logical, wrapper_records) != (28, 29):
+    raise SystemExit(f"red setup changed: expected parent counts 28/29, observed {logical}/{wrapper_records}")
+print("RED 4007243520: exact parent selector certification counted 28 logical selectors but 29 go_test_checked records because the indented go_vet_checked adapter call was included")
+
+wrapper_start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
+wrapper_end = packet.index("\nPY\n}", wrapper_start)
+wrapper = packet[wrapper_start:wrapper_end]
+functions = {node.name: node for node in ast.parse(wrapper).body if isinstance(node, ast.FunctionDef)}
+unbounded = [
+    node for node in ast.walk(functions["terminate_go_child_group"])
+    if isinstance(node, ast.Call)
+    and isinstance(node.func, ast.Attribute)
+    and node.func.attr == "wait"
+    and not node.args
+    and not node.keywords
+]
+if not unbounded:
+    raise SystemExit("red setup changed: exact parent has no unbounded process.wait()")
+print("RED 4007243527: exact parent SIGKILL cleanup used unbounded process.wait() and could hang instead of failing closed within grace")
+PY
+```
+
+Recorded exact-parent red output:
+
+```text
+RED 4007243497: exact parent accepted perl -e system("gh workflow run ci.yml") (violation=None)
+RED 4007243507: exact parent accepted eval, exec and __import__ primitives even with the reviewed safe marker
+RED 4007243520: exact parent selector certification counted 28 logical selectors but 29 go_test_checked records because the indented go_vet_checked adapter call was included
+RED 4007243527: exact parent SIGKILL cleanup used unbounded process.wait() and could hang instead of failing closed within grace
+```
+
+#### Minimal packet-only correction and focused green probes
+
+The minimal correction denies command-capable interpreter basenames, including
+Perl `-e` forms, while retaining safe reviewed Git/printf commands and the
+isolated Python-heredoc path. The Python AST pass now rejects direct, qualified,
+aliased and unresolved built-in `eval`/`exec`/`__import__` execution primitives
+before dynamic safe-marker handling; only the packet's static `compile(...,
+<reviewed>, "exec")` metaprogramming shape and literal packet-only imports are
+recognized as reviewed helpers. The selector count is restricted to top-level
+`go_test_checked` prescriptions, excluding the indented `go_vet_checked` adapter
+delegation. Every process reap, including the SIGKILL path, carries a bounded
+timeout and fails closed when the owned child/group cannot be reaped within the
+reviewed grace period.
+
+The focused green probe reads only the candidate packet and exercises pure
+scanner/AST/count helpers plus a synthetic process-group model. It runs no
+interpreter payload, compiler, Go child, test body, workflow, runner, Docker,
+Lima, Keychain, launchd, credential or live GitHub operation.
+
+```sh
+set -euo pipefail
+export PATH=/opt/homebrew/bin:/usr/bin:/bin
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
+# g01-safe-python-heredoc: reviewed focused four-finding boundary probes
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import os
+import re
+import shlex
+import signal
+import subprocess
+import time
+from pathlib import Path
+
+packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
+scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
+scanner_start = packet.rfind("source = Path(", 0, scanner_anchor)
+scanner_end = packet.index("\nmatches = []", scanner_anchor)
+scanner_ns = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+exec(compile(packet[scanner_start:scanner_end], "<candidate-scanner>", "exec"), scanner_ns)
+
+def rejects(command):
+    return any(
+        scanner_ns["forbidden_command"](segment) is not None
+        for segment in scanner_ns["shell_token_segments"](command)
+    )
+
+for command in (
+    "perl -e 'system(\"gh workflow run ci.yml\")'",
+    "ruby -e 'system(\"gh workflow run ci.yml\")'",
+    "node -e 'require(\"child_process\").exec(\"gh workflow run ci.yml\")'",
+    "python3 /synthetic/script.py",
+):
+    if not rejects(command):
+        raise SystemExit(f"command-capable interpreter escaped scanner: {command!r}")
+for command in ("git status", "printf safe"):
+    if rejects(command):
+        raise SystemExit(f"safe reviewed command was rejected: {command!r}")
+print("GREEN 4007243497: Perl/ruby/node/Python command-capable interpreter forms rejected before execution; safe Git status and printf retained")
+
+for body in (
+    'eval("print(\\"safe\\")")\n',
+    'exec("print(\\"safe\\")")\n',
+    '__import__(module_name)\n',
+    'import builtins\nbuiltins.eval("print(1)")\n',
+    'import builtins\ngetattr(builtins, name)(payload)\n',
+    'launch = eval\nlaunch(payload)\n',
+):
+    if scanner_ns["inspect_python_heredoc"](body, True) is None:
+        raise SystemExit(f"dynamic Python primitive escaped AST scanner: {body!r}")
+for body in (
+    'import subprocess\nsubprocess.run(["printf", "safe"])\n',
+    'import subprocess\nsubprocess.run(command)\n',
+    'exec(compile(wrapper, "<reviewed>", "exec"), namespace)\n',
+    '__import__("signal")\n',
+):
+    if scanner_ns["inspect_python_heredoc"](body, True) is not None:
+        raise SystemExit(f"reviewed Python body was rejected: {body!r}")
+print("GREEN 4007243507: direct/qualified/aliased/unresolved eval, exec and __import__ forms fail closed before marker certification; reviewed safe launcher/static helper forms retained")
+
+lines = packet.splitlines()
+logical_selector_command = re.compile(
+    r"^\s*(?:go_test_checked\b.*\bgo test\b|"
+    r"(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+)\s+)*"
+    r"(?:env\s+.*\s+)?(?:command(?:\s+-[^\s]+)*\s+)?go test\b)"
+    r".*\s--?(?:run|skip)(?:=|\s)", re.DOTALL,
+)
+def logical_commands(source_lines):
+    commands = []
+    index = 0
+    while index < len(source_lines):
+        first = index
+        command = source_lines[index].rstrip()
+        while command.endswith("\\"):
+            command = command[:-1].rstrip() + " "
+            index += 1
+            command += source_lines[index].lstrip()
+        commands.append((first, command))
+        index += 1
+    return commands
+logical = sum(
+    not command.lstrip().startswith("selector_probe=$'")
+    and logical_selector_command.search(command) is not None
+    for _, command in logical_commands(lines)
+)
+wrapper_records = sum(line.startswith("go_test_checked ") for line in lines)
+if logical != wrapper_records or logical != 28:
+    raise SystemExit(f"selector count mismatch: logical={logical}, top-level wrapper={wrapper_records}")
+print("GREEN 4007243520: selector certification counted 28 logical selectors and 28 top-level go_test_checked records; indented go_vet_checked adapter excluded")
+
+wrapper_start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
+wrapper_end = packet.index("\nPY\n}", wrapper_start)
+wrapper = packet[wrapper_start:wrapper_end]
+module = ast.parse(wrapper, filename="<candidate-wrapper>")
+functions = {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}
+terminator = functions["terminate_go_child_group"]
+if any(
+    isinstance(node, ast.Call)
+    and isinstance(node.func, ast.Attribute)
+    and node.func.attr == "wait"
+    and not node.args
+    and not node.keywords
+    for node in ast.walk(terminator)
+):
+    raise SystemExit("unbounded terminate_go_child_group wait remains")
+
+class FakeProcess:
+    pid = 424242
+    def __init__(self, group_dies):
+        self.group_dies = group_dies
+        self.wait_calls = []
+    def wait(self, timeout=None):
+        if timeout is None:
+            raise AssertionError("unbounded wait called")
+        self.wait_calls.append(timeout)
+        if len(self.wait_calls) > 1 and not self.group_dies:
+            raise subprocess.TimeoutExpired(["go", "test"], timeout)
+        return 0
+
+def run_cleanup(group_dies):
+    group_alive = True
+    signals = []
+    def fake_killpg(pid, signal_number):
+        nonlocal group_alive
+        if pid != 424242:
+            raise AssertionError("cleanup targeted a different process group")
+        signals.append(signal_number)
+        if signal_number == signal.SIGKILL and group_dies:
+            group_alive = False
+        elif signal_number == 0 and not group_alive:
+            raise ProcessLookupError
+    saved_killpg = os.killpg
+    os.killpg = fake_killpg
+    try:
+        namespace = {
+            "os": os, "signal": signal, "subprocess": subprocess, "time": time,
+            "label": "sigkill-boundary", "go_child_termination_grace_seconds": 0.01,
+        }
+        exec(compile(ast.Module(body=[
+            functions["close_go_child_streams"],
+            functions["owned_go_process_group_exists"],
+            functions["wait_for_owned_go_process_group_exit"],
+            terminator,
+        ], type_ignores=[]), "<sigkill-helper>", "exec"), namespace)
+        process = FakeProcess(group_dies)
+        try:
+            namespace["terminate_go_child_group"](process)
+        except SystemExit as error:
+            if group_dies or "not reaped after SIGKILL" not in str(error):
+                raise
+            if signal.SIGKILL not in signals:
+                raise SystemExit("SIGKILL was not sent to the owned group")
+            if any(call is None for call in process.wait_calls):
+                raise SystemExit("SIGKILL reap used an unbounded wait")
+            return "unreaped child/group failed closed after bounded grace"
+        if not group_dies:
+            raise SystemExit("unreaped child/group was accepted")
+        if any(call is None for call in process.wait_calls):
+            raise SystemExit("successful SIGKILL reap used an unbounded wait")
+        return "owned child/group reaped within bounded grace"
+    finally:
+        os.killpg = saved_killpg
+
+print(f"GREEN 4007243527: {run_cleanup(False)}; {run_cleanup(True)}; no real child ran")
+PY
+```
+
+Recorded focused green output:
+
+```text
+GREEN 4007243497: Perl/ruby/node/Python command-capable interpreter forms rejected before execution; safe Git status and printf retained
+GREEN 4007243507: direct/qualified/aliased/unresolved eval, exec and __import__ forms fail closed before marker certification; reviewed safe launcher/static helper forms retained
+GREEN 4007243520: selector certification counted 28 logical selectors and 28 top-level go_test_checked records; indented go_vet_checked adapter excluded
+GREEN 4007243527: unreaped child/group failed closed after bounded grace; owned child/group reaped within bounded grace; no real child ran
+```
+
+The focused probes are static, synthetic or in-memory boundary evidence only.
+They do not qualify a compiler, Go test/list/body command, live runner,
+workflow, remote API, credential, Docker/Lima, Keychain or launchd operation.
+The packet remains offline/source evidence with all live authorization gaps
+explicit.
+
+Rollback is narrow and packet-only: restore
+`docs/evidence/g01-recovery-packet.md` to immutable parent
+`2abe394ee32f09888892c4adea5fc08121845d6b`; preserve independent driver,
+review and manual-runner state, and never force-kill, prune or replay a live
+resource.
+
+#### Exact review URL ledger and dispositions
+
+| Finding and immutable source | Exact review URL | Disposition and rollback evidence |
+|---|---|---|
+| 4007243497, source `2abe394ee32f09888892c4adea5fc08121845d6b` | [discussion 4007243497](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4007243497) | Reproduced exact-parent acceptance of `perl -e system("gh workflow run ci.yml")`. The scanner now rejects Perl and other reviewed command-capable interpreter basenames before execution while safe Git status/printf forms remain accepted. Rollback is packet-only parent restoration. |
+| 4007243507, source `2abe394ee32f09888892c4adea5fc08121845d6b` | [discussion 4007243507](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4007243507) | Reproduced exact-parent acceptance of direct `eval`, `exec` and `__import__` primitives even with the safe marker. The AST pass now rejects direct/qualified/aliased/unresolved dynamic execution primitives before marker handling, retaining only the static reviewed packet helper shape and literal packet imports. Rollback is packet-only parent restoration. |
+| 4007243520, source `2abe394ee32f09888892c4adea5fc08121845d6b` | [discussion 4007243520](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4007243520) | Reproduced the exact-parent 28 logical selector/29 wrapper-record mismatch caused by the indented `go_vet_checked` adapter delegation. The audit now counts only column-zero test prescriptions, so selector certification is 28/28 while both vet commands remain adapter-guarded. Rollback is packet-only parent restoration. |
+| 4007243527, source `2abe394ee32f09888892c4adea5fc08121845d6b` | [discussion 4007243527](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4007243527) | Reproduced the exact-parent unbounded `process.wait()` after SIGKILL. Cleanup now bounds the post-kill direct-child reap and owned-group liveness grace, failing closed on timeout/unsupported bounded waits; synthetic group-dies and group-does-not-reap cases passed without a real child. Rollback is packet-only parent restoration. |
+
+#### Packet body/link/fence/hygiene certification
+
+The final packet-only candidate is checked without any compiler, Go/vet child or
+live operation. Markdown fence parity, packet-local links/files, backlog JSON,
+changed-boundary ledger shape, embedded wrapper/scanner AST/compile, focused
+red/green transcript presence, packet-only scope, added-line secret/private-path
+hygiene and whitespace are checked before push; exact local/remote parity is
+recorded only after the focused commit is pushed.
+
+Recorded packet certification output:
+
+```text
+GREEN packet certification: 314 Markdown fences balanced, 25 packet-local targets checked, backlog JSON valid, changed-boundary ledger valid with 10 data rows and 4 columns, embedded wrapper/scanner AST and compile valid, 2 fresh probe bodies AST-valid, exact red/green outputs present, only packet changed, added-line secret/private-path hygiene clean
 ```
