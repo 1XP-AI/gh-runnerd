@@ -5215,11 +5215,18 @@ def markdown_outside_fences(markdown):
     in_fence = False
     fence_marker = None
     for line in markdown.splitlines():
-        if line.startswith(("```", "~~~")):
-            marker = line[:3]
-            info = line[3:].strip()
+        match = re.match(r"^( {0,3})(`{3,}|~{3,})(.*)$", line)
+        if match:
+            marker = match.group(2)
+            info = match.group(3).strip()
+            if marker[0] == "`" and "`" in info:
+                continue
             if in_fence:
-                if marker == fence_marker and not info:
+                if (
+                    marker[0] == fence_marker[0]
+                    and len(marker) >= len(fence_marker)
+                    and not info
+                ):
                     in_fence = False
                     fence_marker = None
             elif info:
@@ -6741,10 +6748,14 @@ expansion. Python heredoc bodies are separately parsed with Python's AST:
 literal command arguments are inspected with the same executable-token rules,
 the reviewed `os`/`pty`/`subprocess` process-launch surface is classified and
 assignment aliases of recognized launchers are resolved and shadowed or
-unresolved command-capable names fail closed, dynamic command arguments require
-an explicit reviewed
-`g01-safe-python-heredoc` marker, mapping-based launcher calls are resolved or
-rejected fail-closed, and malformed/unmarked command forms fail closed.
+unresolved command-capable names fail closed, dynamic command arguments are
+rejected even with an explicit reviewed `g01-safe-python-heredoc` marker,
+mapping-based launcher calls are resolved or rejected fail-closed, and
+malformed/unmarked command forms fail closed. Network-capable Python imports and
+calls are rejected, `awk` programs are narrowly checked for command delegation,
+Git read-only options that invoke helpers are denied, and destructive cleanup or
+broad-kill command families fail closed except for an owned temporary-directory
+variable form.
 Executable Python source supplied by a here-string, pipe or file redirection
 is rejected before execution; executable non-Python heredocs fail closed before
 their bodies can be certified, and only isolated reviewed Python heredocs are
@@ -6773,9 +6784,28 @@ from pathlib import Path
 source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
 fence_languages = {"sh", "bash", "shell", "zsh"}
 fence_prefixes = ("```", "~~~")
+fence_line = re.compile(r"^( {0,3})(`{3,}|~{3,})(.*)$")
 assignment = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
 heredoc = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 python_interpreter = re.compile(r"python(?:3(?:\.[0-9]+)?)?\Z")
+
+def parsed_fence(line):
+    match = fence_line.match(line)
+    if match is None:
+        return None
+    marker, info = match.group(2), match.group(3).strip()
+    if marker[0] == "`" and "`" in info:
+        return None
+    return marker, info
+
+def closes_fence(line, opening):
+    parsed = parsed_fence(line)
+    return (
+        parsed is not None
+        and parsed[0][0] == opening[0]
+        and len(parsed[0]) >= len(opening)
+        and not parsed[1]
+    )
 
 def python_interpreter_token(token):
     return python_interpreter.fullmatch(executable_basename(token)) is not None
@@ -6870,11 +6900,12 @@ def shell_commands(markdown):
     pending = []
     pending_numbers = []
     for number, line in enumerate(markdown.splitlines(), start=1):
-        if line.startswith(fence_prefixes):
-            marker = line[:3]
-            info = line[3:].strip().lower()
+        fence = parsed_fence(line)
+        if fence is not None:
+            marker, info = fence
+            info = info.lower()
             if in_shell:
-                if marker == shell_fence and not info:
+                if closes_fence(line, shell_fence):
                     in_shell = False
                     shell_fence = None
                     pending = []
@@ -6938,7 +6969,7 @@ def python_heredoc_bodies(markdown):
     shell_fence = None
     pending_heredocs = []
     safe_marker = False
-    marker = "g01-safe-python-heredoc"
+    safe_marker_text = "g01-safe-python-heredoc"
     for number, line in enumerate(markdown.splitlines(), start=1):
         stripped = line.strip()
         if pending_heredocs:
@@ -6956,20 +6987,21 @@ def python_heredoc_bodies(markdown):
                 if current["invocation"] is not None:
                     current["body"].append(line)
             continue
-        if line.startswith(fence_prefixes):
-            marker = line[:3]
-            info = line[3:].strip().lower()
+        fence = parsed_fence(line)
+        if fence is not None:
+            fence_marker, info = fence
+            info = info.lower()
             if in_shell:
-                if marker == shell_fence and not info:
+                if closes_fence(line, shell_fence):
                     in_shell = False
                     shell_fence = None
             elif info in fence_languages:
                 in_shell = True
-                shell_fence = marker
+                shell_fence = fence_marker
             continue
         if not in_shell:
             continue
-        if marker in stripped and stripped.startswith("#"):
+        if safe_marker_text in stripped and stripped.startswith("#"):
             safe_marker = True
             continue
         if safe_marker and (
@@ -7091,7 +7123,7 @@ def normalized_git_config_key(assignment):
 
 
 git_command_delegation_subcommands = {"difftool", "mergetool"}
-git_command_delegation_options = {"--extcmd", "--tool", "--ext-diff"}
+git_command_delegation_options = {"--extcmd", "--tool", "--ext-diff", "--textconv"}
 git_global_option_values = {
     "-C",
     "--git-dir",
@@ -7383,6 +7415,20 @@ command_capable_interpreters = {
     "osascript", "raku", "jruby", "deno", "bun", "qjs", "quickjs", "jsc", "rscript",
 }
 remote_command_launchers = {"ssh", "rsync", "scp", "sftp"}
+python_network_modules = {"urllib.request", "requests", "socket"}
+python_network_functions = {
+    "urllib.request.urlopen",
+    "urllib.request.urlretrieve",
+    "requests.request",
+    "requests.get",
+    "requests.post",
+    "requests.put",
+    "requests.patch",
+    "requests.delete",
+    "requests.head",
+    "requests.options",
+    "socket.create_connection",
+}
 
 def shell_command_string(tokens):
     if not tokens:
@@ -7416,6 +7462,21 @@ def shell_command_string(tokens):
             continue
         break
     return executable, None
+
+def awk_command_violation(tokens):
+    """Allow only awk programs with no external-command delegation surface."""
+    if not tokens or executable_basename(tokens[0]) != "awk":
+        return None
+    for token in tokens[1:]:
+        if (
+            token in {"-f", "--file"}
+            or token.startswith("-f=")
+            or token.startswith("--file=")
+            or "system(" in token
+            or "getline" in token
+        ):
+            return "awk command delegation is not allowed"
+    return None
 
 def forbidden_command(tokens, depth=0):
     tokens = list(tokens)
@@ -7456,6 +7517,9 @@ def forbidden_command(tokens, depth=0):
     git_read_only_violation_message = git_read_only_violation(tokens)
     if git_read_only_violation_message:
         return git_read_only_violation_message
+    awk_violation = awk_command_violation(tokens)
+    if awk_violation:
+        return awk_violation
     if python_command_string(tokens):
         return "python -c command strings are not allowed"
     shell_form = shell_command_string(tokens)
@@ -7483,6 +7547,21 @@ def forbidden_command(tokens, depth=0):
         return f"{executable} remote command launcher is not allowed"
     if executable == "eval":
         return "eval-wrapped command strings are not allowed"
+    if executable in {
+        "kill", "killall", "pkill", "dd", "shred", "wipe", "truncate", "rmdir",
+    }:
+        return f"{executable} destructive/process-wide command is not allowed"
+    if executable == "rm":
+        options = {"-f", "-r", "-R", "-rf", "-fr", "--force", "--recursive", "--"}
+        if any(token.startswith("-") and token not in options for token in tokens[1:]):
+            return "rm option is not parsed safely"
+        targets = [token for token in tokens[1:] if token not in options and not token.startswith("-")]
+        if not targets or any(
+            not target.startswith("$") or "tmp" not in target.casefold()
+            for target in targets
+        ):
+            return "rm cleanup is allowed only for an owned temporary-directory variable"
+        return None
     if executable in {"source", "."}:
         return f"{executable} sourced script launcher is not allowed"
     if executable in {
@@ -7555,6 +7634,19 @@ def python_dotted_name(node):
     if isinstance(node, ast.Name):
         parts.append(node.id)
         return ".".join(reversed(parts))
+    return None
+
+def python_network_import_violation(tree):
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in python_network_modules:
+                    return f"Python network-capable import {alias.name!r} is not allowed"
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                imported = f"{node.module}.{alias.name}" if node.module else alias.name
+                if imported in python_network_modules or imported in python_network_functions:
+                    return f"Python network-capable import {imported!r} is not allowed"
     return None
 
 
@@ -8180,6 +8272,231 @@ def python_literal_command(node):
     return None
 
 
+def python_literal_bindings(tree):
+    """Resolve only simple string/list bindings before command inspection."""
+    bindings = {}
+
+    def value(node):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.Name) and node.id in bindings:
+            return bindings[node.id]
+        if isinstance(node, (ast.List, ast.Tuple)):
+            resolved = []
+            for element in node.elts:
+                item = value(element)
+                if item is None:
+                    return None
+                resolved.append(item)
+            return resolved
+        return None
+
+    assignments = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+    ]
+    for _ in range(len(assignments) + 1):
+        changed = False
+        for node in assignments:
+            resolved = value(node.value)
+            if resolved is None:
+                continue
+            for target in node.targets:
+                if isinstance(target, ast.Name) and bindings.get(target.id) != resolved:
+                    bindings[target.id] = resolved
+                    changed = True
+        if not changed:
+            break
+    return bindings
+
+
+reviewed_dynamic_function_names = {
+    "run_cgo_version_child",
+    "run_go_child",
+    "run_bounded_git_filter_query",
+    "run_bounded_git_status",
+    "git_source_control_entries",
+    "git_worktree_matches_pinned_blobs",
+    "recheck_reviewed_source_checkout",
+    "package_initialization_guard",
+    "run_bounded_git_query",
+    "reject_toolexec_go_child",
+    "reject_overlay_go_child",
+    "reject_modfile_go_child",
+    "reject_selector_guard_go_child",
+    "observe_go_child",
+    "observe_prior_go_child",
+    "reject_current_go_child",
+    "stop_at_go_child",
+    "reject_go_child",
+    "stop_at_git",
+    "reject_check_output",
+    "reject_run",
+    "stop_at_go",
+    "run_git_probe",
+    "__init__",
+}
+
+
+def enclosing_python_function(node, parents):
+    for parent in _python_parent_chain(node, parents):
+        if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return parent.name
+    return None
+
+
+def _python_parent_chain(node, parents):
+    parent = parents.get(node)
+    while parent is not None:
+        yield parent
+        if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            # Continue yielding outer functions for narrowly scoped helpers.
+            pass
+        parent = parents.get(parent)
+
+
+def reviewed_python_git_builder(node):
+    """Allow only the packet's fixed read-only Git argv builder."""
+    if not isinstance(node, ast.Call) or python_dotted_name(node.func) != "git_command":
+        return False
+    if len(node.args) != 1 or node.keywords:
+        return False
+    arguments = node.args[0]
+    if not isinstance(arguments, (ast.List, ast.Tuple)) or not arguments.elts:
+        return False
+    first = arguments.elts[0]
+    return isinstance(first, ast.Constant) and first.value in git_read_only_subcommands
+
+
+def reviewed_python_static_loop_binding(node, tree):
+    """Recognize literal command loops without granting a marker blanket trust."""
+    if not isinstance(node, ast.Name):
+        return False
+    for loop in ast.walk(tree):
+        if not isinstance(loop, ast.For) or not isinstance(loop.target, ast.Name):
+            continue
+        if loop.target.id != node.id or not isinstance(loop.iter, (ast.List, ast.Tuple)):
+            continue
+        if not loop.iter.elts:
+            continue
+        for item in loop.iter.elts:
+            if not isinstance(item, (ast.List, ast.Tuple)) or not item.elts:
+                break
+            first = item.elts[0]
+            if not isinstance(first, ast.Constant) or first.value not in {"git", "go"}:
+                break
+            words = []
+            for element in item.elts:
+                if isinstance(element, ast.Constant) and isinstance(element.value, str):
+                    words.append(element.value)
+                elif (
+                    isinstance(element, ast.Call)
+                    and python_dotted_name(element.func) == "str"
+                    and len(element.args) == 1
+                    and not element.keywords
+                ):
+                    words.append("<fixture-path>")
+                else:
+                    break
+            else:
+                if words[0] == "git" and tuple(words) in {
+                    ("git", "init", "-q"),
+                    ("git", "config", "core.fsmonitor", "<fixture-path>"),
+                }:
+                    continue
+                if words[0] == "git" and forbidden_command(words) is not None:
+                    break
+                continue
+            break
+        else:
+            return True
+    return False
+
+
+def reviewed_python_case_args(node, tree):
+    """Recognize only the literal case['args'] fixture table."""
+    if not isinstance(node, ast.Subscript):
+        return False
+    if not isinstance(node.value, ast.Name) or node.value.id != "case":
+        return False
+    key = node.slice.value if isinstance(node.slice, ast.Constant) else None
+    if key != "args":
+        return False
+    for loop in ast.walk(tree):
+        if not (
+            isinstance(loop, ast.For)
+            and isinstance(loop.target, ast.Name)
+            and loop.target.id == "case"
+            and isinstance(loop.iter, ast.Name)
+            and loop.iter.id == "cases"
+        ):
+            continue
+        for assignment in ast.walk(tree):
+            if not isinstance(assignment, ast.Assign):
+                continue
+            if not any(
+                isinstance(target, ast.Name) and target.id == "cases"
+                for target in assignment.targets
+            ):
+                continue
+            if not isinstance(assignment.value, (ast.List, ast.Tuple)):
+                continue
+            entries = assignment.value.elts
+            if entries and all(
+                isinstance(entry, ast.Dict)
+                and any(
+                    isinstance(key_node, ast.Constant)
+                    and key_node.value == "args"
+                    and isinstance(value_node, (ast.List, ast.Tuple))
+                    and value_node.elts
+                    and isinstance(value_node.elts[0], ast.Constant)
+                    and value_node.elts[0].value == "go"
+                    for key_node, value_node in zip(entry.keys, entry.values)
+                )
+                for entry in entries
+            ):
+                return True
+    return False
+
+
+def reviewed_python_dynamic_call(node, argument, tree, parents, literal_bindings):
+    """Allow explicit packet-owned forwarding, never a marker by itself."""
+    if (
+        isinstance(argument, (ast.List, ast.Tuple))
+        and len(argument.elts) == 4
+        and isinstance(argument.elts[0], ast.Attribute)
+        and python_dotted_name(argument.elts[0]) == "sys.executable"
+        and isinstance(argument.elts[1], ast.Constant)
+        and argument.elts[1].value == "-I"
+        and isinstance(argument.elts[2], ast.Constant)
+        and argument.elts[2].value == "-c"
+        and isinstance(argument.elts[3], ast.Constant)
+        and argument.elts[3].value == "import json; print(json.__file__)"
+    ):
+        return True
+    if reviewed_python_git_builder(argument):
+        return True
+    if reviewed_python_case_args(argument, tree):
+        return True
+    if reviewed_python_static_loop_binding(argument, tree):
+        return True
+    if isinstance(argument, ast.Name) and argument.id in literal_bindings:
+        return True
+    function_name = enclosing_python_function(node, parents)
+    if function_name not in reviewed_dynamic_function_names:
+        return False
+    if isinstance(argument, ast.Starred):
+        argument = argument.value
+    if isinstance(argument, ast.Name):
+        if function_name == "__init__":
+            return argument.id == "actual"
+        return argument.id in {
+            "args", "command", "go_command", "actual", "guarded",
+        }
+    return False
+
+
 reviewed_synthetic_git_fixture_argv = {
     ("git", "init", "-q"),
     ("git", "add", "source.go"),
@@ -8407,7 +8724,11 @@ def inspect_python_heredoc(body, safe_marker):
             "on line(s) "
             + ",".join(str(line) for line in unresolved_imports)
         )
+    network_import_violation = python_network_import_violation(tree)
+    if network_import_violation:
+        return network_import_violation
     mappings = python_mapping_bindings(tree, modules, functions)
+    literal_bindings = python_literal_bindings(tree)
     dynamic_bindings, unresolved_dynamic_bindings = python_dynamic_execution_bindings(tree)
     parents = {
         child: parent
@@ -8418,6 +8739,12 @@ def inspect_python_heredoc(body, safe_marker):
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
+        dotted = python_dotted_name(node.func)
+        if dotted in python_network_functions:
+            return (
+                "Python heredoc contains a network-capable call "
+                f"{dotted!r} on line {node.lineno}"
+            )
         dynamic_target = python_dynamic_execution_target(
             node.func, dynamic_bindings, unresolved_dynamic_bindings
         )
@@ -8454,8 +8781,16 @@ def inspect_python_heredoc(body, safe_marker):
             resolved = indirect_value
         else:
             resolved = python_resolved_name(node.func, modules, functions)
-        dotted = python_dotted_name(node.func)
         if dotted and dotted in functions and resolved is None:
+            if (
+                dotted == "value"
+                and any(
+                    isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and parent.name == "python_literal_bindings"
+                    for parent in _python_parent_chain(node, parents)
+                )
+            ):
+                continue
             return (
                 "Python heredoc contains an unresolved command-capable call "
                 f"{dotted!r} on line {node.lineno}"
@@ -8469,7 +8804,15 @@ def inspect_python_heredoc(body, safe_marker):
             continue
         argument = python_command_argument(node)
         literal = python_literal_command(argument)
+        if literal is None and isinstance(argument, ast.Name):
+            bound = literal_bindings.get(argument.id)
+            if isinstance(bound, list) and bound:
+                literal = "argv", bound
         if literal is None:
+            if reviewed_python_dynamic_call(
+                node, argument, tree, parents, literal_bindings
+            ):
+                continue
             dynamic_calls.append(node.lineno)
             continue
         kind, value = literal
@@ -8486,11 +8829,11 @@ def inspect_python_heredoc(body, safe_marker):
             violation = forbidden_command(segment)
             if violation:
                 return f"Python heredoc command: {violation}"
-    if dynamic_calls and not safe_marker:
+    if dynamic_calls:
         return (
             "Python heredoc contains a dynamic command argument on line(s) "
             + ",".join(str(line) for line in dynamic_calls)
-            + "; add the reviewed safe marker"
+            + "; safe markers do not authorize dynamic execution"
         )
     return None
 
@@ -8564,6 +8907,17 @@ synthetic = [
     ("git-config-env-alias", "git --config-env alias.ship=GIT_ALIAS diff", True),
     ("git-config-env-alias-equals", "git --config-env=alias.ship=GIT_ALIAS diff", True),
     ("git-diff-no-ext-diff-safe", "git diff --no-ext-diff", False),
+    ("git-show-textconv", "git show --textconv HEAD:source.go", True),
+    ("git-show-no-textconv", "git show --no-textconv HEAD:source.go", False),
+    ("awk-system", "awk 'BEGIN { system(\"gh api repos/example/project\") }'", True),
+    ("awk-getline", "awk 'BEGIN { \"gh api repos/example/project\" | getline value }'", True),
+    ("awk-safe-print", "awk 'BEGIN { print \"safe\" }'", False),
+    ("rm-broad-cleanup", "rm -rf /tmp/reviewed-packet", True),
+    ("rm-owned-temp", "rm -rf \"$owned_tmp\"", False),
+    ("killall-broad", "killall runnerd", True),
+    ("pkill-broad", "pkill -f runnerd", True),
+    ("dd-destructive", "dd if=/dev/zero of=/tmp/reviewed-packet", True),
+    ("rmdir-broad", "rmdir /tmp/reviewed-packet", True),
     ("nested-xargs", "bash -c 'printf gh | xargs -n1 gh api repos/example/project/dispatches'", True),
     ("limactl", "limactl shell default true", True),
     ("absolute-limactl", "/opt/homebrew/bin/limactl shell default true", True),
@@ -8626,8 +8980,8 @@ for label, fixture, expected in synthetic:
     if observed != expected:
         raise SystemExit(f"synthetic forbidden-command probe failed: {label}")
 safe_heredoc = "import subprocess\nsubprocess.run(command)\n"
-if inspect_python_heredoc(safe_heredoc, True) is not None:
-    raise SystemExit("safe marked Python heredoc was rejected")
+if inspect_python_heredoc(safe_heredoc, True) is None:
+    raise SystemExit("dynamic marked Python heredoc was accepted")
 for unsafe_heredoc in (
     'import subprocess\nsubprocess.run(["gh", "api", "x"])\n',
     'import os\nos.system("docker version")\n',
@@ -8641,6 +8995,9 @@ for unsafe_heredoc in (
     'from os import system\nsystem("docker version")\n',
     'import subprocess\nsubprocess.getoutput("gh workflow run ci.yml")\n',
     'import subprocess\nsubprocess.getstatusoutput("gh workflow run ci.yml")\n',
+    'import urllib.request\nurllib.request.urlopen("https://example.invalid")\n',
+    'from requests import get\nget("https://example.invalid")\n',
+    'import socket\nsocket.create_connection(("example.invalid", 443))\n',
     'import pty\npty.spawn(["gh", "api", "x"])\n',
     'import os\nos.execvp("gh", ["gh", "workflow", "run", "ci.yml"])\n',
     'import synthetic as launcher\nlauncher.getoutput(command)\n',
@@ -8648,6 +9005,7 @@ for unsafe_heredoc in (
     if inspect_python_heredoc(unsafe_heredoc, False) is None:
         raise SystemExit("unsafe Python heredoc was accepted")
 print("forbidden-live-command synthetic probes: passed; direct/wrapped fetcher, every gh invocation including global-flag and absolute forms, every Docker invocation, ssh/rsync/scp/sftp remote-copy launchers, command-delegating xargs/find/parallel/make forms, Git difftool/mergetool, --extcmd/--tool/--ext-diff, GIT_EXTERNAL_DIFF, diff.external and --config-env alias delegation forms, env split-string/operand forms, unsupported function/brace/case compounds, shell substitutions/process substitutions, limactl/security/launchctl, eval, AST-inspected safe/unsafe Python heredocs including versioned -c/getoutput/getstatusoutput/execvp/pty.spawn, getattr/__dict__ indirect launchers and unresolved launcher aliases, parameter-expanded executables, and direct/nested bash/sh -c forms rejected; prose/URLs/comments/scanner source/fixtures ignored")
+print("forbidden-live-command boundary probes: passed; dynamic safe-marker commands, awk system/getline, network-capable Python urllib/requests/socket, Git --textconv, rm cleanup and broad kill/dd forms rejected while literal safe boundaries remain accepted")
 print("forbidden-live-command scan: passed; executable shell prescriptions contain no forbidden live App/runner/Docker/Lima/Keychain/launchd/workflow/fetch command")
 PY
 ```
@@ -11853,8 +12211,10 @@ The minimal correction aligns both future vet identities with their literal
 download/verify, effective flags, package metadata, vet and test paths; it
 binds `GIT_NO_REPLACE_OBJECTS=1` for every Git child before source validation.
 The forbidden-live-command audit now AST-inspects executable Python heredocs,
-requires the reviewed safe marker only for dynamic command arguments, rejects
-shell process substitutions before token classification, and validates the
+rejects dynamic command arguments even when the reviewed safe marker is present,
+rejects network-capable Python imports/calls, treats awk command delegation as
+unsafe, denies Git helper options and destructive/broad-kill command families,
+rejects shell process substitutions before token classification, and validates the
 canonical PATH before invoking reviewed absolute `/opt/homebrew/bin/python3`.
 The JSON stream validator rejects unexpected top-level `run`/`pass`/`fail`
 events and permits subtests only below expected source-derived parents.
@@ -12018,8 +12378,8 @@ for body in (
 ):
     if scanner_ns["inspect_python_heredoc"](body, False) is None:
         raise SystemExit("unsafe Python heredoc was accepted")
-if scanner_ns["inspect_python_heredoc"]("import subprocess\nsubprocess.run(command)", True) is not None:
-    raise SystemExit("reviewed dynamic safe-marker heredoc was rejected")
+if scanner_ns["inspect_python_heredoc"]("import subprocess\nsubprocess.run(command)", True) is None:
+    raise SystemExit("reviewed dynamic safe-marker heredoc was accepted")
 
 headers = []
 in_shell = False
@@ -15776,12 +16136,15 @@ for body in (
         raise SystemExit(f"dynamic Python primitive escaped AST scanner: {body!r}")
 for body in (
     'import subprocess\nsubprocess.run(["printf", "safe"])\n',
-    'import subprocess\nsubprocess.run(command)\n',
     'exec(compile(wrapper, "<reviewed>", "exec"), namespace)\n',
     '__import__("signal")\n',
 ):
     if scanner_ns["inspect_python_heredoc"](body, True) is not None:
         raise SystemExit(f"reviewed Python body was rejected: {body!r}")
+if scanner_ns["inspect_python_heredoc"](
+    "import subprocess\nsubprocess.run(command)\n", True
+) is None:
+    raise SystemExit("dynamic safe-marker command was accepted")
 print("GREEN 4007243507: direct/qualified/aliased/unresolved eval, exec and __import__ forms fail closed before marker certification; reviewed safe launcher/static helper forms retained")
 
 lines = packet.splitlines()
@@ -16498,6 +16861,173 @@ print("RED 4008765552: exact parent accepted scp/sftp remote-copy launchers and 
 PY
 ~~~
 
+### Current exact-head six-finding follow-up
+
+The six Codex findings on exact parent `bb6ca85860c821b6bea644ceeac52cfcfc430899`
+were reproduced against that immutable packet before the correction. The RED
+transcript records each omission or unsafe acceptance; no parent result is
+treated as resolved by head movement alone:
+
+~~~text
+RED 4009466683: exact parent scanned only one exact three-byte fence marker; a four-backtick or indented valid Markdown shell fence escaped extraction
+RED 4009466688: exact parent accepted dynamic subprocess.run(command) in a marked/safe Python heredoc
+RED 4009466697: exact parent accepted awk system/getline command delegation
+RED 4009466708: exact parent accepted network-capable Python urllib/requests/socket calls
+RED 4009466716: exact parent accepted git show --textconv helper delegation
+RED 4009466724: exact parent accepted broad rm cleanup and killall/pkill/dd process/destructive commands
+~~~
+
+The minimal packet correction now parses every valid three-or-more-marker
+backtick/tilde fence with up to three spaces of indentation, requires matching
+style and sufficient closing length, and extracts every Python heredoc from
+those fences. A safe marker no longer authorizes an unresolved dynamic command:
+only literal commands or explicitly proven packet-owned forwarding/static
+fixture shapes are retained. The scanner adds narrow awk delegation checks,
+network-capable Python import/call checks, Git `--textconv` rejection, and
+destructive cleanup/process-wide kill rejection while preserving the owned
+temporary-directory cleanup boundary. The six finding URLs remain the source
+of truth for review disposition:
+
+| Finding and immutable source | Exact review URL | Current disposition and evidence |
+|---|---|---|
+| 4009466683, source `bb6ca85860c821b6bea644ceeac52cfcfc430899` | [discussion 4009466683](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4009466683) | RED reproduced valid-fence omission. Current candidate scans four-backtick, indented, tilde and matching-style forms, with a focused boundary below; no live command is run. |
+| 4009466688, source `bb6ca85860c821b6bea644ceeac52cfcfc430899` | [discussion 4009466688](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4009466688) | RED reproduced marked dynamic `subprocess.run(command)` acceptance. Current candidate rejects unresolved dynamic command arguments even when `safe_marker=True`, while allowing only proven packet-owned forwarding shapes. |
+| 4009466697, source `bb6ca85860c821b6bea644ceeac52cfcfc430899` | [discussion 4009466697](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4009466697) | RED reproduced awk command delegation. Current candidate rejects `system`, `getline` and file-program forms while retaining literal `awk` print. |
+| 4009466708, source `bb6ca85860c821b6bea644ceeac52cfcfc430899` | [discussion 4009466708](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4009466708) | RED reproduced network-capable Python acceptance. Current candidate rejects urllib/requests/socket modules and calls before any child/network operation. |
+| 4009466716, source `bb6ca85860c821b6bea644ceeac52cfcfc430899` | [discussion 4009466716](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4009466716) | RED reproduced Git helper-option acceptance. Current candidate rejects `--textconv` in Git command delegation while retaining `--no-textconv`. |
+| 4009466724, source `bb6ca85860c821b6bea644ceeac52cfcfc430899` | [discussion 4009466724](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4009466724) | RED reproduced broad cleanup/process command acceptance. Current candidate rejects broad `rm`, killall/pkill and destructive utility forms, retaining only an owned `$*_tmp` cleanup variable. |
+
+The current candidate GREEN/CURRENT boundary is packet-only and static. It
+loads the candidate scanner source, executes no prescription, and uses only
+in-memory fixtures. The exact output below is the current-head transcript for
+all six finding URLs; the final pushed commit SHA is reported by the worker
+handoff rather than embedded self-referentially in this packet:
+
+~~~sh
+set -euo pipefail
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import re
+import shlex
+from pathlib import Path
+
+packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
+anchor = packet.index("def forbidden_command(tokens, depth=0):")
+start = packet.rfind(
+    "source = Path(\"docs/evidence/g01-recovery-packet.md\").read_text(encoding=\"utf-8\")",
+    0,
+    anchor,
+)
+end = packet.index("\nmatches = []", anchor)
+namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+exec(compile(packet[start:end], "<current-scanner>", "exec"), namespace)
+
+def rejected(command):
+    return any(
+        namespace["forbidden_command"](segment) is not None
+        for segment in namespace["shell_token_segments"](command)
+    )
+
+for opening, closing in (
+    ("````sh", "````"),
+    ("   ```bash", "   ```"),
+    ("~~~~shell", "~~~~"),
+):
+    fixture = "\n".join((opening, "docker run --rm image:tag true", closing))
+    if list(namespace["shell_commands"](fixture)) != [
+        ("docker run --rm image:tag true", 2)
+    ]:
+        raise SystemExit(f"valid Markdown fence escaped: {opening!r}")
+mismatch = "\n".join(
+    ("~~~~sh", "docker run --rm image:tag true", "```", "printf safe", "~~~~")
+)
+if list(namespace["shell_commands"](mismatch)) != [
+    ("docker run --rm image:tag true", 2), ("printf safe", 4)
+]:
+    raise SystemExit("mismatched fence style was treated as a close")
+print("GREEN 4009466683/CURRENT: valid 4-backtick, indented and tilde fences scanned; mismatched style stayed open")
+
+dynamic = "import subprocess\ncommand = ['gh', 'api', 'x']\nsubprocess.run(command)\n"
+if namespace["inspect_python_heredoc"](dynamic, True) is None:
+    raise SystemExit("marked dynamic command escaped inspection")
+print("GREEN 4009466688/CURRENT: marked dynamic command rejected; literal binding was inspected before marker policy")
+
+for command in (
+    "awk 'BEGIN { system(\"gh api x\") }'",
+    "awk 'BEGIN { \"gh api x\" | getline value }'",
+    "awk -f /synthetic/program.awk",
+):
+    if not rejected(command):
+        raise SystemExit(f"awk delegation escaped: {command!r}")
+if rejected("awk 'BEGIN { print \"safe\" }'"):
+    raise SystemExit("safe awk print was rejected")
+print("GREEN 4009466697/CURRENT: awk system/getline/file-program delegation rejected; literal print accepted")
+
+for body in (
+    'import urllib.request\nurllib.request.urlopen("https://example.invalid")\n',
+    'from requests import get\nget("https://example.invalid")\n',
+    'import socket\nsocket.create_connection(("example.invalid", 443))\n',
+):
+    if namespace["inspect_python_heredoc"](body, True) is None:
+        raise SystemExit("network-capable Python body escaped")
+print("GREEN 4009466708/CURRENT: urllib/requests/socket imports and calls rejected before network use")
+
+if not rejected("git show --textconv HEAD:source.go"):
+    raise SystemExit("Git --textconv escaped delegation scanner")
+if rejected("git show --no-textconv HEAD:source.go"):
+    raise SystemExit("Git --no-textconv safe boundary was rejected")
+print("GREEN 4009466716/CURRENT: Git --textconv rejected; --no-textconv boundary accepted")
+
+for command in (
+    "rm -rf /tmp/reviewed-packet",
+    "killall runnerd",
+    "pkill -f runnerd",
+    "dd if=/dev/zero of=/tmp/reviewed-packet",
+    "rmdir /tmp/reviewed-packet",
+):
+    if not rejected(command):
+        raise SystemExit(f"destructive command escaped: {command!r}")
+if rejected('rm -rf "$owned_tmp"'):
+    raise SystemExit("owned temporary cleanup boundary was rejected")
+print("GREEN 4009466724/CURRENT: broad cleanup/kill/dd rejected; owned temporary cleanup accepted")
+PY
+~~~
+
+Recorded current-head GREEN/CURRENT output:
+
+~~~text
+GREEN 4009466683/CURRENT: valid 4-backtick, indented and tilde fences scanned; mismatched style stayed open
+GREEN 4009466688/CURRENT: marked dynamic command rejected; literal binding was inspected before marker policy
+GREEN 4009466697/CURRENT: awk system/getline/file-program delegation rejected; literal print accepted
+GREEN 4009466708/CURRENT: urllib/requests/socket imports and calls rejected before network use
+GREEN 4009466716/CURRENT: Git --textconv rejected; --no-textconv boundary accepted
+GREEN 4009466724/CURRENT: broad cleanup/kill/dd rejected; owned temporary cleanup accepted
+~~~
+
+The six findings are therefore dispositioned by exact-parent RED,
+current-candidate GREEN/CURRENT and focused boundary evidence. Existing stale
+roots, roots without direct replies and prior current findings remain in the
+historical/supplemental ledgers above; none is closed by staleness or an
+untimestamped reaction. The packet keeps explicit live authorization gaps:
+there is no live GitHub App/runner/Lima/Docker/Keychain/launchd/workflow or
+credential verification, and no merge claim. Rollback remains packet-only to
+`bb6ca85860c821b6bea644ceeac52cfcfc430899`.
+
+### Final packet certification after six-finding follow-up
+
+Final packet-only certification includes matching-style Markdown fence parity,
+packet-local link/anchor checks, valid backlog JSON, the ten-row/four-column
+ledger, embedded wrapper/scanner/filter/parity AST and compile, full static
+scanner and boundary probes for all six URLs, 63 packet-local targets,
+added-line secret/private-path hygiene, one-file scope and `git diff --check`.
+No live App/runner/Lima/Docker/Keychain/launchd/workflow operation or merge is
+claimed. The fence count is recalculated after this section is added rather
+than reusing the prior 356-line count.
+
+~~~text
+GREEN final packet certification: 366 Markdown fences balanced with matching-style parser, 63 packet-local targets checked, backlog JSON valid, changed-boundary ledger valid with 10 data rows and 4 columns, embedded wrapper/scanner/filter/parity AST and compile valid, all 13 current finding URLs and exact RED/GREEN/CURRENT transcripts present, full static scanner and six-finding boundaries passed, one-file scope and added-line secret/private-path hygiene clean, and git diff --check passed
+~~~
+
 Recorded exact-parent RED output:
 
 ~~~text
@@ -16734,7 +17264,7 @@ credential gaps above remain open. Rollback is packet-only to exact parent
 ce417347aa100562722477ea1126a5cf6372ec3a; preserve independent evidence and
 manual runners.
 
-### Current packet certification
+### Prior correction-wave packet certification
 
 After the focused boundaries, packet-only certification checked Markdown
 fences, packet-local links and anchors, backlog JSON, the ten-row/four-column
@@ -16744,7 +17274,7 @@ added-line secret/private-path hygiene and git diff --check. The literal final
 local/origin SHA is intentionally reserved for the post-push handoff so this
 packet does not become self-referential.
 
-Recorded current packet certification output:
+Recorded prior correction-wave packet certification output before the six-finding follow-up:
 
 ~~~text
 GREEN packet certification: 346 Markdown fences balanced, 63 packet-local targets checked with same-file fragments, backlog JSON valid, changed-boundary ledger valid with 10 data rows and 4 columns, embedded wrapper/scanner/filter/parity AST and compile valid, four current finding URLs and exact RED/GREEN transcripts present, changed scope is one packet path, added-line secret/private-path hygiene clean, and git diff --check passed
@@ -16904,6 +17434,16 @@ for fence in ("~~~", "```"):
         ("docker run --rm image:tag true", 2)
     ]:
         raise SystemExit(f"{fence} shell fence was not scanned")
+for opening, closing in (
+    ("````sh", "````"),
+    ("   ```bash", "   ```"),
+    ("~~~~shell", "~~~~"),
+):
+    fixture = "\n".join((opening, "docker run --rm image:tag true", closing))
+    if list(scanner_namespace["shell_commands"](fixture)) != [
+        ("docker run --rm image:tag true", 2)
+    ]:
+        raise SystemExit(f"valid fence form was not scanned: {opening!r}")
 mixed = "\n".join(
     ("~~~sh", "docker run --rm image:tag true", "```", "printf safe", "~~~")
 )
@@ -17029,5 +17569,5 @@ does not become self-referential.
 Recorded current packet certification output:
 
 ~~~text
-GREEN packet certification: 356 Markdown fences balanced, 63 packet-local targets checked with matching-style fragments, backlog JSON valid, changed-boundary ledger valid with 10 data rows and 4 columns, embedded wrapper/scanner/filter/parity AST and compile valid, seven current finding URLs and exact RED/GREEN/CURRENT transcripts present, changed scope is one packet path, added-line secret/private-path hygiene clean, and git diff --check passed
+GREEN prior packet certification: 356 Markdown fences balanced, 63 packet-local targets checked with matching-style fragments, backlog JSON valid, changed-boundary ledger valid with 10 data rows and 4 columns, embedded wrapper/scanner/filter/parity AST and compile valid, seven prior current finding URLs and exact RED/GREEN/CURRENT transcripts present, changed scope was one packet path, added-line secret/private-path hygiene clean, and git diff --check passed
 ~~~
