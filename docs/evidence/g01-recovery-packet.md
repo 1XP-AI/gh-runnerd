@@ -1363,6 +1363,128 @@ def run_go_child(go_command, **kwargs):
         if process is not None:
             terminate_go_child_group(process)
 
+
+git_status_deadline_seconds = 30
+git_status_output_max_bytes = 64 * 1024
+git_status_stream_chunk_bytes = 4096
+
+
+def capture_git_status_output(process, git_status_command):
+    """Read only enough status output to detect dirtiness, with hard bounds."""
+    captures = {"stdout": bytearray(), "stderr": bytearray()}
+    selector = selectors.DefaultSelector()
+    try:
+        for name in captures:
+            stream = getattr(process, name, None)
+            if stream is not None:
+                os.set_blocking(stream.fileno(), False)
+                selector.register(stream, selectors.EVENT_READ, name)
+        deadline = time.monotonic() + git_status_deadline_seconds
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(
+                    git_status_command, git_status_deadline_seconds
+                )
+            ready = selector.select(remaining)
+            if not ready:
+                raise subprocess.TimeoutExpired(
+                    git_status_command, git_status_deadline_seconds
+                )
+            for key, _ in ready:
+                stream = key.fileobj
+                try:
+                    chunk = os.read(stream.fileno(), git_status_stream_chunk_bytes)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    selector.unregister(stream)
+                    stream.close()
+                    continue
+                captured = captures[key.data]
+                if (
+                    len(captures["stdout"])
+                    + len(captures["stderr"])
+                    + len(chunk)
+                    > git_status_output_max_bytes
+                ):
+                    raise SystemExit(
+                        f"{label}: Git status output exceeded the reviewed "
+                        f"{git_status_output_max_bytes}-byte budget"
+                    )
+                captured.extend(chunk)
+                if key.data == "stdout":
+                    # One status record proves the checkout is not clean; do not
+                    # buffer the remainder of a generated/ignored tree.
+                    return bytes(captures["stdout"]), bytes(captures["stderr"]), True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(
+                git_status_command, git_status_deadline_seconds
+            )
+        try:
+            process.wait(timeout=remaining)
+        except TypeError:
+            raise SystemExit(f"{label}: Git status child lacks bounded reap support")
+        return bytes(captures["stdout"]), bytes(captures["stderr"]), False
+    finally:
+        selector.close()
+
+
+def run_bounded_git_status(repo_root, module_dir, env):
+    """Run the scoped status query with bounded output, runtime and cleanup."""
+    command = git_command(
+        [
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--ignored=matching",
+            "--",
+            module_dir,
+        ]
+    )
+    process = None
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=repo_root,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        try:
+            stdout, stderr, early_output = capture_git_status_output(
+                process, command
+            )
+        except subprocess.TimeoutExpired:
+            terminate_go_child_group(process)
+            process = None
+            raise SystemExit(
+                f"{label}: Git status query exceeded independent "
+                f"{git_status_deadline_seconds}s deadline; process group terminated and reaped"
+            )
+        except BaseException:
+            terminate_go_child_group(process)
+            process = None
+            raise
+        returncode = process.returncode
+        terminate_go_child_group(process)
+        process = None
+        try:
+            stdout = stdout.decode("utf-8")
+            stderr = stderr.decode("utf-8")
+        except UnicodeDecodeError:
+            raise SystemExit(f"{label}: Git status output was not valid UTF-8")
+        # Early output is an intentional dirty-tree result; normalize the
+        # post-termination code so the caller can report the first entry.
+        if early_output:
+            return subprocess.CompletedProcess(command, 0, stdout, stderr)
+        return subprocess.CompletedProcess(command, returncode, stdout, stderr)
+    finally:
+        if process is not None:
+            terminate_go_child_group(process)
+
 effective_toolchain_result = run_go_child(
     [
         "go", "env", "GOVERSION", "GOSUMDB", "GOPROXY",
@@ -1640,21 +1762,7 @@ def recheck_reviewed_source_checkout(phase):
     if source_tree.stdout.strip() != reviewed_module_tree:
         raise SystemExit(f"{label}: {phase} source tree drifted from the reviewed pin")
     git_worktree_matches_pinned_blobs(repo_root, module_dir, env)
-    source_status = subprocess.run(
-        git_command([
-            "status",
-            "--porcelain=v1",
-            "--untracked-files=all",
-            "--ignored=matching",
-            "--",
-            module_dir,
-        ]),
-        cwd=repo_root,
-        env=env,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    source_status = run_bounded_git_status(repo_root, module_dir, env)
     if source_status.returncode != 0 or source_status.stderr.strip():
         raise SystemExit(f"{label}: {phase} source status query failed")
     if source_status.stdout.strip():
@@ -1679,21 +1787,7 @@ def package_initialization_guard():
             f"{label}: package-initialization guard requires reviewed source tree"
         )
     git_worktree_matches_pinned_blobs(repo_root, module_dir, env)
-    source_status = subprocess.run(
-        git_command([
-            "status",
-            "--porcelain=v1",
-            "--untracked-files=all",
-            "--ignored=matching",
-            "--",
-            module_dir,
-        ]),
-        cwd=repo_root,
-        env=env,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    source_status = run_bounded_git_status(repo_root, module_dir, env)
     if source_status.returncode != 0 or source_status.stderr.strip():
         raise SystemExit(f"{label}: package source status query failed")
     if source_status.stdout.strip():
@@ -2860,7 +2954,7 @@ def shell_token_segments(command):
     return [segment for segment in segments if segment]
 
 def executable_basename(token):
-    return token.rsplit("/", 1)[-1]
+    return token.rsplit("/", 1)[-1].casefold()
 
 
 python_interpreter = re.compile(r"python(?:3(?:\.[0-9]+)?)?\Z")
@@ -6077,7 +6171,12 @@ sent to AST inspection.
 Unsupported shell function/brace/case compounds fail closed; only the two
 packet wrapper declarations and their safe `printf` preflight brace are
 recognized structural forms. Markdown prose, URLs, comments, scanner source
-and synthetic fixtures are not executable prescriptions:
+and literal historical RED/fixture data are not executable prescriptions.
+Executable Python AST remains inspected: the only synthetic subprocess
+exceptions are exact local Git setup/cleanup argv forms whose `cwd` is a
+direct `Path` alias inside a literal `TemporaryDirectory`, plus the two named
+shell-input bodies whose immutable preflight-derived expressions are inspected
+before retention. A marker alone never exempts a command:
 
 ```sh
 set -euo pipefail
@@ -6359,7 +6458,7 @@ def shell_process_substitution(command):
 def executable_basename(token):
     if "://" in token:
         return token
-    return token.rsplit("/", 1)[-1]
+    return token.rsplit("/", 1)[-1].casefold()
 
 def unresolved_executable(token):
     """Reject executable names whose shell expansion cannot be proven statically."""
@@ -6502,6 +6601,90 @@ def git_command_delegation(tokens):
     return None
 
 
+git_read_only_subcommands = {
+    "cat-file",
+    "config",
+    "diff",
+    "ls-files",
+    "ls-remote",
+    "ls-tree",
+    "rev-parse",
+    "show",
+    "status",
+}
+git_config_read_only_options = {
+    "--get",
+    "--get-all",
+    "--get-regexp",
+    "--get-urlmatch",
+    "--list",
+    "-l",
+    "--name-only",
+}
+git_config_mutating_options = {
+    "--add",
+    "--blob",
+    "--edit",
+    "--file",
+    "--fixed-value",
+    "--null",
+    "--rename-section",
+    "--remove-section",
+    "--replace-all",
+    "--stdin",
+    "--unset",
+    "--unset-all",
+}
+
+
+def git_subcommand(tokens):
+    """Return the first Git subcommand after global/config options."""
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            return None
+        if token == "-c":
+            index += 2
+            continue
+        if token.startswith("-c=") or (token.startswith("-c") and len(token) > 2):
+            index += 1
+            continue
+        if token in git_global_option_values:
+            index += 2
+            continue
+        if any(token.startswith(option + "=") for option in git_global_option_values):
+            index += 1
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        return executable_basename(token)
+    return None
+
+
+def git_read_only_violation(tokens):
+    """Allow only the packet's read-only Git queries; reject remote/mutating Git."""
+    if not tokens or executable_basename(tokens[0]) != "git":
+        return None
+    subcommand = git_subcommand(tokens)
+    if subcommand not in git_read_only_subcommands:
+        if subcommand is None:
+            return "Git command must name an approved read-only subcommand"
+        return f"Git {subcommand} subcommand is not allowed"
+    if subcommand == "config":
+        options = tokens[1:]
+        if any(
+            option == mutating or option.startswith(mutating + "=")
+            for option in options
+            for mutating in git_config_mutating_options
+        ):
+            return "Git config mutation is not allowed"
+        if not any(option in git_config_read_only_options for option in options):
+            return "Git config query must use an approved read-only option"
+    return None
+
+
 unsupported_shell_compound_words = {
     "case", "esac", "function", "select", "coproc", "for", "while", "until",
 }
@@ -6625,7 +6808,7 @@ def shell_command_string(tokens):
     while index < len(tokens):
         option = tokens[index]
         if option == "--":
-            return None
+            return executable, None
         if option == "-c" or option == "--command":
             payload = tokens[index + 1] if index + 1 < len(tokens) else None
             return executable, payload
@@ -6640,7 +6823,7 @@ def shell_command_string(tokens):
             index += 1
             continue
         break
-    return None
+    return executable, None
 
 def forbidden_command(tokens, depth=0):
     tokens = list(tokens)
@@ -6678,11 +6861,16 @@ def forbidden_command(tokens, depth=0):
     git_delegation_violation = git_command_delegation(tokens)
     if git_delegation_violation:
         return git_delegation_violation
+    git_read_only_violation_message = git_read_only_violation(tokens)
+    if git_read_only_violation_message:
+        return git_read_only_violation_message
     if python_command_string(tokens):
         return "python -c command strings are not allowed"
     shell_form = shell_command_string(tokens)
     if shell_form:
         executable, payload = shell_form
+        if payload is None:
+            return f"{executable} non-inline script or redirected input is not allowed"
         if depth >= 8:
             return f"{executable} -c nested command-string depth exceeded"
         if payload is not None:
@@ -6855,6 +7043,86 @@ def python_dynamic_execution_target(node, bindings, unresolved):
     return None
 
 
+reviewed_python_compile_source_names = {
+    "wrapper",
+    "previous_wrapper",
+    "current_wrapper",
+    "prior_wrapper",
+    "previous",
+    "packet",
+    "prefix",
+    "scanner",
+    "setup",
+    "helper_source",
+}
+reviewed_python_compile_ast_names = {
+    "module",
+    "validator",
+    "process_functions",
+    "init_helpers",
+    "selected_nodes",
+    "selected",
+    "module_node",
+    "terminator",
+    "helper",
+}
+reviewed_python_compile_slice_bases = reviewed_python_compile_source_names
+
+
+def reviewed_python_compile_source(node):
+    """Permit only packet-derived source slices or explicitly selected AST nodes."""
+    if isinstance(node, ast.Name):
+        return (
+            node.id in reviewed_python_compile_source_names
+            or node.id in reviewed_python_compile_ast_names
+        )
+    if isinstance(node, ast.Subscript):
+        if not (
+            isinstance(node.value, ast.Name)
+            and node.value.id in reviewed_python_compile_slice_bases
+            and isinstance(node.slice, ast.Slice)
+        ):
+            return False
+        return all(
+            part is None or isinstance(part, ast.Name)
+            for part in (node.slice.lower, node.slice.upper, node.slice.step)
+        )
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return reviewed_python_compile_source(node.left) and reviewed_python_compile_source(
+            node.right
+        )
+    if not (
+        isinstance(node, ast.Call)
+        and python_dotted_name(node.func) == "ast.Module"
+        and not node.args
+    ):
+        return False
+    keywords = {keyword.arg: keyword.value for keyword in node.keywords}
+    if set(keywords) != {"body", "type_ignores"}:
+        return False
+    type_ignores = keywords["type_ignores"]
+    if not isinstance(type_ignores, ast.List) or type_ignores.elts:
+        return False
+    body = keywords["body"]
+    if isinstance(body, ast.Name):
+        return body.id in reviewed_python_compile_ast_names
+    if not isinstance(body, ast.List) or not body.elts:
+        return False
+    for element in body.elts:
+        if isinstance(element, ast.Name):
+            if element.id not in reviewed_python_compile_ast_names:
+                return False
+        elif not (
+            isinstance(element, ast.Subscript)
+            and isinstance(element.value, ast.Name)
+            and element.value.id == "functions"
+            and isinstance(element.slice, ast.Constant)
+            and isinstance(element.slice.value, str)
+        ):
+            return False
+    return True
+
+
 def reviewed_python_exec_call(call, safe_marker):
     """Allow only the packet's static compile/exec metaprogramming path."""
     if not isinstance(call.func, ast.Name) or call.func.id != "exec":
@@ -6864,7 +7132,9 @@ def reviewed_python_exec_call(call, safe_marker):
     compiler = call.args[0]
     if not isinstance(compiler.func, ast.Name) or compiler.func.id != "compile":
         return False
-    if len(compiler.args) < 3:
+    if len(compiler.args) != 3 or compiler.keywords:
+        return False
+    if not reviewed_python_compile_source(compiler.args[0]):
         return False
     filename, mode = compiler.args[1:3]
     return (
@@ -7312,6 +7582,222 @@ def python_literal_command(node):
         return "argv", values
     return None
 
+
+reviewed_synthetic_git_fixture_argv = {
+    ("git", "init", "-q"),
+    ("git", "add", "source.go"),
+    ("git", "add", "experiments/g01-scaleset/source.go"),
+    (
+        "git",
+        "-c",
+        "user.name=probe",
+        "-c",
+        "user.email=probe@example.invalid",
+        "commit",
+        "-q",
+        "-m",
+        "source",
+    ),
+    (
+        "git",
+        "update-index",
+        "--no-skip-worktree",
+        "--no-assume-unchanged",
+        "source.go",
+    ),
+    (
+        "git",
+        "update-index",
+        "--no-skip-worktree",
+        "--no-assume-unchanged",
+        "experiments/g01-scaleset/source.go",
+    ),
+}
+
+
+def temporary_directory_binding(node, parents):
+    """Return the local binding only inside a literal TemporaryDirectory block."""
+    parent = parents.get(node)
+    while parent is not None:
+        if isinstance(parent, (ast.With, ast.AsyncWith)):
+            for item in parent.items:
+                context = item.context_expr
+                if not (
+                    isinstance(context, ast.Call)
+                    and python_dotted_name(context.func) == "tempfile.TemporaryDirectory"
+                    and not context.args
+                    and not context.keywords
+                    and isinstance(item.optional_vars, ast.Name)
+                ):
+                    continue
+                return item.optional_vars.id
+        parent = parents.get(parent)
+    return None
+
+
+def temporary_directory_bindings(node, tree, parents):
+    """Resolve only direct Path aliases of the active TemporaryDirectory binding."""
+    binding = temporary_directory_binding(node, parents)
+    bindings = {binding} if binding is not None else set()
+    changed = True
+    while changed:
+        changed = False
+        for candidate in ast.walk(tree):
+            if temporary_directory_binding(candidate, parents) != binding:
+                continue
+            if not isinstance(candidate, ast.Assign):
+                continue
+            value = candidate.value
+            source = None
+            if isinstance(value, ast.Name):
+                source = value.id
+            elif (
+                isinstance(value, ast.Call)
+                and python_dotted_name(value.func) in {"Path", "pathlib.Path"}
+                and len(value.args) == 1
+                and not value.keywords
+                and isinstance(value.args[0], ast.Name)
+            ):
+                source = value.args[0].id
+            if source not in bindings:
+                continue
+            for target in candidate.targets:
+                if isinstance(target, ast.Name) and target.id not in bindings:
+                    bindings.add(target.id)
+                    changed = True
+    return bindings
+
+
+def reviewed_python_synthetic_git_fixture(node, value, tree, parents):
+    """Allow only known local-temp Git setup/cleanup fixture argv forms."""
+    if not isinstance(value, list) or not value or value[0] != "git":
+        return False
+    fixture_bindings = temporary_directory_bindings(node, tree, parents)
+    cwd = next(
+        (keyword.value for keyword in node.keywords if keyword.arg == "cwd"),
+        None,
+    )
+    if (
+        not fixture_bindings
+        or not isinstance(cwd, ast.Name)
+        or cwd.id not in fixture_bindings
+    ):
+        return False
+    if tuple(value) in reviewed_synthetic_git_fixture_argv:
+        return True
+    argument = python_command_argument(node)
+    if not isinstance(argument, (ast.List, ast.Tuple)):
+        return False
+    elements = argument.elts
+    if len(elements) == 4:
+        first, second, third, fourth = elements
+        if (
+            isinstance(first, ast.Constant)
+            and first.value == "git"
+            and isinstance(second, ast.Constant)
+            and second.value == "update-index"
+            and isinstance(third, ast.Name)
+            and third.id == "flag"
+            and isinstance(fourth, ast.Constant)
+            and fourth.value in {
+                "source.go",
+                "experiments/g01-scaleset/source.go",
+            }
+        ):
+            return True
+        if (
+            isinstance(first, ast.Constant)
+            and first.value == "git"
+            and isinstance(second, ast.Constant)
+            and second.value == "config"
+            and isinstance(third, ast.Constant)
+            and third.value == "core.fsmonitor"
+            and isinstance(fourth, ast.Call)
+            and python_dotted_name(fourth.func) == "str"
+            and len(fourth.args) == 1
+            and not fourth.keywords
+            and isinstance(fourth.args[0], ast.Name)
+            and fourth.args[0].id == "hook"
+        ):
+            return True
+    return False
+
+
+def reviewed_python_shell_body_expression(node, input_name):
+    """Accept only the two immutable, preflight-derived synthetic shell bodies."""
+    if isinstance(node, ast.Constant):
+        return isinstance(node.value, str)
+    if isinstance(node, ast.Name):
+        allowed = {
+            "failure_probe": {"preflight"},
+            "script": {"path_check", "first_loader"},
+        }
+        return node.id in allowed.get(input_name, set()) or node.id == "marker"
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return reviewed_python_shell_body_expression(node.left, input_name) and reviewed_python_shell_body_expression(
+            node.right, input_name
+        )
+    if not isinstance(node, ast.Call) or node.keywords:
+        return False
+    dotted = python_dotted_name(node.func)
+    if dotted == "str":
+        return (
+            len(node.args) == 1
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id == "marker"
+        )
+    if dotted != "shlex.quote" or len(node.args) != 1:
+        return False
+    return (
+        isinstance(node.args[0], ast.Call)
+        and python_dotted_name(node.args[0].func) == "str"
+        and len(node.args[0].args) == 1
+        and not node.args[0].keywords
+        and isinstance(node.args[0].args[0], ast.Name)
+        and node.args[0].args[0].id == "marker"
+    )
+
+
+def reviewed_python_synthetic_shell_input(node, value, tree, parents):
+    """Inspect, then allow only named shell bodies built inside temp fixtures."""
+    if value != ["/bin/bash"]:
+        return False
+    fixture_binding = temporary_directory_binding(node, parents)
+    if fixture_binding is None:
+        return False
+    keywords = {keyword.arg: keyword.value for keyword in node.keywords}
+    input_node = keywords.get("input")
+    if not isinstance(input_node, ast.Name) or input_node.id not in {
+        "failure_probe",
+        "script",
+    }:
+        return False
+    if set(keywords) - {"input", "text", "env", "stdout", "stderr", "check"}:
+        return False
+    if not (
+        isinstance(keywords.get("text"), ast.Constant)
+        and keywords["text"].value is True
+        and python_dotted_name(keywords.get("stdout")) == "subprocess.PIPE"
+        and python_dotted_name(keywords.get("stderr")) == "subprocess.PIPE"
+    ):
+        return False
+    assignments = []
+    for candidate in ast.walk(tree):
+        if not isinstance(candidate, ast.Assign):
+            continue
+        if any(
+            isinstance(target, ast.Name) and target.id == input_node.id
+            for target in candidate.targets
+        ):
+            assignments.append(candidate)
+    if len(assignments) != 1:
+        return False
+    assignment = assignments[0]
+    if temporary_directory_binding(assignment, parents) != fixture_binding:
+        return False
+    return reviewed_python_shell_body_expression(assignment.value, input_node.id)
+
+
 def inspect_python_heredoc(body, safe_marker):
     try:
         tree = ast.parse(body, filename="<python-heredoc>")
@@ -7326,6 +7812,11 @@ def inspect_python_heredoc(body, safe_marker):
         )
     mappings = python_mapping_bindings(tree, modules, functions)
     dynamic_bindings, unresolved_dynamic_bindings = python_dynamic_execution_bindings(tree)
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
     dynamic_calls = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -7385,6 +7876,14 @@ def inspect_python_heredoc(body, safe_marker):
             dynamic_calls.append(node.lineno)
             continue
         kind, value = literal
+        if kind == "argv" and reviewed_python_synthetic_git_fixture(
+            node, value, tree, parents
+        ):
+            continue
+        if kind == "argv" and reviewed_python_synthetic_shell_input(
+            node, value, tree, parents
+        ):
+            continue
         segments = shell_token_segments(value) if kind == "shell" else [value]
         for segment in segments:
             violation = forbidden_command(segment)
@@ -14826,4 +15325,80 @@ Recorded packet certification output:
 
 ```text
 GREEN packet certification: 314 Markdown fences balanced, 25 packet-local targets checked, backlog JSON valid, changed-boundary ledger valid with 10 data rows and 4 columns, embedded wrapper/scanner AST and compile valid, 2 fresh probe bodies AST-valid, exact red/green outputs present, only packet changed, added-line secret/private-path hygiene clean
+```
+
+### Fresh exact-head Codex corrections at `477d5e6d9af5f04d5b506d0a4337ae3444a71688`
+
+The five exact-head PR #78 findings below were reproduced against immutable
+parent `477d5e6d9af5f04d5b506d0a4337ae3444a71688` before editing this packet.
+The candidate correction remains limited to this evidence packet; no Go source,
+workflow, PR/issue metadata, live App/runner, Docker/Lima, Keychain, launchd,
+credential or real child operation was used.
+
+| Finding | Exact review URL | Packet-only disposition |
+|---|---|---|
+| 4007547706 | [discussion 4007547706](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4007547706) | Reviewed `exec(compile(...))` source is limited to named packet-derived slices, approved concatenations and selected AST modules; arbitrary literal source and compiler kwargs are rejected. |
+| 4007547713 | [discussion 4007547713](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4007547713) | Executable basenames are casefolded before wrapper, shell and deny-list classification, so `BASH`, `GH` and `DOCKER` case variants retain their blocked classifications. |
+| 4007547724 | [discussion 4007547724](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4007547724) | Direct Git commands are allowlisted to read-only packet queries; remote/destructive subcommands and mutating `config` forms fail closed. Exact local temporary-repository setup/cleanup argv is retained only when its `cwd` is a direct `Path` alias inside a literal `TemporaryDirectory`, never by marker alone. |
+| 4007547735 | [discussion 4007547735](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4007547735) | Both source-status checks use selector-based bounded reads, a 64 KiB combined output cap, a 30 second independent deadline, first-entry dirty short-circuit and process-group cleanup; timeout, overflow, decode and cleanup failures fail closed. |
+| 4007547741 | [discussion 4007547741](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4007547741) | Shell script paths and redirected shell input fail closed before payload inspection. The only retained shell-input probe is a named immutable preflight-derived body whose expression, temporary fixture scope and `PIPE` capture are AST-inspected; unresolved input remains rejected. |
+
+#### Exact-parent red outputs
+
+The focused red command used `git show` for only the immutable parent packet,
+then extracted that packet's own embedded scanner and wrapper AST with isolated
+Python. It ran no extracted command or child; the exact output was:
+
+```text
+RED 4007547706: exact parent accepted arbitrary literal source in reviewed exec(compile(...))
+RED 4007547713: exact parent accepted case-variant BASH/GH/DOCKER executable basenames
+RED 4007547724: exact parent accepted remote/destructive Git subcommands
+RED 4007547735: exact parent had 2 unbounded captured git status call(s) with no timeout/output cap
+RED 4007547741: exact parent accepted shell script and redirected shell input forms
+```
+
+#### Focused green and boundary outputs
+
+The focused green command reused the candidate packet's exact embedded scanner
+definitions and wrapper helper AST. Direct classification covered all three
+case-variant executable forms, all four remote/destructive Git forms, all three
+shell script/redirected-input forms and retained read-only Git status/diff/
+`ls-remote`; AST probes covered arbitrary versus packet-derived compile source,
+the immutable temporary shell body, unresolved shell input, and in-memory fake
+pipes for first-entry, cap and deadline boundaries.
+
+```text
+GREEN 4007547713/4007547724/4007547741: casefolded executable basenames, remote/destructive Git forms, and shell script/redirected-input forms classified at the direct-command boundary; read-only Git retained
+GREEN 4007547706: arbitrary literal compile source rejected; reviewed packet source slices and selected AST modules retained
+GREEN 4007547741: only the inspected TemporaryDirectory-derived synthetic shell body retained; unresolved shell input rejected
+GREEN 4007547735: bounded Git status helper uses selector reads, first-entry dirty short-circuit, 64KiB cap, independent deadline, and stalled/oversized fake pipes fail closed; no child started
+```
+
+The full current embedded forbidden-command scan and its static synthetic
+probes then passed:
+
+```text
+forbidden-live-command synthetic probes: passed; direct/wrapped fetcher, every gh invocation including global-flag and absolute forms, every Docker invocation, command-delegating xargs/find/parallel/make forms, Git difftool/mergetool, --extcmd/--tool/--ext-diff, GIT_EXTERNAL_DIFF, diff.external and --config-env alias delegation forms, env split-string/operand forms, unsupported function/brace/case compounds, shell substitutions/process substitutions, limactl/security/launchctl, eval, AST-inspected safe/unsafe Python heredocs including versioned -c/getoutput/getstatusoutput/execvp, getattr/__dict__ indirect launchers and unresolved launcher aliases, parameter-expanded executables, and direct/nested bash/sh -c forms rejected; prose/URLs/comments/scanner source/fixtures ignored
+forbidden-live-command scan: passed; executable shell prescriptions contain no forbidden live App/runner/Docker/Lima/Keychain/launchd/workflow/fetch command
+```
+
+Rollback is narrow and packet-only: restore
+`docs/evidence/g01-recovery-packet.md` to immutable parent
+`477d5e6d9af5f04d5b506d0a4337ae3444a71688`; preserve independent driver,
+review and manual-runner state, and do not force-kill, prune or replay a live
+resource. These checks remain static, synthetic, in-memory or read-only Git
+inspection evidence: no Go/compiler/test body, live runner, workflow/API,
+credential, Docker/Lima, Keychain or launchd qualification is claimed.
+
+#### Packet certification for this exact-head correction
+
+The packet-only certification ran after the focused boundaries and full
+embedded scan. It checked fence parity, all packet-local link targets and
+anchors, backlog JSON, the ten-row/four-column changed-boundary ledger, exact
+wrapper/scanner AST and compilation, bounded status-call shape, exact finding
+URLs and red/green transcripts, packet-only scope, added-line secret/private
+path hygiene and whitespace:
+
+```text
+GREEN packet certification: 322 Markdown fences balanced, 63 packet-local targets checked, backlog JSON valid, changed-boundary ledger valid with 10 data rows and 4 columns, embedded wrapper/scanner AST and compile valid, bounded Git status checks valid, exact five URLs and red/green outputs present, only packet changed, added-line secret/private-path hygiene clean, and git diff --check passed
 ```
