@@ -7115,9 +7115,142 @@ def shell_output_redirection_violation(tokens):
             return "shell output redirection has no destination"
         if destination in {"1", "2", "&1", "/dev/null"}:
             continue
-        if destination.startswith("$pair_fragment_tmp/"):
+        if shell_packet_owned_path(destination):
             continue
         return "shell output redirection is not allowed outside the owned fragment directory"
+    return None
+
+
+def shell_packet_owned_path(token):
+    """Recognize only the packet's reviewed fragment-directory path forms."""
+    for prefix in ("$pair_fragment_tmp", "${pair_fragment_tmp}"):
+        if token == prefix:
+            return True
+        if token.startswith(prefix + "/"):
+            return temporary_path_component_safe(token[len(prefix) + 1:])
+    return False
+
+
+shell_writer_executables = {"tee", "cp", "install", "mv"}
+shell_writer_flags = {
+    "tee": {"-a", "--append", "-i", "--ignore-interrupts"},
+    "cp": {
+        "-f", "-i", "-n", "-p", "-R", "-r", "-T", "--force",
+        "--interactive", "--no-clobber", "--no-target-directory", "--preserve",
+        "--recursive",
+    },
+    "install": {
+        "-b", "-c", "-d", "-D", "-p", "-s", "--backup", "--compare",
+        "--directory", "--preserve-timestamps", "--strip",
+    },
+    "mv": {"-f", "-i", "-n", "-T", "--force", "--interactive", "--no-clobber"},
+}
+shell_writer_option_values = {
+    "cp": {"-S", "-t", "--suffix", "--target-directory"},
+    "install": {"-g", "-m", "-o", "-S", "--group", "--mode", "--owner", "--suffix", "-t", "--target-directory"},
+}
+shell_writer_destination_options = {
+    "cp": {"-t", "--target-directory"},
+    "install": {"-t", "--target-directory"},
+}
+
+
+def shell_writer_violation(tokens):
+    """Require tee/cp/install/mv destinations to be packet-owned."""
+    if not tokens:
+        return None
+    executable = executable_basename(tokens[0])
+    if executable not in shell_writer_executables:
+        return None
+    arguments = list(tokens[1:])
+    positional = []
+    explicit_destinations = []
+    index = 0
+    while index < len(arguments):
+        token = arguments[index]
+        if token == "--":
+            positional.extend(arguments[index + 1:])
+            break
+        if token in shell_writer_option_values.get(executable, set()):
+            if index + 1 >= len(arguments):
+                return f"{executable} destination option has no operand"
+            if token in shell_writer_destination_options.get(executable, set()):
+                explicit_destinations.append(arguments[index + 1])
+            index += 2
+            continue
+        if any(
+            token.startswith(option + "=")
+            for option in shell_writer_option_values.get(executable, set())
+        ):
+            option = token.split("=", 1)[0]
+            if option in shell_writer_destination_options.get(executable, set()):
+                explicit_destinations.append(token.split("=", 1)[1])
+            index += 1
+            continue
+        if token.startswith("-"):
+            if token not in shell_writer_flags.get(executable, set()):
+                return f"{executable} option/operand form is not reviewed"
+            index += 1
+            continue
+        positional.append(token)
+        index += 1
+    if executable == "tee":
+        destinations = positional
+    elif explicit_destinations:
+        destinations = explicit_destinations
+        if not positional:
+            return f"{executable} destination option has no source"
+    else:
+        if len(positional) < 2:
+            return f"{executable} must name a source and destination"
+        destinations = [positional[-1]]
+    if not destinations or any(not shell_packet_owned_path(path) for path in destinations):
+        return f"{executable} destination is not proven packet-owned"
+    return None
+
+
+def reviewed_shell_cleanup(tokens):
+    """Permit only the established owned fragment cleanup inside a trap."""
+    return (
+        len(tokens) == 3
+        and executable_basename(tokens[0]) == "rm"
+        and tokens[1] == "-rf"
+        and shell_packet_owned_path(tokens[2])
+    )
+
+
+def shell_trap_violation(tokens, depth=0):
+    """Recursively inspect literal trap handlers before deferred execution."""
+    if not tokens or executable_basename(tokens[0]) != "trap":
+        return None
+    arguments = list(tokens[1:])
+    if not arguments:
+        return "trap must name a literal handler"
+    index = 0
+    while index < len(arguments) and arguments[index].startswith("-") and arguments[index] != "-":
+        if arguments[index] == "--":
+            index += 1
+            break
+        return "trap options/handler form is not reviewed"
+    if index >= len(arguments):
+        return "trap must name a literal handler"
+    handler = arguments[index]
+    if handler in {"", "-"}:
+        return None
+    variables = re.findall(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)", handler)
+    if any(variable != "pair_fragment_tmp" for variable in variables) or "`" in handler:
+        return "trap handler contains an unreviewed dynamic expansion"
+    if depth >= 8:
+        return "trap handler recursion depth exceeded"
+    segments = shell_token_segments(handler)
+    if not segments:
+        return "trap handler is not a parseable literal command"
+    for segment in segments:
+        if reviewed_shell_cleanup(segment):
+            continue
+        violation = forbidden_command(segment, depth + 1)
+        if violation:
+            return f"trap handler -> {violation}"
     return None
 
 def executable_basename(token):
@@ -7461,11 +7594,17 @@ remote_command_launchers = {"ssh", "rsync", "scp", "sftp"}
 python_network_modules = {
     "http",
     "http.client",
+    "imaplib",
+    "nntplib",
+    "poplib",
     "urllib.request",
     "requests",
     "socket",
     "smtplib",
+    "telnetlib",
     "ftplib",
+    "xmlrpc",
+    "xmlrpc.client",
 }
 python_network_functions = {
     "urllib.request.urlopen",
@@ -7484,6 +7623,14 @@ python_network_functions = {
     "smtplib.LMTP",
     "ftplib.FTP",
     "ftplib.FTP_TLS",
+    "imaplib.IMAP4",
+    "imaplib.IMAP4_SSL",
+    "nntplib.NNTP",
+    "nntplib.NNTP_SSL",
+    "poplib.POP3",
+    "poplib.POP3_SSL",
+    "telnetlib.Telnet",
+    "xmlrpc.client.ServerProxy",
 }
 
 def shell_command_string(tokens):
@@ -7595,6 +7742,12 @@ def forbidden_command(tokens, depth=0):
         return "env wrapper option/operand is not parsed safely"
     if unresolved_executable(tokens[0]):
         return "unresolved or parameter-expanded executable is not allowed"
+    trap_violation = shell_trap_violation(tokens, depth)
+    if trap_violation:
+        return trap_violation
+    writer_violation = shell_writer_violation(tokens)
+    if writer_violation:
+        return writer_violation
     git_alias_violation = git_shell_alias(tokens)
     if git_alias_violation:
         return git_alias_violation
@@ -7701,7 +7854,30 @@ python_command_leaf_names = {
 }
 python_dynamic_execution_names = {"eval", "exec", "__import__"}
 reviewed_python_import_modules = {
-    "pathlib", "re", "selectors", "signal", "stat", "tempfile", "time",
+    "__future__",
+    "ast",
+    "contextlib",
+    "decimal",
+    "hashlib",
+    "io",
+    "json",
+    "os",
+    "pathlib",
+    "re",
+    "selectors",
+    "shlex",
+    "shutil",
+    "signal",
+    "stat",
+    "subprocess",
+    "sys",
+    "tempfile",
+    "threading",
+    "time",
+    "types",
+    "unicodedata",
+    "urllib.parse",
+    "warnings",
 }
 
 def python_dotted_name(node):
@@ -7720,6 +7896,8 @@ def python_network_import_violation(tree):
             for alias in node.names:
                 if alias.name in python_network_modules:
                     return f"Python network-capable import {alias.name!r} is not allowed"
+                if alias.name not in reviewed_python_import_modules:
+                    return f"Python import {alias.name!r} is not in the reviewed non-network allowlist"
         elif isinstance(node, ast.ImportFrom):
             for alias in node.names:
                 imported = f"{node.module}.{alias.name}" if node.module else alias.name
@@ -7729,6 +7907,11 @@ def python_network_import_violation(tree):
                     or imported in python_network_functions
                 ):
                     return f"Python network-capable import {imported!r} is not allowed"
+                if (
+                    node.level
+                    or node.module not in reviewed_python_import_modules
+                ):
+                    return f"Python import {imported!r} is not in the reviewed non-network allowlist"
     return None
 
 
@@ -7925,7 +8108,7 @@ def reviewed_python_import_call(call, safe_marker):
     if not call.args or not isinstance(call.args[0], ast.Constant):
         return False
     module = call.args[0].value
-    return isinstance(module, str) and module.split(".", 1)[0] in reviewed_python_import_modules
+    return isinstance(module, str) and module in reviewed_python_import_modules
 
 
 def python_module_name(node, modules):
@@ -8795,6 +8978,14 @@ def temporary_directory_bindings(node, tree, parents):
     return bindings
 
 
+def temporary_path_component_safe(value):
+    """Reject absolute and parent-traversing path components conservatively."""
+    if not isinstance(value, str) or value.startswith("/"):
+        return False
+    normalized = value.replace("\\", "/")
+    return ".." not in normalized.split("/")
+
+
 python_filesystem_mutating_methods = {
     "chmod",
     "chown",
@@ -8829,6 +9020,47 @@ python_filesystem_mutating_functions = {
     "shutil.move",
     "shutil.rmtree",
 }
+
+
+def python_filesystem_mutator_alias_violation(tree, parents):
+    """Reject extracted mutator methods unless their receiver is temp-owned."""
+    for node in ast.walk(tree):
+        assignments = []
+        if isinstance(node, ast.Assign):
+            assignments.extend((target, node.value) for target in node.targets)
+        elif isinstance(node, ast.AnnAssign):
+            assignments.append((node.target, node.value))
+        elif isinstance(node, ast.NamedExpr):
+            assignments.append((node.target, node.value))
+        for target, value in assignments:
+            if not isinstance(target, ast.Name):
+                continue
+            receiver = None
+            method = None
+            if (
+                isinstance(value, ast.Attribute)
+                and value.attr in python_filesystem_mutating_methods
+            ):
+                receiver = value.value
+                method = value.attr
+            elif (
+                isinstance(value, ast.Call)
+                and isinstance(value.func, ast.Name)
+                and value.func.id == "getattr"
+                and len(value.args) == 2
+                and isinstance(value.args[1], ast.Constant)
+                and value.args[1].value in python_filesystem_mutating_methods
+            ):
+                receiver = value.args[0]
+                method = value.args[1].value
+            if receiver is None:
+                continue
+            if not temporary_path_expression(receiver, tree, parents):
+                return (
+                    "Python heredoc extracts an unowned filesystem mutator "
+                    f"{method!r} into alias {target.id!r} on line {node.lineno}"
+                )
+    return None
 
 
 def python_path_receiver_expression(node, tree, parents, seen=None):
@@ -8883,22 +9115,66 @@ def temporary_path_expression(node, tree, parents, seen=None):
     bindings = temporary_directory_bindings(node, tree, parents)
     if isinstance(node, ast.Name):
         if node.id in bindings:
-            return True
+            assignments = []
+            for candidate in ast.walk(tree):
+                targets = []
+                value = None
+                if isinstance(candidate, ast.Assign):
+                    targets = candidate.targets
+                    value = candidate.value
+                elif isinstance(candidate, ast.AnnAssign):
+                    targets = [candidate.target]
+                    value = candidate.value
+                elif isinstance(candidate, ast.NamedExpr):
+                    targets = [candidate.target]
+                    value = candidate.value
+                elif isinstance(candidate, ast.AugAssign):
+                    targets = [candidate.target]
+                if (
+                    temporary_directory_binding(candidate, parents) == binding
+                    and any(
+                        isinstance(target, ast.Name) and target.id == node.id
+                        for target in targets
+                    )
+                ):
+                    assignments.append(value)
+            if not assignments:
+                return True
+            return all(
+                value is not None
+                and temporary_path_expression(value, tree, parents, seen)
+                for value in assignments
+            )
         if node.id in seen:
             return False
         seen.add(node.id)
+        assignment_values = []
         for candidate in ast.walk(tree):
-            if not isinstance(candidate, ast.Assign):
-                continue
+            targets = []
+            value = None
+            if isinstance(candidate, ast.Assign):
+                targets = candidate.targets
+                value = candidate.value
+            elif isinstance(candidate, ast.AnnAssign):
+                targets = [candidate.target]
+                value = candidate.value
+            elif isinstance(candidate, ast.NamedExpr):
+                targets = [candidate.target]
+                value = candidate.value
+            elif isinstance(candidate, ast.AugAssign):
+                targets = [candidate.target]
             if temporary_directory_binding(candidate, parents) != binding:
                 continue
-            if not any(
+            if any(
                 isinstance(target, ast.Name) and target.id == node.id
-                for target in candidate.targets
+                for target in targets
             ):
-                continue
-            if temporary_path_expression(candidate.value, tree, parents, seen):
-                return True
+                assignment_values.append(value)
+        if assignment_values:
+            return all(
+                temporary_path_expression(value, tree, parents, seen)
+                for value in assignment_values
+            )
         return False
     if isinstance(node, ast.Call):
         dotted = python_dotted_name(node.func)
@@ -8911,7 +9187,7 @@ def temporary_path_expression(node, tree, parents, seen=None):
             and all(
                 isinstance(argument, ast.Constant)
                 and isinstance(argument.value, str)
-                and not argument.value.startswith("/")
+                and temporary_path_component_safe(argument.value)
                 for argument in node.args
             )
             and not node.keywords
@@ -8923,13 +9199,16 @@ def temporary_path_expression(node, tree, parents, seen=None):
             temporary_path_expression(node.left, tree, parents, seen)
             and isinstance(node.right, ast.Constant)
             and isinstance(node.right.value, str)
-            and not node.right.value.startswith("/")
+            and temporary_path_component_safe(node.right.value)
         )
     return False
 
 
 def python_filesystem_mutation_violation(tree, parents):
     """Reject filesystem mutations unless their path is temp-owned."""
+    alias_violation = python_filesystem_mutator_alias_violation(tree, parents)
+    if alias_violation:
+        return alias_violation
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -18321,4 +18600,305 @@ operation, merge, credential or workflow claim.
 
 ~~~text
 GREEN final packet certification: 378 Markdown fence markers balanced with matching-style parser, 157 packet-local targets checked, backlog JSON valid, changed-boundary ledger valid with 10 data rows and 4 columns, embedded wrapper/scanner/filter/parity AST and compile valid, all six fresh finding URLs have exact RED/GREEN/CURRENT transcripts and focused boundaries, full static scanner passed with 286 shell commands and 77 Python heredoc bodies, one-file scope and added-line secret/private-path hygiene clean, and git diff --check passed
+~~~
+
+### Fresh exact-head [Codex review `5203707521`](https://github.com/1XP-AI/gh-runnerd/pull/78#pullrequestreview-5203707521) against immutable parent `3c4eb91ba0dabce5ab29785e5da273d1734ae612`
+
+The exact-head review identified six scanner-policy gaps in the packet's
+temporary ownership, deferred command, network-client and shell-writer
+boundaries. The following TDD evidence first reproduces each finding against
+the immutable parent `3c4eb91ba0dabce5ab29785e5da273d1734ae612` using only
+`git show` and in-memory scanner text, then runs the focused current-head
+boundary checks after the minimal scanner-policy correction. It starts no Go
+child, Python child, forbidden command, workflow, runner, Docker, Lima,
+Keychain or launchd operation and performs no network or live qualification.
+
+~~~sh
+set -euo pipefail
+# g01-safe-python-heredoc: reviewed exact-parent six-finding RED and current GREEN boundary
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import re
+import shlex
+import subprocess
+from pathlib import Path
+
+parent_sha = "3c4eb91ba0dabce5ab29785e5da273d1734ae612"
+packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
+
+def load_scanner(text, label):
+    anchor = text.index("def forbidden_command(tokens, depth=0):")
+    start = text.rfind("source = Path(", 0, anchor)
+    end = text.index("\nmatches = []", anchor)
+    scanner = text[start:end].replace(
+        'source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")',
+        'source = ""',
+        1,
+    )
+    namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+    exec(compile(scanner, "<scanner>", "exec"), namespace)
+    return namespace
+
+current = load_scanner(packet, "current-scanner-401034")
+parent_packet = subprocess.check_output(
+    ["git", "show", f"{parent_sha}:docs/evidence/g01-recovery-packet.md"],
+    text=True,
+)
+parent = load_scanner(parent_packet, "exact-parent-3c4eb91-scanner")
+
+def inspected(namespace, body):
+    return namespace["inspect_python_heredoc"](body, True)
+
+def shell_result(namespace, command):
+    return [
+        namespace["forbidden_command"](segment)
+        for segment in namespace["shell_token_segments"](command)
+    ]
+
+def parent_accepts(label, value):
+    if value is not None and not all(result is None for result in value):
+        raise SystemExit(f"parent unexpectedly rejected {label}: {value!r}")
+    print(f"RED {label}: exact parent accepted the finding witness")
+
+def current_rejects(label, value):
+    if value is None or (isinstance(value, list) and all(result is None for result in value)):
+        raise SystemExit(f"current scanner accepted {label}")
+    finding = label.split(None, 1)[0]
+    print(f"GREEN {finding}/CURRENT: focused boundary rejected the witness ({label})")
+
+def current_accepts(label, value):
+    if value is not None and (not isinstance(value, list) or any(result is not None for result in value)):
+        raise SystemExit(f"current scanner rejected reviewed safe witness {label}: {value!r}")
+    finding = label.split(None, 1)[0]
+    print(f"GREEN {finding}/CURRENT: reviewed safe witness remained accepted ({label})")
+
+parent_accepts(
+    "4010340722 parent traversal",
+    inspected(
+        parent,
+        "from pathlib import Path\n"
+        "from tempfile import TemporaryDirectory\n"
+        "with TemporaryDirectory() as td:\n"
+        "    Path(td).joinpath('../outside').write_text('x')\n",
+    ),
+)
+parent_accepts(
+    "4010340728 unsafe same-block reassignment",
+    inspected(
+        parent,
+        "from pathlib import Path\n"
+        "from tempfile import TemporaryDirectory\n"
+        "with TemporaryDirectory() as td:\n"
+        "    target = Path(td) / 'safe'\n"
+        "    target = Path('/outside')\n"
+        "    target.write_text('x')\n",
+    ),
+)
+parent_accepts(
+    "4010340734 filesystem mutator alias",
+    inspected(
+        parent,
+        "from pathlib import Path\n"
+        "writer = Path('/outside').write_text\n"
+        "writer('x')\n",
+    ),
+)
+for trap in (
+    "trap 'gh workflow run ci.yml' EXIT",
+    "trap 'rm -rf /outside' EXIT",
+    "handler='gh workflow run ci.yml'; trap \"$handler\" EXIT",
+):
+    parent_accepts("4010340738 trap witness " + trap, shell_result(parent, trap))
+parent_accepts(
+    "4010340742 imaplib client",
+    inspected(parent, "import imaplib\nimaplib.IMAP4('example.invalid')\n"),
+)
+parent_accepts(
+    "4010340742 xmlrpc ServerProxy client",
+    inspected(
+        parent,
+        "import xmlrpc.client\n"
+        "xmlrpc.client.ServerProxy('http://example.invalid')\n",
+    ),
+)
+for writer in (
+    "tee /outside/packet.txt",
+    "cp packet.txt /outside/packet.txt",
+    "install packet.txt /outside/packet.txt",
+    "mv packet.txt /outside/packet.txt",
+):
+    parent_accepts("4010340746 shell writer " + writer, shell_result(parent, writer))
+
+current_rejects(
+    "4010340722 parent traversal",
+    inspected(
+        current,
+        "from pathlib import Path\n"
+        "from tempfile import TemporaryDirectory\n"
+        "with TemporaryDirectory() as td:\n"
+        "    Path(td).joinpath('../outside').write_text('x')\n",
+    ),
+)
+current_accepts(
+    "4010340722 owned child path",
+    inspected(
+        current,
+        "from pathlib import Path\n"
+        "from tempfile import TemporaryDirectory\n"
+        "with TemporaryDirectory() as td:\n"
+        "    Path(td).joinpath('inside/file').write_text('x')\n",
+    ),
+)
+current_rejects(
+    "4010340728 unsafe same-block reassignment",
+    inspected(
+        current,
+        "from pathlib import Path\n"
+        "from tempfile import TemporaryDirectory\n"
+        "with TemporaryDirectory() as td:\n"
+        "    target = Path(td) / 'safe'\n"
+        "    target = Path('/outside')\n"
+        "    target.write_text('x')\n",
+    ),
+)
+current_accepts(
+    "4010340728 unchanged owned variable",
+    inspected(
+        current,
+        "from pathlib import Path\n"
+        "from tempfile import TemporaryDirectory\n"
+        "with TemporaryDirectory() as td:\n"
+        "    target = Path(td) / 'safe'\n"
+        "    target.write_text('x')\n",
+    ),
+)
+current_rejects(
+    "4010340734 filesystem mutator alias",
+    inspected(
+        current,
+        "from pathlib import Path\n"
+        "writer = Path('/outside').write_text\n"
+        "writer('x')\n",
+    ),
+)
+current_accepts(
+    "4010340734 owned filesystem mutator alias",
+    inspected(
+        current,
+        "from pathlib import Path\n"
+        "from tempfile import TemporaryDirectory\n"
+        "with TemporaryDirectory() as td:\n"
+        "    writer = (Path(td) / 'inside').write_text\n"
+        "    writer('x')\n",
+    ),
+)
+for trap in (
+    "trap 'gh workflow run ci.yml' EXIT",
+    "trap 'rm -rf /outside' EXIT",
+    "handler='gh workflow run ci.yml'; trap \"$handler\" EXIT",
+):
+    current_rejects("4010340738 trap witness " + trap, shell_result(current, trap))
+current_accepts(
+    "4010340738 owned trap cleanup",
+    shell_result(current, "trap 'rm -rf \"$pair_fragment_tmp\"' EXIT"),
+)
+current_rejects(
+    "4010340742 imaplib client",
+    inspected(current, "import imaplib\nimaplib.IMAP4('example.invalid')\n"),
+)
+current_rejects(
+    "4010340742 xmlrpc ServerProxy client",
+    inspected(
+        current,
+        "import xmlrpc.client\n"
+        "xmlrpc.client.ServerProxy('http://example.invalid')\n",
+    ),
+)
+current_accepts(
+    "4010340742 reviewed urllib parse",
+    inspected(current, "from urllib.parse import quote\nquote('safe')\n"),
+)
+for writer in (
+    "tee /outside/packet.txt",
+    "cp packet.txt /outside/packet.txt",
+    "install packet.txt /outside/packet.txt",
+    "mv packet.txt /outside/packet.txt",
+):
+    current_rejects("4010340746 shell writer " + writer, shell_result(current, writer))
+for writer in (
+    "tee \"$pair_fragment_tmp/packet.txt\"",
+    "cp packet.txt \"$pair_fragment_tmp/packet.txt\"",
+    "install packet.txt \"$pair_fragment_tmp/packet.txt\"",
+    "mv packet.txt \"$pair_fragment_tmp/packet.txt\"",
+):
+    current_accepts("4010340746 owned shell writer " + writer, shell_result(current, writer))
+print("focused six-boundary RED/GREEN/CURRENT checks: passed")
+PY
+~~~
+
+The exact-parent RED and current-head GREEN/CURRENT transcript was:
+
+~~~text
+RED 4010340722 parent traversal: exact parent accepted the finding witness
+RED 4010340728 unsafe same-block reassignment: exact parent accepted the finding witness
+RED 4010340734 filesystem mutator alias: exact parent accepted the finding witness
+RED 4010340738 trap witness trap 'gh workflow run ci.yml' EXIT: exact parent accepted the finding witness
+RED 4010340738 trap witness trap 'rm -rf /outside' EXIT: exact parent accepted the finding witness
+RED 4010340738 trap witness handler='gh workflow run ci.yml'; trap "$handler" EXIT: exact parent accepted the finding witness
+RED 4010340742 imaplib client: exact parent accepted the finding witness
+RED 4010340742 xmlrpc ServerProxy client: exact parent accepted the finding witness
+RED 4010340746 shell writer tee /outside/packet.txt: exact parent accepted the finding witness
+RED 4010340746 shell writer cp packet.txt /outside/packet.txt: exact parent accepted the finding witness
+RED 4010340746 shell writer install packet.txt /outside/packet.txt: exact parent accepted the finding witness
+RED 4010340746 shell writer mv packet.txt /outside/packet.txt: exact parent accepted the finding witness
+GREEN 4010340722/CURRENT: focused boundary rejected the witness (4010340722 parent traversal)
+GREEN 4010340722/CURRENT: reviewed safe witness remained accepted (4010340722 owned child path)
+GREEN 4010340728/CURRENT: focused boundary rejected the witness (4010340728 unsafe same-block reassignment)
+GREEN 4010340728/CURRENT: reviewed safe witness remained accepted (4010340728 unchanged owned variable)
+GREEN 4010340734/CURRENT: focused boundary rejected the witness (4010340734 filesystem mutator alias)
+GREEN 4010340734/CURRENT: reviewed safe witness remained accepted (4010340734 owned filesystem mutator alias)
+GREEN 4010340738/CURRENT: focused boundary rejected the witness (4010340738 trap witness trap 'gh workflow run ci.yml' EXIT)
+GREEN 4010340738/CURRENT: focused boundary rejected the witness (4010340738 trap witness trap 'rm -rf /outside' EXIT)
+GREEN 4010340738/CURRENT: focused boundary rejected the witness (4010340738 trap witness handler='gh workflow run ci.yml'; trap "$handler" EXIT)
+GREEN 4010340738/CURRENT: reviewed safe witness remained accepted (4010340738 owned trap cleanup)
+GREEN 4010340742/CURRENT: focused boundary rejected the witness (4010340742 imaplib client)
+GREEN 4010340742/CURRENT: focused boundary rejected the witness (4010340742 xmlrpc ServerProxy client)
+GREEN 4010340742/CURRENT: reviewed safe witness remained accepted (4010340742 reviewed urllib parse)
+GREEN 4010340746/CURRENT: focused boundary rejected the witness (4010340746 shell writer tee /outside/packet.txt)
+GREEN 4010340746/CURRENT: focused boundary rejected the witness (4010340746 shell writer cp packet.txt /outside/packet.txt)
+GREEN 4010340746/CURRENT: focused boundary rejected the witness (4010340746 shell writer install packet.txt /outside/packet.txt)
+GREEN 4010340746/CURRENT: focused boundary rejected the witness (4010340746 shell writer mv packet.txt /outside/packet.txt)
+GREEN 4010340746/CURRENT: reviewed safe witness remained accepted (4010340746 owned shell writer tee "$pair_fragment_tmp/packet.txt")
+GREEN 4010340746/CURRENT: reviewed safe witness remained accepted (4010340746 owned shell writer cp packet.txt "$pair_fragment_tmp/packet.txt")
+GREEN 4010340746/CURRENT: reviewed safe witness remained accepted (4010340746 owned shell writer install packet.txt "$pair_fragment_tmp/packet.txt")
+GREEN 4010340746/CURRENT: reviewed safe witness remained accepted (4010340746 owned shell writer mv packet.txt "$pair_fragment_tmp/packet.txt")
+focused six-boundary RED/GREEN/CURRENT checks: passed
+~~~
+
+| Finding and immutable source | Exact review URL | Current disposition and evidence |
+|---|---|---|
+| 4010340722, source `3c4eb91ba0dabce5ab29785e5da273d1734ae612` | [discussion 4010340722](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4010340722) | RED reproduced `Path(td).joinpath('../outside')` escaping the temporary ownership proof. The current path policy rejects `..` components in `joinpath` and `/` expressions while retaining literal child paths; focused GREEN/CURRENT passed. |
+| 4010340728, source `3c4eb91ba0dabce5ab29785e5da273d1734ae612` | [discussion 4010340728](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4010340728) | RED reproduced a temporary path variable reassigned to `Path('/outside')` in the same block. The current policy checks every assignment to a proven temporary path name and fails closed when any reassignment is unsafe; unchanged owned assignment remained GREEN/CURRENT. |
+| 4010340734, source `3c4eb91ba0dabce5ab29785e5da273d1734ae612` | [discussion 4010340734](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4010340734) | RED reproduced `writer = Path('/outside').write_text` as an uninspected mutator alias. The current AST pass rejects extracted mutator methods unless the receiver is temporary-owned, while an owned alias remained accepted; focused GREEN/CURRENT passed. |
+| 4010340738, source `3c4eb91ba0dabce5ab29785e5da273d1734ae612` | [discussion 4010340738](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4010340738) | RED reproduced literal `trap` handlers hiding forbidden `gh`, destructive `rm`, and deferred variable handlers. The current scanner recursively tokenizes literal handlers, rejects dynamic/deferred forms and forbidden/destructive payloads, and retains only the established packet-owned cleanup; focused GREEN/CURRENT passed. |
+| 4010340742, source `3c4eb91ba0dabce5ab29785e5da273d1734ae612` | [discussion 4010340742](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4010340742) | RED reproduced unlisted `imaplib.IMAP4` and `xmlrpc.client.ServerProxy` clients. The current Python AST import gate uses the reviewed non-network module allowlist plus explicit network-client denials, rejecting both before any network use while retaining reviewed `urllib.parse`; focused GREEN/CURRENT passed. |
+| 4010340746, source `3c4eb91ba0dabce5ab29785e5da273d1734ae612` | [discussion 4010340746](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4010340746) | RED reproduced outside destinations for `tee`, `cp`, `install` and `mv`. The current shell policy parses writer options and requires every destination to be the reviewed `$pair_fragment_tmp` packet-owned form; outside destinations reject and owned destinations remain accepted in GREEN/CURRENT. |
+
+The six findings are resolved only for the embedded offline scanner policy at
+the current candidate head. No live GitHub/App/runner/workflow/credential or
+host qualification is claimed; rollback is packet-only to immutable parent
+`3c4eb91ba0dabce5ab29785e5da273d1734ae612`.
+
+### Final packet certification after exact-head review `5203707521`
+
+The final packet-only certification reruns only the changed scanner boundaries
+above before the full packet gate: matching-style Markdown fence parity,
+packet-local link/anchor targets, backlog JSON, the ten-row/four-column changed
+boundary ledger, embedded wrapper/scanner/filter/parity AST and compile, full
+static scanner, all six focused boundaries, one-file scope, added-line
+secret/private-path hygiene and `git diff --check`. It records no live
+operation, merge, credential or workflow claim.
+
+~~~text
+GREEN final packet certification: 384 Markdown fence markers balanced with matching-style parser, 157 packet-local targets checked, backlog JSON valid, changed-boundary ledger valid with 10 data rows and 4 columns, embedded wrapper/scanner/filter/parity AST and compile valid, full static scanner passed with 288 shell commands and 78 Python heredoc bodies, all six exact-head RED/GREEN/CURRENT boundaries passed, one-file scope and added-line secret/private-path hygiene clean, and git diff --check passed; no live verification claimed
 ~~~
