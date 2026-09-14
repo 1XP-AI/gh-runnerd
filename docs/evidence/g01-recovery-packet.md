@@ -238,7 +238,7 @@ expected package identity
 (`module-directory:package`) and build configuration (tag set, race mode,
 explicit reviewed `CGO_ENABLED=1` mode, the reviewed default cgo compiler/tool
 set, reviewed `GOEXPERIMENT=none` binding, reviewed `GOOS=darwin`,
-`GOARCH=arm64`, `GOARM64=v8.0` target and `GOTOOLCHAIN`). Compiler commands, cgo flags/linker controls, pkg-config
+`GOARCH=arm64`, `GOARM64=v8.0` target and the requested `GOTOOLCHAIN`). Compiler commands, cgo flags/linker controls, pkg-config
 selectors and other cgo tool overrides are rejected before any Go child; the
 effective default-tool, experiment and target identities are recorded in each
 build identity. `GOENV=off` disables persisted Go compiler/tool settings before
@@ -246,8 +246,13 @@ any Go child; an inherited or command-supplied GOENV path is rejected. The
 reviewed GOROOT default (`GOROOT=""`) and `GOFIPS140=off` are likewise pinned
 before any Go child; non-default inherited or command-supplied values fail
 closed, and `goroot-default`/`gofips140-off` are bound into every build
-identity. The reviewed canonical PATH is pinned before the first Git or Go
-executable lookup.
+identity. The reviewed `GOSUMDB=sum.golang.org` and
+`GOPROXY=https://proxy.golang.org,direct` trust settings are required before
+the first Go child and verified through effective `go env`; custom inherited or
+command-supplied values fail closed. The wrapper queries effective
+`GOVERSION` before metadata or tests and binds that verified toolchain identity,
+not merely the requested `GOTOOLCHAIN`, into every build identity. The reviewed
+canonical PATH is pinned before the first Git or Go executable lookup.
 `GOCACHEPROG` is rejected unless empty and then pinned empty before any Go child;
 `GOAUTH` is rejected unless `off` and then pinned `off`, so executable cache
 hooks and command-form authentication cannot reach module, metadata, vet or
@@ -284,7 +289,11 @@ parsing inherited and command-prefix assignments, it rejects every repository-
 control `GIT_*` override—including `GIT_WORK_TREE`, `GIT_DIR`,
 `GIT_INDEX_FILE` and related repository, object, config, namespace, discovery,
 pathspec and replacement controls—before the first Git query or immutable-tree
-validation. It also rejects `PATH` and equivalent dynamic loader-affecting
+pathspec and replacement controls—before the first Git query or immutable-tree
+validation. Every wrapper-controlled Git query uses `-c core.fsmonitor=false`
+and `-c core.hooksPath=/dev/null`, with system/global Git configuration disabled
+in the child environment, before trusting source-tree, status/porcelain or
+intent-bit results. It also rejects `PATH` and equivalent dynamic loader-affecting
 prefixes, validates the inherited PATH against the reviewed canonical
 `/opt/homebrew/bin:/usr/bin:/bin`, and creates the Go-child
 environment with `GOWORK=off` and passes that exact environment to every Go
@@ -430,6 +439,16 @@ for source, value in (
             f"{label}: {source} GOENV must be {reviewed_goenv!r}"
         )
 env["GOENV"] = reviewed_goenv
+reviewed_toolchain = "go1.26.8"
+for source, value in (
+    ("inherited", os.environ.get("GOTOOLCHAIN")),
+    ("command", command_assignments.get("GOTOOLCHAIN")),
+):
+    if value is not None and value != reviewed_toolchain:
+        raise SystemExit(
+            f"{label}: {source} GOTOOLCHAIN must be {reviewed_toolchain!r}"
+        )
+env["GOTOOLCHAIN"] = reviewed_toolchain
 reviewed_goroot = ""
 for source, value in (
     ("inherited", os.environ.get("GOROOT")),
@@ -460,6 +479,26 @@ for source, value in (
             f"{label}: {source} GOEXPERIMENT must be {reviewed_goexperiment!r}"
         )
 env["GOEXPERIMENT"] = reviewed_goexperiment
+reviewed_gosumdb = "sum.golang.org"
+reviewed_goproxy = "https://proxy.golang.org,direct"
+for source, value in (
+    ("inherited", os.environ.get("GOSUMDB")),
+    ("command", command_assignments.get("GOSUMDB")),
+):
+    if value is not None and value != reviewed_gosumdb:
+        raise SystemExit(
+            f"{label}: {source} GOSUMDB must use the reviewed trust setting"
+        )
+for source, value in (
+    ("inherited", os.environ.get("GOPROXY")),
+    ("command", command_assignments.get("GOPROXY")),
+):
+    if value is not None and value != reviewed_goproxy:
+        raise SystemExit(
+            f"{label}: {source} GOPROXY must use the reviewed module proxy"
+        )
+env["GOSUMDB"] = reviewed_gosumdb
+env["GOPROXY"] = reviewed_goproxy
 reviewed_gocacheprog = ""
 for source, value in (
     ("inherited", os.environ.get("GOCACHEPROG")),
@@ -589,6 +628,26 @@ if git_environment_overrides:
         f"{label}: Git repository-control environment overrides are not allowed: "
         + ", ".join(git_environment_overrides)
     )
+# Do not inherit user/system Git configuration, and force repository hooks and
+# fsmonitor off on every wrapper-controlled Git query. The command-line -c
+# settings override repository configuration; the fixed environment removes
+# user/system configuration before source status/tree/intent results are trusted.
+env.update(
+    {
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+    }
+)
+
+
+def git_command(arguments):
+    return [
+        "git",
+        "-c", "core.fsmonitor=false",
+        "-c", "core.hooksPath=/dev/null",
+        *arguments,
+    ]
 loader_assignment_names = {
     "PATH",
     "LD_PRELOAD",
@@ -621,7 +680,7 @@ if os.pathsep != ":" or os.environ.get("PATH") != reviewed_path:
 env["PATH"] = reviewed_path
 repo_root = Path(
     subprocess.check_output(
-        ["git", "rev-parse", "--show-toplevel"],
+        git_command(["rev-parse", "--show-toplevel"]),
         cwd=invocation_root,
         env=env,
         text=True,
@@ -808,6 +867,18 @@ if go_env.get("GOEXPERIMENT") != reviewed_goexperiment:
     raise SystemExit(
         f"{label}: Go child environment did not pin GOEXPERIMENT={reviewed_goexperiment}"
     )
+if go_env.get("GOTOOLCHAIN") != reviewed_toolchain:
+    raise SystemExit(
+        f"{label}: Go child environment did not pin GOTOOLCHAIN={reviewed_toolchain}"
+    )
+if go_env.get("GOSUMDB") != reviewed_gosumdb:
+    raise SystemExit(
+        f"{label}: Go child environment did not pin GOSUMDB={reviewed_gosumdb}"
+    )
+if go_env.get("GOPROXY") != reviewed_goproxy:
+    raise SystemExit(
+        f"{label}: Go child environment did not pin the reviewed GOPROXY"
+    )
 if go_env.get("GOCACHEPROG") != reviewed_gocacheprog:
     raise SystemExit(
         f"{label}: Go child environment did not pin GOCACHEPROG={reviewed_gocacheprog!r}"
@@ -877,6 +948,27 @@ def run_go_child(go_command, **kwargs):
     except SystemExit:
         raise
 
+effective_toolchain_result = run_go_child(
+    ["go", "env", "GOVERSION", "GOSUMDB", "GOPROXY"],
+    cwd=repo_root,
+    env=go_env,
+    text=True,
+    capture_output=True,
+    check=False,
+)
+if effective_toolchain_result.returncode != 0 or effective_toolchain_result.stderr.strip():
+    raise SystemExit(f"{label}: effective toolchain/trust query failed")
+effective_toolchain_lines = effective_toolchain_result.stdout.splitlines()
+if effective_toolchain_lines != [
+    reviewed_toolchain,
+    reviewed_gosumdb,
+    reviewed_goproxy,
+]:
+    raise SystemExit(
+        f"{label}: effective toolchain/trust identity did not match the reviewed pin"
+    )
+effective_toolchain_identity = effective_toolchain_lines[0]
+
 effective_goflags = run_go_child(
     ["go", "env", "GOFLAGS"],
     cwd=repo_root,
@@ -945,7 +1037,7 @@ for value in test_args:
 if len(race_modes) > 1:
     raise SystemExit(f"{label}: expected at most one -race flag")
 race_identity = race_modes[0] if race_modes else "norace"
-toolchain_identity = env.get("GOTOOLCHAIN", "")
+toolchain_identity = effective_toolchain_identity
 cgo_identity = "cgo" + env.get("CGO_ENABLED", "")
 compiler_tool_identity = "cgo-tools-default"
 goexperiment_identity = "goexperiment-" + reviewed_goexperiment
@@ -1034,7 +1126,7 @@ def verify_downloaded_module_sources():
 
 def git_source_control_entries(repo_root, module_dir, env):
     source_flags = subprocess.run(
-        ["git", "ls-files", "-v", "--full-name", "--", module_dir],
+        git_command(["ls-files", "-v", "--full-name", "--", module_dir]),
         cwd=repo_root,
         env=env,
         text=True,
@@ -1051,7 +1143,7 @@ def git_source_control_entries(repo_root, module_dir, env):
 
 def package_initialization_guard():
     source_tree = subprocess.run(
-        ["git", "rev-parse", f"HEAD:{module_dir}"],
+        git_command(["rev-parse", f"HEAD:{module_dir}"]),
         cwd=repo_root,
         env=env,
         text=True,
@@ -1065,15 +1157,14 @@ def package_initialization_guard():
             f"{label}: package-initialization guard requires reviewed source tree"
         )
     source_status = subprocess.run(
-        [
-            "git",
+        git_command([
             "status",
             "--porcelain=v1",
             "--untracked-files=all",
             "--ignored=matching",
             "--",
             module_dir,
-        ],
+        ]),
         cwd=repo_root,
         env=env,
         text=True,
@@ -5621,6 +5712,10 @@ python_command_functions = {
     "subprocess.check_output",
     "subprocess.run",
 }
+python_command_modules = {"os", "subprocess"}
+python_command_leaf_names = {
+    name.rsplit(".", 1)[-1] for name in python_command_functions
+}
 
 def python_dotted_name(node):
     parts = []
@@ -5631,6 +5726,39 @@ def python_dotted_name(node):
         parts.append(node.id)
         return ".".join(reversed(parts))
     return None
+
+
+def python_import_bindings(tree):
+    modules = {}
+    functions = {}
+    unresolved = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in python_command_modules:
+                    modules[alias.asname or alias.name] = alias.name
+        elif isinstance(node, ast.ImportFrom) and node.module in python_command_modules:
+            for alias in node.names:
+                if alias.name == "*":
+                    unresolved.append(node.lineno)
+                    continue
+                imported = f"{node.module}.{alias.name}"
+                if imported in python_command_functions:
+                    functions[alias.asname or alias.name] = imported
+    return modules, functions, unresolved
+
+
+def python_resolved_name(node, modules, functions):
+    dotted = python_dotted_name(node)
+    if dotted is None:
+        return None
+    if dotted in functions:
+        return functions[dotted]
+    parts = dotted.split(".")
+    module = modules.get(parts[0])
+    if module is not None and len(parts) > 1:
+        return ".".join([module, *parts[1:]])
+    return dotted
 
 def python_command_argument(call):
     if call.args:
@@ -5657,11 +5785,25 @@ def inspect_python_heredoc(body, safe_marker):
         tree = ast.parse(body, filename="<python-heredoc>")
     except SyntaxError as error:
         return f"Python heredoc is not parseable: {error}"
+    modules, functions, unresolved_imports = python_import_bindings(tree)
+    if unresolved_imports:
+        return (
+            "Python heredoc contains an unresolved command-capable star import "
+            "on line(s) "
+            + ",".join(str(line) for line in unresolved_imports)
+        )
     dynamic_calls = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        if python_dotted_name(node.func) not in python_command_functions:
+        resolved = python_resolved_name(node.func, modules, functions)
+        dotted = python_dotted_name(node.func)
+        if resolved not in python_command_functions:
+            if dotted and dotted.rsplit(".", 1)[-1] in python_command_leaf_names:
+                return (
+                    "Python heredoc contains an unresolved command-capable call "
+                    f"{dotted!r} on line {node.lineno}"
+                )
             continue
         argument = python_command_argument(node)
         literal = python_literal_command(argument)
@@ -5770,6 +5912,9 @@ if inspect_python_heredoc(safe_heredoc, True) is not None:
 for unsafe_heredoc in (
     'import subprocess\nsubprocess.run(["gh", "api", "x"])\n',
     'import os\nos.system("docker version")\n',
+    'import subprocess as sp\nsp.run(["gh", "api", "x"])\n',
+    'from subprocess import run\nrun(["gh", "api", "x"])\n',
+    'from os import system\nsystem("docker version")\n',
 ):
     if inspect_python_heredoc(unsafe_heredoc, False) is None:
         raise SystemExit("unsafe Python heredoc was accepted")
@@ -9133,8 +9278,8 @@ for number, line in enumerate(lines, start=1):
         continue
     if in_shell and re.search(r"\b(?:/opt/homebrew/bin/)?python3\s+-I\b[^\n]*<<", line):
         headers.append((number, line))
-if len(headers) != 43:
-    raise SystemExit(f"expected 43 executable Python heredocs, observed {len(headers)}")
+if len(headers) != 47:
+    raise SystemExit(f"expected 47 executable Python heredocs, observed {len(headers)}")
 for number, line in headers:
     if "/opt/homebrew/bin/python3 -I" not in line:
         raise SystemExit(f"non-absolute Python interpreter at line {number}")
@@ -9145,7 +9290,7 @@ print(
     "GREEN focused packet regression: passed; vet identity/tag alignment, "
     "GOCACHEPROG/GOAUTH rejection and pins, GIT_NO_REPLACE_OBJECTS=1 binding, "
     "AST heredoc safe/unsafe probes, <(...)/>(...) rejection, absolute "
-    "Python+canonical PATH preflight (43/43), and JSON top-level/subtest "
+    "Python+canonical PATH preflight (47/47), and JSON top-level/subtest "
     "validation; no Go/live child started"
 )
 PY
@@ -9184,3 +9329,305 @@ resource.
 | 4002688125, source `81787b2e90df496a9c5a51fddc7607d3019834b7` | [discussion 4002688125](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002688125) | Reproduced `<(...)`/`>(...)` acceptance; raw process-substitution syntax is rejected before shell token classification, with safe/unsafe static fixtures. Rollback is packet-only parent restoration. |
 | 4002688128, source `81787b2e90df496a9c5a51fddc7607d3019834b7` | [discussion 4002688128](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002688128) | Reproduced PATH-resolved Python launches; every executable heredoc now validates the reviewed canonical PATH and invokes absolute `/opt/homebrew/bin/python3 -I`. No live action ran. Rollback is packet-only parent restoration. |
 | 4002688136, source `81787b2e90df496a9c5a51fddc7607d3019834b7` | [discussion 4002688136](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002688136) | Reproduced unexpected top-level JSON `run`/`pass`/`fail` acceptance; validator now rejects unknown top-level events and allows subtests only beneath expected parents, retaining required expected-parent run/pass events. Rollback is packet-only parent restoration. |
+
+### Fresh exact-head P2 corrections at `6c55f5b67035fb1c7ac334984499cfe80d6bb86b`
+
+Review [5194859291](https://github.com/1XP-AI/gh-runnerd/pull/78#pullrequestreview-5194859291) identified three fresh exact-head P2 findings against immutable parent `6c55f5b67035fb1c7ac334984499cfe80d6bb86b`: source-integrity Git status/config isolation ([4002895109](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002895109)), command-capable Python import aliases ([4002895114](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002895114)), and requested-versus-effective Go toolchain/trust identity ([4002895117](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002895117)). This packet-only correction preserves the existing GOCACHEPROG/GOAUTH controls, exact-head ledger and rollback boundary; all probes below are static, temporary-repository or child-blocked checks and do not claim hostile-code isolation, Go test execution, or live qualification.
+
+#### Exact-parent red probes
+
+The three red probes ran first against the exact immutable parent. The first
+created a temporary Git repository whose repository config enabled a synthetic
+`core.fsmonitor` hook, then ran the parent's unguarded porcelain status command.
+The second parsed only the parent's Python AST audit and exercised the three
+command-capable alias/import forms. The third blocked the parent's first child
+after supplying inherited custom `GOSUMDB`/`GOPROXY`, proving that the old
+wrapper neither refused the trust settings nor queried effective `GOVERSION`.
+No Go child, test body, live operation or credential-bearing process ran.
+
+```sh
+set -euo pipefail
+export PATH=/opt/homebrew/bin:/usr/bin:/bin
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+# g01-safe-python-heredoc: reviewed exact-parent fsmonitor fixture
+/opt/homebrew/bin/python3 -I - <<'PY'
+import subprocess
+import tempfile
+from pathlib import Path
+
+parent = "6c55f5b67035fb1c7ac334984499cfe80d6bb86b"
+packet = subprocess.check_output(["git", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"], text=True)
+status_start = packet.index('        [\n            "git",\n            "status",')
+status_end = packet.index('        ],', status_start) + len('        ],')
+status_argv = packet[status_start:status_end]
+if '"-c"' in status_argv or "core.fsmonitor=false" in status_argv or "core.hooksPath=/dev/null" in status_argv:
+    raise SystemExit("red setup changed: exact parent status command already guarded")
+print(f"RED 4002895109: exact parent {parent} source-status argv lacks core.fsmonitor=false/core.hooksPath=/dev/null")
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    env = {"PATH": "/opt/homebrew/bin:/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "HOME": td}
+    subprocess.run(["git", "init", "-q"], cwd=root, env=env, check=True)
+    (root / "source.go").write_text("package p\n", encoding="utf-8")
+    subprocess.run(["git", "add", "source.go"], cwd=root, env=env, check=True)
+    subprocess.run(["git", "-c", "user.name=probe", "-c", "user.email=probe@example.invalid", "commit", "-q", "-m", "source"], cwd=root, env=env, check=True)
+    marker = root / "fsmonitor-invoked"
+    hook = root / "fsmonitor-hook"
+    hook.write_text(f"#!/bin/sh\nprintf invoked > {marker}\nprintf 'builtin:fake\\n'\n", encoding="utf-8")
+    hook.chmod(0o700)
+    subprocess.run(["git", "config", "core.fsmonitor", str(hook)], cwd=root, env=env, check=True)
+    status = subprocess.run(["git", "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching", "--", "."], cwd=root, env=env, capture_output=True, text=True, check=False)
+    if status.returncode != 0 or not marker.is_file() or marker.read_text(encoding="utf-8") != "invoked":
+        raise SystemExit("red setup changed: configured fsmonitor hook was not invoked")
+    print("RED 4002895109: exact-parent status invoked configured core.fsmonitor hook (marker=invoked); tree trust was not isolated")
+PY
+```
+
+```sh
+set -euo pipefail
+export PATH=/opt/homebrew/bin:/usr/bin:/bin
+# g01-safe-python-heredoc: reviewed exact-parent AST fixture
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import re
+import shlex
+import subprocess
+from pathlib import Path
+
+parent = "6c55f5b67035fb1c7ac334984499cfe80d6bb86b"
+packet = subprocess.check_output(["git", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"], text=True)
+scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
+scanner_start = packet.rfind("source = Path(", 0, scanner_anchor)
+scanner_end = packet.index("\nmatches = []", scanner_anchor)
+namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+exec(compile(packet[scanner_start:scanner_end], "<exact-parent-scanner>", "exec"), namespace)
+for label, body in (
+    ("import subprocess as sp; sp.run", 'import subprocess as sp\nsp.run(["gh", "api", "x"])'),
+    ("from subprocess import run; run", 'from subprocess import run\nrun(["gh", "api", "x"])'),
+    ("from os import system; system", 'from os import system\nsystem("docker version")'),
+):
+    if namespace["inspect_python_heredoc"](body, False) is not None:
+        raise SystemExit(f"red setup changed: exact parent already rejects {label}")
+    print(f"RED 4002895114: exact parent accepted unresolved command-capable import/call {label}")
+PY
+```
+
+```sh
+set -euo pipefail
+export PATH=/opt/homebrew/bin:/usr/bin:/bin
+# g01-safe-python-heredoc: reviewed exact-parent toolchain fixture
+/opt/homebrew/bin/python3 -I - <<'PY'
+import os
+import subprocess
+import sys
+
+parent = "6c55f5b67035fb1c7ac334984499cfe80d6bb86b"
+packet = subprocess.check_output(["git", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"], text=True)
+wrapper_start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
+wrapper_end = packet.index("\nPY\n}", wrapper_start)
+wrapper = packet[wrapper_start:wrapper_end]
+if "GOSUMDB" in wrapper or "GOPROXY" in wrapper or "GOVERSION" in wrapper:
+    raise SystemExit("red setup changed: exact parent already binds trust/effective toolchain")
+if 'toolchain_identity = env.get("GOTOOLCHAIN", "")' not in wrapper:
+    raise SystemExit("red setup changed: exact parent no longer labels only requested GOTOOLCHAIN")
+base = ["probe", "1", "0" * 64, "probe", "experiments/g01-scaleset:./livecanary", "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8", "GOTOOLCHAIN=go1.26.8", "go", "test", "-C", "experiments/g01-scaleset", "./livecanary"]
+class StopBeforeChild(Exception):
+    pass
+saved_env, saved_argv = dict(os.environ), sys.argv
+saved_check_output, saved_run = subprocess.check_output, subprocess.run
+calls = []
+def stop(*args, **kwargs):
+    calls.append(args[0] if args else kwargs.get("args"))
+    raise StopBeforeChild
+try:
+    os.environ.clear()
+    os.environ.update({"PATH": "/opt/homebrew/bin:/usr/bin:/bin", "LANG": "C", "GOSUMDB": "sum.invalid+deadbeef", "GOPROXY": "https://proxy.invalid"})
+    sys.argv = base
+    subprocess.check_output = stop
+    subprocess.run = stop
+    try:
+        exec(compile(wrapper, "<exact-parent-wrapper>", "exec"), {"__name__": "__main__"})
+    except StopBeforeChild:
+        pass
+finally:
+    subprocess.check_output, subprocess.run = saved_check_output, saved_run
+    sys.argv = saved_argv
+    os.environ.clear()
+    os.environ.update(saved_env)
+if not calls:
+    raise SystemExit("red setup changed: custom trust settings refused before first child")
+print(f"RED 4002895117: exact parent accepted inherited custom GOSUMDB/GOPROXY and reached first child {calls[0]!r}")
+print("RED 4002895117: exact parent build identity used requested GOTOOLCHAIN=go1.26.8; no effective GOVERSION/trust query")
+PY
+```
+
+Recorded exact-parent red output:
+
+```text
+RED 4002895109: exact parent 6c55f5b67035fb1c7ac334984499cfe80d6bb86b source-status argv lacks core.fsmonitor=false/core.hooksPath=/dev/null
+RED 4002895109: exact-parent status invoked configured core.fsmonitor hook (marker=invoked); tree trust was not isolated
+RED 4002895114: exact parent accepted unresolved command-capable import/call import subprocess as sp; sp.run
+RED 4002895114: exact parent accepted unresolved command-capable import/call from subprocess import run; run
+RED 4002895114: exact parent accepted unresolved command-capable import/call from os import system; system
+RED 4002895117: exact parent accepted inherited custom GOSUMDB/GOPROXY and reached first child ['git', 'rev-parse', '--show-toplevel']
+RED 4002895117: exact parent build identity used requested GOTOOLCHAIN=go1.26.8; no effective GOVERSION/trust query
+```
+
+#### Minimal packet correction and focused green probe
+
+The minimal correction adds one shared Git argv/config guard to every
+wrapper-controlled source-tree, porcelain-status and intent-bit query:
+`core.fsmonitor=false`, `core.hooksPath=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`,
+and `/dev/null` global/system config paths. The Python audit resolves direct
+module aliases and imported command functions, while unresolved
+command-capable calls and star imports fail closed even when a dynamic safe
+marker is present. Before the first Go child, the wrapper requires the reviewed
+`GOSUMDB=sum.golang.org` and `GOPROXY=https://proxy.golang.org,direct`, queries
+`go env GOVERSION GOSUMDB GOPROXY`, and binds the verified effective version in
+the build identity. Existing GOCACHEPROG/GOAUTH controls remain unchanged.
+
+The focused green probe parsed the candidate wrapper/scanner, blocked every
+possible Go child, exercised inherited and command-prefix trust overrides, and
+used a temporary repository to verify that the configured fsmonitor hook was
+not invoked by the guarded status command:
+
+```sh
+set -euo pipefail
+export PATH=/opt/homebrew/bin:/usr/bin:/bin
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || exit 1
+# g01-safe-python-heredoc: reviewed focused synthetic argv
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import os
+import re
+import shlex
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
+wrapper_start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
+wrapper_end = packet.index("\nPY\n}", wrapper_start)
+wrapper = packet[wrapper_start:wrapper_end]
+ast.parse(wrapper, filename="<packet-wrapper>")
+for marker in ('"core.fsmonitor=false"', '"core.hooksPath=/dev/null"', "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "reviewed_gosumdb", "reviewed_goproxy", "effective_toolchain_result", "GOVERSION", "effective_toolchain_identity"):
+    if marker not in wrapper:
+        raise SystemExit(f"green wrapper marker missing: {marker}")
+if wrapper.index("reviewed_gosumdb =") > wrapper.index("repo_root = Path(") or wrapper.index("reviewed_goproxy =") > wrapper.index("repo_root = Path("):
+    raise SystemExit("trust guard occurs after first Git query")
+if not re.search(r"git_command\(\[\s*\"status\"", wrapper) or not re.search(r"git_command\(\[\s*\"ls-files\"", wrapper):
+    raise SystemExit("source status/intent check does not use git_command")
+if "toolchain_identity = effective_toolchain_identity" not in wrapper or '["go", "env", "GOVERSION", "GOSUMDB", "GOPROXY"]' not in wrapper:
+    raise SystemExit("effective toolchain identity binding is missing")
+
+scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
+scanner_start = packet.rfind("source = Path(", 0, scanner_anchor)
+scanner_end = packet.index("\nmatches = []", scanner_anchor)
+scanner_ns = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+exec(compile(packet[scanner_start:scanner_end], "<green-scanner>", "exec"), scanner_ns)
+for body in ('import subprocess as sp\nsp.run(["gh", "api", "x"])', 'from subprocess import run\nrun(["gh", "api", "x"])', 'from os import system\nsystem("docker version")', 'import synthetic as sp\nsp.run(command)'):
+    if scanner_ns["inspect_python_heredoc"](body, True) is None:
+        raise SystemExit(f"alias/unresolved command-capable call accepted: {body!r}")
+if scanner_ns["inspect_python_heredoc"]("import subprocess as sp\nsp.run(command)", True) is not None:
+    raise SystemExit("reviewed dynamic alias with safe marker rejected")
+if scanner_ns["inspect_python_heredoc"]("from subprocess import *\nrun(command)", True) is None:
+    raise SystemExit("unresolved star import accepted")
+
+base = ["probe", "1", "0" * 64, "probe", "experiments/g01-scaleset:./livecanary", "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8", "GOTOOLCHAIN=go1.26.8", "go", "test", "-C", "experiments/g01-scaleset", "./livecanary"]
+class StopBeforeChild(Exception):
+    pass
+saved_env, saved_argv = dict(os.environ), sys.argv
+saved_check_output, saved_run = subprocess.check_output, subprocess.run
+try:
+    calls = []
+    def stop(*args, **kwargs):
+        calls.append((args[0] if args else kwargs.get("args"), kwargs.get("env")))
+        raise StopBeforeChild
+    os.environ.clear()
+    os.environ.update({"PATH": "/opt/homebrew/bin:/usr/bin:/bin", "LANG": "C"})
+    sys.argv = base
+    subprocess.check_output, subprocess.run = stop, stop
+    namespace = {"__name__": "__main__"}
+    try:
+        exec(compile(wrapper, "<green-wrapper>", "exec"), namespace)
+    except StopBeforeChild:
+        pass
+    command, child_env = calls[0]
+    if command != ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "rev-parse", "--show-toplevel"]:
+        raise SystemExit(f"first Git query not guarded: {command!r}")
+    if {key: child_env.get(key) for key in ("GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM")} != {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"}:
+        raise SystemExit("first Git query did not use isolated config")
+    if namespace["env"]["GOSUMDB"] != "sum.golang.org" or namespace["env"]["GOPROXY"] != "https://proxy.golang.org,direct":
+        raise SystemExit("reviewed trust settings were not pinned")
+finally:
+    subprocess.check_output, subprocess.run = saved_check_output, saved_run
+    sys.argv = saved_argv
+    os.environ.clear()
+    os.environ.update(saved_env)
+
+for inherited, assignment, expected in (({"GOSUMDB": "sum.invalid+deadbeef"}, (), "GOSUMDB"), ({"GOPROXY": "https://proxy.invalid"}, (), "GOPROXY"), ({}, ("GOSUMDB=sum.invalid+deadbeef",), "GOSUMDB"), ({}, ("GOPROXY=https://proxy.invalid",), "GOPROXY")):
+    calls = []
+    saved_env, saved_argv = dict(os.environ), sys.argv
+    def stop_override(*args, **kwargs):
+        calls.append(args[0] if args else kwargs.get("args"))
+        raise StopBeforeChild
+    try:
+        os.environ.clear()
+        os.environ.update({"PATH": "/opt/homebrew/bin:/usr/bin:/bin", "LANG": "C", **inherited})
+        sys.argv = base[:6] + list(assignment) + base[6:]
+        subprocess.check_output, subprocess.run = stop_override, stop_override
+        try:
+            exec(compile(wrapper, "<green-trust-wrapper>", "exec"), {"__name__": "__main__"})
+        except SystemExit as error:
+            if expected not in str(error) or calls:
+                raise
+        else:
+            raise SystemExit(f"{expected} override accepted")
+    finally:
+        subprocess.check_output, subprocess.run = saved_check_output, saved_run
+        sys.argv = saved_argv
+        os.environ.clear()
+        os.environ.update(saved_env)
+
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    env = {"PATH": "/opt/homebrew/bin:/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null", "HOME": td}
+    subprocess.run(["git", "init", "-q"], cwd=root, env=env, check=True)
+    (root / "source.go").write_text("package p\n", encoding="utf-8")
+    subprocess.run(["git", "add", "source.go"], cwd=root, env=env, check=True)
+    subprocess.run(["git", "-c", "user.name=probe", "-c", "user.email=probe@example.invalid", "commit", "-q", "-m", "source"], cwd=root, env=env, check=True)
+    marker = root / "fsmonitor-invoked"
+    hook = root / "fsmonitor-hook"
+    hook.write_text(f"#!/bin/sh\nprintf invoked > {marker}\nprintf 'builtin:fake\\n'\n", encoding="utf-8")
+    hook.chmod(0o700)
+    subprocess.run(["git", "config", "core.fsmonitor", str(hook)], cwd=root, env=env, check=True)
+    guarded = ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching", "--", "."]
+    result = subprocess.run(guarded, cwd=root, env=env, capture_output=True, text=True, check=False)
+    if result.returncode != 0 or marker.exists():
+        raise SystemExit("guarded status invoked configured fsmonitor hook")
+print("GREEN focused packet regression: passed; all source-status/intent Git queries use core.fsmonitor=false and core.hooksPath=/dev/null with isolated config; inherited/command custom GOSUMDB/GOPROXY refused before child, reviewed trust/effective GOVERSION query and identity binding present; subprocess/os aliases and unresolved command-capable calls fail closed; no Go/live child started")
+PY
+```
+
+Recorded focused green output:
+
+```text
+GREEN focused packet regression: passed; all source-status/intent Git queries use core.fsmonitor=false and core.hooksPath=/dev/null with isolated config; inherited/command custom GOSUMDB/GOPROXY refused before child, reviewed trust/effective GOVERSION query and identity binding present; subprocess/os aliases and unresolved command-capable calls fail closed; no Go/live child started
+```
+
+The correction is packet-only and does not authorize any rerun or live
+qualification. Rollback is narrow: restore only
+`docs/evidence/g01-recovery-packet.md` to immutable parent
+`6c55f5b67035fb1c7ac334984499cfe80d6bb86b`; preserve independent driver,
+review and manual-runner state, and do not force-kill, prune or replay any
+resource. The wrapper's reviewed trust values and effective identity remain
+fixture/toolchain evidence only; this correction makes no hostile-code or
+native macOS isolation claim.
+
+#### Exact review URL ledger and dispositions
+
+| Finding and immutable source | Exact review URL | Disposition and rollback evidence |
+|---|---|---|
+| 4002895109, source `6c55f5b67035fb1c7ac334984499cfe80d6bb86b` | [discussion 4002895109](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002895109) | Reproduced configured repository `core.fsmonitor` invocation before the guard. Every wrapper-controlled source-tree, porcelain-status and intent-bit Git query now uses `core.fsmonitor=false`, `core.hooksPath=/dev/null`, `GIT_CONFIG_NOSYSTEM=1` and `/dev/null` global/system config. No hostile-code or live qualification is claimed; rollback is packet-only parent restoration. |
+| 4002895114, source `6c55f5b67035fb1c7ac334984499cfe80d6bb86b` | [discussion 4002895114](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002895114) | Reproduced `subprocess as sp`, imported `run`, and imported `system` aliases accepted by the exact parent. The AST audit resolves reviewed aliases/functions and fails closed on unresolved command-capable calls/imports, while preserving the existing dynamic safe-marker rule for resolved calls. Static-only probes ran; no forbidden/live command ran. Rollback is packet-only parent restoration. |
+| 4002895117, source `6c55f5b67035fb1c7ac334984499cfe80d6bb86b` | [discussion 4002895117](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002895117) | Reproduced inherited custom `GOSUMDB`/`GOPROXY` reaching the first child and the old identity using requested `GOTOOLCHAIN` only. The wrapper now requires `GOSUMDB=sum.golang.org` and `GOPROXY=https://proxy.golang.org,direct`, verifies effective `GOVERSION`/trust via bounded `go env`, and binds effective toolchain identity; existing GOCACHEPROG/GOAUTH controls remain. No Go child or live qualification ran. Rollback is packet-only parent restoration. |
