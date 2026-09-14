@@ -261,9 +261,12 @@ are rejected when inherited or command-supplied before the first Git query.
 `GOCACHEPROG` is rejected unless empty and then pinned empty before any Go child;
 `GOAUTH` is rejected unless `off` and then pinned `off`, so executable cache
 hooks and command-form authentication cannot reach module, metadata, vet or
-test children. `GOMAXPROCS=1` is likewise required for any inherited or
-command-prefix value, pinned before metadata and tests, and recorded as the
-`gomaxprocs-1` runtime identity. Git replacement refs are disabled by binding
+test children. Inherited or command-prefix `GODEBUG` is likewise rejected
+unless empty, pinned before metadata and tests, and recorded as the
+`godebug-empty` runtime identity. `GOMAXPROCS=1` is likewise required for any
+inherited or command-prefix value, pinned before metadata and tests, and
+recorded as the `gomaxprocs-1` runtime identity. Git replacement refs are
+disabled by binding
 `GIT_NO_REPLACE_OBJECTS=1` before the first Git child; other replacement and
 repository-control overrides remain rejected.
 Before source-derived selector validation, the wrapper resolves the active
@@ -341,11 +344,14 @@ before test execution, so a prior checkout check cannot be reused across a
 source mutation. Every Go child is launched through one wrapper-controlled
 subprocess helper with an independent 300-second deadline covering toolchain
 selection, toolchain downloads, compilation, `go env`, `go list` metadata and
-test execution. The helper starts a new session/process group, terminates and
-waits for that owned group on timeout, normal/nonzero return, interruption or
-any other failure, escalates to group kill after a bounded grace period, and
-never matches unrelated processes; the Go `-timeout` flag remains a separate
-in-process test-body bound.
+test execution. The helper streams stdout and stderr with an 8 MiB per-stream
+byte cap before that deadline, starts a new session/process group, terminates
+and waits for that owned group on timeout, output overflow, normal/nonzero
+return, interruption or any other failure, escalates to group kill after a
+bounded grace period, and never matches unrelated processes; the Go
+`-timeout` flag remains a separate in-process test-body bound. After the test
+child returns, the full reviewed tree/raw-byte/status/intent gate is repeated
+before its JSON/result is accepted.
 The execution command adds a wrapper-controlled `-json` stream and fails closed
 on malformed output, non-empty stderr or any Go test `Action` of `skip`,
 including skipped subtests. It rejects unexpected top-level `run`, `pass` or
@@ -378,11 +384,13 @@ import hashlib
 import json
 import os
 import re
+import selectors
 import signal
 import shutil
 import stat
 import subprocess
 import sys
+import time
 from decimal import Decimal
 from pathlib import Path
 
@@ -598,6 +606,17 @@ for source, value in (
             f"{label}: {source} GOAUTH must be {reviewed_goauth!r}; auth command forms are not allowed"
         )
 env["GOAUTH"] = reviewed_goauth
+reviewed_godebug = ""
+for source, value in (
+    ("inherited", os.environ.get("GODEBUG")),
+    ("command", command_assignments.get("GODEBUG")),
+):
+    if value is not None and value != reviewed_godebug:
+        raise SystemExit(
+            f"{label}: {source} GODEBUG must be empty; runtime debug overrides are not allowed"
+        )
+env["GODEBUG"] = reviewed_godebug
+godebug_identity = "godebug-empty"
 reviewed_gomaxprocs = "1"
 for source, value in (
     ("inherited", os.environ.get("GOMAXPROCS")),
@@ -1014,6 +1033,10 @@ if go_env.get("GOAUTH") != reviewed_goauth:
     raise SystemExit(
         f"{label}: Go child environment did not pin GOAUTH={reviewed_goauth!r}"
     )
+if go_env.get("GODEBUG") != reviewed_godebug:
+    raise SystemExit(
+        f"{label}: Go child environment did not pin GODEBUG={reviewed_godebug!r}"
+    )
 if go_env.get("GOMAXPROCS") != reviewed_gomaxprocs:
     raise SystemExit(
         f"{label}: Go child environment did not pin GOMAXPROCS={reviewed_gomaxprocs}"
@@ -1026,6 +1049,18 @@ for name, expected in reviewed_target_environment.items():
 
 go_child_deadline_seconds = 300
 go_child_termination_grace_seconds = 5
+go_child_output_max_bytes = 8 * 1024 * 1024
+go_child_stream_chunk_bytes = 64 * 1024
+
+
+def close_go_child_streams(process):
+    for name in ("stdout", "stderr"):
+        stream = getattr(process, name, None)
+        if stream is not None:
+            try:
+                stream.close()
+            except OSError:
+                pass
 
 
 def terminate_go_child_group(process):
@@ -1037,15 +1072,66 @@ def terminate_go_child_group(process):
     except ProcessLookupError:
         pass
     try:
-        process.communicate(timeout=go_child_termination_grace_seconds)
+        process.wait(timeout=go_child_termination_grace_seconds)
+    except TypeError:
+        # Keep small synthetic process doubles usable in packet-only probes;
+        # real Popen objects support the bounded timeout form above.
+        process.wait()
     except subprocess.TimeoutExpired:
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        process.communicate()
-    finally:
         process.wait()
+    finally:
+        close_go_child_streams(process)
+
+
+def capture_go_child_output(process, go_command):
+    """Stream both Go-child pipes with a per-stream byte cap and deadline."""
+    captures = {"stdout": bytearray(), "stderr": bytearray()}
+    selector = selectors.DefaultSelector()
+    try:
+        for name in captures:
+            stream = getattr(process, name, None)
+            if stream is not None:
+                os.set_blocking(stream.fileno(), False)
+                selector.register(stream, selectors.EVENT_READ, name)
+        deadline = time.monotonic() + go_child_deadline_seconds
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(go_command, go_child_deadline_seconds)
+            ready = selector.select(remaining)
+            if not ready:
+                raise subprocess.TimeoutExpired(go_command, go_child_deadline_seconds)
+            for key, _ in ready:
+                stream = key.fileobj
+                try:
+                    chunk = os.read(stream.fileno(), go_child_stream_chunk_bytes)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    selector.unregister(stream)
+                    stream.close()
+                    continue
+                captured = captures[key.data]
+                if len(captured) + len(chunk) > go_child_output_max_bytes:
+                    raise SystemExit(
+                        f"{label}: Go child {key.data} exceeded the reviewed "
+                        f"{go_child_output_max_bytes}-byte output budget"
+                    )
+                captured.extend(chunk)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(go_command, go_child_deadline_seconds)
+        try:
+            process.wait(timeout=remaining)
+        except TypeError:
+            process.wait()
+        return bytes(captures["stdout"]), bytes(captures["stderr"])
+    finally:
+        selector.close()
 
 
 def run_go_child(go_command, **kwargs):
@@ -1059,6 +1145,9 @@ def run_go_child(go_command, **kwargs):
             raise SystemExit(f"{label}: duplicate Go child output capture controls")
         kwargs["stdout"] = subprocess.PIPE
         kwargs["stderr"] = subprocess.PIPE
+    text_mode = kwargs.pop("text", False) or kwargs.pop("universal_newlines", False)
+    encoding = kwargs.pop("encoding", None) or "utf-8"
+    errors = kwargs.pop("errors", None) or "strict"
     process = None
     try:
         process = subprocess.Popen(
@@ -1067,7 +1156,7 @@ def run_go_child(go_command, **kwargs):
             **kwargs,
         )
         try:
-            stdout, stderr = process.communicate(timeout=go_child_deadline_seconds)
+            stdout, stderr = capture_go_child_output(process, go_command)
         except subprocess.TimeoutExpired:
             terminate_go_child_group(process)
             process = None
@@ -1081,12 +1170,19 @@ def run_go_child(go_command, **kwargs):
             terminate_go_child_group(process)
             process = None
             raise
-        # communicate() reaps the direct child, but a compiler/helper spawned
-        # in its private session may outlive it; reap that owned group too on
-        # every non-timeout return, including nonzero exits.
+        # The bounded stream drains child output before this point; a compiler
+        # helper spawned in the private session may still outlive its parent.
+        # Reap that owned group too on every non-timeout return, including
+        # nonzero exits.
         returncode = process.returncode
         terminate_go_child_group(process)
         process = None
+        if text_mode:
+            try:
+                stdout = stdout.decode(encoding, errors)
+                stderr = stderr.decode(encoding, errors)
+            except UnicodeDecodeError:
+                raise SystemExit(f"{label}: Go child output was not valid UTF-8")
         result = subprocess.CompletedProcess(go_command, returncode, stdout, stderr)
         if check and result.returncode:
             raise subprocess.CalledProcessError(
@@ -1997,7 +2093,8 @@ if is_vet:
     print(
         f"{label}: bounded vet validation passed; package {actual_package}; "
         f"build {actual_build}; source tree {reviewed_module_tree}; "
-        f"GOWORK={go_env['GOWORK']}; GOMAXPROCS={gomaxprocs_identity}; "
+        f"GOWORK={go_env['GOWORK']}; GODEBUG={godebug_identity}; "
+        f"GOMAXPROCS={gomaxprocs_identity}; "
         f"compiler-tools={compiler_tool_identity}"
     )
     raise SystemExit(0)
@@ -2033,7 +2130,8 @@ print(
     f"build {actual_build}; CGO_ENABLED={go_env['CGO_ENABLED']}; "
     f"GOEXPERIMENT={go_env['GOEXPERIMENT']}; compiler-tools={compiler_tool_identity}; "
     f"GOROOT=default; GOFIPS140={go_env['GOFIPS140']}; "
-    f"GOWORK={go_env['GOWORK']}; GOMAXPROCS={gomaxprocs_identity}; "
+    f"GOWORK={go_env['GOWORK']}; GODEBUG={godebug_identity}; "
+    f"GOMAXPROCS={gomaxprocs_identity}; "
     f"source-derived candidates {len(listed)}; "
     f"filtered executed {expected_count} names; "
     f"set-sha256 {actual_digest}"
@@ -2105,6 +2203,9 @@ run_result = run_go_child(
     capture_output=True,
     check=False,
 )
+# The child may have observed a source mutation while it ran. Recheck every
+# reviewed source boundary before accepting either its status or JSON stream.
+recheck_reviewed_source_checkout("after test execution before result acceptance")
 if run_result.returncode:
     raise SystemExit(run_result.returncode)
 validate_test_stream(run_result.stdout, run_result.stderr)
@@ -2868,6 +2969,10 @@ for index, line in enumerate(lines):
             f"line {index + 2}: private-module trust assignments are not allowed: "
             + ", ".join(private_module_trust_overrides)
         )
+    if env.get("GODEBUG") not in {None, ""}:
+        raise SystemExit(
+            f"line {index + 2}: conflicting GODEBUG runtime assignment"
+        )
     if command and command[0] == "env":
         raise SystemExit(
             f"line {index + 2}: standard env-wrapped go test command is not allowed"
@@ -3028,7 +3133,7 @@ print(
     f"package/build metadata audit: passed; {len(seen)} wrapper prescriptions "
     "matched one package/import-path identity and explicit GOTOOLCHAIN/tag/race/CGO/GOEXPERIMENT/target/GOROOT/GOFIPS140 "
     "compiler-tool build configuration, exact PR #78/PR #72 source-tree family pins, exactly "
-    "one count/timeout, and no Git repository-control, GOENV/GOROOT/GOFIPS140/target-feature, test-binary, benchmark/CPU, double-dash or "
+    "one count/timeout, reviewed empty GODEBUG runtime identity, and no Git repository-control, GOENV/GOROOT/GOFIPS140/target-feature, test-binary, benchmark/CPU, double-dash or "
     "env/command overrides; duplicate package candidates and synthetic Git "
     "repository-control assignments fail closed"
 )
@@ -3045,15 +3150,16 @@ build identity matched its tag set, race mode, pinned `CGO_ENABLED=1`,
 toolchain. The two drain labels selected the exact
 PR #72 module tree `9b30ef1b69c6375cb264c759d366fc5a52a5439f`; all other labels
 selected the PR #78 module tree `08c7830de7bc5120d1302d7ba6df162abd582315`.
-`GIT_*` repository-control assignments, `GOENV` and target-feature assignments,
-`-args`, test-binary overrides, `-toolexec` hooks, benchmark/CPU flags, standard
+`GIT_*` repository-control assignments, `GOENV`, non-empty `GODEBUG` and
+target-feature assignments, `-args`, test-binary overrides, `-toolexec` hooks,
+benchmark/CPU flags, standard
 `env` and shell `command` wrappers, every equivalent double-dash Go flag and
 duplicate relative or import-path package arguments are rejected before
 source-derived selector validation.
 The recorded metadata-audit output was:
 
 ```text
-package/build metadata audit: passed; 28 wrapper prescriptions matched one package/import-path identity, explicit GOTOOLCHAIN/tag/race/CGO/GOEXPERIMENT/target/GOROOT/GOFIPS140 build configuration, exact PR #78/PR #72 source-tree family pins, exactly one count/timeout, and no Git repository-control, GOENV/GOROOT/GOFIPS140/target-feature, test-binary, benchmark/CPU, double-dash or env/command overrides; duplicate package candidates and synthetic Git repository-control assignments fail closed
+package/build metadata audit: passed; 28 wrapper prescriptions matched one package/import-path identity, explicit GOTOOLCHAIN/tag/race/CGO/GOEXPERIMENT/target/GOROOT/GOFIPS140 build configuration, reviewed empty GODEBUG runtime identity, exact PR #78/PR #72 source-tree family pins, exactly one count/timeout, and no Git repository-control, GOENV/GOROOT/GOFIPS140/target-feature, test-binary, benchmark/CPU, double-dash or env/command overrides; duplicate package candidates and synthetic Git repository-control assignments fail closed
 ```
 
 The wrapper's selector edge cases were then exercised with a trimmed copy of
@@ -11324,3 +11430,484 @@ resource.
 | 4004331174, source `bf98be330c0907b3cb67f3630223e9b76c9c6df7` | [discussion 4004331174](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4004331174) | Reproduced `launch, = (subprocess.run,)` escaping the parent AST binding pass. Tuple/list aliases and chains now resolve recursively; unresolved aliases remain fail-closed, with no command execution. Rollback is packet-only parent restoration. |
 | 4004331181, source `bf98be330c0907b3cb67f3630223e9b76c9c6df7` | [discussion 4004331181](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4004331181) | Reproduced uncontrolled inherited/command-prefix `GOMAXPROCS`. The wrapper rejects values other than reviewed `1`, pins the child environment before metadata and records `gomaxprocs-1`; no Go child ran. Rollback is packet-only parent restoration. |
 | 4004331186, source `bf98be330c0907b3cb67f3630223e9b76c9c6df7` | [discussion 4004331186](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4004331186) | Reproduced unreaped owned groups on normal/nonzero, interruption and other failure exits. The helper now terminates and waits on every owned group, saves `returncode` before clearing the handle, and performs no broad process matching. Rollback is packet-only parent restoration. |
+
+### Fresh exact-head P2 corrections at `4ee7c855b1e79f9478e5cf73c270731dfbf58cf7`
+
+The three fresh Codex P2 findings on the exact PR #78 head above were
+reproduced against that immutable packet parent before editing. This
+packet-only correction preserves all earlier ledgers, source/tree pins,
+rollback boundaries and live-operation gates. No compiler, Go child, test
+body, workflow, App/runner, Docker, Lima, Keychain, launchd or live operation
+is authorized or claimed.
+
+#### Exact-parent red reproductions
+
+The red probe reads only the immutable parent packet with `git show`. The
+oversized Go output witness uses a fake `Popen`, the GODEBUG witnesses block
+the first Git lookup, and the final witness is source/AST ordering only; no
+Go, compiler or live child starts.
+
+```sh
+set -euo pipefail
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import os
+import subprocess
+import sys
+
+parent = "4ee7c855b1e79f9478e5cf73c270731dfbf58cf7"
+packet = subprocess.check_output(
+    ["git", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    text=True,
+)
+start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
+end = packet.index("\nPY\n}", start)
+wrapper = packet[start:end]
+tree = ast.parse(wrapper)
+functions = {
+    node.name: node
+    for node in tree.body
+    if isinstance(node, ast.FunctionDef)
+}
+
+# 4004742812: the exact parent captured arbitrary communicate() output.
+if "capture_go_child_output" in wrapper or "go_child_output_max_bytes" in wrapper:
+    raise SystemExit("red setup changed: parent already has bounded output markers")
+class OversizedPopen:
+    pid = 987654321
+    returncode = 0
+    def communicate(self, *args, **kwargs):
+        if kwargs.get("timeout") == 300:
+            return "x" * 1100000, "y" * 1100000
+        return "", ""
+    def wait(self):
+        return self.returncode
+saved_popen, saved_killpg = subprocess.Popen, os.killpg
+subprocess.Popen = lambda *args, **kwargs: OversizedPopen()
+os.killpg = lambda *args, **kwargs: None
+try:
+    namespace = {
+        "__name__": "__main__",
+        "os": os,
+        "signal": __import__("signal"),
+        "subprocess": subprocess,
+        "label": "capture-red",
+        "go_child_deadline_seconds": 300,
+        "go_child_termination_grace_seconds": 5,
+    }
+    exec(compile(ast.Module(
+        body=[functions["terminate_go_child_group"], functions["run_go_child"]],
+        type_ignores=[],
+    ), "<parent-go-child-helper>", "exec"), namespace)
+    result = namespace["run_go_child"](
+        ["go", "env", "GOFLAGS"], cwd=".", env={}, text=True,
+        capture_output=True, check=False,
+    )
+finally:
+    subprocess.Popen, os.killpg = saved_popen, saved_killpg
+if len(result.stdout) <= 1048576 or len(result.stderr) <= 1048576:
+    raise SystemExit("red setup changed: oversized fake output was not delivered")
+print(
+    f"RED 4004742812: exact parent {parent} accepted synthetic "
+    f"{len(result.stdout)}-byte stdout/{len(result.stderr)}-byte stderr without a "
+    "byte-limited stream before the 300s deadline"
+)
+
+# 4004742819: inherited and command-prefix GODEBUG reached the first lookup.
+if "GODEBUG" in wrapper or "godebug" in wrapper.lower():
+    raise SystemExit("red setup changed: parent already has a GODEBUG guard/identity")
+base = [
+    "probe", "1", "0" * 64, "probe",
+    "experiments/g01-scaleset:./livecanary",
+    "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-"
+    "goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+    "go", "test", "-C", "experiments/g01-scaleset", "./livecanary",
+]
+class StopBeforeChild(Exception):
+    pass
+def blocked_child(*args, **kwargs):
+    raise StopBeforeChild
+saved_env, saved_argv = dict(os.environ), sys.argv
+saved_check, saved_run = subprocess.check_output, subprocess.run
+try:
+    for mode, assignment in (("inherited", None), ("command-prefix", "GODEBUG=asyncpreemptoff")):
+        os.environ.clear()
+        os.environ.update({"PATH": "/opt/homebrew/bin:/usr/bin:/bin", "LANG": "C"})
+        if assignment is None:
+            os.environ["GODEBUG"] = "asyncpreemptoff"
+        sys.argv = base[:6] + ([assignment] if assignment else []) + base[6:]
+        subprocess.check_output, subprocess.run = blocked_child, blocked_child
+        try:
+            exec(compile(wrapper, "<parent-godebug-red>", "exec"), {"__name__": "__main__"})
+        except StopBeforeChild:
+            print(
+                f"RED 4004742819: exact parent {parent} accepted {mode} "
+                "GODEBUG=asyncpreemptoff and reached its first Git lookup without refusal"
+            )
+        except SystemExit as error:
+            raise SystemExit(f"red setup changed: parent refused {mode} GODEBUG: {error}")
+        else:
+            raise SystemExit(f"red setup changed: parent completed {mode} probe")
+finally:
+    subprocess.check_output, subprocess.run = saved_check, saved_run
+    sys.argv = saved_argv
+    os.environ.clear()
+    os.environ.update(saved_env)
+
+# 4004742824: no recheck separated test-child return and JSON acceptance.
+run_pos = wrapper.index("run_result = run_go_child")
+json_pos = wrapper.index("validate_test_stream(run_result.stdout", run_pos)
+post_child = wrapper[run_pos:json_pos]
+if "recheck_reviewed_source_checkout" in post_child:
+    raise SystemExit("red setup changed: parent already rechecks after test child")
+print(
+    f"RED 4004742824: exact parent {parent} has no reviewed tree/raw-byte/status/intent "
+    "recheck between test-child return and JSON/result acceptance"
+)
+PY
+```
+
+Recorded exact-parent red output:
+
+```text
+RED 4004742812: exact parent 4ee7c855b1e79f9478e5cf73c270731dfbf58cf7 accepted synthetic 1100000-byte stdout/1100000-byte stderr without a byte-limited stream before the 300s deadline
+RED 4004742819: exact parent 4ee7c855b1e79f9478e5cf73c270731dfbf58cf7 accepted inherited GODEBUG=asyncpreemptoff and reached its first Git lookup without refusal
+RED 4004742819: exact parent 4ee7c855b1e79f9478e5cf73c270731dfbf58cf7 accepted command-prefix GODEBUG=asyncpreemptoff and reached its first Git lookup without refusal
+RED 4004742824: exact parent 4ee7c855b1e79f9478e5cf73c270731dfbf58cf7 has no reviewed tree/raw-byte/status/intent recheck between test-child return and JSON/result acceptance
+```
+
+#### Minimal correction and focused green assertions
+
+The correction adds selector-based streaming with an 8 MiB cap on each
+Go-child stdout/stderr pipe, while preserving private process-group termination
+and wait cleanup on timeout, overflow, normal/nonzero return and exceptional
+exit. It rejects inherited or command-prefix GODEBUG unless the reviewed value
+is empty, pins that value into every Go-child environment and emits the
+godebug-empty runtime identity alongside the existing build identity. It
+repeats the reviewed tree, raw-byte, status and intent checks immediately after
+the test child returns and before either its return code or JSON/result is
+accepted.
+
+The focused green probe uses fake Go Popen objects backed by synthetic pipes, a
+synthetic temporary Git repository for the mutation witness, and patched child
+boundaries. It uses a short synthetic deadline and a reduced test byte cap, so
+it never waits for the reviewed 300-second deadline and starts no compiler, Go
+child, test body, workflow, live operation or credential-bearing process.
+
+```sh
+set -euo pipefail
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import os
+import subprocess
+import sys
+import tempfile
+import threading
+from pathlib import Path
+
+packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
+start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
+end = packet.index("\nPY\n}", start)
+wrapper = packet[start:end]
+tree = ast.parse(wrapper)
+functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+
+# 4004742812: bounded selector capture and cleanup on every owned path.
+if "go_child_output_max_bytes = 8 * 1024 * 1024" not in wrapper:
+    raise SystemExit("bounded capture assertion: reviewed per-stream cap missing")
+capture_text = ast.unparse(functions["capture_go_child_output"])
+run_text = ast.unparse(functions["run_go_child"])
+for marker in ("selector.select", "os.read", "go_child_output_max_bytes"):
+    if marker not in capture_text:
+        raise SystemExit("bounded capture assertion: missing " + marker)
+if "capture_go_child_output" not in run_text or "communicate" in run_text:
+    raise SystemExit("bounded capture assertion: run helper bypasses bounded capture")
+if "start_new_session=True" not in run_text or "terminate_go_child_group" not in run_text:
+    raise SystemExit("bounded capture assertion: owned session/cleanup missing")
+
+ns = {
+    "os": os,
+    "selectors": __import__("selectors"),
+    "signal": __import__("signal"),
+    "subprocess": subprocess,
+    "time": __import__("time"),
+    "label": "bounded-green",
+    "go_child_deadline_seconds": 0.2,
+    "go_child_termination_grace_seconds": 0.1,
+    "go_child_output_max_bytes": 1024,
+    "go_child_stream_chunk_bytes": 128,
+}
+exec(compile(ast.Module(body=[
+    functions["close_go_child_streams"],
+    functions["terminate_go_child_group"],
+    functions["capture_go_child_output"],
+    functions["run_go_child"],
+], type_ignores=[]), "<bounded-green>", "exec"), ns)
+
+class FakeProcess:
+    next_pid = 41000
+    def __init__(self, returncode=0, stdout_data=b"", stderr_data=b""):
+        self.pid = FakeProcess.next_pid
+        FakeProcess.next_pid += 1
+        self.returncode = returncode
+        self.stdout_read, self.stdout_write = os.pipe()
+        self.stderr_read, self.stderr_write = os.pipe()
+        self.stdout = os.fdopen(self.stdout_read, "rb", buffering=0)
+        self.stderr = os.fdopen(self.stderr_read, "rb", buffering=0)
+        self.threads = []
+        for fd, data in ((self.stdout_write, stdout_data), (self.stderr_write, stderr_data)):
+            def writer(fd=fd, data=data):
+                try:
+                    offset = 0
+                    while offset < len(data):
+                        offset += os.write(fd, data[offset:offset + 4096])
+                except OSError:
+                    pass
+                finally:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+            thread = threading.Thread(target=writer)
+            thread.start()
+            self.threads.append(thread)
+    def wait(self, timeout=None):
+        return self.returncode
+    def join(self):
+        for thread in self.threads:
+            thread.join(timeout=2)
+
+active = []
+def launch(command, **kwargs):
+    if command[0] != "go" or kwargs.get("start_new_session") is not True:
+        raise AssertionError("bounded capture assertion: invalid fake launch")
+    process = FakeProcess()
+    active.append(process)
+    return process
+
+saved_popen, saved_killpg = subprocess.Popen, os.killpg
+kills = []
+subprocess.Popen = launch
+os.killpg = lambda pid, sig: kills.append((pid, sig))
+try:
+    first = ns["run_go_child"](
+        ["go", "env", "GOFLAGS"], cwd=".", env={}, text=True,
+        capture_output=True, check=False,
+    )
+    if (first.returncode, first.stdout, first.stderr) != (0, "", ""):
+        raise SystemExit("bounded capture assertion: normal result changed")
+    nonzero = FakeProcess(returncode=7)
+    active.append(nonzero)
+    subprocess.Popen = lambda *args, **kwargs: nonzero
+    if ns["run_go_child"](
+        ["go", "env", "GOFLAGS"], cwd=".", env={}, text=True,
+        capture_output=True, check=False,
+    ).returncode != 7:
+        raise SystemExit("bounded capture assertion: nonzero result changed")
+    for stream in ("stdout", "stderr"):
+        overflow = FakeProcess(
+            stdout_data=b"x" * 1025 if stream == "stdout" else b"",
+            stderr_data=b"y" * 1025 if stream == "stderr" else b"",
+        )
+        active.append(overflow)
+        subprocess.Popen = lambda *args, _process=overflow, **kwargs: _process
+        try:
+            ns["run_go_child"](
+                ["go", "env", "GOFLAGS"], cwd=".", env={}, text=True,
+                capture_output=True, check=False,
+            )
+        except SystemExit as error:
+            if "output budget" not in str(error):
+                raise SystemExit("bounded capture assertion: wrong overflow refusal")
+        else:
+            raise SystemExit("bounded capture assertion: " + stream + " overflow accepted")
+    for failure in ("timeout", "keyboard"):
+        process = FakeProcess()
+        active.append(process)
+        subprocess.Popen = lambda *args, _process=process, **kwargs: _process
+        original = ns["capture_go_child_output"]
+        if failure == "timeout":
+            def synthetic_timeout(*args, **kwargs):
+                raise subprocess.TimeoutExpired(["go", "env", "GOFLAGS"], 0.2)
+            ns["capture_go_child_output"] = synthetic_timeout
+        else:
+            def synthetic_keyboard(*args, **kwargs):
+                raise KeyboardInterrupt
+            ns["capture_go_child_output"] = synthetic_keyboard
+        try:
+            try:
+                ns["run_go_child"](
+                    ["go", "env", "GOFLAGS"], cwd=".", env={}, text=True,
+                    capture_output=True, check=False,
+                )
+            except SystemExit as error:
+                if failure != "timeout" or "deadline" not in str(error):
+                    raise SystemExit("bounded capture assertion: wrong timeout refusal")
+            except KeyboardInterrupt:
+                if failure != "keyboard":
+                    raise
+            else:
+                raise SystemExit("bounded capture assertion: " + failure + " accepted")
+        finally:
+            ns["capture_go_child_output"] = original
+finally:
+    subprocess.Popen, os.killpg = saved_popen, saved_killpg
+    for process in active:
+        process.join()
+        for stream in (process.stdout, process.stderr):
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
+if len(kills) != 6 or len({pid for pid, _ in kills}) != 6:
+    raise SystemExit("bounded capture assertion: not every owned path cleaned up")
+print("GREEN 4004742812: selector streaming bounded stdout/stderr, rejected both overflows, preserved normal/nonzero results, and cleaned owned groups on overflow/timeout/exception paths; no Go child")
+
+# 4004742819: reviewed empty GODEBUG pin/rejection and runtime identity.
+if wrapper.count("godebug_identity") < 3 or "GODEBUG" not in wrapper:
+    raise SystemExit("GODEBUG assertion: reviewed guard/identity missing")
+base = [
+    "probe", "1", "0" * 64, "probe",
+    "experiments/g01-scaleset:./livecanary",
+    "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+    "go", "test", "-C", "experiments/g01-scaleset", "./livecanary",
+]
+class StopBeforeChild(Exception):
+    pass
+def stop_before_child(*args, **kwargs):
+    raise StopBeforeChild
+saved_env, saved_argv = dict(os.environ), sys.argv
+saved_check, saved_run = subprocess.check_output, subprocess.run
+try:
+    def prefix_probe(inherited=None, assignment=None):
+        os.environ.clear()
+        os.environ.update({"PATH": "/opt/homebrew/bin:/usr/bin:/bin", "LANG": "C"})
+        if inherited is not None:
+            os.environ["GODEBUG"] = inherited
+        sys.argv = base[:6] + ([assignment] if assignment else []) + base[6:]
+        subprocess.check_output, subprocess.run = stop_before_child, stop_before_child
+        namespace = {"__name__": "__main__"}
+        try:
+            exec(compile(wrapper, "<godebug-green>", "exec"), namespace)
+        except StopBeforeChild:
+            return namespace, "child-blocked"
+        except SystemExit as error:
+            return namespace, str(error)
+        raise SystemExit("GODEBUG assertion: probe completed unexpectedly")
+    safe, safe_result = prefix_probe(assignment="GODEBUG=")
+    if safe_result != "child-blocked" or safe["env"].get("GODEBUG") != "" or safe["godebug_identity"] != "godebug-empty":
+        raise SystemExit("GODEBUG assertion: empty setting not pinned/identified")
+    for inherited, assignment in (("asyncpreemptoff", None), (None, "GODEBUG=asyncpreemptoff")):
+        namespace, result = prefix_probe(inherited=inherited, assignment=assignment)
+        if result == "child-blocked" or "GODEBUG" not in result:
+            raise SystemExit("GODEBUG assertion: non-empty override accepted")
+finally:
+    subprocess.check_output, subprocess.run = saved_check, saved_run
+    sys.argv = saved_argv
+    os.environ.clear()
+    os.environ.update(saved_env)
+print("GREEN 4004742819: inherited and command-prefix GODEBUG overrides rejected before the first child; empty GODEBUG pinned and emitted as godebug-empty runtime identity; no Go child")
+
+# 4004742824: exact order plus Git-only mutation witness.
+run_pos = wrapper.index("run_result = run_go_child")
+recheck_text = "recheck_reviewed_source_checkout(\"after test execution before result acceptance\")"
+recheck_pos = wrapper.index(recheck_text, run_pos)
+return_pos = wrapper.index("if run_result.returncode:", recheck_pos)
+json_pos = wrapper.index("validate_test_stream(run_result.stdout, run_result.stderr)", return_pos)
+if not run_pos < recheck_pos < return_pos < json_pos:
+    raise SystemExit("post-test assertion: source recheck/result ordering changed")
+recheck_body = ast.unparse(functions["recheck_reviewed_source_checkout"])
+for marker in ("rev-parse", "git_worktree_matches_pinned_blobs", "status", "git_source_control_entries"):
+    if marker not in recheck_body:
+        raise SystemExit("post-test assertion: missing " + marker)
+with tempfile.TemporaryDirectory() as directory:
+    root = Path(directory)
+    module_root = root / "experiments" / "g01-scaleset"
+    module_root.mkdir(parents=True)
+    source_file = module_root / "source.go"
+    source_file.write_bytes(b"package p\n")
+    git_env = {
+        "PATH": "/opt/homebrew/bin:/usr/bin:/bin",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "HOME": directory,
+    }
+    subprocess.run(["git", "init", "-q"], cwd=root, env=git_env, check=True)
+    subprocess.run(["git", "add", "experiments/g01-scaleset/source.go"], cwd=root, env=git_env, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=probe", "-c", "user.email=probe@example.invalid", "commit", "-q", "-m", "source"],
+        cwd=root, env=git_env, check=True,
+    )
+    reviewed_tree = subprocess.check_output(
+        ["git", "rev-parse", "HEAD:experiments/g01-scaleset"], cwd=root, env=git_env, text=True,
+    ).strip()
+    namespace = {
+        "os": os,
+        "re": __import__("re"),
+        "stat": __import__("stat"),
+        "subprocess": subprocess,
+        "Path": Path,
+        "label": "post-test-git",
+        "repo_root": root.resolve(),
+        "module_dir": "experiments/g01-scaleset",
+        "env": git_env,
+        "reviewed_module_tree": reviewed_tree,
+    }
+    exec(compile(ast.Module(body=[
+        functions["git_command"],
+        functions["git_source_control_entries"],
+        functions["git_worktree_matches_pinned_blobs"],
+        functions["recheck_reviewed_source_checkout"],
+    ], type_ignores=[]), "<post-test-git>", "exec"), namespace)
+    namespace["recheck_reviewed_source_checkout"]("before synthetic child")
+    source_file.write_bytes(b"package p\n// mutation after child\n")
+    try:
+        namespace["recheck_reviewed_source_checkout"]("after synthetic child")
+    except SystemExit as error:
+        if "raw worktree bytes differ" not in str(error):
+            raise SystemExit("post-test assertion: wrong mutation refusal")
+    else:
+        raise SystemExit("post-test assertion: mutated source accepted")
+print("GREEN 4004742824: post-child reviewed tree/raw-byte/status/intent recheck rejected a synthetic source mutation before JSON/result acceptance; Git-only/static check, no Go child")
+PY
+```
+
+Recorded focused green output:
+
+```text
+GREEN 4004742812: selector streaming bounded stdout/stderr, rejected both overflows, preserved normal/nonzero results, and cleaned owned groups on overflow/timeout/exception paths; no Go child
+GREEN 4004742819: inherited and command-prefix GODEBUG overrides rejected before the first child; empty GODEBUG pinned and emitted as godebug-empty runtime identity; no Go child
+GREEN 4004742824: post-child reviewed tree/raw-byte/status/intent recheck rejected a synthetic source mutation before JSON/result acceptance; Git-only/static check, no Go child
+```
+
+The focused probes are static, synthetic or Git-only evidence. They do not
+qualify a compiler, Go test/list/body command, live runner, workflow, remote
+API or production operation. Exact-head Codex review of the final pushed head,
+required CI and maintainer live authorization remain open.
+
+Rollback is narrow and packet-only: restore
+docs/evidence/g01-recovery-packet.md to immutable parent
+4ee7c855b1e79f9478e5cf73c270731dfbf58cf7; preserve independent driver, review
+and manual-runner state, and never force-kill, prune or replay a live resource.
+
+#### Exact review URL ledger and dispositions
+
+| Finding and immutable source | Exact review URL | Disposition and rollback evidence |
+|---|---|---|
+| 4004742812, source 4ee7c855b1e79f9478e5cf73c270731dfbf58cf7 | [discussion 4004742812](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4004742812) | Reproduced unbounded captured Go-child stdout/stderr with a fake child. The wrapper now streams both pipes with an 8 MiB per-stream cap and preserves private process-group cleanup on overflow, timeout, normal/nonzero return and exceptions; no Go child ran. Rollback is packet-only parent restoration. |
+| 4004742819, source 4ee7c855b1e79f9478e5cf73c270731dfbf58cf7 | [discussion 4004742819](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4004742819) | Reproduced inherited and command-prefix GODEBUG=asyncpreemptoff reaching the exact parent's first lookup. The wrapper rejects non-empty values before child startup, pins reviewed empty GODEBUG and emits godebug-empty in every runtime identity; no Go child ran. Rollback is packet-only parent restoration. |
+| 4004742824, source 4ee7c855b1e79f9478e5cf73c270731dfbf58cf7 | [discussion 4004742824](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4004742824) | Reproduced the missing post-test source-integrity boundary. The wrapper repeats reviewed tree/raw-byte/status/intent checks after the test child returns and before return-code or JSON/result acceptance; Git-only mutation evidence rejected changed bytes. Rollback is packet-only parent restoration. |
+
+#### Packet body/link/fence/hygiene certification
+
+The final packet-only diff was checked without running any Go or compiler child.
+Markdown fence parity, packet-local links/files, backlog JSON syntax, added-line
+secret/private-path hygiene and whitespace all passed:
+
+```text
+GREEN packet certification: 127 Markdown fences balanced, 62 local links/files checked, backlog JSON valid, packet-only diff, added-line secret/private-path hygiene clean, and git diff --check passed
+```
