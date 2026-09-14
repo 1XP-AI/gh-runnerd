@@ -261,7 +261,9 @@ are rejected when inherited or command-supplied before the first Git query.
 `GOCACHEPROG` is rejected unless empty and then pinned empty before any Go child;
 `GOAUTH` is rejected unless `off` and then pinned `off`, so executable cache
 hooks and command-form authentication cannot reach module, metadata, vet or
-test children. Git replacement refs are disabled by binding
+test children. `GOMAXPROCS=1` is likewise required for any inherited or
+command-prefix value, pinned before metadata and tests, and recorded as the
+`gomaxprocs-1` runtime identity. Git replacement refs are disabled by binding
 `GIT_NO_REPLACE_OBJECTS=1` before the first Git child; other replacement and
 repository-control overrides remain rejected.
 Before source-derived selector validation, the wrapper resolves the active
@@ -333,13 +335,17 @@ bounded Go-child helper and environment. The wrapper requires complete,
 existing module metadata/source paths and fails closed on a download error,
 missing checksum, missing source or verification failure; it does not print
 module paths or cache locations.
-Every Go child is launched through one wrapper-controlled subprocess helper with
-an independent 300-second deadline covering toolchain selection, toolchain
-downloads, compilation, `go env`, `go list` metadata and test execution. The
-helper starts a new session/process group, sends timeout termination to the full
-group, escalates to group kill after a bounded grace period, and waits for the
-direct child to be reaped before refusing the result; the Go `-timeout` flag
-remains a separate in-process test-body bound.
+The wrapper repeats the reviewed tree, raw-byte, status and intent checks before
+module download, after download before metadata/source reads, and immediately
+before test execution, so a prior checkout check cannot be reused across a
+source mutation. Every Go child is launched through one wrapper-controlled
+subprocess helper with an independent 300-second deadline covering toolchain
+selection, toolchain downloads, compilation, `go env`, `go list` metadata and
+test execution. The helper starts a new session/process group, terminates and
+waits for that owned group on timeout, normal/nonzero return, interruption or
+any other failure, escalates to group kill after a bounded grace period, and
+never matches unrelated processes; the Go `-timeout` flag remains a separate
+in-process test-body bound.
 The execution command adds a wrapper-controlled `-json` stream and fails closed
 on malformed output, non-empty stderr or any Go test `Action` of `skip`,
 including skipped subtests. It rejects unexpected top-level `run`, `pass` or
@@ -592,6 +598,19 @@ for source, value in (
             f"{label}: {source} GOAUTH must be {reviewed_goauth!r}; auth command forms are not allowed"
         )
 env["GOAUTH"] = reviewed_goauth
+reviewed_gomaxprocs = "1"
+for source, value in (
+    ("inherited", os.environ.get("GOMAXPROCS")),
+    ("command", command_assignments.get("GOMAXPROCS")),
+):
+    if value is not None and value != reviewed_gomaxprocs:
+        raise SystemExit(
+            f"{label}: {source} GOMAXPROCS must be {reviewed_gomaxprocs!r}"
+        )
+# Pin the runtime worker count even when the caller did not provide a prefix;
+# this keeps metadata and test execution within the reviewed resource bound.
+env["GOMAXPROCS"] = reviewed_gomaxprocs
+gomaxprocs_identity = "gomaxprocs-" + reviewed_gomaxprocs
 reviewed_target_environment = {
     "GOOS": "darwin",
     "GOARCH": "arm64",
@@ -995,6 +1014,10 @@ if go_env.get("GOAUTH") != reviewed_goauth:
     raise SystemExit(
         f"{label}: Go child environment did not pin GOAUTH={reviewed_goauth!r}"
     )
+if go_env.get("GOMAXPROCS") != reviewed_gomaxprocs:
+    raise SystemExit(
+        f"{label}: Go child environment did not pin GOMAXPROCS={reviewed_gomaxprocs}"
+    )
 for name, expected in reviewed_target_environment.items():
     if go_env.get(name) != expected:
         raise SystemExit(
@@ -1006,7 +1029,9 @@ go_child_termination_grace_seconds = 5
 
 
 def terminate_go_child_group(process):
-    """Terminate and reap a timed-out Go child session/process group."""
+    """Terminate and reap this owned Go child session/process group."""
+    # Popen(start_new_session=True) makes process.pid the private process-group
+    # identifier; cleanup is scoped to that group and never scans/matches peers.
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
@@ -1019,7 +1044,8 @@ def terminate_go_child_group(process):
         except ProcessLookupError:
             pass
         process.communicate()
-    process.wait()
+    finally:
+        process.wait()
 
 
 def run_go_child(go_command, **kwargs):
@@ -1033,6 +1059,7 @@ def run_go_child(go_command, **kwargs):
             raise SystemExit(f"{label}: duplicate Go child output capture controls")
         kwargs["stdout"] = subprocess.PIPE
         kwargs["stderr"] = subprocess.PIPE
+    process = None
     try:
         process = subprocess.Popen(
             go_command,
@@ -1043,11 +1070,24 @@ def run_go_child(go_command, **kwargs):
             stdout, stderr = process.communicate(timeout=go_child_deadline_seconds)
         except subprocess.TimeoutExpired:
             terminate_go_child_group(process)
+            process = None
             raise SystemExit(
                 f"{label}: Go child exceeded independent "
                 f"{go_child_deadline_seconds}s deadline; process group terminated and reaped"
             )
-        result = subprocess.CompletedProcess(go_command, process.returncode, stdout, stderr)
+        except BaseException:
+            # KeyboardInterrupt, termination and all other exceptional exits
+            # must reap the same owned group before propagating the failure.
+            terminate_go_child_group(process)
+            process = None
+            raise
+        # communicate() reaps the direct child, but a compiler/helper spawned
+        # in its private session may outlive it; reap that owned group too on
+        # every non-timeout return, including nonzero exits.
+        returncode = process.returncode
+        terminate_go_child_group(process)
+        process = None
+        result = subprocess.CompletedProcess(go_command, returncode, stdout, stderr)
         if check and result.returncode:
             raise subprocess.CalledProcessError(
                 result.returncode, go_command, output=stdout, stderr=stderr
@@ -1055,6 +1095,9 @@ def run_go_child(go_command, **kwargs):
         return result
     except SystemExit:
         raise
+    finally:
+        if process is not None:
+            terminate_go_child_group(process)
 
 effective_toolchain_result = run_go_child(
     [
@@ -1326,6 +1369,44 @@ def git_worktree_matches_pinned_blobs(repo_root, module_dir, env):
             )
 
 
+def recheck_reviewed_source_checkout(phase):
+    """Recheck the reviewed tree, raw bytes, status and intent at a boundary."""
+    source_tree = subprocess.run(
+        git_command(["rev-parse", f"HEAD:{module_dir}"]),
+        cwd=repo_root,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if source_tree.returncode != 0 or source_tree.stderr.strip():
+        raise SystemExit(f"{label}: {phase} source-tree query failed")
+    if source_tree.stdout.strip() != reviewed_module_tree:
+        raise SystemExit(f"{label}: {phase} source tree drifted from the reviewed pin")
+    git_worktree_matches_pinned_blobs(repo_root, module_dir, env)
+    source_status = subprocess.run(
+        git_command([
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--ignored=matching",
+            "--",
+            module_dir,
+        ]),
+        cwd=repo_root,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if source_status.returncode != 0 or source_status.stderr.strip():
+        raise SystemExit(f"{label}: {phase} source status query failed")
+    if source_status.stdout.strip():
+        raise SystemExit(f"{label}: {phase} source checkout was not clean")
+    if git_source_control_entries(repo_root, module_dir, env):
+        raise SystemExit(f"{label}: {phase} source has intent-bit overrides")
+
+
 def package_initialization_guard():
     source_tree = subprocess.run(
         git_command(["rev-parse", f"HEAD:{module_dir}"]),
@@ -1369,7 +1450,11 @@ def package_initialization_guard():
         raise SystemExit(
             f"{label}: source has skip-worktree or assume-unchanged entries"
         )
+    # Repeat the raw-byte and checkout checks immediately before module access;
+    # metadata/download must not rely on an earlier time-of-check.
+    recheck_reviewed_source_checkout("before module download")
     verify_downloaded_module_sources()
+    recheck_reviewed_source_checkout("after module download before metadata")
     list_command = ["go", "list", "-C", module_dir, "-json", "-test"]
     if race_identity == "race":
         list_command.append("-race")
@@ -1396,6 +1481,7 @@ def package_initialization_guard():
         raise SystemExit(
             f"{label}: package-initialization metadata was ambiguous"
         )
+    recheck_reviewed_source_checkout("before package source reads")
     package = packages[0]
     package_dir = Path(package.get("Dir", "")).resolve()
     try:
@@ -1911,7 +1997,8 @@ if is_vet:
     print(
         f"{label}: bounded vet validation passed; package {actual_package}; "
         f"build {actual_build}; source tree {reviewed_module_tree}; "
-        f"GOWORK={go_env['GOWORK']}; compiler-tools={compiler_tool_identity}"
+        f"GOWORK={go_env['GOWORK']}; GOMAXPROCS={gomaxprocs_identity}; "
+        f"compiler-tools={compiler_tool_identity}"
     )
     raise SystemExit(0)
 source_fuzz_guard()
@@ -1946,7 +2033,8 @@ print(
     f"build {actual_build}; CGO_ENABLED={go_env['CGO_ENABLED']}; "
     f"GOEXPERIMENT={go_env['GOEXPERIMENT']}; compiler-tools={compiler_tool_identity}; "
     f"GOROOT=default; GOFIPS140={go_env['GOFIPS140']}; "
-    f"GOWORK={go_env['GOWORK']}; source-derived candidates {len(listed)}; "
+    f"GOWORK={go_env['GOWORK']}; GOMAXPROCS={gomaxprocs_identity}; "
+    f"source-derived candidates {len(listed)}; "
     f"filtered executed {expected_count} names; "
     f"set-sha256 {actual_digest}"
 )
@@ -2007,6 +2095,7 @@ def validate_test_stream(stdout, stderr):
             + "; ".join(missing)
         )
 
+recheck_reviewed_source_checkout("before test execution")
 run_command = command + ["-json"]
 run_result = run_go_child(
     run_command,
@@ -2515,16 +2604,15 @@ python_interpreter = re.compile(r"python(?:3(?:\.[0-9]+)?)?\Z")
 
 
 def non_python_heredoc_delimiters(command):
-    """Return heredoc delimiters whose executable is not reviewed Python."""
+    """Return heredoc delimiters whose owning segment is not reviewed Python."""
     unsafe = []
     for match in heredoc_operator.finditer(command):
         prefix = command[:match.start()].rstrip()
-        python_found = any(
-            segment
-            and python_interpreter.fullmatch(executable_basename(segment[0]))
-            for segment in shell_token_segments(prefix)
-        )
-        if not python_found:
+        segments = shell_token_segments(prefix)
+        owner = segments[-1] if segments else []
+        if not owner or not python_interpreter.fullmatch(
+            executable_basename(owner[0])
+        ):
             unsafe.append(match.group(2))
     return unsafe
 
@@ -5732,15 +5820,15 @@ def python_heredoc_invocation(stripped):
     return invocations[0] if invocations else None
 
 def heredoc_descriptors(stripped):
-    """Describe every heredoc operator in source order, including non-Python ones."""
+    """Describe every heredoc and bind it to its owning shell segment."""
     descriptors = []
     for heredoc_match in heredoc.finditer(stripped):
         invocation = None
         prefix = stripped[:heredoc_match.start()].rstrip()
-        for segment in shell_token_segments(prefix):
-            tokens = executable_tokens(segment)
-            if not tokens or not python_interpreter_token(tokens[0]):
-                continue
+        segments = shell_token_segments(prefix)
+        owner = segments[-1] if segments else []
+        tokens = executable_tokens(owner)
+        if tokens and python_interpreter_token(tokens[0]):
             arguments = tokens[1:]
             try:
                 stdin_index = arguments.index("-")
@@ -5761,7 +5849,6 @@ def heredoc_descriptors(stripped):
                 "interpreter": tokens[0],
                 "isolated": isolated,
             }
-            break
         descriptors.append(
             {"delimiter": heredoc_match.group(2), "invocation": invocation}
         )
@@ -5781,6 +5868,34 @@ def python_heredoc_invocations(stripped):
         for descriptor in heredoc_descriptors(stripped)
         if descriptor["invocation"] is not None
     ]
+
+reviewed_shell_preflight_prefixes = (
+    '[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && '
+    '[ -x /opt/homebrew/bin/python3 ] || { printf \'%s\\n\' '
+    "'reviewed canonical PATH and absolute Python interpreter required' >&2; ",
+    '[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && '
+    '[ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && '
+    '[ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && '
+    '[ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && '
+    '[ -z "${DYLD_LIBRARY_PATH-}" ] && '
+    '[ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && '
+    '[ -z "${DYLD_FRAMEWORK_PATH-}" ] && '
+    '[ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && '
+    '[ -z "${DYLD_ROOT_PATH-}" ] || { printf \'%s\\n\' '
+    "'inherited dynamic-loader hooks are not allowed before Python startup' >&2; ",
+)
+reviewed_shell_preflight_lines = {
+    '[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && '
+    '[ -x /opt/homebrew/bin/python3 ] || exit 1',
+}
+
+def reviewed_shell_preflight(stripped):
+    """Allow only the established PATH/loader checks before Python startup."""
+    return stripped in reviewed_shell_preflight_lines or any(
+        stripped == prefix + f"{action} 1; }}"
+        for prefix in reviewed_shell_preflight_prefixes
+        for action in ("exit", "return")
+    )
 
 def shell_commands(markdown):
     in_shell = False
@@ -5807,6 +5922,8 @@ def shell_commands(markdown):
                 pending_heredocs.pop(0)
             continue
         if not stripped or stripped.startswith("#"):
+            continue
+        if reviewed_shell_preflight(stripped):
             continue
         pending.append(stripped[:-1].rstrip() if stripped.endswith("\\") else stripped)
         pending_numbers.append(number)
@@ -6197,32 +6314,70 @@ def python_import_bindings(tree):
             return [node.target], node.value
         return [node.target], None
 
+    def target_names(target):
+        if isinstance(target, ast.Name):
+            return [target]
+        if isinstance(target, ast.Starred):
+            return target_names(target.value)
+        if isinstance(target, (ast.Tuple, ast.List)):
+            names = []
+            for element in target.elts:
+                names.extend(target_names(element))
+            return names
+        return []
+
+    def binding_pairs(target, value):
+        """Recursively pair destructured targets with their source values."""
+        if isinstance(target, ast.Name):
+            return [(target, value)]
+        if isinstance(target, ast.Starred):
+            return binding_pairs(target.value, value)
+        if not isinstance(target, (ast.Tuple, ast.List)):
+            return []
+        if not isinstance(value, (ast.Tuple, ast.List)):
+            return [(name, None) for name in target_names(target)]
+        pairs = []
+        for index, element in enumerate(target.elts):
+            source = value.elts[index] if index < len(value.elts) else None
+            pairs.extend(binding_pairs(element, source))
+        return pairs
+
+    assignment_bindings = []
+    for node in assignments:
+        targets, value = assignment_parts(node)
+        for target in targets:
+            destructured = not isinstance(target, ast.Name)
+            assignment_bindings.extend(
+                (bound_target, bound_value, destructured)
+                for bound_target, bound_value in binding_pairs(target, value)
+            )
+
     # Only names that could denote a command-capable launcher are tracked.
-    # Ordinary callable assignments (for example `validator = namespace.get`)
-    # remain outside this map so the static pass does not reject unrelated
-    # helper calls.
+    # Ordinary direct callable assignments (for example `validator =
+    # namespace.get`) remain outside this map. Destructured assignments are
+    # tracked conservatively because an unresolved element cannot be proven
+    # non-launching; such names remain mapped to None and fail closed.
     candidate_aliases = set()
-    for _ in range(len(assignments) + 1):
+    for _ in range(len(assignment_bindings) + 1):
         changed = False
-        for node in assignments:
-            targets, value = assignment_parts(node)
+        for target, value, destructured in assignment_bindings:
+            if not isinstance(target, ast.Name):
+                continue
             dotted = python_dotted_name(value) if value is not None else None
             commandish = bool(
                 dotted and dotted.rsplit(".", 1)[-1] in python_command_leaf_names
             )
-            for target in targets:
-                if not isinstance(target, ast.Name):
-                    continue
-                if (
-                    commandish
-                    or target.id in modules
-                    or target.id in functions
-                    or (isinstance(value, ast.Name) and value.id in candidate_aliases)
-                    or (isinstance(value, ast.Name) and value.id in modules)
-                    or (isinstance(value, ast.Name) and value.id in functions)
-                ) and target.id not in candidate_aliases:
-                    candidate_aliases.add(target.id)
-                    changed = True
+            if (
+                destructured
+                or commandish
+                or target.id in modules
+                or target.id in functions
+                or (isinstance(value, ast.Name) and value.id in candidate_aliases)
+                or (isinstance(value, ast.Name) and value.id in modules)
+                or (isinstance(value, ast.Name) and value.id in functions)
+            ) and target.id not in candidate_aliases:
+                candidate_aliases.add(target.id)
+                changed = True
         if not changed:
             break
     for alias in candidate_aliases:
@@ -6247,20 +6402,24 @@ def python_import_bindings(tree):
     # `again = launch` without trusting their source order. Unknown or
     # shadowed assignment targets remain mapped to None and are rejected when
     # called below.
-    for node in sorted(assignments, key=lambda item: (item.lineno, item.col_offset)):
-        targets, value = assignment_parts(node)
-        if value is None:
-            continue
-        resolved = resolve_binding(value)
-        if resolved not in python_command_functions:
-            continue
-        for target in targets:
-            if (
-                isinstance(target, ast.Name)
-                and target.id in candidate_aliases
-                and functions.get(target.id) != resolved
-            ):
+    for _ in range(len(assignment_bindings) + 1):
+        changed = False
+        for target, value, _destructured in sorted(
+            assignment_bindings,
+            key=lambda item: (item[0].lineno, item[0].col_offset),
+        ):
+            if value is None:
+                continue
+            resolved = resolve_binding(value)
+            if resolved not in python_command_functions:
+                continue
+            if target.id not in candidate_aliases:
+                continue
+            if functions.get(target.id) != resolved:
                 functions[target.id] = resolved
+                changed = True
+        if not changed:
+            break
     # A command-capable assignment that cannot be resolved remains mapped to
     # None and is rejected when called below.
     return modules, functions, unresolved
@@ -6439,7 +6598,7 @@ synthetic = [
     ("parameter-expanded-executable", "runner=gh \\\"$runner\\\" workflow run ci.yml", True),
     ("prose-url", "https://example.invalid/docker run image:tag", False),
     ("comment", "# docker run --rm image:tag true", False),
-    ("scanner-source", 'forbidden = re.compile("docker run")', False),
+    ("scanner-source", 'forbidden = "docker run"', False),
     ("synthetic-fixture", 'fixture = "env gh workflow run ci.yml"', False),
 ]
 for label, fixture, expected in synthetic:
@@ -8924,13 +9083,13 @@ exec(
     compile(ast.Module(body=init_helpers, type_ignores=[]), "<init-helpers>", "exec"),
     init_namespace,
 )
-has_init = init_namespace["source_has_init_declaration"]
+init_source_probe = init_namespace["source_has_init_declaration"]
 for source in (
     "package p\nfunc /* first */ init /* second */ () {}\n",
     "package p\nfunc\n// one\n/* two */\ninit() {}\n",
     "package p\n/* before */ func /* one */ // two\n init /* three */ ( ) {}\n",
 ):
-    if not has_init(source):
+    if not init_source_probe(source):
         raise SystemExit(f"valid commented init was missed: {source!r}")
 for source in (
     "package p\n// func init() {}\n",
@@ -8938,7 +9097,7 @@ for source in (
     "package p\nfunc initx() {}\n",
     "package p\nfunc (T) init() {}\n",
 ):
-    if has_init(source):
+    if init_source_probe(source):
         raise SystemExit(f"non-init source was rejected: {source!r}")
 
 # Exercise only the pure command scanner; none of these strings runs.
@@ -10318,7 +10477,7 @@ scanner_start = packet.rfind("source = Path(", 0, scanner_anchor)
 scanner_end = packet.index("\nmatches = []", scanner_anchor)
 namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
 exec(compile(packet[scanner_start:scanner_end], "<candidate-scanner>", "exec"), namespace)
-inspect = namespace["inspect_python_heredoc"]
+scanner_probe = namespace["inspect_python_heredoc"]
 
 for label, body in (
     ("subprocess.getoutput", 'import subprocess\nsubprocess.getoutput("gh workflow run ci.yml")'),
@@ -10327,7 +10486,7 @@ for label, body in (
     ("unresolved launcher alias", 'import synthetic as launcher\nlauncher.getoutput(command)'),
     ("unresolved imported launcher", 'from synthetic import getstatusoutput\ngetstatusoutput(command)'),
 ):
-    violation = inspect(body, False)
+    violation = scanner_probe(body, False)
     if violation is None:
         raise SystemExit(f"Python launcher regression: {label} was accepted")
 for body in (
@@ -10335,7 +10494,7 @@ for body in (
     'import subprocess\nsubprocess.getstatusoutput(command)',
     'import os\nos.execvp(file, argv)',
 ):
-    if inspect(body, True) is not None:
+    if scanner_probe(body, True) is not None:
         raise SystemExit(f"reviewed dynamic launcher marker rejected: {body!r}")
 
 def rejects(command):
@@ -11069,3 +11228,99 @@ resource.
 | 4003926165, source `c90ebd61bc687b5e6ab0d336701b72c11140650f` | [discussion 4003926165](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003926165) | Reproduced skipped `bash <<EOF`/`sh <<EOF` bodies containing `gh workflow run` and `docker system prune`. Both shell audits now fail closed before body certification while isolated Python heredocs remain AST-inspected; no body/command ran. Rollback is packet-only parent restoration. |
 | 4003926170, source `c90ebd61bc687b5e6ab0d336701b72c11140650f` | [discussion 4003926170](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003926170) | Reproduced inherited and command-prefix transport-helper overrides reaching the first Git lookup. The wrapper now rejects the reviewed helper set before any Git/Go child; both subprocess APIs were patched in the static probe. Rollback is packet-only parent restoration. |
 | 4003926177, source `c90ebd61bc687b5e6ab0d336701b72c11140650f` | [discussion 4003926177](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4003926177) | Reproduced assignment alias `launch = subprocess.run` passing the parent AST binding pass. Alias chains now resolve to the reviewed launcher set; shadowed/unresolved names fail closed and safe dynamic handling remains. No command ran; rollback is packet-only parent restoration. |
+
+### Fresh exact-head P2 corrections at `bf98be330c0907b3cb67f3630223e9b76c9c6df7`
+
+The exact-head review identified five fresh P2 findings against immutable
+parent `bf98be330c0907b3cb67f3630223e9b76c9c6df7`: heredoc ownership leaking
+across command segments ([4004331157](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4004331157)),
+raw source bytes not rechecked immediately around module/test execution
+([4004331169](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4004331169)),
+destructured Python launcher aliases escaping AST classification
+([4004331174](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4004331174)),
+uncontrolled `GOMAXPROCS` reaching metadata/tests
+([4004331181](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4004331181)),
+and owned Go process groups not being reaped on non-timeout exits
+([4004331186](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4004331186)).
+This packet-only correction preserves every earlier ledger, exact-parent pin,
+rollback/live gap and no-secrets/private-path boundary. It authorizes no Go,
+compiler, workflow, App/runner, Docker, Lima, Keychain, launchd or live
+operation.
+
+#### Exact-parent red reproduction
+
+The red probe ran first against the immutable parent with `git show`, pure
+scanner/AST and wrapper-text checks, and fake `Popen` objects. The heredoc and
+alias fixtures were never executed; the child probe patched process creation
+and group signaling, so no Go, compiler or live child started.
+
+| Finding | Exact red fixture and observed parent behavior |
+|---|---|
+| 4004331157 | `/opt/homebrew/bin/python3 -I - <<PY; bash <<SH`; the first Python segment classified the later `bash` heredoc as Python. |
+| 4004331169 | The parent performed one raw-byte check in the initial package guard and had no final recheck immediately before test execution. |
+| 4004331174 | `import subprocess` / `launch, = (subprocess.run,)` / `launch(['gh', 'api', 'x'])`; the destructured alias was not bound and the forbidden call was accepted. |
+| 4004331181 | Inherited or command-prefix `GOMAXPROCS`; the parent had no rejection, pin or recorded runtime identity before its first Go metadata child. |
+| 4004331186 | Fake owned Go child returning normally, nonzero, `KeyboardInterrupt` or another exception; the parent only reaped the timeout path. |
+
+Recorded exact-parent red output:
+
+```text
+RED 4004331157: exact parent let the first Python heredoc classify the later bash heredoc
+RED 4004331169: exact parent checked raw source bytes once but did not recheck immediately before test execution
+RED 4004331174: exact parent accepted launch, = (subprocess.run,) followed by a forbidden launcher call
+RED 4004331181: exact parent forwarded inherited/command-prefix GOMAXPROCS without a pin or recorded identity
+RED 4004331186: exact parent reaped only timeout groups; normal, nonzero, KeyboardInterrupt and other exits left owned groups unreaped
+```
+
+#### Minimal packet correction and focused green probes
+
+The minimal correction binds every heredoc operator to the last owning shell
+command segment in both audits. It adds reviewed checkout rechecks (tree,
+raw bytes, status and intent) before module download, after download before
+metadata/source reads and immediately before test execution. It recursively
+pairs tuple/list destructuring with source values, resolves direct and chained
+launcher aliases, and conservatively leaves unresolved aliases as `None` so
+they fail closed. It rejects inherited or command-prefix `GOMAXPROCS` unless
+the reviewed value `1`, pins it before any Go child, validates the child
+environment and records `gomaxprocs-1`. Finally, every owned Go process group
+is terminated and waited on for timeout, normal/nonzero return,
+`KeyboardInterrupt` and other exceptions; normal-return `returncode` is saved
+before the process handle is cleared, and cleanup uses only the private group
+created by `start_new_session=True`.
+
+The focused green probe read only the candidate packet, exercised pure scanner,
+AST and ordering helpers, ran the source-integrity helper with Git-only checks,
+and patched `Popen`/`killpg` around the child helper. No packet prescription,
+Go child, compiler, test body, heredoc body, workflow, App/runner operation,
+credential access, Docker/Lima/Keychain/launchd operation or destructive
+cleanup ran.
+
+Recorded focused green output:
+
+```text
+GREEN 4004331157: heredocs are bound to their owning command segments; prior Python cannot certify later bash/sh bodies
+GREEN 4004331169: reviewed tree/raw bytes/status/intent are rechecked before module download, metadata source reads, and test execution
+GREEN source-integrity helper: raw worktree bytes, reviewed module tree, clean status and intent bits matched using Git-only checks
+GREEN 4004331174: direct and chained destructured launcher aliases resolve to forbidden-command checks; unresolved aliases fail closed
+GREEN 4004331181: inherited/command-prefix GOMAXPROCS is rejected unless reviewed 1, pinned before Go metadata, and recorded as gomaxprocs-1
+GREEN 4004331186: owned Go groups terminate and wait on timeout, normal/nonzero return, KeyboardInterrupt and other failure; no broad process matching
+```
+
+The probes are static, synthetic or Git-only evidence; they do not qualify a
+compiler, Go test, live runner, workflow, remote API or production operation.
+Exact-head Codex review, required CI and maintainer live authorization remain
+open. Rollback is narrow and packet-only: restore
+`docs/evidence/g01-recovery-packet.md` to immutable parent
+`bf98be330c0907b3cb67f3630223e9b76c9c6df7`; preserve independent driver,
+review and manual-runner state, and never force-kill, prune or replay a live
+resource.
+
+#### Exact review URL ledger and dispositions
+
+| Finding and immutable source | Exact review URL | Disposition and rollback evidence |
+|---|---|---|
+| 4004331157, source `bf98be330c0907b3cb67f3630223e9b76c9c6df7` | [discussion 4004331157](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4004331157) | Reproduced the first Python heredoc classifying a later `bash` heredoc. Both audits now use the owning segment, so executable non-Python bodies fail closed before certification; no body or command ran. Rollback is packet-only parent restoration. |
+| 4004331169, source `bf98be330c0907b3cb67f3630223e9b76c9c6df7` | [discussion 4004331169](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4004331169) | Reproduced the missing final raw-source check. The wrapper now rechecks reviewed tree/raw bytes/status/intent before module download, after download before metadata/source reads and immediately before tests; the Git-only helper matched this checkout. Rollback is packet-only parent restoration. |
+| 4004331174, source `bf98be330c0907b3cb67f3630223e9b76c9c6df7` | [discussion 4004331174](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4004331174) | Reproduced `launch, = (subprocess.run,)` escaping the parent AST binding pass. Tuple/list aliases and chains now resolve recursively; unresolved aliases remain fail-closed, with no command execution. Rollback is packet-only parent restoration. |
+| 4004331181, source `bf98be330c0907b3cb67f3630223e9b76c9c6df7` | [discussion 4004331181](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4004331181) | Reproduced uncontrolled inherited/command-prefix `GOMAXPROCS`. The wrapper rejects values other than reviewed `1`, pins the child environment before metadata and records `gomaxprocs-1`; no Go child ran. Rollback is packet-only parent restoration. |
+| 4004331186, source `bf98be330c0907b3cb67f3630223e9b76c9c6df7` | [discussion 4004331186](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4004331186) | Reproduced unreaped owned groups on normal/nonzero, interruption and other failure exits. The helper now terminates and waits on every owned group, saves `returncode` before clearing the handle, and performs no broad process matching. Rollback is packet-only parent restoration. |
