@@ -6111,9 +6111,16 @@ def shell_commands(markdown):
                 + ", ".join(unsafe_heredocs)
             )
         if shell_assignment_only(command):
-            pending = []
-            pending_numbers = []
-            continue
+            if (
+                not any(
+                    shell_command_substitution(segment)
+                    for segment in shell_token_segments(command)
+                )
+                and not shell_process_substitution(command)
+            ):
+                pending = []
+                pending_numbers = []
+                continue
         yield command, pending_numbers[0]
         pending_heredocs.extend(
             descriptor["delimiter"] for descriptor in heredoc_descriptors(command)
@@ -6268,11 +6275,16 @@ def git_shell_alias(tokens):
                 break
             index += 1
             continue
-        if assignment.startswith("alias.") and "=" in assignment:
+        if "=" in assignment and normalized_git_config_key(assignment).startswith("alias."):
             _, value = assignment.split("=", 1)
             if value.lstrip().startswith("!"):
                 return "Git shell-form alias is not allowed"
     return None
+
+
+def normalized_git_config_key(assignment):
+    """Normalize a Git config assignment key before case-insensitive matching."""
+    return assignment.split("=", 1)[0].lower()
 
 
 git_command_delegation_subcommands = {"difftool", "mergetool"}
@@ -6295,10 +6307,10 @@ def git_command_delegation(tokens):
         return None
     for index, token in enumerate(tokens):
         if token == "--config-env" and index + 1 < len(tokens):
-            if tokens[index + 1].split("=", 1)[0].lower().startswith("alias."):
+            if normalized_git_config_key(tokens[index + 1]).startswith("alias."):
                 return "Git --config-env shell alias delegation is not allowed"
         if token.startswith("--config-env="):
-            if token.split("=", 1)[1].split("=", 1)[0].lower().startswith("alias."):
+            if normalized_git_config_key(token.split("=", 1)[1]).startswith("alias."):
                 return "Git --config-env shell alias delegation is not allowed"
     if any(
         token == "--ext-diff" or token.startswith("--ext-diff=")
@@ -6590,6 +6602,48 @@ def python_dotted_name(node):
     return None
 
 
+def python_module_name(node, modules):
+    """Resolve a directly imported command-capable module or its alias."""
+    if not isinstance(node, ast.Name):
+        return None
+    return modules.get(node.id)
+
+
+def python_indirect_command(node, modules):
+    """Classify getattr/__dict__ launcher indirection through known modules."""
+    module_node = None
+    attribute_node = None
+    if isinstance(node, ast.Call):
+        if not isinstance(node.func, ast.Name) or node.func.id != "getattr":
+            return None
+        if len(node.args) < 2:
+            return ("unresolved", "getattr")
+        module_node, attribute_node = node.args[0], node.args[1]
+    elif isinstance(node, ast.Subscript):
+        if not (
+            isinstance(node.value, ast.Attribute)
+            and node.value.attr == "__dict__"
+        ):
+            return None
+        module_node = node.value.value
+        attribute_node = node.slice
+        if isinstance(attribute_node, ast.Index):
+            attribute_node = attribute_node.value
+    else:
+        return None
+    module_name = python_module_name(module_node, modules)
+    if module_name not in python_command_modules:
+        return None
+    if (
+        isinstance(attribute_node, ast.Constant)
+        and isinstance(attribute_node.value, str)
+    ):
+        resolved = f"{module_name}.{attribute_node.value}"
+        if resolved in python_command_functions:
+            return ("resolved", resolved)
+    return ("unresolved", module_name)
+
+
 def python_import_bindings(tree):
     modules = {}
     functions = {}
@@ -6782,7 +6836,18 @@ def inspect_python_heredoc(body, safe_marker):
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        resolved = python_resolved_name(node.func, modules, functions)
+        indirect = python_indirect_command(node.func, modules)
+        if indirect is not None:
+            indirect_kind, indirect_value = indirect
+            if indirect_kind == "unresolved":
+                return (
+                    "Python heredoc contains an unresolved indirect "
+                    "command-capable call through "
+                    f"{indirect_value!r} on line {node.lineno}"
+                )
+            resolved = indirect_value
+        else:
+            resolved = python_resolved_name(node.func, modules, functions)
         dotted = python_dotted_name(node.func)
         if dotted and dotted in functions and resolved is None:
             return (
@@ -6935,6 +7000,10 @@ for unsafe_heredoc in (
     'import os\nos.system("docker version")\n',
     'import subprocess as sp\nsp.run(["gh", "api", "x"])\n',
     'import subprocess\nlaunch = subprocess.run\nlaunch(["gh", "api", "x"])\n',
+    'import subprocess\ngetattr(subprocess, "run")(["gh", "api", "x"])\n',
+    'import os\nos.__dict__["system"]("docker version")\n',
+    'import subprocess\ngetattr(subprocess, launcher_name)(command)\n',
+    'import os\nos.__dict__[launcher_name](command)\n',
     'from subprocess import run\nrun(["gh", "api", "x"])\n',
     'from os import system\nsystem("docker version")\n',
     'import subprocess\nsubprocess.getoutput("gh workflow run ci.yml")\n',
@@ -6944,7 +7013,7 @@ for unsafe_heredoc in (
 ):
     if inspect_python_heredoc(unsafe_heredoc, False) is None:
         raise SystemExit("unsafe Python heredoc was accepted")
-print("forbidden-live-command synthetic probes: passed; direct/wrapped fetcher, every gh invocation including global-flag and absolute forms, every Docker invocation, command-delegating xargs/find/parallel/make forms, Git difftool/mergetool, --extcmd/--tool/--ext-diff, GIT_EXTERNAL_DIFF, diff.external and --config-env alias delegation forms, env split-string/operand forms, unsupported function/brace/case compounds, shell substitutions/process substitutions, limactl/security/launchctl, eval, AST-inspected safe/unsafe Python heredocs including versioned -c/getoutput/getstatusoutput/execvp and unresolved launcher aliases, parameter-expanded executables, and direct/nested bash/sh -c forms rejected; prose/URLs/comments/scanner source/fixtures ignored")
+print("forbidden-live-command synthetic probes: passed; direct/wrapped fetcher, every gh invocation including global-flag and absolute forms, every Docker invocation, command-delegating xargs/find/parallel/make forms, Git difftool/mergetool, --extcmd/--tool/--ext-diff, GIT_EXTERNAL_DIFF, diff.external and --config-env alias delegation forms, env split-string/operand forms, unsupported function/brace/case compounds, shell substitutions/process substitutions, limactl/security/launchctl, eval, AST-inspected safe/unsafe Python heredocs including versioned -c/getoutput/getstatusoutput/execvp, getattr/__dict__ indirect launchers and unresolved launcher aliases, parameter-expanded executables, and direct/nested bash/sh -c forms rejected; prose/URLs/comments/scanner source/fixtures ignored")
 print("forbidden-live-command scan: passed; executable shell prescriptions contain no forbidden live App/runner/Docker/Lima/Keychain/launchd/workflow/fetch command")
 PY
 ```
@@ -9902,8 +9971,9 @@ source/package/build identity used by the 28 test prescriptions.
 #### Root 4002447537: shell command substitutions fail closed
 
 Disposition: `$()` and backtick substitutions are rejected before assignment or
-wrapper stripping, including direct, assignment, pipeline and nested forms;
-the scanner does not attempt shell expansion.
+wrapper stripping, including direct, assignment-only, pipeline and nested forms;
+the scanner does not skip assignment-only records when they contain command or
+process substitutions, and it does not attempt shell expansion.
 
 #### Root 4002447542: every Docker invocation is forbidden
 
@@ -12906,9 +12976,8 @@ system/global configuration and `core.fsmonitor=false`/
 `core.hooksPath=/dev/null` fence
 ([discussion 4006042843](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4006042843)).
 The coordinator also dispatched an independent Luna-max finding for split and
-equals-form `git --config-env alias.*` delegation; its exact discussion URL was
-not supplied in the worker dispatch, so the finding is recorded as a coordinator
-follow-up in the ledger below. This packet-only correction preserves all source
+equals-form `git --config-env alias.*` delegation; its concrete tracking comment
+is recorded in the ledger below. This packet-only correction preserves all source
 and live-operation boundaries; no Go, compiler, workflow, runner, Docker, Lima,
 Keychain, launchd, credential or live GitHub operation ran.
 
@@ -13195,7 +13264,7 @@ resource.
 | 4006042822, source `7d91bed688dbea21bea7dff62f41d48d1d57ce4b` | [discussion 4006042822](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4006042822) | Reproduced accepted `GIT_EXTERNAL_DIFF`, `git diff --ext-diff` and `diff.external` helper delegation. The scanner now rejects environment, `--ext-diff`, `diff.external`, `difftool`/`mergetool` and command-delegation forms before generic classification while safe `--no-ext-diff`, status and diff forms remain accepted. Rollback is packet-only parent restoration. |
 | 4006042835, source `7d91bed688dbea21bea7dff62f41d48d1d57ce4b` | [discussion 4006042835](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4006042835) | Reproduced the selector audit reaching `rg` before a complete loader fence. Both selector preflights now include `DYLD_FALLBACK_FRAMEWORK_PATH` and all reviewed loader variables; static ordering and hostile-loader marker boundaries passed. Rollback is packet-only parent restoration. |
 | 4006042843, source `7d91bed688dbea21bea7dff62f41d48d1d57ce4b` | [discussion 4006042843](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4006042843) | Reproduced a bare `git ls-files` child in the exact-parent markdown/link validation. Every current documentation-validation Git block now exports system/global isolation and `GIT_CONFIG_COUNT` overrides for `core.fsmonitor=false` and `core.hooksPath=/dev/null`; a synthetic local fsmonitor hook was suppressed. Rollback is packet-only parent restoration. |
-| Independent Luna-max follow-up, source `7d91bed688dbea21bea7dff62f41d48d1d57ce4b` | URL not supplied in worker dispatch; coordinator follow-up recorded | Reproduced and rejected split/equals `git --config-env alias.*` delegation before generic Git classification while safe user config/status remained accepted. Coordinator owns the review URL/comments; rollback is packet-only parent restoration. |
+| Independent Luna-max follow-up, source `7d91bed688dbea21bea7dff62f41d48d1d57ce4b` | [tracking comment](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5666074520) | Reproduced and rejected split/equals `git --config-env alias.*` delegation before generic Git classification while safe user config/status remained accepted. The concrete tracking comment carries the independent finding; rollback is packet-only parent restoration. |
 
 #### Packet body/link/fence/hygiene certification
 
@@ -13211,4 +13280,273 @@ Recorded packet certification output:
 
 ```text
 GREEN packet certification: 284 Markdown fences balanced, 157 local markdown targets checked, backlog JSON valid, changed-boundary ledger valid with 10 data rows and 4 columns, embedded wrapper/scanner AST and compile valid, 2 fresh probe bodies AST-valid, exact red/green outputs present, only packet changed, added-line secret/private-path hygiene clean, and git diff --check passed
+```
+
+### Fresh exact-head P1/P2 corrections at `71a7a599de567914158b05e3c480f7e0d48c709f`
+
+The exact-head Codex review of immutable parent
+`71a7a599de567914158b05e3c480f7e0d48c709f` identified three actionable
+findings, followed by one additional current-head substitution boundary. The
+Git scanner compared config assignment keys case-sensitively and
+accepted case-variant `Alias.*` shell aliases in split/equals forms
+([discussion 4006514896](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4006514896));
+the Python AST pass skipped indirect command-capable module launchers such as
+`getattr(subprocess, "run")([...])` and an `os.__dict__` subscript launcher for
+`system`
+([discussion 4006514914](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4006514914));
+and the independent Luna follow-up ledger still had URL-pending text
+([discussion 4006514927](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4006514927)).
+The independent Luna review also found that assignment-only shell records
+could skip command substitutions
+([discussion 4002447537](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002447537)).
+This packet-only wave keeps the exact parent/source/rollback evidence and all
+live qualification gaps explicit; no Go, compiler, workflow, runner, Docker,
+Lima, Keychain, launchd, credential or live GitHub operation ran.
+
+#### Exact-parent red reproductions
+
+The red probe reads only immutable parent `71a7a599de567914158b05e3c480f7e0d48c709f`
+with `git show`, executes the parent scanner over in-memory packet text, and
+checks the parent ledger text. It records the case-variant Git alias bypass,
+the assignment-only substitution bypass, both indirect Python launcher
+examples, and the URL-pending Luna row without starting a Go child or any live
+command.
+
+```sh
+set -euo pipefail
+export PATH=/opt/homebrew/bin:/usr/bin:/bin
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=false GIT_CONFIG_KEY_1=core.hooksPath GIT_CONFIG_VALUE_1=/dev/null
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import re
+import shlex
+import subprocess
+from pathlib import Path
+
+parent = "71a7a599de567914158b05e3c480f7e0d48c709f"
+packet = subprocess.check_output(
+    ["git", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    text=True,
+)
+scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
+scanner_start = packet.rfind("source = Path(", 0, scanner_anchor)
+scanner_end = packet.index("\nmatches = []", scanner_anchor)
+scanner = packet[scanner_start:scanner_end].replace(
+    'source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")',
+    'source = ""',
+    1,
+)
+scanner_ns = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+exec(compile(scanner, "<exact-parent-scanner>", "exec"), scanner_ns)
+for command in (
+    "git -c Alias.ship=!gh workflow run ci.yml",
+    "git -c=ALIAS.ship=!gh workflow run ci.yml",
+    "git -cAlias.ship=!gh workflow run ci.yml",
+):
+    segments = scanner_ns["shell_token_segments"](command)
+    if not segments or scanner_ns["forbidden_command"](segments[0]) is not None:
+        raise SystemExit(f"red setup changed: parent already rejected {command!r}")
+print("RED 4006514896: exact parent accepted case-variant Alias.* shell aliases in split/equals/attached -c forms")
+
+assignment_fixture = "```sh\nx=\"$(gh workflow run ci.yml)\"\n```"
+if list(scanner_ns["shell_commands"](assignment_fixture)):
+    raise SystemExit("red setup changed: parent yielded assignment-only substitution")
+print("RED 4002447537 follow-up: exact parent skipped assignment-only x=\"$(gh workflow run ci.yml)\" and recorded no forbidden command")
+
+for body in (
+    'import subprocess\ngetattr(subprocess, "run")(["gh", "api", "x"])\n',
+    'import os\nos.__dict__["system"]("docker version")\n',
+):
+    if scanner_ns["inspect_python_heredoc"](body, False) is not None:
+        raise SystemExit("red setup changed: parent already rejected indirect module launcher")
+print("RED 4006514914: exact parent accepted getattr(subprocess, \\\"run\\\")([...]) and os.__dict__[\\\"system\\\"](...) command launchers")
+
+if "URL not supplied in worker dispatch" not in packet or "https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5666074520" in packet:
+    raise SystemExit("red setup changed: exact parent follow-up ledger text moved")
+print("RED 4006514927: exact parent Luna follow-up ledger still had URL-pending text and no concrete tracking URL")
+PY
+```
+
+Recorded exact-parent red output:
+
+```text
+RED 4006514896: exact parent accepted case-variant Alias.* shell aliases in split/equals/attached -c forms
+RED 4002447537 follow-up: exact parent skipped assignment-only x="$(gh workflow run ci.yml)" and recorded no forbidden command
+RED 4006514914: exact parent accepted getattr(subprocess, "run")([...]) and os.__dict__["system"](...) command launchers
+RED 4006514927: exact parent Luna follow-up ledger still had URL-pending text and no concrete tracking URL
+```
+
+#### Minimal packet-only correction, refactor and focused green/boundary probes
+
+The minimal correction keeps command substitutions visible even when a shell
+record is assignment-only, so `$()`/backticks/process substitutions cannot be
+skipped before forbidden-command inspection. It normalizes every Git config assignment key before
+matching `Alias.*`, covering `-c` split/equals/attached forms and both
+`--config-env` forms while retaining ordinary user config/status/diff behavior.
+The AST refactor classifies indirect `getattr` and module `__dict__` launcher
+calls through imported `os`/`subprocess` modules, resolves known literal
+launchers through the existing command policy, and rejects unresolved module
+attributes before dynamic-argument handling. The ledger replaces the URL-pending
+independent Luna text with tracking comment
+`https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5666074520` while
+retaining exact-head source and packet-only rollback evidence.
+
+The green probe exercises all Git assignment forms, safe config boundaries,
+known and unresolved indirect Python launchers, the concrete tracking URL and
+the exact current source/rollback text. It remains static/in-memory and does
+not execute any Python launcher, Go, compiler, workflow, runner, Docker, Lima,
+Keychain, launchd, credential or live GitHub operation.
+
+```sh
+set -euo pipefail
+export PATH=/opt/homebrew/bin:/usr/bin:/bin
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=false GIT_CONFIG_KEY_1=core.hooksPath GIT_CONFIG_VALUE_1=/dev/null
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import re
+import shlex
+from pathlib import Path
+
+packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
+scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
+scanner_start = packet.rfind("source = Path(", 0, scanner_anchor)
+scanner_end = packet.index("\nmatches = []", scanner_anchor)
+scanner = packet[scanner_start:scanner_end].replace(
+    'source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")',
+    'source = ""',
+    1,
+)
+scanner_ns = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+exec(compile(scanner, "<candidate-scanner>", "exec"), scanner_ns)
+for command in (
+    "git -c Alias.ship=!gh workflow run ci.yml",
+    "git -c=ALIAS.ship=!gh workflow run ci.yml",
+    "git -cAlias.ship=!gh workflow run ci.yml",
+    "git --config-env AlIaS.ship=GIT_ALIAS diff",
+    "git --config-env=ALIAS.ship=GIT_ALIAS diff",
+):
+    segments = scanner_ns["shell_token_segments"](command)
+    violation = scanner_ns["forbidden_command"](segments[0]) if segments else None
+    if violation is None:
+        raise SystemExit(f"case-variant alias escaped scanner: {command!r}")
+for command in (
+    "git status",
+    "git -c user.name=probe status",
+    "git -c=UsEr.NaMe=probe status",
+    "git -c UsEr.NaMe=probe status",
+    "git diff --no-ext-diff",
+):
+    segments = scanner_ns["shell_token_segments"](command)
+    violation = scanner_ns["forbidden_command"](segments[0]) if segments else None
+    if violation is not None:
+        raise SystemExit(f"safe Git form was rejected: {command!r}: {violation}")
+print("GREEN 4006514896: case-insensitive Alias.* normalization rejected split/equals/attached -c and --config-env forms; safe status/user-config/no-ext-diff retained")
+
+for fixture in (
+    'x="$(gh workflow run ci.yml)"',
+    'x="`gh api repos/example/project`"',
+    'x=<(gh workflow run ci.yml)',
+):
+    commands = list(
+        scanner_ns["shell_commands"](f"```sh\n{fixture}\n```")
+    )
+    if not commands:
+        raise SystemExit(f"assignment substitution was skipped: {fixture!r}")
+    violations = [
+        scanner_ns["forbidden_command"](segment)
+        for command, _ in commands
+        for segment in scanner_ns["shell_token_segments"](command)
+    ]
+    if not any(violation is not None for violation in violations):
+        raise SystemExit(f"assignment substitution escaped forbidden scan: {fixture!r}")
+if list(scanner_ns["shell_commands"]('```sh\nx="printf safe"\n```')):
+    raise SystemExit("safe assignment-only command was unexpectedly yielded")
+print("GREEN 4002447537 follow-up: assignment-only command substitutions/process substitutions now reach fail-closed scanning; safe assignment-only text remains ignored")
+
+for body in (
+    'import subprocess\ngetattr(subprocess, "run")(["gh", "api", "x"])\n',
+    'import os\nos.__dict__["system"]("docker version")\n',
+    'import subprocess\ngetattr(subprocess, name)(command)\n',
+    'import os\nos.__dict__[name](command)\n',
+):
+    violation = scanner_ns["inspect_python_heredoc"](body, False)
+    if violation is None:
+        raise SystemExit(f"indirect launcher escaped AST scanner: {body!r}")
+for body in (
+    'import subprocess\nsubprocess.run(["printf", "safe"])\n',
+    'import os\nos.system("printf safe")\n',
+):
+    if scanner_ns["inspect_python_heredoc"](body, False) is not None:
+        raise SystemExit(f"safe direct launcher was rejected: {body!r}")
+print("GREEN 4006514914: getattr/__dict__ indirect and unresolved command-capable launchers rejected; safe direct launcher boundary retained")
+
+tracking_url = "https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5666074520"
+latest_start = packet.index(
+    "### Fresh exact-head P1/P2 corrections at `71a7a599de567914158b05e3c480f7e0d48c709f`"
+)
+ledger_marker = "\n#### Exact review URL ledger and dispositions\n"
+ledger = packet[packet.index(ledger_marker, latest_start) + 1:]
+if tracking_url not in ledger or "URL not supplied in worker dispatch" in ledger:
+    raise SystemExit("concrete Luna tracking URL was not the only ledger disposition")
+for required in (
+    "### Fresh exact-head P1/P2 corrections at `71a7a599de567914158b05e3c480f7e0d48c709f`",
+    "source `71a7a599de567914158b05e3c480f7e0d48c709f`",
+    "Rollback is narrow and packet-only",
+    tracking_url,
+):
+    if required not in packet:
+        raise SystemExit(f"exact-head/source/rollback evidence missing: {required}")
+print("GREEN 4006514927: independent Luna follow-up uses concrete tracking URL; exact-head/source/packet-only rollback evidence retained")
+PY
+```
+
+Recorded focused green output:
+
+```text
+GREEN 4006514896: case-insensitive Alias.* normalization rejected split/equals/attached -c and --config-env forms; safe status/user-config/no-ext-diff retained
+GREEN 4002447537 follow-up: assignment-only command substitutions/process substitutions now reach fail-closed scanning; safe assignment-only text remains ignored
+GREEN 4006514914: getattr/__dict__ indirect and unresolved command-capable launchers rejected; safe direct launcher boundary retained
+GREEN 4006514927: independent Luna follow-up uses concrete tracking URL; exact-head/source/packet-only rollback evidence retained
+```
+
+The packet-only focused probes are static or in-memory boundary evidence. They
+do not qualify compiler, Go test/list/body, live runner, workflow, remote API,
+credential, Docker/Lima, Keychain or launchd operation. Exact-head Codex review
+of the final pushed head, required CI and explicit maintainer live
+authorization remain open.
+
+Rollback is narrow and packet-only: restore
+`docs/evidence/g01-recovery-packet.md` to immutable parent
+`71a7a599de567914158b05e3c480f7e0d48c709f`; preserve independent driver,
+review and manual-runner state, and never force-kill, prune or replay a live
+resource.
+
+#### Exact review URL ledger and dispositions
+
+| Finding and immutable source | Exact review URL | Disposition and rollback evidence |
+|---|---|---|
+| 4002447537, source `71a7a599de567914158b05e3c480f7e0d48c709f` | [discussion 4002447537](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002447537) | Reproduced assignment-only `x="$(gh workflow run ci.yml)"` being skipped before forbidden-command inspection. The scanner now retains assignment-only records containing `$()`/backticks/process substitutions for fail-closed scanning while safe assignment-only text remains ignored. Rollback is packet-only parent restoration. |
+| 4006514896, source `71a7a599de567914158b05e3c480f7e0d48c709f` | [discussion 4006514896](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4006514896) | Reproduced case-variant `Alias.*` bypasses in split/equals/attached `-c` forms. The scanner now normalizes assignment keys case-insensitively before alias matching and covers both `--config-env` forms; safe user config/status/diff behavior remains accepted. Rollback is packet-only parent restoration. |
+| 4006514914, source `71a7a599de567914158b05e3c480f7e0d48c709f` | [discussion 4006514914](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4006514914) | Reproduced `getattr(subprocess, "run")([...])` and the `os.__dict__` subscript launcher for `system` escaping the parent AST pass. Indirect known launchers now use the reviewed command policy and unresolved module attributes fail closed; safe direct launchers remain bounded. No command ran. Rollback is packet-only parent restoration. |
+| 4006514927, source `71a7a599de567914158b05e3c480f7e0d48c709f` | [tracking comment](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5666074520) | Replaced the independent Luna follow-up URL-pending text with the concrete tracking URL while retaining exact-head/source/rollback evidence. Live qualification gaps remain explicit; rollback is packet-only parent restoration. |
+
+#### Packet body/link/fence/hygiene certification
+
+The final packet-only diff was checked after this four-finding wave without
+any compiler, Go/vet child or live operation: Markdown fence parity, rendered
+packet-local links/files, backlog JSON syntax, changed-boundary ledger shape,
+embedded wrapper/scanner AST/compile, fresh probe-body AST, exact red/green
+transcripts, packet-only scope, added-line secret/private-path hygiene,
+working/staged whitespace and exact-head/local/remote parity were checked.
+
+Recorded packet certification output:
+
+```text
+GREEN packet syntax: 294 Markdown fences balanced, 157 rendered packet-local links/files checked, backlog JSON valid, changed-boundary ledger valid with 10 data rows and 4 columns, embedded wrapper/scanner AST and compile valid, 2 fresh probe bodies AST-valid
+GREEN packet diff: git diff --check passed
+GREEN packet hygiene: added-line secret/private-path scan clean; early-match rejection probe passed; concrete tracking URL present
 ```
