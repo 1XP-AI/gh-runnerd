@@ -6779,6 +6779,7 @@ set -euo pipefail
 import ast
 import re
 import shlex
+import subprocess
 from pathlib import Path
 
 source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
@@ -7088,6 +7089,14 @@ def shell_output_redirection_violation(tokens):
         "1>|", "2>|",
     }
     for index, token in enumerate(tokens):
+        unknown_descriptor = re.match(
+            r"^(?:[0-9]+|\{[A-Za-z_][A-Za-z0-9_]*\})(?:>>?|>&|>\|)",
+            token,
+        )
+        if unknown_descriptor:
+            descriptor = unknown_descriptor.group(0).split(">", 1)[0]
+            if descriptor not in {"1", "2"}:
+                return "shell output redirection descriptor is not reviewed"
         operator = token if token in output_tokens else next(
             (candidate for candidate in sorted(output_tokens, key=len, reverse=True)
              if token.startswith(candidate)),
@@ -7388,7 +7397,7 @@ unsupported_env_wrapper_token = "__g01_unsupported_env_wrapper_option__"
 
 def executable_tokens(tokens):
     tokens = list(tokens)
-    while tokens and tokens[0] in {"if", "then", "else", "do", "while", "until", "!"}:
+    while tokens and tokens[0] in {"if", "then", "else", "elif", "do", "while", "until", "!"}:
         tokens.pop(0)
     while tokens and (assignment.fullmatch(tokens[0]) or tokens[0] in {";", "&&", "||", "|"}):
         tokens.pop(0)
@@ -7455,6 +7464,8 @@ python_network_modules = {
     "urllib.request",
     "requests",
     "socket",
+    "smtplib",
+    "ftplib",
 }
 python_network_functions = {
     "urllib.request.urlopen",
@@ -7468,6 +7479,11 @@ python_network_functions = {
     "requests.head",
     "requests.options",
     "socket.create_connection",
+    "smtplib.SMTP",
+    "smtplib.SMTP_SSL",
+    "smtplib.LMTP",
+    "ftplib.FTP",
+    "ftplib.FTP_TLS",
 }
 
 def shell_command_string(tokens):
@@ -7507,6 +7523,33 @@ def awk_command_violation(tokens):
     """Allow only awk programs with no external-command delegation surface."""
     if not tokens or executable_basename(tokens[0]) != "awk":
         return None
+
+    def output_pipe(program):
+        """Recognize AWK output pipes outside quoted strings/regex literals."""
+        quote = None
+        regex = False
+        escaped = False
+        for character in program:
+            if escaped:
+                escaped = False
+                continue
+            if character == "\\":
+                escaped = True
+                continue
+            if quote is not None:
+                if character == quote:
+                    quote = None
+                continue
+            if character in {"'", '"'}:
+                quote = character
+                continue
+            if character == "/":
+                regex = not regex
+                continue
+            if character == "|" and not regex:
+                return True
+        return False
+
     for token in tokens[1:]:
         if (
             token in {"-f", "--file"}
@@ -7514,6 +7557,7 @@ def awk_command_violation(tokens):
             or token.startswith("--file=")
             or re.search(r"\bsystem\s*\(", token)
             or "getline" in token
+            or output_pipe(token)
         ):
             return "awk command delegation is not allowed"
     return None
@@ -7679,7 +7723,11 @@ def python_network_import_violation(tree):
         elif isinstance(node, ast.ImportFrom):
             for alias in node.names:
                 imported = f"{node.module}.{alias.name}" if node.module else alias.name
-                if imported in python_network_modules or imported in python_network_functions:
+                if (
+                    node.module in {"smtplib", "ftplib"}
+                    or imported in python_network_modules
+                    or imported in python_network_functions
+                ):
                     return f"Python network-capable import {imported!r} is not allowed"
     return None
 
@@ -8408,6 +8456,52 @@ reviewed_python_helper_required_calls = {
 }
 
 
+reviewed_python_helper_allowed_launchers = {
+    "run_cgo_version_child": {"subprocess.Popen"},
+    "run_go_child": {"subprocess.Popen"},
+    "run_bounded_git_filter_query": {"subprocess.Popen"},
+    "run_bounded_git_status": {"subprocess.Popen"},
+    "run_bounded_git_query": {"subprocess.Popen"},
+    "reject_toolexec_go_child": {"real_run"},
+    "reject_overlay_go_child": {"real_run"},
+    "reject_modfile_go_child": {"real_run"},
+    "reject_selector_guard_go_child": {"real_run"},
+    "observe_go_child": {"real_run"},
+    "observe_prior_go_child": {"real_run"},
+    "reject_current_go_child": {"real_run"},
+    "stop_at_go_child": {"real_run"},
+    "reject_go_child": {"real_run"},
+    "stop_at_git": {"real_check_output"},
+    "reject_check_output": {"real_check_output"},
+    "reject_run": {"real_run"},
+    "stop_at_go": {"real_run"},
+    "run_git_probe": {"subprocess.run"},
+    "__init__": {"real_popen"},
+}
+reviewed_python_helper_allowed_argv = {
+    "run_cgo_version_child": {"command"},
+    "run_go_child": {"go_command"},
+    "run_bounded_git_filter_query": {"command"},
+    "run_bounded_git_status": {"command"},
+    "run_bounded_git_query": {"command"},
+    "reject_toolexec_go_child": {"args"},
+    "reject_overlay_go_child": {"args"},
+    "reject_modfile_go_child": {"args"},
+    "reject_selector_guard_go_child": {"args"},
+    "observe_go_child": {"args"},
+    "observe_prior_go_child": {"args"},
+    "reject_current_go_child": {"args"},
+    "stop_at_go_child": {"args"},
+    "reject_go_child": {"args"},
+    "stop_at_git": {"args"},
+    "reject_check_output": {"args"},
+    "reject_run": {"args"},
+    "stop_at_go": {"args"},
+    "run_git_probe": {"args"},
+    "__init__": {"actual"},
+}
+
+
 def reviewed_python_helper_definition(node, parents):
     """Require a reviewed helper's body to contain its actual primitive calls."""
     function_name = enclosing_python_function(node, parents)
@@ -8433,6 +8527,17 @@ def reviewed_python_helper_definition(node, parents):
         elif isinstance(call.func, ast.Attribute):
             calls.add(call.func.attr)
     return required.issubset(calls)
+
+
+def reviewed_python_helper_launcher(node, parents):
+    """Bind a dynamic exemption to the helper's reviewed launcher call."""
+    function_name = enclosing_python_function(node, parents)
+    allowed = reviewed_python_helper_allowed_launchers.get(function_name)
+    if allowed is None:
+        return False
+    dotted = python_dotted_name(node.func)
+    raw_name = node.func.id if isinstance(node.func, ast.Name) else None
+    return dotted in allowed or raw_name in allowed
 
 
 def _python_parent_chain(node, parents):
@@ -8549,7 +8654,9 @@ def reviewed_python_case_args(node, tree):
     return False
 
 
-def reviewed_python_dynamic_call(node, argument, tree, parents, literal_bindings):
+def reviewed_python_dynamic_call(
+    node, argument, tree, parents, literal_bindings, resolved=None
+):
     """Allow explicit packet-owned forwarding, never a marker by itself."""
     if (
         isinstance(argument, (ast.List, ast.Tuple))
@@ -8577,14 +8684,12 @@ def reviewed_python_dynamic_call(node, argument, tree, parents, literal_bindings
         return False
     if not reviewed_python_helper_definition(node, parents):
         return False
+    if not reviewed_python_helper_launcher(node, parents):
+        return False
     if isinstance(argument, ast.Starred):
         argument = argument.value
     if isinstance(argument, ast.Name):
-        if function_name == "__init__":
-            return argument.id == "actual"
-        return argument.id in {
-            "args", "command", "go_command", "actual", "guarded",
-        }
+        return argument.id in reviewed_python_helper_allowed_argv.get(function_name, set())
     return False
 
 
@@ -8620,6 +8725,26 @@ reviewed_synthetic_git_fixture_argv = {
 }
 
 
+def temporary_directory_call(node):
+    """Recognize the reviewed literal TemporaryDirectory constructor forms."""
+    if not isinstance(node, ast.Call) or node.args or node.keywords:
+        return False
+    dotted = python_dotted_name(node.func)
+    if dotted in {"tempfile.TemporaryDirectory", "TemporaryDirectory"}:
+        return True
+    return (
+        isinstance(node.func, ast.Attribute)
+        and node.func.attr == "TemporaryDirectory"
+        and isinstance(node.func.value, ast.Call)
+        and isinstance(node.func.value.func, ast.Name)
+        and node.func.value.func.id == "__import__"
+        and len(node.func.value.args) == 1
+        and isinstance(node.func.value.args[0], ast.Constant)
+        and node.func.value.args[0].value == "tempfile"
+        and not node.func.value.keywords
+    )
+
+
 def temporary_directory_binding(node, parents):
     """Return the local binding only inside a literal TemporaryDirectory block."""
     parent = parents.get(node)
@@ -8628,10 +8753,7 @@ def temporary_directory_binding(node, parents):
             for item in parent.items:
                 context = item.context_expr
                 if not (
-                    isinstance(context, ast.Call)
-                    and python_dotted_name(context.func) == "tempfile.TemporaryDirectory"
-                    and not context.args
-                    and not context.keywords
+                    temporary_directory_call(context)
                     and isinstance(item.optional_vars, ast.Name)
                 ):
                     continue
@@ -8671,6 +8793,183 @@ def temporary_directory_bindings(node, tree, parents):
                     bindings.add(target.id)
                     changed = True
     return bindings
+
+
+python_filesystem_mutating_methods = {
+    "chmod",
+    "chown",
+    "mkdir",
+    "makedirs",
+    "move",
+    "open",
+    "rename",
+    "replace",
+    "rmdir",
+    "touch",
+    "unlink",
+    "write_bytes",
+    "write_text",
+}
+python_filesystem_mutating_functions = {
+    "os.chmod",
+    "os.chown",
+    "os.makedirs",
+    "os.mkdir",
+    "os.mkfifo",
+    "os.mknod",
+    "os.remove",
+    "os.rename",
+    "os.replace",
+    "os.rmdir",
+    "os.truncate",
+    "os.unlink",
+    "shutil.copy",
+    "shutil.copy2",
+    "shutil.copytree",
+    "shutil.move",
+    "shutil.rmtree",
+}
+
+
+def python_path_receiver_expression(node, tree, parents, seen=None):
+    """Recognize a Path-like receiver for ambiguous mutating method names."""
+    if node is None:
+        return False
+    if seen is None:
+        seen = set()
+    if id(node) in seen:
+        return False
+    seen.add(id(node))
+    if temporary_path_expression(node, tree, parents):
+        return True
+    if isinstance(node, ast.Call):
+        dotted = python_dotted_name(node.func)
+        if dotted in {"Path", "pathlib.Path"}:
+            return True
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "joinpath"
+        ):
+            return python_path_receiver_expression(node.func.value, tree, parents, seen)
+        return False
+    if isinstance(node, ast.Name):
+        for candidate in ast.walk(tree):
+            if not isinstance(candidate, ast.Assign):
+                continue
+            if not any(
+                isinstance(target, ast.Name) and target.id == node.id
+                for target in candidate.targets
+            ):
+                continue
+            if python_path_receiver_expression(candidate.value, tree, parents, seen):
+                return True
+        return node.id.casefold().endswith(("path", "file", "directory", "dir", "root"))
+    if isinstance(node, ast.Attribute):
+        return python_path_receiver_expression(node.value, tree, parents, seen)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        return python_path_receiver_expression(node.left, tree, parents, seen)
+    return False
+
+
+def temporary_path_expression(node, tree, parents, seen=None):
+    """Prove a path stays below the active literal TemporaryDirectory."""
+    if node is None:
+        return False
+    if seen is None:
+        seen = set()
+    binding = temporary_directory_binding(node, parents)
+    if binding is None:
+        return False
+    bindings = temporary_directory_bindings(node, tree, parents)
+    if isinstance(node, ast.Name):
+        if node.id in bindings:
+            return True
+        if node.id in seen:
+            return False
+        seen.add(node.id)
+        for candidate in ast.walk(tree):
+            if not isinstance(candidate, ast.Assign):
+                continue
+            if temporary_directory_binding(candidate, parents) != binding:
+                continue
+            if not any(
+                isinstance(target, ast.Name) and target.id == node.id
+                for target in candidate.targets
+            ):
+                continue
+            if temporary_path_expression(candidate.value, tree, parents, seen):
+                return True
+        return False
+    if isinstance(node, ast.Call):
+        dotted = python_dotted_name(node.func)
+        if dotted in {"Path", "pathlib.Path"} and len(node.args) == 1 and not node.keywords:
+            return temporary_path_expression(node.args[0], tree, parents, seen)
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "joinpath"
+            and temporary_path_expression(node.func.value, tree, parents, seen)
+            and all(
+                isinstance(argument, ast.Constant)
+                and isinstance(argument.value, str)
+                and not argument.value.startswith("/")
+                for argument in node.args
+            )
+            and not node.keywords
+        ):
+            return True
+        return False
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        return (
+            temporary_path_expression(node.left, tree, parents, seen)
+            and isinstance(node.right, ast.Constant)
+            and isinstance(node.right.value, str)
+            and not node.right.value.startswith("/")
+        )
+    return False
+
+
+def python_filesystem_mutation_violation(tree, parents):
+    """Reject filesystem mutations unless their path is temp-owned."""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        dotted = python_dotted_name(node.func)
+        mutation = False
+        path_arguments = []
+        if isinstance(node.func, ast.Attribute) and node.func.attr in python_filesystem_mutating_methods:
+            if (
+                node.func.attr == "replace"
+                and not python_path_receiver_expression(node.func.value, tree, parents)
+            ):
+                continue
+            mutation = True
+            path_arguments = [node.func.value]
+        elif dotted in python_filesystem_mutating_functions:
+            mutation = True
+            path_arguments = list(node.args[:2])
+        elif dotted == "open":
+            mode = node.args[1] if len(node.args) > 1 else None
+            if mode is None:
+                continue
+            if not isinstance(mode, ast.Constant) or not isinstance(mode.value, str):
+                mutation = True
+            else:
+                mutation = any(flag in mode.value for flag in ("w", "a", "x", "+"))
+            path_arguments = list(node.args[:1])
+        elif dotted in {"tempfile.TemporaryDirectory", "tempfile.mkdtemp"}:
+            continue
+        if not mutation:
+            continue
+        if path_arguments and all(
+            temporary_path_expression(argument, tree, parents)
+            for argument in path_arguments
+        ):
+            continue
+        return (
+            "Python heredoc contains an unreviewed filesystem mutation "
+            f"{dotted or '<call>'!r} on line {node.lineno}"
+        )
+    return None
 
 
 def reviewed_python_synthetic_git_fixture(node, value, tree, parents):
@@ -8826,6 +9125,9 @@ def inspect_python_heredoc(body, safe_marker):
         for parent in ast.walk(tree)
         for child in ast.iter_child_nodes(parent)
     }
+    filesystem_violation = python_filesystem_mutation_violation(tree, parents)
+    if filesystem_violation:
+        return filesystem_violation
     dynamic_calls = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -17791,4 +18093,232 @@ operation or merge is claimed.
 
 ~~~text
 GREEN final packet certification: 374 Markdown fence markers balanced with matching-style parser, 157 packet-local targets checked, backlog JSON valid, changed-boundary ledger valid with 10 data rows and 4 columns, embedded wrapper/scanner/filter/parity AST and compile valid, all six fresh finding URLs have exact RED/GREEN/CURRENT transcripts and focused boundaries, full static scanner passed with 284 shell commands and 76 Python heredoc bodies, one-file scope and added-line secret/private-path hygiene clean, and git diff --check passed
+~~~
+
+### Fresh exact-head Codex follow-up at `b85839cc801395f4ec9560b056a2a6706c7aa306`
+
+The fresh exact-head review identified six scanner-policy gaps. Each was first
+reproduced against immutable parent `b85839cc801395f4ec9560b056a2a6706c7aa306`
+with in-memory packet text and no command, child, network, workflow, runner,
+credential or live operation; the recorded RED transcript is retained below:
+
+~~~sh
+# g01-safe-python-heredoc: reviewed exact-parent six-finding RED and current GREEN boundary
+set -euo pipefail
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import re
+import shlex
+import subprocess
+from pathlib import Path
+
+packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
+anchor = packet.index("def forbidden_command(tokens, depth=0):")
+start = packet.rfind(
+    "source = Path(\"docs/evidence/g01-recovery-packet.md\").read_text(encoding=\"utf-8\")",
+    0,
+    anchor,
+)
+end = packet.index("\nmatches = []", anchor)
+namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+exec(compile(packet[start:end], "<current-scanner>", "exec"), namespace)
+
+def rejected(command):
+    return any(
+        namespace["forbidden_command"](segment) is not None
+        for segment in namespace["shell_token_segments"](command)
+    )
+
+def inspected(body, safe_marker=True):
+    return namespace["inspect_python_heredoc"](body, safe_marker)
+
+# Reproduce every RED against the immutable parent scanner loaded only by git show.
+parent_sha = "b85839cc801395f4ec9560b056a2a6706c7aa306"
+parent_packet = subprocess.check_output(
+    ["git", "show", f"{parent_sha}:docs/evidence/g01-recovery-packet.md"],
+    text=True,
+)
+parent_anchor = parent_packet.index("def forbidden_command(tokens, depth=0):")
+parent_start = parent_packet.rfind("source = Path(", 0, parent_anchor)
+parent_end = parent_packet.index("\nmatches = []", parent_anchor)
+scanner = parent_packet[parent_start:parent_end].replace(
+    'source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")',
+    'source = ""',
+    1,
+)
+parent_namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+exec(compile(scanner, "<exact-parent-b858-scanner>", "exec"), parent_namespace)
+
+def parent_rejected(command):
+    return any(
+        parent_namespace["forbidden_command"](segment) is not None
+        for segment in parent_namespace["shell_token_segments"](command)
+    )
+
+def parent_inspected(body):
+    return parent_namespace["inspect_python_heredoc"](body, True)
+
+parent_helper = (
+    "import subprocess\n"
+    "def run_go_child(go_command):\n"
+    "    subprocess.Popen(go_command)\n"
+    "    capture_go_child_output()\n"
+    "    subprocess.run(go_command)\n"
+    "run_go_child([\"gh\", \"workflow\", \"run\", \"ci.yml\"])\n"
+)
+if parent_inspected(parent_helper) is not None:
+    raise SystemExit("parent unexpectedly rejected helper RED witness")
+if parent_rejected("awk 'BEGIN { print \\\"x\\\" | \\\"gh workflow run ci.yml\\\" }'"):
+    raise SystemExit("parent unexpectedly rejected AWK output-pipe RED witness")
+if parent_rejected("printf x 3>/var/lib/actions-runner/.credentials"):
+    raise SystemExit("parent unexpectedly rejected descriptor RED witness")
+for body in (
+    "import smtplib as mail\nmail.SMTP(\"example.invalid\")\n",
+    "import ftplib as ftp\nftp.FTP(\"example.invalid\")\n",
+    "from smtplib import SMTP as Client\nClient(\"example.invalid\")\n",
+):
+    if parent_inspected(body) is not None:
+        raise SystemExit("parent unexpectedly rejected network alias RED witness")
+if parent_rejected("elif gh workflow run ci.yml"):
+    raise SystemExit("parent unexpectedly rejected elif RED witness")
+if parent_inspected("from pathlib import Path\nPath(\"/unsafe\").write_text(\"x\")\n") is not None:
+    raise SystemExit("parent unexpectedly rejected filesystem RED witness")
+
+# Exact immutable-parent RED outputs, reproduced with git show at parent b85839c:
+# RED 4010081477: function-wide helper exemption accepted reviewed Popen plus subprocess.run(go_command)
+# RED 4010081477: exact parent accepted function-wide helper exemption with an unexpected launcher
+# RED 4010081488: AWK output pipe `print value | "gh workflow run ci.yml"` was accepted
+# RED 4010081494: unknown descriptor 3>/var/lib/actions-runner/.credentials was accepted
+# RED 4010081502: smtplib/ftplib clients and aliases were accepted before network use
+# RED 4010081509: elif gh workflow run ci.yml was not classified as an executable segment
+# RED 4010081513: Path('/unsafe').write_text(...) was accepted outside reviewed temporary ownership
+print("RED 4010081477: exact parent accepted function-wide helper exemption with an unexpected launcher")
+print("RED 4010081488: exact parent accepted AWK output-pipe command delegation")
+print("RED 4010081494: exact parent accepted unknown shell descriptor 3>")
+print("RED 4010081502: exact parent accepted smtplib/ftplib aliases")
+print("RED 4010081509: exact parent accepted elif-prefixed command")
+print("RED 4010081513: exact parent accepted unowned Python filesystem mutation")
+
+helper_bad = (
+    "import subprocess\n"
+    "def run_go_child(go_command):\n"
+    "    subprocess.Popen(go_command)\n"
+    "    capture_go_child_output()\n"
+    "    subprocess.run(go_command)\n"
+    "run_go_child([\"gh\", \"workflow\", \"run\", \"ci.yml\"])\n"
+)
+if inspected(helper_bad) is None:
+    raise SystemExit("dynamic helper exemption escaped")
+wrong_argv = (
+    "import subprocess\n"
+    "def run_go_child(args):\n"
+    "    subprocess.Popen(args)\n"
+    "    capture_go_child_output()\n"
+    "run_go_child([\"printf\", \"safe\"])\n"
+)
+if inspected(wrong_argv) is None:
+    raise SystemExit("helper argv binding escaped")
+helper_good = (
+    "import subprocess\n"
+    "def run_go_child(go_command):\n"
+    "    subprocess.Popen(go_command)\n"
+    "    capture_go_child_output()\n"
+    "run_go_child([\"printf\", \"safe\"])\n"
+)
+if inspected(helper_good) is not None:
+    raise SystemExit("reviewed helper launcher was rejected")
+print("GREEN 4010081477/CURRENT: dynamic helper exemption is bound to reviewed launcher and argv")
+
+if not rejected("awk 'BEGIN { print \\\"x\\\" | \\\"gh workflow run ci.yml\\\" }'"):
+    raise SystemExit("AWK output pipe escaped")
+if rejected("awk 'BEGIN { print \\\"safe\\\" }'"):
+    raise SystemExit("safe AWK print was rejected")
+print("GREEN 4010081488/CURRENT: AWK output pipe rejected; literal print accepted")
+
+for command in (
+    "printf x 3>/var/lib/actions-runner/.credentials",
+    "printf x 9>>/var/lib/actions-runner/.credentials",
+    "printf x {fd}>/var/lib/actions-runner/.credentials",
+):
+    if not rejected(command):
+        raise SystemExit(f"unknown descriptor escaped: {command!r}")
+if rejected("printf x 2>/dev/null"):
+    raise SystemExit("reviewed stderr redirect was rejected")
+print("GREEN 4010081494/CURRENT: unknown descriptors rejected; reviewed stderr redirect accepted")
+
+for body in (
+    "import smtplib as mail\nmail.SMTP(\"example.invalid\")\n",
+    "import ftplib as ftp\nftp.FTP(\"example.invalid\")\n",
+    "from smtplib import SMTP as Client\nClient(\"example.invalid\")\n",
+):
+    if inspected(body) is None:
+        raise SystemExit("network-client alias escaped")
+print("GREEN 4010081502/CURRENT: smtplib/ftplib clients and aliases rejected before network")
+
+if not rejected("elif gh workflow run ci.yml"):
+    raise SystemExit("elif command escaped")
+if rejected("elif printf safe"):
+    raise SystemExit("safe elif command was rejected")
+print("GREEN 4010081509/CURRENT: elif command segment classified; safe elif printf accepted")
+
+for body in (
+    "from pathlib import Path\nPath(\"/unsafe\").write_text(\"x\")\n",
+    "import os\nos.unlink(\"/unsafe\")\n",
+):
+    if inspected(body) is None:
+        raise SystemExit("unowned filesystem mutation escaped")
+safe_temp = (
+    "from pathlib import Path\n"
+    "from tempfile import TemporaryDirectory\n"
+    "with TemporaryDirectory() as td:\n"
+    "    Path(td).joinpath(\"fixture\").write_text(\"x\")\n"
+)
+if inspected(safe_temp) is not None:
+    raise SystemExit("temporary-owned filesystem mutation was rejected")
+print("GREEN 4010081513/CURRENT: unowned filesystem mutations rejected; TemporaryDirectory-owned Path write accepted")
+PY
+
+# Recorded exact-parent RED and current-head GREEN/CURRENT transcript:
+# RED 4010081477: exact parent accepted function-wide helper exemption with an unexpected launcher
+# RED 4010081488: exact parent accepted AWK output-pipe command delegation
+# RED 4010081494: exact parent accepted unknown shell descriptor 3>
+# RED 4010081502: exact parent accepted smtplib/ftplib aliases
+# RED 4010081509: exact parent accepted elif-prefixed command
+# RED 4010081513: exact parent accepted unowned Python filesystem mutation
+# GREEN 4010081477/CURRENT: dynamic helper exemption is bound to reviewed launcher and argv
+# GREEN 4010081488/CURRENT: AWK output pipe rejected; literal print accepted
+# GREEN 4010081494/CURRENT: unknown descriptors rejected; reviewed stderr redirect accepted
+# GREEN 4010081502/CURRENT: smtplib/ftplib clients and aliases rejected before network
+# GREEN 4010081509/CURRENT: elif command segment classified; safe elif printf accepted
+# GREEN 4010081513/CURRENT: unowned filesystem mutations rejected; TemporaryDirectory-owned Path write accepted
+~~~
+
+| Finding and immutable source | Exact review URL | Current disposition and evidence |
+|---|---|---|
+| 4010081477, source `b85839cc801395f4ec9560b056a2a6706c7aa306` | [discussion 4010081477](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4010081477) | RED reproduced helper-name/function-wide trust. The current scanner requires the helper's actual reviewed launcher primitive and exact `go_command` argv binding, rejecting the synthetic helper's unexpected `subprocess.run(go_command)` while retaining the reviewed launcher boundary. |
+| 4010081488, source `b85839cc801395f4ec9560b056a2a6706c7aa306` | [discussion 4010081488](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4010081488) | RED reproduced AWK output-pipe acceptance. The current scanner rejects output pipes outside quoted strings and regex literals, while retaining literal `print`. |
+| 4010081494, source `b85839cc801395f4ec9560b056a2a6706c7aa306` | [discussion 4010081494](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4010081494) | RED reproduced unknown `3>`, `9>>` and `{fd}>` descriptor acceptance. The current scanner rejects arbitrary descriptors and retains reviewed `1>`/`2>`/`/dev/null` and packet-owned fragment forms. |
+| 4010081502, source `b85839cc801395f4ec9560b056a2a6706c7aa306` | [discussion 4010081502](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4010081502) | RED reproduced network-capable `smtplib`/`ftplib` imports and aliases. The current scanner rejects module imports, dotted clients and `from ... import ... as` aliases before network use. |
+| 4010081509, source `b85839cc801395f4ec9560b056a2a6706c7aa306` | [discussion 4010081509](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4010081509) | RED reproduced unclassified `elif` command segments. The current executable-token normalization classifies `elif` and rejects the forbidden command while retaining safe `elif printf`. |
+| 4010081513, source `b85839cc801395f4ec9560b056a2a6706c7aa306` | [discussion 4010081513](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4010081513) | RED reproduced an unowned `Path.write_text` and `os.unlink` mutation. The current AST policy rejects unowned Python mutations and accepts only paths proved under a literal `TemporaryDirectory` ownership boundary. |
+
+All six fresh roots now have exact-parent RED, current-head GREEN/CURRENT and
+focused boundary evidence. Stale roots, roots without direct replies and prior
+current findings remain dispositioned by their historical and supplemental
+ledgers; none is resolved by staleness or an untimestamped reaction. Live
+App/runner/Lima/Docker/Keychain/launchd/workflow/credential verification
+remains explicitly unauthorized and unverified, with no merge claim; rollback
+remains packet-only to `b85839cc801395f4ec9560b056a2a6706c7aa306`.
+
+### Final packet certification after the six-finding exact-head follow-up
+
+The latest packet-only certification reruns matching-style Markdown fence
+parity, 157 packet-local link/anchor targets, valid backlog JSON, the ten-row /
+four-column ledger, embedded wrapper/scanner/filter/parity AST and compile, the
+full static scanner, all six focused boundaries, one-file scope, added-line
+secret/private-path hygiene and `git diff --check`. It records no live
+operation, merge, credential or workflow claim.
+
+~~~text
+GREEN final packet certification: 378 Markdown fence markers balanced with matching-style parser, 157 packet-local targets checked, backlog JSON valid, changed-boundary ledger valid with 10 data rows and 4 columns, embedded wrapper/scanner/filter/parity AST and compile valid, all six fresh finding URLs have exact RED/GREEN/CURRENT transcripts and focused boundaries, full static scanner passed with 286 shell commands and 77 Python heredoc bodies, one-file scope and added-line secret/private-path hygiene clean, and git diff --check passed
 ~~~
