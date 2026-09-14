@@ -6911,7 +6911,8 @@ def shell_commands(markdown):
                     pending = []
                     pending_numbers = []
                 continue
-            if info in fence_languages:
+            language = info.split(None, 1)[0] if info else ""
+            if language in fence_languages:
                 in_shell = True
                 shell_fence = marker
             continue
@@ -6995,9 +6996,11 @@ def python_heredoc_bodies(markdown):
                 if closes_fence(line, shell_fence):
                     in_shell = False
                     shell_fence = None
-            elif info in fence_languages:
-                in_shell = True
-                shell_fence = fence_marker
+            else:
+                language = info.split(None, 1)[0] if info else ""
+                if language in fence_languages:
+                    in_shell = True
+                    shell_fence = fence_marker
             continue
         if not in_shell:
             continue
@@ -7076,6 +7079,37 @@ def shell_command_substitution(tokens):
 def shell_process_substitution(command):
     """Reject Bash process substitution before shell token classification."""
     return re.search(r"(?<!\\)(?:<|>)\(", command) is not None
+
+
+def shell_output_redirection_violation(tokens):
+    """Reject output redirection except the packet's owned fragment directory."""
+    output_tokens = {
+        ">", ">>", "1>", "1>>", "2>", "2>>", "&>", "&>>", ">|",
+        "1>|", "2>|",
+    }
+    for index, token in enumerate(tokens):
+        operator = token if token in output_tokens else next(
+            (candidate for candidate in sorted(output_tokens, key=len, reverse=True)
+             if token.startswith(candidate)),
+            None,
+        )
+        if operator is None:
+            continue
+        destination = token[len(operator):]
+        if not destination and index + 1 < len(tokens):
+            destination = tokens[index + 1]
+        if not destination:
+            if token == ">" and index == len(tokens) - 1:
+                # shlex separates the safe stderr form `>&2` at the `&`
+                # command-control boundary; its `2` is the next segment.
+                continue
+            return "shell output redirection has no destination"
+        if destination in {"1", "2", "&1", "/dev/null"}:
+            continue
+        if destination.startswith("$pair_fragment_tmp/"):
+            continue
+        return "shell output redirection is not allowed outside the owned fragment directory"
+    return None
 
 def executable_basename(token):
     if "://" in token:
@@ -7415,7 +7449,13 @@ command_capable_interpreters = {
     "osascript", "raku", "jruby", "deno", "bun", "qjs", "quickjs", "jsc", "rscript",
 }
 remote_command_launchers = {"ssh", "rsync", "scp", "sftp"}
-python_network_modules = {"urllib.request", "requests", "socket"}
+python_network_modules = {
+    "http",
+    "http.client",
+    "urllib.request",
+    "requests",
+    "socket",
+}
 python_network_functions = {
     "urllib.request.urlopen",
     "urllib.request.urlretrieve",
@@ -7472,7 +7512,7 @@ def awk_command_violation(tokens):
             token in {"-f", "--file"}
             or token.startswith("-f=")
             or token.startswith("--file=")
-            or "system(" in token
+            or re.search(r"\bsystem\s*\(", token)
             or "getline" in token
         ):
             return "awk command delegation is not allowed"
@@ -7492,6 +7532,9 @@ def forbidden_command(tokens, depth=0):
         return "shell command substitutions are not allowed"
     if any(re.search(r"(?<!\\)(?:<|>)\(", token) for token in tokens):
         return "shell process substitutions are not allowed"
+    redirection_violation = shell_output_redirection_violation(tokens)
+    if redirection_violation:
+        return redirection_violation
     if shell_compound_syntax(tokens):
         return "unsupported shell compound syntax is not allowed"
     if python_stdin_command(tokens):
@@ -7552,16 +7595,7 @@ def forbidden_command(tokens, depth=0):
     }:
         return f"{executable} destructive/process-wide command is not allowed"
     if executable == "rm":
-        options = {"-f", "-r", "-R", "-rf", "-fr", "--force", "--recursive", "--"}
-        if any(token.startswith("-") and token not in options for token in tokens[1:]):
-            return "rm option is not parsed safely"
-        targets = [token for token in tokens[1:] if token not in options and not token.startswith("-")]
-        if not targets or any(
-            not target.startswith("$") or "tmp" not in target.casefold()
-            for target in targets
-        ):
-            return "rm cleanup is allowed only for an owned temporary-directory variable"
-        return None
+        return "direct rm cleanup is not allowed; use a reviewed TemporaryDirectory helper"
     if executable in {"source", "."}:
         return f"{executable} sourced script launcher is not allowed"
     if executable in {
@@ -8346,6 +8380,61 @@ def enclosing_python_function(node, parents):
     return None
 
 
+reviewed_python_helper_required_calls = {
+    "run_cgo_version_child": {"Popen", "capture_cgo_version_output"},
+    "run_go_child": {"Popen", "capture_go_child_output"},
+    "run_bounded_git_filter_query": {"Popen", "capture_git_filter_output"},
+    "run_bounded_git_status": {"Popen", "capture_git_status_output"},
+    "run_bounded_git_query": {"Popen", "capture_git_query_output"},
+    "git_source_control_entries": {"run", "git_command"},
+    "git_worktree_matches_pinned_blobs": {"run", "git_command", "read_bytes"},
+    "package_initialization_guard": {"git_worktree_matches_pinned_blobs", "run_go_child"},
+    "recheck_reviewed_source_checkout": {"run", "git_worktree_matches_pinned_blobs"},
+    "reject_toolexec_go_child": {"real_run"},
+    "reject_overlay_go_child": {"real_run"},
+    "reject_modfile_go_child": {"real_run"},
+    "reject_selector_guard_go_child": {"real_run"},
+    "observe_go_child": {"real_run"},
+    "observe_prior_go_child": {"real_run"},
+    "reject_current_go_child": {"real_run"},
+    "stop_at_go_child": {"real_run"},
+    "reject_go_child": {"real_run"},
+    "stop_at_git": {"real_check_output"},
+    "reject_check_output": {"real_check_output"},
+    "reject_run": {"real_run"},
+    "stop_at_go": {"real_run"},
+    "run_git_probe": {"run"},
+    "__init__": {"real_popen"},
+}
+
+
+def reviewed_python_helper_definition(node, parents):
+    """Require a reviewed helper's body to contain its actual primitive calls."""
+    function_name = enclosing_python_function(node, parents)
+    required = reviewed_python_helper_required_calls.get(function_name)
+    if required is None:
+        return False
+    calls = set()
+    function_node = next(
+        (
+            parent
+            for parent in _python_parent_chain(node, parents)
+            if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ),
+        None,
+    )
+    if function_node is None:
+        return False
+    for call in ast.walk(function_node):
+        if not isinstance(call, ast.Call):
+            continue
+        if isinstance(call.func, ast.Name):
+            calls.add(call.func.id)
+        elif isinstance(call.func, ast.Attribute):
+            calls.add(call.func.attr)
+    return required.issubset(calls)
+
+
 def _python_parent_chain(node, parents):
     parent = parents.get(node)
     while parent is not None:
@@ -8485,6 +8574,8 @@ def reviewed_python_dynamic_call(node, argument, tree, parents, literal_bindings
         return True
     function_name = enclosing_python_function(node, parents)
     if function_name not in reviewed_dynamic_function_names:
+        return False
+    if not reviewed_python_helper_definition(node, parents):
         return False
     if isinstance(argument, ast.Starred):
         argument = argument.value
@@ -8913,7 +9004,7 @@ synthetic = [
     ("awk-getline", "awk 'BEGIN { \"gh api repos/example/project\" | getline value }'", True),
     ("awk-safe-print", "awk 'BEGIN { print \"safe\" }'", False),
     ("rm-broad-cleanup", "rm -rf /tmp/reviewed-packet", True),
-    ("rm-owned-temp", "rm -rf \"$owned_tmp\"", False),
+    ("rm-owned-temp", "rm -rf \"$owned_tmp\"", True),
     ("killall-broad", "killall runnerd", True),
     ("pkill-broad", "pkill -f runnerd", True),
     ("dd-destructive", "dd if=/dev/zero of=/tmp/reviewed-packet", True),
@@ -16884,9 +16975,10 @@ those fences. A safe marker no longer authorizes an unresolved dynamic command:
 only literal commands or explicitly proven packet-owned forwarding/static
 fixture shapes are retained. The scanner adds narrow awk delegation checks,
 network-capable Python import/call checks, Git `--textconv` rejection, and
-destructive cleanup/process-wide kill rejection while preserving the owned
-temporary-directory cleanup boundary. The six finding URLs remain the source
-of truth for review disposition:
+destructive cleanup/process-wide kill rejection. Direct shell `rm` and output
+redirection now fail closed; cleanup must use a reviewed `TemporaryDirectory`
+helper, and packet-owned fragment output is the only reviewed redirection.
+The six finding URLs remain the source of truth for review disposition:
 
 | Finding and immutable source | Exact review URL | Current disposition and evidence |
 |---|---|---|
@@ -16895,7 +16987,7 @@ of truth for review disposition:
 | 4009466697, source `bb6ca85860c821b6bea644ceeac52cfcfc430899` | [discussion 4009466697](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4009466697) | RED reproduced awk command delegation. Current candidate rejects `system`, `getline` and file-program forms while retaining literal `awk` print. |
 | 4009466708, source `bb6ca85860c821b6bea644ceeac52cfcfc430899` | [discussion 4009466708](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4009466708) | RED reproduced network-capable Python acceptance. Current candidate rejects urllib/requests/socket modules and calls before any child/network operation. |
 | 4009466716, source `bb6ca85860c821b6bea644ceeac52cfcfc430899` | [discussion 4009466716](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4009466716) | RED reproduced Git helper-option acceptance. Current candidate rejects `--textconv` in Git command delegation while retaining `--no-textconv`. |
-| 4009466724, source `bb6ca85860c821b6bea644ceeac52cfcfc430899` | [discussion 4009466724](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4009466724) | RED reproduced broad cleanup/process command acceptance. Current candidate rejects broad `rm`, killall/pkill and destructive utility forms, retaining only an owned `$*_tmp` cleanup variable. |
+| 4009466724, source `bb6ca85860c821b6bea644ceeac52cfcfc430899` | [discussion 4009466724](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4009466724) | RED reproduced broad cleanup/process command acceptance, including a malicious value hidden behind `$owned_tmp`. Current candidate rejects every direct `rm`, killall/pkill and destructive utility form; cleanup must use the reviewed `TemporaryDirectory` helper. |
 
 The current candidate GREEN/CURRENT boundary is packet-only and static. It
 loads the candidate scanner source, executes no prescription, and uses only
@@ -16987,9 +17079,9 @@ for command in (
 ):
     if not rejected(command):
         raise SystemExit(f"destructive command escaped: {command!r}")
-if rejected('rm -rf "$owned_tmp"'):
-    raise SystemExit("owned temporary cleanup boundary was rejected")
-print("GREEN 4009466724/CURRENT: broad cleanup/kill/dd rejected; owned temporary cleanup accepted")
+if not rejected('rm -rf "$owned_tmp"'):
+    raise SystemExit("cleanup variable value was not rejected")
+print("GREEN 4009466724/CURRENT: broad cleanup/kill/dd and variable-valued rm rejected; TemporaryDirectory helper is required")
 PY
 ~~~
 
@@ -17001,7 +17093,7 @@ GREEN 4009466688/CURRENT: marked dynamic command rejected; literal binding was i
 GREEN 4009466697/CURRENT: awk system/getline/file-program delegation rejected; literal print accepted
 GREEN 4009466708/CURRENT: urllib/requests/socket imports and calls rejected before network use
 GREEN 4009466716/CURRENT: Git --textconv rejected; --no-textconv boundary accepted
-GREEN 4009466724/CURRENT: broad cleanup/kill/dd rejected; owned temporary cleanup accepted
+GREEN 4009466724/CURRENT: broad cleanup/kill/dd and variable-valued rm rejected; TemporaryDirectory helper is required
 ~~~
 
 The six findings are therefore dispositioned by exact-parent RED,
@@ -17570,4 +17662,133 @@ Recorded current packet certification output:
 
 ~~~text
 GREEN prior packet certification: 356 Markdown fences balanced, 63 packet-local targets checked with matching-style fragments, backlog JSON valid, changed-boundary ledger valid with 10 data rows and 4 columns, embedded wrapper/scanner/filter/parity AST and compile valid, seven prior current finding URLs and exact RED/GREEN/CURRENT transcripts present, changed scope was one packet path, added-line secret/private-path hygiene clean, and git diff --check passed
+~~~
+
+### Fresh exact-head Codex follow-up at `4269d2cd474c18a1d3db9e434a8d71ecfebe9526`
+
+The fresh manual request [issuecomment-5671059150](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5671059150) completed as [Codex review 5203172931](https://github.com/1XP-AI/gh-runnerd/pull/78#pullrequestreview-5203172931) for exact head `4269d2cd474c18a1d3db9e434a8d71ecfebe9526`. Its six P2 findings were reproduced first against that immutable parent; no command, child, network, workflow, runner, credential or live operation ran:
+
+~~~text
+RED 4009841543: exact parent inspect_python_heredoc(helper, safe_marker=True) => None; marked run_go_child(args): subprocess.run(args) forwarded gh workflow run ci.yml
+RED 4009841551: exact parent forbidden_command(awk system with whitespace before `(`) => None
+RED 4009841555: exact parent forbidden_command(rm -rf "$owned_tmp") => None; assigned value was not inspected
+RED 4009841562: exact parent inspect_python_heredoc(import http.client + HTTPSConnection.request) => None
+RED 4009841568: exact parent shell_commands(````sh title=rerun`) => []; gh workflow run ci.yml was skipped
+RED 4009841572: exact parent forbidden_command(printf x > /var/lib/actions-runner/.credentials) => None; `: >` was likewise accepted
+~~~
+
+The minimal packet-only correction binds dynamic helper exemptions to their actual reviewed helper body primitives, recognizes optional Markdown info-string attributes by leading language token, matches AWK `system` with intervening whitespace, rejects `http`/`http.client` network imports, rejects direct `rm` cleanup and unowned output redirection, and retains only packet-owned fragment output plus the reviewed `TemporaryDirectory` cleanup route. The focused static boundary probe below uses in-memory strings and AST/source checks only:
+
+~~~sh
+# g01-safe-python-heredoc: reviewed fresh exact-head six-finding boundary
+set -euo pipefail
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import re
+import shlex
+from pathlib import Path
+
+packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
+anchor = packet.index("def forbidden_command(tokens, depth=0):")
+start = packet.rfind(
+    "source = Path(\"docs/evidence/g01-recovery-packet.md\").read_text(encoding=\"utf-8\")",
+    0,
+    anchor,
+)
+end = packet.index("\nmatches = []", anchor)
+namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+exec(compile(packet[start:end], "<fresh-current-scanner>", "exec"), namespace)
+
+def rejected(command):
+    return any(
+        namespace["forbidden_command"](segment) is not None
+        for segment in namespace["shell_token_segments"](command)
+    )
+
+helper = (
+    "import subprocess\n"
+    "def run_go_child(args):\n"
+    "    subprocess.run(args)\n"
+    "run_go_child([\"gh\", \"workflow\", \"run\", \"ci.yml\"])\n"
+)
+if namespace["inspect_python_heredoc"](helper, True) is None:
+    raise SystemExit("helper body exemption escaped")
+print("GREEN 4009841543/CURRENT: dynamic helper exemption requires actual reviewed body primitives")
+
+if not rejected("awk 'BEGIN { system (\"gh workflow run ci.yml\") }'"):
+    raise SystemExit("AWK system whitespace escaped")
+if rejected("awk 'BEGIN { print \"safe\" }'"):
+    raise SystemExit("safe AWK print was rejected")
+print("GREEN 4009841551/CURRENT: AWK system with whitespace rejected; literal print accepted")
+
+if not rejected('rm -rf "$owned_tmp"'):
+    raise SystemExit("cleanup variable escaped")
+print("GREEN 4009841555/CURRENT: variable-valued rm rejected; TemporaryDirectory helper required")
+
+http_body = (
+    "import http.client\n"
+    "http.client.HTTPSConnection(\"api.github.com\").request(\"GET\", \"/\")\n"
+)
+if namespace["inspect_python_heredoc"](http_body, True) is None:
+    raise SystemExit("http.client network call escaped")
+print("GREEN 4009841562/CURRENT: http.client import/call rejected before network use")
+
+if list(namespace["shell_commands"]("```sh title=rerun\ngh workflow run ci.yml\n```")) != [
+    ("gh workflow run ci.yml", 2)
+]:
+    raise SystemExit("fence info-string attributes skipped the shell command")
+print("GREEN 4009841568/CURRENT: leading shell language token recognized with valid info attributes")
+
+for command in (
+    "printf x > /var/lib/actions-runner/.credentials",
+    ": > /var/lib/actions-runner/.credentials",
+    "printf x > \"$owned_tmp/.credentials\"",
+):
+    if not rejected(command):
+        raise SystemExit(f"unowned output redirection escaped: {command!r}")
+if rejected('printf x > "$pair_fragment_tmp/output"'):
+    raise SystemExit("packet-owned fragment output was rejected")
+print("GREEN 4009841572/CURRENT: unowned output redirection rejected; packet-owned fragment output accepted")
+PY
+~~~
+
+Recorded current-head GREEN/CURRENT output:
+
+~~~text
+GREEN 4009841543/CURRENT: dynamic helper exemption requires actual reviewed body primitives
+GREEN 4009841551/CURRENT: AWK system with whitespace rejected; literal print accepted
+GREEN 4009841555/CURRENT: variable-valued rm rejected; TemporaryDirectory helper required
+GREEN 4009841562/CURRENT: http.client import/call rejected before network use
+GREEN 4009841568/CURRENT: leading shell language token recognized with valid info attributes
+GREEN 4009841572/CURRENT: unowned output redirection rejected; packet-owned fragment output accepted
+~~~
+
+| Finding and immutable source | Exact review URL | Current disposition and evidence |
+|---|---|---|
+| 4009841543, source `4269d2cd474c18a1d3db9e434a8d71ecfebe9526` | [discussion 4009841543](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4009841543) | RED reproduced helper-name-only trust. The current scanner requires the actual reviewed helper body to contain its expected primitive calls and rejects the synthetic `run_go_child` forwarding helper. |
+| 4009841551, source `4269d2cd474c18a1d3db9e434a8d71ecfebe9526` | [discussion 4009841551](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4009841551) | RED reproduced AWK `system (` omission. The current scanner matches optional whitespace before `(` and retains literal `awk print`. |
+| 4009841555, source `4269d2cd474c18a1d3db9e434a8d71ecfebe9526` | [discussion 4009841555](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4009841555) | RED reproduced variable-name-only cleanup trust. Every direct `rm` now fails closed; cleanup must use the reviewed `TemporaryDirectory` helper. |
+| 4009841562, source `4269d2cd474c18a1d3db9e434a8d71ecfebe9526` | [discussion 4009841562](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4009841562) | RED reproduced `http.client` network-capable call acceptance. `http` and `http.client` imports now fail closed before any network use. |
+| 4009841568, source `4269d2cd474c18a1d3db9e434a8d71ecfebe9526` | [discussion 4009841568](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4009841568) | RED reproduced a valid shell fence with trailing info attributes being skipped. The scanner now classifies the leading language token and scans the body. |
+| 4009841572, source `4269d2cd474c18a1d3db9e434a8d71ecfebe9526` | [discussion 4009841572](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4009841572) | RED reproduced unowned output redirection to a runner credential path. The scanner rejects unowned destinations while retaining only packet-owned fragment output and safe stderr/dev-null redirects. |
+
+These six current findings now have exact-parent RED, current-head GREEN/CURRENT
+and focused boundary evidence. Existing stale roots, roots without direct
+replies and prior current findings remain dispositioned by their historical and
+supplemental ledgers; none is resolved by staleness or an untimestamped
+reaction. Live App/runner/Lima/Docker/Keychain/launchd/workflow/credential
+verification remains explicitly unauthorized and unverified, with no merge
+claim; rollback remains packet-only to `4269d2cd474c18a1d3db9e434a8d71ecfebe9526`.
+
+### Final packet certification after fresh exact-head follow-up
+
+Final packet-only certification includes matching-style Markdown fence parity,
+157 packet-local link/anchor targets, valid backlog JSON, the ten-row/four-column
+ledger, embedded wrapper/scanner/filter/parity AST and compile, full static
+scanner and focused boundaries for all six fresh URLs, one-file scope,
+added-line secret/private-path hygiene and `git diff --check`. No live
+operation or merge is claimed.
+
+~~~text
+GREEN final packet certification: 374 Markdown fence markers balanced with matching-style parser, 157 packet-local targets checked, backlog JSON valid, changed-boundary ledger valid with 10 data rows and 4 columns, embedded wrapper/scanner/filter/parity AST and compile valid, all six fresh finding URLs have exact RED/GREEN/CURRENT transcripts and focused boundaries, full static scanner passed with 284 shell commands and 76 Python heredoc bodies, one-file scope and added-line secret/private-path hygiene clean, and git diff --check passed
 ~~~
