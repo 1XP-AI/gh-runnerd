@@ -253,15 +253,19 @@ fuzz seed work that is absent from the source-derived expected set. Executable
 `Example` declarations are likewise rejected before a set digest is claimed
 because examples are otherwise outside the source-derived test-name set. The
 source scanner consumes consecutive whitespace and line/block comments between
-declaration tokens, so comments cannot hide a valid top-level test name. The
-wrapper queries the effective
-`go env GOFLAGS`, including GOENV/configuration, rejects non-empty output, and
-then pins `GOFLAGS=` for metadata and the original command. After
-parsing command-prefix assignments, it creates the Go-child environment with
-`GOWORK=off` and passes that exact environment to every Go metadata and test
-subprocess; inherited or command-supplied workspace paths are therefore
-ignored before package metadata can be selected. The reviewed behavior is
-force-off, not validation or reuse of a caller-provided `go.work` file.
+declaration tokens, so comments cannot hide a valid top-level test name. Before
+opening any candidate source file, the wrapper performs the immutable reviewed
+module-tree and tracked/untracked/ignored status gate; only a clean source tree
+can reach package metadata and source derivation. The wrapper queries the
+effective `go env GOFLAGS`, including GOENV/configuration, rejects non-empty
+output, and then pins `GOFLAGS=` for metadata and the original command. After
+parsing command-prefix assignments, it rejects `PATH` and equivalent dynamic
+loader-affecting prefixes before any guarded Go subprocess, then creates the
+Go-child environment with `GOWORK=off` and passes that exact environment to
+every Go metadata and test subprocess; inherited or command-supplied workspace
+paths are therefore ignored before package metadata can be selected. The
+reviewed behavior is force-off, not validation or reuse of a caller-provided
+`go.work` file.
 Race-mode prescriptions reject inherited or command-supplied `GORACE` before
 either source derivation or test execution. The wrapper pins `CGO_ENABLED=1`
 after command-prefix parsing, rejects a command-supplied conflicting value,
@@ -354,6 +358,30 @@ while command and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", command[0]):
     key, value = command.pop(0).split("=", 1)
     command_assignments[key] = value
     env[key] = value
+loader_assignment_names = {
+    "PATH",
+    "LD_PRELOAD",
+    "LD_PRELOAD_32",
+    "LD_PRELOAD_64",
+    "LD_LIBRARY_PATH",
+    "LD_LIBRARY_PATH_32",
+    "LD_LIBRARY_PATH_64",
+    "LD_AUDIT",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FALLBACK_LIBRARY_PATH",
+    "DYLD_FRAMEWORK_PATH",
+    "DYLD_FALLBACK_FRAMEWORK_PATH",
+    "DYLD_ROOT_PATH",
+}
+unsafe_loader_assignments = sorted(
+    key for key in command_assignments if key in loader_assignment_names
+)
+if unsafe_loader_assignments:
+    raise SystemExit(
+        f"{label}: executable-loader environment assignments are not allowed: "
+        + ", ".join(unsafe_loader_assignments)
+    )
 fixture_child_env = {
     "G01_INPUT_CHILD",
     "G01_NAMED_FIFO_CHILD",
@@ -989,8 +1017,6 @@ def reject_unsupported_regexp_syntax(pattern, phase):
         raise SystemExit(f"{label}: {phase} uses regexp syntax outside the reviewed Go subset")
 
 
-source_fuzz_guard()
-
 run_indices = [
     index for index, value in enumerate(list_base_args)
     if value == "-run" or value.startswith("-run=")
@@ -1018,6 +1044,11 @@ for skip_pattern in skip_patterns:
     reject_unsupported_regexp_syntax(skip_pattern, "-skip")
 
 test_source_paths = package_initialization_guard()
+
+# The package tree/status gate above must complete before this broader source
+# scan opens any candidate *_test.go path. In particular, an ignored FIFO or
+# other special file is rejected by git status before this glob/read path.
+source_fuzz_guard()
 
 def skip_source_ignored(source, position):
     while position < len(source):
@@ -1049,6 +1080,15 @@ def skip_source_literal(source, position):
             return position + 1
         position += 1
     raise SystemExit(f"{label}: unterminated Go literal")
+
+
+def is_go_lower_rune(rune):
+    # cmd/go uses unicode.IsLower on the first suffix rune. Python str.islower
+    # is not equivalent because it treats some non-Ll letters, such as U+00AA,
+    # as lowercase; keep the Go Unicode lowercase-letter category exactly.
+    import unicodedata
+
+    return unicodedata.category(rune) == "Ll"
 
 
 def source_test_names(source_path):
@@ -1106,7 +1146,7 @@ def source_test_names(source_path):
                 )
             if name.startswith("Test"):
                 suffix = name[len("Test"):]
-                if not suffix or not suffix[0].islower():
+                if not suffix or not is_go_lower_rune(suffix[0]):
                     names.append(name)
         position = cursor
     if brace_depth:
@@ -1558,6 +1598,30 @@ for index, line in enumerate(lines):
     while command and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", command[0]):
         key, value = command.pop(0).split("=", 1)
         env[key] = value
+    loader_assignment_names = {
+        "PATH",
+        "LD_PRELOAD",
+        "LD_PRELOAD_32",
+        "LD_PRELOAD_64",
+        "LD_LIBRARY_PATH",
+        "LD_LIBRARY_PATH_32",
+        "LD_LIBRARY_PATH_64",
+        "LD_AUDIT",
+        "DYLD_INSERT_LIBRARIES",
+        "DYLD_LIBRARY_PATH",
+        "DYLD_FALLBACK_LIBRARY_PATH",
+        "DYLD_FRAMEWORK_PATH",
+        "DYLD_FALLBACK_FRAMEWORK_PATH",
+        "DYLD_ROOT_PATH",
+    }
+    unsafe_loader_assignments = sorted(
+        key for key in env if key in loader_assignment_names
+    )
+    if unsafe_loader_assignments:
+        raise SystemExit(
+            f"line {index + 2}: executable-loader environment assignments are not allowed: "
+            + ", ".join(unsafe_loader_assignments)
+        )
     if command and command[0] == "env":
         raise SystemExit(
             f"line {index + 2}: standard env-wrapped go test command is not allowed"
@@ -4209,7 +4273,9 @@ to fail closed if a documentation correction accidentally adds a live App,
 runner, Docker, Lima, Keychain, launchd, workflow or remote-fetch operation.
 It joins shell continuations, strips assignment/`env`/`command`/`sudo`/`exec`
 prefixes, splits executable shell command chains and examines only each
-executable command token. Markdown prose,
+executable command token. Shell command-string forms (`bash`/`sh` and
+equivalent absolute, optioned or `busybox` forms with `-c`) are recursively
+inspected and rejected before any nested payload could execute. Markdown prose,
 URLs, comments, Python heredoc bodies, scanner source and synthetic fixtures
 are not executable prescriptions and are not scanned:
 
@@ -4316,9 +4382,59 @@ def executable_tokens(tokens):
             tokens.pop(0)
     return tokens
 
-def forbidden_command(tokens):
+shell_executables = {
+    "sh", "bash", "dash", "zsh", "ksh", "mksh", "ash", "fish", "csh", "tcsh",
+}
+
+def shell_command_string(tokens):
     if not tokens:
         return None
+    shell_index = 0
+    executable = tokens[0].rsplit("/", 1)[-1]
+    if executable == "busybox":
+        if len(tokens) < 2 or tokens[1].rsplit("/", 1)[-1] not in shell_executables:
+            return None
+        shell_index = 1
+        executable = tokens[shell_index].rsplit("/", 1)[-1]
+    if executable not in shell_executables:
+        return None
+    index = shell_index + 1
+    while index < len(tokens):
+        option = tokens[index]
+        if option == "--":
+            return None
+        if option == "-c" or option == "--command":
+            payload = tokens[index + 1] if index + 1 < len(tokens) else None
+            return executable, payload
+        if option.startswith("--command="):
+            return executable, option.split("=", 1)[1]
+        if option.startswith("-c="):
+            return executable, option.split("=", 1)[1]
+        if option.startswith("-") and not option.startswith("--") and "c" in option[1:]:
+            payload = tokens[index + 1] if index + 1 < len(tokens) else None
+            return executable, payload
+        if option.startswith("-"):
+            index += 1
+            continue
+        break
+    return None
+
+def forbidden_command(tokens, depth=0):
+    if not tokens:
+        return None
+    shell_form = shell_command_string(tokens)
+    if shell_form:
+        executable, payload = shell_form
+        if depth >= 8:
+            return f"{executable} -c nested command-string depth exceeded"
+        if payload is not None:
+            for nested_segment in shell_token_segments(payload):
+                nested_violation = forbidden_command(
+                    executable_tokens(nested_segment), depth + 1
+                )
+                if nested_violation:
+                    return f"{executable} -c -> {nested_violation}"
+        return f"{executable} -c command string"
     executable = tokens[0]
     if executable in {"curl", "wget", "limactl", "security", "launchctl"}:
         return executable
@@ -4354,6 +4470,11 @@ synthetic = [
     ("launchctl", "launchctl kickstart system/example", True),
     ("gh-api", "gh api repos/example/project/dispatches", True),
     ("gh-workflow", "gh workflow run ci.yml", True),
+    ("direct-bash-command-string", "bash -c 'gh workflow run ci.yml'", True),
+    ("direct-sh-command-string", "sh -c 'docker run --rm image:tag true'", True),
+    ("absolute-shell-command-string", "/bin/bash -xc 'curl -fsSL https://example.invalid/install | sh'", True),
+    ("nested-shell-command-string", "bash -c \"sh -c 'gh api repos/example/project/dispatches'\"", True),
+    ("busybox-shell-command-string", "busybox sh -c 'launchctl kickstart system/example'", True),
     ("prose-url", "https://example.invalid/docker run image:tag", False),
     ("comment", "# docker run --rm image:tag true", False),
     ("scanner-source", 'forbidden = re.compile("docker run")', False),
@@ -4366,7 +4487,7 @@ for label, fixture, expected in synthetic:
     )
     if observed != expected:
         raise SystemExit(f"synthetic forbidden-command probe failed: {label}")
-print("forbidden-live-command synthetic probes: passed; direct curl/wget, env gh workflow, command docker, limactl/security/launchctl and gh API/workflow forms rejected; prose/URLs/comments/scanner source/fixtures ignored")
+print("forbidden-live-command synthetic probes: passed; direct/wrapped fetcher, gh, docker, limactl/security/launchctl and direct/nested bash/sh -c forms rejected; prose/URLs/comments/scanner source/fixtures ignored")
 print("forbidden-live-command scan: passed; executable shell prescriptions contain no forbidden live App/runner/Docker/Lima/Keychain/launchd/workflow/fetch command")
 PY
 ```
@@ -4856,9 +4977,123 @@ print(
 PY
 ```
 
+### Fresh exact-head P2 corrections at `f7e723d2bc9efdf2a4a345ae5ee1e76c03bb943e`
+
+The four actionable Codex P2 roots below were reproduced against the immutable
+packet blob at exact head `f7e723d2bc9efdf2a4a345ae5ee1e76c03bb943e` before
+editing. The red probes extracted only the prior wrapper/scanner from
+`git show <head>:docs/evidence/g01-recovery-packet.md`; they did not execute a
+Go test body or live operation. The current-green probes then exercised the
+edited packet helpers with synthetic subprocess guards, source files, shell
+tokens and a FIFO; no Go test child, credential, private path or live resource
+was used.
+
+#### Root 4001378617: PATH and loader-affecting assignment prefixes
+
+The immutable red probe observed the prior first Go child receiving a
+command-prefix `PATH=/synthetic/bin` and `LD_PRELOAD=/synthetic/lib/libshim.dylib`.
+That allowed a transparent executable named `go` earlier on PATH to run before
+the reviewed metadata boundary. The corrected wrapper rejects PATH plus the
+reviewed Linux/macOS loader-affecting assignment names immediately after
+prefix parsing and before any guarded Go subprocess.
+
+Recorded red output:
+
+```text
+RED PATH/loader-prefix gap: prior f7e723d2bc9efdf2a4a345ae5ee1e76c03bb943e forwarded PATH='/synthetic/bin' and LD_PRELOAD='/synthetic/lib/libshim.dylib' to first Go child ('go', 'env', 'GOFLAGS'); a transparent executable wrapper could run
+```
+
+Recorded current-green output:
+
+```text
+loader-prefix regression: passed; PATH and 13 equivalent LD_/DYLD_ assignments rejected before any Go child/result, and transparent go wrapper did not run
+```
+
+The boundary includes separated command-prefix assignments, an executable
+transparent `go` wrapper that would leave a marker if reached, and the allowed
+`GOTOOLCHAIN` assignment remains outside the rejection set. Final anchor:
+[PATH/loader boundary](#root-4001378617-path-and-loader-affecting-assignment-prefixes).
+
+#### Root 4001378618: Go Unicode lowercase predicate for test names
+
+The immutable red probe used the prior Python `str.islower()` predicate and
+showed that it omitted `Testª`, although Go's `unicode.IsLower(U+00AA)` is false.
+The corrected source-name helper uses the Unicode lowercase-letter (`Ll`)
+category, matching cmd/go's `isTest` rule: an empty suffix or a first suffix
+rune that is not lowercase is accepted, including uppercase, titlecase and
+other non-lowercase runes.
+
+Recorded red output:
+
+```text
+RED Unicode Test-name gap: prior f7e723d2bc9efdf2a4a345ae5ee1e76c03bb943e used Python islower and omitted Testª (Go unicode.IsLower(U+00AA)=false); observed ['Testǅ', 'Testƻ', 'Test中'], expected ['Testǅ', 'Testƻ', 'Test中', 'Testª']
+```
+
+Recorded current-green output:
+
+```text
+source-name Unicode regression: passed; Testª/title/other non-lowercase runes accepted, lowercase Testa/Testǆ rejected, no Go child
+```
+
+The source-only boundary retained `Test`, `Test1`, `Test_Foo`, ASCII
+uppercase, titlecase `ǅ`, other-letter `ƻ`/`中`, and `Testª`, while rejecting
+lowercase-initial `Testa` and `Testǆ`; no Go child or test body ran. Final
+anchor: [Go Unicode test-name boundary](#root-4001378618-go-unicode-lowercase-predicate-for-test-names).
+
+#### Root 4001378622: recursive shell command-string scan
+
+The immutable red probe showed that the prior executable-token scan accepted
+direct `bash -c`/`sh -c` and nested shell command strings without inspecting
+their payloads. The corrected static scanner recognizes absolute and optioned
+shells, `busybox sh`, wrapper prefixes and nested command strings, recursively
+examining payloads and rejecting the command-string form before any nested
+payload could execute.
+
+Recorded red output:
+
+```text
+RED nested-shell command gap: prior f7e723d2bc9efdf2a4a345ae5ee1e76c03bb943e accepted direct bash/sh -c and nested shell command strings without recursively inspecting their live command payloads
+```
+
+Recorded current-green output:
+
+```text
+nested-shell forbidden-command regression: passed; direct/absolute/optioned/env/busybox and nested bash/sh -c forms rejected; safe printf boundary retained
+```
+
+The focused boundary covered direct bash/sh, `/bin/bash -xc`, env-wrapped
+`/bin/sh --command`, `busybox sh -c`, and nested `bash -c "sh -c ..."`, while
+retaining a safe direct `printf` result. Final anchor: [recursive shell
+command-string boundary](#root-4001378622-recursive-shell-command-string-scan).
+
+#### Root 4001378624: cleanliness gate before source reads
+
+The immutable red probe created an ignored FIFO named `stuck_test.go` and ran
+the prior source-fuzz scan in a bounded child; it blocked while opening the
+candidate before the cleanliness gate. The corrected order performs the
+immutable module-tree and `git status --ignored=matching` gate first, then
+opens candidate source files only after a clean result. A synthetic ignored
+FIFO status record is rejected before read, metadata/Go child or blocking.
+
+Recorded red output:
+
+```text
+RED cleanliness/source-read gap: prior f7e723d2bc9efdf2a4a345ae5ee1e76c03bb943e opened ignored candidate FIFO stuck_test.go before the status gate; bounded probe blocked in source scan
+```
+
+Recorded current-green output:
+
+```text
+FIFO cleanliness regression: passed; ignored stuck_test.go rejected before read, metadata/Go child, or blocking
+```
+
+The green probe verifies the candidate is a real FIFO, status reports it as
+ignored, the candidate `read_text` hook is never reached, and no Go subprocess
+is started. Final anchor: [cleanliness-before-source-read boundary](#root-4001378624-cleanliness-gate-before-source-reads).
+
 ### Current exact-head Luna/Codex finding ledger
 
-These eleven actionable roots were reproduced against immutable prior packet
+These fifteen actionable roots were reproduced against immutable prior packet
 heads and are carried with their discussion URL and exact source commit. The
 rows describe only offline/static or wrapper evidence; they do not resolve the
 GitHub discussions or claim a live result.
@@ -4876,3 +5111,7 @@ GitHub discussions or claim a live result.
 | [4000964602](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000964602), source [22a2923033c875ddd4f755774f79f60b94649449](https://github.com/1XP-AI/gh-runnerd/commit/22a2923033c875ddd4f755774f79f60b94649449) | The prior source set omitted executable `Example` functions even though an unfiltered prescription executes them. The conservative correction rejects any top-level `Example` declaration before claiming a set digest. | Focused synthetic `ExampleWidget` declaration rejected before a digest or result was recorded; no example body ran. |
 | [4001254021](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4001254021), source [423d4fc501120a014e63f77d3ef6652606d0326a lines 971-1062](https://github.com/1XP-AI/gh-runnerd/blob/423d4fc501120a014e63f77d3ef6652606d0326a/docs/evidence/g01-recovery-packet.md#L971-L1062) | Reproduced: the immutable source-name helper returned after its first `//` line, so consecutive line/block comments between `func` and `TestHidden` caused the valid declaration to be omitted. Corrected: `skip_source_ignored` now consumes whitespace and consecutive line/block comments until the next token; final source-name anchors are lines 1019-1111. | Immutable red/current-green source-only evidence is recorded at packet lines 4574-4688; the current probe discovers `TestHidden` and observed zero Go children. |
 | [4001254025](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4001254025), source [423d4fc501120a014e63f77d3ef6652606d0326a lines 1065-1083](https://github.com/1XP-AI/gh-runnerd/blob/423d4fc501120a014e63f77d3ef6652606d0326a/docs/evidence/g01-recovery-packet.md#L1065-L1083) | Reproduced: the immutable helper left `[[:xdigit:]]` untranslated, so Python derived a set different from Go's ASCII xdigit class. Corrected: preflight now scans nested POSIX classes against the explicit seven-name translation table and rejects all other classes before compile or metadata, while preserving reviewed translations and escaped literals; final regexp anchors are lines 935-986 and 1114-1123. | Immutable red/current-green mismatch and no-Go-child evidence is recorded at packet lines 4691-4856; six unsupported classes were rejected before Python compile and zero Go children were observed. |
+| [4001378617](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4001378617), source [f7e723d2bc9efdf2a4a345ae5ee1e76c03bb943e](https://github.com/1XP-AI/gh-runnerd/commit/f7e723d2bc9efdf2a4a345ae5ee1e76c03bb943e) | Reproduced: command-prefix `PATH` and loader variables reached the first Go child, allowing a transparent executable-loader override. Corrected: the wrapper and package/build metadata audit reject PATH plus reviewed `LD_`/`DYLD_` loader-affecting assignments before guarded subprocesses. | [Final PATH/loader evidence](#root-4001378617-path-and-loader-affecting-assignment-prefixes): 14 assignment forms rejected before any Go child/result; a transparent `go` wrapper did not run. |
+| [4001378618](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4001378618), source [f7e723d2bc9efdf2a4a345ae5ee1e76c03bb943e](https://github.com/1XP-AI/gh-runnerd/commit/f7e723d2bc9efdf2a4a345ae5ee1e76c03bb943e) | Reproduced: Python `str.islower()` omitted Go-valid `Testª`. Corrected: source derivation matches cmd/go's `unicode.IsLower` lowercase-letter rule, accepting non-lowercase Unicode initial runes and rejecting lowercase ones. | [Final Unicode evidence](#root-4001378618-go-unicode-lowercase-predicate-for-test-names): `Testª`, titlecase and other non-lowercase boundaries accepted; lowercase cases rejected; no Go child. |
+| [4001378622](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4001378622), source [f7e723d2bc9efdf2a4a345ae5ee1e76c03bb943e](https://github.com/1XP-AI/gh-runnerd/commit/f7e723d2bc9efdf2a4a345ae5ee1e76c03bb943e) | Reproduced: direct and nested `bash/sh -c` payloads bypassed the executable-token scan. Corrected: shell command-string forms are recursively inspected and fail closed across direct, absolute, optioned, wrapper-prefixed, `busybox` and nested forms. | [Final nested-shell evidence](#root-4001378622-recursive-shell-command-string-scan): all direct/nested forms rejected while a safe direct command remained accepted by the pure scanner. |
+| [4001378624](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4001378624), source [f7e723d2bc9efdf2a4a345ae5ee1e76c03bb943e](https://github.com/1XP-AI/gh-runnerd/commit/f7e723d2bc9efdf2a4a345ae5ee1e76c03bb943e) | Reproduced: source-fuzz scanning opened an ignored FIFO before the cleanliness gate and blocked. Corrected: immutable tree/status cleanliness runs before candidate glob/read; the guard rejects ignored special files before metadata or Go execution. | [Final FIFO evidence](#root-4001378624-cleanliness-gate-before-source-reads): ignored `stuck_test.go` rejected before read, metadata/Go child or blocking. |
