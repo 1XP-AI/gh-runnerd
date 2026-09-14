@@ -261,10 +261,13 @@ are rejected when inherited or command-supplied before the first Git query.
 The static forbidden-command scanner also rejects `git -c alias.*=!…` shell
 aliases and Git external-tool delegation (`difftool`, `mergetool`,
 `--extcmd`, `--tool` and `--ext-diff`), `GIT_EXTERNAL_DIFF`,
-`diff.external` and `git --config-env alias.*` before generic Git executable
-classification; no Git alias, external-diff helper or Git command-delegation
-option can hide a workflow, Docker, or other delegated command behind an
-otherwise allowed token.
+`diff.external`, `git --config-env alias.*`, `git --exec-path`, and
+command-capable `-c` keys (`core.fsmonitor` except the reviewed `false`,
+`core.sshCommand` and `credential.helper`) before generic Git executable
+classification; no Git alias, external-diff/helper, transport override or Git
+command-delegation option can hide a workflow, Docker, or other delegated
+command behind an otherwise allowed token. Shell wrappers `nice`, `timeout`
+and `setsid` are rejected before their operands are classified.
 `GOCACHEPROG` is rejected unless empty and then pinned empty before any Go child;
 `GOAUTH` is rejected unless `off` and then pinned `off`, so executable cache
 hooks and command-form authentication cannot reach module, metadata, vet or
@@ -332,7 +335,10 @@ Go-selected `CC` through the reviewed canonical PATH, and validates the complete
 empty output, more than 4,096 UTF-8 bytes, more than 32 lines, or a line over
 256 UTF-8 bytes fails closed; the reviewed compiler identity must match the
 first line, while valid bounded multiline banners are accepted. That actual
-identity is bound into every build identity. Exactly one `-count=1` and one positive bounded
+identity is bound into every build identity. The compiler child is started in
+an owned session and streamed with a 4,096-byte cap and 30-second deadline
+before UTF-8 decoding, so oversized or stalled `--version` output cannot be
+captured unboundedly. Exactly one `-count=1` and one positive bounded
 `-timeout` (at most 300 seconds) are required; `-args` and test-binary
 selector/count/timeout overrides, Go `-modfile FILE`/`-modfile=FILE`
 alternate-module-file overrides, Go `-overlay FILE`/`-overlay=FILE` build
@@ -561,6 +567,8 @@ reviewed_cgo_identity = "cgo-cc-clang-apple21.0.0"
 reviewed_cgo_version_max_bytes = 4096
 reviewed_cgo_version_max_lines = 32
 reviewed_cgo_version_max_line_length = 256
+reviewed_cgo_version_timeout_seconds = 30
+reviewed_cgo_version_stream_chunk_bytes = 4096
 
 def verified_cgo_compiler_identity(command, version_line):
     if command != reviewed_cgo_command:
@@ -1183,6 +1191,101 @@ def capture_go_child_output(process, go_command):
         selector.close()
 
 
+def capture_cgo_version_output(process, compiler_command):
+    """Stream the compiler banner before decoding, with a strict byte cap."""
+    captures = {"stdout": bytearray(), "stderr": bytearray()}
+    selector = selectors.DefaultSelector()
+    try:
+        for name in captures:
+            stream = getattr(process, name, None)
+            if stream is not None:
+                os.set_blocking(stream.fileno(), False)
+                selector.register(stream, selectors.EVENT_READ, name)
+        deadline = time.monotonic() + reviewed_cgo_version_timeout_seconds
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(
+                    compiler_command, reviewed_cgo_version_timeout_seconds
+                )
+            ready = selector.select(remaining)
+            if not ready:
+                raise subprocess.TimeoutExpired(
+                    compiler_command, reviewed_cgo_version_timeout_seconds
+                )
+            for key, _ in ready:
+                stream = key.fileobj
+                try:
+                    chunk = os.read(
+                        stream.fileno(), reviewed_cgo_version_stream_chunk_bytes
+                    )
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    selector.unregister(stream)
+                    stream.close()
+                    continue
+                captured = captures[key.data]
+                if len(captured) + len(chunk) > reviewed_cgo_version_max_bytes:
+                    raise SystemExit(
+                        f"{label}: cgo compiler version {key.data} exceeded the "
+                        f"reviewed {reviewed_cgo_version_max_bytes}-byte output budget"
+                    )
+                captured.extend(chunk)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(
+                compiler_command, reviewed_cgo_version_timeout_seconds
+            )
+        try:
+            process.wait(timeout=remaining)
+        except TypeError:
+            process.wait()
+        return bytes(captures["stdout"]), bytes(captures["stderr"])
+    finally:
+        selector.close()
+
+
+def run_cgo_version_child(compiler_path):
+    """Run clang --version only through the bounded owned-child capture."""
+    command = [compiler_path, "--version"]
+    process = None
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=repo_root,
+            env=go_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        try:
+            stdout, stderr = capture_cgo_version_output(process, command)
+        except subprocess.TimeoutExpired:
+            terminate_go_child_group(process)
+            process = None
+            raise SystemExit(
+                f"{label}: cgo compiler version query exceeded independent "
+                f"{reviewed_cgo_version_timeout_seconds}s deadline; process group terminated and reaped"
+            )
+        except BaseException:
+            terminate_go_child_group(process)
+            process = None
+            raise
+        returncode = process.returncode
+        terminate_go_child_group(process)
+        process = None
+        try:
+            stdout = stdout.decode("utf-8")
+            stderr = stderr.decode("utf-8")
+        except UnicodeDecodeError:
+            raise SystemExit(f"{label}: cgo compiler version output was not UTF-8")
+        return subprocess.CompletedProcess(command, returncode, stdout, stderr)
+    finally:
+        if process is not None:
+            terminate_go_child_group(process)
+
+
 def run_go_child(go_command, **kwargs):
     if not go_command or go_command[0] != "go":
         raise SystemExit(f"{label}: non-Go command passed to Go child runner")
@@ -1277,15 +1380,7 @@ if resolved_cgo_path != reviewed_cgo_path:
     raise SystemExit(
         f"{label}: Go-selected CC did not resolve to the reviewed compiler path"
     )
-cgo_version_result = subprocess.run(
-    [resolved_cgo_path, "--version"],
-    cwd=repo_root,
-    env=go_env,
-    text=True,
-    capture_output=True,
-    check=False,
-    timeout=30,
-)
+cgo_version_result = run_cgo_version_child(resolved_cgo_path)
 effective_cgo_compiler_identity = validate_cgo_version_output(
     effective_cgo_command,
     cgo_version_result.returncode,
@@ -5957,9 +6052,12 @@ the reviewed `os`/`subprocess` process-launch surface is classified and
 assignment aliases of recognized launchers are resolved and shadowed or
 unresolved command-capable names fail closed, dynamic command arguments require
 an explicit reviewed
-`g01-safe-python-heredoc` marker, and malformed/unmarked command forms fail
-closed. Executable non-Python heredocs fail closed before their bodies can be
-certified; only isolated reviewed Python heredocs are sent to AST inspection.
+`g01-safe-python-heredoc` marker, mapping-based launcher calls are resolved or
+rejected fail-closed, and malformed/unmarked command forms fail closed.
+Executable Python source supplied by a here-string, pipe or file redirection
+is rejected before execution; executable non-Python heredocs fail closed before
+their bodies can be certified, and only isolated reviewed Python heredocs are
+sent to AST inspection.
 Unsupported shell function/brace/case compounds fail closed; only the two
 packet wrapper declarations and their safe `printf` preflight brace are
 recognized structural forms. Markdown prose, URLs, comments, scanner source
@@ -6299,6 +6397,19 @@ git_global_option_values = {
     "--super-prefix",
 }
 
+def git_config_delegation(assignment, *, config_env=False):
+    """Reject Git config keys that can select executable helpers."""
+    if "=" not in assignment:
+        key, value = assignment.lower(), None
+    else:
+        key, value = assignment.split("=", 1)
+        key = key.lower()
+    if key in {"core.sshcommand", "credential.helper"}:
+        return f"Git {key} command delegation is not allowed"
+    if key == "core.fsmonitor" and (config_env or value != "false"):
+        return "Git core.fsmonitor command delegation is not allowed"
+    return None
+
 
 def git_command_delegation(tokens):
     """Reject Git subcommands/options/config that launch external tools."""
@@ -6306,12 +6417,22 @@ def git_command_delegation(tokens):
     if not tokens or executable_basename(tokens[0]) != "git":
         return None
     for index, token in enumerate(tokens):
+        if token == "--exec-path" or token.startswith("--exec-path="):
+            return "Git --exec-path command delegation is not allowed"
         if token == "--config-env" and index + 1 < len(tokens):
-            if normalized_git_config_key(tokens[index + 1]).startswith("alias."):
+            assignment = tokens[index + 1]
+            if normalized_git_config_key(assignment).startswith("alias."):
                 return "Git --config-env shell alias delegation is not allowed"
+            config_violation = git_config_delegation(assignment, config_env=True)
+            if config_violation:
+                return config_violation
         if token.startswith("--config-env="):
-            if normalized_git_config_key(token.split("=", 1)[1]).startswith("alias."):
+            assignment = token.split("=", 1)[1]
+            if normalized_git_config_key(assignment).startswith("alias."):
                 return "Git --config-env shell alias delegation is not allowed"
+            config_violation = git_config_delegation(assignment, config_env=True)
+            if config_violation:
+                return config_violation
     if any(
         token == "--ext-diff" or token.startswith("--ext-diff=")
         for token in tokens
@@ -6325,9 +6446,22 @@ def git_command_delegation(tokens):
         if token == "--":
             return None
         if token == "-c":
+            if index + 1 < len(tokens):
+                config_violation = git_config_delegation(tokens[index + 1])
+                if config_violation:
+                    return config_violation
             index += 2
             continue
-        if token.startswith("-c=") or token.startswith("-c") and len(token) > 2:
+        if token.startswith("-c="):
+            config_violation = git_config_delegation(token[3:])
+            if config_violation:
+                return config_violation
+            index += 1
+            continue
+        if token.startswith("-c") and len(token) > 2:
+            config_violation = git_config_delegation(token[2:])
+            if config_violation:
+                return config_violation
             index += 1
             continue
         if token in git_global_option_values:
@@ -6503,6 +6637,11 @@ def forbidden_command(tokens, depth=0):
         return "shell process substitutions are not allowed"
     if shell_compound_syntax(tokens):
         return "unsupported shell compound syntax is not allowed"
+    if python_stdin_command(tokens):
+        return (
+            "Python stdin/heredoc execution must be an isolated "
+            "AST-inspected heredoc"
+        )
     tokens = executable_tokens(tokens)
     if not tokens:
         return None
@@ -6542,7 +6681,10 @@ def forbidden_command(tokens, depth=0):
         "just", "task", "at", "batch", "watch", "entr", "chronic",
     }:
         return f"{executable} command delegation is not allowed"
-    if executable in {"curl", "wget", "limactl", "security", "launchctl"}:
+    if executable in {
+        "curl", "wget", "limactl", "security", "launchctl",
+        "nice", "timeout", "setsid",
+    }:
         return executable
     if executable == "docker":
         return "docker command"
@@ -6642,6 +6784,213 @@ def python_indirect_command(node, modules):
         if resolved in python_command_functions:
             return ("resolved", resolved)
     return ("unresolved", module_name)
+
+
+def python_stdin_command(tokens):
+    """Reject Python source supplied by a pipe, here-string or redirection."""
+    tokens = executable_tokens(tokens)
+    if not tokens or not python_interpreter_token(tokens[0]):
+        return False
+    return "-" in tokens[1:]
+
+
+def reviewed_python_heredoc_segment(command, tokens):
+    """Allow only isolated Python heredocs to reach the AST body pass."""
+    if not python_stdin_command(tokens):
+        return False
+    normalized = executable_tokens(tokens)
+    if not normalized or "<<" not in command:
+        return False
+    return any(
+        descriptor["invocation"] is not None
+        and descriptor["invocation"]["isolated"]
+        and descriptor["invocation"]["interpreter"] == normalized[0]
+        for descriptor in heredoc_descriptors(command)
+    )
+
+
+def python_mapping_value(node, modules, functions):
+    """Resolve a mapping value only when it is a known launcher."""
+    indirect = python_indirect_command(node, modules)
+    if indirect is not None:
+        return indirect
+    resolved = python_resolved_name(node, modules, functions)
+    if resolved in python_command_functions:
+        return ("resolved", resolved)
+    if isinstance(node, (ast.Name, ast.Attribute, ast.Call, ast.Subscript)):
+        return ("unresolved", resolved or "mapping value")
+    return ("safe", resolved)
+
+
+def python_mapping_bindings(tree, modules, functions):
+    """Collect literal mapping aliases and preserve unknown keys fail-closed."""
+    mappings = {}
+
+    def mapping_target_names(node):
+        if isinstance(node, ast.Name):
+            return [node.id]
+        if isinstance(node, (ast.Tuple, ast.List)):
+            names = []
+            for element in node.elts:
+                names.extend(mapping_target_names(element))
+            return names
+        return []
+
+    def literal_mapping(value):
+        if not isinstance(value, ast.Dict):
+            return None
+        entries = {}
+        uncertain = False
+        for key, element in zip(value.keys, value.values):
+            if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+                uncertain = True
+                continue
+            resolved = python_mapping_value(element, modules, functions)
+            if resolved[0] == "unresolved":
+                uncertain = True
+                entries[key.value] = None
+            elif resolved[0] == "resolved":
+                entries[key.value] = resolved[1]
+            else:
+                entries[key.value] = False
+        return entries, uncertain
+
+    assignments = []
+    updates = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Subscript) and isinstance(
+                    target.value, ast.Name
+                ):
+                    updates.append((target.value.id, target.slice, node.value))
+                else:
+                    assignments.append((target, node.value))
+        elif isinstance(node, ast.AnnAssign):
+            assignments.append((node.target, node.value))
+        elif isinstance(node, ast.NamedExpr):
+            assignments.append((node.target, node.value))
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "update"
+            and isinstance(node.func.value, ast.Name)
+        ):
+            if node.args and isinstance(node.args[0], ast.Dict):
+                updates.append((node.func.value.id, None, node.args[0]))
+            else:
+                updates.append((node.func.value.id, None, None))
+
+    def merge(previous, current):
+        if previous is None:
+            return current
+        previous_entries, previous_uncertain = previous
+        current_entries, current_uncertain = current
+        entries = dict(previous_entries)
+        uncertain = previous_uncertain or current_uncertain
+        for key, value in current_entries.items():
+            if key in entries and entries[key] != value:
+                if (
+                    entries[key] in python_command_functions
+                    or value in python_command_functions
+                    or entries[key] is None
+                    or value is None
+                ):
+                    entries[key] = None
+                    uncertain = True
+                else:
+                    entries[key] = value
+            else:
+                entries[key] = value
+        return entries, uncertain
+
+    for _ in range(len(assignments) + 1):
+        changed = False
+        for target, value in assignments:
+            mapping = literal_mapping(value)
+            if mapping is None and isinstance(value, ast.Name):
+                mapping = mappings.get(value.id)
+            if mapping is None:
+                continue
+            for name in mapping_target_names(target):
+                merged = merge(mappings.get(name), mapping)
+                if mappings.get(name) != merged:
+                    mappings[name] = merged
+                    changed = True
+        for name, key, value in updates:
+            if value is None:
+                mapping = ({}, True)
+            elif key is None:
+                mapping = literal_mapping(value)
+                if mapping is None:
+                    mapping = ({}, True)
+            else:
+                resolved = python_mapping_value(value, modules, functions)
+                if resolved[0] == "resolved":
+                    entry = resolved[1]
+                elif resolved[0] == "unresolved":
+                    entry = None
+                else:
+                    entry = False
+                if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                    mapping = ({key.value: entry}, False)
+                else:
+                    mapping = ({"__unknown__": entry}, True)
+            merged = merge(mappings.get(name), mapping)
+            if mappings.get(name) != merged:
+                mappings[name] = merged
+                changed = True
+        if not changed:
+            break
+    return mappings
+
+
+def python_mapping_command(node, mappings, modules, functions):
+    """Classify mapping/subscript launcher calls, including `.get` indirection."""
+    mapping_name = None
+    key_node = None
+    if isinstance(node, ast.Subscript):
+        if isinstance(node.value, ast.Name):
+            mapping_name = node.value.id
+        elif isinstance(node.value, ast.Dict):
+            return ("unresolved", "mapping literal")
+        else:
+            return ("unresolved", "mapping subscript")
+        key_node = node.slice
+        if isinstance(key_node, ast.Index):
+            key_node = key_node.value
+    elif (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in {"get", "__getitem__"}
+    ):
+        if isinstance(node.func.value, ast.Name):
+            mapping_name = node.func.value.id
+        else:
+            return ("unresolved", "mapping literal")
+        key_node = node.args[0] if node.args else None
+    else:
+        return None
+    if mapping_name not in mappings:
+        return None
+    entries, uncertain = mappings[mapping_name]
+    known_command = any(value in python_command_functions for value in entries.values())
+    command_named_key = any(
+        key.rsplit(".", 1)[-1].lower() in python_command_leaf_names
+        for key in entries
+    )
+    if not known_command and not command_named_key:
+        return None
+    if not isinstance(key_node, ast.Constant) or not isinstance(key_node.value, str):
+        return ("unresolved", mapping_name)
+    if key_node.value not in entries:
+        return ("unresolved", mapping_name)
+    resolved = entries[key_node.value]
+    if resolved in python_command_functions:
+        return ("resolved", resolved)
+    if resolved is None or uncertain:
+        return ("unresolved", mapping_name)
+    return ("safe", resolved)
 
 
 def python_import_bindings(tree):
@@ -6832,12 +7181,25 @@ def inspect_python_heredoc(body, safe_marker):
             "on line(s) "
             + ",".join(str(line) for line in unresolved_imports)
         )
+    mappings = python_mapping_bindings(tree, modules, functions)
     dynamic_calls = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
+        mapping = python_mapping_command(node.func, mappings, modules, functions)
         indirect = python_indirect_command(node.func, modules)
-        if indirect is not None:
+        if mapping is not None:
+            mapping_kind, mapping_value = mapping
+            if mapping_kind == "unresolved":
+                return (
+                    "Python heredoc contains an unresolved mapping-based "
+                    "command-capable call through "
+                    f"{mapping_value!r} on line {node.lineno}"
+                )
+            if mapping_kind == "safe":
+                continue
+            resolved = mapping_value
+        elif indirect is not None:
             indirect_kind, indirect_value = indirect
             if indirect_kind == "unresolved":
                 return (
@@ -6886,6 +7248,14 @@ for command, number in shell_commands(source):
         matches.append(f"line {number}: shell process substitutions are not allowed")
         continue
     for segment in shell_token_segments(command):
+        if python_stdin_command(segment):
+            if reviewed_python_heredoc_segment(command, segment):
+                continue
+            matches.append(
+                f"line {number}: Python stdin/heredoc execution must be "
+                "an isolated AST-inspected heredoc"
+            )
+            continue
         violation = forbidden_command(segment)
         if violation:
             matches.append(f"line {number}: {violation}")
@@ -13549,4 +13919,403 @@ Recorded packet certification output:
 GREEN packet syntax: 294 Markdown fences balanced, 157 rendered packet-local links/files checked, backlog JSON valid, changed-boundary ledger valid with 10 data rows and 4 columns, embedded wrapper/scanner AST and compile valid, 2 fresh probe bodies AST-valid
 GREEN packet diff: git diff --check passed
 GREEN packet hygiene: added-line secret/private-path scan clean; early-match rejection probe passed; concrete tracking URL present
+```
+
+### Fresh exact-head P1/P2 corrections at `8dfa9a031bc321f2ccc208104268f7c5ead9281b`
+
+The exact-parent red probe at the current PR #78 head reproduced the three
+Codex findings supplied for this correction: Git `--exec-path` delegation
+([discussion 4006874715](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4006874715)),
+mapping-based/indirect Python launchers
+([discussion 4006874734](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4006874734)),
+and unbounded capture before the clang `--version` validator
+([discussion 4006874746](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4006874746)).
+The independent security/recovery review escalation additionally covered
+Python source delivered by here-string, pipe and heredoc forms; `nice`,
+`timeout` and `setsid` shell wrappers; and Git `-c` keys that can select
+`core.fsmonitor`, `core.sshCommand` or `credential.helper` behavior. This is a
+packet-only correction: no compiler, Go child, Python launcher body, workflow,
+runner, Docker/Lima, Keychain, launchd, credential or live GitHub operation
+ran, and the trusted-same-user boundary remains explicit.
+
+#### Exact-parent red reproductions
+
+The red probe reads only immutable parent
+`8dfa9a031bc321f2ccc208104268f7c5ead9281b` with `git show`, extracts the
+parent scanner and wrapper in memory, and uses synthetic command/source
+strings. The clang witness checks the parent AST shape: it applied output
+limits only after `subprocess.run(capture_output=True)` had already collected
+the complete child stream. The heredoc control witness confirms that the
+parent's isolated heredoc body pass remains a control to preserve while the
+pipe and here-string paths must be closed.
+
+```sh
+set -euo pipefail
+export PATH=/opt/homebrew/bin:/usr/bin:/bin
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=false GIT_CONFIG_KEY_1=core.hooksPath GIT_CONFIG_VALUE_1=/dev/null
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
+# g01-safe-python-heredoc: reviewed exact-parent fresh-P1/P2 red probes
+/opt/homebrew/bin/python3 -I - <<'PROBE'
+import ast
+import re
+import shlex
+import subprocess
+from pathlib import Path
+
+parent = "8dfa9a031bc321f2ccc208104268f7c5ead9281b"
+packet = subprocess.check_output(
+    ["git", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    text=True,
+)
+scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
+scanner_start = packet.rfind("source = Path(", 0, scanner_anchor)
+scanner_end = packet.index("\nmatches = []", scanner_anchor)
+scanner = packet[scanner_start:scanner_end].replace(
+    'source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")',
+    'source = ""',
+    1,
+)
+scanner_ns = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+exec(compile(scanner, "<exact-parent-scanner>", "exec"), scanner_ns)
+for command in (
+    "git --exec-path=/synthetic/helper status",
+    "git --exec-path /synthetic/helper status",
+):
+    segments = scanner_ns["shell_token_segments"](command)
+    if not segments or scanner_ns["forbidden_command"](segments[0]) is not None:
+        raise SystemExit(f"red setup changed: parent already rejected {command!r}")
+print("RED 4006874715: exact parent accepted git --exec-path split and equals forms")
+for body in (
+    'import subprocess\nlaunchers = {"run": subprocess.run}\nlaunchers["run"](["gh", "api", "x"])\n',
+    'import os\nlaunchers = {"system": os.system}\nlaunchers["system"]("docker version")\n',
+):
+    if scanner_ns["inspect_python_heredoc"](body, False) is not None:
+        raise SystemExit(f"red setup changed: parent rejected mapping launcher {body!r}")
+print("RED 4006874734: exact parent accepted mapping-based subprocess/os launcher calls")
+wrapper_start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
+wrapper_end = packet.index("\nPY\n}", wrapper_start)
+wrapper = packet[wrapper_start:wrapper_end]
+module = ast.parse(wrapper, filename="<exact-parent-wrapper>")
+cgo_run_calls = []
+for node in ast.walk(module):
+    if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+        continue
+    if not (
+        isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "subprocess"
+        and node.func.attr == "run"
+    ):
+        continue
+    if (
+        node.args
+        and isinstance(node.args[0], ast.List)
+        and len(node.args[0].elts) == 2
+        and isinstance(node.args[0].elts[0], ast.Name)
+        and node.args[0].elts[0].id == "resolved_cgo_path"
+        and isinstance(node.args[0].elts[1], ast.Constant)
+        and node.args[0].elts[1].value == "--version"
+    ):
+        cgo_run_calls.append(node)
+if len(cgo_run_calls) != 1 or not any(
+    keyword.arg == "capture_output"
+    and isinstance(keyword.value, ast.Constant)
+    and keyword.value.value is True
+    for keyword in cgo_run_calls[0].keywords
+):
+    raise SystemExit("red setup changed: exact parent cgo capture shape moved")
+if "capture_cgo_version_output" in wrapper or "run_cgo_version_child" in wrapper:
+    raise SystemExit("red setup changed: exact parent already has bounded cgo child capture")
+print("RED 4006874746: exact parent bounded clang output only after unbounded subprocess.run(capture_output=True) capture")
+for command in (
+    "nice -n 5 gh workflow run ci.yml",
+    "timeout 30s docker run image:tag true",
+    "setsid gh api repos/example/project",
+    "git -c core.fsmonitor=/synthetic/hook status",
+    "git -c core.sshCommand='gh api x' fetch origin",
+    "git -c credential.helper='!gh auth token' fetch origin",
+):
+    segments = scanner_ns["shell_token_segments"](command)
+    if not segments or scanner_ns["forbidden_command"](segments[0]) is not None:
+        raise SystemExit(f"red setup changed: parent already rejected {command!r}")
+print("RED independent review escalation: exact parent accepted nice/timeout/setsid wrappers and Git core.fsmonitor/core.sshCommand/credential.helper delegation")
+for command in (
+    "python3 -I - <<< 'import subprocess; subprocess.run([\"gh\", \"api\", \"x\"])'",
+    "printf 'import subprocess; subprocess.run([\\\"gh\\\", \\\"api\\\", \\\"x\\\"])' | python3 -I -",
+):
+    segments = scanner_ns["shell_token_segments"](command)
+    if not segments or any(
+        scanner_ns["forbidden_command"](segment) is not None
+        for segment in segments
+    ):
+        raise SystemExit(f"red setup changed: parent already rejected Python stdin form {command!r}")
+print("RED independent review Python stdin escalation: exact parent accepted Python here-string and pipe-fed source before AST inspection")
+heredoc = "```sh\npython3 -I - <<PY\nimport subprocess\nsubprocess.run([\"gh\", \"api\", \"x\"])\nPY\n```"
+records = list(scanner_ns["python_heredoc_bodies"](heredoc))
+if not records or scanner_ns["inspect_python_heredoc"](records[0][1], False) is None:
+    raise SystemExit("red setup changed: parent no longer AST-rejected reviewed heredoc body")
+print("RED independent review Python heredoc control: exact parent shell token was accepted and relied on a separate AST-body pass; candidate must retain that body check while closing pipe/here-string forms")
+PROBE
+```
+
+Recorded exact-parent red output:
+
+```text
+RED 4006874715: exact parent accepted git --exec-path split and equals forms
+RED 4006874734: exact parent accepted mapping-based subprocess/os launcher calls
+RED 4006874746: exact parent bounded clang output only after unbounded subprocess.run(capture_output=True) capture
+RED independent review escalation: exact parent accepted nice/timeout/setsid wrappers and Git core.fsmonitor/core.sshCommand/credential.helper delegation
+RED independent review Python stdin escalation: exact parent accepted Python here-string and pipe-fed source before AST inspection
+RED independent review Python heredoc control: exact parent shell token was accepted and relied on a separate AST-body pass; candidate must retain that body check while closing pipe/here-string forms
+```
+
+#### Minimal packet-only correction, refactor and focused green/boundary probes
+
+The minimal correction rejects Git `--exec-path` in split and equals forms,
+parses `-c`/`--config-env` assignment keys before generic Git classification,
+and retains only the reviewed `core.fsmonitor=false` setting. It rejects
+`core.sshCommand` and `credential.helper`, along with `nice`, `timeout` and
+`setsid`, before any wrapped operand can hide a delegated command. The Python
+AST pass resolves literal mapping aliases and `.get`/subscript launchers,
+rejecting unknown mapping keys/values while retaining safe direct launchers.
+Python stdin execution is rejected for here-string, pipe and file-redirection
+forms; an isolated heredoc is still extracted and AST-inspected. The clang
+version child now uses an owned session with streaming stdout/stderr capture,
+a 4,096-byte per-stream cap and a 30-second deadline before UTF-8 decoding or
+identity validation.
+
+The green probe reads only the candidate packet, exercises pure scanner/AST
+helpers and a synthetic pipe-backed capture helper, and confirms safe boundary
+controls. It does not execute a Python launcher, compiler, Go child, workflow,
+runner, Docker/Lima, Keychain, launchd, credential or live GitHub operation.
+
+```sh
+set -euo pipefail
+export PATH=/opt/homebrew/bin:/usr/bin:/bin
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=false GIT_CONFIG_KEY_1=core.hooksPath GIT_CONFIG_VALUE_1=/dev/null
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
+# g01-safe-python-heredoc: reviewed focused scanner/capture boundary probe
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import os
+import re
+import selectors
+import shlex
+import subprocess
+import time
+from pathlib import Path
+from types import SimpleNamespace
+
+packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
+scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
+scanner_start = packet.rfind("source = Path(", 0, scanner_anchor)
+scanner_end = packet.index("\nmatches = []", scanner_anchor)
+scanner = packet[scanner_start:scanner_end].replace(
+    'source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")',
+    'source = ""',
+    1,
+)
+scanner_ns = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+exec(compile(scanner, "<candidate-scanner>", "exec"), scanner_ns)
+for command in (
+    "git --exec-path=/synthetic/helper status",
+    "git --exec-path /synthetic/helper status",
+    "nice -n 5 gh workflow run ci.yml",
+    "timeout 30s docker run image:tag true",
+    "setsid gh api repos/example/project",
+    "git -c core.fsmonitor=/synthetic/hook status",
+    "git -c core.fsmonitor=true status",
+    "git -c core.sshCommand='gh api x' fetch origin",
+    "git -c credential.helper='!gh auth token' fetch origin",
+):
+    segments = scanner_ns["shell_token_segments"](command)
+    if not segments or not any(
+        scanner_ns["forbidden_command"](segment) is not None
+        for segment in segments
+    ):
+        raise SystemExit(f"delegation escaped candidate scanner: {command!r}")
+for command in (
+    "git status",
+    "git -c core.fsmonitor=false status",
+    "git -c user.name=probe status",
+    "printf safe",
+):
+    segments = scanner_ns["shell_token_segments"](command)
+    if not segments or any(
+        scanner_ns["forbidden_command"](segment) is not None
+        for segment in segments
+    ):
+        raise SystemExit(f"safe boundary rejected: {command!r}")
+print("GREEN 4006874715: git --exec-path split/equals delegation rejected before generic Git classification; safe Git status retained")
+for body in (
+    'import subprocess\nlaunchers = {"run": subprocess.run}\nlaunchers["run"](["gh", "api", "x"])\n',
+    'import os\nlaunchers = {"system": os.system}\nlaunchers["system"]("docker version")\n',
+    'import subprocess\nlaunchers = {"run": subprocess.run}\nlaunchers.get("run")(["gh", "api", "x"])\n',
+    'import subprocess\nlaunchers = {"run": subprocess.run}\nlaunchers[name](command)\n',
+    'launchers = {"run": unknown}\nlaunchers["run"](command)\n',
+):
+    if scanner_ns["inspect_python_heredoc"](body, False) is None:
+        raise SystemExit(f"mapping launcher escaped candidate AST scanner: {body!r}")
+if scanner_ns["inspect_python_heredoc"](
+    'import subprocess\nsubprocess.run(["printf", "safe"])\n', False
+) is not None:
+    raise SystemExit("safe direct Python launcher rejected")
+print("GREEN 4006874734: mapping/subscript/.get known and unresolved Python launchers rejected; safe direct launcher retained")
+wrapper_start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
+wrapper_end = packet.index("\nPY\n}", wrapper_start)
+wrapper = packet[wrapper_start:wrapper_end]
+module = ast.parse(wrapper, filename="<candidate-wrapper>")
+cgo_calls = []
+for node in ast.walk(module):
+    if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+        continue
+    if not (
+        isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "subprocess"
+        and node.func.attr == "run"
+    ):
+        continue
+    if (
+        node.args
+        and isinstance(node.args[0], ast.List)
+        and len(node.args[0].elts) == 2
+        and isinstance(node.args[0].elts[0], ast.Name)
+        and node.args[0].elts[0].id == "resolved_cgo_path"
+        and isinstance(node.args[0].elts[1], ast.Constant)
+        and node.args[0].elts[1].value == "--version"
+    ):
+        cgo_calls.append(node)
+if cgo_calls:
+    raise SystemExit("unbounded subprocess.run cgo capture remains")
+for marker in (
+    "def capture_cgo_version_output",
+    "def run_cgo_version_child",
+    "reviewed_cgo_version_max_bytes = 4096",
+    "reviewed_cgo_version_stream_chunk_bytes = 4096",
+    "run_cgo_version_child(resolved_cgo_path)",
+    "start_new_session=True",
+):
+    if marker not in wrapper:
+        raise SystemExit(f"bounded cgo marker missing: {marker}")
+selected = []
+for node in module.body:
+    if isinstance(node, ast.Assign) and any(
+        isinstance(target, ast.Name)
+        and target.id in {
+            "reviewed_cgo_version_max_bytes",
+            "reviewed_cgo_version_timeout_seconds",
+            "reviewed_cgo_version_stream_chunk_bytes",
+        }
+        for target in node.targets
+    ):
+        selected.append(node)
+    if isinstance(node, ast.FunctionDef) and node.name == "capture_cgo_version_output":
+        selected.append(node)
+helper_ns = {
+    "ast": ast,
+    "os": os,
+    "selectors": selectors,
+    "subprocess": subprocess,
+    "time": time,
+    "label": "cgo-boundary",
+}
+exec(compile(ast.Module(body=selected, type_ignores=[]), "<cgo-capture-helper>", "exec"), helper_ns)
+
+def fake_process(payload):
+    out_read, out_write = os.pipe()
+    err_read, err_write = os.pipe()
+    os.write(out_write, payload)
+    os.close(out_write)
+    os.close(err_write)
+    return SimpleNamespace(
+        stdout=os.fdopen(out_read, "rb"),
+        stderr=os.fdopen(err_read, "rb"),
+        returncode=0,
+        wait=lambda timeout=None: 0,
+    )
+
+proc = fake_process(b"Apple clang version 21.0.0 (clang-2100.1.1.101)\n")
+stdout, stderr = helper_ns["capture_cgo_version_output"](
+    proc, ["/usr/bin/clang", "--version"]
+)
+if stdout != b"Apple clang version 21.0.0 (clang-2100.1.1.101)\n" or stderr:
+    raise SystemExit("bounded cgo capture changed valid banner")
+proc = fake_process(b"x" * 4097)
+try:
+    helper_ns["capture_cgo_version_output"](proc, ["/usr/bin/clang", "--version"])
+except SystemExit:
+    for stream in (proc.stdout, proc.stderr):
+        stream.close()
+else:
+    raise SystemExit("bounded cgo capture accepted oversized output")
+print("GREEN 4006874746: clang --version uses owned streaming capture with 4,096-byte/30-second bounds before UTF-8 validation; overflow rejected without compiler child")
+for command in (
+    "python3 -I - <<< 'import subprocess; subprocess.run([\"gh\", \"api\", \"x\"])'",
+    "printf 'import subprocess; subprocess.run([\\\"gh\\\", \\\"api\\\", \\\"x\\\"])' | python3 -I -",
+):
+    segments = scanner_ns["shell_token_segments"](command)
+    if not segments or not any(
+        scanner_ns["forbidden_command"](segment) is not None
+        for segment in segments
+    ):
+        raise SystemExit(f"Python stdin form escaped candidate scanner: {command!r}")
+heredoc = "```sh\npython3 -I - <<PY\nimport subprocess\nsubprocess.run([\"gh\", \"api\", \"x\"])\nPY\n```"
+records = list(scanner_ns["python_heredoc_bodies"](heredoc))
+if len(records) != 1 or not records[0][3]["isolated"]:
+    raise SystemExit("reviewed isolated Python heredoc was not retained")
+if scanner_ns["inspect_python_heredoc"](records[0][1], False) is None:
+    raise SystemExit("unmarked reviewed heredoc body unexpectedly accepted")
+if not scanner_ns["reviewed_python_heredoc_segment"](
+    "python3 -I - <<PY", ["python3", "-I", "-", "<<PY"]
+):
+    raise SystemExit("reviewed isolated Python heredoc was not recognized")
+print("GREEN independent review Python stdin: here-string and pipe-fed Python rejected before body execution; isolated heredoc retained for AST inspection and dangerous body rejected")
+PY
+```
+
+Recorded focused green output:
+
+```text
+GREEN 4006874715: git --exec-path split/equals delegation rejected before generic Git classification; safe Git status retained
+GREEN 4006874734: mapping/subscript/.get known and unresolved Python launchers rejected; safe direct launcher retained
+GREEN 4006874746: clang --version uses owned streaming capture with 4,096-byte/30-second bounds before UTF-8 validation; overflow rejected without compiler child
+GREEN independent review Python stdin: here-string and pipe-fed Python rejected before body execution; isolated heredoc retained for AST inspection and dangerous body rejected
+```
+
+The focused probes are static, synthetic or in-memory boundary evidence. They
+do not qualify a compiler, Go test/list/body command, live runner, workflow,
+remote API, credential, Docker/Lima, Keychain or launchd operation. Exact-head
+Codex review of the final pushed head, required CI and explicit maintainer live
+authorization remain open.
+
+Rollback is narrow and packet-only: restore
+`docs/evidence/g01-recovery-packet.md` to immutable parent
+`8dfa9a031bc321f2ccc208104268f7c5ead9281b`; preserve independent driver,
+review and manual-runner state, and never force-kill, prune or replay a live
+resource.
+
+#### Exact review URL ledger and dispositions
+
+| Finding and immutable source | Exact review URL | Disposition and rollback evidence |
+|---|---|---|
+| 4006874715, source `8dfa9a031bc321f2ccc208104268f7c5ead9281b` | [discussion 4006874715](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4006874715) | Reproduced split and equals `git --exec-path` delegation accepted before generic Git classification. The scanner now rejects both forms before any Git child while safe status remains accepted. Rollback is packet-only parent restoration. |
+| 4006874734, source `8dfa9a031bc321f2ccc208104268f7c5ead9281b` | [discussion 4006874734](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4006874734) | Reproduced mapping-based `subprocess.run` and `os.system` launchers escaping the AST pass. Literal mappings, `.get`/subscript indirection and unresolved mapping keys/values now use the reviewed deny policy or fail closed; safe direct launchers remain bounded. Rollback is packet-only parent restoration. |
+| 4006874746, source `8dfa9a031bc321f2ccc208104268f7c5ead9281b` | [discussion 4006874746](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4006874746) | Reproduced the parent collecting the complete clang `--version` stream with `subprocess.run(capture_output=True)` before applying its byte/line validator. The candidate streams both pipes in an owned session with a 4,096-byte cap and 30-second deadline before decode/identity validation; synthetic overflow was rejected without a compiler child. Rollback is packet-only parent restoration. |
+| Independent security/recovery review escalation, source `8dfa9a031bc321f2ccc208104268f7c5ead9281b` | Current exact-head independent review escalation (dispatch record) | Reproduced Python here-string/pipe acceptance, retained isolated heredoc AST inspection, and reproduced wrapper/Git config delegation through `nice`/`timeout`/`setsid` and `core.fsmonitor`/`core.sshCommand`/`credential.helper`. Candidate probes show all delegated paths fail closed and safe `core.fsmonitor=false`/direct launcher boundaries remain; no live operation ran. Rollback is packet-only parent restoration. |
+
+#### Packet body/link/fence/hygiene certification
+
+The candidate packet-only diff is checked without any compiler, Go/vet child or
+live operation: Markdown fence parity, rendered packet-local links/files,
+backlog JSON syntax, changed-boundary ledger shape, embedded wrapper/scanner
+AST/compile, fresh probe-body AST, exact red/green transcript presence,
+packet-only scope, added-line secret/private-path hygiene and whitespace are
+checked before the focused commit and push. Exact local/remote parity is
+reported only after the push in the worker handoff.
+
+Recorded packet certification output:
+
+```text
+GREEN packet certification: 302 Markdown fences balanced, 157 local Markdown targets checked, backlog JSON valid, changed-boundary ledger valid with 10 data rows and 4 columns, embedded wrapper/scanner AST and compile valid, 2 fresh probe bodies AST-valid, exact red/green outputs present, only packet changed, added-line secret/private-path hygiene clean, and git diff --check passed
 ```
