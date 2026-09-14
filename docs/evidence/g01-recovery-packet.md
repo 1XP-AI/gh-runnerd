@@ -259,13 +259,17 @@ module-tree and tracked/untracked/ignored status gate; only a clean source tree
 can reach package metadata and source derivation. The wrapper queries the
 effective `go env GOFLAGS`, including GOENV/configuration, rejects non-empty
 output, and then pins `GOFLAGS=` for metadata and the original command. After
-parsing command-prefix assignments, it rejects `PATH` and equivalent dynamic
-loader-affecting prefixes before any guarded Go subprocess, then creates the
-Go-child environment with `GOWORK=off` and passes that exact environment to
-every Go metadata and test subprocess; inherited or command-supplied workspace
-paths are therefore ignored before package metadata can be selected. The
-reviewed behavior is force-off, not validation or reuse of a caller-provided
-`go.work` file.
+parsing inherited and command-prefix assignments, it rejects every repository-
+control `GIT_*` override—including `GIT_WORK_TREE`, `GIT_DIR`,
+`GIT_INDEX_FILE` and related repository, object, config, namespace, discovery,
+pathspec and replacement controls—before the first Git query or immutable-tree
+validation. It also rejects `PATH` and equivalent dynamic loader-affecting
+prefixes before any guarded Go subprocess, then creates the Go-child
+environment with `GOWORK=off` and passes that exact environment to every Go
+metadata and test subprocess; inherited or command-supplied workspace paths are
+therefore ignored before package metadata can be selected. The reviewed
+behavior is force-off, not validation or reuse of a caller-provided `go.work`
+file.
 Race-mode prescriptions reject inherited or command-supplied `GORACE` before
 either source derivation or test execution. The wrapper pins `CGO_ENABLED=1`
 after command-prefix parsing, rejects a command-supplied conflicting value,
@@ -342,22 +346,51 @@ if not re.fullmatch(r"go[A-Za-z0-9._-]+", expected_toolchain):
     raise SystemExit(f"{label}: invalid expected toolchain")
 
 invocation_root = Path.cwd().resolve()
-repo_root = Path(
-    subprocess.check_output(
-        ["git", "rev-parse", "--show-toplevel"],
-        cwd=invocation_root,
-        text=True,
-    ).strip()
-).resolve()
-if invocation_root != repo_root:
-    raise SystemExit(f"{label}: run this selector from the repository root")
-
 env = dict(os.environ)
 command_assignments = {}
 while command and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", command[0]):
     key, value = command.pop(0).split("=", 1)
     command_assignments[key] = value
     env[key] = value
+git_repository_control_names = {
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_INDEX_VERSION",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_OBJECT_DIRECTORY_RELATIVE",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    "GIT_CONFIG",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM",
+    "GIT_CONFIG_NOSYSTEM",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_LITERAL_PATHSPECS",
+    "GIT_GLOB_PATHSPECS",
+    "GIT_NOGLOB_PATHSPECS",
+    "GIT_OPTIONAL_LOCKS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_ATTR_NOSYSTEM",
+    "GIT_QUARANTINE_PATH",
+}
+git_repository_control_prefixes = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
+git_environment_overrides = sorted(
+    key
+    for key in env
+    if key in git_repository_control_names
+    or any(key.startswith(prefix) for prefix in git_repository_control_prefixes)
+)
+if git_environment_overrides:
+    raise SystemExit(
+        f"{label}: Git repository-control environment overrides are not allowed: "
+        + ", ".join(git_environment_overrides)
+    )
 loader_assignment_names = {
     "PATH",
     "LD_PRELOAD",
@@ -382,6 +415,16 @@ if unsafe_loader_assignments:
         f"{label}: executable-loader environment assignments are not allowed: "
         + ", ".join(unsafe_loader_assignments)
     )
+repo_root = Path(
+    subprocess.check_output(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=invocation_root,
+        env=env,
+        text=True,
+    ).strip()
+).resolve()
+if invocation_root != repo_root:
+    raise SystemExit(f"{label}: run this selector from the repository root")
 fixture_child_env = {
     "G01_INPUT_CHILD",
     "G01_NAMED_FIFO_CHILD",
@@ -1598,6 +1641,45 @@ for index, line in enumerate(lines):
     while command and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", command[0]):
         key, value = command.pop(0).split("=", 1)
         env[key] = value
+    git_repository_control_names = {
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_INDEX_VERSION",
+        "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_OBJECT_DIRECTORY_RELATIVE",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_NAMESPACE",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+        "GIT_CONFIG",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_CONFIG_NOSYSTEM",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_LITERAL_PATHSPECS",
+        "GIT_GLOB_PATHSPECS",
+        "GIT_NOGLOB_PATHSPECS",
+        "GIT_OPTIONAL_LOCKS",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_NO_REPLACE_OBJECTS",
+        "GIT_ATTR_NOSYSTEM",
+        "GIT_QUARANTINE_PATH",
+    }
+    git_repository_control_prefixes = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
+    git_environment_overrides = sorted(
+        key
+        for key in env
+        if key in git_repository_control_names
+        or any(key.startswith(prefix) for prefix in git_repository_control_prefixes)
+    )
+    if git_environment_overrides:
+        raise SystemExit(
+            f"line {index + 2}: Git repository-control environment overrides are not allowed: "
+            + ", ".join(git_environment_overrides)
+        )
     loader_assignment_names = {
         "PATH",
         "LD_PRELOAD",
@@ -1738,13 +1820,25 @@ for index, line in enumerate(lines):
     seen.append(label)
 if len(seen) != 28 or len(set(seen)) != len(seen):
     raise SystemExit(f"expected 28 unique wrapper metadata records, observed {len(seen)}")
+synthetic_git_assignments = [
+    "GIT_WORK_TREE=/synthetic/work-tree",
+    "GIT_DIR=/synthetic/repository",
+    "GIT_INDEX_FILE=/synthetic/index",
+    "GIT_CONFIG_KEY_0=core.worktree",
+]
+for assignment in synthetic_git_assignments:
+    key = assignment.split("=", 1)[0]
+    if key not in git_repository_control_names and not any(
+        key.startswith(prefix) for prefix in git_repository_control_prefixes
+    ):
+        raise SystemExit(f"synthetic Git assignment escaped repository-control guard: {key}")
 print(
     f"package/build metadata audit: passed; {len(seen)} wrapper prescriptions "
     "matched one package/import-path identity and explicit GOTOOLCHAIN/tag/race/CGO "
     "build configuration, exact PR #78/PR #72 source-tree family pins, exactly "
-    "one count/timeout, and no test-binary, benchmark/CPU, double-dash or "
-    "env/command overrides; "
-    "duplicate package candidates fail closed"
+    "one count/timeout, and no Git repository-control, test-binary, benchmark/CPU, double-dash or "
+    "env/command overrides; duplicate package candidates and synthetic Git "
+    "repository-control assignments fail closed"
 )
 PY
 ```
@@ -1757,14 +1851,14 @@ build identity matched its tag set, race mode, pinned `CGO_ENABLED=1` mode and
 toolchain. The two drain labels selected the exact
 PR #72 module tree `9b30ef1b69c6375cb264c759d366fc5a52a5439f`; all other labels
 selected the PR #78 module tree `08c7830de7bc5120d1302d7ba6df162abd582315`.
-`-args`, test-binary overrides, `-toolexec` hooks, benchmark/CPU flags, standard
+`GIT_*` repository-control assignments, `-args`, test-binary overrides, `-toolexec` hooks, benchmark/CPU flags, standard
 `env` and shell `command` wrappers, every equivalent double-dash Go flag and
 duplicate relative or import-path package arguments are rejected before
 source-derived selector validation.
 The recorded metadata-audit output was:
 
 ```text
-package/build metadata audit: passed; 28 wrapper prescriptions matched one package/import-path identity, explicit GOTOOLCHAIN/tag/race/CGO build configuration, exact PR #78/PR #72 source-tree family pins, exactly one count/timeout, and no test-binary, benchmark/CPU, double-dash or env/command overrides; duplicate package candidates fail closed
+package/build metadata audit: passed; 28 wrapper prescriptions matched one package/import-path identity, explicit GOTOOLCHAIN/tag/race/CGO build configuration, exact PR #78/PR #72 source-tree family pins, exactly one count/timeout, and no Git repository-control, test-binary, benchmark/CPU, double-dash or env/command overrides; duplicate package candidates and synthetic Git repository-control assignments fail closed
 ```
 
 The wrapper's selector edge cases were then exercised with a trimmed copy of
@@ -2450,7 +2544,7 @@ args-test-selector: rejected before test body: args-test-selector: -args is not 
 exec-wrapper: rejected before test body: exec-wrapper: -exec execution wrappers are not allowed
 active-package-init: rejected before test body: active-package-init: active package init requires a new reviewed guard
 skipped-subtest-event: rejected before result recording: wrapper-probe: test execution contained a skipped test
-missing-run-pass-events: rejected before result recording: wrapper-probe: test execution was missing expected event(s): run=TestSupportedListenerBarriersAndReservation; pass=TestSupportedListenerBarriersAndReservation
+missing-run-pass-events: rejected before result recording: missing-run-pass-probe: test execution was missing expected event(s): run=TestNoMessageDoesNotCountAsCompletedBarrier; pass=TestNoMessageDoesNotCountAsCompletedBarrier
 inherited-gowork: passed; synthetic external workspace was overridden; both direct Go metadata probes received GOWORK=off before source derivation
 inherited-child-mode: rejected before test body: inherited-child-mode: fixture child-mode environment is not allowed: G01_INPUT_CHILD
 ```
@@ -4681,7 +4775,7 @@ resolution.
 
 | Finding and immutable source | Red reproduction, correction and final evidence |
 |---|---|
-| [4001124039](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4001124039), source [3bc8445567fe68cc355cf3f88f0c962a41e9cad5 lines 858-914](https://github.com/1XP-AI/gh-runnerd/blob/3bc8445567fe68cc355cf3f88f0c962a41e9cad5/docs/evidence/g01-recovery-packet.md#L858-L914) | Reproduced: the immutable source-name helper omitted top-level `Fuzz*`, while `paired-all-except` has no `-run`; an unrepresented fuzz seed could therefore execute. Corrected: the wrapper's pre-Go-child `source_fuzz_guard` scans package test declarations and `source_test_names` rejects `Fuzz*` before digest derivation. Immutable red/current-green evidence is at packet lines 2834-2954; final wrapper anchors are `source_fuzz_declarations`/`source_fuzz_guard` at lines 814-916 and the defense-in-depth `Fuzz*` rejection at lines 1096-1098. |
+| [4001124039](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4001124039), source [3bc8445567fe68cc355cf3f88f0c962a41e9cad5 lines 858-914](https://github.com/1XP-AI/gh-runnerd/blob/3bc8445567fe68cc355cf3f88f0c962a41e9cad5/docs/evidence/g01-recovery-packet.md#L858-L914) | Reproduced: the immutable source-name helper omitted top-level `Fuzz*`, while `paired-all-except` has no `-run`; an unrepresented fuzz seed could therefore execute. Corrected: the wrapper's pre-Go-child `source_fuzz_guard` scans package test declarations and `source_test_names` rejects `Fuzz*` before digest derivation. Immutable red/current-green evidence is in [the fuzz-target correction](#root-4001124039-top-level-fuzz-declarations); final wrapper anchors are `source_fuzz_declarations`, `source_fuzz_guard`, and the defense-in-depth `Fuzz*` rejection in the wrapper. |
 | [4001124042](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4001124042), source [3bc8445567fe68cc355cf3f88f0c962a41e9cad5 lines 917-936](https://github.com/1XP-AI/gh-runnerd/blob/3bc8445567fe68cc355cf3f88f0c962a41e9cad5/docs/evidence/g01-recovery-packet.md#L917-L936) | Reproduced: the immutable helper passed Go `\\w` to Python, where Unicode `é` matched despite Go's ASCII Perl-class semantics. Corrected: preflight rejects unescaped `\\b`, `\\B`, `\\w`, `\\W`, `\\d`, `\\D`, `\\s`, `\\S` before Python compilation/metadata, while escaped literal backslashes remain supported. Immutable red/current-green evidence is at packet lines 2958-3071; final anchors are `reject_python_semantic_regexp_constructs` at lines 917-932, `translate_go_posix_classes`/`reject_unsupported_regexp_syntax` at lines 935-986 and preflight ordering at lines 1013-1017. |
 | [4001124048](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4001124048), source [3bc8445567fe68cc355cf3f88f0c962a41e9cad5 lines 3726-3750](https://github.com/1XP-AI/gh-runnerd/blob/3bc8445567fe68cc355cf3f88f0c962a41e9cad5/docs/evidence/g01-recovery-packet.md#L3726-L3750) | Reproduced: the immutable anchored scan missed curl/wget and `env gh`/`command docker` wrappers. Corrected: the current scanner inspects only executable shell fences, joins continuations, skips Python heredocs/comments/prose/URLs/fixtures and strips assignment/env/command wrappers before checking curl/wget, Docker, Lima, Keychain, launchd and gh API/workflow forms. Static synthetic probes and the current scan are at packet lines 4164-4310. |
 
@@ -5091,9 +5185,298 @@ The green probe verifies the candidate is a real FIFO, status reports it as
 ignored, the candidate `read_text` hook is never reached, and no Go subprocess
 is started. Final anchor: [cleanliness-before-source-read boundary](#root-4001378624-cleanliness-gate-before-source-reads).
 
+### Fresh exact-head P2 correction at `01764bbed0a387129d2a2abbc9e27a87e073f87e`
+
+The fresh Codex finding below was reproduced against the immutable packet blob
+at the exact starting head before editing. The red probe stops at the first Git
+query after injecting synthetic repository/worktree/index overrides; it does
+not run the metadata query, selector parser, test body or live operation. The
+current green probe exercises inherited and command-prefix forms for the
+repository-control namespace, patches both Git and Go child launches, and
+requires rejection before immutable-tree/status validation.
+
+#### Root 4001471783: Git repository-control environment overrides
+
+The immutable red witness shows that the prior wrapper performed
+`git rev-parse --show-toplevel` before parsing or rejecting environment
+assignments. `GIT_WORK_TREE`, `GIT_DIR` and `GIT_INDEX_FILE` therefore reached
+the first Git query and could redirect worktree, repository or index semantics;
+the same ordering left related `GIT_*` repository, object, config, namespace,
+discovery, pathspec and replacement controls unchecked.
+
+```sh
+set -euo pipefail
+python3 - <<'PY'
+import os
+import subprocess
+import sys
+
+starting_head = "01764bbed0a387129d2a2abbc9e27a87e073f87e"
+previous = subprocess.check_output(
+    [
+        "git",
+        "show",
+        f"{starting_head}:docs/evidence/g01-recovery-packet.md",
+    ],
+    text=True,
+)
+wrapper_start = previous.index("\nimport hashlib\n", previous.index("go_test_checked()")) + 1
+wrapper_end = previous.index("\nPY\n}", wrapper_start)
+previous_wrapper = previous[wrapper_start:wrapper_end]
+if "Git repository-control environment overrides are not allowed" in previous_wrapper:
+    raise SystemExit("red reproduction setup changed: starting wrapper already rejected Git environment")
+
+class StopAtGit(Exception):
+    pass
+
+saved = {key: os.environ.get(key) for key in ("GIT_WORK_TREE", "GIT_DIR", "GIT_INDEX_FILE")}
+os.environ["GIT_WORK_TREE"] = "/synthetic/work-tree"
+os.environ["GIT_DIR"] = "/synthetic/repository"
+os.environ["GIT_INDEX_FILE"] = "/synthetic/index"
+real_check_output = subprocess.check_output
+git_calls = []
+
+def stop_at_git(*args, **kwargs):
+    command = args[0] if args else kwargs.get("args", [])
+    if command and command[0] == "git":
+        git_calls.append((tuple(command), {key: os.environ.get(key) for key in saved}))
+        raise StopAtGit
+    return real_check_output(*args, **kwargs)
+
+subprocess.check_output = stop_at_git
+try:
+    sys.argv = [
+        "wrapper-probe", "1",
+        "f" * 64,
+        "red-git-environment",
+        "experiments/g01-scaleset:./livecanary",
+        "default+race+cgo1+go1.26.8",
+        "GIT_WORK_TREE=/synthetic/work-tree",
+        "GIT_DIR=/synthetic/repository",
+        "GIT_INDEX_FILE=/synthetic/index",
+        "GOTOOLCHAIN=go1.26.8", "go", "test", "-C", "experiments/g01-scaleset",
+        "-race", "-count=1", "-timeout=45s", "./livecanary",
+        "-run=^TestNoMessageDoesNotCountAsCompletedBarrier$",
+    ]
+    try:
+        exec(compile(previous_wrapper, "<prior-wrapper>", "exec"), {"__name__": "__main__"})
+    except StopAtGit:
+        pass
+finally:
+    subprocess.check_output = real_check_output
+    for key, value in saved.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
+if not git_calls or git_calls[0][0] != ("git", "rev-parse", "--show-toplevel"):
+    raise SystemExit(f"red reproduction did not reach first Git query: {git_calls!r}")
+observed = git_calls[0][1]
+if observed != {
+    "GIT_WORK_TREE": "/synthetic/work-tree",
+    "GIT_DIR": "/synthetic/repository",
+    "GIT_INDEX_FILE": "/synthetic/index",
+}:
+    raise SystemExit(f"red reproduction did not expose all Git overrides: {observed!r}")
+print(
+    f"RED Git repository-control environment gap: prior {starting_head} reached git rev-parse --show-toplevel with GIT_WORK_TREE/GIT_DIR/GIT_INDEX_FILE overrides before parsing or rejecting them; immutable-tree validation was not trustworthy"
+)
+PY
+```
+
+Recorded red output:
+
+```text
+RED Git repository-control environment gap: prior 01764bbed0a387129d2a2abbc9e27a87e073f87e reached git rev-parse --show-toplevel with GIT_WORK_TREE/GIT_DIR/GIT_INDEX_FILE overrides before parsing or rejecting them; immutable-tree validation was not trustworthy
+```
+
+The minimum correction parses assignments before the first Git query, rejects
+all inherited or command-prefix repository-control `GIT_*` variables, and
+passes the resulting environment explicitly to the repository-root query. The
+same namespace rejection is mirrored in the package/build metadata audit. This
+conservative fail-closed rule covers the named worktree/repository/index
+variables and related repository, object, config, namespace, discovery,
+pathspec and replacement controls using one shared reviewed name/prefix set.
+The boundary probe below uses only synthetic values and rejects every case
+before any Git or Go child, output, immutable-tree check or source read:
+
+```sh
+set -euo pipefail
+python3 - <<'PY'
+import io
+import os
+import subprocess
+import sys
+from contextlib import redirect_stdout
+from pathlib import Path
+
+packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
+wrapper_start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
+wrapper_end = packet.index("\nPY\n}", wrapper_start)
+wrapper = packet[wrapper_start:wrapper_end]
+if wrapper.index("git_environment_overrides") > wrapper.index('["git", "rev-parse"'):
+    raise SystemExit("Git environment guard moved after immutable-tree Git query")
+
+inherited_names = [
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_INDEX_VERSION",
+    "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_OBJECT_DIRECTORY_RELATIVE",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE",
+    "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    "GIT_CONFIG", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+    "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_LITERAL_PATHSPECS",
+    "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_OPTIONAL_LOCKS",
+    "GIT_REPLACE_REF_BASE", "GIT_NO_REPLACE_OBJECTS", "GIT_ATTR_NOSYSTEM",
+    "GIT_QUARANTINE_PATH",
+]
+assignment_names = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"]
+base = [
+    "GOTOOLCHAIN=go1.26.8", "go", "test", "-C", "experiments/g01-scaleset",
+    "-race", "-count=1", "-timeout=45s", "./livecanary",
+    "-run=^TestNoMessageDoesNotCountAsCompletedBarrier$",
+]
+digest = "f" * 64
+saved_git = {key: os.environ.get(key) for key in list(os.environ) if key.startswith("GIT_")}
+real_check_output = subprocess.check_output
+real_run = subprocess.run
+children = []
+
+def reject_check_output(*args, **kwargs):
+    command = args[0] if args else kwargs.get("args", [])
+    if command and command[0] in {"git", "go"}:
+        children.append(("check_output", tuple(command)))
+        raise AssertionError("Git/Go child started before Git environment guard")
+    return real_check_output(*args, **kwargs)
+
+def reject_run(*args, **kwargs):
+    command = args[0] if args else kwargs.get("args", [])
+    if command and command[0] in {"git", "go"}:
+        children.append(("run", tuple(command)))
+        raise AssertionError("Git/Go child started before Git environment guard")
+    return real_run(*args, **kwargs)
+
+subprocess.check_output = reject_check_output
+subprocess.run = reject_run
+try:
+    for key in list(os.environ):
+        if key.startswith("GIT_"):
+            os.environ.pop(key)
+    cases = [(f"inherited-{key}", None, key) for key in inherited_names]
+    cases.extend((f"assignment-{key}", key, None) for key in assignment_names)
+    for label, assignment, inherited in cases:
+        if inherited is not None:
+            os.environ[inherited] = "/synthetic/" + inherited.lower()
+        command = ([assignment + "=/synthetic/command"] if assignment else []) + base
+        sys.argv = [
+            "wrapper-probe", "1", digest, label,
+            "experiments/g01-scaleset:./livecanary",
+            "default+race+cgo1+go1.26.8", *command,
+        ]
+        output = io.StringIO()
+        try:
+            with redirect_stdout(output):
+                exec(compile(wrapper, "<current-wrapper>", "exec"), {"__name__": "__main__"})
+        except SystemExit as error:
+            if output.getvalue():
+                raise SystemExit(f"{label}: guard emitted a result before rejection")
+            if "Git repository-control environment overrides are not allowed" not in str(error):
+                raise SystemExit(f"{label}: rejected for wrong reason: {error}")
+        else:
+            raise SystemExit(f"{label}: Git override was unexpectedly accepted")
+        if inherited is not None:
+            os.environ.pop(inherited, None)
+finally:
+    subprocess.check_output = real_check_output
+    subprocess.run = real_run
+    for key in list(os.environ):
+        if key.startswith("GIT_"):
+            os.environ.pop(key)
+    for key, value in saved_git.items():
+        if value is not None:
+            os.environ[key] = value
+if children:
+    raise SystemExit(f"Git environment guard started child(ren): {children!r}")
+print(
+    f"Git repository-control environment regression: passed; {len(inherited_names)} inherited and {len(assignment_names)} command-prefix repository-control GIT_* overrides rejected before any git/go child or immutable-tree/status validation"
+)
+PY
+```
+
+Recorded current-green output:
+
+```text
+Git repository-control environment regression: passed; 27 inherited and 3 command-prefix repository-control GIT_* overrides rejected before any git/go child or immutable-tree/status validation
+```
+
+Final stable anchor: [Git repository-control environment boundary](#root-4001471783-git-repository-control-environment-overrides).
+
+### Stable anchors for ledger-only roots
+
+The detailed ledger immediately below carries the immutable source and
+discussion URL for each row. These per-root headings make the current and
+stale dispositions addressable without relying on mutable line numbers.
+
+#### Root 4000820533: command-wrapped selectors
+
+Disposition: the static shell/logical audits discover bare, assignment-prefixed,
+`env`-wrapped and option-bearing `command ... go test` selectors; the wrapper
+rejects command prefixes before any Go child, with no test body or live result.
+
+#### Root 4000820538: package-variable and imported initialization
+
+Disposition: source-derived names use the exact non-executing `go list -json
+-test` file set and never start `go test -list`; synthetic package-variable and
+imported-init source is parsed only, so no initializer or test body runs.
+
+#### Root 4000935445: CGO mode in build identity
+
+Disposition: the wrapper pins `CGO_ENABLED=1`, rejects conflicting command
+assignments before metadata, passes that environment to metadata and execution,
+and records `cgo1` in every build identity.
+
+#### Root 4000935448: CPU multiplicity
+
+Disposition: `-cpu` and equivalent double-dash forms are rejected before
+metadata, so repeated run/pass events cannot be collapsed into one set-based
+result.
+
+#### Root 4000820530: `-toolexec` execution hooks
+
+Disposition: separated and equals-form `-toolexec` inputs are rejected before
+the first Go child; no tool hook, metadata query, test body or result runs.
+
+#### Root 4000935440: double-dash overrides
+
+Disposition: every `--...` Go spelling is rejected before the first Go child,
+including tool/module/overlay/timeout/exec/args, benchmark, selector, CPU and
+build overrides.
+
+#### Root 4000935441: all valid Go test names
+
+Disposition: source derivation follows Go's `isTest` condition, retaining empty
+suffix, numeric, underscore, uppercase and other non-lowercase-rune names while
+rejecting lowercase-initial suffixes.
+
+#### Root 4000935444: benchmark execution
+
+Disposition: benchmark-enabling `-bench`/`-test.bench` and equivalent
+double-dash forms are rejected before metadata; no benchmark or test body runs.
+
+#### Root 4000935449: additional package paths
+
+Disposition: pre-metadata parsing requires exactly one positional package and
+matches it to the reviewed `module-directory:package` identity; extra relative
+or import-path targets fail closed before Git/Go metadata.
+
+#### Root 4000964602: executable examples
+
+Disposition: any top-level executable `Example` declaration is rejected before
+claiming a source-derived digest, so an unrepresented example body cannot run.
+
 ### Current exact-head Luna/Codex finding ledger
 
-These fifteen actionable roots were reproduced against immutable prior packet
+These sixteen actionable roots were reproduced against immutable prior packet
 heads and are carried with their discussion URL and exact source commit. The
 rows describe only offline/static or wrapper evidence; they do not resolve the
 GitHub discussions or claim a live result.
@@ -5115,3 +5498,4 @@ GitHub discussions or claim a live result.
 | [4001378618](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4001378618), source [f7e723d2bc9efdf2a4a345ae5ee1e76c03bb943e](https://github.com/1XP-AI/gh-runnerd/commit/f7e723d2bc9efdf2a4a345ae5ee1e76c03bb943e) | Reproduced: Python `str.islower()` omitted Go-valid `Testª`. Corrected: source derivation matches cmd/go's `unicode.IsLower` lowercase-letter rule, accepting non-lowercase Unicode initial runes and rejecting lowercase ones. | [Final Unicode evidence](#root-4001378618-go-unicode-lowercase-predicate-for-test-names): `Testª`, titlecase and other non-lowercase boundaries accepted; lowercase cases rejected; no Go child. |
 | [4001378622](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4001378622), source [f7e723d2bc9efdf2a4a345ae5ee1e76c03bb943e](https://github.com/1XP-AI/gh-runnerd/commit/f7e723d2bc9efdf2a4a345ae5ee1e76c03bb943e) | Reproduced: direct and nested `bash/sh -c` payloads bypassed the executable-token scan. Corrected: shell command-string forms are recursively inspected and fail closed across direct, absolute, optioned, wrapper-prefixed, `busybox` and nested forms. | [Final nested-shell evidence](#root-4001378622-recursive-shell-command-string-scan): all direct/nested forms rejected while a safe direct command remained accepted by the pure scanner. |
 | [4001378624](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4001378624), source [f7e723d2bc9efdf2a4a345ae5ee1e76c03bb943e](https://github.com/1XP-AI/gh-runnerd/commit/f7e723d2bc9efdf2a4a345ae5ee1e76c03bb943e) | Reproduced: source-fuzz scanning opened an ignored FIFO before the cleanliness gate and blocked. Corrected: immutable tree/status cleanliness runs before candidate glob/read; the guard rejects ignored special files before metadata or Go execution. | [Final FIFO evidence](#root-4001378624-cleanliness-gate-before-source-reads): ignored `stuck_test.go` rejected before read, metadata/Go child or blocking. |
+| [4001471783](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4001471783), source [01764bbed0a387129d2a2abbc9e27a87e073f87e](https://github.com/1XP-AI/gh-runnerd/commit/01764bbed0a387129d2a2abbc9e27a87e073f87e) | Reproduced: the exact starting wrapper queried Git before parsing inherited or command-prefix assignments, so `GIT_WORK_TREE`, `GIT_DIR`, `GIT_INDEX_FILE` and related repository-control `GIT_*` variables could alter immutable-tree/status/index semantics. Corrected: assignment parsing and one shared reviewed Git name/prefix rejection now precede every Git query; the package/build audit mirrors the rejection. | [Final Git-environment evidence](#root-4001471783-git-repository-control-environment-overrides): 27 inherited and 3 command-prefix overrides rejected before any Git/Go child or immutable-tree/status validation. |
