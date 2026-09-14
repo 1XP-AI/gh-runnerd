@@ -1,6 +1,6 @@
 # G01 reusable recovery evidence packet
 
-Date: 2026-09-13. Issue: [G01 / #1](https://github.com/1XP-AI/gh-runnerd/issues/1).
+Date: 2026-09-14. Issue: [G01 / #1](https://github.com/1XP-AI/gh-runnerd/issues/1).
 Status: **selected path recorded; offline/source evidence only; live gate
 unresolved**. This packet is a sanitized index and changed-boundary ledger. It
 does not replace the linked records, authorize a canary, or claim production
@@ -78,6 +78,7 @@ result into a live result or claim that PR #72 is mergeable from this packet.
 |---|---|---|
 | Scale Set SDK | `github.com/actions/scaleset v0.4.0`; tag/source `6ce025902cd964747a078c2aabe7340ebc667eca`; [release](https://github.com/actions/scaleset/releases/tag/v0.4.0), [listener source](https://github.com/actions/scaleset/blob/6ce025902cd964747a078c2aabe7340ebc667eca/listener/listener.go), [module](https://github.com/actions/scaleset/blob/6ce025902cd964747a078c2aabe7340ebc667eca/go.mod) | Source + fixture pin. The module declares Go `1.25.3`; the audited comparison is not the selected release. |
 | Go toolchain | Experiment module directive `go 1.26.3`; verification toolchain `GOTOOLCHAIN=go1.26.8` / `go1.26.8`; reviewed `GOEXPERIMENT=none` | Fixture/toolchain evidence only; every rerun records the exact toolchain and experiment setting. |
+| Go root/FIPS mode | Reviewed `GOROOT` mode is the toolchain default (`GOROOT=""`, identity `goroot-default`); reviewed `GOFIPS140=off` (identity `gofips140-off`) | Fixture/toolchain evidence only; non-empty inherited or command-prefix `GOROOT` and any `GOFIPS140` other than `off` are refused before a guarded Go child. The effective modes are bound in every guarded build identity; raw root paths are never recorded. |
 | Runner | `v2.337.0`, source `397b032cbf865e9c3ddfab89d533ec19325e1273`; [release](https://github.com/actions/runner/releases/tag/v2.337.0), [command parser](https://github.com/actions/runner/blob/397b032cbf865e9c3ddfab89d533ec19325e1273/src/Runner.Listener/CommandSettings.cs), [JIT materialization](https://github.com/actions/runner/blob/397b032cbf865e9c3ddfab89d533ec19325e1273/src/Runner.Listener/Runner.cs) | Source pin; no runner binary was downloaded or executed by the contract evidence. |
 | JIT bootstrap | Select worker-only `ACTIONS_RUNNER_INPUT_JITCONFIG` as parsed by runner `v2.337.0`; [environment parsing](https://github.com/actions/runner/blob/397b032cbf865e9c3ddfab89d533ec19325e1273/src/Runner.Listener/CommandSettings.cs) | Source-supported fallback, with no separate transport version. It avoids argv but remains sensitive in initial environment, process memory, container metadata and runner-written files. `--jitconfig` exposes argv; stdin/FD/file transport is not established and is not claimed. |
 | REST observation | GitHub REST API header `2022-11-28` for exact runner/job reads; Scale Set acquisition uses SDK's `api-version=6.0-preview` | Source/fixture request contract, not live acceptance or freshness evidence. |
@@ -173,7 +174,7 @@ the count includes the actual live-canary gate row.
 | Reconciliation, inventory/identity/quarantine | statistics readers, paged inventory normalization, generation fences, ownership checks and journal/authority schema are unchanged. | Retain the prior reconciliation selector and add the exact focused `TestObservation*` and `TestRoster*` families, inventory/quarantine and journal/authority selectors in the command block below, including controller-side `TestAmbiguousCreateNeverRetriesAfterRestart`, the four `TestInventory*` cases, `TestDemandStatisticsAllowControlledProbeButNeverCleanup`, `TestCleanupOnlyForNeverIssuedWorkerWithExactReceipt`, `TestWorkerPreparationReturnsCanonicalSnapshotAndRejectsPriorEffect`, and the named journal/authority contracts in both `./livecanary` and `./liveworker`. | Fixture: record normalized facts and retained uncertainty; no live equality/absence claim. |
 | Secret and error handling | SDK error sentinels, HTTP body/debug redaction and shared response-budget controls are unchanged. | See the exact root, livecanary and liveworker selectors in the secret/error command block below, including decoded-body truncation, gzip-budget, uncertain-start, bounded Unix-response/redirect, journal-create-failure and raw-runtime-status tests. | Fixture: record normalized sentinel/error and body-budget behavior; no secret-bearing output or live result is claimed. |
 | Tagged controller/JIT input and credential transport boundary | `g01_live` source, input reader, credential attestation and transport refusal tests are unchanged. | Run the tagged command below plus the livecanary credential/transport selector below, including `TestAuthoritySplitAndPolicyRejection`, `TestSDKTransportOwnership`, `TestCredentialAttestationMismatchAndExpiredTokenRejected` and `TestTransportRejectsPlaintextOffHostAndProxyBeforeNetwork`. | Fixture: record no-secret/no-echo/refusal result; no credential or live phase. |
-| Idle drain and withdrawal | Only reuse the authoritative current PR #72 head `f5560ba950f77343e57034cc1cf85dc67f5ac922` and its unchanged fixture/source. | On that authoritative current PR #72 checkout, run the guarded `drain-pr72` and `drain-pr72-race` commands below; both carry the same exact selector/package digest, with `default+norace+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8` and `default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8` metadata respectively. | Fixture/source: record physical-write markers as client facts and inconclusive server receipt; never reuse as live assignment/drain evidence. |
+| Idle drain and withdrawal | Only reuse the authoritative current PR #72 head `f5560ba950f77343e57034cc1cf85dc67f5ac922` and its unchanged fixture/source. | On that authoritative current PR #72 checkout, run the guarded `drain-pr72` and `drain-pr72-race` commands below; both carry the same exact selector/package digest, with `default+norace+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8` and `default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8` metadata respectively. | Fixture/source: record physical-write markers as client facts and inconclusive server receipt; never reuse as live assignment/drain evidence. |
 | Paired terminal/worker support | paired journal/lease, worker profile, `liveworker` runtime source/implementation, image/runtime pins and terminal selectors are unchanged. | See the exact controller update-policy and worker runtime commands plus the tagged partition commands below; the worker runtime selector includes the direct Docker state/inspection, mutation-EOF and changed-daemon contracts, while tagged partition commands retain `go1.26.8`, `-race`, `-count=1` and `-timeout=120s`, the complete worker `^TestPaired` partition is included, and the controller-side terminal groups remain exhaustive/disjoint. | Fixture: record receipt/identity checks only; no live worker or terminal success claim. |
 | Actual live canary | There is no live evidence to reuse today. A future result is reusable only for the same immutable workflow/run attempt, source/head, resources, authority scope and approved observation boundary. | Rebuild/plan the exact reviewed tagged binary, then run only the explicitly authorized phase from [the driver](g01-live-driver.md); never substitute fixture commands or broaden phases. | Live: record sanitized server observations, authorization and unresolved outcomes; any changed target or boundary requires a fresh approval/rerun. |
 
@@ -242,7 +243,11 @@ selectors and other cgo tool overrides are rejected before any Go child; the
 effective default-tool, experiment and target identities are recorded in each
 build identity. `GOENV=off` disables persisted Go compiler/tool settings before
 any Go child; an inherited or command-supplied GOENV path is rejected. The
-reviewed canonical PATH is pinned before the first Git or Go executable lookup.
+reviewed GOROOT default (`GOROOT=""`) and `GOFIPS140=off` are likewise pinned
+before any Go child; non-default inherited or command-supplied values fail
+closed, and `goroot-default`/`gofips140-off` are bound into every build
+identity. The reviewed canonical PATH is pinned before the first Git or Go
+executable lookup.
 Before source-derived selector validation, the wrapper resolves the active
 package and test source files with the non-executing metadata query, requires the
 reviewed immutable `experiments/g01-scaleset` source tree, rejects tracked,
@@ -295,6 +300,12 @@ overrides, `-toolexec` execution hooks, benchmark-enabling `-bench` and
 `-test.bench` overrides, `-cpu` multiplicity overrides, `env` and shell
 `command` wrappers, all double-dash Go flags, and `-exec` execution wrappers
 are rejected.
+Before package metadata, downloaded module sources are obtained with
+`go mod download -json all` and verified with `go mod verify` through the same
+bounded Go-child helper and environment. The wrapper requires complete,
+existing module metadata/source paths and fails closed on a download error,
+missing checksum, missing source or verification failure; it does not print
+module paths or cache locations.
 Every Go child is launched through one wrapper-controlled subprocess helper with
 an independent 300-second deadline covering toolchain selection, toolchain
 downloads, compilation, `go env`, `go list` metadata and test execution; the
@@ -314,14 +325,14 @@ set -euo pipefail
 
 # The digest is SHA-256 of sorted test names joined with one trailing newline.
 # Invocation metadata is: package ID module-dir:package, then build ID
-# tags+race-mode+cgo-mode+cgo-tool-identity+goexperiment+target+toolchain (for
+# tags+race-mode+cgo-mode+cgo-tool-identity+goexperiment+target+goroot+gofips140+toolchain (for
 # example, experiments/g01-scaleset:./livecanary
-# default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8).
+# default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8).
 # The wrapper checks package initialization/build state, derives test names from
 # the same source/build selection without starting a test binary, then runs the
 # original command with its own JSON stream.
 go_test_checked() {
-  python3 - "$@" <<'PY'
+  python3 -I - "$@" <<'PY'
 import hashlib
 import json
 import os
@@ -350,7 +361,7 @@ if not re.fullmatch(
 ):
     raise SystemExit(f"{label}: invalid expected package identity")
 build_parts = expected_build.split("+")
-if len(build_parts) != 7:
+if len(build_parts) != 9:
     raise SystemExit(f"{label}: invalid expected build configuration")
 (
     expected_tags,
@@ -359,6 +370,8 @@ if len(build_parts) != 7:
     expected_cgo_tools,
     expected_goexperiment,
     expected_target,
+    expected_goroot,
+    expected_gofips140,
     expected_toolchain,
 ) = build_parts
 if expected_tags != "default" and not re.fullmatch(
@@ -375,6 +388,10 @@ if expected_goexperiment != "goexperiment-none":
     raise SystemExit(f"{label}: invalid expected GOEXPERIMENT identity")
 if expected_target != "darwin-arm64-goarm64-v8.0":
     raise SystemExit(f"{label}: invalid expected GOOS/GOARCH/GOARM64 target identity")
+if expected_goroot != "goroot-default":
+    raise SystemExit(f"{label}: invalid expected GOROOT identity")
+if expected_gofips140 != "gofips140-off":
+    raise SystemExit(f"{label}: invalid expected GOFIPS140 identity")
 if not re.fullmatch(r"go[A-Za-z0-9._-]+", expected_toolchain):
     raise SystemExit(f"{label}: invalid expected toolchain")
 
@@ -395,6 +412,26 @@ for source, value in (
             f"{label}: {source} GOENV must be {reviewed_goenv!r}"
         )
 env["GOENV"] = reviewed_goenv
+reviewed_goroot = ""
+for source, value in (
+    ("inherited", os.environ.get("GOROOT")),
+    ("command", command_assignments.get("GOROOT")),
+):
+    if value is not None and value != reviewed_goroot:
+        raise SystemExit(
+            f"{label}: {source} GOROOT must use the reviewed toolchain default"
+        )
+env["GOROOT"] = reviewed_goroot
+reviewed_gofips140 = "off"
+for source, value in (
+    ("inherited", os.environ.get("GOFIPS140")),
+    ("command", command_assignments.get("GOFIPS140")),
+):
+    if value is not None and value != reviewed_gofips140:
+        raise SystemExit(
+            f"{label}: {source} GOFIPS140 must be {reviewed_gofips140!r}"
+        )
+env["GOFIPS140"] = reviewed_gofips140
 reviewed_goexperiment = "none"
 for source, value in (
     ("inherited", os.environ.get("GOEXPERIMENT")),
@@ -698,6 +735,14 @@ if go_env.get("GOENV") != reviewed_goenv:
     raise SystemExit(
         f"{label}: Go child environment did not disable GOENV with {reviewed_goenv}"
     )
+if go_env.get("GOROOT") != reviewed_goroot:
+    raise SystemExit(
+        f"{label}: Go child environment did not pin the reviewed GOROOT default"
+    )
+if go_env.get("GOFIPS140") != reviewed_gofips140:
+    raise SystemExit(
+        f"{label}: Go child environment did not pin GOFIPS140={reviewed_gofips140}"
+    )
 if go_env.get("GOEXPERIMENT") != reviewed_goexperiment:
     raise SystemExit(
         f"{label}: Go child environment did not pin GOEXPERIMENT={reviewed_goexperiment}"
@@ -799,9 +844,12 @@ cgo_identity = "cgo" + env.get("CGO_ENABLED", "")
 compiler_tool_identity = "cgo-tools-default"
 goexperiment_identity = "goexperiment-" + reviewed_goexperiment
 target_identity = "darwin-arm64-goarm64-v8.0"
+goroot_identity = "goroot-default"
+gofips140_identity = "gofips140-off"
 actual_build = (
     f"{tag_identity}+{race_identity}+{cgo_identity}+{compiler_tool_identity}+"
-    f"{goexperiment_identity}+{target_identity}+{toolchain_identity}"
+    f"{goexperiment_identity}+{target_identity}+{goroot_identity}+"
+    f"{gofips140_identity}+{toolchain_identity}"
 )
 if actual_build != expected_build:
     raise SystemExit(
@@ -842,6 +890,40 @@ def json_objects(raw, phase):
     if not objects:
         raise SystemExit(f"{label}: {phase} emitted no package metadata")
     return objects
+
+
+def verify_downloaded_module_sources():
+    """Download and cryptographically verify module sources through bounded Go children."""
+    module_root = (repo_root / module_dir).resolve()
+    download = run_go_child(
+        ["go", "mod", "download", "-json", "all"],
+        cwd=module_root,
+        env=go_env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if download.returncode != 0 or download.stderr.strip():
+        raise SystemExit(f"{label}: module source download/metadata query failed")
+    modules = json_objects(download.stdout, "module source metadata")
+    for module in modules:
+        if module.get("Error"):
+            raise SystemExit(f"{label}: module source download reported an error")
+        required = ("Path", "Version", "GoMod", "Dir", "Sum", "GoModSum")
+        if any(not isinstance(module.get(name), str) or not module[name].strip() for name in required):
+            raise SystemExit(f"{label}: module source metadata was incomplete")
+        if not Path(module["GoMod"]).is_file() or not Path(module["Dir"]).is_dir():
+            raise SystemExit(f"{label}: downloaded module source path was missing")
+    verified = run_go_child(
+        ["go", "mod", "verify"],
+        cwd=module_root,
+        env=go_env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if verified.returncode != 0 or verified.stderr.strip():
+        raise SystemExit(f"{label}: downloaded module source verification failed")
 
 
 def git_source_control_entries(repo_root, module_dir, env):
@@ -904,6 +986,7 @@ def package_initialization_guard():
         raise SystemExit(
             f"{label}: source has skip-worktree or assume-unchanged entries"
         )
+    verify_downloaded_module_sources()
     list_command = ["go", "list", "-C", module_dir, "-json", "-test"]
     if race_identity == "race":
         list_command.append("-race")
@@ -1408,6 +1491,7 @@ print(
     f"{label}: source selector validation passed; package {actual_package}; "
     f"build {actual_build}; CGO_ENABLED={go_env['CGO_ENABLED']}; "
     f"GOEXPERIMENT={go_env['GOEXPERIMENT']}; compiler-tools={compiler_tool_identity}; "
+    f"GOROOT=default; GOFIPS140={go_env['GOFIPS140']}; "
     f"GOWORK={go_env['GOWORK']}; source-derived candidates {len(listed)}; "
     f"filtered executed {expected_count} names; "
     f"set-sha256 {actual_digest}"
@@ -1465,72 +1549,72 @@ validate_test_stream(run_result.stdout, run_result.stderr)
 PY
 }
 
-go_test_checked 9 9aef95c84ffd42ad632040498c628c78072ce94f5cc2f6af8493fcffc233b707 ack-root experiments/g01-scaleset:. default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8 \
+go_test_checked 9 9aef95c84ffd42ad632040498c628c78072ce94f5cc2f6af8493fcffc233b707 ack-root experiments/g01-scaleset:. default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s -run '^(TestSDKACKBoundaries|TestSDKDemandAboveFiftyAndPartialAcquisition|TestSDKRepeatedStatisticsAnd202ReuseLastObservation|TestRecoveryAfterACKCallbackCrash|TestRecoveryMissingLifecycleCallback|TestRecoveryErrorsHoldReservationsAndRedact|TestSDKAcquisitionResponseLossAfterACK|TestSDKCapacityWithdrawalDoesNotFenceInFlightAcquisition|TestSDKHTTPFailuresAndSessionRefresh)$' .
-go_test_checked 5 f95a296947af0fb862e8b447d3e27b7ce9f01e726659f5f87393789b62b783c9 ack-livecanary experiments/g01-scaleset:./livecanary default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8 \
+go_test_checked 5 f95a296947af0fb862e8b447d3e27b7ce9f01e726659f5f87393789b62b783c9 ack-livecanary experiments/g01-scaleset:./livecanary default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestSupportedListenerBarriersAndReservation|TestDriverBarriersThroughPinnedSDK|TestForeignIdentityAndUnreviewedWorkNeverACKOrDelete|TestAuditPR25MultiJobAcquisitionMustRefuseBeforeACK|TestNoMessageDoesNotCountAsCompletedBarrier)$'
 
-go_test_checked 24 eae489a7d743c942dca803c9b13cb618dcd87fbd9a53634f022bc5381c7d6436 baseline experiments/g01-scaleset:./livecanary default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8 \
+go_test_checked 24 eae489a7d743c942dca803c9b13cb618dcd87fbd9a53634f022bc5381c7d6436 baseline experiments/g01-scaleset:./livecanary default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=180s ./livecanary -run '^TestBaseline'
-go_test_checked 9 b6a378d192ba2c614cd82c20eab7cffcdbbb00115a1bba4da803fc262a1c3d8f admission-livecanary experiments/g01-scaleset:./livecanary default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8 \
+go_test_checked 9 b6a378d192ba2c614cd82c20eab7cffcdbbb00115a1bba4da803fc262a1c3d8f admission-livecanary experiments/g01-scaleset:./livecanary default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=180s ./livecanary -run '^(TestAdmission.*|TestAuditPR25DistinctStateDirectoriesMustShareCap)$'
-go_test_checked 8 4bce3c998c4f2e6806888de2ea9936c6dd9ea877c72b190d47f4f47e24cdb559 admission-liveworker experiments/g01-scaleset:./liveworker default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8 \
+go_test_checked 8 4bce3c998c4f2e6806888de2ea9936c6dd9ea877c72b190d47f4f47e24cdb559 admission-liveworker experiments/g01-scaleset:./liveworker default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=180s ./liveworker -run '^(TestAdmissionDirectoryUsesOSAccountWithoutEnvironmentFallback|TestAdmissionAuthorityChecksTheCurrentClaim|TestWorkerAdmissionCapsIndependentDirectories|TestWorkerAdmissionRetainsSlotAfterOutcomeAndClose|TestAdmissionRejectsCopiedJournalInDifferentDirectory|TestAdmissionSyncFailureMustBeRetried|TestAdmissionRefusesMissingUnsafeOrUnknownRootState|TestAdmissionInitializationLockPrecedesClaimCreation)$'
-go_test_checked 1 e7cdff09074beb49efb17b8e68201798140ea6f0e83ad10f3fc096aed98823ce unsupported-liveworker experiments/g01-scaleset:./liveworker osusergo+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8 \
+go_test_checked 1 e7cdff09074beb49efb17b8e68201798140ea6f0e83ad10f3fc096aed98823ce unsupported-liveworker experiments/g01-scaleset:./liveworker osusergo+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -tags=osusergo -count=1 -timeout=180s ./liveworker -run '^TestUnsupportedAccountLookupRefusesBeforeJournal$'
-go_test_checked 1 e7cdff09074beb49efb17b8e68201798140ea6f0e83ad10f3fc096aed98823ce unsupported-livecanary experiments/g01-scaleset:./livecanary osusergo+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8 \
+go_test_checked 1 e7cdff09074beb49efb17b8e68201798140ea6f0e83ad10f3fc096aed98823ce unsupported-livecanary experiments/g01-scaleset:./livecanary osusergo+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -tags=osusergo -count=1 -timeout=180s ./livecanary -run '^TestUnsupportedAccountLookupRefusesBeforeJournal$'
 
-go_test_checked 3 0f5a8b0633982f8cc04a541cb396c46736c6eec486622354a6456554c52cfc75 jit-root experiments/g01-scaleset:. default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8 \
+go_test_checked 3 0f5a8b0633982f8cc04a541cb396c46736c6eec486622354a6456554c52cfc75 jit-root experiments/g01-scaleset:. default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s -run '^(TestSDKJITLookupBeforeCreationDoesNotDiscoverIdentity|TestSDKJITResponseLossWithoutCommitDoesNotDiscoverIdentity|TestSDKJITResponseLossDiscoversIdentityWithoutReissuing)$' .
-go_test_checked 2 42eac255f830436a6fba9457bcb1964e8f9f596761fecfdb721c2d34b684f4cb jit-livecanary experiments/g01-scaleset:./livecanary default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8 \
+go_test_checked 2 42eac255f830436a6fba9457bcb1964e8f9f596761fecfdb721c2d34b684f4cb jit-livecanary experiments/g01-scaleset:./livecanary default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestJITLostResponseIsSecretSafeAndNeverReissued|TestDriverBarriersThroughPinnedSDK)$'
 
-go_test_checked 34 fcdcde4fce2efa204fdb352c035329a010f7a41b4b9746bf748b2ebc22b4d330 worker-runtime experiments/g01-scaleset:./liveworker default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8 \
+go_test_checked 34 fcdcde4fce2efa204fdb352c035329a010f7a41b4b9746bf748b2ebc22b4d330 worker-runtime experiments/g01-scaleset:./liveworker default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./liveworker -run '^(TestOneWorkerNeverRecreatedAndOnlyJITAddedToEnvironment|TestUncertainStartNeverRetriesAndCannotCleanup|TestEveryRuntimeBoundaryRejectsProfileAndOwnershipMismatch|TestUnverifiedRunnerUpdatePolicyRefusesBeforeRuntime|TestSocketReplacementAfterPreflightCannotReceiveAnyMutation|TestSocketModesAndControllerOwnership|TestSocketPostConnectRecheckClosesBeforeHTTP|TestNoCreateBeforeDurableIntent|TestUnknownCreateNeverRetriesAfterRestart|TestCreationWarningsPreserveKnownIDWithoutAuthorizingStart|TestWorkerPreparationReturnsCanonicalSnapshotAndRejectsPriorEffect|TestUnixInspectRequiresStateFlagsBeforeMutation|TestDockerInspectExact(KnownStatesAndSerializableFacts|StatePresenceAndLegacyRequirements|RejectsMalformedOrAmbiguousBodiesBeforeMutation|NotFoundReportsOnlyTheExactGET|RejectsOtherResponsesAndInvalidTargets|RequiresSupported404Body|CancellationNeverReportsPresenceOrAbsence|RejectsReplacedSocket|EOFCancellationKeepsUnknownOutcome)|TestDockerInspectLegacyCleanupKeepsSignedAndAbsentExitPolicy|TestDockerInspectMapsPreserveCaseSensitiveKeysAndProfile|TestDockerCompletedMutationResponseSurvivesEOFCancellation|TestDockerInspectUnknownOrAbsentStatusCannotAuthorizeMutation|TestUnixRuntimeRejectsWrongIdentityImagesAndUnsupportedLimits|TestUnixRuntimeOneShotCreateStartAndNonForceCleanup|TestUnixRuntimeAmbiguousEffectsNeverRetry|TestChangedDaemonCannotCreate|TestChangedDaemonOrAbsentContainerNeverMeansCleanupComplete|TestUnixTransportRejectsSymlinksAndInheritedTCPDestinations|TestAuditPR28MissingBridgeMustNotStart|TestCleanupRetainsActiveAndUnknownWorkers|TestOwnedTerminalCleanupAndRunningRemovalRace)$'
-go_test_checked 4 8a0a576036768baff9a9b7d53b3487ef84b2e95f502b3ca9dd453463f396cade update-policy experiments/g01-scaleset:./livecanary default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8 \
+go_test_checked 4 8a0a576036768baff9a9b7d53b3487ef84b2e95f502b3ca9dd453463f396cade update-policy experiments/g01-scaleset:./livecanary default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestCreateRequestsDisabledRunnerUpdate|TestUnconfirmedUpdateSettingQuarantinesCreate|TestUpdateSettingDriftStopsBeforeSessionOrJIT|TestUpdateSettingDriftDoesNotBlockSafeEmptyCleanup)$'
-go_test_checked 2 2614438aa4873bd044d1f0d6247b929403e2225c2e5112c13787bf790af42413 worker-command experiments/g01-scaleset:./cmd/g01-worker g01_worker+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8 \
+go_test_checked 2 2614438aa4873bd044d1f0d6247b929403e2225c2e5112c13787bf790af42413 worker-command experiments/g01-scaleset:./cmd/g01-worker g01_worker+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -tags=g01_worker -count=1 -timeout=45s ./cmd/g01-worker -run '^(TestBlockedJITInputHonorsDeadline|TestOfflinePlanAndRefusalDoNotReadSecretsOrEchoInput)$'
 
-go_test_checked 45 2e182d6aeb4c278eddbe272be1693e6bf0143759c23c03348435da59addfde53 reconciliation experiments/g01-scaleset:./livecanary default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8 \
+go_test_checked 45 2e182d6aeb4c278eddbe272be1693e6bf0143759c23c03348435da59addfde53 reconciliation experiments/g01-scaleset:./livecanary default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestAmbiguousCreateNeverRetriesAfterRestart|TestObserve.*|TestObservationIntentFailureStopsBeforeRead|TestObservationResponseCaptureIsLocalAndRejectsOtherOperations|TestStatistics.*|TestDemandStatisticsAllowControlledProbeButNeverCleanup|TestInvalidOwnedProof.*|TestCanonicalPreparationRecordsNoPhaseOrRemoteIntent|TestCanonicalPreparationRefusesInvalidJournalAndPhase|TestCanonicalPreparationRecoveryAndDriverShareLocalGate|TestJournal.*|TestAuthority.*|TestInventoryStrictPages|TestInventoryMalformedStopsLegacyEffects|TestInventoryTransportRefusalIsBoundedAndSanitized|TestInventoryImpossibleTotalStopsBeforeNextPage|TestRosterActualTLSCompleteObservation|TestRosterPreservesOnlyAcceptedPagePrefix|TestRosterFinalPublicationGuardAfterDigest|TestRosterRefusesInvalidEntryWithoutNetwork|TestStrictJSONRejectsDecoderEquivalentDuplicateFields|TestStrictJSONRejectsDuplicateAuthorityFields|TestFailedDirectorySyncMustBeRetried|TestFileJournalRejectsUnrecordedAuthorityBeforeRawDriverEffect|TestRenewedRecoveryApprovalRetainsOwnedState)$'
-go_test_checked 9 47a97f1f9083abbe72dfc21a2477bd25580684506fbf71bf5aba9e7f6f1a40e8 reconciliation-worker experiments/g01-scaleset:./liveworker default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8 \
+go_test_checked 9 47a97f1f9083abbe72dfc21a2477bd25580684506fbf71bf5aba9e7f6f1a40e8 reconciliation-worker experiments/g01-scaleset:./liveworker default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./liveworker -run '^(TestPrivateJournalLocksAndRetainsReservationAcrossRestart|TestJournalRejectsChangedApprovalTornTailAndUnsafeFiles|TestAuthorityLeaseRefusesConcurrentRunsAndFencesClose|TestAuthorityRejectsReplacedJournalOrDirectory|TestStrictJSONRejectsDecoderEquivalentDuplicateFields|TestStrictInputRejectsAmbiguousOrExtraAuthorityFields|TestFailedDirectorySyncMustBeRetried|TestFileJournalRejectsUnrecordedAuthorityBeforeRawDriverEffect|TestRenewedRecoveryApprovalRetainsOwnedState)$'
-go_test_checked 11 84b872130057cf2103feaa8f7c6cdb69a4d779e135eebf11cc04cb00590eacb9 reconciliation-quarantine experiments/g01-scaleset:./livecanary default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8 \
+go_test_checked 11 84b872130057cf2103feaa8f7c6cdb69a4d779e135eebf11cc04cb00590eacb9 reconciliation-quarantine experiments/g01-scaleset:./livecanary default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestDemandStatisticsAllowControlledProbeButNeverCleanup|TestCleanupOnlyForNeverIssuedWorkerWithExactReceipt|TestZeroStatisticsAndOptionalAbsencePermitEmptyCleanup|TestUnsafeStatisticsStopNewEffectsBeforeControlledMessage|TestEmptyAvailableWithWorkStatisticsStaysQuarantined|TestOlderPendingIntentSurvivesSuccessfulZeroInspection|TestUnownedDiscoveryEvidenceCannotAuthorizeCreationAfterAbsence|TestAuditPR25ObservedJobsMustBlockCleanup|TestUnexpectedWorkMessageQuarantinesBeforeSafeClose|TestObservedRunnerSurvivesLaterAbsenceAndFirstCleanup|TestObservationResultFailureSurvivesFileReopenAndInspection)$'
 
-go_test_checked 1 be0f21a92ce13d75e85a1182706e84b84884a8cf0ec01172e14e5ac2e04b600f secret-root experiments/g01-scaleset:. default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8 \
+go_test_checked 1 be0f21a92ce13d75e85a1182706e84b84884a8cf0ec01172e14e5ac2e04b600f secret-root experiments/g01-scaleset:. default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s -run '^TestSDKBusyRemovalSentinelAndRawErrorExposure$' .
-go_test_checked 6 6d0b3fc255928a6c7a5f7ae087d25715f96c0bad9f9298b5fb08ea7bc5fc34df secret-livecanary experiments/g01-scaleset:./livecanary default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8 \
+go_test_checked 6 6d0b3fc255928a6c7a5f7ae087d25715f96c0bad9f9298b5fb08ea7bc5fc34df secret-livecanary experiments/g01-scaleset:./livecanary default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./livecanary -run '^(TestHTTPErrorsDoNotReturnSecretResponseBody|TestSDKHTTPDebugDoesNotLogCredentials|TestSharedTransportRejectsOversizeSuccessAndErrorBodies|TestResponseReaderConsumesOnlyBudgetPlusOneAndRejectsTruncation|TestResponseBudgetAppliesAfterGzipDecompression|TestRealJournalCreateFailureBlocksRetryAndContainsNoErrorBody)$'
-go_test_checked 3 feda1bf98e323aef3e209cc4ea2765131ca7d17d70dfd7bb4828c0faab14dff4 secret-liveworker experiments/g01-scaleset:./liveworker default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8 \
+go_test_checked 3 feda1bf98e323aef3e209cc4ea2765131ca7d17d70dfd7bb4828c0faab14dff4 secret-liveworker experiments/g01-scaleset:./liveworker default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s ./liveworker -run '^(TestUncertainStartNeverRetriesAndCannotCleanup|TestUnixResponsesAreBoundedAndRedirectsNeverFollowed|TestObservationDoesNotJournalRawRuntimeStatus)$'
 
-go_test_checked 10 7ced37498c6790e0a1276ffece4cf0bcb2cad09f39da3ebdd0e28694f752596c live-command experiments/g01-scaleset:./cmd/g01-live g01_live+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8 \
+go_test_checked 10 7ced37498c6790e0a1276ffece4cf0bcb2cad09f39da3ebdd0e28694f752596c live-command experiments/g01-scaleset:./cmd/g01-live g01_live+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -tags=g01_live -count=1 -timeout=45s ./cmd/g01-live -run '^(TestPlanAndRefusalsNeverReadCredentialsOrEchoInputs|TestPreparationCommandNeverReadsCredentialsOrRunsRemotePhase|TestPairedTerminalModeReadsControllerInputAfterAllGates|TestPairedTerminalModeRejectsUnusedPhaseAndControllerFlagsBeforeInput|TestPairedTerminalModeRequiresWorkflowVerificationAuthorityBeforeInput|TestInheritedNamedCredentialFIFODelayedEOF|TestInheritedCredentialPipeStopsAtDeadline|TestCredentialInputRejectsNonPipeDescriptor|TestBlockedCredentialPipeStopsAtDeadline|TestCredentialInputAcceptsCompleteAndRejectsOversize)$'
-go_test_checked 4 a751c8b1a6a22d2f4ce76d90d6d79c48ab377355deed0f3bf189496c22b5492e live-transport experiments/g01-scaleset:./livecanary g01_live+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8 \
+go_test_checked 4 a751c8b1a6a22d2f4ce76d90d6d79c48ab377355deed0f3bf189496c22b5492e live-transport experiments/g01-scaleset:./livecanary g01_live+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -tags=g01_live -count=1 -timeout=45s ./livecanary -run '^(TestAuthoritySplitAndPolicyRejection|TestSDKTransportOwnership|TestCredentialAttestationMismatchAndExpiredTokenRejected|TestTransportRejectsPlaintextOffHostAndProxyBeforeNetwork)$'
 
-go_test_checked 34 a79b7fa367d8eb1e7fe4ee4ef637696518946dab6f2f25410f6e04bfba137298 drain-pr72 experiments/g01-scaleset:./livecanary default+norace+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8 \
+go_test_checked 34 a79b7fa367d8eb1e7fe4ee4ef637696518946dab6f2f25410f6e04bfba137298 drain-pr72 experiments/g01-scaleset:./livecanary default+norace+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset ./livecanary -run '^(TestBaselineAcquireTargetIsActionsOnly|TestPinnedSDKDrain.*|TestDriverDrainThroughPinnedSDKAndPollHook|TestDrainListenerWithdrawsWhilePollResponseIsHeld|TestDrainCancellationStopsBeforeReleasingHeldResponse)$' -count=1 -v -timeout=180s
-go_test_checked 34 a79b7fa367d8eb1e7fe4ee4ef637696518946dab6f2f25410f6e04bfba137298 drain-pr72-race experiments/g01-scaleset:./livecanary default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8 \
+go_test_checked 34 a79b7fa367d8eb1e7fe4ee4ef637696518946dab6f2f25410f6e04bfba137298 drain-pr72-race experiments/g01-scaleset:./livecanary default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race ./livecanary -run '^(TestBaselineAcquireTargetIsActionsOnly|TestPinnedSDKDrain.*|TestDriverDrainThroughPinnedSDKAndPollHook|TestDrainListenerWithdrawsWhilePollResponseIsHeld|TestDrainCancellationStopsBeforeReleasingHeldResponse)$' -count=1 -v -timeout=180s
 
 terminal_heavy_tests='^TestPairedTerminal(FinalResultCapacity|PendingChildCapacity|EligibilityUsesFreshExactFacts|CapturedAcknowledgementCancellation|MissingAcknowledgementsAndPostchecks)$'
 terminal_remainder_skip='^TestPairedTerminal(FinalResultCapacity|PendingChildCapacity|EligibilityUsesFreshExactFacts|CapturedAcknowledgementCancellation|MissingAcknowledgementsAndPostchecks|Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$'
 terminal_storage_tests='^TestPairedTerminal(Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$'
-go_test_checked 22 f3efc29451112b27d2cb590763612790db48f05b54718b1e023196ead6625222 paired-collection experiments/g01-scaleset:./livecanary g01_pair_fixture+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8 \
+go_test_checked 22 f3efc29451112b27d2cb590763612790db48f05b54718b1e023196ead6625222 paired-collection experiments/g01-scaleset:./livecanary g01_pair_fixture+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run '^TestPaired' -skip '^TestPairedTerminal'
-go_test_checked 106 bdeef850cfe820297e3896477219f0fcf90046bc30fb0bd454bfd0f8fe6db2ff paired-all-except experiments/g01-scaleset:./livecanary g01_pair_fixture+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8 \
+go_test_checked 106 bdeef850cfe820297e3896477219f0fcf90046bc30fb0bd454bfd0f8fe6db2ff paired-all-except experiments/g01-scaleset:./livecanary g01_pair_fixture+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -skip '^TestPaired'
-go_test_checked 24 b7f253f33da157adba67fe4312eddb0ee90172e24f46d4f48502890ab5f080f5 paired-worker experiments/g01-scaleset:./liveworker g01_pair_fixture+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8 \
+go_test_checked 24 b7f253f33da157adba67fe4312eddb0ee90172e24f46d4f48502890ab5f080f5 paired-worker experiments/g01-scaleset:./liveworker g01_pair_fixture+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./liveworker -run '^TestPaired'
-go_test_checked 5 9e1a2e099c0fc48bbbd83dd0dc798d3c954910cd150b210037741b2c70211952 paired-heavy experiments/g01-scaleset:./livecanary g01_pair_fixture+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8 \
+go_test_checked 5 9e1a2e099c0fc48bbbd83dd0dc798d3c954910cd150b210037741b2c70211952 paired-heavy experiments/g01-scaleset:./livecanary g01_pair_fixture+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run "$terminal_heavy_tests"
-go_test_checked 15 5e5dd1ee80d3d303271ab17b17aed22d5084e15684bcbe9f31152c1092ec1f73 paired-remainder experiments/g01-scaleset:./livecanary g01_pair_fixture+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8 \
+go_test_checked 15 5e5dd1ee80d3d303271ab17b17aed22d5084e15684bcbe9f31152c1092ec1f73 paired-remainder experiments/g01-scaleset:./livecanary g01_pair_fixture+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run '^TestPairedTerminal' -skip "$terminal_remainder_skip"
-go_test_checked 6 458f77f55209a59338a63bfc27697d85ebe5e0c3c7d1b959a0b56b2527f3ead5 paired-storage experiments/g01-scaleset:./livecanary g01_pair_fixture+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8 \
+go_test_checked 6 458f77f55209a59338a63bfc27697d85ebe5e0c3c7d1b959a0b56b2527f3ead5 paired-storage experiments/g01-scaleset:./livecanary g01_pair_fixture+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run "$terminal_storage_tests"
 GOTOOLCHAIN=go1.26.8 go vet -C experiments/g01-scaleset -tags=g01_pair_fixture ./livecanary
 GOTOOLCHAIN=go1.26.8 go vet -C experiments/g01-scaleset -tags=g01_pair_fixture ./liveworker
@@ -1556,7 +1640,7 @@ selector_lines="$(rg -n "$selector_pattern" docs/evidence/g01-recovery-packet.md
 test -n "$selector_lines"
 selector_probe=$'GOTOOLCHAIN=go1.26.8 go test ./livecanary -run=^TestProbe$\nenv GOTOOLCHAIN=go1.26.8 go test ./livecanary --run=^TestProbe$\nenv -i GOTOOLCHAIN=go1.26.8 go test ./livecanary --skip ^TestProbe$\n  GOTOOLCHAIN=go1.26.8 go test ./livecanary -skip ^TestProbe$\ncommand go test ./livecanary -run ^TestCommandProbe$\nGOTOOLCHAIN=go1.26.8 command go test ./livecanary -skip=^TestCommandProbe$'
 test "$(rg -n "$selector_pattern" <<< "$selector_probe" | wc -l | tr -d ' ')" -eq 6
-python3 - <<'PY'
+python3 -I - <<'PY'
 from pathlib import Path
 import re
 import tempfile
@@ -1789,14 +1873,14 @@ stream guards.
 
 ```sh
 set -euo pipefail
-python3 - <<'PY'
+python3 -I - <<'PY'
 import re
 import shlex
 from pathlib import Path
 
 source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
 fence_languages = {"sh", "bash", "shell", "zsh"}
-heredoc = re.compile(r"\bpython(?:3)?\b.*<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+heredoc = re.compile(r"\bpython3\s+-I\s+-\s+<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 
 
 def executable_shell_commands(markdown):
@@ -2009,7 +2093,7 @@ different tag/race configuration:
 
 ```sh
 set -euo pipefail
-python3 - <<'PY'
+python3 -I - <<'PY'
 import re
 import shlex
 from pathlib import Path
@@ -2227,6 +2311,10 @@ for index, line in enumerate(lines):
         raise SystemExit(f"line {index + 2}: conflicting GOEXPERIMENT assignment")
     if env.get("GOENV") not in {None, "off"}:
         raise SystemExit(f"line {index + 2}: conflicting GOENV assignment")
+    if env.get("GOROOT") not in {None, ""}:
+        raise SystemExit(f"line {index + 2}: conflicting GOROOT assignment")
+    if env.get("GOFIPS140") not in {None, "off"}:
+        raise SystemExit(f"line {index + 2}: conflicting GOFIPS140 assignment")
     target_assignments = {
         "GOOS": "darwin",
         "GOARCH": "arm64",
@@ -2245,7 +2333,8 @@ for index, line in enumerate(lines):
         raise SystemExit(f"line {index + 2}: unreviewed target assignment")
     actual_build = (
         f"{tag_identity}+{race_identity}+cgo1+cgo-tools-default+"
-        f"goexperiment-none+darwin-arm64-goarm64-v8.0+{env.get('GOTOOLCHAIN', '')}"
+        f"goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+"
+        f"gofips140-off+{env.get('GOTOOLCHAIN', '')}"
     )
     if actual_package != fields[4] or actual_build != fields[5]:
         raise SystemExit(
@@ -2271,9 +2360,9 @@ for assignment in synthetic_git_assignments:
         raise SystemExit(f"synthetic Git assignment escaped repository-control guard: {key}")
 print(
     f"package/build metadata audit: passed; {len(seen)} wrapper prescriptions "
-    "matched one package/import-path identity and explicit GOTOOLCHAIN/tag/race/CGO/GOEXPERIMENT/target "
+    "matched one package/import-path identity and explicit GOTOOLCHAIN/tag/race/CGO/GOEXPERIMENT/target/GOROOT/GOFIPS140 "
     "compiler-tool build configuration, exact PR #78/PR #72 source-tree family pins, exactly "
-    "one count/timeout, and no Git repository-control, test-binary, benchmark/CPU, double-dash or "
+    "one count/timeout, and no Git repository-control, GOENV/GOROOT/GOFIPS140/target-feature, test-binary, benchmark/CPU, double-dash or "
     "env/command overrides; duplicate package candidates and synthetic Git "
     "repository-control assignments fail closed"
 )
@@ -2286,6 +2375,7 @@ argument, every record carried explicit `GOTOOLCHAIN` metadata, exactly one
 `-count=1` and one positive timeout no greater than 300 seconds, and every
 build identity matched its tag set, race mode, pinned `CGO_ENABLED=1`,
 `GOEXPERIMENT=none`, `GOOS=darwin`, `GOARCH=arm64` and `GOARM64=v8.0` modes and
+`GOROOT=""`/`goroot-default`, `GOFIPS140=off`/`gofips140-off` modes and
 toolchain. The two drain labels selected the exact
 PR #72 module tree `9b30ef1b69c6375cb264c759d366fc5a52a5439f`; all other labels
 selected the PR #78 module tree `08c7830de7bc5120d1302d7ba6df162abd582315`.
@@ -2297,14 +2387,15 @@ source-derived selector validation.
 The recorded metadata-audit output was:
 
 ```text
-package/build metadata audit: passed; 28 wrapper prescriptions matched one package/import-path identity, explicit GOTOOLCHAIN/tag/race/CGO/GOEXPERIMENT/target build configuration, exact PR #78/PR #72 source-tree family pins, exactly one count/timeout, and no Git repository-control, GOENV/target-feature, test-binary, benchmark/CPU, double-dash or env/command overrides; duplicate package candidates and synthetic Git repository-control assignments fail closed
+package/build metadata audit: passed; 28 wrapper prescriptions matched one package/import-path identity, explicit GOTOOLCHAIN/tag/race/CGO/GOEXPERIMENT/target/GOROOT/GOFIPS140 build configuration, exact PR #78/PR #72 source-tree family pins, exactly one count/timeout, and no Git repository-control, GOENV/GOROOT/GOFIPS140/target-feature, test-binary, benchmark/CPU, double-dash or env/command overrides; duplicate package candidates and synthetic Git repository-control assignments fail closed
 ```
 
 The wrapper's selector edge cases were then exercised with a trimmed copy of
 the documented Python body that stops before the original test subprocess. Its
-only Go child processes are the effective `go env GOFLAGS` and package metadata
-(`go list -json -test`) query; no `go test -list` child is allowed because that
-would start package and imported initialization paths. Every Go child receives
+Go child processes are the effective `go env GOFLAGS`, bounded module download/
+verification, and package metadata (`go list -json -test`) queries; no
+`go test -list` child is allowed because that would start package and imported
+initialization paths. Every Go child receives
 `GOWORK=off` after inherited and command-prefix environment parsing, so an
 external or auto-discovered workspace cannot alter metadata or test selection;
 every Go child also receives the reviewed `GOEXPERIMENT=none` binding and an
@@ -2318,7 +2409,7 @@ direct Go child:
 
 ```sh
 set -euo pipefail
-python3 - <<'PY'
+python3 -I - <<'PY'
 import hashlib
 import io
 import json
@@ -2359,14 +2450,14 @@ cases = [
     (
         "equals-run",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8",
+        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         common + ["./livecanary", "-run=" + "^" + one_name + "$"],
         True,
     ),
     (
         "separated-filter",
         "22", "f3efc29451112b27d2cb590763612790db48f05b54718b1e023196ead6625222",
-        "experiments/g01-scaleset:./livecanary", "g01_pair_fixture+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8",
+        "experiments/g01-scaleset:./livecanary", "g01_pair_fixture+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         common + ["-tags=g01_pair_fixture", "./livecanary", "-run", "^TestPaired",
                   "-skip", "^TestPairedTerminal"],
         True,
@@ -2374,14 +2465,14 @@ cases = [
     (
         "no-match",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8",
+        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         common + ["./livecanary", "-run=^TestNoSuchSelectorName$"],
         False,
     ),
     (
         "skip-all-equals",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8",
+        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         common + ["./livecanary", "-run=^" + one_name + "$",
                   "-skip=^" + one_name + "$"],
         False,
@@ -2389,7 +2480,7 @@ cases = [
     (
         "posix-class-skip",
         "1", supported_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8",
+        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         common + ["./livecanary", "-run",
                   "^(TestSupportedListenerBarriersAndReservation|TestNoMessageDoesNotCountAsCompletedBarrier)$",
                   "-skip", "[[:upper:]]o"],
@@ -2398,7 +2489,7 @@ cases = [
     (
         "slash-subtest-skip",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8",
+        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         common + ["./livecanary", "-run", "^TestProbe$",
                   "-skip", "^TestProbe/subtest$"],
         False,
@@ -2406,112 +2497,112 @@ cases = [
     (
         "count-zero",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8",
+        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         count_zero_common + ["./livecanary", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "count-two",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8",
+        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         count_two_common + ["./livecanary", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "timeout-zero",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8",
+        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         timeout_zero_common + ["./livecanary", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "timeout-too-large",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8",
+        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         timeout_large_common + ["./livecanary", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "timeout-missing",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8",
+        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         no_timeout_common + ["./livecanary", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "timeout-duplicate",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8",
+        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         common + ["./livecanary", "-timeout=30s", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "inherited-gorace",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8",
+        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         gorace_common + ["./livecanary", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "args-test-selector",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8",
+        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         common + ["./livecanary", "-run=^" + one_name + "$", "-args", "-test.run=^Other$"],
         False,
     ),
     (
         "direct-test-selector",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8",
+        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         common + ["./livecanary", "-run=^" + one_name + "$", "-test.run=^Other$"],
         False,
     ),
     (
         "test-list-discovery",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8",
+        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         common + ["./livecanary", "-list", ".", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "exec-wrapper",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8",
+        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         common + ["-exec", "true", "./livecanary", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "active-package-init",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "g01_pair_fixture,g01_pair_real_cadence+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8",
+        "g01_pair_fixture,g01_pair_real_cadence+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         common + ["-tags=g01_pair_fixture,g01_pair_real_cadence", "./livecanary", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "package-mismatch",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8",
+        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         common + ["./liveworker", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "build-mismatch",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8",
+        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         common + ["-tags=g01_live", "./livecanary", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "duplicate-package-target",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8",
+        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         common + ["./livecanary", "./liveworker", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "extra-import-path-package",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8",
+        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         common + ["./livecanary",
                   "github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/liveworker",
                   "-run=^" + one_name + "$"],
@@ -2520,35 +2611,35 @@ cases = [
     (
         "benchmark-flag",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8",
+        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         common + ["./livecanary", "-bench=.", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "benchmark-test-binary-override",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8",
+        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         common + ["./livecanary", "-test.bench=.", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "cpu-multiplicity",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8",
+        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         common + ["./livecanary", "-cpu=1,2", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "conflicting-cgo",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8",
+        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         ["CGO_ENABLED=0", *common, "./livecanary", "-run=^" + one_name + "$"],
         False,
     ),
     (
         "conflicting-goexperiment",
         "1", one_digest, "experiments/g01-scaleset:./livecanary",
-        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8",
+        "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
         ["GOEXPERIMENT=rangefunc", *common, "./livecanary", "-run=^" + one_name + "$"],
         False,
     ),
@@ -2560,7 +2651,7 @@ with tempfile.TemporaryDirectory() as goenv_dir:
         (
             "persisted-goflags",
             "1", one_digest, "experiments/g01-scaleset:./livecanary",
-            "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8",
+            "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
             [f"GOENV={goenv}", *common, "./livecanary",
              "-run=^" + one_name + "$"],
             False,
@@ -2615,7 +2706,7 @@ try:
     for toolexec_label, toolexec_command in toolexec_cases:
         sys.argv = [
             "wrapper-probe", "1", one_digest, toolexec_label,
-            "experiments/g01-scaleset:./livecanary", "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8",
+            "experiments/g01-scaleset:./livecanary", "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
             *toolexec_command,
         ]
         output = io.StringIO()
@@ -2673,7 +2764,7 @@ try:
     for overlay_label, overlay_command in overlay_cases:
         sys.argv = [
             "wrapper-probe", "1", one_digest, overlay_label,
-            "experiments/g01-scaleset:./livecanary", "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8",
+            "experiments/g01-scaleset:./livecanary", "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
             *overlay_command,
         ]
         output = io.StringIO()
@@ -2729,7 +2820,7 @@ try:
     for modfile_label, modfile_command in modfile_cases:
         sys.argv = [
             "wrapper-probe", "1", one_digest, modfile_label,
-            "experiments/g01-scaleset:./livecanary", "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8",
+            "experiments/g01-scaleset:./livecanary", "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
             *modfile_command,
         ]
         output = io.StringIO()
@@ -2817,7 +2908,7 @@ try:
     for selector_label, selector_command in selector_guard_cases:
         sys.argv = [
             "wrapper-probe", "1", one_digest, selector_label,
-            "experiments/g01-scaleset:./livecanary", "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8",
+            "experiments/g01-scaleset:./livecanary", "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
             *selector_command,
         ]
         output = io.StringIO()
@@ -2896,7 +2987,7 @@ subprocess.run = observe_go_child
 try:
     sys.argv = [
         "wrapper-probe", "1", one_digest, "inherited-gowork",
-        "experiments/g01-scaleset:./livecanary", "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8", *(
+        "experiments/g01-scaleset:./livecanary", "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8", *(
             common + ["./livecanary", "-run=^" + one_name + "$"]
         ),
     ]
@@ -2965,7 +3056,7 @@ inherited_previous = os.environ.get("G01_INPUT_CHILD")
 os.environ["G01_INPUT_CHILD"] = "blocked"
 sys.argv = [
     "wrapper-probe", "1", one_digest, "inherited-child-mode",
-    "experiments/g01-scaleset:./livecanary", "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8", *(
+    "experiments/g01-scaleset:./livecanary", "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8", *(
         common + ["./livecanary", "-run=^" + one_name + "$"]
     ),
 ]
@@ -3081,9 +3172,9 @@ correctly gated by their separate reviewed source-tree pin:
 
 The two historical PR #72 output lines below retain the pre-correction
 three-part build labels because that immutable replay predates the current
-`CGO_ENABLED=1` and `GOEXPERIMENT=none` pins; every current prescription and
-metadata identity above uses the seven-part
-`tags+race+cgo+cgo-tools+goexperiment+target+toolchain` form.
+`CGO_ENABLED=1`, `GOEXPERIMENT=none`, GOROOT and GOFIPS140 pins; every current
+prescription and metadata identity above uses the nine-part
+`tags+race+cgo+cgo-tools+goexperiment+target+goroot+gofips140+toolchain` form.
 
 ```text
 source-derived prescription replay: passed; 26 non-PR72 wrapper records validated without go test -list or test-body execution
@@ -3103,7 +3194,7 @@ requires empty output and zero direct Go children for every case.
 
 ```sh
 set -euo pipefail
-python3 - <<'PY'
+python3 -I - <<'PY'
 import io
 import subprocess
 import sys
@@ -3208,7 +3299,7 @@ try:
             "wrapper-probe", "1",
             "9aef95c84ffd42ad632040498c628c78072ce94f5cc2f6af8493fcffc233b707",
             label, "experiments/g01-scaleset:./livecanary",
-            "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8", *common, *option,
+            "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8", *common, *option,
         ]
         output = io.StringIO()
         try:
@@ -3255,7 +3346,7 @@ start:
 
 ```sh
 set -euo pipefail
-python3 - <<'PY'
+python3 -I - <<'PY'
 import io
 import os
 import subprocess
@@ -3381,8 +3472,14 @@ requires its own PR metadata, exact-head review and CI. This packet correction
 updates only packet documentation, including selector-wrapper metadata and
 validation wording; it leaves the experiments source unchanged. The comparison parent
 ee8df8b7e00204c74a892b27f8b4c0ab278751ba is only the unchanged
-experiments/g01-scaleset source-comparison parent. The selector declaration audit is
-anchored to immutable source commit
+experiments/g01-scaleset source-comparison parent.
+The exact parent for this follow-up is `da1af0d041e37e5df9f3ed8028b51a69ec58ed8c`;
+all output records below the historical blocks are scoped explicitly either to
+that parent or to the candidate worktree derived from it. Historical snapshot,
+pre-correction-head and prior correction outputs are not current results and
+must not be reused as evidence for this follow-up.
+
+The selector declaration audit is anchored to immutable source commit
 `95cd9210620c54e098ecbe0df1217af1659f0c74` and tree
 `d8b79cd1ddc6993792a44a8e8ae88985ce7466c0`. The audited default-build
 declarations are in `./liveworker` (`docker_observation_test.go`,
@@ -3419,7 +3516,7 @@ immutable starting packet head `36ec84b27c934a25484b0a5391af0a20c7643912`:
 
 ```sh
 set -euo pipefail
-python3 - <<'PY'
+python3 -I - <<'PY'
 import subprocess
 
 previous = subprocess.check_output(
@@ -3472,7 +3569,7 @@ prior packet and records those exact misses without starting any child:
 
 ```sh
 set -euo pipefail
-python3 - <<'PY'
+python3 -I - <<'PY'
 import re
 import subprocess
 
@@ -3545,7 +3642,7 @@ omitted a synthetic `FuzzSeed` declaration and that `paired-all-except` had no
 
 ```sh
 set -euo pipefail
-python3 - <<'PY'
+python3 -I - <<'PY'
 import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -3604,7 +3701,7 @@ defense-in-depth check. The no-Go-child probe uses a temporary synthetic
 
 ```sh
 set -euo pipefail
-python3 - <<'PY'
+python3 -I - <<'PY'
 import io
 import subprocess
 from contextlib import redirect_stdout
@@ -3670,7 +3767,7 @@ Go would not execute:
 
 ```sh
 set -euo pipefail
-python3 - <<'PY'
+python3 -I - <<'PY'
 import re
 import subprocess
 from pathlib import Path
@@ -3715,7 +3812,7 @@ green probe records both properties and rejects any attempted Go child:
 
 ```sh
 set -euo pipefail
-python3 - <<'PY'
+python3 -I - <<'PY'
 import re
 import subprocess
 from pathlib import Path
@@ -3788,7 +3885,7 @@ that contain scanner source or synthetic fixtures:
 
 ```sh
 set -euo pipefail
-python3 - <<'PY'
+python3 -I - <<'PY'
 import re
 import subprocess
 
@@ -3836,7 +3933,7 @@ RED forbidden-command scan gap: prior 3bc8445567fe68cc355cf3f88f0c962a41e9cad5 m
 
 ```sh
 set -euo pipefail
-python3 - <<'PY'
+python3 -I - <<'PY'
 import re
 import subprocess
 import unicodedata
@@ -3943,7 +4040,7 @@ assignments fail closed:
 
 ```sh
 set -euo pipefail
-python3 - <<'PY'
+python3 -I - <<'PY'
 from pathlib import Path
 
 packet_path = Path("docs/evidence/g01-recovery-packet.md")
@@ -4070,7 +4167,7 @@ success.
 Recorded output for the historical exact-`08ce` head/remote audit:
 
 ```text
-post-correction current/remote head audit: passed; both returned 08ce02f7716c991d088eebf1f7311628e7991f9e
+post-correction historical head/remote audit: passed; both returned 08ce02f7716c991d088eebf1f7311628e7991f9e
 ```
 
 The new packet-correction head that followed the `08ce` review was
@@ -4079,7 +4176,7 @@ The new packet-correction head that followed the `08ce` review was
 push and is kept separate from the historical `08ce` output:
 
 ```text
-post-correction current/remote head audit: passed; both returned 201f5eed4d561a1255fbf5a2e930d676c23024c1
+post-correction historical head/remote audit: passed; both returned 201f5eed4d561a1255fbf5a2e930d676c23024c1
 ```
 
 Before this follow-up, the exact current head was checked against the remote
@@ -4088,7 +4185,7 @@ the pre-follow-up parity record; it is not a claim about the head produced by
 this follow-up:
 
 ```text
-post-correction current/remote head audit (pre-follow-up parity): passed; both returned 87fbad320d2f264200dc539a048d5704220fab3f
+post-correction historical head/remote audit (pre-follow-up parity): passed; both returned 87fbad320d2f264200dc539a048d5704220fab3f
 ```
 
 The `08ce`, `201f` and `87fb` output records are historical parity evidence
@@ -4128,7 +4225,7 @@ The `-tags=osusergo` case is intentionally included in that fail-closed set.
 
 ```sh
 set -euo pipefail
-python3 - <<'PY'
+python3 -I - <<'PY'
 import os
 import re
 import subprocess
@@ -4321,7 +4418,7 @@ rg -q '^package liveworker$' experiments/g01-scaleset/liveworker/docker_observat
 rg -q '^func Test(Observe|Statistics|InvalidOwnedProof|Journal|Authority)' experiments/g01-scaleset/livecanary --glob '*_test.go'
 rg -q '^//go:build !cgo \|\| osusergo \|\| android$|func TestUnsupportedAccountLookupRefusesBeforeJournal' experiments/g01-scaleset/liveworker/admission_lookup_unsupported_test.go experiments/g01-scaleset/livecanary/admission_lookup_unsupported_test.go
 rg -q '^func TestMain\(m \*testing\.M\)' experiments/g01-scaleset/livecanary/preparation_fixture_test.go
-python3 - <<'PY'
+python3 -I - <<'PY'
 from pathlib import Path
 
 
@@ -4559,7 +4656,7 @@ was read-only and did not run test bodies or live resources:
 
 ```sh
 set -euo pipefail
-python3 - <<'PY'
+python3 -I - <<'PY'
 import json
 import os
 import re
@@ -4678,11 +4775,11 @@ for label, package, tags in cases:
         if re.search(r"(?m)^\s*func\s+init\s*\(", source):
             raise SystemExit(f"{label}: active package init was not reviewed")
     print(f"{label}: passed; active source/test files contain no package init")
-print("package-initialization guard audit: passed; 7 reviewed package/build sets; source tree and Git intent bits pinned, GOENV=off, CGO_ENABLED=1/GOEXPERIMENT=none/GOOS=darwin/GOARCH=arm64/GOARM64=v8.0 bound with 300s metadata deadlines, and no active init effects")
+print("historical package-initialization guard audit: passed; 7 reviewed package/build sets; source tree and Git intent bits pinned, GOENV=off, CGO_ENABLED=1/GOEXPERIMENT=none/GOOS=darwin/GOARCH=arm64/GOARM64=v8.0 bound with 300s metadata deadlines, and no active init effects")
 PY
 ```
 
-The package-initialization guard audit passed for all seven package/build sets
+The historical package-initialization guard audit passed for all seven package/build sets
 (root, default and tagged controller/worker packages); the source subtree was
 unchanged from the reviewed tree, the `--ignored=matching` status output was
 empty, the `git ls-files -v` intent-bit output contained no skip-worktree or
@@ -4706,7 +4803,7 @@ probe therefore has no test-binary path on which those initializers could run.
 
 ```sh
 set -euo pipefail
-python3 - <<'PY'
+python3 -I - <<'PY'
 import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -4757,7 +4854,7 @@ is checked:
 
 ```sh
 set -euo pipefail
-python3 - <<'PY'
+python3 -I - <<'PY'
 import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -4881,7 +4978,7 @@ else
   staged_scan_status=$?
   test "$staged_scan_status" -eq 1
 fi
-early_match_probe="$(python3 - <<'PY'
+early_match_probe="$(python3 -I - <<'PY'
 synthetic_match = "+" + "gh" + "p_" + "early_probe"
 print("\n".join([synthetic_match] + [f"+ordinary-line-{index:04d}" for index in range(2048)]))
 PY
@@ -4921,7 +5018,7 @@ are not executable prescriptions and are not scanned:
 
 ```sh
 set -euo pipefail
-python3 - <<'PY'
+python3 -I - <<'PY'
 import re
 import shlex
 from pathlib import Path
@@ -4929,7 +5026,7 @@ from pathlib import Path
 source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
 fence_languages = {"sh", "bash", "shell", "zsh"}
 assignment = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
-heredoc = re.compile(r"\bpython(?:3)?\b.*<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+heredoc = re.compile(r"\bpython3\s+-I\s+-\s+<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 
 def shell_commands(markdown):
     in_shell = False
@@ -5114,10 +5211,12 @@ def forbidden_command(tokens, depth=0):
         "run", "rm", "kill", "exec", "system", "context",
     }:
         return "docker " + tokens[1]
-    if executable == "gh" and len(tokens) > 1 and tokens[1] in {
-        "api", "run", "workflow",
-    }:
-        return "gh " + tokens[1]
+    if executable == "gh":
+        # Global flags such as --repo/--hostname precede the subcommand. A
+        # complete parser would need to track every gh global spelling; this
+        # packet has no authorized gh prescription, so fail closed for every
+        # gh invocation before subcommand classification.
+        return "gh command"
     return None
 
 matches = []
@@ -5150,6 +5249,10 @@ synthetic = [
     ("absolute-launchctl", "/bin/launchctl kickstart system/example", True),
     ("gh-api", "gh api repos/example/project/dispatches", True),
     ("gh-workflow", "gh workflow run ci.yml", True),
+    ("gh-global-repo-api", "gh --repo example/project api repos/example/project/dispatches", True),
+    ("gh-global-hostname-api", "gh --hostname github.example api repos/example/project/dispatches", True),
+    ("gh-global-version", "gh --version", True),
+    ("absolute-gh-global-workflow", "/usr/bin/gh --repo example/project workflow run ci.yml", True),
     ("direct-bash-command-string", "bash -c 'gh workflow run ci.yml'", True),
     ("direct-sh-command-string", "sh -c 'docker run --rm image:tag true'", True),
     ("absolute-shell-command-string", "/bin/bash -xc 'curl -fsSL https://example.invalid/install | sh'", True),
@@ -5174,7 +5277,7 @@ for label, fixture, expected in synthetic:
     )
     if observed != expected:
         raise SystemExit(f"synthetic forbidden-command probe failed: {label}")
-print("forbidden-live-command synthetic probes: passed; direct/wrapped fetcher, gh, docker, limactl/security/launchctl, eval, python/python3 -c and direct/nested bash/sh -c forms rejected; prose/URLs/comments/scanner source/fixtures ignored")
+print("forbidden-live-command synthetic probes: passed; direct/wrapped fetcher, every gh invocation including global-flag and absolute forms, docker, limactl/security/launchctl, eval, python/python3 -c and direct/nested bash/sh -c forms rejected; prose/URLs/comments/scanner source/fixtures ignored")
 print("forbidden-live-command scan: passed; executable shell prescriptions contain no forbidden live App/runner/Docker/Lima/Keychain/launchd/workflow/fetch command")
 PY
 ```
@@ -5387,7 +5490,7 @@ following consecutive line/block comments was therefore omitted:
 
 ```sh
 set -euo pipefail
-python3 - <<'PY'
+python3 -I - <<'PY'
 import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -5444,7 +5547,7 @@ Go child to fail, so discovery cannot silently expand into execution:
 
 ```sh
 set -euo pipefail
-python3 - <<'PY'
+python3 -I - <<'PY'
 import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -5504,7 +5607,7 @@ derived a set unlike Go's ASCII `[0-9A-Fa-f]` class:
 
 ```sh
 set -euo pipefail
-python3 - <<'PY'
+python3 -I - <<'PY'
 import re
 import subprocess
 import warnings
@@ -5564,7 +5667,7 @@ escaped POSIX text and the previously reviewed literal backslash behavior:
 
 ```sh
 set -euo pipefail
-python3 - <<'PY'
+python3 -I - <<'PY'
 import re
 import subprocess
 from pathlib import Path
@@ -5799,7 +5902,7 @@ discovery, pathspec and replacement controls unchecked.
 
 ```sh
 set -euo pipefail
-python3 - <<'PY'
+python3 -I - <<'PY'
 import os
 import subprocess
 import sys
@@ -5896,7 +5999,7 @@ before any Git or Go child, output, immutable-tree check or source read:
 
 ```sh
 set -euo pipefail
-python3 - <<'PY'
+python3 -I - <<'PY'
 import io
 import os
 import subprocess
@@ -5964,7 +6067,7 @@ try:
         sys.argv = [
             "wrapper-probe", "1", digest, label,
             "experiments/g01-scaleset:./livecanary",
-            "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8", *command,
+            "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8", *command,
         ]
         output = io.StringIO()
         try:
@@ -6029,7 +6132,7 @@ The immutable red command was:
 
 ```sh
 set -euo pipefail
-python3 - <<'PY'
+python3 -I - <<'PY'
 import io
 import os
 import subprocess
@@ -6135,7 +6238,7 @@ The immutable scanner red command was:
 
 ```sh
 set -euo pipefail
-python3 - <<'PY'
+python3 -I - <<'PY'
 import re
 import shlex
 import subprocess
@@ -6203,7 +6306,7 @@ The immutable selector-audit red command was:
 
 ```sh
 set -euo pipefail
-python3 - <<'PY'
+python3 -I - <<'PY'
 import re
 import subprocess
 
@@ -6275,7 +6378,7 @@ The immutable red command was:
 
 ```sh
 set -euo pipefail
-python3 - <<'PY'
+python3 -I - <<'PY'
 import ast
 import shlex
 import subprocess
@@ -6338,7 +6441,7 @@ PY
 The correction rejects any inherited or command-prefix experiment other than
 the reviewed `GOEXPERIMENT=none`, binds that value before the first Go child,
 passes it to metadata and execution, and records `goexperiment-none` plus the
-reviewed target in every seven-part checked build identity. This makes an
+reviewed target, GOROOT default and GOFIPS140 mode in every nine-part checked build identity. This makes an
 experiment override a refusal, and makes the effective experiment setting and
 target part of the prescription identity.
 
@@ -6354,7 +6457,7 @@ The focused offline AST/timeout/environment/scanner regression was:
 
 ```sh
 set -euo pipefail
-python3 - <<'PY'
+python3 -I - <<'PY'
 import ast
 import os
 import shlex
@@ -6389,8 +6492,8 @@ go_child_calls = [
     and isinstance(node.func, ast.Name)
     and node.func.id == "run_go_child"
 ]
-if len(go_child_calls) != 3:
-    raise SystemExit(f"deadline regression: expected 3 Go child helper calls, observed {len(go_child_calls)}")
+if len(go_child_calls) != 5:
+    raise SystemExit(f"deadline regression: expected 5 Go child helper calls, observed {len(go_child_calls)}")
 helper = functions["run_go_child"]
 timeout_calls = [
     node
@@ -6442,10 +6545,10 @@ record_builds = [
     if line.startswith("go_test_checked ")
 ]
 if len(record_builds) != 28 or any(
-    "+goexperiment-none+darwin-arm64-goarm64-v8.0+" not in build
+    "+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+" not in build
     for build in record_builds
 ):
-    raise SystemExit("GOEXPERIMENT/target regression: not all 28 prescriptions bind reviewed settings")
+    raise SystemExit("GOEXPERIMENT/target/GOROOT/GOFIPS140 regression: not all 28 prescriptions bind reviewed settings")
 
 prefix = wrapper[:wrapper.index("compiler_tool_environment_names =")]
 base_command = [
@@ -6481,7 +6584,7 @@ def expect_prefix_rejection(argv, inherited=None):
     if called:
         raise SystemExit(f"GOEXPERIMENT regression: child started before refusal: {called}")
 
-build = "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8"
+build = "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8"
 expect_prefix_rejection(
     ["probe", "1", "f" * 64, "command-experiment", "experiments/g01-scaleset:./livecanary", build,
      "GOEXPERIMENT=rangefunc", "GOTOOLCHAIN=go1.26.8", *base_command]
@@ -6535,9 +6638,11 @@ if any(
 ):
     raise SystemExit("eval scanner regression: safe direct printf was rejected")
 print(
-    "fresh P2 regression: passed; 3 Go child call sites route through one "
-    "helper with independent 300s timeout (timeout expiry refused); 28 "
-    "prescriptions carry goexperiment-none and darwin-arm64-goarm64-v8.0; inherited/command experiment "
+    "fresh P2 regression: passed; 5 Go child call sites route through one "
+    "helper with independent 300s timeout (timeout expiry refused), including "
+    "bounded module download and verify; 28 prescriptions carry "
+    "goexperiment-none, darwin-arm64-goarm64-v8.0, goroot-default and "
+    "gofips140-off; inherited/command experiment "
     "overrides refused before children; direct/absolute/nested eval forms "
     "refused while direct printf remained accepted; no Go child/list/test/live "
     "command started"
@@ -6548,7 +6653,7 @@ PY
 Recorded focused output:
 
 ```text
-fresh P2 regression: passed; 3 Go child call sites route through one helper with independent 300s timeout (timeout expiry refused); 28 prescriptions carry goexperiment-none and darwin-arm64-goarm64-v8.0; inherited/command experiment overrides refused before children; direct/absolute/nested eval forms refused while direct printf remained accepted; no Go child/list/test/live command started
+fresh P2 regression: passed; 5 Go child call sites route through one helper with independent 300s timeout (timeout expiry refused), including bounded module download and verify; 28 prescriptions carry goexperiment-none, darwin-arm64-goarm64-v8.0, goroot-default and gofips140-off; inherited/command experiment overrides refused before children; direct/absolute/nested eval forms refused while direct printf remained accepted; no Go child/list/test/live command started
 ```
 
 The three corrections are packet-only and do not authorize a live operation;
@@ -6606,7 +6711,8 @@ The immutable wrapper had no reviewed `GOOS`/`GOARCH`/`GOARM64` binding and no
 target component in its build identity. The current wrapper rejects
 unreviewed target feature settings, binds `GOOS=darwin`, `GOARCH=arm64` and
 `GOARM64=v8.0` before children, and records
-`darwin-arm64-goarm64-v8.0` in every seven-part identity.
+`darwin-arm64-goarm64-v8.0`, `goroot-default` and `gofips140-off` in every
+nine-part identity.
 
 <a id="root-4001907060-git-intent-bits-before-source-derivation"></a>
 #### Root 4001907060: Git intent bits before source derivation
@@ -6644,7 +6750,7 @@ below for reproducibility:
 
 ```sh
 set -euo pipefail
-python3 - <<'PY'
+python3 -I - <<'PY'
 import ast
 import os
 import shlex
@@ -6792,7 +6898,7 @@ live command.
 
 ```sh
 set -euo pipefail
-python3 - <<'PY'
+python3 -I - <<'PY'
 import ast
 import os
 import re
@@ -6821,7 +6927,7 @@ prefix_end = wrapper.index("repo_root = Path(")
 prefix_ns = {"__name__": "__main__"}
 base = [
     "probe", "1", "f" * 64, "current", "experiments/g01-scaleset:./livecanary",
-    "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+go1.26.8",
+    "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
     "GOTOOLCHAIN=go1.26.8", "go", "test", "-C", "experiments/g01-scaleset", "-race",
     "-count=1", "-timeout=45s", "./livecanary", "-run=^TestProbe$",
 ]
@@ -6972,6 +7078,380 @@ all live-operation/credential gates, and do not authorize a rerun.
 | 4001767363 | [discussion 4001767363](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4001767363) | Preserve the prior finding URL as immutable packet evidence. |
 | 4001767365 | [discussion 4001767365](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4001767365) | Preserve the prior finding URL as immutable packet evidence. |
 
+### Fresh exact-head corrections at `da1af0d041e37e5df9f3ed8028b51a69ec58ed8c`
+
+The [exact-head Codex review 5193796950](https://github.com/1XP-AI/gh-runnerd/pull/78#pullrequestreview-5193796950) identified six fresh exact-head evidence gaps in the
+packet-only wrapper/scanner. This follow-up keeps the immutable parent explicit
+and addresses the findings only in this document: 4002136372 (GOROOT),
+4002136380 (GOFIPS140), 4002136385 (gh global flags), 4002136391 (isolated
+Python audit execution), 4002136393 (stale exact-head outputs), and
+4002136395 (downloaded module-source verification). No production Go, source
+tree, runner, App, workflow, Docker, Lima, Keychain or launchd state is
+changed by these corrections.
+
+#### Exact-parent red reproduction
+
+The following offline/static probe was run against the immutable parent before
+the correction. It extracts only the packet text from that commit, exercises
+the historical gh scanner with global flags, counts executable Python heredoc
+prescriptions, checks for the missing Go environment/identity controls and
+bounded module verifier, and identifies the three literal head-output records
+that were not scoped to this follow-up:
+
+```sh
+set -euo pipefail
+python3 -I - <<'PY'
+import re
+import shlex
+import subprocess
+from pathlib import Path
+
+parent = "da1af0d041e37e5df9f3ed8028b51a69ec58ed8c"
+packet = subprocess.check_output(
+    ["git", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    text=True,
+)
+scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
+scanner_start = packet.rfind("source = Path(", 0, scanner_anchor)
+scanner_end = packet.index("\nmatches = []", scanner_anchor)
+scanner_ns = {"Path": Path, "re": re, "shlex": shlex}
+exec(
+    compile(packet[scanner_start:scanner_end], "<historical-scanner>", "exec"),
+    scanner_ns,
+)
+
+def scanner_result(command):
+    executable_tokens = scanner_ns["executable_tokens"]
+    tokens = executable_tokens(shlex.split(command))
+    forbidden_command = scanner_ns["forbidden_command"]
+    return forbidden_command(tokens)
+
+if scanner_result("gh --repo example/project api repos/example/project/dispatches") is None:
+    print(f"RED 4002136385: exact parent {parent} accepted gh global flags before api classification")
+else:
+    raise SystemExit("red probe expected the historical gh global-flag gap")
+heredocs = [
+    line for line in packet.splitlines()
+    if "python3" in line and "<<" in line and "python3 -I" not in line
+]
+if len(heredocs) != 36:
+    raise SystemExit(f"red probe expected 36 non-isolated Python heredocs, found {len(heredocs)}")
+print(f"RED 4002136391: exact parent {parent} has {len(heredocs)} executable Python heredoc prescriptions without -I")
+if "GOROOT" in packet or "GOFIPS140" in packet:
+    raise SystemExit("red probe expected no GOROOT/GOFIPS140 guard or identity")
+print(f"RED 4002136372/6380: exact parent {parent} has no GOROOT/GOFIPS140 guard or identity")
+if "go\", \"mod\", \"download" in packet or "go\", \"mod\", \"verify" in packet:
+    raise SystemExit("red probe expected no bounded module-source verification child")
+print(f"RED 4002136395: exact parent {parent} has no bounded module-source verification child")
+stale = [
+    line for line in packet.splitlines()
+    if "post-correction current/remote head audit: passed; both returned" in line
+]
+if len(stale) != 3:
+    raise SystemExit(f"red probe expected three stale head-output records, found {len(stale)}")
+print(f"RED 4002136393: exact parent {parent} retains {len(stale)} historical head-output lines not tied to the current packet parent")
+PY
+```
+
+Recorded red output:
+
+```text
+RED 4002136385: exact parent da1af0d041e37e5df9f3ed8028b51a69ec58ed8c accepted gh global flags before api classification
+RED 4002136391: exact parent da1af0d041e37e5df9f3ed8028b51a69ec58ed8c has 36 executable Python heredoc prescriptions without -I
+RED 4002136372/6380: exact parent da1af0d041e37e5df9f3ed8028b51a69ec58ed8c has no GOROOT/GOFIPS140 guard or identity
+RED 4002136395: exact parent da1af0d041e37e5df9f3ed8028b51a69ec58ed8c has no bounded module-source verification child
+RED 4002136393: exact parent da1af0d041e37e5df9f3ed8028b51a69ec58ed8c retains 3 historical head-output lines not tied to the current packet parent
+```
+
+#### Minimal correction and focused boundary/failure probes
+
+The minimal correction pins reviewed `GOROOT=""` (the toolchain-selected
+default, represented as `goroot-default`) and `GOFIPS140=off` before any
+guarded Go child, rejects conflicting inherited and command-prefix values, and
+binds both effective values into the nine-part build identity. It fails closed
+for every `gh` invocation before subcommand classification, changes every
+executable audit heredoc to `python3 -I`, and requires `go mod download -json
+all` followed by `go mod verify` through the bounded Go-child helper before
+package metadata. Historical head outputs are relabeled as historical and the
+new exact-parent scope is declared above; the dynamic final head template
+remains a template until the post-push handoff.
+
+The focused green probe below parses the candidate wrapper/scanner without
+starting Go, creates no live operation, and checks the rejection boundaries,
+identity shape, Python import isolation, bounded module download/verify call
+sites and fail-closed metadata path, global-flag gh forms, current prescription
+count, and historical-output relabeling:
+
+```sh
+set -euo pipefail
+python3 -I - <<'PY'
+import ast
+import os
+import re
+import shlex
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from types import SimpleNamespace
+
+parent = "da1af0d041e37e5df9f3ed8028b51a69ec58ed8c"
+packet_path = Path("docs/evidence/g01-recovery-packet.md")
+packet = packet_path.read_text(encoding="utf-8")
+if subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip() != parent:
+    raise SystemExit("green probe must run at the immutable exact parent")
+
+wrapper_start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
+wrapper_end = packet.index("\nPY\n}", wrapper_start)
+wrapper_source = packet[wrapper_start:wrapper_end]
+wrapper_tree = ast.parse(wrapper_source, filename="<candidate-wrapper>")
+functions = {
+    node.name: node
+    for node in wrapper_tree.body
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+}
+if "verify_downloaded_module_sources" not in functions:
+    raise SystemExit("module verification helper missing")
+go_child_calls = [
+    node for node in ast.walk(wrapper_tree)
+    if isinstance(node, ast.Call)
+    and isinstance(node.func, ast.Name)
+    and node.func.id == "run_go_child"
+]
+if len(go_child_calls) != 5:
+    raise SystemExit("expected effective-flags, module download, module verify, list and test Go children")
+build_identity = "default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8"
+if "build_parts) != 9" not in wrapper_source:
+    raise SystemExit("nine-part build identity parser missing")
+for marker in ("goroot-default", "gofips140-off", "reviewed_goroot", "reviewed_gofips140"):
+    if marker not in wrapper_source:
+        raise SystemExit(f"identity/environment marker missing: {marker}")
+
+# Execute only the pre-child wrapper prefix with synthetic argv/env values.
+# The prefix ends immediately before its first repository subprocess query.
+prefix_end = wrapper_source.index("repo_root = Path(")
+prefix = wrapper_source[:prefix_end]
+argv_tail = [
+    "probe", "1", "0" * 64, "probe-label",
+    "experiments/g01-scaleset:./livecanary", build_identity,
+    "GOTOOLCHAIN=go1.26.8", "go", "test", "-C",
+    "experiments/g01-scaleset", "./livecanary",
+]
+reviewed_path = "/opt/homebrew/bin:/usr/bin:/bin"
+original_environment = dict(os.environ)
+
+def prefix_rejects(inherited, assignments, needle):
+    os.environ.clear()
+    os.environ.update({"PATH": reviewed_path, "LANG": "C", **inherited})
+    command_argv = ["probe", "1", "0" * 64, "probe-label",
+                    "experiments/g01-scaleset:./livecanary", build_identity,
+                    *assignments, "go", "test", "-C",
+                    "experiments/g01-scaleset", "./livecanary"]
+    namespace = {"__name__": "__main__"}
+    original_argv = sys.argv
+    sys.argv = command_argv
+    try:
+        exec(compile(prefix, "<prefix-probe>", "exec"), namespace)
+    except SystemExit as error:
+        if needle not in str(error):
+            raise SystemExit(f"wrong rejection for {needle}: {error}")
+        return
+    finally:
+        sys.argv = original_argv
+    raise SystemExit(f"prefix accepted forbidden {needle}")
+
+try:
+    prefix_rejects({"GOROOT": "/synthetic/root"}, [], "GOROOT")
+    prefix_rejects({}, ["GOROOT=/synthetic/root"], "GOROOT")
+    prefix_rejects({"GOFIPS140": "latest"}, [], "GOFIPS140")
+    prefix_rejects({}, ["GOFIPS140=latest"], "GOFIPS140")
+    os.environ.clear()
+    os.environ.update({"PATH": reviewed_path, "LANG": "C"})
+    safe_namespace = {"__name__": "__main__"}
+    original_argv = sys.argv
+    sys.argv = argv_tail
+    try:
+        exec(compile(prefix, "<accepted-prefix-probe>", "exec"), safe_namespace)
+    finally:
+        sys.argv = original_argv
+finally:
+    os.environ.clear()
+    os.environ.update(original_environment)
+
+module_node = functions["verify_downloaded_module_sources"]
+module_calls = [
+    node for node in ast.walk(module_node)
+    if isinstance(node, ast.Call)
+    and isinstance(node.func, ast.Name)
+    and node.func.id == "run_go_child"
+]
+if len(module_calls) != 2:
+    raise SystemExit("module helper must use exactly download and verify Go children")
+module_commands = [ast.literal_eval(call.args[0]) for call in module_calls]
+if module_commands != [
+    ["go", "mod", "download", "-json", "all"],
+    ["go", "mod", "verify"],
+]:
+    raise SystemExit("module helper command sequence changed")
+guard_node = functions["package_initialization_guard"]
+verify_line = next(node.lineno for node in ast.walk(guard_node)
+                   if isinstance(node, ast.Call)
+                   and isinstance(node.func, ast.Name)
+                   and node.func.id == "verify_downloaded_module_sources")
+list_line = next(node.lineno for node in ast.walk(guard_node)
+                 if isinstance(node, ast.Assign)
+                 and any(isinstance(target, ast.Name) and target.id == "list_command"
+                         for target in node.targets))
+if verify_line >= list_line:
+    raise SystemExit("module verification must precede package metadata")
+
+# Exercise both the successful bounded sequence and incomplete metadata failure
+# with fakes; no Go executable is invoked.
+with tempfile.TemporaryDirectory() as directory:
+    root = Path(directory)
+    module_root = root / "module"
+    module_root.mkdir()
+    gomod = module_root / "go.mod"
+    gomod.write_text("module synthetic/module\n", encoding="utf-8")
+    source_dir = root / "downloaded-source"
+    source_dir.mkdir()
+    calls = []
+    metadata = [{
+        "Path": "synthetic/dependency",
+        "Version": "v1.0.0",
+        "GoMod": str(gomod),
+        "Dir": str(source_dir),
+        "Sum": "h1:synthetic-module-sum",
+        "GoModSum": "h1:synthetic-gomod-sum",
+    }]
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(
+            returncode=0,
+            stderr="",
+            stdout="download-json-output" if command[2] == "download" else "",
+        )
+
+    def fake_json(_raw, _phase):
+        return metadata
+
+    module_namespace = {
+        "Path": Path,
+        "repo_root": root,
+        "module_dir": "module",
+        "run_go_child": fake_run,
+        "json_objects": fake_json,
+        "go_env": {},
+        "label": "module-probe",
+    }
+    exec(compile(ast.Module(body=[module_node], type_ignores=[]),
+                 "<module-helper-probe>", "exec"), module_namespace)
+    module_namespace["verify_downloaded_module_sources"]()
+    if calls != [
+        ["go", "mod", "download", "-json", "all"],
+        ["go", "mod", "verify"],
+    ]:
+        raise SystemExit("bounded module download/verify sequence was not used")
+    calls.clear()
+    module_namespace["json_objects"] = lambda _raw, _phase: [{"Path": "incomplete"}]
+    try:
+        module_namespace["verify_downloaded_module_sources"]()
+    except SystemExit as error:
+        if "incomplete" not in str(error):
+            raise SystemExit(f"wrong incomplete-module rejection: {error}")
+    else:
+        raise SystemExit("incomplete module metadata was accepted")
+    if len(calls) != 1:
+        raise SystemExit("module verification continued after incomplete metadata")
+
+scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
+scanner_start = packet.rfind("source = Path(", 0, scanner_anchor)
+scanner_end = packet.index("\nmatches = []", scanner_anchor)
+scanner_namespace = {"Path": Path, "re": re, "shlex": shlex}
+exec(compile(packet[scanner_start:scanner_end], "<candidate-scanner>", "exec"), scanner_namespace)
+
+def scanner_result(command):
+    executable_tokens = scanner_namespace["executable_tokens"]
+    tokens = executable_tokens(shlex.split(command))
+    forbidden_command = scanner_namespace["forbidden_command"]
+    return forbidden_command(tokens)
+
+for command in (
+    "gh --repo example/project api repos/example/project/dispatches",
+    "gh --hostname github.example api repos/example/project/dispatches",
+    "gh --version",
+    "/usr/bin/gh --repo example/project workflow run ci.yml",
+):
+    if scanner_result(command) is None:
+        raise SystemExit(f"gh global-flag form was accepted: {command}")
+if scanner_result("printf ok") is not None:
+    raise SystemExit("safe printf fixture was rejected")
+
+heredoc_lines = [
+    line for line in packet.splitlines()
+    if "<<" in line and re.search(r"(?:^|[=(])python3\s", line)
+]
+if not heredoc_lines or any("python3 -I" not in line for line in heredoc_lines):
+    raise SystemExit("an executable Python heredoc is not isolated with -I")
+with tempfile.TemporaryDirectory() as directory:
+    hostile_root = Path(directory)
+    (hostile_root / "json.py").write_text(
+        "raise RuntimeError('cwd/PYTHONPATH module executed')\n", encoding="utf-8"
+    )
+    isolated_environment = dict(os.environ)
+    isolated_environment["PYTHONPATH"] = str(hostile_root)
+    isolated = subprocess.run(
+        [sys.executable, "-I", "-c", "import json; print(json.__file__)"],
+        cwd=hostile_root,
+        env=isolated_environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if isolated.returncode != 0 or "json.py" in isolated.stdout:
+        raise SystemExit("isolated Python audit imported a cwd/PYTHONPATH module")
+
+prescriptions = [line for line in packet.splitlines()
+                 if line.startswith("go_test_checked ")]
+if len(prescriptions) != 28:
+    raise SystemExit(f"current packet prescription count changed: {len(prescriptions)}")
+if any("+goroot-default+gofips140-off+" not in line for line in prescriptions):
+    raise SystemExit("a current prescription lacks GOROOT/GOFIPS140 identity")
+historical = (
+    "post-correction historical head/remote audit: passed; both returned"
+)
+for sha in (
+    "08ce02f7716c991d088eebf1f7311628e7991f9e",
+    "201f5eed4d561a1255fbf5a2e930d676c23024c1",
+):
+    if f"{historical} {sha}" not in packet:
+        raise SystemExit("historical exact-head output was not relabeled")
+if "post-correction historical head/remote audit (pre-follow-up parity): passed; both returned 87fbad320d2f264200dc539a048d5704220fab3f" not in packet:
+    raise SystemExit("pre-follow-up parity output was not relabeled")
+print(
+    "GREEN exact-parent packet probe: passed; inherited/command-prefix GOROOT "
+    "and GOFIPS140 conflicts refused before children, reviewed defaults bound in "
+    "nine-part identities, gh global-flag/absolute forms refused, all Python "
+    f"heredocs isolated ({len(heredoc_lines)}), bounded module download/verify "
+    f"sequence and incomplete metadata failure passed, stale outputs relabeled, "
+    f"and {len(prescriptions)} current prescriptions retained; no Go child started"
+)
+PY
+```
+
+Recorded focused output:
+
+```text
+GREEN exact-parent packet probe: passed; inherited/command-prefix GOROOT and GOFIPS140 conflicts refused before children, reviewed defaults bound in nine-part identities, gh global-flag/absolute forms refused, all Python heredocs isolated (37), bounded module download/verify sequence and incomplete metadata failure passed, stale outputs relabeled, and 28 current prescriptions retained; no Go child started
+```
+
+The green probe is deliberately anchored to the immutable parent while the
+candidate remains uncommitted; after commit/push, the exact-head audit below is
+the only current head/remote assertion. The packet's extracted static audits
+then provide the corresponding candidate-worktree counts and link/JSON/diff
+results.
+
 ### Stable anchors for ledger-only roots
 
 The detailed ledger immediately below carries the immutable source and
@@ -7082,13 +7562,15 @@ focused static audit observed and rejected that absolute synthetic command.
 Disposition: the scanner rejects direct, absolute, `env`-wrapped and compact
 `python`/`python3 -c` forms before payload execution or further interpretation;
 safe direct `printf` remains accepted. The focused pure-scanner probe rejected
-all four synthetic Python forms without running a command.
+all four synthetic Python forms without running a command. The scanner also
+fails closed for every `gh` invocation, including global flags before a
+subcommand, so it never relies on a partial global-flag parser.
 
 #### Root 4001907059: reviewed target in build identity
 
 Disposition: the wrapper binds reviewed `GOOS=darwin`, `GOARCH=arm64` and
 `GOARM64=v8.0`, rejects unreviewed target feature settings, and records the
-target identity in all 28 seven-part build identities. The focused prefix and
+target identity in all 28 nine-part build identities. The focused prefix and
 record audit verified the binding without a Go child.
 
 #### Root 4001907060: Git index intent bits
@@ -7105,9 +7587,51 @@ Disposition: the packet URL ledger retains immutable discussion URLs for
 that review metadata is resolved. The focused string/URL probe verified all
 three exact URLs.
 
+#### Root 4002136372: inherited and command-prefix GOROOT
+
+Disposition: the wrapper accepts only the reviewed toolchain-selected default
+`GOROOT=""`, rejects any other inherited or command-prefix value before a Go
+child, passes the effective default to each bounded child and records only the
+sanitized `goroot-default` identity. No raw root path is emitted.
+
+#### Root 4002136380: inherited and command-prefix GOFIPS140
+
+Disposition: the wrapper rejects any inherited or command-prefix
+`GOFIPS140` value other than reviewed `off` before a Go child, pins `off` in
+the child environment and records `gofips140-off` in every current build
+identity.
+
+#### Root 4002136385: gh global flags before subcommand classification
+
+Disposition: the executable scanner fails closed for every `gh` invocation,
+including global-flag, version and absolute-path forms, before it attempts to
+classify a subcommand. No gh command or live operation ran.
+
+#### Root 4002136391: isolated Python guard and audit imports
+
+Disposition: every executable Python heredoc uses `python3 -I`; an isolated
+synthetic import probe rejected cwd/PYTHONPATH shadowing before audit imports
+could execute. The current packet has 37 such heredoc prescriptions.
+
+#### Root 4002136393: stale exact-head output records
+
+Disposition: the three older literal head-output records are explicitly
+historical, the follow-up is scoped to immutable parent
+`da1af0d041e37e5df9f3ed8028b51a69ec58ed8c`, and the dynamic post-push
+head/remote template is the only current-head assertion. The focused exact-head
+probe verified the relabeling and did not claim a stale result.
+
+#### Root 4002136395: downloaded module-source verification
+
+Disposition: before package metadata, the wrapper obtains module metadata with
+bounded `go mod download -json all`, requires complete checksum/source fields
+and existing paths without printing them, then runs bounded `go mod verify`;
+download, metadata and verification failures fail closed. No live or Go child
+was started by the focused probe.
+
 ### Current exact-head Luna/Codex finding ledger
 
-These twenty-two actionable roots were reproduced against immutable prior packet
+These thirty-two actionable roots were reproduced against immutable packet
 heads and are carried with their discussion URL and exact source commit. The
 rows describe only offline/static or wrapper evidence; they do not resolve the
 GitHub discussions or claim a live result.
@@ -7140,3 +7664,9 @@ GitHub discussions or claim a live result.
 | [4001907059](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4001907059), source [d85f99fa70a6f563079b1ed4f29a1bc97740a3c5](https://github.com/1XP-AI/gh-runnerd/commit/d85f99fa70a6f563079b1ed4f29a1bc97740a3c5) | Reproduced: the immutable build identity omitted reviewed GOOS/GOARCH/arch-feature settings. Corrected: `GOOS=darwin`, `GOARCH=arm64`, `GOARM64=v8.0` are bound and recorded in the target identity. | [Target binding](#root-4001907059-reviewed-target-in-build-identity): reviewed values were accepted, conflicting/unreviewed settings refused, and all 28 records carry the target component. |
 | [4001907060](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4001907060), source [d85f99fa70a6f563079b1ed4f29a1bc97740a3c5](https://github.com/1XP-AI/gh-runnerd/commit/d85f99fa70a6f563079b1ed4f29a1bc97740a3c5) | Reproduced: the immutable status-only cleanliness gate could hide skip-worktree/assume-unchanged source entries. Corrected: `git ls-files -v` intent bits are checked before metadata and source derivation. | [Git intent-bit gate](#root-4001907060-git-intent-bits-before-source-derivation): synthetic skip-worktree and assume-unchanged entries were observed and refused before source reads. |
 | [4001907063](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4001907063), source [d85f99fa70a6f563079b1ed4f29a1bc97740a3c5](https://github.com/1XP-AI/gh-runnerd/commit/d85f99fa70a6f563079b1ed4f29a1bc97740a3c5) | Reproduced: the immutable packet URL ledger omitted the three prior fresh P2 discussion anchors. Corrected: exact immutable URLs for 4001767353, 4001767363 and 4001767365 are retained in the dedicated URL ledger. | [Prior-correction URL ledger](#root-4001907063-immutable-urls-for-prior-fresh-p2-corrections): the focused string probe verified all three exact URLs. |
+| [4002136372](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002136372), source [da1af0d041e37e5df9f3ed8028b51a69ec58ed8c](https://github.com/1XP-AI/gh-runnerd/commit/da1af0d041e37e5df9f3ed8028b51a69ec58ed8c) | Reproduced: the exact parent had no GOROOT guard or identity. Corrected: reviewed `GOROOT=""` is pinned before every Go child, non-default inherited and command-prefix values fail closed, and `goroot-default` is bound into the nine-part identity. | [GOROOT boundary](#root-4002136372-inherited-and-command-prefix-goroot): both synthetic conflict forms were rejected before a child; no raw root path was recorded. |
+| [4002136380](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002136380), source [da1af0d041e37e5df9f3ed8028b51a69ec58ed8c](https://github.com/1XP-AI/gh-runnerd/commit/da1af0d041e37e5df9f3ed8028b51a69ec58ed8c) | Reproduced: the exact parent had no GOFIPS140 guard or identity. Corrected: reviewed `GOFIPS140=off` is pinned before every Go child, other inherited and command-prefix values fail closed, and `gofips140-off` is bound into the nine-part identity. | [GOFIPS140 boundary](#root-4002136380-inherited-and-command-prefix-gofips140): both synthetic conflict forms were rejected before a child. |
+| [4002136385](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002136385), source [da1af0d041e37e5df9f3ed8028b51a69ec58ed8c](https://github.com/1XP-AI/gh-runnerd/commit/da1af0d041e37e5df9f3ed8028b51a69ec58ed8c) | Reproduced: the exact parent accepted `gh --repo ... api` before subcommand classification. Corrected: the scanner fails closed for every gh invocation, so global flags need no partial parser. | [gh scanner boundary](#root-4002136385-gh-global-flags-before-subcommand-classification): global-flag, version and absolute-path forms were rejected by the pure scanner; no gh command ran. |
+| [4002136391](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002136391), source [da1af0d041e37e5df9f3ed8028b51a69ec58ed8c](https://github.com/1XP-AI/gh-runnerd/commit/da1af0d041e37e5df9f3ed8028b51a69ec58ed8c) | Reproduced: the exact parent had 36 executable Python heredocs without `-I`. Corrected: all current executable heredocs use `python3 -I`, and executable audit regexes require that form. | [Python isolation boundary](#root-4002136391-isolated-python-guard-and-audit-imports): 37 isolated heredocs and a hostile cwd/PYTHONPATH module probe passed without importing the shadow module. |
+| [4002136393](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002136393), source [da1af0d041e37e5df9f3ed8028b51a69ec58ed8c](https://github.com/1XP-AI/gh-runnerd/commit/da1af0d041e37e5df9f3ed8028b51a69ec58ed8c) | Reproduced: the exact parent retained three literal head-output records from older packet heads. Corrected: those outputs are historical-only, the follow-up parent is explicit, and the post-push dynamic template is the only current-head assertion. | [Exact-head output boundary](#root-4002136393-stale-exact-head-output-records): the focused probe verified historical relabeling and did not reuse a stale result. |
+| [4002136395](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002136395), source [da1af0d041e37e5df9f3ed8028b51a69ec58ed8c](https://github.com/1XP-AI/gh-runnerd/commit/da1af0d041e37e5df9f3ed8028b51a69ec58ed8c) | Reproduced: the exact parent had no bounded module-source verification. Corrected: `go mod download -json all` and `go mod verify` run through the shared bounded Go-child helper, complete metadata/source paths are required and all failures fail closed. | [Module-source boundary](#root-4002136395-downloaded-module-source-verification): fake bounded download/verify success and incomplete-metadata failure probes passed without starting Go. |
