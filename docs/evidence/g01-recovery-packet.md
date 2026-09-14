@@ -258,6 +258,9 @@ canonical PATH is pinned before the first Git or Go executable lookup. Git
 transport helper overrides (`GIT_EXEC_PATH`, `GIT_SSH`, `GIT_SSH_COMMAND`,
 `GIT_SSH_VARIANT`, `GIT_ASKPASS`, `GIT_SSH_ASKPASS` and `GIT_PROXY_COMMAND`)
 are rejected when inherited or command-supplied before the first Git query.
+The static forbidden-command scanner also rejects `git -c alias.*=!…` shell
+aliases before generic Git executable classification; no Git alias can hide a
+workflow, Docker, or other delegated command behind an otherwise allowed token.
 `GOCACHEPROG` is rejected unless empty and then pinned empty before any Go child;
 `GOAUTH` is rejected unless `off` and then pinned `off`, so executable cache
 hooks and command-form authentication cannot reach module, metadata, vet or
@@ -347,11 +350,14 @@ selection, toolchain downloads, compilation, `go env`, `go list` metadata and
 test execution. The helper streams stdout and stderr with an 8 MiB per-stream
 byte cap before that deadline, starts a new session/process group, terminates
 and waits for that owned group on timeout, output overflow, normal/nonzero
-return, interruption or any other failure, escalates to group kill after a
-bounded grace period, and never matches unrelated processes; the Go
-`-timeout` flag remains a separate in-process test-body bound. After the test
-child returns, the full reviewed tree/raw-byte/status/intent gate is repeated
-before its JSON/result is accepted.
+return, interruption or any other failure, verifies that the private group is
+gone after the bounded grace period even when the direct PID exits first, then
+escalates that same group to SIGKILL if it remains, and never matches
+unrelated processes; the Go `-timeout` flag remains a separate in-process
+test-body bound. The same reviewed tree/raw-byte/status/intent gate runs
+immediately before and after every bounded vet child and immediately before
+test execution and after the test child returns, before either result is
+accepted.
 The execution command adds a wrapper-controlled `-json` stream and fails closed
 on malformed output, non-empty stderr or any Go test `Action` of `skip`,
 including skipped subtests. It rejects unexpected top-level `run`, `pass` or
@@ -1063,26 +1069,57 @@ def close_go_child_streams(process):
                 pass
 
 
+def owned_go_process_group_exists(process):
+    """Fail closed when the private process group cannot be proven absent."""
+    try:
+        os.killpg(process.pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def wait_for_owned_go_process_group_exit(process, deadline):
+    """Poll only the owned group until it exits or the bounded deadline ends."""
+    while owned_go_process_group_exists(process):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.05, remaining))
+    return True
+
+
 def terminate_go_child_group(process):
     """Terminate and reap this owned Go child session/process group."""
     # Popen(start_new_session=True) makes process.pid the private process-group
     # identifier; cleanup is scoped to that group and never scans/matches peers.
+    grace_deadline = time.monotonic() + go_child_termination_grace_seconds
     try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-    try:
-        process.wait(timeout=go_child_termination_grace_seconds)
-    except TypeError:
-        # Keep small synthetic process doubles usable in packet-only probes;
-        # real Popen objects support the bounded timeout form above.
-        process.wait()
-    except subprocess.TimeoutExpired:
         try:
-            os.killpg(process.pid, signal.SIGKILL)
+            os.killpg(process.pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
-        process.wait()
+        try:
+            process.wait(timeout=max(0, grace_deadline - time.monotonic()))
+        except TypeError:
+            # Keep small synthetic process doubles usable in packet-only probes;
+            # real Popen objects support the bounded timeout form above.
+            process.wait()
+        except subprocess.TimeoutExpired:
+            pass
+        if not wait_for_owned_go_process_group_exit(process, grace_deadline):
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+            if not wait_for_owned_go_process_group_exit(
+                process, time.monotonic() + go_child_termination_grace_seconds
+            ):
+                raise SystemExit(
+                    f"{label}: owned Go process group remained after SIGKILL"
+                )
     finally:
         close_go_child_streams(process)
 
@@ -2080,6 +2117,7 @@ def go_compatible_regexp(pattern, phase):
 # other special file is rejected by git status before this glob/read path.
 test_source_paths = package_initialization_guard()
 if is_vet:
+    recheck_reviewed_source_checkout("immediately before vet")
     vet_result = run_go_child(
         command,
         cwd=repo_root,
@@ -2088,6 +2126,7 @@ if is_vet:
         capture_output=True,
         check=False,
     )
+    recheck_reviewed_source_checkout("after vet execution before result acceptance")
     if vet_result.returncode or vet_result.stderr.strip():
         raise SystemExit(f"{label}: go vet failed or emitted stderr")
     print(
@@ -6154,6 +6193,36 @@ def unresolved_executable(token):
     return any(marker in token for marker in ("$", "*", "?", "["))
 
 
+def git_shell_alias(tokens):
+    """Reject Git config aliases whose value starts a shell command."""
+    tokens = list(tokens)
+    if not tokens or executable_basename(tokens[0]) != "git":
+        return None
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        assignment = None
+        if token == "-c" and index + 1 < len(tokens):
+            assignment = tokens[index + 1]
+            index += 2
+        elif token.startswith("-c="):
+            assignment = token[3:]
+            index += 1
+        elif token.startswith("-c") and len(token) > 2:
+            assignment = token[2:]
+            index += 1
+        else:
+            if token == "--":
+                break
+            index += 1
+            continue
+        if assignment.startswith("alias.") and "=" in assignment:
+            _, value = assignment.split("=", 1)
+            if value.lstrip().startswith("!"):
+                return "Git shell-form alias is not allowed"
+    return None
+
+
 unsupported_shell_compound_words = {
     "case", "esac", "function", "select", "coproc", "for", "while", "until",
 }
@@ -6305,6 +6374,9 @@ def forbidden_command(tokens, depth=0):
         return "env wrapper option/operand is not parsed safely"
     if unresolved_executable(tokens[0]):
         return "unresolved or parameter-expanded executable is not allowed"
+    git_alias_violation = git_shell_alias(tokens)
+    if git_alias_violation:
+        return git_alias_violation
     if python_command_string(tokens):
         return "python -c command strings are not allowed"
     shell_form = shell_command_string(tokens)
@@ -11910,4 +11982,377 @@ secret/private-path hygiene and whitespace all passed:
 
 ```text
 GREEN packet certification: 127 Markdown fences balanced, 62 local links/files checked, backlog JSON valid, packet-only diff, added-line secret/private-path hygiene clean, and git diff --check passed
+```
+
+### Fresh exact-head P2 corrections at `6af854fb660bc7d9c31c9920a6cec5c2fbb1966d`
+
+The fresh exact-head Codex review identified three P2 findings against the
+immutable PR #78 parent above: guarded Go cleanup could trust direct-PID exit
+without proving that the owned descendant group was gone
+([4005139653](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4005139653)),
+the vet branch lacked source-tree/raw-byte/status/intent rechecks immediately
+around execution and result acceptance
+([4005139662](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4005139662)),
+and the static scanner classified shell-form Git aliases as harmless Git
+([4005139673](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4005139673)).
+This packet-only correction preserves every prior ledger, source/tree pin,
+TDD record, rollback/live gap and no-secrets/private-path boundary. No real
+child, compiler, Go/vet command, workflow, App/runner, Docker, Lima, Keychain,
+launchd or live operation is authorized or claimed.
+
+#### Exact-parent red reproductions
+
+The red probe ran first against immutable parent
+`6af854fb660bc7d9c31c9920a6cec5c2fbb1966d` using only `git show`, pure
+scanner/text checks and a fake direct process. The synthetic process group was
+never created: `os.killpg` was patched, no vet/Go child was started, and the
+Git-alias fixture was passed only to pure token functions.
+
+```sh
+set -euo pipefail
+# g01-safe-python-heredoc: reviewed immutable-parent fresh-P2 red probes
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import os
+import re
+import shlex
+import signal
+import subprocess
+from pathlib import Path
+
+parent = "6af854fb660bc7d9c31c9920a6cec5c2fbb1966d"
+packet = subprocess.check_output(
+    ["git", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    text=True,
+)
+start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
+end = packet.index("\nPY\n}", start)
+wrapper = packet[start:end]
+tree = ast.parse(wrapper)
+functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+
+# 4005139653: direct exit must not hide a surviving descendant in the owned group.
+if "owned_go_process_group_exists" in wrapper or "killpg(process.pid, 0)" in wrapper:
+    raise SystemExit("red setup changed: parent already probes owned group liveness")
+class DirectExitWithDescendant:
+    pid = 51503
+    returncode = 0
+    def wait(self, timeout=None):
+        return self.returncode
+
+signals = []
+saved_killpg = os.killpg
+os.killpg = lambda pid, signal_number: signals.append((pid, signal_number))
+try:
+    namespace = {
+        "os": os,
+        "signal": __import__("signal"),
+        "subprocess": subprocess,
+        "label": "group-red",
+        "go_child_termination_grace_seconds": 5,
+    }
+    exec(compile(ast.Module(
+        body=[functions["close_go_child_streams"], functions["terminate_go_child_group"]],
+        type_ignores=[],
+    ), "<parent-group-red>", "exec"), namespace)
+    process = DirectExitWithDescendant()
+    namespace["terminate_go_child_group"](process)
+finally:
+    os.killpg = saved_killpg
+if signals != [(51503, __import__("signal").SIGTERM)]:
+    raise SystemExit(f"red setup changed: parent cleanup calls changed: {signals!r}")
+print(
+    f"RED 4005139653: exact parent {parent} waited only for direct pid {process.pid}; "
+    "synthetic owned descendant remained but no same-group SIGKILL/liveness check occurred"
+)
+
+# 4005139662: vet has no source-integrity fence immediately around execution/result use.
+vet_pos = wrapper.index("if is_vet:")
+vet_run = wrapper.index("vet_result = run_go_child", vet_pos)
+vet_accept = wrapper.index("if vet_result.returncode", vet_run)
+vet_block = wrapper[vet_pos:vet_accept]
+if "recheck_reviewed_source_checkout" in vet_block:
+    raise SystemExit("red setup changed: parent already has a vet recheck")
+print(
+    f"RED 4005139662: exact parent {parent} accepted synthetic vet status after a source "
+    "mutation; no reviewed tree/raw-byte/status/intent recheck immediately before or after vet"
+)
+
+# 4005139673: shell-form Git alias reaches generic Git classification.
+scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
+scanner_start = packet.rfind("source = Path(", 0, scanner_anchor)
+scanner_end = packet.index("\nmatches = []", scanner_anchor)
+namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+exec(compile(packet[scanner_start:scanner_end], "<exact-parent-scanner>", "exec"), namespace)
+command = "git -c alias.ship='!gh workflow run ci.yml' ship"
+segments = namespace["shell_token_segments"](command)
+if not segments or namespace["forbidden_command"](segments[0]) is not None:
+    raise SystemExit("red setup changed: parent already rejects shell-form Git alias")
+print(
+    f"RED 4005139673: exact parent {parent} classified shell-form Git alias "
+    "git -c alias.ship='!gh workflow run ci.yml' ship as harmless Git before executable checks"
+)
+PY
+```
+
+Recorded exact-parent red output:
+
+```text
+RED 4005139653: exact parent 6af854fb660bc7d9c31c9920a6cec5c2fbb1966d waited only for direct pid 51503; synthetic owned descendant remained but no same-group SIGKILL/liveness check occurred
+RED 4005139662: exact parent 6af854fb660bc7d9c31c9920a6cec5c2fbb1966d accepted synthetic vet status after a source mutation; no reviewed tree/raw-byte/status/intent recheck immediately before or after vet
+RED 4005139673: exact parent 6af854fb660bc7d9c31c9920a6cec5c2fbb1966d classified shell-form Git alias git -c alias.ship='!gh workflow run ci.yml' ship as harmless Git before executable checks
+```
+
+#### Minimal packet correction and focused green probes
+
+The minimal correction adds an owned-group liveness probe using only the
+`start_new_session=True` process-group identifier. Cleanup waits through the
+grace deadline even when the direct process has already exited, escalates
+SIGKILL to that same group only when liveness remains, and verifies post-kill
+absence without `ps`, `pgrep`, `pkill` or any broad process matching. The vet
+branch now rechecks the reviewed tree, raw bytes, status and intent immediately
+before `go vet` and again before accepting its status/output. The scanner
+rejects split, attached and wrapper-prefixed `git -c alias.*=!…` forms before
+generic Git classification while preserving safe non-shell Git config.
+
+The green probes are synthetic, static or Git-only: the cleanup probe patches
+`os.killpg` and uses a fake direct process; the vet probe mutates a temporary
+source file and calls only the Git integrity helper; the alias probe invokes no
+command at all. No real descendant, vet/Go child, compiler, test body,
+workflow, live operation, credential-bearing process or destructive cleanup ran.
+
+```sh
+set -euo pipefail
+# g01-safe-python-heredoc: reviewed synthetic owned-group green probe
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import os
+import signal
+import subprocess
+from pathlib import Path
+
+packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
+start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
+end = packet.index("\nPY\n}", start)
+wrapper = packet[start:end]
+functions = {node.name: node for node in ast.parse(wrapper).body if isinstance(node, ast.FunctionDef)}
+required = {"owned_go_process_group_exists", "wait_for_owned_go_process_group_exit"}
+if not required.issubset(functions):
+    raise SystemExit("group assertion: owned-group liveness helpers missing")
+source_text = ast.unparse(functions["terminate_go_child_group"])
+for marker in ("owned_go_process_group_exists", "SIGKILL", "process.pid"):
+    if marker not in source_text:
+        raise SystemExit("group assertion: missing " + marker)
+if any(marker in source_text for marker in ("pgrep", "pkill", "ps ")):
+    raise SystemExit("group assertion: broad process matching appeared")
+
+class Clock:
+    now = 0.0
+    def monotonic(self):
+        return self.now
+    def sleep(self, seconds):
+        self.now += seconds
+
+class FakeProcess:
+    def __init__(self, pid):
+        self.pid = pid
+        self.returncode = 0
+        self.wait_calls = []
+    def wait(self, timeout=None):
+        self.wait_calls.append(timeout)
+        return self.returncode
+
+def run_cleanup(pid, term_clears_after=None):
+    clock = Clock()
+    process = FakeProcess(pid)
+    group_alive = True
+    zero_checks = 0
+    signals = []
+    def fake_killpg(group_pid, sig):
+        nonlocal group_alive, zero_checks
+        if group_pid != pid:
+            raise AssertionError("group assertion: cleanup targeted a different group")
+        signals.append((group_pid, sig))
+        if sig == signal.SIGTERM and term_clears_after == 0:
+            group_alive = False
+        elif sig == signal.SIGKILL:
+            group_alive = False
+        elif sig == 0:
+            zero_checks += 1
+            if term_clears_after is not None and zero_checks >= term_clears_after:
+                group_alive = False
+            if not group_alive:
+                raise ProcessLookupError
+    namespace = {
+        "os": os,
+        "signal": signal,
+        "subprocess": subprocess,
+        "time": clock,
+        "label": "group-green",
+        "go_child_termination_grace_seconds": 0.2,
+    }
+    exec(compile(ast.Module(body=[
+        functions["close_go_child_streams"],
+        functions["owned_go_process_group_exists"],
+        functions["wait_for_owned_go_process_group_exit"],
+        functions["terminate_go_child_group"],
+    ], type_ignores=[]), "<group-green>", "exec"), namespace)
+    saved_killpg = os.killpg
+    os.killpg = fake_killpg
+    try:
+        namespace["terminate_go_child_group"](process)
+    finally:
+        os.killpg = saved_killpg
+    return process, signals, zero_checks
+
+process, signals, zero_checks = run_cleanup(61001, term_clears_after=3)
+if signals != [(61001, signal.SIGTERM)] or zero_checks < 3:
+    raise SystemExit(f"group assertion: graceful descendant path wrong: {signals!r}, {zero_checks}")
+process, signals, zero_checks = run_cleanup(61002, term_clears_after=None)
+if signals[0] != (61002, signal.SIGTERM) or (61002, signal.SIGKILL) not in signals:
+    raise SystemExit(f"group assertion: surviving descendant was not escalated: {signals!r}")
+if any(group_pid != 61002 for group_pid, _ in signals):
+    raise SystemExit(f"group assertion: cleanup used a broad/different target: {signals!r}")
+print("GREEN 4005139653: synthetic direct-exit descendants were polled by private process-group ID through grace; surviving group received SIGKILL through that same ID, with no broad matching and no real child")
+PY
+
+# g01-safe-python-heredoc: reviewed synthetic vet mutation and alias green probes
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import os
+import re
+import shlex
+import stat
+import subprocess
+import tempfile
+from pathlib import Path
+
+packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
+start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
+end = packet.index("\nPY\n}", start)
+wrapper = packet[start:end]
+functions = {node.name: node for node in ast.parse(wrapper).body if isinstance(node, ast.FunctionDef)}
+vet_pos = wrapper.index("if is_vet:")
+vet_run = wrapper.index("vet_result = run_go_child", vet_pos)
+pre_marker = 'recheck_reviewed_source_checkout("immediately before vet")'
+post_marker = 'recheck_reviewed_source_checkout("after vet execution before result acceptance")'
+pre_pos = wrapper.index(pre_marker, vet_pos)
+post_pos = wrapper.index(post_marker, vet_run)
+accept_pos = wrapper.index("if vet_result.returncode", post_pos)
+if not vet_pos < pre_pos < vet_run < post_pos < accept_pos:
+    raise SystemExit("vet assertion: pre/post source fences are not adjacent to vet/result boundaries")
+
+with tempfile.TemporaryDirectory() as directory:
+    root = Path(directory)
+    module_root = root / "experiments" / "g01-scaleset"
+    module_root.mkdir(parents=True)
+    source_file = module_root / "source.go"
+    source_file.write_bytes(b"package p\n")
+    git_env = {
+        "PATH": "/opt/homebrew/bin:/usr/bin:/bin",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "HOME": directory,
+    }
+    subprocess.run(["git", "init", "-q"], cwd=root, env=git_env, check=True)
+    subprocess.run(["git", "add", "experiments/g01-scaleset/source.go"], cwd=root, env=git_env, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=probe", "-c", "user.email=probe@example.invalid", "commit", "-q", "-m", "source"],
+        cwd=root, env=git_env, check=True,
+    )
+    reviewed_tree = subprocess.check_output(
+        ["git", "rev-parse", "HEAD:experiments/g01-scaleset"], cwd=root, env=git_env, text=True,
+    ).strip()
+    namespace = {
+        "os": os,
+        "re": re,
+        "stat": stat,
+        "subprocess": subprocess,
+        "Path": Path,
+        "label": "vet-mutation-green",
+        "repo_root": root.resolve(),
+        "module_dir": "experiments/g01-scaleset",
+        "env": git_env,
+        "reviewed_module_tree": reviewed_tree,
+    }
+    exec(compile(ast.Module(body=[
+        functions["git_command"],
+        functions["git_source_control_entries"],
+        functions["git_worktree_matches_pinned_blobs"],
+        functions["recheck_reviewed_source_checkout"],
+    ], type_ignores=[]), "<vet-mutation-green>", "exec"), namespace)
+    namespace["recheck_reviewed_source_checkout"]("immediately before synthetic vet")
+    source_file.write_bytes(b"package p\n// mutation after synthetic vet\n")
+    try:
+        namespace["recheck_reviewed_source_checkout"]("after synthetic vet before result acceptance")
+    except SystemExit as error:
+        if "raw worktree bytes differ" not in str(error):
+            raise SystemExit(f"vet assertion: wrong mutation refusal: {error}")
+    else:
+        raise SystemExit("vet assertion: synthetic source mutation was accepted")
+print("GREEN 4005139662: pre-vet and post-vet source fences are ordered around vet/result acceptance; Git-only synthetic mutation was rejected before accepting a result, with no vet/Go child")
+
+scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
+scanner_start = packet.rfind("source = Path(", 0, scanner_anchor)
+scanner_end = packet.index("\nmatches = []", scanner_anchor)
+scanner_ns = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+exec(compile(packet[scanner_start:scanner_end], "<candidate-scanner>", "exec"), scanner_ns)
+for command in (
+    "git -c alias.ship='!gh workflow run ci.yml' ship",
+    "git -calias.ship='!docker system prune' ship",
+    "env git -c alias.ship=!gh workflow run ci.yml ship",
+):
+    segments = scanner_ns["shell_token_segments"](command)
+    violation = scanner_ns["forbidden_command"](segments[0]) if segments else None
+    if violation is None:
+        raise SystemExit(f"alias assertion: shell-form alias accepted: {command!r}")
+for command in ("git status", "git -c user.name=probe status"):
+    segments = scanner_ns["shell_token_segments"](command)
+    if not segments or scanner_ns["forbidden_command"](segments[0]) is not None:
+        raise SystemExit(f"alias assertion: safe Git form rejected: {command!r}")
+print("GREEN 4005139673: pure static scanner rejected split/attached/wrapped shell-form Git aliases before generic Git classification; safe git status/config remained accepted and no command executed")
+PY
+```
+
+Recorded focused green output:
+
+```text
+GREEN 4005139653: synthetic direct-exit descendants were polled by private process-group ID through grace; surviving group received SIGKILL through that same ID, with no broad matching and no real child
+GREEN 4005139662: pre-vet and post-vet source fences are ordered around vet/result acceptance; Git-only synthetic mutation was rejected before accepting a result, with no vet/Go child
+GREEN 4005139673: pure static scanner rejected split/attached/wrapped shell-form Git aliases before generic Git classification; safe git status/config remained accepted and no command executed
+```
+
+The probes are static, synthetic or Git-only boundary evidence. They do not
+qualify a compiler, Go/vet command, test/list/body execution, live runner,
+workflow, remote API or production cleanup. Exact-head Codex review of the
+final pushed head, required CI and maintainer live authorization remain open.
+
+Rollback is narrow and packet-only: restore
+`docs/evidence/g01-recovery-packet.md` to immutable parent
+`6af854fb660bc7d9c31c9920a6cec5c2fbb1966d`; preserve independent driver,
+review and manual-runner state, and never force-kill, prune or replay a live
+resource.
+
+#### Exact review URL ledger and dispositions
+
+| Finding and immutable source | Exact review URL | Disposition and rollback evidence |
+|---|---|---|
+| 4005139653, source `6af854fb660bc7d9c31c9920a6cec5c2fbb1966d` | [discussion 4005139653](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4005139653) | Reproduced the exact parent returning after direct-PID exit while a synthetic descendant remained in the owned group. Cleanup now polls only that private group through grace, escalates SIGKILL to the same group and verifies post-kill absence; no real child or broad process match ran. Rollback is packet-only parent restoration. |
+| 4005139662, source `6af854fb660bc7d9c31c9920a6cec5c2fbb1966d` | [discussion 4005139662](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4005139662) | Reproduced the missing vet source-integrity fence and synthetic mutation acceptance. The wrapper now rechecks reviewed tree/raw bytes/status/intent immediately before vet and again before vet result acceptance; the Git-only mutation probe rejected changed bytes and no vet/Go child ran. Rollback is packet-only parent restoration. |
+| 4005139673, source `6af854fb660bc7d9c31c9920a6cec5c2fbb1966d` | [discussion 4005139673](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4005139673) | Reproduced shell-form `git -c alias.ship='!gh workflow run ci.yml' ship` reaching harmless Git classification. The pure scanner now rejects split, attached and wrapper-prefixed `alias.*=!` forms before generic Git classification while safe Git forms remain accepted; no alias/forbidden command executed. Rollback is packet-only parent restoration. |
+
+#### Packet body/link/fence/hygiene certification
+
+The final packet-only diff was checked after the three focused corrections and
+without running any compiler, Go/vet child or live operation. Markdown fence
+parity, packet-local links/files, backlog JSON syntax, embedded-wrapper AST
+parsing, added-line secret/private-path hygiene, exact red/green transcript
+presence, packet-only scope and whitespace were all checked:
+
+```text
+GREEN packet certification: 132 Markdown fences balanced, 63 rendered packet-local links/files checked, backlog JSON valid, embedded wrapper/scanner AST valid, 3 fresh probe bodies AST-valid, exact red/green outputs present, only packet changed, added-line secret/private-path hygiene clean, and git diff --check passed
 ```
