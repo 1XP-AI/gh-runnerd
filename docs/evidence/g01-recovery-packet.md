@@ -357,7 +357,11 @@ label = sys.argv[3]
 expected_package = sys.argv[4]
 expected_build = sys.argv[5]
 command = list(sys.argv[6:])
-if expected_count <= 0 or not re.fullmatch(r"[0-9a-f]{64}", expected_digest):
+if (
+    expected_count < 0
+    or not re.fullmatch(r"[0-9a-f]{64}", expected_digest)
+    or (expected_count == 0 and expected_digest != "0" * 64)
+):
     raise SystemExit(f"{label}: invalid expected count/digest")
 if not re.fullmatch(
     r"experiments/g01-scaleset:(?:\.|\./[A-Za-z0-9._/-]+)",
@@ -486,6 +490,15 @@ compiler_tool_environment_names = {
     "PKG_CONFIG_PATH",
     "PKG_CONFIG_LIBDIR",
     "PKG_CONFIG_SYSROOT_DIR",
+    # Reject compiler search-path and SDK/deployment overrides before the
+    # reviewed cgo/tool identity is computed or any Go child starts.
+    "LIBRARY_PATH",
+    "C_INCLUDE_PATH",
+    "CPLUS_INCLUDE_PATH",
+    "OBJC_INCLUDE_PATH",
+    "CPATH",
+    "SDKROOT",
+    "MACOSX_DEPLOYMENT_TARGET",
 }
 compiler_tool_environment_overrides = sorted(
     key
@@ -598,8 +611,13 @@ if command and command[0] == "command":
         f"{label}: shell command-prefix go test wrappers are not allowed; "
         "invoke go test directly"
     )
-if len(command) < 3 or command[:2] != ["go", "test"]:
-    raise SystemExit(f"{label}: expected a go test command")
+if len(command) < 3 or command[:2] not in (["go", "test"], ["go", "vet"]):
+    raise SystemExit(f"{label}: expected a go test or go vet command")
+is_vet = command[1] == "vet"
+if is_vet and expected_count != 0:
+    raise SystemExit(f"{label}: go vet metadata must use zero test count")
+if not is_vet and expected_count <= 0:
+    raise SystemExit(f"{label}: go test metadata requires a positive test count")
 test_args = command[2:]
 
 # Reject every equivalent double-dash Go flag before any Go child is started.
@@ -1117,35 +1135,38 @@ if skip_patterns and "/" in skip_patterns[0]:
     )
 
 count_values = flag_values(test_args, "-count")
-if len(count_values) != 1 or count_values[0] != "1":
-    raise SystemExit(f"{label}: exactly one -count=1 is required")
-
 timeout_values = flag_values(test_args, "-timeout")
-if len(timeout_values) != 1:
-    raise SystemExit(f"{label}: exactly one -timeout value is required")
-duration_token = re.compile(r"(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:ns|us|µs|ms|s|m|h)")
-duration_units = {
-    "ns": Decimal("1"),
-    "us": Decimal("1000"),
-    "µs": Decimal("1000"),
-    "ms": Decimal("1000000"),
-    "s": Decimal("1000000000"),
-    "m": Decimal("60000000000"),
-    "h": Decimal("3600000000000"),
-}
-timeout_text = timeout_values[0]
-if timeout_text == "0" or timeout_text.startswith("-"):
-    raise SystemExit(f"{label}: -timeout must be positive and at most 300s")
-timeout_matches = list(duration_token.finditer(timeout_text))
-if not timeout_matches or "".join(match.group(0) for match in timeout_matches) != timeout_text:
-    raise SystemExit(f"{label}: invalid -timeout duration")
-timeout_nanos = Decimal("0")
-for match in timeout_matches:
-    number = match.group(0)
-    unit = next(suffix for suffix in duration_units if number.endswith(suffix))
-    timeout_nanos += Decimal(number[:-len(unit)]) * duration_units[unit]
-if timeout_nanos <= 0 or timeout_nanos > Decimal("300000000000"):
-    raise SystemExit(f"{label}: -timeout must be positive and at most 300s")
+if is_vet:
+    if count_values or timeout_values:
+        raise SystemExit(f"{label}: go vet does not accept test count/timeout controls")
+else:
+    if len(count_values) != 1 or count_values[0] != "1":
+        raise SystemExit(f"{label}: exactly one -count=1 is required")
+    if len(timeout_values) != 1:
+        raise SystemExit(f"{label}: exactly one -timeout value is required")
+    duration_token = re.compile(r"(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:ns|us|µs|ms|s|m|h)")
+    duration_units = {
+        "ns": Decimal("1"),
+        "us": Decimal("1000"),
+        "µs": Decimal("1000"),
+        "ms": Decimal("1000000"),
+        "s": Decimal("1000000000"),
+        "m": Decimal("60000000000"),
+        "h": Decimal("3600000000000"),
+    }
+    timeout_text = timeout_values[0]
+    if timeout_text == "0" or timeout_text.startswith("-"):
+        raise SystemExit(f"{label}: -timeout must be positive and at most 300s")
+    timeout_matches = list(duration_token.finditer(timeout_text))
+    if not timeout_matches or "".join(match.group(0) for match in timeout_matches) != timeout_text:
+        raise SystemExit(f"{label}: invalid -timeout duration")
+    timeout_nanos = Decimal("0")
+    for match in timeout_matches:
+        number = match.group(0)
+        unit = next(suffix for suffix in duration_units if number.endswith(suffix))
+        timeout_nanos += Decimal(number[:-len(unit)]) * duration_units[unit]
+    if timeout_nanos <= 0 or timeout_nanos > Decimal("300000000000"):
+        raise SystemExit(f"{label}: -timeout must be positive and at most 300s")
 
 package_value_flags = {"-C", "-tags", "-run", "-list", "-count", "-timeout"}
 package_boolean_flags = {"-race", "-v"}
@@ -1552,6 +1573,23 @@ def go_compatible_regexp(pattern, phase):
 # scan opens any candidate *_test.go path. In particular, an ignored FIFO or
 # other special file is rejected by git status before this glob/read path.
 test_source_paths = package_initialization_guard()
+if is_vet:
+    vet_result = run_go_child(
+        command,
+        cwd=repo_root,
+        env=go_env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if vet_result.returncode or vet_result.stderr.strip():
+        raise SystemExit(f"{label}: go vet failed or emitted stderr")
+    print(
+        f"{label}: bounded vet validation passed; package {actual_package}; "
+        f"build {actual_build}; source tree {reviewed_module_tree}; "
+        f"GOWORK={go_env['GOWORK']}; compiler-tools={compiler_tool_identity}"
+    )
+    raise SystemExit(0)
 source_fuzz_guard()
 
 all_test_names = []
@@ -1641,6 +1679,23 @@ validate_test_stream(run_result.stdout, run_result.stderr)
 PY
 }
 
+# `go_vet_checked` is a thin prescription adapter to the same Python wrapper:
+# it supplies the zero-test-count mode while retaining the shared bounded
+# process-group helper, reviewed Go-child environment and source/package/build
+# identity gate used by every `go_test_checked` command.
+go_vet_checked() {
+  if [ "$#" -lt 4 ]; then
+    return 2
+  fi
+  local label="$1"
+  local package_id="$2"
+  local build_id="$3"
+  local checked_helper=go_test_checked
+  shift 3
+  "$checked_helper" 0 0000000000000000000000000000000000000000000000000000000000000000 \
+    "$label" "$package_id" "$build_id" "$@"
+}
+
 go_test_checked 9 9aef95c84ffd42ad632040498c628c78072ce94f5cc2f6af8493fcffc233b707 ack-root experiments/g01-scaleset:. default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -race -count=1 -timeout=45s -run '^(TestSDKACKBoundaries|TestSDKDemandAboveFiftyAndPartialAcquisition|TestSDKRepeatedStatisticsAnd202ReuseLastObservation|TestRecoveryAfterACKCallbackCrash|TestRecoveryMissingLifecycleCallback|TestRecoveryErrorsHoldReservationsAndRedact|TestSDKAcquisitionResponseLossAfterACK|TestSDKCapacityWithdrawalDoesNotFenceInFlightAcquisition|TestSDKHTTPFailuresAndSessionRefresh)$' .
 go_test_checked 5 f95a296947af0fb862e8b447d3e27b7ce9f01e726659f5f87393789b62b783c9 ack-livecanary experiments/g01-scaleset:./livecanary default+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
@@ -1708,8 +1763,10 @@ go_test_checked 15 5e5dd1ee80d3d303271ab17b17aed22d5084e15684bcbe9f31152c1092ec1
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run '^TestPairedTerminal' -skip "$terminal_remainder_skip"
 go_test_checked 6 458f77f55209a59338a63bfc27697d85ebe5e0c3c7d1b959a0b56b2527f3ead5 paired-storage experiments/g01-scaleset:./livecanary g01_pair_fixture+race+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
   GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run "$terminal_storage_tests"
-GOTOOLCHAIN=go1.26.8 go vet -C experiments/g01-scaleset -tags=g01_pair_fixture ./livecanary
-GOTOOLCHAIN=go1.26.8 go vet -C experiments/g01-scaleset -tags=g01_pair_fixture ./liveworker
+go_vet_checked vet-livecanary experiments/g01-scaleset:./livecanary default+norace+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
+  GOTOOLCHAIN=go1.26.8 go vet -C experiments/g01-scaleset -tags=g01_pair_fixture ./livecanary
+go_vet_checked vet-liveworker experiments/g01-scaleset:./liveworker default+norace+cgo1+cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8 \
+  GOTOOLCHAIN=go1.26.8 go vet -C experiments/g01-scaleset -tags=g01_pair_fixture ./liveworker
 ```
 
 The packet also audits every future shell `go test` selector prescription
@@ -1728,10 +1785,9 @@ carry explicit `GOTOOLCHAIN`, tag and race metadata.
 ```sh
 set -euo pipefail
 selector_pattern='^[[:space:]]*(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]+)[[:space:]]+)*(?:env[[:space:]]+.*[[:space:]]+)?(?:command(?:[[:space:]]+-[^[:space:]]+)*[[:space:]]+)?go test .*[[:space:]]--?(run|skip)(=|[[:space:]])'
-selector_lines="$(rg -n "$selector_pattern" docs/evidence/g01-recovery-packet.md)"
-test -n "$selector_lines"
+rg -n "$selector_pattern" docs/evidence/g01-recovery-packet.md >/dev/null
 selector_probe=$'GOTOOLCHAIN=go1.26.8 go test ./livecanary -run=^TestProbe$\nenv GOTOOLCHAIN=go1.26.8 go test ./livecanary --run=^TestProbe$\nenv -i GOTOOLCHAIN=go1.26.8 go test ./livecanary --skip ^TestProbe$\n  GOTOOLCHAIN=go1.26.8 go test ./livecanary -skip ^TestProbe$\ncommand go test ./livecanary -run ^TestCommandProbe$\nGOTOOLCHAIN=go1.26.8 command go test ./livecanary -skip=^TestCommandProbe$'
-test "$(rg -n "$selector_pattern" <<< "$selector_probe" | wc -l | tr -d ' ')" -eq 6
+rg -n "$selector_pattern" <<< "$selector_probe" | wc -l | tr -d ' ' | grep -Fxq 6
 python3 -I - <<'PY'
 from pathlib import Path
 import re
@@ -1919,6 +1975,38 @@ with tempfile.NamedTemporaryFile("w+", encoding="utf-8", suffix=".md") as probe:
         )
     else:
         raise SystemExit("zero-indent selector probe: unguarded command was accepted")
+
+# Audit the future vet prescriptions in their own shell-fence block. Both
+# logical commands must use the thin adapter, which delegates to the same
+# bounded Go-child/environment/source-identity wrapper as the test records.
+vet_start = next(
+    index for index, line in enumerate(lines)
+    if line.startswith("go_vet_checked vet-livecanary ")
+)
+vet_end = next(
+    index for index in range(vet_start, len(lines))
+    if lines[index] == "```"
+)
+vet_commands = [
+    command for _, command in logical_commands(lines[vet_start:vet_end])
+    if re.search(r"\bgo vet\b", command)
+]
+if len(vet_commands) != 2:
+    raise SystemExit(f"expected two future go vet prescriptions, observed {len(vet_commands)}")
+if any(not command.lstrip().startswith("go_vet_checked ") for command in vet_commands):
+    raise SystemExit("an executable go vet prescription bypassed go_vet_checked")
+if any(
+    "cgo-tools-default+goexperiment-none+darwin-arm64-goarm64-v8.0+"
+    not in command
+    or "+goroot-default+gofips140-off+go1.26.8" not in command
+    for command in vet_commands
+):
+    raise SystemExit("a go vet prescription lacks the reviewed nine-part build identity")
+print(
+    "go vet prescription audit: passed; 2/2 future go vet commands use "
+    "go_vet_checked and the shared bounded Go-child/environment/source-identity "
+    "wrapper"
+)
 print(
     f"future selector guard audit: passed; {guarded} go test selector "
     "prescriptions are wrapper-guarded and equal the logical wrapper count; "
@@ -1950,6 +2038,7 @@ env-wrapped selector probe: passed; standard env command prefixes were discovere
 assignment-prefixed selector probe: passed; standard GOTOOLCHAIN=... go test selector forms were discovered and rejected when unguarded
 command-prefix selector probe: passed; bare, assignment-prefixed and option-bearing shell command go test selector forms were discovered and rejected when unguarded
 zero-indent selector probe: passed; an unguarded column-zero `go test -run` without GOTOOLCHAIN was discovered and rejected
+go vet prescription audit: passed; 2/2 future go vet commands use go_vet_checked and the shared bounded Go-child/environment/source-identity wrapper
 future selector guard audit: passed; 28 go test selector prescriptions equal the logical wrapper count; column-zero, assignment-prefixed, env-wrapped, command-prefixed, double-dash and indented discovery forms recognized
 ```
 
@@ -1972,7 +2061,7 @@ from pathlib import Path
 
 source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
 fence_languages = {"sh", "bash", "shell", "zsh"}
-heredoc = re.compile(r"\bpython3\s+-I\s+-\s+<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+heredoc = re.compile(r"\bpython3\s+-I\b[^\n]*<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 
 
 def executable_shell_commands(markdown):
@@ -2281,7 +2370,9 @@ for index, line in enumerate(lines):
     compiler_tool_environment_names = {
         "CC", "CXX", "GCCGO", "GOGCCFLAGS", "GO_EXTLINK_ENABLED", "GO_LDSO",
         "CC_FOR_TARGET", "CXX_FOR_TARGET", "PKG_CONFIG", "PKG_CONFIG_PATH",
-        "PKG_CONFIG_LIBDIR", "PKG_CONFIG_SYSROOT_DIR",
+        "PKG_CONFIG_LIBDIR", "PKG_CONFIG_SYSROOT_DIR", "LIBRARY_PATH",
+        "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "OBJC_INCLUDE_PATH", "CPATH",
+        "SDKROOT", "MACOSX_DEPLOYMENT_TARGET",
     }
     compiler_tool_environment_overrides = sorted(
         key
@@ -4069,14 +4160,13 @@ if errors:
 print(f"local markdown link/anchor check: passed; {checked} local targets checked; external URLs syntax-skipped")
 PY
 jq empty docs/backlog.json
-ledger_rows=$(awk '
+awk '
   /^\| Boundary \| Reuse unchanged evidence when \| Exact focused rerun \| Class\/result to record \|$/ { in_table=1; next }
   in_table && /^\|---/ { next }
   in_table && /^\|/ { rows++; next }
   in_table && !/^\|/ { exit }
-  END { print rows + 0 }
-' docs/evidence/g01-recovery-packet.md)
-test "$ledger_rows" -eq 10
+  END { if (rows != 10) exit 1 }
+' docs/evidence/g01-recovery-packet.md
 awk '
   /^\| Boundary \| Reuse unchanged evidence when \| Exact focused rerun \| Class\/result to record \|$/ { in_table=1; next }
   in_table && /^\|---/ { next }
@@ -4179,11 +4269,11 @@ packet_correction_head='6b1535ee7b6f08582ff162eca30f1e4294dbf32b'
 packet_correction_tree='87a0724932277dd3cc79ca50fcf0b2c1fe9b9e06'
 packet_correction_blob='0907f18b9f664f7d021a88ad13a50423fbef21d4'
 packet_correction_parent='82eeef99f9bb5ec85c8cb3bea7a9a5947e8df26a'
-test "$(git rev-parse HEAD)" = "$packet_correction_head"
-test "$(git rev-parse --verify "${packet_correction_head}^{commit}")" = "$packet_correction_head"
-test "$(git rev-parse "${packet_correction_head}^{tree}")" = "$packet_correction_tree"
-test "$(git rev-parse "${packet_correction_head}:docs/evidence/g01-recovery-packet.md")" = "$packet_correction_blob"
-test "$(git rev-parse "${packet_correction_head}^")" = "$packet_correction_parent"
+git rev-parse HEAD | grep -Fxq "$packet_correction_head"
+git rev-parse --verify "${packet_correction_head}^{commit}" | grep -Fxq "$packet_correction_head"
+git rev-parse "${packet_correction_head}^{tree}" | grep -Fxq "$packet_correction_tree"
+git rev-parse "${packet_correction_head}:docs/evidence/g01-recovery-packet.md" | grep -Fxq "$packet_correction_blob"
+git rev-parse "${packet_correction_head}^" | grep -Fxq "$packet_correction_parent"
 printf 'existing packet-correction exact-head audit: passed; HEAD=%s; commit=%s; tree=%s; packet blob=%s; parent=%s\n' "$packet_correction_head" "$packet_correction_head" "$packet_correction_tree" "$packet_correction_blob" "$packet_correction_parent"
 ```
 
@@ -4197,18 +4287,18 @@ existing packet-correction exact-head audit: passed; HEAD=6b1535ee7b6f08582ff162
 
 ```sh
 set -euo pipefail
-test "$(git rev-parse HEAD)" = "5979b7d722f3bf8e24404912f9b1f3e888d0828d"
-test "$(git rev-parse --verify HEAD^{commit})" = "5979b7d722f3bf8e24404912f9b1f3e888d0828d"
-test "$(git show -s --format=%H HEAD)" = "5979b7d722f3bf8e24404912f9b1f3e888d0828d"
-current_head="$(git rev-parse HEAD)"
-test "$(git rev-parse --show-toplevel)" = "$(pwd -P)"
+git rev-parse HEAD | grep -Fxq "5979b7d722f3bf8e24404912f9b1f3e888d0828d"
+git rev-parse --verify HEAD^{commit} | grep -Fxq "5979b7d722f3bf8e24404912f9b1f3e888d0828d"
+git show -s --format=%H HEAD | grep -Fxq "5979b7d722f3bf8e24404912f9b1f3e888d0828d"
+git rev-parse --show-toplevel | grep -Fxq "$PWD"
 test -d experiments/g01-scaleset
-test "$(git rev-parse --verify ee8df8b7e00204c74a892b27f8b4c0ab278751ba)" = "ee8df8b7e00204c74a892b27f8b4c0ab278751ba"
+git rev-parse --verify ee8df8b7e00204c74a892b27f8b4c0ab278751ba | grep -Fxq "ee8df8b7e00204c74a892b27f8b4c0ab278751ba"
 git diff --quiet ee8df8b7e00204c74a892b27f8b4c0ab278751ba -- experiments/g01-scaleset
-source_status="$(git status --porcelain=v1 --untracked-files=all -- experiments/g01-scaleset)"
-test -z "$source_status"
-test "$(git rev-parse 1396e201d905be204c3ac697be43723820581314:docs/evidence/g01-red.md)" = "c36e0af0c8e9b301f4889a02454c83ece8d5942f"
-printf 'stable checkout audit: passed; current HEAD is %s, repo root is current directory, experiments/g01-scaleset exists, source comparison parent is unchanged, scoped tracked/untracked status is empty, and g01-red.md resolves to its pinned blob\n' "$current_head"
+if git status --porcelain=v1 --untracked-files=all -- experiments/g01-scaleset | grep -q .; then
+  exit 1
+fi
+git rev-parse 1396e201d905be204c3ac697be43723820581314:docs/evidence/g01-red.md | grep -Fxq "c36e0af0c8e9b301f4889a02454c83ece8d5942f"
+printf 'stable checkout audit: passed; current HEAD, repo root, source comparison parent, scoped status and g01-red.md blob checks passed\n'
 ```
 
 The stable checkout commands were actually run from immutable validation
@@ -4238,8 +4328,8 @@ fail closed and the new pushed head must be verified independently:
 
 ```sh
 set -euo pipefail
-test "$(git rev-parse HEAD)" = "82eeef99f9bb5ec85c8cb3bea7a9a5947e8df26a"
-test "$(git ls-remote origin refs/heads/orca/g01-evidence-packet | awk '{print $1}')" = "82eeef99f9bb5ec85c8cb3bea7a9a5947e8df26a"
+git rev-parse HEAD | grep -Fxq "82eeef99f9bb5ec85c8cb3bea7a9a5947e8df26a"
+git ls-remote origin refs/heads/orca/g01-evidence-packet | awk '{print $1}' | grep -Fxq "82eeef99f9bb5ec85c8cb3bea7a9a5947e8df26a"
 printf 'pre-correction PR #78 head/remote-ref audit: passed; both returned 82eeef99f9bb5ec85c8cb3bea7a9a5947e8df26a\n'
 ```
 
@@ -4295,12 +4385,21 @@ literal "final" SHA self-referential:
 
 ```sh
 set -euo pipefail
-test -z "$(git status --porcelain=v1 --untracked-files=all)"
-final_head="$(git rev-parse HEAD)"
-remote_head="$(git ls-remote origin refs/heads/orca/g01-evidence-packet | awk '{print $1}')"
-test -n "$final_head"
-test "$final_head" = "$remote_head"
-printf 'post-correction current/remote head audit: passed; both returned %s\n' "$final_head"
+if git status --porcelain=v1 --untracked-files=all | grep -q .; then
+  exit 1
+fi
+python3 -I - <<'PY'
+import subprocess
+
+local = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+remote = subprocess.check_output(
+    ["git", "ls-remote", "origin", "refs/heads/orca/g01-evidence-packet"],
+    text=True,
+).split()[0]
+if not local or local != remote:
+    raise SystemExit("post-correction current/remote head mismatch")
+print(f"post-correction current/remote head audit: passed; both returned {local}")
+PY
 ```
 
 The focused PR handoff/review must record the exact SHA and output from this
@@ -4496,8 +4595,8 @@ uses immutable source/tree assertions plus quiet presence/absence checks:
 
 ```sh
 set -euo pipefail
-test "$(git rev-parse 95cd9210620c54e098ecbe0df1217af1659f0c74)" = "95cd9210620c54e098ecbe0df1217af1659f0c74"
-test "$(git rev-parse '95cd9210620c54e098ecbe0df1217af1659f0c74^{tree}')" = "d8b79cd1ddc6993792a44a8e8ae88985ce7466c0"
+git rev-parse 95cd9210620c54e098ecbe0df1217af1659f0c74 | grep -Fxq "95cd9210620c54e098ecbe0df1217af1659f0c74"
+git rev-parse '95cd9210620c54e098ecbe0df1217af1659f0c74^{tree}' | grep -Fxq "d8b79cd1ddc6993792a44a8e8ae88985ce7466c0"
 rg -q 'func TestAmbiguousCreateNeverRetriesAfterRestart' experiments/g01-scaleset/livecanary/driver_test.go
 rg -q 'func (TestSocketModesAndControllerOwnership|TestSocketPostConnectRecheckClosesBeforeHTTP)' experiments/g01-scaleset/liveworker/docker_test.go
 rg -q 'func (TestNoCreateBeforeDurableIntent|TestUnknownCreateNeverRetriesAfterRestart)' experiments/g01-scaleset/liveworker/worker_test.go
@@ -5056,34 +5155,59 @@ After staging only this packet file, the final local checks were:
 
 ```sh
 set -euo pipefail
-test "$(git diff --cached --name-only)" = "docs/evidence/g01-recovery-packet.md"
-test "$(git diff --cached --name-only | wc -l | tr -d ' ')" -eq 1
+git diff --cached --name-only | grep -Fxq "docs/evidence/g01-recovery-packet.md"
+git diff --cached --name-only | wc -l | tr -d ' ' | grep -Fxq 1
 git diff --check
 git diff --cached --check
-private_user_root='/'"Users/"
-private_home_root='/'"home/"
-private_var_root='/'"private/var/"
-secret_private_pattern='^\+.*(-----BEGIN[[:space:]]+[A-Z0-9 ]*PRIVATE KEY|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]+|'"${private_user_root}"'|'"${private_home_root}"'|'"${private_var_root}"')'
-staged_diff="$(git diff --cached --unified=0 -- docs/evidence/g01-recovery-packet.md)"
-if rg -q -- "$secret_private_pattern" <<< "$staged_diff"; then
-  printf 'staged secret/private-path scan: FAILED\n'
-  exit 1
-else
-  staged_scan_status=$?
-  test "$staged_scan_status" -eq 1
-fi
-early_match_probe="$(python3 -I - <<'PY'
+python3 -I - <<'PY'
+import re
+import subprocess
+
+staged_diff = subprocess.check_output(
+    ["git", "diff", "--cached", "--unified=0", "--", "docs/evidence/g01-recovery-packet.md"],
+    text=True,
+)
+private_user_root = "/" + "Users/"
+private_home_root = "/" + "home/"
+private_var_root = "/" + "private/var/"
+private_var_folders_root = "/" + "var/folders/"
+secret_private_pattern = re.compile(
+    r"^\+.*(?:-----BEGIN\s+[A-Z0-9 ]*PRIVATE KEY|"
+    r"gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|"
+    r"AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]+|"
+    + "|".join(
+        re.escape(root)
+        for root in (
+            private_user_root,
+            private_home_root,
+            private_var_root,
+            private_var_folders_root,
+        )
+    )
+    + r")",
+    re.MULTILINE,
+)
+if secret_private_pattern.search(staged_diff):
+    raise SystemExit("staged secret/private-path scan: FAILED")
 synthetic_match = "+" + "gh" + "p_" + "early_probe"
-print("\n".join([synthetic_match] + [f"+ordinary-line-{index:04d}" for index in range(2048)]))
+early_match_probe = "\n".join(
+    [synthetic_match] + [f"+ordinary-line-{index:04d}" for index in range(2048)]
+)
+if not secret_private_pattern.search(early_match_probe):
+    raise SystemExit(
+        "staged secret/private-path early-match regression probe: FAILED; "
+        "first added line was not detected"
+    )
+print(
+    "staged secret/private-path early-match regression probe: passed; first "
+    "added line was detected and would be rejected"
+)
+print(
+    "diff and staged secret/private-path checks: passed; working/staged diff "
+    "checks exited 0, one staged packet path, no added-line matches, and "
+    "early-match rejection probe passed"
+)
 PY
-)"
-if rg -q -- "$secret_private_pattern" <<< "$early_match_probe"; then
-  printf 'staged secret/private-path early-match regression probe: passed; first added line was detected and would be rejected\n'
-else
-  printf 'staged secret/private-path early-match regression probe: FAILED; first added line was not detected\n'
-  exit 1
-fi
-printf 'diff and staged secret/private-path checks: passed; working/staged diff checks exited 0, one staged packet path, no added-line matches, and early-match rejection probe passed\n'
 ```
 
 The complete staged diff is captured in a shell variable before scanning, so an
@@ -5109,7 +5233,10 @@ executable command token. Command-delegating executables (`xargs`, `find`,
 own right, before a delegated `gh`/live command can be hidden in an argument,
 pipeline or generated command. Shell command-string forms (`bash`/`sh` and
 equivalent absolute, optioned or `busybox` forms with `-c`) are recursively
-inspected and rejected before any nested payload could execute. Markdown prose,
+inspected and rejected before any nested payload could execute. Shell command
+substitutions (`$()` and backticks) are rejected before token-wrapper stripping
+or fence certification, including direct, assignment, pipeline and nested
+forms; the scanner does not attempt to model shell expansion. Markdown prose,
 URLs, comments, Python heredoc bodies, scanner source and synthetic fixtures
 are not executable prescriptions and are not scanned:
 
@@ -5123,7 +5250,7 @@ from pathlib import Path
 source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
 fence_languages = {"sh", "bash", "shell", "zsh"}
 assignment = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
-heredoc = re.compile(r"\bpython3\s+-I\s+-\s+<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+heredoc = re.compile(r"\bpython3\s+-I\b[^\n]*<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 
 def shell_commands(markdown):
     in_shell = False
@@ -5177,6 +5304,10 @@ def shell_token_segments(command):
         else:
             segments[-1].append(token)
     return [segment for segment in segments if segment]
+
+def shell_command_substitution(tokens):
+    """Fail closed before wrapper stripping or shell expansion semantics."""
+    return any("$(" in token or "`" in token for token in tokens)
 
 def executable_basename(token):
     if "://" in token:
@@ -5279,6 +5410,12 @@ def shell_command_string(tokens):
     return None
 
 def forbidden_command(tokens, depth=0):
+    tokens = list(tokens)
+    if not tokens:
+        return None
+    if shell_command_substitution(tokens):
+        return "shell command substitutions are not allowed"
+    tokens = executable_tokens(tokens)
     if not tokens:
         return None
     if python_command_string(tokens):
@@ -5290,9 +5427,7 @@ def forbidden_command(tokens, depth=0):
             return f"{executable} -c nested command-string depth exceeded"
         if payload is not None:
             for nested_segment in shell_token_segments(payload):
-                nested_violation = forbidden_command(
-                    executable_tokens(nested_segment), depth + 1
-                )
+                nested_violation = forbidden_command(nested_segment, depth + 1)
                 if nested_violation:
                     return f"{executable} -c -> {nested_violation}"
         return f"{executable} -c command string"
@@ -5309,10 +5444,8 @@ def forbidden_command(tokens, depth=0):
         return f"{executable} command delegation is not allowed"
     if executable in {"curl", "wget", "limactl", "security", "launchctl"}:
         return executable
-    if executable == "docker" and len(tokens) > 1 and tokens[1] in {
-        "run", "rm", "kill", "exec", "system", "context",
-    }:
-        return "docker " + tokens[1]
+    if executable == "docker":
+        return "docker command"
     if executable == "gh":
         # Global flags such as --repo/--hostname precede the subcommand. A
         # complete parser would need to track every gh global spelling; this
@@ -5324,7 +5457,7 @@ def forbidden_command(tokens, depth=0):
 matches = []
 for command, number in shell_commands(source):
     for segment in shell_token_segments(command):
-        violation = forbidden_command(executable_tokens(segment))
+        violation = forbidden_command(segment)
         if violation:
             matches.append(f"line {number}: {violation}")
 if matches:
@@ -5342,6 +5475,10 @@ synthetic = [
     ("absolute-docker", "/usr/local/bin/docker run --rm image:tag true", True),
     ("absolute-command-docker", "/usr/bin/command /usr/local/bin/docker run --rm image:tag true", True),
     ("command-option-docker", "command -p docker run --rm image:tag true", True),
+    ("docker-ps", "docker ps", True),
+    ("docker-version", "docker version", True),
+    ("docker-help", "docker --help", True),
+    ("absolute-docker-images", "/usr/bin/docker images", True),
     ("chained-command", "printf ok; env gh workflow run ci.yml", True),
     ("direct-xargs", "xargs -0 -n1 gh api repos/example/project/dispatches", True),
     ("pipeline-xargs", "printf gh | xargs -n1 gh api repos/example/project/dispatches", True),
@@ -5370,6 +5507,11 @@ synthetic = [
     ("absolute-eval-docker-command-string", "/bin/eval 'docker run --rm image:tag true'", True),
     ("nested-eval-gh-command-string", "bash -c \"eval 'gh workflow run ci.yml'\"", True),
     ("eval-safe-command-string", "eval 'printf safe'", True),
+    ("dollar-command-substitution", "printf \"$(gh api repos/example/project)\"", True),
+    ("dollar-assignment-substitution", "PAYLOAD=$(gh api repos/example/project) printf safe", True),
+    ("dollar-pipeline-substitution", "printf safe | sed \"s/x/$(gh api repos/example/project)/\"", True),
+    ("backtick-command-substitution", "printf \"`gh api repos/example/project`\"", True),
+    ("nested-command-substitution", "bash -c \"printf \\\"$(gh api repos/example/project)\\\"\"", True),
     ("python-c-gh-command-string", "python3 -c 'import subprocess; subprocess.run([\\\"gh\\\", \\\"api\\\", \\\"x\\\"])'", True),
     ("absolute-python-c-docker-command-string", "/usr/bin/python -c 'import os; os.system(\\\"docker run image:tag true\\\")'", True),
     ("env-python-c-command-string", "env python3 -c 'print(\\\"gh api x\\\")'", True),
@@ -5380,12 +5522,12 @@ synthetic = [
 ]
 for label, fixture, expected in synthetic:
     observed = any(
-        forbidden_command(executable_tokens(segment)) is not None
+        forbidden_command(segment) is not None
         for segment in shell_token_segments(fixture)
     )
     if observed != expected:
         raise SystemExit(f"synthetic forbidden-command probe failed: {label}")
-print("forbidden-live-command synthetic probes: passed; direct/wrapped fetcher, every gh invocation including global-flag and absolute forms, command-delegating xargs/find/parallel/make forms, docker, limactl/security/launchctl, eval, python/python3 -c and direct/nested bash/sh -c forms rejected; prose/URLs/comments/scanner source/fixtures ignored")
+print("forbidden-live-command synthetic probes: passed; direct/wrapped fetcher, every gh invocation including global-flag and absolute forms, every Docker invocation, command-delegating xargs/find/parallel/make forms, shell substitutions, limactl/security/launchctl, eval, python/python3 -c and direct/nested bash/sh -c forms rejected; prose/URLs/comments/scanner source/fixtures ignored")
 print("forbidden-live-command scan: passed; executable shell prescriptions contain no forbidden live App/runner/Docker/Lima/Keychain/launchd/workflow/fetch command")
 PY
 ```
@@ -8001,6 +8143,95 @@ The three corrections are offline/static packet evidence only. The explicit live
 G01 gaps, manual-runner preservation, credential gates, trusted native-runtime
 gate and post-push exact-head Codex/CI gates remain unresolved and unchanged.
 
+### Fresh exact-head P2 corrections at `09ecc1b581af8a3b955b8f44b817e064e9674abe`
+
+This packet-only follow-up starts from immutable parent
+[`09ecc1b581af8a3b955b8f44b817e064e9674abe`](https://github.com/1XP-AI/gh-runnerd/commit/09ecc1b581af8a3b955b8f44b817e064e9674abe)
+and changes only `docs/evidence/g01-recovery-packet.md`. The candidate head is
+the single clean commit made from that parent; its SHA is intentionally left to
+the post-push exact-head check, so this section does not make a self-referential
+head claim. No Go test/list/body execution, live App/runner/workflow/Docker/
+Lima/Keychain/launchd operation, credential access or private-path/log capture
+is claimed.
+
+#### Exact-parent red evidence recorded before correction
+
+The source-extracted red probes ran against the immutable parent before the
+minimal edits. They recorded two unguarded future `go vet` prescriptions, all
+four named compiler search-path controls reaching the first Go child before the
+cgo/tool identity, four accepted Docker forms outside the old subcommand list,
+four accepted direct/assignment/pipeline/nested shell-substitution forms, and
+coverage of only the first macOS private-var spelling. The probes were static
+or child-witness checks only and did not run Go, Docker, shell payloads or live
+operations.
+
+Recorded red results:
+
+```text
+RED 4002447532: exact parent 09ecc1b581af8a3b955b8f44b817e064e9674abe leaves 2 future go vet prescriptions outside a shared bounded helper
+RED 4002447545: exact parent 09ecc1b581af8a3b955b8f44b817e064e9674abe forwards all 4 named compiler search-path controls before cgo/tool identity
+RED 4002447542: exact parent 09ecc1b581af8a3b955b8f44b817e064e9674abe accepts 4 Docker invocations outside its small subcommand list
+RED 4002447537: exact parent 09ecc1b581af8a3b955b8f44b817e064e9674abe accepts 4 direct/assignment/pipeline/nested command substitutions
+RED 4002447549: exact parent 09ecc1b581af8a3b955b8f44b817e064e9674abe scans the first private-var spelling but has no second macOS private-var spelling
+RED 4002447545 child witness: exact parent 09ecc1b581af8a3b955b8f44b817e064e9674abe forwarded 4 named search-path values to first go env child
+```
+
+#### Minimal packet correction and focused green evidence
+
+The correction routes both future vet prescriptions through the thin
+`go_vet_checked` adapter and the existing bounded process-group, reviewed
+environment and source/package/build-identity wrapper. Vet uses zero-test-count
+metadata, the same `run_go_child` deadline/reap path and the same nine-part
+identity; the adapter avoids adding a prescription to the 28-test ledger.
+Compiler search-path and SDK/deployment controls are rejected before the
+reviewed cgo/tool identity in both the wrapper and its prescription audit.
+The forbidden-command scanner checks substitutions before assignment/wrapper
+stripping, rejects every Docker executable form, and the staged private-path
+audit binds both macOS private-var spellings through separate reviewed roots.
+
+The focused candidate probe read only the packet, exercised direct, assignment,
+pipeline and nested `$()`/backtick boundaries, every Docker fixture, all named
+compiler controls, both private-var roots, both vet prescriptions and the
+retained 28 test prescriptions. It ran with `python3 -I`; no Go child or live
+operation started.
+
+Recorded focused green result:
+
+```text
+GREEN focused boundary probe: passed; Docker, direct/assignment/pipeline/nested $()/backtick forms fail closed; compiler search paths reject before cgo/tool identity; both private-var spellings present; 2 vet prescriptions share the bounded wrapper; 28 test prescriptions retained
+```
+
+The focused hygiene run then passed 28 prescription identity checks, the
+five-row exact-parent URL/ledger checks, local-link/anchor checks, backlog JSON
+parsing, isolated-Python checks and working/staged diff checks. It observed one
+staged packet path and no added-line secret/private-path matches; the early
+match regression fixture also failed closed as intended.
+
+```text
+GREEN hygiene: passed; 28 prescription identity records, 2 vet records, 5 exact URLs/parent ledger rows, compiler/private-root order, 63 local links, backlog JSON and isolated Python checks passed
+```
+
+#### Exact review URL ledger, dispositions and rollback
+
+All five findings below are scoped to the same immutable parent and remain
+unresolved GitHub review metadata until a fresh exact-head Codex review is
+completed on the pushed candidate.
+
+| Finding and immutable source | Exact review URL | Disposition and rollback |
+|---|---|---|
+| 4002447532, source `09ecc1b581af8a3b955b8f44b817e064e9674abe` | [discussion 4002447532](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002447532) | Reproduced the two raw vet prescriptions; both now use `go_vet_checked`, which delegates to the shared bounded Go-child/environment/source-identity wrapper. Roll back only this packet correction commit or restore this document to the immutable parent; preserve unrelated corrections and manual runners. |
+| 4002447537, source `09ecc1b581af8a3b955b8f44b817e064e9674abe` | [discussion 4002447537](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002447537) | Reproduced direct, assignment, pipeline and nested command-substitution acceptance; scanner now fails closed before token-wrapper stripping or fence certification for `$()` and backticks. Rollback is packet-only parent restoration, with no live cleanup. |
+| 4002447542, source `09ecc1b581af8a3b955b8f44b817e064e9674abe` | [discussion 4002447542](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002447542) | Reproduced the small Docker subcommand allowlist; scanner now rejects every Docker invocation, including help/version/read-only and absolute forms. Rollback is packet-only parent restoration; no Docker command ran. |
+| 4002447545, source `09ecc1b581af8a3b955b8f44b817e064e9674abe` | [discussion 4002447545](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002447545) | Reproduced four named compiler search-path controls reaching the first child; wrapper and metadata audit now reject or bind them before cgo/tool identity. Rollback is packet-only parent restoration; no compiler, Go, test or live process ran. |
+| 4002447549, source `09ecc1b581af8a3b955b8f44b817e064e9674abe` | [discussion 4002447549](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002447549) | Reproduced the missing second macOS private-var spelling; staged secret/private-path audit now scans both reviewed roots. Rollback is packet-only parent restoration; no private path or private log was captured. |
+
+The rollback boundary is deliberately narrow: remove the one focused commit,
+or restore only this document to the immutable parent after recording the
+failed candidate SHA. Do not reset unrelated work, delete runners, prune
+Docker, alter Lima/Keychain/launchd state or replay a workflow. After push,
+`git rev-parse HEAD`, `git ls-remote origin refs/heads/orca/g01-evidence-packet`
+and the exact-head Codex/CI gates are the only current candidate assertions.
+
 ### Stable anchors for ledger-only roots
 
 
@@ -8203,9 +8434,38 @@ functions, and fails closed on a valid top-level `func init()` declaration. The
 focused source-only probe detected valid commented declarations and rejected
 comment/string/receiver/name boundaries without Go metadata/list/test execution.
 
+#### Root 4002447532: future go vet prescriptions use the bounded wrapper
+
+Disposition: both future vet commands use `go_vet_checked`, which delegates to
+the same bounded Go-child process-group helper, reviewed child environment and
+source/package/build identity used by the 28 test prescriptions.
+
+#### Root 4002447537: shell command substitutions fail closed
+
+Disposition: `$()` and backtick substitutions are rejected before assignment or
+wrapper stripping, including direct, assignment, pipeline and nested forms;
+the scanner does not attempt shell expansion.
+
+#### Root 4002447542: every Docker invocation is forbidden
+
+Disposition: Docker is rejected by executable identity before subcommand
+classification, covering direct, wrapper-prefixed, absolute, help/version and
+read-only forms.
+
+#### Root 4002447545: compiler search paths precede cgo/tool identity
+
+Disposition: the named compiler search-path and SDK/deployment controls are
+rejected from inherited/command-prefix environments before the reviewed
+`cgo-tools-default` identity and any Go child.
+
+#### Root 4002447549: both macOS private-var spellings are scanned
+
+Disposition: the staged diff audit binds separate reviewed roots for both
+macOS private-var spellings and rejects either spelling before certification.
+
 ### Current exact-head Luna/Codex finding ledger
 
-These thirty-five actionable roots were reproduced against immutable packet
+These forty actionable roots were reproduced against immutable packet
 heads and are carried with their discussion URL and exact source commit. The
 rows describe only offline/static or wrapper evidence; they do not resolve the
 GitHub discussions or claim a live result.
@@ -8247,3 +8507,8 @@ GitHub discussions or claim a live result.
 | [4002184738](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002184738), source [5297b3c3b05afedf97723b7b58806cdd5519a2b6](https://github.com/1XP-AI/gh-runnerd/commit/5297b3c3b05afedf97723b7b58806cdd5519a2b6) | Reproduced: the exact parent allowed xargs and other command-delegating forms to hide a downstream `gh`/live command. Corrected: the scanner rejects xargs, find, parallel, make and equivalent launchers before delegated command classification, across direct, pipeline, wrapper-prefixed and nested forms. | [Delegation boundary](#root-4002184738-command-delegating-live-command-forms): direct/pipeline/env/nested xargs and find/parallel/make fixtures failed closed; safe `printf` remained accepted and no live command ran. |
 | [4002184745](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002184745), source [5297b3c3b05afedf97723b7b58806cdd5519a2b6](https://github.com/1XP-AI/gh-runnerd/commit/5297b3c3b05afedf97723b7b58806cdd5519a2b6) | Reproduced: the exact parent applied a deadline to only the direct Go process, leaving descendants outside timeout termination/reap. Corrected: the wrapper owns a new session/process group, terminates/escalates the full group and waits for the direct child before refusal. | [Process-group boundary](#root-4002184745-descendant-process-group-timeout-and-reap): a synthetic descendant tree terminated/reaped under a shortened deadline without starting a real Go child; no live cleanup ran. |
 | [4002184748](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002184748), source [5297b3c3b05afedf97723b7b58806cdd5519a2b6](https://github.com/1XP-AI/gh-runnerd/commit/5297b3c3b05afedf97723b7b58806cdd5519a2b6) | Reproduced: the exact parent’s `^\s*func\s+init` check missed valid Go init declarations separated by whitespace and consecutive line/block comments. Corrected: lexical top-level scanning consumes ignored tokens and fails closed on valid `func init()` while preserving literal/receiver/name boundaries. | [Package-init boundary](#root-4002184748-commented-package-init-declarations): focused source-only red/green probe detected commented declarations and rejected unsafe boundaries; no Go metadata/list/test execution ran. |
+| [4002447532](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002447532), source [09ecc1b581af8a3b955b8f44b817e064e9674abe](https://github.com/1XP-AI/gh-runnerd/commit/09ecc1b581af8a3b955b8f44b817e064e9674abe) | Reproduced: two future vet commands bypassed the bounded prescription wrapper. Corrected: both now use `go_vet_checked`, delegating to the shared bounded Go-child/environment/source-identity path. | [Fresh exact-head vet correction](#root-4002447532-future-go-vet-prescriptions-use-the-bounded-wrapper): two vet prescriptions retained, no Go child claimed in focused static evidence; rollback is packet-only parent restoration. |
+| [4002447537](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002447537), source [09ecc1b581af8a3b955b8f44b817e064e9674abe](https://github.com/1XP-AI/gh-runnerd/commit/09ecc1b581af8a3b955b8f44b817e064e9674abe) | Reproduced: direct, assignment, pipeline and nested shell substitutions could pass the scanner. Corrected: `$()` and backticks fail closed before wrapper stripping or fence certification. | [Fresh exact-head substitution correction](#root-4002447537-shell-command-substitutions-fail-closed): all focused boundary forms rejected; rollback is packet-only parent restoration. |
+| [4002447542](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002447542), source [09ecc1b581af8a3b955b8f44b817e064e9674abe](https://github.com/1XP-AI/gh-runnerd/commit/09ecc1b581af8a3b955b8f44b817e064e9674abe) | Reproduced: Docker was rejected only for a small subcommand list. Corrected: every Docker executable invocation now fails closed, including absolute and read-only forms. | [Fresh exact-head Docker correction](#root-4002447542-every-docker-invocation-is-forbidden): every focused Docker fixture rejected; no Docker operation ran; rollback is packet-only parent restoration. |
+| [4002447545](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002447545), source [09ecc1b581af8a3b955b8f44b817e064e9674abe](https://github.com/1XP-AI/gh-runnerd/commit/09ecc1b581af8a3b955b8f44b817e064e9674abe) | Reproduced: four named compiler search-path controls reached the first metadata child. Corrected: inherited/command-prefix values fail closed before the reviewed cgo/tool identity, with the identity retained in prescriptions. | [Fresh exact-head compiler correction](#root-4002447545-compiler-search-paths-precede-cgotool-identity): focused boundary probe rejected all named controls; no compiler or Go child ran; rollback is packet-only parent restoration. |
+| [4002447549](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002447549), source [09ecc1b581af8a3b955b8f44b817e064e9674abe](https://github.com/1XP-AI/gh-runnerd/commit/09ecc1b581af8a3b955b8f44b817e064e9674abe) | Reproduced: the staged private-path audit covered only one macOS private-var spelling. Corrected: separate reviewed roots cover both spellings before fence certification. | [Fresh exact-head private-path correction](#root-4002447549-both-macos-private-var-spellings-are-scanned): focused audit confirmed both roots; no private path/log was captured; rollback is packet-only parent restoration. |
