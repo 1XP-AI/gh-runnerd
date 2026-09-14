@@ -267,7 +267,7 @@ command-capable `-c` keys (`core.fsmonitor` except the reviewed `false`,
 classification; no Git alias, external-diff/helper, transport override or Git
 command-delegation option can hide a workflow, Docker, or other delegated
 command behind an otherwise allowed token. Remote command launchers such as
-`ssh` and command-capable interpreters such as Python's `pty.spawn` are also
+`ssh`/`rsync` and command-capable interpreters such as Python's `pty.spawn` are also
 rejected before their operands are classified. Shell wrappers `nice`,
 `timeout` and `setsid` are rejected before their operands are classified.
 `GOCACHEPROG` is rejected unless empty and then pinned empty before any Go child;
@@ -307,8 +307,10 @@ pinned `HEAD` blob before consulting porcelain/status; Git clean filters and
 attributes therefore cannot make modified source appear clean. Immediately
 before each status query, a bounded read-only preflight rejects local Git filter
 configuration and any active `filter` attribute resolved across tracked,
-untracked and ignored paths; `GIT_ATTR_NOSYSTEM=1` also disables system
-attributes. A status child is started only after that preflight is empty, and
+untracked and ignored paths; each tracked, untracked and ignored path inventory
+is streamed through an owned child under one aggregate 64 KiB cap before the
+attribute query; `GIT_ATTR_NOSYSTEM=1` also disables system attributes. A
+status child is started only after that preflight is empty, and
 any query, attribute, configuration or output-bound failure fails closed. It
 then performs the tracked/untracked/ignored status gate; only a clean,
 byte-identical source tree can reach package metadata and source derivation. The wrapper disables persisted
@@ -1442,11 +1444,111 @@ def capture_git_status_output(process, git_status_command):
 
 git_filter_guard_deadline_seconds = 30
 git_filter_guard_output_max_bytes = 64 * 1024
+git_filter_guard_stream_chunk_bytes = 4096
+
+
+def capture_git_filter_output(process, git_command, output_limit):
+    """Stream a Git filter-preflight child before applying the hard cap."""
+    if output_limit <= 0:
+        raise SystemExit(f"{label}: Git path inventory exceeded the reviewed budget")
+    captures = {"stdout": bytearray(), "stderr": bytearray()}
+    selector = selectors.DefaultSelector()
+    try:
+        for name in captures:
+            stream = getattr(process, name, None)
+            if stream is not None:
+                os.set_blocking(stream.fileno(), False)
+                selector.register(stream, selectors.EVENT_READ, name)
+        deadline = time.monotonic() + git_filter_guard_deadline_seconds
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(
+                    git_command, git_filter_guard_deadline_seconds
+                )
+            ready = selector.select(remaining)
+            if not ready:
+                raise subprocess.TimeoutExpired(
+                    git_command, git_filter_guard_deadline_seconds
+                )
+            for key, _ in ready:
+                stream = key.fileobj
+                try:
+                    chunk = os.read(stream.fileno(), git_filter_guard_stream_chunk_bytes)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    selector.unregister(stream)
+                    stream.close()
+                    continue
+                captured = captures[key.data]
+                if (
+                    len(captures["stdout"])
+                    + len(captures["stderr"])
+                    + len(chunk)
+                    > output_limit
+                ):
+                    raise SystemExit(
+                        f"{label}: Git path inventory exceeded the reviewed "
+                        f"{output_limit}-byte budget while streaming"
+                    )
+                captured.extend(chunk)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(
+                git_command, git_filter_guard_deadline_seconds
+            )
+        try:
+            process.wait(timeout=remaining)
+        except TypeError:
+            raise SystemExit(f"{label}: Git path inventory child lacks bounded reap support")
+        return bytes(captures["stdout"]), bytes(captures["stderr"])
+    finally:
+        selector.close()
+
+
+def run_bounded_git_filter_query(repo_root, arguments, env, output_limit):
+    """Run one path inventory in an owned session with bounded output/reap."""
+    command = git_command(arguments)
+    process = None
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=repo_root,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+    except OSError:
+        raise SystemExit(f"{label}: Git path inventory query failed closed")
+    try:
+        try:
+            stdout, stderr = capture_git_filter_output(process, command, output_limit)
+        except subprocess.TimeoutExpired:
+            terminate_go_child_group(process)
+            process = None
+            raise SystemExit(
+                f"{label}: Git path inventory query exceeded independent "
+                f"{git_filter_guard_deadline_seconds}s deadline; process group terminated and reaped"
+            )
+        except BaseException:
+            terminate_go_child_group(process)
+            process = None
+            raise
+        returncode = process.returncode
+        terminate_go_child_group(process)
+        process = None
+        return subprocess.CompletedProcess(command, returncode, stdout, stderr)
+    finally:
+        if process is not None:
+            terminate_go_child_group(process)
 
 
 def git_filter_attribute_guard(repo_root, module_dir, env):
     """Reject configured or active Git filters before starting status."""
     path_bytes = bytearray()
+    remaining_inventory_budget = git_filter_guard_output_max_bytes
     for arguments in (
         ["ls-files", "-z", "--cached", "--full-name", "--", module_dir],
         ["ls-files", "-z", "--others", "--exclude-standard", "--", module_dir],
@@ -1460,22 +1562,14 @@ def git_filter_attribute_guard(repo_root, module_dir, env):
             module_dir,
         ],
     ):
-        try:
-            paths = subprocess.run(
-                git_command(arguments),
-                cwd=repo_root,
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=git_filter_guard_deadline_seconds,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            raise SystemExit(f"{label}: Git path inventory query failed closed")
+        if remaining_inventory_budget <= 0:
+            raise SystemExit(f"{label}: Git path inventory exceeded the reviewed budget")
+        paths = run_bounded_git_filter_query(
+            repo_root, arguments, env, remaining_inventory_budget
+        )
         if paths.returncode != 0 or paths.stderr:
             raise SystemExit(f"{label}: Git path inventory query failed closed")
-        if len(paths.stdout) > git_filter_guard_output_max_bytes:
-            raise SystemExit(f"{label}: Git path inventory exceeded the reviewed budget")
+        remaining_inventory_budget -= len(paths.stdout) + len(paths.stderr)
         path_bytes.extend(paths.stdout)
     try:
         attributes = subprocess.run(
@@ -5362,11 +5456,14 @@ only; the immutable `5979...`, `82ee...` and `6b153...` records above remain
 separate exact-head records and are not combined into one checkout or result.
 
 The following dynamic command is the live final-verification template. Run it
-only after the packet follow-up has been committed and pushed. It first pins
-`origin` to the immutable `https://github.com/1XP-AI/gh-runnerd.git` URL, then
-performs the same bounded local filter/configuration and active-attribute
-preflight before starting `git status`; it derives both heads at runtime and
-fails closed on a dirty worktree, an empty head or any local/remote mismatch.
+only after the packet follow-up has been committed and pushed. It first
+verifies that `origin` has the immutable
+`https://github.com/1XP-AI/gh-runnerd.git` URL, then performs remote parity
+against that canonical URL from an isolated temporary working directory with
+repository-local URL rewriting and config unavailable; it performs the same
+bounded local filter/configuration and active-attribute preflight before
+starting `git status`, derives both heads at runtime and fails closed on a
+dirty worktree, an empty head or any local/remote mismatch.
 Its actual output and exact pushed SHA belong in the focused PR handoff/review,
 not in a subsequent packet commit that would make a literal "final" SHA
 self-referential:
@@ -5377,7 +5474,9 @@ export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
 [ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
+import os
 import subprocess
+import tempfile
 
 expected_origin_url = "https://github.com/1XP-AI/gh-runnerd.git"
 try:
@@ -5466,10 +5565,44 @@ status = subprocess.run(
 if status.returncode != 0 or status.stderr or status.stdout.strip():
     raise SystemExit("post-correction worktree is not clean")
 local = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
-remote = subprocess.check_output(
-    ["git", "ls-remote", "origin", "refs/heads/orca/g01-evidence-packet"],
-    text=True,
-).split()[0]
+remote_environment = {
+    key: value
+    for key, value in os.environ.items()
+    if key not in {
+        "GIT_CONFIG",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_NOSYSTEM",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_COMMON_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_NAMESPACE",
+    }
+    and not key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))
+}
+remote_environment.update(
+    {
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+    }
+)
+with tempfile.TemporaryDirectory() as isolated_cwd:
+    remote = subprocess.check_output(
+        [
+            "git",
+            "ls-remote",
+            "https://github.com/1XP-AI/gh-runnerd.git",
+            "refs/heads/orca/g01-evidence-packet",
+        ],
+        cwd=isolated_cwd,
+        env=remote_environment,
+        text=True,
+        timeout=30,
+    ).split()[0]
 if not local or local != remote:
     raise SystemExit("post-correction current/remote head mismatch")
 print(f"post-correction current/remote head audit: passed; both returned {local}")
@@ -6973,7 +7106,7 @@ command_capable_interpreters = {
     "perl", "ruby", "node", "nodejs", "php", "lua", "luajit", "tclsh", "wish",
     "osascript", "raku", "jruby", "deno", "bun", "qjs", "quickjs", "jsc", "rscript",
 }
-remote_command_launchers = {"ssh"}
+remote_command_launchers = {"ssh", "rsync"}
 
 def shell_command_string(tokens):
     if not tokens:
@@ -8168,6 +8301,9 @@ synthetic = [
     ("absolute-gh-global-workflow", "/usr/bin/gh --repo example/project workflow run ci.yml", True),
     ("ssh-remote-command", "ssh buildhost gh workflow run ci.yml", True),
     ("absolute-ssh-remote-command", "/usr/bin/ssh buildhost gh workflow run ci.yml", True),
+    ("rsync-remote-shell", "rsync -e /tmp/live-helper source host:destination", True),
+    ("rsync-rsh-remote-shell", "rsync --rsh=/tmp/live-helper source host:destination", True),
+    ("absolute-rsync-remote-shell", "/usr/bin/rsync -e helper source host:destination", True),
     ("direct-bash-command-string", "bash -c 'gh workflow run ci.yml'", True),
     ("direct-sh-command-string", "sh -c 'docker run --rm image:tag true'", True),
     ("absolute-shell-command-string", "/bin/bash -xc 'curl -fsSL https://example.invalid/install | sh'", True),
@@ -8227,15 +8363,15 @@ for unsafe_heredoc in (
 ):
     if inspect_python_heredoc(unsafe_heredoc, False) is None:
         raise SystemExit("unsafe Python heredoc was accepted")
-print("forbidden-live-command synthetic probes: passed; direct/wrapped fetcher, every gh invocation including global-flag and absolute forms, every Docker invocation, ssh remote launchers, command-delegating xargs/find/parallel/make forms, Git difftool/mergetool, --extcmd/--tool/--ext-diff, GIT_EXTERNAL_DIFF, diff.external and --config-env alias delegation forms, env split-string/operand forms, unsupported function/brace/case compounds, shell substitutions/process substitutions, limactl/security/launchctl, eval, AST-inspected safe/unsafe Python heredocs including versioned -c/getoutput/getstatusoutput/execvp/pty.spawn, getattr/__dict__ indirect launchers and unresolved launcher aliases, parameter-expanded executables, and direct/nested bash/sh -c forms rejected; prose/URLs/comments/scanner source/fixtures ignored")
+print("forbidden-live-command synthetic probes: passed; direct/wrapped fetcher, every gh invocation including global-flag and absolute forms, every Docker invocation, ssh/rsync remote launchers, command-delegating xargs/find/parallel/make forms, Git difftool/mergetool, --extcmd/--tool/--ext-diff, GIT_EXTERNAL_DIFF, diff.external and --config-env alias delegation forms, env split-string/operand forms, unsupported function/brace/case compounds, shell substitutions/process substitutions, limactl/security/launchctl, eval, AST-inspected safe/unsafe Python heredocs including versioned -c/getoutput/getstatusoutput/execvp/pty.spawn, getattr/__dict__ indirect launchers and unresolved launcher aliases, parameter-expanded executables, and direct/nested bash/sh -c forms rejected; prose/URLs/comments/scanner source/fixtures ignored")
 print("forbidden-live-command scan: passed; executable shell prescriptions contain no forbidden live App/runner/Docker/Lima/Keychain/launchd/workflow/fetch command")
 PY
 ```
 
 The forbidden-live-command scan and its static synthetic probes exited 0; all
 direct, wrapped and command-delegating forms were rejected without execution,
-including xargs, find, parallel and make forms that could otherwise hide a
-downstream `gh`/live command, while prose, URLs, comments, scanner source and
+including xargs, find, parallel, make and rsync remote-shell forms that could
+otherwise hide a downstream `gh`/live command, while prose, URLs, comments, scanner source and
 fixtures were ignored. No live operation, workflow replay, credential access
 or destructive cleanup command was introduced.
 
@@ -15591,12 +15727,394 @@ path hygiene and whitespace:
 ```text
 GREEN packet certification: 322 Markdown fences balanced, 63 packet-local targets checked, backlog JSON valid, changed-boundary ledger valid with 10 data rows and 4 columns, embedded wrapper/scanner AST and compile valid, bounded Git status checks valid, exact five URLs and red/green outputs present, only packet changed, added-line secret/private-path hygiene clean, and git diff --check passed
 ```
-#### Final packet certification for current candidate
+#### Historical pre-fix packet certification
 
-The final packet-only certification was run with same-file fragment handling,
-then the working diff, one-file scope and added-line secret/private-path
-hygiene checks passed:
+The final packet-only certification for the exact prior candidate was run with
+same-file fragment handling, then the working diff, one-file scope and
+added-line secret/private-path checks passed. It is retained as historical
+evidence; the current correction's certification is recorded below:
 
 ```text
 GREEN packet certification: 324 Markdown fences balanced, 157 packet-local targets checked with same-file fragments, backlog JSON valid, changed scope is one packet path, embedded wrapper/scanner/filter/parity AST and compile valid, four current correction boundaries present, and added-line secret/private-path hygiene clean
+```
+
+### Fresh exact-head corrections at `14f998f32710f122f5861edfac8fdbc89ef95bfb`
+
+The three fresh exact-head PR #78 Codex roots below were reproduced against the
+immutable packet parent before this correction. The correction remains limited to
+this evidence packet; no Go/runtime/live App/runner/Docker/Lima/Keychain/launchd,
+workflow or credential state was changed, and no live operation was run. The
+three older no-direct-reply roots are also listed below: their review ancestry is
+stale, but each was inspected against the current packet and dispositioned from
+current source evidence rather than staleness or a later duplicate fix alone.
+
+#### Exact-parent RED probes
+
+The red probe reads only the exact parent blob with `git show`, extracts the
+parent wrapper/scanner in memory, and uses static AST checks. It runs no command
+from the extracted packet and no live or remote operation:
+
+```sh
+set -euo pipefail
+export PATH=/opt/homebrew/bin:/usr/bin:/bin
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
+# g01-safe-python-heredoc: reviewed exact-parent packet extraction
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import re
+import shlex
+import subprocess
+from pathlib import Path
+
+parent = "14f998f32710f122f5861edfac8fdbc89ef95bfb"
+packet = subprocess.check_output(
+    ["git", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    text=True,
+)
+
+remote_anchor = packet.index("expected_origin_url =")
+remote_block = packet[remote_anchor:packet.index("\nPY\n```", remote_anchor)]
+remote_query = re.search(
+    r'\["git", "ls-remote", "origin", "refs/heads/orca/g01-evidence-packet"\]',
+    remote_block,
+)
+if remote_query and "TemporaryDirectory" not in remote_block:
+    print("RED 4008370032: exact parent remote parity used local-config-sensitive git ls-remote origin without an isolated config/cwd")
+else:
+    raise SystemExit("red setup changed: exact parent remote query already isolated")
+
+wrapper_start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
+wrapper_end = packet.index("\nPY\n}", wrapper_start)
+wrapper_tree = ast.parse(packet[wrapper_start:wrapper_end], filename="<exact-parent-wrapper>")
+guard = next(
+    node for node in wrapper_tree.body
+    if isinstance(node, ast.FunctionDef) and node.name == "git_filter_attribute_guard"
+)
+path_calls = [
+    node for node in ast.walk(guard)
+    if isinstance(node, ast.Call)
+    and isinstance(node.func, ast.Attribute)
+    and isinstance(node.func.value, ast.Name)
+    and node.func.value.id == "subprocess"
+    and node.func.attr == "run"
+]
+if len(path_calls) >= 3 and all(
+    any(keyword.arg == "stdout" and isinstance(keyword.value, ast.Attribute) and keyword.value.attr == "PIPE" for keyword in call.keywords)
+    and any(keyword.arg == "stderr" and isinstance(keyword.value, ast.Attribute) and keyword.value.attr == "PIPE" for keyword in call.keywords)
+    for call in path_calls[:3]
+):
+    print(f"RED 4008370041: exact parent path-inventory filter preflight buffered {len(path_calls[:3])} git ls-files stream(s) through subprocess.run before its post-capture cap")
+else:
+    raise SystemExit("red setup changed: exact parent path inventory already streamed")
+
+scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
+scanner_start = packet.rfind("source = Path(", 0, scanner_anchor)
+scanner_end = packet.index("\nmatches = []", scanner_anchor)
+scanner_ns = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+exec(compile(packet[scanner_start:scanner_end], "<exact-parent-scanner>", "exec"), scanner_ns)
+fixture = "rsync -e /tmp/live-helper source host:destination"
+observed = any(
+    scanner_ns["forbidden_command"](segment) is not None
+    for segment in scanner_ns["shell_token_segments"](fixture)
+)
+if not observed:
+    print("RED 4008370049: exact parent accepted rsync -e external remote-shell delegation (violation=None)")
+else:
+    raise SystemExit("red setup changed: exact parent already rejects rsync delegation")
+
+stale = {
+    "4002335146": (
+        'reviewed_goauth = "off"' in packet
+        and 'env["GOAUTH"] = reviewed_goauth' in packet
+        and "auth command forms are not allowed" in packet
+    ),
+    "4002335150": (
+        "go_vet_checked vet-livecanary" in packet
+        and "go_vet_checked vet-liveworker" in packet
+        and "go vet -C experiments/g01-scaleset" in packet
+    ),
+    "4002335155": (
+        "def capture_go_child_output(process, go_command):" in packet
+        and "go_child_output_max_bytes = 8 * 1024 * 1024" in packet
+        and "subprocess.Popen(" in packet[packet.index("def run_go_child("):packet.index("def run_go_child(") + 6000]
+    ),
+}
+for root, fixed in stale.items():
+    if not fixed:
+        raise SystemExit(f"stale-root setup changed: current packet lacks evidence for {root}")
+    print(f"CURRENT {root}: exact-parent packet contains current bounded disposition evidence; no staleness-only resolution used")
+PY
+```
+
+Recorded exact-parent RED output:
+
+```text
+RED 4008370032: exact parent remote parity used local-config-sensitive git ls-remote origin without an isolated config/cwd
+RED 4008370041: exact parent path-inventory filter preflight buffered 3 git ls-files stream(s) through subprocess.run before its post-capture cap
+RED 4008370049: exact parent accepted rsync -e external remote-shell delegation (violation=None)
+CURRENT 4002335146: exact-parent packet contains current bounded disposition evidence; no staleness-only resolution used
+CURRENT 4002335150: exact-parent packet contains current bounded disposition evidence; no staleness-only resolution used
+CURRENT 4002335155: exact-parent packet contains current bounded disposition evidence; no staleness-only resolution used
+```
+
+A separate local-only Git fixture confirmed the URL rewrite mechanism: a
+repository whose literal `remote.origin.url` was the canonical GitHub URL
+returned a synthetic fixture SHA from `git ls-remote origin` after a local
+`url.*.insteadOf` rule was installed. No network, GitHub, runner or workflow
+operation was involved:
+
+```text
+RED 4008370032 local fixture: local remote.origin.url=https://github.com/1XP-AI/gh-runnerd.git; git ls-remote origin returned rewritten fixture SHA (not canonical GitHub)
+```
+
+#### Minimal packet correction and focused GREEN probes
+
+The minimal correction streams each of the three `git ls-files` inventories
+through an owned process group with selector reads, a 30-second deadline and a
+single aggregate 64 KiB cap before appending path bytes. It isolates final remote
+parity from repository-local URL rewriting by querying the pinned canonical URL
+from a fresh temporary working directory after removing repository/config
+environment overrides. The scanner now rejects `rsync` as an external remote
+launcher, including `-e`/`--rsh` forms, while retaining safe `printf` and
+read-only Git queries; existing GOAUTH, vet and Go-child output safeguards remain
+unchanged.
+
+The focused GREEN probe extracts only the candidate wrapper/scanner and remote
+parity template. It exercises synthetic selector pipes for normal and oversized
+path inventories, static canonical-URL/isolation checks, scanner boundaries and
+the three stale-root dispositions; it starts no child and performs no live
+operation:
+
+```sh
+set -euo pipefail
+export PATH=/opt/homebrew/bin:/usr/bin:/bin
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
+# g01-safe-python-heredoc: reviewed focused packet boundary probes
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import os
+import re
+import selectors
+import shlex
+import subprocess
+import time
+from pathlib import Path
+
+packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
+
+wrapper_start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
+wrapper_end = packet.index("\nPY\n}", wrapper_start)
+wrapper = packet[wrapper_start:wrapper_end]
+wrapper_tree = ast.parse(wrapper, filename="<candidate-wrapper>")
+functions = {
+    node.name: node for node in wrapper_tree.body if isinstance(node, ast.FunctionDef)
+}
+guard = functions["git_filter_attribute_guard"]
+run_calls = [
+    node for node in ast.walk(guard)
+    if isinstance(node, ast.Call)
+    and isinstance(node.func, ast.Attribute)
+    and isinstance(node.func.value, ast.Name)
+    and node.func.value.id == "subprocess"
+    and node.func.attr == "run"
+]
+if len(run_calls) != 2:
+    raise SystemExit(f"path guard should retain only bounded attr/config run calls, observed {len(run_calls)}")
+filter_runner = functions["run_bounded_git_filter_query"]
+if not any(
+    isinstance(node, ast.Call)
+    and isinstance(node.func, ast.Attribute)
+    and isinstance(node.func.value, ast.Name)
+    and node.func.value.id == "subprocess"
+    and node.func.attr == "Popen"
+    for node in ast.walk(filter_runner)
+):
+    raise SystemExit("path inventory runner does not start an owned Popen child")
+if "git_filter_guard_stream_chunk_bytes" not in wrapper:
+    raise SystemExit("path inventory stream chunk bound missing")
+
+capture_namespace = {
+    "os": os,
+    "selectors": selectors,
+    "subprocess": subprocess,
+    "time": time,
+    "label": "filter-probe",
+    "git_filter_guard_deadline_seconds": 0.5,
+    "git_filter_guard_stream_chunk_bytes": 4096,
+}
+exec(compile(ast.Module(body=[functions["capture_git_filter_output"]], type_ignores=[]), "<filter-capture>", "exec"), capture_namespace)
+
+class FakeProcess:
+    def __init__(self, stdout, stderr):
+        self.stdout = stdout
+        self.stderr = stderr
+        self.wait_calls = []
+    def wait(self, timeout=None):
+        self.wait_calls.append(timeout)
+        return 0
+
+def pipes(stdout_bytes, stderr_bytes=b""):
+    stdout_read, stdout_write = os.pipe()
+    stderr_read, stderr_write = os.pipe()
+    os.write(stdout_write, stdout_bytes)
+    os.close(stdout_write)
+    os.close(stderr_write)
+    return FakeProcess(
+        os.fdopen(stdout_read, "rb", closefd=True),
+        os.fdopen(stderr_read, "rb", closefd=True),
+    )
+
+overflow = pipes(b"x" * 9)
+try:
+    capture_namespace["capture_git_filter_output"](overflow, ["git", "ls-files"], 8)
+except SystemExit as error:
+    if "exceeded" not in str(error):
+        raise
+else:
+    raise SystemExit("oversized path inventory was accepted")
+finally:
+    overflow.stdout.close()
+    overflow.stderr.close()
+
+bounded = pipes(b"abc")
+try:
+    output = capture_namespace["capture_git_filter_output"](bounded, ["git", "ls-files"], 8)
+    if output != (b"abc", b"") or not bounded.wait_calls or any(call is None for call in bounded.wait_calls):
+        raise SystemExit("bounded path inventory did not return bounded output/reap")
+finally:
+    bounded.stdout.close()
+    bounded.stderr.close()
+print("GREEN 4008370041: path inventories stream through owned selector reads, enforce the aggregate 64KiB cap before buffering, and bounded synthetic overflow/normal cases passed; no child started")
+
+remote_anchor = packet.index("expected_origin_url =")
+remote_body = packet[remote_anchor:packet.index("\nPY\n```", remote_anchor)]
+remote_tree = ast.parse(remote_body, filename="<remote-parity>")
+remote_calls = []
+for node in ast.walk(remote_tree):
+    if not (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "subprocess"
+        and node.func.attr == "check_output"
+        and node.args
+        and isinstance(node.args[0], ast.List)
+    ):
+        continue
+    try:
+        values = [ast.literal_eval(value) for value in node.args[0].elts]
+    except (ValueError, TypeError):
+        continue
+    if len(values) >= 2 and values[:2] == ["git", "ls-remote"]:
+        remote_calls.append((node, values))
+if len(remote_calls) != 1:
+    raise SystemExit(f"expected one isolated remote ls-remote call, found {len(remote_calls)}")
+remote_call, values = remote_calls[0]
+if values[2:] != ["https://github.com/1XP-AI/gh-runnerd.git", "refs/heads/orca/g01-evidence-packet"]:
+    raise SystemExit(f"remote query target changed: {values}")
+if not any(
+    isinstance(node, ast.Call)
+    and isinstance(node.func, ast.Attribute)
+    and isinstance(node.func.value, ast.Name)
+    and node.func.value.id == "tempfile"
+    and node.func.attr == "TemporaryDirectory"
+    for node in ast.walk(remote_tree)
+):
+    raise SystemExit("remote query lacks isolated TemporaryDirectory cwd")
+keywords = {keyword.arg: keyword.value for keyword in remote_call.keywords}
+if not isinstance(keywords.get("cwd"), ast.Name) or keywords["cwd"].id != "isolated_cwd":
+    raise SystemExit("remote query does not use isolated cwd")
+print("GREEN 4008370032: remote parity uses the canonical URL from an isolated TemporaryDirectory with repository/global/system/config-env overrides removed; no origin rewrite can redirect the query")
+
+scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
+scanner_start = packet.rfind("source = Path(", 0, scanner_anchor)
+scanner_end = packet.index("\nmatches = []", scanner_anchor)
+scanner_namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+exec(compile(packet[scanner_start:scanner_end], "<candidate-scanner>", "exec"), scanner_namespace)
+def rejects(command):
+    return any(
+        scanner_namespace["forbidden_command"](segment) is not None
+        for segment in scanner_namespace["shell_token_segments"](command)
+    )
+for command in (
+    "rsync -e /tmp/live-helper source host:destination",
+    "rsync --rsh=/tmp/live-helper source host:destination",
+    "/usr/bin/rsync -e helper source host:destination",
+):
+    if not rejects(command):
+        raise SystemExit(f"rsync delegation escaped scanner: {command!r}")
+for command in ("printf safe", "git ls-remote https://example.invalid/repo refs/heads/main"):
+    if rejects(command):
+        raise SystemExit(f"safe read-only command was rejected: {command!r}")
+print("GREEN 4008370049: rsync direct/absolute and -e/--rsh external-launcher forms fail closed; safe printf and read-only Git remain accepted")
+
+if not (
+    'reviewed_goauth = "off"' in wrapper
+    and 'env["GOAUTH"] = reviewed_goauth' in wrapper
+    and "auth command forms are not allowed" in wrapper
+):
+    raise SystemExit("GOAUTH stale root lacks current refusal/pin evidence")
+if "go_vet_checked vet-livecanary" not in packet or "go_vet_checked vet-liveworker" not in packet:
+    raise SystemExit("vet stale root lacks current adapter prescriptions")
+if "capture_go_child_output" not in wrapper or "go_child_output_max_bytes = 8 * 1024 * 1024" not in wrapper:
+    raise SystemExit("test-output stale root lacks current bounded stream evidence")
+print("CURRENT 4002335146: candidate wrapper pins GOAUTH=off and rejects inherited/command auth hooks before Go children")
+print("CURRENT 4002335150: candidate vet prescriptions use go_vet_checked and the shared bounded Go-child wrapper")
+print("CURRENT 4002335155: candidate Go-child capture streams each pipe with an 8MiB cap before decode and result acceptance")
+PY
+```
+
+Recorded focused GREEN output:
+
+```text
+GREEN 4008370041: path inventories stream through owned selector reads, enforce the aggregate 64KiB cap before buffering, and bounded synthetic overflow/normal cases passed; no child started
+GREEN 4008370032: remote parity uses the canonical URL from an isolated TemporaryDirectory with repository/global/system/config-env overrides removed; no origin rewrite can redirect the query
+GREEN 4008370049: rsync direct/absolute and -e/--rsh external-launcher forms fail closed; safe printf and read-only Git remain accepted
+CURRENT 4002335146: candidate wrapper pins GOAUTH=off and rejects inherited/command auth hooks before Go children
+CURRENT 4002335150: candidate vet prescriptions use go_vet_checked and the shared bounded Go-child wrapper
+CURRENT 4002335155: candidate Go-child capture streams each pipe with an 8MiB cap before decode and result acceptance
+```
+
+These probes are static, synthetic, in-memory or read-only Git inspection only;
+they do not qualify a compiler, Go test/list/body command, live runner,
+workflow/API, credential, Docker/Lima, Keychain or launchd operation. Rollback
+is narrow and packet-only: restore
+`docs/evidence/g01-recovery-packet.md` to immutable parent
+`14f998f32710f122f5861edfac8fdbc89ef95bfb`; preserve independent evidence and
+live-runner state and never force-kill, prune or replay a live resource.
+
+#### Exact review URL ledger and dispositions
+
+The three fresh roots are current exact-head findings; the three older roots had
+no direct reply in the review API and are treated as actionable until current
+evidence below proves their disposition. No review reply or PR metadata was
+changed by this correction.
+
+| Finding and immutable source | Exact review URL | Current disposition and evidence |
+|---|---|---|
+| 4008370032, source `14f998f32710f122f5861edfac8fdbc89ef95bfb` | [discussion 4008370032](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4008370032) | Reproduced the local `url.*.insteadOf` redirect against the exact parent. The parity template now reads the canonical URL from an isolated temporary cwd with repository/config environment overrides removed; the focused GREEN probe inspects that exact call. |
+| 4008370041, source `14f998f32710f122f5861edfac8fdbc89ef95bfb` | [discussion 4008370041](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4008370041) | Reproduced three post-capture `git ls-files` path inventories in the exact parent. The candidate streams each owned child through selector reads under one aggregate 64 KiB cap and bounded deadline/reap; synthetic overflow and normal cases passed. |
+| 4008370049, source `14f998f32710f122f5861edfac8fdbc89ef95bfb` | [discussion 4008370049](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4008370049) | Reproduced exact-parent acceptance of `rsync -e` and `--rsh` remote-shell delegation. The scanner now rejects direct and absolute `rsync` forms while retaining safe read-only commands; focused scanner GREEN passed. |
+| 4002335146, original source `5297b3c3b05afedf97723b7b58806cdd5519a2b6` | [discussion 4002335146](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002335146) | Current wrapper evidence pins `GOAUTH=off`, rejects inherited/command-prefix auth hooks before Go children, and the focused GREEN probe checks those exact assignments. The finding is dispositioned by current source evidence, not staleness or a later duplicate fix. |
+| 4002335150, original source `5297b3c3b05afedf97723b7b58806cdd5519a2b6` | [discussion 4002335150](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002335150) | Current prescriptions route both vet commands through `go_vet_checked` into the shared bounded Go-child/environment/source wrapper; the focused GREEN probe checks both commands. The finding is dispositioned by current source evidence, not staleness or a later duplicate fix. |
+| 4002335155, original source `5297b3c3b05afedf97723b7b58806cdd5519a2b6` | [discussion 4002335155](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4002335155) | Current `capture_go_child_output` streams stdout/stderr with an 8 MiB per-stream cap before decode and result acceptance; the focused GREEN probe checks that helper and cap. The finding is dispositioned by current source evidence, not staleness or a later duplicate fix. |
+
+#### Current packet certification
+
+After the focused boundaries, run the packet-only certification with same-file
+fragment handling. It checks Markdown fence parity, packet-local links and
+anchors, backlog JSON, the changed-boundary ledger, embedded wrapper/scanner/
+filter/parity AST and compile, exact current finding URLs and RED/GREEN
+transcripts, one-file scope, added-line secret/private-path hygiene and
+`git diff --check`. Its final output and exact local/remote SHA belong in the
+post-push worker handoff because recording a literal final SHA here would make
+the packet self-referential.
+
+Recorded current packet certification output (the exact local/remote SHA is
+intentionally reserved for the post-push worker handoff):
+
+```text
+GREEN packet certification: 336 Markdown fences balanced, 25 packet-local targets checked, backlog JSON valid, changed-boundary ledger valid with 10 data rows and 4 columns, embedded wrapper/scanner/filter/parity AST and compile valid, six current finding URLs and exact RED/GREEN/CURRENT transcripts present, changed scope is one packet path, added-line secret/private-path hygiene clean, and git diff --check passed
 ```
