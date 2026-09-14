@@ -479,10 +479,54 @@ if not re.fullmatch(r"go[A-Za-z0-9._-]+", expected_toolchain):
     raise SystemExit(f"{label}: invalid expected toolchain")
 
 invocation_root = Path.cwd().resolve()
-env = dict(os.environ)
+credential_environment_names = {
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+    "ACTIONS_RUNNER_INPUT_JITCONFIG",
+    "ACTIONS_RUNTIME_TOKEN",
+    "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+    "ACTIONS_ID_TOKEN_REQUEST_URL",
+    "RUNNER_TOKEN",
+    "JIT_CONFIG",
+    "JITCONFIG",
+    "GITHUB_APP_PRIVATE_KEY",
+}
+credential_environment_suffixes = (
+    "_TOKEN",
+    "_PASSWORD",
+    "_PASS",
+    "_SECRET",
+    "_PRIVATE_KEY",
+    "_CLIENT_SECRET",
+)
+
+def credential_environment_name(name):
+    normalized = name.upper()
+    return normalized in credential_environment_names or normalized.endswith(
+        credential_environment_suffixes
+    )
+
+inherited_credential_environment = sorted(
+    name for name in os.environ if credential_environment_name(name)
+)
+if inherited_credential_environment:
+    raise SystemExit(
+        f"{label}: credential-bearing environment is not allowed before child startup "
+        f"({len(inherited_credential_environment)} variable(s))"
+    )
+env = {
+    name: value
+    for name, value in os.environ.items()
+    if not credential_environment_name(name)
+}
 command_assignments = {}
 while command and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", command[0]):
     key, value = command.pop(0).split("=", 1)
+    if credential_environment_name(key):
+        raise SystemExit(
+            f"{label}: command-supplied credential-bearing environment is not allowed"
+        )
     command_assignments[key] = value
     env[key] = value
 reviewed_goenv = "off"
@@ -7586,6 +7630,18 @@ shell_executables = {
     "sh", "bash", "dash", "zsh", "ksh", "mksh", "ash", "fish", "csh", "tcsh",
 }
 
+# Every executable accepted by the packet scanner must be named here. Shell
+# control fragments are listed separately because token segmentation exposes
+# them while checking function bodies and redirections; an unknown executable
+# such as `nc` remains rejected before any network-capable command can run.
+reviewed_shell_executables = {
+    "awk", "diff", "exit", "export", "fi", "git", "go", "go_test_checked",
+    "go_test_checked()", "go_vet_checked", "go_vet_checked()", "grep", "jq",
+    "local", "mkdir", "printf", "return", "rg", "set", "shift", "test",
+    "tr", "trap", "umask", "wc",
+}
+reviewed_shell_control_tokens = {"2", "{", "}"}
+
 command_capable_interpreters = {
     "perl", "ruby", "node", "nodejs", "php", "lua", "luajit", "tclsh", "wish",
     "osascript", "raku", "jruby", "deno", "bun", "qjs", "quickjs", "jsc", "rscript",
@@ -7813,6 +7869,10 @@ def forbidden_command(tokens, depth=0):
         # packet has no authorized gh prescription, so fail closed for every
         # gh invocation before subcommand classification.
         return "gh command"
+    if executable in reviewed_shell_control_tokens:
+        return None
+    if executable not in reviewed_shell_executables:
+        return f"{executable} shell executable is not in the reviewed safe allowlist"
     return None
 
 python_command_functions = {
@@ -7853,6 +7913,11 @@ python_command_leaf_names = {
     name.rsplit(".", 1)[-1] for name in python_command_functions
 }
 python_dynamic_execution_names = {"eval", "exec", "__import__"}
+python_indirect_execution_constructors = {
+    "types.FunctionType",
+    "types.LambdaType",
+    "types.CodeType",
+}
 reviewed_python_import_modules = {
     "__future__",
     "ast",
@@ -8099,6 +8164,34 @@ def reviewed_python_exec_call(call, safe_marker):
         and isinstance(mode, ast.Constant)
         and mode.value == "exec"
     )
+
+
+def python_indirect_execution_violation(tree, parents, safe_marker):
+    """Reject compiled/function-object execution outside reviewed AST probes."""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        dotted = python_dotted_name(node.func)
+        if dotted in python_indirect_execution_constructors:
+            return (
+                "Python heredoc contains an indirect executable function object "
+                f"{dotted!r} on line {node.lineno}"
+            )
+        if dotted != "compile":
+            continue
+        reviewed_parent = any(
+            isinstance(parent, ast.Call)
+            and parent.args
+            and parent.args[0] is node
+            and reviewed_python_exec_call(parent, safe_marker)
+            for parent in _python_parent_chain(node, parents)
+        )
+        if not reviewed_parent:
+            return (
+                "Python heredoc contains an unreviewed compile call "
+                f"on line {node.lineno}"
+            )
+    return None
 
 
 def reviewed_python_import_call(call, safe_marker):
@@ -8733,6 +8826,90 @@ def _python_parent_chain(node, parents):
         parent = parents.get(parent)
 
 
+python_process_signal_functions = {
+    "os.kill",
+    "os.killpg",
+    "signal.raise_signal",
+    "signal.pthread_kill",
+}
+reviewed_python_signal_helpers = {
+    "owned_go_process_group_exists",
+    "terminate_go_child_group",
+    "git_query_group_exists",
+    "terminate_git_query_group",
+}
+
+
+def reviewed_python_signal_target(node, tree, parents, dotted):
+    """Prove only the packet's private process-group fixture targets."""
+    if dotted == "os.killpg":
+        if not node.args or not (
+            isinstance(node.args[0], ast.Attribute)
+            and node.args[0].attr == "pid"
+            and isinstance(node.args[0].value, ast.Name)
+            and node.args[0].value.id == "process"
+        ):
+            return False
+        function_name = enclosing_python_function(node, parents)
+        if function_name in reviewed_python_signal_helpers:
+            return True
+        for parent in _python_parent_chain(node, parents):
+            if not isinstance(parent, ast.For):
+                continue
+            if not (
+                isinstance(parent.target, ast.Name)
+                and parent.target.id == "process"
+                and isinstance(parent.iter, ast.Name)
+                and parent.iter.id == "active_process"
+            ):
+                continue
+            return True
+        return False
+    if dotted == "os.kill":
+        if not node.args or not (
+            isinstance(node.args[0], ast.Name)
+            and node.args[0].id == "child_pid"
+        ):
+            return False
+        for candidate in ast.walk(tree):
+            if not isinstance(candidate, ast.Assign):
+                continue
+            if not any(
+                isinstance(target, ast.Name) and target.id == "child_pid"
+                for target in candidate.targets
+            ):
+                continue
+            value = candidate.value
+            if not (
+                isinstance(value, ast.Call)
+                and python_dotted_name(value.func) == "int"
+                and len(value.args) == 1
+                and isinstance(value.args[0], ast.Call)
+                and python_dotted_name(value.args[0].func) == "marker.read_text"
+            ):
+                continue
+            return True
+        return False
+    return False
+
+
+def python_process_signal_violation(tree, parents):
+    """Reject unowned process signals and broad targets before execution."""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        dotted = python_dotted_name(node.func)
+        if dotted not in python_process_signal_functions:
+            continue
+        if reviewed_python_signal_target(node, tree, parents, dotted):
+            continue
+        return (
+            "Python heredoc contains an unowned process-signal call "
+            f"{dotted!r} on line {node.lineno}"
+        )
+    return None
+
+
 def reviewed_python_git_builder(node):
     """Allow only the packet's fixed read-only Git argv builder."""
     if not isinstance(node, ast.Call) or python_dotted_name(node.func) != "git_command":
@@ -9227,8 +9404,15 @@ def python_filesystem_mutation_violation(tree, parents):
             mutation = True
             path_arguments = list(node.args[:2])
         elif dotted == "open":
-            mode = node.args[1] if len(node.args) > 1 else None
-            if mode is None:
+            mode_keyword = next(
+                (keyword.value for keyword in node.keywords if keyword.arg == "mode"),
+                None,
+            )
+            has_mode = len(node.args) > 1 or any(
+                keyword.arg == "mode" for keyword in node.keywords
+            )
+            mode = node.args[1] if len(node.args) > 1 else mode_keyword
+            if not has_mode:
                 continue
             if not isinstance(mode, ast.Constant) or not isinstance(mode.value, str):
                 mutation = True
@@ -9407,6 +9591,14 @@ def inspect_python_heredoc(body, safe_marker):
     filesystem_violation = python_filesystem_mutation_violation(tree, parents)
     if filesystem_violation:
         return filesystem_violation
+    signal_violation = python_process_signal_violation(tree, parents)
+    if signal_violation:
+        return signal_violation
+    indirect_execution_violation = python_indirect_execution_violation(
+        tree, parents, safe_marker
+    )
+    if indirect_execution_violation:
+        return indirect_execution_violation
     dynamic_calls = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -9639,10 +9831,10 @@ synthetic = [
     ("versioned-python-c-gh-command-string", "/opt/homebrew/bin/python3.12 -c 'import os; os.system(\\\"gh workflow run ci.yml\\\"); pass'", True),
     ("env-python-c-command-string", "env python3 -c 'print(\\\"gh api x\\\")'", True),
     ("parameter-expanded-executable", "runner=gh \\\"$runner\\\" workflow run ci.yml", True),
-    ("prose-url", "https://example.invalid/docker run image:tag", False),
+    ("prose-url", "https://example.invalid/docker run image:tag", True),
     ("comment", "# docker run --rm image:tag true", False),
-    ("scanner-source", 'forbidden = "docker run"', False),
-    ("synthetic-fixture", 'fixture = "env gh workflow run ci.yml"', False),
+    ("scanner-source", 'forbidden = "docker run"', True),
+    ("synthetic-fixture", 'fixture = "env gh workflow run ci.yml"', True),
 ]
 for label, fixture, expected in synthetic:
     observed = any(
@@ -18901,4 +19093,230 @@ operation, merge, credential or workflow claim.
 
 ~~~text
 GREEN final packet certification: 384 Markdown fence markers balanced with matching-style parser, 157 packet-local targets checked, backlog JSON valid, changed-boundary ledger valid with 10 data rows and 4 columns, embedded wrapper/scanner/filter/parity AST and compile valid, full static scanner passed with 288 shell commands and 78 Python heredoc bodies, all six exact-head RED/GREEN/CURRENT boundaries passed, one-file scope and added-line secret/private-path hygiene clean, and git diff --check passed; no live verification claimed
+~~~
+
+### Fresh exact-head Codex review `5203924311` and prior credential finding `4010340749` against immutable parent `390c89b5e431a165dfbf8fa986cbf2594e3444ce`
+
+The current exact-head Codex review added four P2 findings and one P1
+credential-boundary finding. The prior credential discussion was also still
+open from the parent review. The following TDD evidence first loads only the
+immutable parent packet with `git show` and reproduces every unsafe witness in
+memory, then loads the current packet scanner and wrapper for focused
+GREEN/CURRENT checks after the minimal fail-closed policy correction. It starts
+no child, compiler, Go, workflow, runner, Docker, Lima, Keychain or launchd
+operation and performs no network or live qualification.
+
+~~~sh
+set -euo pipefail
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import re
+import shlex
+import subprocess
+from pathlib import Path
+
+parent_sha = "390c89b5e431a165dfbf8fa986cbf2594e3444ce"
+current_packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
+parent_packet = subprocess.check_output(
+    ["git", "show", f"{parent_sha}:docs/evidence/g01-recovery-packet.md"],
+    text=True,
+)
+
+def load_scanner(text, label):
+    anchor = text.index("def forbidden_command(tokens, depth=0):")
+    start = text.rfind("source = Path(", 0, anchor)
+    end = text.index("\nmatches = []", anchor)
+    scanner = text[start:end].replace(
+        'source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")',
+        'source = ""',
+        1,
+    )
+    namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+    exec(compile(scanner, "<evidence-scanner>", "exec"), namespace)
+    return namespace
+
+def wrapper_source(text):
+    start = text.index("\nimport hashlib\n", text.index("go_test_checked()")) + 1
+    end = text.index("\nPY\n}", start)
+    return text[start:end]
+
+parent = load_scanner(parent_packet, "exact-parent-390c89b-scanner")
+current = load_scanner(current_packet, "current-401052-scanner")
+
+def inspected(namespace, body):
+    return namespace["inspect_python_heredoc"](body, True)
+
+def shell_result(namespace, command):
+    return [
+        namespace["forbidden_command"](segment)
+        for segment in namespace["shell_token_segments"](command)
+    ]
+
+def rejected(value):
+    return any(result is not None for result in value) if isinstance(value, list) else value is not None
+
+def parent_accepts(label, value):
+    if rejected(value):
+        raise SystemExit(f"parent unexpectedly rejected {label}: {value!r}")
+    print(f"RED {label}: immutable parent accepted finding witness")
+
+def current_rejects(label, value):
+    if not rejected(value):
+        raise SystemExit(f"current scanner accepted {label}")
+    print(f"GREEN {label}/CURRENT: current scanner rejected unsafe witness")
+
+def current_accepts(label, value):
+    if rejected(value):
+        raise SystemExit(f"current scanner rejected safe control {label}: {value!r}")
+    print(f"GREEN {label}/CURRENT: reviewed safe control remained accepted")
+
+for mode in ("w", "a", "x", "+", "w+", "a+"):
+    body = f"open('/outside', mode={mode!r})\n"
+    parent_accepts(f"4010522126 builtin open mode={mode!r}", inspected(parent, body))
+    current_rejects(f"4010522126 builtin open mode={mode!r}", inspected(current, body))
+current_accepts(
+    "4010522126 owned builtin open mode keyword",
+    inspected(
+        current,
+        "from pathlib import Path\n"
+        "from tempfile import TemporaryDirectory\n"
+        "with TemporaryDirectory() as td:\n"
+        "    open(Path(td) / 'safe', mode='w')\n",
+    ),
+)
+
+signal_witnesses = (
+    "import os\nos.kill(0, 9)\n",
+    "import os\nos.kill(1, 9)\n",
+    "import os\nos.killpg(0, 9)\n",
+    "import os\nos.killpg(os.getpgrp(), 9)\n",
+    "import signal\nsignal.raise_signal(signal.SIGKILL)\n",
+    "import signal\nsignal.pthread_kill(0, signal.SIGKILL)\n",
+)
+for body in signal_witnesses:
+    parent_accepts("4010522134 unowned process signal", inspected(parent, body))
+    current_rejects("4010522134 unowned process signal", inspected(current, body))
+current_accepts(
+    "4010522134 reviewed owned process-group helper",
+    inspected(
+        current,
+        "import os\n"
+        "def terminate_go_child_group(process):\n"
+        "    os.killpg(process.pid, 9)\n"
+        "terminate_go_child_group(object())\n",
+    ),
+)
+
+parent_accepts("4010522141 unclassified nc", shell_result(parent, "nc example.invalid 4444"))
+current_rejects("4010522141 unclassified nc", shell_result(current, "nc example.invalid 4444"))
+for command in (
+    "printf safe",
+    "git status --porcelain=v1",
+    "awk 'BEGIN { print \"safe\" }'",
+):
+    current_accepts("4010522141 reviewed safe command " + command, shell_result(current, command))
+
+compiled = (
+    "import types\n"
+    "code = compile(\"import os; os.system('gh workflow run ci.yml')\", '<x>', 'exec')\n"
+    "types.FunctionType(code, {})()\n"
+)
+parent_accepts("4010522151 compiled indirect FunctionType", inspected(parent, compiled))
+current_rejects("4010522151 compiled indirect FunctionType", inspected(current, compiled))
+current_accepts(
+    "4010522151 reviewed static exec compile",
+    inspected(
+        current,
+        "wrapper = 'print(\\\"safe\\\")'\n"
+        "exec(compile(wrapper, '<fixture>', 'exec'), {})\n",
+    ),
+)
+
+parent_wrapper = wrapper_source(parent_packet)
+current_wrapper = wrapper_source(current_packet)
+parent_tree = ast.parse(parent_wrapper, filename="<exact-parent-wrapper>")
+current_tree = ast.parse(current_wrapper, filename="<current-wrapper>")
+if "dict(os.environ)" not in parent_wrapper:
+    raise SystemExit("credential RED witness changed: parent no longer copies os.environ")
+if "dict(os.environ)" in current_wrapper:
+    raise SystemExit("credential GREEN failed: current wrapper still copies os.environ")
+print("RED 4010340749/4010522157 credential environment: immutable parent copies dict(os.environ) before child maps")
+if "credential_environment_name" not in current_wrapper:
+    raise SystemExit("credential GREEN failed: explicit credential guard missing")
+if "credential-bearing environment" not in current_wrapper:
+    raise SystemExit("credential GREEN failed: credential rejection message missing")
+if current_wrapper.index("credential_environment_name") > current_wrapper.index("go_env = dict(env)"):
+    raise SystemExit("credential GREEN failed: guard appears after Go child environment construction")
+print("GREEN 4010340749/CURRENT: explicit inherited/command credential guard rejects before child environment construction")
+print("GREEN 4010522157/CURRENT: no dict(os.environ) propagation; credential-bearing environment is rejected before guarded children")
+print("focused unresolved exact-head RED/GREEN/CURRENT checks: passed")
+PY
+~~~
+
+Recorded TDD RED and current-head GREEN/CURRENT output:
+
+~~~text
+RED 4010522126 builtin open mode='w': immutable parent accepted finding witness
+RED 4010522126 builtin open mode='a': immutable parent accepted finding witness
+RED 4010522126 builtin open mode='x': immutable parent accepted finding witness
+RED 4010522126 builtin open mode='+': immutable parent accepted finding witness
+RED 4010522126 builtin open mode='w+': immutable parent accepted finding witness
+RED 4010522126 builtin open mode='a+': immutable parent accepted finding witness
+GREEN 4010522126 builtin open mode='w'/CURRENT: current scanner rejected unsafe witness
+GREEN 4010522126 builtin open mode='a'/CURRENT: current scanner rejected unsafe witness
+GREEN 4010522126 builtin open mode='x'/CURRENT: current scanner rejected unsafe witness
+GREEN 4010522126 builtin open mode='+'/CURRENT: current scanner rejected unsafe witness
+GREEN 4010522126 builtin open mode='w+'/CURRENT: current scanner rejected unsafe witness
+GREEN 4010522126 builtin open mode='a+'/CURRENT: current scanner rejected unsafe witness
+GREEN 4010522126 owned builtin open mode keyword/CURRENT: reviewed safe control remained accepted
+RED 4010522134 unowned process signal: immutable parent accepted finding witness
+GREEN 4010522134 unowned process signal/CURRENT: current scanner rejected unsafe witness
+RED 4010522134 unowned process signal: immutable parent accepted finding witness
+GREEN 4010522134 unowned process signal/CURRENT: current scanner rejected unsafe witness
+RED 4010522134 unowned process signal: immutable parent accepted finding witness
+GREEN 4010522134 unowned process signal/CURRENT: current scanner rejected unsafe witness
+RED 4010522134 unowned process signal: immutable parent accepted finding witness
+GREEN 4010522134 unowned process signal/CURRENT: current scanner rejected unsafe witness
+RED 4010522134 unowned process signal: immutable parent accepted finding witness
+GREEN 4010522134 unowned process signal/CURRENT: current scanner rejected unsafe witness
+RED 4010522134 unowned process signal: immutable parent accepted finding witness
+GREEN 4010522134 unowned process signal/CURRENT: current scanner rejected unsafe witness
+GREEN 4010522134 reviewed owned process-group helper/CURRENT: reviewed safe control remained accepted
+RED 4010522141 unclassified nc: immutable parent accepted finding witness
+GREEN 4010522141 unclassified nc/CURRENT: current scanner rejected unsafe witness
+GREEN 4010522141 reviewed safe command printf safe/CURRENT: reviewed safe control remained accepted
+GREEN 4010522141 reviewed safe command git status --porcelain=v1/CURRENT: reviewed safe control remained accepted
+GREEN 4010522141 reviewed safe command awk 'BEGIN { print "safe" }'/CURRENT: reviewed safe control remained accepted
+RED 4010522151 compiled indirect FunctionType: immutable parent accepted finding witness
+GREEN 4010522151 compiled indirect FunctionType/CURRENT: current scanner rejected unsafe witness
+GREEN 4010522151 reviewed static exec compile/CURRENT: reviewed safe control remained accepted
+RED 4010340749/4010522157 credential environment: immutable parent copies dict(os.environ) before child maps
+GREEN 4010340749/CURRENT: explicit inherited/command credential guard rejects before child environment construction
+GREEN 4010522157/CURRENT: no dict(os.environ) propagation; credential-bearing environment is rejected before guarded children
+focused unresolved exact-head RED/GREEN/CURRENT checks: passed
+~~~
+
+| Finding and immutable source | Exact review URL | Current disposition and evidence |
+|---|---|---|
+| 4010340749, source `390c89b5e431a165dfbf8fa986cbf2594e3444ce` | [discussion 4010340749](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4010340749) | RED reproduced `dict(os.environ)` copying inherited credential-bearing variables before child maps. The current wrapper rejects inherited and command-prefix credential names before constructing any guarded child environment; no credential value is printed or retained. |
+| 4010522126, source `390c89b5e431a165dfbf8fa986cbf2594e3444ce` | [discussion 4010522126](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4010522126) | RED reproduced unowned `open(..., mode='w'/'a'/'x'/'+')` keyword mutations that bypassed positional-mode parsing. The current filesystem policy parses the `mode` keyword and rejects every mutating mode outside temporary ownership while retaining an owned `Path(td)` write. |
+| 4010522134, source `390c89b5e431a165dfbf8fa986cbf2594e3444ce` | [discussion 4010522134](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4010522134) | RED reproduced broad `os.kill`, `os.killpg`, `signal.raise_signal` and `signal.pthread_kill` targets. The current AST policy rejects unowned process signals and permits only the reviewed private process-group helpers and synthetic owned fixture target; focused GREEN/CURRENT passed. |
+| 4010522141, source `390c89b5e431a165dfbf8fa986cbf2594e3444ce` | [discussion 4010522141](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4010522141) | RED reproduced unclassified `nc` acceptance. The scanner now requires every shell executable to appear in its reviewed safe allowlist, retains the packet's safe `printf`/`git`/`awk` controls and rejects unknown network-capable executables before execution. |
+| 4010522151, source `390c89b5e431a165dfbf8fa986cbf2594e3444ce` | [discussion 4010522151](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4010522151) | RED reproduced `types.FunctionType(compile(...), {})()` bypassing literal dynamic-execution checks. The AST pass rejects indirect executable function/code constructors and unreviewed `compile` calls while retaining the packet-derived static `exec(compile(...))` path. |
+| 4010522157, source `390c89b5e431a165dfbf8fa986cbf2594e3444ce` | [discussion 4010522157](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4010522157) | RED reproduced inherited `GITHUB_TOKEN`/JIT-style environment propagation through `dict(os.environ)`. The wrapper now rejects credential-bearing inherited and command-prefix variables before `go_env` or any guarded child is constructed, without recording values. |
+
+The exact Codex review URL is [review 5203924311](https://github.com/1XP-AI/gh-runnerd/pull/78#pullrequestreview-5203924311). These findings are resolved only for the embedded offline scanner and wrapper policy at this candidate head; no live GitHub/App/runner/workflow/credential or host qualification is claimed. Rollback is packet-only to immutable parent `390c89b5e431a165dfbf8fa986cbf2594e3444ce`.
+
+### Final packet certification after exact-head review `5203924311`
+
+The final packet-only certification reruns the changed scanner and credential
+boundaries above before the full gate: matching-style Markdown fence parity,
+packet-local link/anchor targets, backlog JSON, the ten-row/four-column changed
+boundary ledger, embedded wrapper/scanner/filter/parity AST and compile, full
+static scanner, all unresolved exact-head focused boundaries, one-file scope,
+added-line secret/private-path hygiene and `git diff --check`. No live
+operation, merge, credential, workflow or production verification is claimed.
+
+~~~text
+GREEN final packet certification: 390 Markdown fence markers balanced with matching-style parser, 157 packet-local targets checked, backlog JSON valid, changed-boundary ledger valid with 10 data rows and 4 columns, embedded wrapper/scanner/filter/parity AST and compile valid across 79 Python heredoc bodies, full static scanner passed with 290 shell commands and 79 Python heredoc bodies, all six exact-head RED/GREEN/CURRENT boundaries passed, exact review URL ledger present, one-file scope and added-line secret/private-path hygiene clean, and git diff --check passed; no live verification claimed; rollback parent 390c89b5e431a165dfbf8fa986cbf2594e3444ce
 ~~~
