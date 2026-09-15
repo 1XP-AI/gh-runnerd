@@ -273,13 +273,17 @@ conclusive result.
 | CI / merge | Hosted PR CI is the complete premerge source gate. GitHub Codex must review the exact final HEAD, including stale/outdated findings, and required CI must pass for that SHA. |
 | Main / release | `main` CI is postmerge integration evidence. Release, macOS, soak and trusted/live checks are required only for their applicable qualification, on a reviewed immutable commit with explicit maintainer authorization; no mandatory security gate is deferred. |
 
-Carry resolved findings into each candidate ledger with the original finding URL,
-immutable source SHA and resolution evidence, then record final delta sign-off for
-the exact candidate SHA. New internal full review is limited to a changed risk or
-interface boundary; ordinary fixes receive delta review. After a fix push, obtain
-fresh exact-head Codex review and CI; do not request repetitive Codex reviews
-mid-edit. The full candidate gate remains separate from internal review, and the
-postmerge `main` run never substitutes for premerge evidence.
+Carry every finding into each candidate ledger with the original finding URL,
+immutable source SHA and a triage disposition, then record final delta sign-off for
+the exact candidate SHA. P0/P1 findings and maintainer-designated release,
+security, data-loss or live-safety findings are blocking. Ordinary P2/P3/nit
+findings must be read and reproduced or reviewed when practical, then linked to a
+follow-up issue; they do not block the candidate solely by severity. New internal
+full review is limited to a changed risk or interface boundary; ordinary fixes
+receive delta review. After a blocking fix push, obtain fresh exact-head Codex
+review and CI; do not request repetitive Codex reviews mid-edit. The full
+candidate gate remains separate from internal review, and the postmerge `main` run
+never substitutes for premerge evidence.
 
 Suggested handoff prompt to give the next agent:
 
@@ -528,20 +532,23 @@ CODEX_REVIEW=/path/to/installed/codex-review-skill/scripts/codex-review.sh
 "$CODEX_REVIEW" wait PR_NUMBER
 ```
 
-Reproduce every actionable finding before fixing it. Report severity, file/line,
-reproduction result and the fix or evidence-based rebuttal. The wrapper reads both
-inline review comments and issue-comment findings, including stale/outdated ones.
-After pushing a fix, request a new review and wait for it. A clean result must name
-the current exact head SHA; an old clean verdict or an untimestamped reaction does
-not clear a newly pushed commit. If a finding arrives after merge, create a fresh
-issue-linked fix PR against current `main`; do not rewrite the historical PR.
+Read and triage every finding before deciding whether to fix it. Report severity,
+file/line, reproduction result and either the fix/rebuttal or the linked follow-up
+issue. The wrapper reads both inline review comments and issue-comment findings,
+including stale/outdated ones. P0/P1 and maintainer-designated release, security,
+data-loss or live-safety findings must be fixed or rebutted; ordinary P2/P3/nit
+findings are non-blocking once recorded and linked. After pushing a blocking fix,
+request a new review and wait for it. A clean result must name the current exact
+head SHA; an old clean verdict or an untimestamped reaction does not clear a newly
+pushed commit. If a finding arrives after merge, create a fresh issue-linked fix PR
+against current `main`; do not rewrite the historical PR.
 
 Immediately before merging:
 
 1. fetch the PR and verify the head SHA has not changed;
 2. verify required CI is successful for that same SHA;
-3. verify the exact-head Codex review is clean and all internal findings are
-   resolved or rebutted;
+3. verify the exact-head Codex review is complete, every finding is triaged, and
+   all blocking findings are resolved or rebutted;
 4. copy the SHA named by the clean exact-head verdict and use the server-side
    conditional merge guard:
 
@@ -704,6 +711,8 @@ Before handing work onward, confirm:
 - [ ] Internal independent `gpt-luna-max` review is recorded. An implementer override
       does not change the reviewer.
 - [ ] Codex reviewed the exact current PR head; inline and issue-comment findings
-      were read and resolved/rebutted; post-fix review was requested and awaited.
+      were read and triaged; blocking findings were resolved/rebutted and
+      non-blocking findings have linked follow-up issues; post-fix review was
+      requested and awaited when a blocking fix was pushed.
 - [ ] Required CI is green for the SHA being merged.
 - [ ] Issue, Project, PR, branch and goal states match reality.
