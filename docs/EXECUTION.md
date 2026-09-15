@@ -38,10 +38,11 @@ its immutable source SHA, original finding URL and resolution evidence, then rec
 the final delta sign-off against the exact candidate SHA. Triage every new finding,
 including stale/outdated findings, before deciding whether it blocks. P0/P1 and
 maintainer-designated release, security, data-loss or live-safety findings are
-blocking; ordinary P2/P3/nit findings receive a reproduced-or-reviewed disposition
-and a linked follow-up issue, but do not stop the candidate by severity alone. A
-new internal full review is needed only when the changed diff crosses a new risk or
-interface boundary; focused delta review remains required for ordinary fixes.
+blocking. A genuinely valuable P2/P3 hardening item may be grouped into a linked
+follow-up issue; routine P2/P3/nit findings receive a one-time disposition and are
+closed without a fix or issue. Neither class stops the candidate by severity alone.
+A new internal full review is needed only when the changed diff crosses a new risk
+or interface boundary; focused delta review remains required for ordinary fixes.
 GitHub Codex review and the required CI gate are separate and stricter: immediately
 before merge, Codex must have reviewed the exact final HEAD, every finding must be
 triaged, no blocking finding may remain unresolved, required CI must pass for that
@@ -82,7 +83,7 @@ attempt and one evidence ledger are the reusable unit.
 3. Create a dedicated branch/worktree. Keep one issue's behavior in one PR; split only if the issue's acceptance contract requires it.
 4. Follow red -> green -> refactor, with meaningful failure evidence before the fix and relevant automated checks afterward.
 5. Ask the assigned independent reviewer to check invariants and failure cases. Independent review uses `gpt-luna-max` unless the user explicitly selects another allowed route; an implementer override does not silently change the reviewer. Record reviewer/model and outcomes in the PR. This internal review is separate from the GitHub Codex review.
-6. Move Project status to In review. Wait for GitHub Codex to finish reviewing the exact current PR head. Use the configured `codex-review` skill to read both inline reviews and issue-comment findings, including stale/outdated findings. Triage every finding; fix or specifically rebut blocking findings, and record ordinary P2/P3/nit findings in the candidate ledger with a linked follow-up issue. After a blocking fix push, request `@codex review` and wait for the new result. Merge only when required CI and both review paths are complete, no blocking finding remains unresolved, and the issue's existing authorization permits it. Check the current head immediately before merge and constrain the merge to that SHA.
+6. Move Project status to In review. Wait for GitHub Codex to finish reviewing the exact current PR head. Use the configured `codex-review` skill to read both inline reviews and issue-comment findings, including stale/outdated findings. Triage every finding; fix or specifically rebut blocking findings, group only genuinely valuable P2/P3 hardening into linked follow-up issues, and close routine P2/P3/nit findings after recording their disposition. After a blocking fix push, request `@codex review` and wait for the new result. Merge only when required CI and both review paths are complete, no blocking finding remains unresolved, and the issue's existing authorization permits it. Check the current head immediately before merge and constrain the merge to that SHA.
 7. Close the issue and mark its goal complete only when all acceptance criteria and evidence are satisfied. If the goal includes merge, a merely opened PR is not completion.
 
 Keep dependent issues blocked until evidence gates pass. Production implementation of #68 is dependent work under that rule and waits for full G01 #1 and G02 #2; completing #67 does not complete G02. Native #68 blockers remain #60/#66/#67 and authorize only reviewed contract and offline evidence work until those gates pass. A blocked issue needs a concrete blocker and an independently useful next step if one exists. Follow the host's actual goal-tool blocked threshold; do not mark a goal blocked after a single inconvenience. GitHub Project Goal text is a durable work specification, not an active Codex goal or an automatic scheduler.

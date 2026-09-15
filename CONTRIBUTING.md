@@ -18,7 +18,9 @@ second independent security/recovery pass remains required when the changed
 boundary warrants it. The coordinator audits the contract, ledger and evidence;
 the coordinator is not a third full-suite tester. Carry resolved findings forward
 with their original URL, source SHA and resolution evidence, and sign off the
-final delta against the exact candidate SHA.
+final delta against the exact candidate SHA. Group only valuable non-blocking
+hardening into follow-up issues; give routine P2/P3/nit findings a one-time
+disposition instead of opening speculative work.
 
 The public baseline is documented in [CI.md](docs/CI.md). `make check` remains the
 complete public validation suite and hosted PR CI remains the required stable

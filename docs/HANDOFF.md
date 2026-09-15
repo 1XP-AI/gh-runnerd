@@ -276,14 +276,15 @@ conclusive result.
 Carry every finding into each candidate ledger with the original finding URL,
 immutable source SHA and a triage disposition, then record final delta sign-off for
 the exact candidate SHA. P0/P1 findings and maintainer-designated release,
-security, data-loss or live-safety findings are blocking. Ordinary P2/P3/nit
-findings must be read and reproduced or reviewed when practical, then linked to a
-follow-up issue; they do not block the candidate solely by severity. New internal
-full review is limited to a changed risk or interface boundary; ordinary fixes
-receive delta review. After a blocking fix push, obtain fresh exact-head Codex
-review and CI; do not request repetitive Codex reviews mid-edit. The full
-candidate gate remains separate from internal review, and the postmerge `main` run
-never substitutes for premerge evidence.
+security, data-loss or live-safety findings are blocking. A genuinely valuable
+P2/P3 hardening item may be grouped into a linked follow-up issue; routine P2/P3/nit
+findings must be read once, recorded and closed without a fix or issue. Neither
+class blocks the candidate solely by severity. New internal full review is limited
+to a changed risk or interface boundary; ordinary fixes receive delta review. After
+a blocking fix push, obtain fresh exact-head Codex review and CI; do not request
+repetitive Codex reviews mid-edit. The full candidate gate remains separate from
+internal review, and the postmerge `main` run never substitutes for premerge
+evidence.
 
 Suggested handoff prompt to give the next agent:
 
@@ -533,15 +534,17 @@ CODEX_REVIEW=/path/to/installed/codex-review-skill/scripts/codex-review.sh
 ```
 
 Read and triage every finding before deciding whether to fix it. Report severity,
-file/line, reproduction result and either the fix/rebuttal or the linked follow-up
-issue. The wrapper reads both inline review comments and issue-comment findings,
-including stale/outdated ones. P0/P1 and maintainer-designated release, security,
-data-loss or live-safety findings must be fixed or rebutted; ordinary P2/P3/nit
-findings are non-blocking once recorded and linked. After pushing a blocking fix,
-request a new review and wait for it. A clean result must name the current exact
-head SHA; an old clean verdict or an untimestamped reaction does not clear a newly
-pushed commit. If a finding arrives after merge, create a fresh issue-linked fix PR
-against current `main`; do not rewrite the historical PR.
+file/line, reproduction result and either the fix/rebuttal, a genuinely valuable
+follow-up issue, or a one-time closed disposition. The wrapper reads both inline
+review comments and issue-comment findings, including stale/outdated ones. P0/P1
+and maintainer-designated release, security, data-loss or live-safety findings must
+be fixed or rebutted. Valuable P2/P3 hardening is non-blocking once grouped into a
+linked issue; routine P2/P3/nit findings are non-blocking after disposition and do
+not receive speculative fixes. After pushing a blocking fix, request a new review
+and wait for it. A clean result must name the current exact head SHA; an old clean
+verdict or an untimestamped reaction does not clear a newly pushed commit. If a
+finding arrives after merge, create a fresh issue-linked fix PR against current
+`main`; do not rewrite the historical PR.
 
 Immediately before merging:
 
@@ -711,8 +714,9 @@ Before handing work onward, confirm:
 - [ ] Internal independent `gpt-luna-max` review is recorded. An implementer override
       does not change the reviewer.
 - [ ] Codex reviewed the exact current PR head; inline and issue-comment findings
-      were read and triaged; blocking findings were resolved/rebutted and
-      non-blocking findings have linked follow-up issues; post-fix review was
-      requested and awaited when a blocking fix was pushed.
+      were read and triaged; blocking findings were resolved/rebutted, valuable
+      non-blocking findings have linked follow-up issues, and routine findings
+      have a one-time disposition; post-fix review was requested and awaited when
+      a blocking fix was pushed.
 - [ ] Required CI is green for the SHA being merged.
 - [ ] Issue, Project, PR, branch and goal states match reality.
