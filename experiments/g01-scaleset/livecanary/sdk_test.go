@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/actions/scaleset"
+	"github.com/google/uuid"
 )
 
 func credentials(a Approval) Credentials {
@@ -103,6 +106,41 @@ func TestCredentialAttestationMismatchAndExpiredTokenRejected(t *testing.T) {
 				t.Fatal("wrong broker authority accepted")
 			}
 		})
+	}
+}
+
+func TestValidDrainSessionWireRequiresExactQueueAuthorization(t *testing.T) {
+	a := approval()
+	token := strings.Repeat("q", 24)
+	other := strings.Repeat("w", 24)
+	zero, one := 0, 1
+	wireStats := &baselineStatistics{Available: &zero, Acquired: &zero, Assigned: &zero, Running: &zero, Registered: &one, Busy: &zero, Idle: &one}
+	sdkStats := &scaleset.RunnerScaleSetStatistic{TotalAvailableJobs: 0, TotalAcquiredJobs: 0, TotalAssignedJobs: 0, TotalRunningJobs: 0, TotalRegisteredRunners: 1, TotalBusyRunners: 0, TotalIdleRunners: 1}
+	set := &scaleset.RunnerScaleSet{
+		ID: 7, Name: a.setName(), RunnerGroupID: a.RunnerGroupID,
+		Labels:        []scaleset.Label{{Name: a.setName()}},
+		RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true}, Statistics: sdkStats,
+	}
+	sessionID := uuid.MustParse("00000000-0000-4000-8000-000000000031")
+	session := scaleset.RunnerScaleSetSession{
+		SessionID: sessionID, OwnerName: a.setName(), MessageQueueURL: "https://fixture.actions.githubusercontent.com/queue",
+		MessageQueueAccessToken: token, RunnerScaleSet: set, Statistics: sdkStats,
+	}
+	wire := &baselineSessionFacts{
+		SessionID: sessionID.String(), Owner: a.setName(), Statistics: wireStats, NestedStatistics: wireStats,
+		NestedSet: true, SetID: 7, SetName: a.setName(), GroupID: a.RunnerGroupID,
+		queueURL: session.MessageQueueURL, authorization: token,
+	}
+	if !validDrainSessionWire(a, 7, a.setName(), wire, session) {
+		t.Fatal("matching queue authorization rejected")
+	}
+	wire.authorization = other
+	if validDrainSessionWire(a, 7, a.setName(), wire, session) {
+		t.Fatal("different queue authorization accepted")
+	}
+	wire.authorization = ""
+	if validDrainSessionWire(a, 7, a.setName(), wire, session) {
+		t.Fatal("missing queue authorization accepted")
 	}
 }
 

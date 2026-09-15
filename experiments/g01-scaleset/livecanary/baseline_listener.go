@@ -18,23 +18,25 @@ var errBaselineCollected = errors.New("baseline callback collection complete")
 // No current phase/CLI calls this. The future pair orchestrator must prove
 // completed pairing and host preflight before invoking this experiment slice.
 type baselineListener struct {
-	finalizer              *pairedBaselineScope
-	finalizing             bool
-	pairGuard              func() error
-	mu                     sync.Mutex
-	ctx                    context.Context
-	cancel                 context.CancelFunc
-	approval               Approval
-	journal                *FileJournal
-	api                    SDKAPI
-	identity               controllerJournalIdentity
-	creation               controllerRecordRef
-	setID                  int
-	session                Session
-	initial                scaleset.RunnerScaleSetSession
-	sessionID, queue       string
-	running, used, invalid bool
-	after                  func(context.Context, baselineAcquisition) error
+	finalizer                *pairedBaselineScope
+	finalizing               bool
+	pairGuard                func() error
+	mu                       sync.Mutex
+	ctx                      context.Context
+	cancel                   context.CancelFunc
+	approval                 Approval
+	journal                  *FileJournal
+	api                      SDKAPI
+	identity                 controllerJournalIdentity
+	creation                 controllerRecordRef
+	setID                    int
+	session                  Session
+	initial                  scaleset.RunnerScaleSetSession
+	sessionID, queue, origin string
+	runtimePathPrefix        string
+	runtimePathPrefixSet     bool
+	running, used, invalid   bool
+	after                    func(context.Context, baselineAcquisition) error
 }
 
 func newBaselineListenerHeld(ctx context.Context, a Approval, j *FileJournal, api *SDKAPI, setID int) (*baselineListener, error) {
@@ -163,7 +165,25 @@ func (b *baselineListener) finish(r baselineRecord, known bool) (controllerRecor
 	return ref, nil
 }
 func (b *baselineListener) wire(stage string) *baselineWireCapture {
-	return &baselineWireCapture{stage: stage, setID: b.setID, queue: b.queue}
+	return &baselineWireCapture{stage: stage, setID: b.setID, organization: b.approval.Organization, owner: b.approval.setName(), sessionID: b.sessionID, queue: b.queue, origin: b.origin, runtimePathPrefix: b.runtimePathPrefix, runtimePathPrefixSet: b.runtimePathPrefixSet, allowedHosts: baselineWireAllowedHosts(b.approval, b.api.drainEndpointHost())}
+}
+
+func (b *baselineListener) capturedOrigin() string {
+	if b == nil {
+		return ""
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.origin
+}
+
+func (b *baselineListener) capturedRuntimePathPrefix() (string, bool) {
+	if b == nil {
+		return "", false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.runtimePathPrefix, b.runtimePathPrefixSet && !b.invalid
 }
 func (b *baselineListener) run(after func(context.Context, baselineAcquisition) error) error {
 	if b == nil || b.ctx == nil || b.cancel == nil || !b.mu.TryLock() {
@@ -225,7 +245,16 @@ func (b *baselineListener) initialize() error {
 	cancel()
 	r.Set = c.set
 	r.HTTPStatus = c.status
-	known := c.observed() && r.Set.eligible(b.approval, b.setID) && ((callErr != nil && b.ctx.Err() != nil) || (callErr == nil && set != nil && set.ID == r.Set.ID && set.Name == r.Set.Name && set.RunnerGroupID == r.Set.GroupID && set.RunnerSetting.DisableUpdate && r.Set.Statistics.matches(set.Statistics)))
+	beforeOrigin := c.requestOrigin()
+	prefix, prefixKnown := c.requestRuntimePathPrefix()
+	known := c.observed() && prefixKnown && r.Set.eligible(b.approval, b.setID) && ((callErr != nil && b.ctx.Err() != nil) || (callErr == nil && set != nil && set.ID == r.Set.ID && set.Name == r.Set.Name && set.RunnerGroupID == r.Set.GroupID && set.RunnerSetting.DisableUpdate && r.Set.Statistics.matches(set.Statistics)))
+	if prefixKnown {
+		b.runtimePathPrefix = prefix
+		b.runtimePathPrefixSet = true
+	}
+	if c.observed() && beforeOrigin != "" {
+		b.origin = beforeOrigin
+	}
 	if _, err = b.finish(r, known); err != nil {
 		return err
 	}
@@ -238,15 +267,23 @@ func (b *baselineListener) initialize() error {
 	session, callErr := b.api.OpenSession(c.context(ctx), b.setID, b.approval.setName())
 	cancel()
 	sf, _, _, status := c.facts()
+	origin := c.requestOrigin()
+	sessionPrefix, sessionPrefixKnown := c.requestRuntimePathPrefix()
 	r.Session = sf
 	r.HTTPStatus = status
-	known = c.observed() && sf.eligible(b.approval, b.setID) && ((callErr != nil && b.ctx.Err() != nil) || (callErr == nil && session != nil))
+	known = c.observed() && sessionPrefixKnown && sf.eligible(b.approval, b.setID) && ((callErr != nil && b.ctx.Err() != nil) || (callErr == nil && session != nil))
 	var initial scaleset.RunnerScaleSetSession
 	if callErr == nil && session != nil {
 		initial = session.Session()
 	}
 	if known && callErr == nil {
 		known = initial.SessionID.String() == sf.SessionID && initial.OwnerName == sf.Owner && sf.Statistics.matches(initial.Statistics) && initial.MessageQueueURL != ""
+	}
+	if known && (origin == "" || !b.runtimePathPrefixSet || sessionPrefix != b.runtimePathPrefix) {
+		known = false
+	}
+	if known && origin != "" {
+		b.origin = origin
 	}
 	if callErr == nil && session != nil && sf != nil && initial.SessionID.String() == sf.SessionID && initial.OwnerName == b.approval.setName() {
 		b.session = session
@@ -388,13 +425,14 @@ func (b *baselineListener) AcquireJobs(_ context.Context, ids []int64) ([]int64,
 		return nil, err
 	}
 	c := b.wire("acquire")
+	c.requestIDs = slices.Clone(ids)
 	ctx, cancel := context.WithTimeout(b.ctx, operationTimeout)
 	got, callErr := b.session.AcquireJobs(c.context(ctx), slices.Clone(ids))
 	cancel()
 	_, _, accepted, status := c.facts()
 	r.Accepted = accepted
 	r.HTTPStatus = status
-	known := c.observed() && status == 200 && accepted != nil && accepted.Count != nil && *accepted.Count == 1 && len(accepted.IDs) == 1 && accepted.IDs[0] == ids[0] && ((callErr == nil && slices.Equal(got, ids)) || (callErr != nil && b.ctx.Err() != nil)) && b.session.Session().SessionID.String() == b.sessionID
+	known := c.observed() && status == 200 && accepted.matches(ids) && ((callErr == nil && slices.Equal(got, ids)) || (callErr != nil && b.ctx.Err() != nil)) && b.session.Session().SessionID.String() == b.sessionID
 	resultRef, err := b.finish(r, known)
 	if err != nil {
 		return nil, err

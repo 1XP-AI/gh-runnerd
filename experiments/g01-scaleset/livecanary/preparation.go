@@ -24,7 +24,7 @@ func authorizePhase(a Approval, j Journal, phase string) (state, func(), error) 
 		return state{}, nil, ErrJournal
 	}
 	events := j.Events()
-	s := replay(events)
+	s := replayWithApproval(events, &a)
 	invalid := phase != "inspect" && (s.uncertain || s.phaseSeen[phase] || s.deleted)
 	// Run has not appended its phase record yet: an eligible create has no events.
 	invalid = invalid || (phase == "create" && (s.setID != 0 || len(events) != 0))
@@ -101,7 +101,7 @@ func pairedPreparationReady(a Approval, now time.Time) bool {
 		if _, ok := want[phase]; ok {
 			want[phase] = true
 		}
-		if phase == "before-ack" || phase == "after-ack" || phase == "before-acquire" || phase == "acquire-loss" {
+		if phase == "before-ack" || phase == "after-ack" || phase == "before-acquire" || phase == "acquire-loss" || phase == "drain" {
 			verification = true
 		}
 	}

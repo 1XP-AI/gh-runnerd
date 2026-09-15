@@ -49,7 +49,7 @@ type BrokerResult struct {
 var errBroker = errors.New("broker stopped; retain private intent and review; no automatic retry")
 var brokerComponent = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$`)
 var brokerWorkerComponent = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`)
-var brokerPhases = map[string]bool{"create": true, "before-ack": true, "after-ack": true, "before-acquire": true, "acquire-loss": true, "jit-loss": true, "inspect": true, "cleanup": true}
+var brokerPhases = map[string]bool{"create": true, "before-ack": true, "after-ack": true, "before-acquire": true, "acquire-loss": true, "jit-loss": true, "drain": true, "inspect": true, "cleanup": true}
 var brokerSpecialSlots = map[string]bool{"discover-actions-host": true, "paired-terminal": true}
 
 func brokerSlotAllowed(slot string) bool { return brokerPhases[slot] || brokerSpecialSlots[slot] }
