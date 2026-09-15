@@ -185,9 +185,9 @@ func TestForeignIdentityAndUnreviewedWorkNeverACKOrDelete(t *testing.T) {
 	}
 }
 
-func TestCleanupOnlyForNeverIssuedWorkerWithExactReceipt(t *testing.T) {
+func TestCleanupOnlyForNeverIssuedWorkerWithExactReceiptRemainsQuarantined(t *testing.T) {
 	d, f, _ := created(t)
-	if err := d.Run(context.Background(), "cleanup"); err != nil || f.deleteCalls != 1 {
-		t.Fatal("verified empty owned scale set was not deleted")
+	if err := d.Run(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) || f.deleteCalls != 0 {
+		t.Fatal("unfenced cleanup was not quarantined")
 	}
 }

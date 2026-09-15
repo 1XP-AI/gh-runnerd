@@ -16,6 +16,12 @@ func authorizePhase(a Approval, j Journal, phase string) (state, func(), error) 
 	if a.Validate(time.Now()) != nil || !slices.Contains(a.Phases, phase) {
 		return state{}, nil, ErrApproval
 	}
+	// The current SDK adapter exposes only an unconditional DeleteScaleSet.
+	// Until it can carry an atomic owner/freshness precondition, cleanup is a
+	// deliberate quarantine rather than an observation-then-delete race.
+	if phase == "cleanup" {
+		return state{}, nil, ErrQuarantine
+	}
 	if j == nil {
 		return state{}, nil, ErrJournal
 	}
@@ -25,7 +31,13 @@ func authorizePhase(a Approval, j Journal, phase string) (state, func(), error) 
 	}
 	events := j.Events()
 	s := replayWithApproval(events, &a)
-	invalid := phase != "inspect" && (s.uncertain || s.phaseSeen[phase] || s.deleted)
+	// Every approved phase, including the read-only inspect slot, is consumed
+	// by its durable phase record. A second inspect must not become a fresh
+	// authority merely because its implementation has no external write. One
+	// inspect remains available to examine an uncertain or durably deleted
+	// state; its own phase record then prevents another attempt. Deletion still
+	// fences every phase that could perform a further effect.
+	invalid := (phase != "inspect" && s.uncertain) || s.phaseSeen[phase] || (s.deleted && phase != "inspect")
 	// Run has not appended its phase record yet: an eligible create has no events.
 	invalid = invalid || (phase == "create" && (s.setID != 0 || len(events) != 0))
 	invalid = invalid || (phase != "create" && phase != "inspect" && (s.setID <= 0 || s.reserved))

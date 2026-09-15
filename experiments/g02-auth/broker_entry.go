@@ -75,6 +75,20 @@ func (c controllerApproval) validate(a BrokerApproval, now time.Time) error {
 	}
 	return nil
 }
+
+// A controller approval carries one stable, reviewed authority whose phase set
+// may cover successive controller invocations. This is only a structural
+// shape guard: it requires the requested outer phase to be included, but does
+// not attest that workflow input selected that phase; that capability remains
+// an explicit gate. Paired-terminal intentionally has its own fixed
+// multi-step sequence.
+func controllerApprovalShapeMatchesPhase(a BrokerApproval, c controllerApproval) bool {
+	if a.Mode != "controller" {
+		return true
+	}
+	return slices.Contains(c.Phases, a.Phase)
+}
+
 func readBrokerPrivateJSON(path string, target any) ([]byte, error) {
 	file, err := openBrokerPrivateFile(path, 0600, 16384)
 	if err != nil {
@@ -145,7 +159,7 @@ func runBrokerWithAPI(ctx context.Context, files BrokerFiles, input *os.File, ap
 		var err error
 		controllerData, err = readBrokerPrivateJSON(files.ControllerApproval, &controller)
 		digest := sha256.Sum256(controllerData)
-		if err != nil || hex.EncodeToString(digest[:]) != approval.ControllerApprovalSHA256 || controller.validate(approval, api.now()) != nil {
+		if err != nil || hex.EncodeToString(digest[:]) != approval.ControllerApprovalSHA256 || controller.validate(approval, api.now()) != nil || !controllerApprovalShapeMatchesPhase(approval, controller) {
 			return BrokerResult{}, errBroker
 		}
 		binary, err = brokerBinaryOpener(files.ControllerBinary, approval)

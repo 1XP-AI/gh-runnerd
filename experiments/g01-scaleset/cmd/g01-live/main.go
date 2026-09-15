@@ -51,6 +51,12 @@ var runPairedTerminalForCommand = func(ctx context.Context, files livecanary.Pai
 	return livecanary.RunPairedTerminal(ctx, files, c)
 }
 
+// Controller execution is quarantined until the broker can provide an
+// authenticated, broker-only input channel. The tagged binary's stdin is not
+// itself evidence of broker provenance, so accepting it here would preserve
+// both the direct FIFO and tagged-entry bypasses under review.
+const controllerExecutionQuarantined = true
+
 func run(args []string, in io.Reader, out io.Writer) int {
 	return runWithPreparation(args, in, out, buildRevision, livecanary.PrepareJournal)
 }
@@ -109,6 +115,9 @@ func runWithPreparation(args []string, in io.Reader, out io.Writer, revisionForB
 		modeCount++
 	}
 	if modeCount != 1 || *plan || *approvalPath == "" || *statePath == "" {
+		return reject()
+	}
+	if controllerExecutionQuarantined && (*execute || *pairedExecute) {
 		return reject()
 	}
 	if *prepareWorker {

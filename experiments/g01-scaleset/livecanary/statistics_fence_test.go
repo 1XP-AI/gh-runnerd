@@ -225,8 +225,8 @@ func TestZeroStatisticsAndOptionalAbsencePermitEmptyCleanup(t *testing.T) {
 			if err != nil && !errors.Is(err, ErrNoMessage) {
 				t.Fatalf("zero/optional absence fixture refused: %v", err)
 			}
-			if err := d.Run(context.Background(), "cleanup"); err != nil || f.deleteCalls != 1 {
-				t.Fatalf("genuine empty cleanup refused: %v", err)
+			if err := d.Run(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) || f.deleteCalls != 0 {
+				t.Fatalf("unfenced empty cleanup was not quarantined: %v", err)
 			}
 		})
 	}
@@ -341,8 +341,8 @@ func TestObservationResultFailureSurvivesFileReopenAndInspection(t *testing.T) {
 			defer j.Close()
 			f.findRunner = nil
 			restarted := Driver{d.Approval, j, statisticsInventoryAPI{f}}
-			if err := restarted.Run(context.Background(), "inspect"); err != nil {
-				t.Fatalf("zero/absent inspection refused: %v", err)
+			if err := restarted.Run(context.Background(), "inspect"); !errors.Is(err, ErrQuarantine) {
+				t.Fatalf("second zero/absent inspection escaped the one-slot gate: %v", err)
 			}
 			if !replay(j.Events()).uncertain || restarted.Run(context.Background(), "cleanup") == nil || f.deleteCalls != 0 {
 				t.Fatal("successful inspection cleared the persisted unfinished observation")
