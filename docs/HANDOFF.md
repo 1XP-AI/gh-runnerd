@@ -255,35 +255,40 @@ For every new issue, after checking for an explicit current user override:
 
 ## Incremental validation and review handoff
 
-Use focused validation while the candidate is changing and the complete gate once
+Use focused validation while the candidate is changing and the PR quick gate once
 the candidate is stable. Keep intermediate commits local. The writer owns
 meaningful red -> minimal green -> refactor evidence and focused unit/negative
 checks; an explicit `make fast` module/package/test selector may help with local
 iteration, but it is fail-closed and never represents `make check` or CI success.
-Push one batched stable candidate, then run the hosted full matrix once. After a
-review fix, batch all actionable fixes before the next candidate push. Do not
-repeat a full suite for an unchanged SHA, unchanged risk boundary or already
-conclusive result.
+Push one batched stable candidate, then consume the PR quick check once. The full
+Public CI matrix runs after the resulting source-affecting merge on `main`; pure
+documentation pushes are filtered out. After a review fix,
+batch all actionable fixes before the next candidate push. Do not repeat a check
+for an unchanged SHA, unchanged risk boundary or already conclusive result.
 
 | Role | Handoff contract |
 |---|---|
 | Writer | Batch all source, documentation and finding-ledger changes before one candidate push; include exact commands/results and `git diff --check`. |
 | Independent reviewers | Inspect the immutable candidate and shared exact-source hosted CI evidence; run delta/risk probes only. Add the independent Luna max security/recovery pass for applicable boundaries. |
 | Coordinator | Audit the issue contract, changed surface, ledger and exact-head evidence; coordinate fixes. Do not act as a third full-suite tester. |
-| CI / merge | Hosted PR CI is the complete premerge source gate. GitHub Codex must review the exact final HEAD, including stale/outdated findings, and required CI must pass for that SHA. |
-| Main / release | `main` CI is postmerge integration evidence. Release, macOS, soak and trusted/live checks are required only for their applicable qualification, on a reviewed immutable commit with explicit maintainer authorization; no mandatory security gate is deferred. |
+| CI / merge | Hosted PR quick checks are the premerge source gate. GitHub Codex must review the exact final HEAD, including stale/outdated findings, and the PR quick check must pass for that SHA. |
+| Main / release | `main` Public CI is the complete postmerge integration matrix. Release, macOS, soak and trusted/live checks are required only for their applicable qualification, on a reviewed immutable commit with explicit maintainer authorization; no mandatory security gate is deferred. |
 
-Carry resolved findings into each candidate ledger with the original finding URL,
-immutable source SHA and resolution evidence, then record final delta sign-off for
-the exact candidate SHA. New internal full review is limited to a changed risk or
-interface boundary; ordinary fixes receive delta review. After a fix push, obtain
-fresh exact-head Codex review and CI; do not request repetitive Codex reviews
-mid-edit. The full candidate gate remains separate from internal review, and the
-postmerge `main` run never substitutes for premerge evidence.
+Carry every finding into each candidate ledger with the original finding URL,
+immutable source SHA and a triage disposition, then record final delta sign-off for
+the exact candidate SHA. P0/P1 findings and maintainer-designated release,
+security, data-loss or live-safety findings are blocking. A genuinely valuable
+P2/P3 hardening item may be grouped into a linked follow-up issue; routine P2/P3/nit
+findings must be read once, recorded and closed without a fix or issue. Neither
+class blocks the candidate solely by severity. New internal full review is limited
+to a changed risk or interface boundary; ordinary fixes receive delta review. After
+a blocking fix push, obtain fresh exact-head Codex review and the PR quick check;
+do not request repetitive Codex reviews mid-edit. The postmerge `main` matrix is
+integration evidence and never substitutes for premerge evidence.
 
 Suggested handoff prompt to give the next agent:
 
-> Work on ISSUE_URL in `1XP-AI/gh-runnerd`. Use `gpt-luna-max` by default or the issue's explicit `grok-high` override, and one active goal exactly equal to the issue's Goal statement; do not invent a token budget. Independent review uses `gpt-luna-max` unless the user explicitly selects another allowed route. Read `AGENTS.md`, `docs/EXECUTION.md`, the plan, the linked ADRs and the current Project item. Verify dependencies first. Create the goal and isolated branch/worktree, then set the item to In progress. Follow meaningful red test -> minimal green implementation -> refactor -> boundary/failure tests. Keep intermediate commits local and push one batched candidate; do not run the full suite or request Codex review for every commit. Preserve no-secrets, no-busy-kill, owned-cleanup, stable-idempotency and trusted-native invariants. Do not change live runners, Docker context, App/Keychain/launchd state or GitHub credentials without explicit maintainer authorization. Open one focused PR with exact commands/results, red evidence, gaps and rollback notes. Obtain independent `gpt-luna-max` review, then the exact-head GitHub Codex review before merge. Update the Project, issue and goal only when their actual state changes. A missing allowed Project Agent option is a routing failure; do not substitute Astra or silently fall back.
+> Work on ISSUE_URL in `1XP-AI/gh-runnerd`. Use `gpt-luna-max` by default or the issue's explicit `grok-high` override, and one active goal exactly equal to the issue's Goal statement; do not invent a token budget. Independent review uses `gpt-luna-max` unless the user explicitly selects another allowed route. Read `AGENTS.md`, `docs/EXECUTION.md`, the plan, the linked ADRs and the current Project item. Verify dependencies first. Create the goal and isolated branch/worktree, then set the item to In progress. Follow meaningful red test -> minimal green implementation -> refactor -> boundary/failure tests. Keep intermediate commits local, push one batched candidate and consume the PR quick check once; do not run the full suite or request Codex review for every commit. The complete Public CI matrix runs after source-affecting merges on `main`; documentation-only pushes are filtered out. Preserve no-secrets, no-busy-kill, owned-cleanup, stable-idempotency and trusted-native invariants. Do not change live runners, Docker context, App/Keychain/launchd state or GitHub credentials without explicit maintainer authorization. Open one focused PR with exact commands/results, red evidence, gaps and rollback notes. Obtain independent `gpt-luna-max` review, then the exact-head GitHub Codex review before merge. Update the Project, issue and goal only when their actual state changes. A missing allowed Project Agent option is a routing failure; do not substitute Astra or silently fall back.
 
 ## Per-issue Project workflow
 
@@ -491,15 +496,17 @@ Preserve these invariants:
 
 Run focused checks appropriate to the changed surface while editing, then batch
 source, docs and finding-ledger changes into one stable review candidate. Public
-CI must not require live App credentials, local runner access or the unreleased
-manager. The hosted PR workflow supplies the complete candidate gate; local
-`make check` is available on demand but is not an automatic per-commit
-requirement. Trusted hardware/live tests require a reviewed immutable commit and
-explicit maintainer-triggered execution on the scoped runner group.
+PR quick checks must not require live App credentials, local runner access or the
+unreleased manager. The PR quick workflow supplies the candidate gate; the full
+Public CI matrix runs after source-affecting merges on `main`; documentation-only
+pushes are filtered out. Local `make check` is available on
+demand but is not an automatic per-commit requirement. Trusted hardware/live
+tests require a reviewed immutable commit and explicit maintainer-triggered
+execution on the scoped runner group.
 
 ```sh
 git diff --check
-make check                    # optional local confidence; hosted PR CI is the full candidate gate
+make check                    # optional local full confidence; PR quick checks are the candidate gate
 git add path/to/changed/files
 git commit -m "..."
 git push -u origin "$BRANCH"
@@ -528,26 +535,31 @@ CODEX_REVIEW=/path/to/installed/codex-review-skill/scripts/codex-review.sh
 "$CODEX_REVIEW" wait PR_NUMBER
 ```
 
-Reproduce every actionable finding before fixing it. Report severity, file/line,
-reproduction result and the fix or evidence-based rebuttal. The wrapper reads both
-inline review comments and issue-comment findings, including stale/outdated ones.
-After pushing a fix, request a new review and wait for it. A clean result must name
-the current exact head SHA; an old clean verdict or an untimestamped reaction does
-not clear a newly pushed commit. If a finding arrives after merge, create a fresh
-issue-linked fix PR against current `main`; do not rewrite the historical PR.
+Read and triage every finding before deciding whether to fix it. Report severity,
+file/line, reproduction result and either the fix/rebuttal, a genuinely valuable
+follow-up issue, or a one-time closed disposition. The wrapper reads both inline
+review comments and issue-comment findings, including stale/outdated ones. P0/P1
+and maintainer-designated release, security, data-loss or live-safety findings must
+be fixed or rebutted. Valuable P2/P3 hardening is non-blocking once grouped into a
+linked issue; routine P2/P3/nit findings are non-blocking after disposition and do
+not receive speculative fixes. After pushing a blocking fix, request a new review
+and wait for it. A clean result must name the current exact head SHA; an old clean
+verdict or an untimestamped reaction does not clear a newly pushed commit. If a
+finding arrives after merge, create a fresh issue-linked fix PR against current
+`main`; do not rewrite the historical PR.
 
 Immediately before merging:
 
 1. fetch the PR and verify the head SHA has not changed;
-2. verify required CI is successful for that same SHA;
-3. verify the exact-head Codex review is clean and all internal findings are
-   resolved or rebutted;
-4. copy the SHA named by the clean exact-head verdict and use the server-side
-   conditional merge guard:
+2. verify the PR quick check is successful for that same SHA;
+3. verify the exact-head Codex review is complete, every finding is triaged, and
+   all blocking findings are resolved or rebutted;
+4. copy the SHA named by the completed exact-head review (clean or containing only
+   triaged non-blocking findings) and use the server-side conditional merge guard:
 
    ```sh
    PR=57
-   REVIEWED_SHA=the-clean-verdict-sha
+   REVIEWED_SHA=the-exact-head-review-sha
    CURRENT_SHA="$(gh pr view "$PR" --repo "$REPO" --json headRefOid --jq .headRefOid)"
    test "$CURRENT_SHA" = "$REVIEWED_SHA"
    gh pr merge "$PR" --repo "$REPO" --squash \
@@ -660,7 +672,7 @@ workflow, Docker/Lima, Keychain or launchd operation):
 - `git diff --check` — PASS (exit 0).
 - `jq empty docs/backlog.json` — PASS (exit 0).
 - `current_goal="$(jq -r '.issues[] | select(.key == "G01") | .goal' docs/backlog.json)"; for file in docs/HANDOFF.md docs/PLAN.md docs/BACKLOG.md docs/ISSUES.md; do rg -F -q "> $current_goal" "$file"; done` — PASS (current optimized Goal matches all four docs; historical predecessor is explicitly labeled in each).
-- `route_functions="$(sed -n '361,374p' docs/HANDOFF.md)"; eval "$route_functions";` canonical-key/display-label assertions against `gh project field-list` plus Astra rejection — PASS (exit 0).
+- `set -eu; route_functions="$(sed -n '366,379p' docs/HANDOFF.md)"; eval "$route_functions"; test "$(normalize_route_key gpt-luna-max)" = gpt-luna-max; test "$(normalize_route_key grok-high)" = grok-high; test "$(route_project_label gpt-luna-max)" = 'Luna max'; test "$(route_project_label grok-high)" = 'Grok high'; if normalize_route_key 'Astra xhigh' >/dev/null 2>&1 || route_project_label 'Astra xhigh' >/dev/null 2>&1; then exit 1; fi; project_json="$(gh project field-list 2 --owner 1XP-AI --format json)"; printf '%s' "$project_json" | jq -e --arg fid 'PVTSSF_lADOD2M2gs4Bismwzhhjobs' '[.fields[] | select(.id == $fid) | .options[]? | select(.name == "Luna max" or .name == "Grok high")] | length == 2' >/dev/null` — PASS (exit 0; corrected 2026-09-15 to invoke both route functions, reject Astra, fail fast on assertion errors and verify both live Project options; the prior line range only loaded helpers).
 - `project_json="$(gh project item-list 2 --owner 1XP-AI --limit 1000 --format json)";` map-count, status, Agent and Release assertions — PASS (38 Project items, 38 map rows; #71 In progress/Luna max/R1; #73 Done/Luna max/—).
 - `p1="$(printf '/'; printf 'Users/')"; p2="$(printf '/'; printf 'private/')"; p3="$(printf '%s' '-----BE' 'GIN')"; p4="$(printf '%s' 'github_' 'pat_')"; p5="$(printf '%s' 'Bear' 'er ')"; git diff --unified=0 -- docs/HANDOFF.md docs/PLAN.md docs/BACKLOG.md docs/ISSUES.md | rg -n -e "$p1" -e "$p2" -e "$p3" -e "$p4" -e "$p5"` — PASS (no matches).
 - `p1="$(printf '36'; printf '-item')"; p2="$(printf 'last verified snapshot is '; printf '36')"; p3="$(printf 'live board now has '; printf '36')"; p4="$(printf 'Verified '; printf '2026-09-08 against Project #2')"; rg -n -e "^## Live $p1" -e "$p2" -e "$p3" -e "$p4" docs/HANDOFF.md docs/PLAN.md docs/BACKLOG.md docs/ISSUES.md` — PASS (no unlabelled stale-count matches; historical baseline remains explicitly labeled).
@@ -704,6 +716,10 @@ Before handing work onward, confirm:
 - [ ] Internal independent `gpt-luna-max` review is recorded. An implementer override
       does not change the reviewer.
 - [ ] Codex reviewed the exact current PR head; inline and issue-comment findings
-      were read and resolved/rebutted; post-fix review was requested and awaited.
-- [ ] Required CI is green for the SHA being merged.
+      were read and triaged; blocking findings were resolved/rebutted, valuable
+      non-blocking findings have linked follow-up issues, and routine findings
+      have a one-time disposition; post-fix review was requested and awaited when
+      a blocking fix was pushed.
+- [ ] PR quick checks are green for the SHA being merged; the resulting `main`
+      Public CI run is recorded separately after merge.
 - [ ] Issue, Project, PR, branch and goal states match reality.

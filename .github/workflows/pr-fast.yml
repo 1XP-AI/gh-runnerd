@@ -1,0 +1,115 @@
+name: Pull Request Checks
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pull-request-checks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quick:
+    name: Go checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      GOTOOLCHAIN: go1.26.8
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Determine validation scope
+        id: scope
+        shell: bash
+        run: |
+          set -eu
+          changed="$(git diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA")"
+          printf '%s\n' "$changed"
+          if printf '%s\n' "$changed" | grep -Eq '(^|/)(cmd|internal|experiments|scripts)/|(^|/)(Makefile|LICENSE|go.mod|go.sum|go.work|go.work.sum)$|^docs/DEPENDENCIES\.md$|(^|/).*\.go$|^\.github/workflows/'; then
+            printf 'go=true\n' >> "$GITHUB_OUTPUT"
+          else
+            printf 'go=false\n' >> "$GITHUB_OUTPUT"
+          fi
+          if printf '%s\n' "$changed" | grep -Eq '^scripts/(check-offline-experiments\.sh|tooling_test\.go)$'; then
+            printf 'tooling=true\n' >> "$GITHUB_OUTPUT"
+          else
+            printf 'tooling=false\n' >> "$GITHUB_OUTPUT"
+          fi
+          if printf '%s\n' "$changed" | grep -Eq '^\.github/workflows/'; then
+            printf 'workflow=true\n' >> "$GITHUB_OUTPUT"
+          else
+            printf 'workflow=false\n' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check diff hygiene
+        run: git diff --check "$BASE_SHA...$HEAD_SHA"
+
+      - name: Set up Go
+        if: steps.scope.outputs.go == 'true'
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+          cache-dependency-path: go.mod
+
+      - name: Verify toolchain
+        if: steps.scope.outputs.go == 'true'
+        run: make toolchain
+
+      - name: Build executable
+        if: steps.scope.outputs.go == 'true'
+        run: make build
+
+      - name: Check formatting
+        if: steps.scope.outputs.go == 'true'
+        run: make fmt-check
+
+      - name: Run vet
+        if: steps.scope.outputs.go == 'true'
+        run: make vet
+
+      - name: Compile root test packages without executing the suite
+        if: steps.scope.outputs.go == 'true'
+        run: GOTOOLCHAIN="$GOTOOLCHAIN" go test -run '^$' -count=1 ./...
+
+      - name: Run changed offline tooling regression
+        if: steps.scope.outputs.tooling == 'true'
+        run: GOTOOLCHAIN="$GOTOOLCHAIN" go test -run '^TestToolingOfflineModuleSelection$' -count=1 ./scripts
+
+      - name: Run workflow contract tests
+        if: steps.scope.outputs.workflow == 'true'
+        run: GOTOOLCHAIN="$GOTOOLCHAIN" go test -run '^(TestPublicWorkflowCapacityContract|TestPullRequestQuickWorkflowContract)$' -count=1 ./scripts
+
+      - name: Compile changed offline modules without executing the suite
+        if: steps.scope.outputs.go == 'true'
+        shell: bash
+        run: |
+          set -eu
+          changed="$(git diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA")"
+          for module in experiments/g01-scaleset experiments/g02-auth experiments/r1-credentials; do
+            if printf '%s\n' "$changed" | grep -Eq "^${module}/"; then
+              (cd "$module" && GOTOOLCHAIN="$GOTOOLCHAIN" go test -run '^$' -count=1 ./...)
+            fi
+          done
+
+      - name: Check dependencies
+        if: steps.scope.outputs.go == 'true'
+        run: make deps
+
+      - name: Check license inventory
+        if: steps.scope.outputs.go == 'true'
+        run: make licenses
+
+      - name: Run vulnerability check
+        if: steps.scope.outputs.go == 'true'
+        run: make vuln

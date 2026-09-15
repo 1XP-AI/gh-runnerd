@@ -8,7 +8,8 @@ Describe the concrete trigger and resulting behavior.
 
 - Failing test before implementation (or explain a documentation-only change):
 - Focused passing commands/results while iterating:
-- Stable candidate hosted CI run/checks (exact head SHA):
+- PR quick checks run/checks (exact head SHA):
+- Full Public CI `main` run after merge (if applicable):
 - Relevant fault/security/resource cases:
 - Independent review and model:
 - Tests not run and why:

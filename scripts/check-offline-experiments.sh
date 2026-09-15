@@ -21,6 +21,20 @@ offline_modules=(
 	experiments/g02-auth
 	experiments/r1-credentials
 )
+selected_modules=("${offline_modules[@]}")
+
+if [[ -n "${OFFLINE_EXPERIMENT_MODULE:-}" ]]; then
+	case "${OFFLINE_EXPERIMENT_MODULE}" in
+		experiments/g01-scaleset|experiments/g02-auth|experiments/r1-credentials)
+			selected_modules=("${OFFLINE_EXPERIMENT_MODULE}")
+			;;
+		*)
+			printf 'offline experiment check failed: unsupported module %s\n' \
+				"${OFFLINE_EXPERIMENT_MODULE}" >&2
+			exit 1
+			;;
+	esac
+fi
 
 # Check the complete inventory before running any suite. A deleted/moved module
 # must not silently remove a gate that already exists on main.
@@ -32,7 +46,7 @@ for module_dir in "${offline_modules[@]}"; do
 done
 
 checked=0
-for module_dir in "${offline_modules[@]}"; do
+for module_dir in "${selected_modules[@]}"; do
 	checked=$((checked + 1))
 	printf 'offline experiment: %s (toolchain=%s)\n' "${module_dir}" "${exact_toolchain}"
 	(
