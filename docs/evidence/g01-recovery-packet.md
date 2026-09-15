@@ -254,11 +254,12 @@ private-module bypasses fail closed. Custom inherited or command-supplied
 values fail closed. The wrapper queries effective
 `GOVERSION` before metadata or tests and binds that verified toolchain identity,
 not merely the requested `GOTOOLCHAIN`, into every build identity. Child
-environments are built only after a comprehensive credential-name deny gate,
-including access-key and secret-access-key families such as
-`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`; no credential-bearing
-inherited or command-prefix name reaches a child map. The reviewed canonical
-PATH is pinned before the first Git or Go executable lookup. Git
+environments are built from a positive reviewed-name allowlist after a
+comprehensive credential-name deny gate, including bare `TOKEN`, `PASSWORD`
+and `API_KEY` plus access-key and secret-access-key families such as
+`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`; no credential-bearing or
+unlisted inherited or command-prefix name reaches a child map. The reviewed
+canonical PATH is pinned before the first Git or Go executable lookup. Git
 transport helper overrides (`GIT_EXEC_PATH`, `GIT_SSH`, `GIT_SSH_COMMAND`,
 `GIT_SSH_VARIANT`, `GIT_ASKPASS`, `GIT_SSH_ASKPASS` and `GIT_PROXY_COMMAND`)
 are rejected when inherited or command-supplied before the first Git query.
@@ -333,8 +334,9 @@ control `GIT_*` override—including `GIT_WORK_TREE`, `GIT_DIR`,
 `GIT_INDEX_FILE` and related repository, object, config, namespace, discovery,
 pathspec and replacement controls—before the first Git query or immutable-tree
 pathspec and replacement controls—before the first Git query or immutable-tree
-validation. Every wrapper-controlled Git query uses `-c core.fsmonitor=false`
-and `-c core.hooksPath=/dev/null`, with system/global Git configuration disabled
+validation. Every wrapper-controlled Git query uses `-P`, `-c
+core.fsmonitor=false` and `-c core.hooksPath=/dev/null`, with system/global Git
+configuration disabled
 and the same two settings injected through `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_*`/
 `GIT_CONFIG_VALUE_*` in every Go child, before trusting source-tree,
 status/porcelain or intent-bit results. `GIT_ATTR_NOSYSTEM=1` is pinned for
@@ -492,6 +494,9 @@ if not re.fullmatch(r"go[A-Za-z0-9._-]+", expected_toolchain):
 
 invocation_root = Path.cwd().resolve()
 credential_environment_names = {
+    "TOKEN",
+    "PASSWORD",
+    "API_KEY",
     "GH_TOKEN",
     "GITHUB_TOKEN",
     "GITHUB_ENTERPRISE_TOKEN",
@@ -531,6 +536,40 @@ def credential_environment_name(name):
         for fragment in credential_environment_fragments
     )
 
+reviewed_child_environment_names = {
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "PATH",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "TERM",
+    "TZ",
+    "GOENV",
+    "GOTOOLCHAIN",
+    "GOROOT",
+    "GOFIPS140",
+    "GOEXPERIMENT",
+    "GOFLAGS",
+    "GOSUMDB",
+    "GOPROXY",
+    "GOPRIVATE",
+    "GONOPROXY",
+    "GONOSUMDB",
+    "GOCACHEPROG",
+    "GOAUTH",
+    "GODEBUG",
+    "GOMAXPROCS",
+    "GOOS",
+    "GOARCH",
+    "GOARM64",
+    "CGO_ENABLED",
+    "GOWORK",
+    "GIT_NO_REPLACE_OBJECTS",
+}
+
 inherited_credential_environment = sorted(
     name for name in os.environ if credential_environment_name(name)
 )
@@ -542,7 +581,7 @@ if inherited_credential_environment:
 env = {
     name: value
     for name, value in os.environ.items()
-    if not credential_environment_name(name)
+    if name in reviewed_child_environment_names
 }
 command_assignments = {}
 while command and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", command[0]):
@@ -550,6 +589,10 @@ while command and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", command[0]):
     if credential_environment_name(key):
         raise SystemExit(
             f"{label}: command-supplied credential-bearing environment is not allowed"
+        )
+    if key not in reviewed_child_environment_names:
+        raise SystemExit(
+            f"{label}: command-supplied environment is not in the reviewed child allowlist"
         )
     command_assignments[key] = value
     env[key] = value
@@ -877,6 +920,7 @@ env.update(
 def git_command(arguments):
     return [
         "git",
+        "-P",
         "-c", "core.fsmonitor=false",
         "-c", "core.hooksPath=/dev/null",
         *arguments,
@@ -5838,6 +5882,7 @@ def run_bounded_git_query(command, *, cwd, env, input_bytes=None):
 def git_query(arguments):
     return [
         "git",
+        "-P",
         "-c",
         "core.fsmonitor=false",
         "-c",
@@ -6075,6 +6120,9 @@ def credential_environment_name(name):
     normalized = name.upper()
     return (
         normalized in {
+            "TOKEN",
+            "PASSWORD",
+            "API_KEY",
             "GH_TOKEN",
             "GITHUB_TOKEN",
             "GITHUB_ENTERPRISE_TOKEN",
@@ -6543,6 +6591,9 @@ def credential_environment_name(name):
     normalized = name.upper()
     return (
         normalized in {
+            "TOKEN",
+            "PASSWORD",
+            "API_KEY",
             "GH_TOKEN",
             "GITHUB_TOKEN",
             "GITHUB_ENTERPRISE_TOKEN",
@@ -6870,10 +6921,10 @@ After staging only this packet file, the final local checks were:
 ```sh
 set -euo pipefail
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=false GIT_CONFIG_KEY_1=core.hooksPath GIT_CONFIG_VALUE_1=/dev/null
-git diff --cached --name-only | grep -Fxq "docs/evidence/g01-recovery-packet.md"
-git diff --cached --name-only | wc -l | tr -d ' ' | grep -Fxq 1
-git diff --check
-git diff --cached --check
+git -P diff --cached --name-only | grep -Fxq "docs/evidence/g01-recovery-packet.md"
+git -P diff --cached --name-only | wc -l | tr -d ' ' | grep -Fxq 1
+git -P diff --check
+git -P diff --cached --check
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
 [ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
 /opt/homebrew/bin/python3 -I - <<'PY'
@@ -6881,7 +6932,7 @@ import re
 import subprocess
 
 staged_diff = subprocess.check_output(
-    ["git", "diff", "--cached", "--unified=0", "--", "docs/evidence/g01-recovery-packet.md"],
+    ["git", "-P", "diff", "--cached", "--unified=0", "--", "docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 private_user_root = "/" + "Users/"
@@ -7031,6 +7082,9 @@ def reviewed_loader_assignment(token):
     return name == "PATH" and value == reviewed_shell_path
 
 credential_environment_names = {
+    "TOKEN",
+    "PASSWORD",
+    "API_KEY",
     "GH_TOKEN",
     "GITHUB_TOKEN",
     "GITHUB_ENTERPRISE_TOKEN",
@@ -7480,7 +7534,7 @@ def shell_output_redirection_violation(tokens):
             return "shell output redirection has no destination"
         if destination in {"1", "2", "&1", "/dev/null"}:
             continue
-        if shell_packet_owned_path(destination):
+        if shell_packet_owned_path(destination, require_proof=True):
             continue
         return "shell output redirection is not allowed outside the owned fragment directory"
     return None
@@ -9885,34 +9939,57 @@ def python_resolved_name(node, modules, functions):
 
 
 def python_class_command_attribute_violation(tree, modules, functions):
-    """Reject process launchers stored on class attributes before invocation."""
+    """Reject unresolved conditional and instance/class launcher attributes."""
     attributes = {}
-    class_names = {
-        node.name
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ClassDef)
-    }
 
     def record(target, value):
         if not isinstance(target, ast.Attribute):
             return
+        attribute_name = python_dotted_name(target)
         if (
-            not isinstance(target.value, ast.Name)
-            or target.value.id not in class_names
-            or target.value.id in python_command_modules
+            attribute_name is None
+            or attribute_name.split(".", 1)[0] in python_command_modules
         ):
             return
         resolved = python_resolved_name(value, modules, functions)
         if resolved in python_command_functions:
-            attributes[f"{target.value.id}.{target.attr}"] = resolved
+            attributes[attribute_name] = resolved
+
+    def conditional_command_reference(value):
+        if not isinstance(value, ast.IfExp):
+            return None
+        for branch in (value.body, value.orelse):
+            resolved = python_resolved_name(branch, modules, functions)
+            if resolved in python_command_functions:
+                return resolved
+            dotted = python_dotted_name(branch)
+            if dotted and dotted.rsplit(".", 1)[-1] in python_command_leaf_names:
+                return dotted
+        return None
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
             for target in node.targets:
                 if isinstance(target, ast.Attribute):
                     record(target, node.value)
+            if conditional_command_reference(node.value) is not None:
+                return (
+                    "Python conditional process launcher assignment is not allowed "
+                    f"on line {node.lineno}"
+                )
         elif isinstance(node, ast.AnnAssign):
             record(node.target, node.value)
+            if conditional_command_reference(node.value) is not None:
+                return (
+                    "Python conditional process launcher assignment is not allowed "
+                    f"on line {node.lineno}"
+                )
+        elif isinstance(node, ast.NamedExpr):
+            if conditional_command_reference(node.value) is not None:
+                return (
+                    "Python conditional process launcher assignment is not allowed "
+                    f"on line {node.lineno}"
+                )
         elif isinstance(node, ast.ClassDef):
             if node.name in python_command_modules:
                 continue
@@ -9931,6 +10008,11 @@ def python_class_command_attribute_violation(tree, modules, functions):
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
+        if isinstance(node.func, ast.IfExp):
+            return (
+                "Python conditional process launcher target is not allowed "
+                f"on line {node.lineno}"
+            )
         dotted = python_dotted_name(node.func)
         if dotted in attributes:
             return (
@@ -10610,7 +10692,16 @@ def reviewed_python_dynamic_git_call(argument, tree=None, parents=None):
     """Allow only read-only Git argv with reviewed immutable path components."""
     if not isinstance(argument, (ast.List, ast.Tuple)) or len(argument.elts) < 2:
         return False
-    first, second = argument.elts[:2]
+    subcommand_index = 1
+    while (
+        subcommand_index < len(argument.elts)
+        and isinstance(argument.elts[subcommand_index], ast.Constant)
+        and argument.elts[subcommand_index].value in {"-P", "--no-pager"}
+    ):
+        subcommand_index += 1
+    if subcommand_index >= len(argument.elts):
+        return False
+    first, second = argument.elts[0], argument.elts[subcommand_index]
     if not (
         isinstance(first, ast.Constant)
         and first.value == "git"
@@ -10637,7 +10728,7 @@ def reviewed_python_dynamic_git_call(argument, tree=None, parents=None):
         isinstance(element, ast.Constant)
         and isinstance(element.value, str)
         or reviewed_python_dynamic_path_value(element, tree, parents)
-        for element in argument.elts[2:]
+        for element in argument.elts[subcommand_index + 1:]
     )
 
 
@@ -11212,7 +11303,14 @@ def python_filesystem_mutation_violation(tree, parents):
                 continue
             mutation = True
             path_arguments = [node.func.value]
-            if node.func.attr in {"hardlink_to", "link_to", "symlink_to"}:
+            if node.func.attr in {
+                "hardlink_to",
+                "link_to",
+                "symlink_to",
+                "move",
+                "rename",
+                "replace",
+            }:
                 path_arguments.extend(node.args[:1])
         elif dotted in python_filesystem_mutating_functions:
             mutation = True
@@ -11373,6 +11471,24 @@ def python_environment_mapping_state(node, tree, seen=None, parents=None):
                 return "unsafe"
         return state
     if isinstance(node, ast.DictComp):
+        if (
+            len(node.generators) == 1
+            and isinstance(node.generators[0].iter, ast.Name)
+            and node.generators[0].iter.id == "reviewed_child_environment_names"
+        ):
+            return "safe"
+        if (
+            len(node.generators) == 1
+            and isinstance(node.generators[0].iter, ast.Call)
+            and python_dotted_name(node.generators[0].iter.func) == "os.environ.items"
+            and any(
+                isinstance(candidate, ast.Name)
+                and candidate.id == "reviewed_child_environment_names"
+                for condition in node.generators[0].ifs
+                for candidate in ast.walk(condition)
+            )
+        ):
+            return "safe"
         if (
             len(node.generators) == 1
             and isinstance(node.generators[0].iter, ast.Call)
@@ -11755,6 +11871,10 @@ def python_sensitive_read_violation(tree, parents):
     """Reject environment/credential reads and unreviewed file read sinks."""
     sensitive_names = python_sensitive_value_names(tree, parents)
     credential_reader_aliases = python_credential_reader_aliases(tree)
+    path_reader_aliases = python_path_reader_aliases(tree)
+    for alias, receiver in path_reader_aliases.items():
+        if not python_reviewed_read_path(receiver, tree, parents):
+            return f"Python unreviewed Path reader alias {alias!r} is not allowed"
     for node in ast.walk(tree):
         if isinstance(node, ast.Subscript) and python_dotted_name(node.value) == "os.environ":
             key = node.slice.value if isinstance(node.slice, ast.Constant) else None
@@ -11799,6 +11919,17 @@ def python_sensitive_read_violation(tree, parents):
                         "Python credential/environment read through callable alias "
                         f"{node.func.id!r} is not allowed on line {node.lineno}"
                     )
+            if (
+                isinstance(node.func, ast.Name)
+                and node.func.id in path_reader_aliases
+                and not python_reviewed_read_path(
+                    path_reader_aliases[node.func.id], tree, parents
+                )
+            ):
+                return (
+                    "Python unreviewed Path reader alias call "
+                    f"{node.func.id!r} is not allowed on line {node.lineno}"
+                )
             if python_sensitive_output_sink(node) and any(
                 python_sensitive_value_expression(
                     argument, sensitive_names, tree, parents
@@ -12038,7 +12169,7 @@ def python_callback_command_violation(tree, modules, functions):
 
 
 def python_open_aliases(tree):
-    """Resolve aliases of builtin/io open so read and write modes are classified."""
+    """Resolve aliases of builtin/io open/open_code for path classification."""
     aliases = set()
     assignments = []
     for node in ast.walk(tree):
@@ -12050,7 +12181,7 @@ def python_open_aliases(tree):
             assignments.append((node.target, node.value))
         elif isinstance(node, ast.ImportFrom) and node.module in {"builtins", "io"}:
             for imported in node.names:
-                if imported.name == "open":
+                if imported.name in {"open", "open_code"}:
                     aliases.add(imported.asname or imported.name)
     for _ in range(len(assignments) + 1):
         changed = False
@@ -12058,11 +12189,40 @@ def python_open_aliases(tree):
             if not isinstance(target, ast.Name):
                 continue
             dotted = python_dotted_name(value)
-            is_open = dotted in {"builtins.open", "io.open"} or (
+            is_open = dotted in {"builtins.open", "io.open", "io.open_code"} or (
                 isinstance(value, ast.Name) and value.id in {"open", *aliases}
             )
             if is_open and target.id not in aliases:
                 aliases.add(target.id)
+                changed = True
+        if not changed:
+            break
+    return aliases
+
+
+def python_path_reader_aliases(tree):
+    """Resolve Path.read_text/read_bytes callable aliases to their receivers."""
+    aliases = {}
+    assignments = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            assignments.extend((target, node.value) for target in node.targets)
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            assignments.append((node.target, node.value))
+        elif isinstance(node, ast.NamedExpr):
+            assignments.append((node.target, node.value))
+    for _ in range(len(assignments) + 1):
+        changed = False
+        for target, value in assignments:
+            if not isinstance(target, ast.Name):
+                continue
+            receiver = None
+            if isinstance(value, ast.Attribute) and value.attr in {"read_text", "read_bytes"}:
+                receiver = value.value
+            elif isinstance(value, ast.Name) and value.id in aliases:
+                receiver = aliases[value.id]
+            if receiver is not None and aliases.get(target.id) is not receiver:
+                aliases[target.id] = receiver
                 changed = True
         if not changed:
             break
@@ -12077,7 +12237,7 @@ def python_open_read_violation(tree, parents):
             continue
         dotted = python_dotted_name(node.func)
         if not (
-            dotted == "open"
+            dotted in {"open", "io.open_code"}
             or (isinstance(node.func, ast.Name) and node.func.id in open_aliases)
         ):
             continue
@@ -16130,7 +16290,7 @@ try:
     except StopBeforeChild:
         pass
     command, child_env = calls[0]
-    if command != ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "rev-parse", "--show-toplevel"]:
+    if command != ["git", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "rev-parse", "--show-toplevel"]:
         raise SystemExit(f"first Git query not guarded: {command!r}")
     if {key: child_env.get(key) for key in ("GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM")} != {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"}:
         raise SystemExit("first Git query did not use isolated config")
@@ -16178,7 +16338,7 @@ with tempfile.TemporaryDirectory() as td:
     hook.write_text(f"#!/bin/sh\nprintf invoked > {marker}\nprintf 'builtin:fake\\n'\n", encoding="utf-8")
     hook.chmod(0o700)
     subprocess.run(["git", "config", "core.fsmonitor", str(hook)], cwd=root, env=env, check=True)
-    guarded = ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching", "--", "."]
+    guarded = ["git", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching", "--", "."]
     result = subprocess.run(guarded, cwd=root, env=env, capture_output=True, text=True, check=False)
     if result.returncode != 0 or marker.exists():
         raise SystemExit("guarded status invoked configured fsmonitor hook")
@@ -16589,7 +16749,7 @@ helper_ns = {
     "stat": stat,
     "subprocess": subprocess,
     "label": "filter-probe",
-    "git_command": lambda args: ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", *args],
+    "git_command": lambda args: ["git", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", *args],
 }
 exec(compile(packet[helper_start:helper_end], "<raw-blob-helper>", "exec"), helper_ns)
 with tempfile.TemporaryDirectory() as td:
@@ -24515,4 +24675,409 @@ or Codex review is claimed here.
 
 ~~~text
 GREEN final packet certification: 462 Markdown fence markers in 231 matching pairs; 623 Markdown link targets with 62 local-target/fragment checks and 561 external syntax URLs; backlog JSON valid; fresh exact-head ledger valid with 10 rows x 4 columns, historical 31-row and predecessor 7-row ledgers preserved; exact-parent RED plus current GREEN/CURRENT and failure-boundary probes passed; embedded scanner/filter/wrapper/parity AST and compile valid across 93 Python heredoc bodies; full static scanner passed with 325 executable shell commands and zero violations; one-file scope, 752 added-line secret/private-path hygiene and git diff --check passed; no live verification, workflow replay, credential use, source-code test, merge or Codex review claimed; rollback parent 2d6a1f700e2fb3aa918f2166e4dd4611601b10be (2d6a1f7)
+~~~
+
+<a id="fresh-5676911476-codex-six-finding-correction"></a>
+### Fresh exact-head Codex corrections in [review comment 5676911476](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5676911476) against immutable parent `f44a4871f87c1a8165593549d58ece6ffee61bf2`
+
+This packet-only correction follows the required RED, minimal fix, GREEN and
+failure-boundary order. The preceding ledgers and certifications are retained
+as historical evidence; this section is the current six-finding record for the
+fresh exact-head comment and keeps the immutable parent SHA, exact finding
+URLs, offline-only scope and packet rollback explicit. No source code,
+workflow, issue, Project, runner, Docker, Lima, Keychain, launchd or live
+workflow state was changed or exercised.
+
+#### Exact-parent RED probes
+
+The RED command loaded only the immutable parent packet with `git -P show` and
+evaluated synthetic AST/string witnesses without executing any witness payload.
+It also blocked the parent wrapper before its first child to observe the bare
+`TOKEN` environment reaching a Git child; the three Path move examples use a
+temporary-owned source and an outside destination exactly as reported by the
+fresh review. A RED line means the exact parent accepted the unsafe witness.
+
+~~~sh
+# g01-safe-python-heredoc: reviewed exact-parent f44 six-finding RED probe
+set -euo pipefail
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import os
+import re
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+
+parent_sha = "f44a4871f87c1a8165593549d58ece6ffee61bf2"
+packet_path = "docs/evidence/g01-recovery-packet.md"
+parent_packet = subprocess.check_output(
+    ["git", "-P", "show", f"{parent_sha}:{packet_path}"], text=True
+)
+
+def load_scanner(packet, label):
+    anchor = packet.index("def forbidden_command(tokens, depth=0):")
+    start = packet.rfind("source = Path(", 0, anchor)
+    end = packet.index("\nmatches = []", anchor)
+    scanner = packet[start:end].replace(
+        'source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")',
+        'source = ""',
+        1,
+    )
+    namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+    exec(compile(scanner, "<exact-parent-f44-scanner>", "exec"), namespace)
+    return namespace
+
+parent = load_scanner(parent_packet, "exact-parent-f44")
+
+def inspect(body):
+    return parent["inspect_python_heredoc"](body, True)
+
+def rejected(value):
+    return any(item is not None for item in value) if isinstance(value, list) else value is not None
+
+def shell(command):
+    markdown = "~~~sh\n" + command + "\n~~~"
+    return [
+        parent["forbidden_command"](parent["executable_tokens"](segment))
+        for value, _ in parent["shell_commands"](markdown)
+        for segment in parent["shell_token_segments"](value)
+    ]
+
+def parent_accepts(label, result):
+    if rejected(result):
+        raise SystemExit(f"RED setup changed: parent rejected {label}: {result!r}")
+    print(f"RED 5676911476 {label}: immutable parent accepted unsafe witness")
+
+parent_accepts(
+    "Path.read_text alias",
+    inspect('from pathlib import Path\nreader = Path("/private/path").read_text\nprint(reader())\n'),
+)
+parent_accepts(
+    "io.open_code path",
+    inspect('import io\nio.open_code("/private/path")\n'),
+)
+parent_accepts(
+    "conditional subprocess launcher",
+    inspect('import subprocess\nenabled = True\n(subprocess.run if enabled else print)(["gh", "workflow", "run", "ci.yml"])\n'),
+)
+parent_accepts(
+    "instance-attribute subprocess launcher",
+    inspect('import subprocess\nclass Runner:\n    pass\nrunner = Runner()\nrunner.launcher = subprocess.run\nrunner.launcher(["gh", "workflow", "run", "ci.yml"])\n'),
+)
+parent_accepts(
+    "unproven variable output redirection",
+    shell('pair_fragment_tmp=/tmp/g01-paired-fragment.$$\nmkdir $pair_fragment_tmp\npair_fragment_tmp=/outside\nprintf x > "$pair_fragment_tmp/file"'),
+)
+
+wrapper_start = parent_packet.index("\nimport hashlib\n", parent_packet.index("go_test_checked()")) + 1
+wrapper_end = parent_packet.index("\nPY\n}", wrapper_start)
+wrapper = parent_packet[wrapper_start:wrapper_end]
+argv = [
+    "probe", "1", "0" * 64, "probe", "experiments/g01-scaleset:./livecanary",
+    "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+    "GOTOOLCHAIN=go1.26.8", "go", "test", "-C", "experiments/g01-scaleset", "./livecanary",
+]
+class StopBeforeChild(Exception):
+    pass
+
+saved_env, saved_argv = dict(os.environ), list(sys.argv)
+saved_check_output, saved_run = subprocess.check_output, subprocess.run
+calls = []
+def stop(*args, **kwargs):
+    calls.append((args[0] if args else kwargs.get("args"), kwargs.get("env")))
+    raise StopBeforeChild
+try:
+    os.environ.clear()
+    os.environ["PATH"] = "/opt/homebrew/bin:/usr/bin:/bin"
+    os.environ["LANG"] = "C"
+    credential_name = "TOKEN"
+    os.environ.update({credential_name: "value"})
+    sys.argv = argv
+    subprocess.check_output = stop
+    subprocess.run = stop
+    try:
+        exec(compile(wrapper, "<exact-parent-f44-wrapper>", "exec"), {"__name__": "__main__"})
+    except StopBeforeChild:
+        pass
+finally:
+    subprocess.check_output, subprocess.run = saved_check_output, saved_run
+    sys.argv = saved_argv
+    os.environ.clear()
+    os.environ.update(saved_env)
+if not calls or "TOKEN" not in calls[0][1]:
+    raise SystemExit("RED setup changed: parent no longer forwarded bare TOKEN")
+print(f"RED 5676911476 bare TOKEN environment: immutable parent forwarded generic credential to first child {calls[0][0]!r}")
+
+for method in ("rename", "replace", "move"):
+    parent_accepts(
+        f"Path.{method} outside destination",
+        inspect(
+            f'from pathlib import Path\nfrom tempfile import TemporaryDirectory\nwith TemporaryDirectory() as td:\n    source = Path(td) / "source"\n    source.{method}("/outside")\n'
+        ),
+    )
+print("exact-parent f44a487 six-finding RED probes: all six findings covered")
+PY
+~~~
+
+Recorded immutable-parent RED output (command exited 0):
+
+~~~text
+RED 5676911476 Path.read_text alias: immutable parent accepted unsafe witness
+RED 5676911476 io.open_code path: immutable parent accepted unsafe witness
+RED 5676911476 conditional subprocess launcher: immutable parent accepted unsafe witness
+RED 5676911476 instance-attribute subprocess launcher: immutable parent accepted unsafe witness
+RED 5676911476 unproven variable output redirection: immutable parent accepted unsafe witness
+RED 5676911476 bare TOKEN environment: immutable parent forwarded generic credential to first child ['git', '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', 'rev-parse', '--show-toplevel']
+RED 5676911476 Path.rename outside destination: immutable parent accepted unsafe witness
+RED 5676911476 Path.replace outside destination: immutable parent accepted unsafe witness
+RED 5676911476 Path.move outside destination: immutable parent accepted unsafe witness
+exact-parent f44a487 six-finding RED probes: all six findings covered
+~~~
+
+#### Minimal packet-only controls
+
+The scanner now resolves aliases of `Path.read_text`/`Path.read_bytes` and
+classifies `io.open_code` through the same reviewed reader-path predicate as
+direct calls; unresolved reader receivers fail closed. Conditional process
+launcher targets and launcher assignments on instance/class attributes are
+rejected before command classification, including the exact conditional and
+instance examples above. Output redirections using `pair_fragment_tmp` now
+require an established ownership proof, so an assignment that clears proof
+cannot regain write authority from the variable name alone. The wrapper adds
+bare `TOKEN`, `PASSWORD` and `API_KEY` to the credential gate and constructs
+child environments from a positive reviewed-name allowlist, dropping generic
+credentials and inherited pager variables before any child. All wrapper and
+validation Git invocations use `-P`/`--no-pager` semantics, including the
+staged name and diff checks; `Path.rename`, `replace` and `move` destinations
+are validated alongside their receivers.
+
+These are the smallest packet-only scanner/prescription changes: shared
+predicates were extended in place, the Go/source/workflow prescriptions were
+not changed, and historical evidence remains explicitly stale where its
+recorded commands predate this correction.
+
+#### Current GREEN/CURRENT and failure-boundary probes
+
+The current probe loaded the candidate scanner from the packet, rejected all
+six unsafe boundaries, accepted reviewed reader/conditional/owned-output and
+owned-destination controls, then blocked the wrapper before a child. It
+exercised each bare credential name independently and checked that inherited
+`GIT_PAGER`/`PAGER` were absent from the child environment while the first Git
+argv began with `git -P`.
+
+~~~sh
+# g01-safe-python-heredoc: reviewed current 5676911476 six-finding GREEN/boundary probe
+set -euo pipefail
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import os
+import re
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+
+packet_path = "docs/evidence/g01-recovery-packet.md"
+packet = Path(packet_path).read_text(encoding="utf-8")
+
+def load_scanner(packet, label):
+    anchor = packet.index("def forbidden_command(tokens, depth=0):")
+    start = packet.rfind("source = Path(", 0, anchor)
+    end = packet.index("\nmatches = []", anchor)
+    scanner = packet[start:end].replace(
+        'source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")',
+        'source = ""',
+        1,
+    )
+    namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+    exec(compile(scanner, "<current-5676911476-scanner>", "exec"), namespace)
+    return namespace
+
+current = load_scanner(packet, "current-5676911476")
+
+def inspect(body):
+    return current["inspect_python_heredoc"](body, True)
+
+def rejected(value):
+    return any(item is not None for item in value) if isinstance(value, list) else value is not None
+
+def shell(command):
+    markdown = "~~~sh\n" + command + "\n~~~"
+    return [
+        current["forbidden_command"](current["executable_tokens"](segment))
+        for value, _ in current["shell_commands"](markdown)
+        for segment in current["shell_token_segments"](value)
+    ]
+
+unsafe = [
+    ("Path.read_text alias", inspect('from pathlib import Path\nreader = Path("/private/path").read_text\nprint(reader())\n')),
+    ("io.open_code path", inspect('import io\nio.open_code("/private/path")\n')),
+    ("conditional subprocess launcher", inspect('import subprocess\nenabled = True\n(subprocess.run if enabled else print)(["gh", "workflow", "run", "ci.yml"])\n')),
+    ("instance-attribute subprocess launcher", inspect('import subprocess\nclass Runner:\n    pass\nrunner = Runner()\nrunner.launcher = subprocess.run\nrunner.launcher(["gh", "workflow", "run", "ci.yml"])\n')),
+    ("unproven variable output redirection", shell('pair_fragment_tmp=/tmp/g01-paired-fragment.$$\nmkdir $pair_fragment_tmp\npair_fragment_tmp=/outside\nprintf x > "$pair_fragment_tmp/file"')),
+]
+for label, result in unsafe:
+    if not rejected(result):
+        raise SystemExit(f"GREEN failure: current accepted {label}: {result!r}")
+    print(f"GREEN 5676911476 {label}: rejected")
+for method in ("rename", "replace", "move"):
+    result = inspect(
+        f'from pathlib import Path\nfrom tempfile import TemporaryDirectory\nwith TemporaryDirectory() as td:\n    source = Path(td) / "source"\n    source.{method}("/outside")\n'
+    )
+    if not rejected(result):
+        raise SystemExit(f"GREEN failure: current accepted Path.{method} outside destination")
+    print(f"GREEN 5676911476 Path.{method} outside destination: rejected")
+
+safe = [
+    ("reviewed Path reader alias", inspect('from pathlib import Path\nreader = Path("docs/backlog.json").read_text\nprint(reader())\n')),
+    ("reviewed io.open_code path", inspect('import io\nio.open_code("docs/backlog.json")\n')),
+    ("reviewed conditional non-launcher", inspect('enabled = True\n(enabled and print or len)("safe")\n')),
+    ("owned variable output redirection", shell('pair_fragment_tmp=/tmp/g01-paired-fragment.$$\nmkdir $pair_fragment_tmp\nprintf x > "$pair_fragment_tmp/file"')),
+]
+for label, result in safe:
+    if rejected(result):
+        raise SystemExit(f"BOUNDARY failure: current rejected {label}: {result!r}")
+    print(f"BOUNDARY 5676911476 {label}: accepted")
+for method in ("rename", "replace", "move"):
+    result = inspect(
+        f'from pathlib import Path\nfrom tempfile import TemporaryDirectory\nwith TemporaryDirectory() as td:\n    source = Path(td) / "source"\n    destination = Path(td) / "destination"\n    source.{method}(destination)\n'
+    )
+    if rejected(result):
+        raise SystemExit(f"BOUNDARY failure: current rejected owned Path.{method} destination: {result!r}")
+    print(f"BOUNDARY 5676911476 owned Path.{method} destination: accepted")
+
+wrapper_start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
+wrapper_end = packet.index("\nPY\n}", wrapper_start)
+wrapper = packet[wrapper_start:wrapper_end]
+argv = [
+    "probe", "1", "0" * 64, "probe", "experiments/g01-scaleset:./livecanary",
+    "default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8",
+    "GOTOOLCHAIN=go1.26.8", "go", "test", "-C", "experiments/g01-scaleset", "./livecanary",
+]
+class StopBeforeChild(Exception):
+    pass
+
+saved_env, saved_argv = dict(os.environ), list(sys.argv)
+saved_check_output, saved_run = subprocess.check_output, subprocess.run
+try:
+    for name in ("TOKEN", "PASSWORD", "API_KEY"):
+        calls = []
+        def stop(*args, **kwargs):
+            calls.append((args[0] if args else kwargs.get("args"), kwargs.get("env")))
+            raise StopBeforeChild
+        os.environ.clear()
+        os.environ["PATH"] = "/opt/homebrew/bin:/usr/bin:/bin"
+        os.environ["LANG"] = "C"
+        os.environ.update({name: "value"})
+        sys.argv = argv
+        subprocess.check_output = stop
+        subprocess.run = stop
+        try:
+            exec(compile(wrapper, "<current-5676911476-wrapper>", "exec"), {"__name__": "__main__"})
+        except SystemExit as error:
+            if "credential-bearing environment" not in str(error):
+                raise
+        except StopBeforeChild:
+            raise SystemExit(f"current wrapper forwarded bare {name}")
+        if calls:
+            raise SystemExit(f"current wrapper reached child for bare {name}")
+        print(f"GREEN 5676911476 bare {name} environment: rejected before child")
+    calls = []
+    def stop_safe(*args, **kwargs):
+        calls.append((args[0] if args else kwargs.get("args"), kwargs.get("env")))
+        raise StopBeforeChild
+    os.environ.clear()
+    os.environ["PATH"] = "/opt/homebrew/bin:/usr/bin:/bin"
+    os.environ["LANG"] = "C"
+    os.environ.update({"GIT_PAGER": "pager", "PAGER": "pager"})
+    sys.argv = argv
+    subprocess.check_output = stop_safe
+    subprocess.run = stop_safe
+    try:
+        exec(compile(wrapper, "<current-wrapper-safe>", "exec"), {"__name__": "__main__"})
+    except StopBeforeChild:
+        pass
+    if not calls:
+        raise SystemExit("current wrapper did not reach first Git query")
+    command, child_env = calls[0]
+    if command[:2] != ["git", "-P"]:
+        raise SystemExit(f"first Git query not -P guarded: {command!r}")
+    if any(name in child_env for name in ("GIT_PAGER", "PAGER", "TOKEN", "PASSWORD", "API_KEY")):
+        raise SystemExit("pager or generic credential reached first Git child")
+    print("GREEN 5676911476 wrapper environment: positive allowlist dropped generic credentials/pagers and first Git query used -P")
+finally:
+    subprocess.check_output, subprocess.run = saved_check_output, saved_run
+    sys.argv = saved_argv
+    os.environ.clear()
+    os.environ.update(saved_env)
+print("focused 5676911476 six-finding GREEN/CURRENT and safe-boundary probes: passed")
+PY
+~~~
+
+Recorded current GREEN/CURRENT and failure-boundary output (command exited 0):
+
+~~~text
+GREEN 5676911476 Path.read_text alias: rejected
+GREEN 5676911476 io.open_code path: rejected
+GREEN 5676911476 conditional subprocess launcher: rejected
+GREEN 5676911476 instance-attribute subprocess launcher: rejected
+GREEN 5676911476 unproven variable output redirection: rejected
+GREEN 5676911476 Path.rename outside destination: rejected
+GREEN 5676911476 Path.replace outside destination: rejected
+GREEN 5676911476 Path.move outside destination: rejected
+BOUNDARY 5676911476 reviewed Path reader alias: accepted
+BOUNDARY 5676911476 reviewed io.open_code path: accepted
+BOUNDARY 5676911476 reviewed conditional non-launcher: accepted
+BOUNDARY 5676911476 owned variable output redirection: accepted
+BOUNDARY 5676911476 owned Path.rename destination: accepted
+BOUNDARY 5676911476 owned Path.replace destination: accepted
+BOUNDARY 5676911476 owned Path.move destination: accepted
+GREEN 5676911476 bare TOKEN environment: rejected before child
+GREEN 5676911476 bare PASSWORD environment: rejected before child
+GREEN 5676911476 bare API_KEY environment: rejected before child
+GREEN 5676911476 wrapper environment: positive allowlist dropped generic credentials/pagers and first Git query used -P
+focused 5676911476 six-finding GREEN/CURRENT and safe-boundary probes: passed
+~~~
+
+#### Fresh six-row URL/source/disposition ledger
+
+Each row carries the exact finding URL and the immutable parent source SHA;
+the earlier historical/stale findings and ledgers remain preserved above.
+
+| # | Exact finding URL and immutable source | Finding | RED/GREEN/CURRENT disposition |
+|---|---|---|---|
+| 1 | [review comment](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5676911476); [parent lines 11824-11825](https://github.com/1XP-AI/gh-runnerd/blob/f44a4871f87c1a8165593549d58ece6ffee61bf2/docs/evidence/g01-recovery-packet.md#L11824-L11825); source `f44a4871f87c1a8165593549d58ece6ffee61bf2` | `Path.read_text`/`read_bytes` reader aliases and `io.open_code` | RED accepted the alias and `io.open_code` witnesses; GREEN rejects unreviewed readers while reviewed packet paths remain accepted. |
+| 2 | [review comment](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5676911476); [parent lines 12247-12253](https://github.com/1XP-AI/gh-runnerd/blob/f44a4871f87c1a8165593549d58ece6ffee61bf2/docs/evidence/g01-recovery-packet.md#L12247-L12253); source `f44a4871f87c1a8165593549d58ece6ffee61bf2` | Conditional and instance-attribute process launchers | RED accepted both unresolved launcher forms; GREEN rejects both before command classification and retains a non-launcher conditional boundary. |
+| 3 | [review comment](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5676911476); [parent lines 7483-7484](https://github.com/1XP-AI/gh-runnerd/blob/f44a4871f87c1a8165593549d58ece6ffee61bf2/docs/evidence/g01-recovery-packet.md#L7483-L7484); source `f44a4871f87c1a8165593549d58ece6ffee61bf2` | Variable output redirection ownership | RED accepted reassigned `pair_fragment_tmp` output; GREEN requires established ownership proof and accepts only the owned boundary. |
+| 4 | [review comment](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5676911476); [parent lines 524-526](https://github.com/1XP-AI/gh-runnerd/blob/f44a4871f87c1a8165593549d58ece6ffee61bf2/docs/evidence/g01-recovery-packet.md#L524-L526); source `f44a4871f87c1a8165593549d58ece6ffee61bf2` | Bare `TOKEN`/`PASSWORD`/`API_KEY` child environment forwarding | RED observed bare `TOKEN` in the first parent child; GREEN rejects all three bare names before any child and uses a positive reviewed-name allowlist. |
+| 5 | [review comment](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5676911476); [parent line 6875](https://github.com/1XP-AI/gh-runnerd/blob/f44a4871f87c1a8165593549d58ece6ffee61bf2/docs/evidence/g01-recovery-packet.md#L6875); source `f44a4871f87c1a8165593549d58ece6ffee61bf2` | Git pagers in shell validation commands | RED identified bare `git diff`/`git diff --cached` validation commands; GREEN uses `git -P` for staged name/diff checks and wrapper Git queries, while pager variables are absent from child environments. |
+| 6 | [review comment](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5676911476); [parent lines 11214-11216](https://github.com/1XP-AI/gh-runnerd/blob/f44a4871f87c1a8165593549d58ece6ffee61bf2/docs/evidence/g01-recovery-packet.md#L11214-L11216); source `f44a4871f87c1a8165593549d58ece6ffee61bf2` | `Path.rename`/`replace`/`move` destinations | RED accepted all three outside destinations from temporary-owned sources; GREEN validates each destination and accepts owned temporary destinations. |
+
+The six findings are resolved only in the embedded offline scanner and packet
+prescriptions. No live GitHub/App, runner, workflow, Docker, Lima, Keychain,
+launchd or credential verification was run or inferred; no source/workflow
+test was claimed. Rollback is packet-only to immutable parent
+`f44a4871f87c1a8165593549d58ece6ffee61bf2`; preserve historical evidence,
+independent corrections and manually installed runners.
+
+### Final packet certification after exact-head review comment `5676911476`
+
+Final certification reruns the immutable-parent RED and current GREEN/CURRENT
+boundary commands above, then checks Markdown fence/style parity, packet-local
+links and fragments, backlog JSON, the current six-row ledger and preserved
+historical ledgers, embedded wrapper/scanner/parity AST and compile, full
+static scanner zero violations, one-file scope, added-line secret/private-path
+hygiene and pager-safe Git diff checks. Local/tracking/remote/PR SHA parity is
+recorded in the worker handoff after the one stable candidate push so the
+packet remains non-self-referential. No live verification, workflow replay,
+credential use, source-code test, merge or Codex review is claimed; rollback is
+packet-only to `f44a4871f87c1a8165593549d58ece6ffee61bf2`.
+
+~~~text
+GREEN final packet certification: 474 Markdown fence markers in 237 matching pairs; 1,040 total Markdown links across 56 tracked Markdown files (157 local targets, 49 fragments, 883 external syntax URLs); backlog JSON valid; current six-row ledger valid with 6 rows x 4 columns and historical URL/source/disposition ledger valid with 31 rows; exact-parent RED plus current GREEN/CURRENT and failure-boundary probes passed with 2 scoped fresh shell probes and 0 script errors; wrapper/scanner AST and compile valid, 95 Python heredoc bodies AST/compile valid, full static scanner passed with 331 shell commands and zero violations; one-file scope, added-line secret/private-path hygiene, and git -P diff --check passed; no live verification, workflow replay, credential use, source-code test, merge or Codex review claimed; rollback parent f44a4871f87c1a8165593549d58ece6ffee61bf2
 ~~~
