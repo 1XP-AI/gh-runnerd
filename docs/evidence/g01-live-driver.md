@@ -31,7 +31,8 @@ minutes and approval expiry, whichever comes first. Each phase is one-shot. An
 empty poll is **unresolved**, never a passed barrier. The high-level listener
 retains upstream ACK ordering; fault barriers use its public client interface.
 Adapter deadlines remain effective after the listener removes cancellation.
-Acquisition probes require exactly one request before the SDK can ACK. Observed
+The SDK ACK precedes acquisition; the `acquire-loss` probe permits exactly one
+request after that ACK. Observed
 job IDs remain reserved across later inspection and stale-zero counts; this
 harness has no terminal-job reconciliation. Unexpected work kinds or an empty
 message with any nonzero statistics quarantine rather than authorize safe close.
