@@ -76,7 +76,6 @@ type API interface {
 	FindScaleSet(context.Context, string, int) (*scaleset.RunnerScaleSet, error)
 	GetScaleSet(context.Context, int) (*scaleset.RunnerScaleSet, error)
 	CreateScaleSet(context.Context, *scaleset.RunnerScaleSet) (*scaleset.RunnerScaleSet, error)
-	DeleteScaleSet(context.Context, int) error
 	OpenSession(context.Context, int, string) (Session, error)
 	FindRunner(context.Context, string) (*scaleset.RunnerReference, error)
 	GenerateJIT(context.Context, int, string) (*scaleset.RunnerScaleSetJitRunnerConfig, error)
@@ -447,6 +446,18 @@ func (d *Driver) owned(ctx context.Context, id int) (*scaleset.RunnerScaleSet, e
 // A second process uses the durable journal to retain unknown reservations;
 // session credentials cannot be rehydrated using the supported SDK API.
 func (d *Driver) Run(ctx context.Context, phase string) error {
+	// Cleanup is never allowed to reach the journal or API unless the concrete
+	// adapter advertises the conditional-delete contract. SDKAPI retains its
+	// legacy DeleteScaleSet method for the paired baseline, but that method is
+	// intentionally absent from this driver's API contract.
+	if phase == "cleanup" {
+		if d == nil || d.API == nil {
+			return ErrQuarantine
+		}
+		if _, ok := d.API.(ConditionalScaleSetDeleter); !ok {
+			return ErrQuarantine
+		}
+	}
 	s, release, err := authorizePhase(d.Approval, d.Journal, phase)
 	if err != nil {
 		return err
@@ -538,7 +549,21 @@ func (d *Driver) Run(ctx context.Context, phase string) error {
 		if s.inventory == "" || inventory != s.inventory {
 			return ErrQuarantine
 		}
-		if err := d.effect(ctx, "delete", nil, func(c context.Context) (Event, error) { return Event{}, d.API.DeleteScaleSet(c, s.setID) }); err != nil {
+		deleter, ok := d.API.(ConditionalScaleSetDeleter)
+		if !ok {
+			return ErrQuarantine
+		}
+		expectation := ScaleSetDeletionExpectation{ScaleSetID: s.setID, ScaleSetName: set.Name, RunnerGroupID: set.RunnerGroupID, OwnerNonce: d.Approval.OwnerNonce, InventoryDigest: inventory}
+		if !expectation.matches(d.Approval, set) {
+			return ErrQuarantine
+		}
+		if err := d.effect(ctx, "delete", nil, func(c context.Context) (Event, error) {
+			fence, err := deleter.PrepareScaleSetDeletion(c, expectation)
+			if err != nil || !fence.matches(expectation) {
+				return Event{}, ErrRemote
+			}
+			return Event{}, deleter.DeleteScaleSetIfOwned(c, fence)
+		}); err != nil {
 			return err
 		}
 		after, err := boundedRead(ctx, d.API.Inventory)

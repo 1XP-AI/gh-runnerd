@@ -24,7 +24,7 @@ and one unknown reservation exhaust the budget.
 | `acquire-loss` | Journal exactly one request ID/intent, call `AcquireJobs` once, record only a response success boolean, suppress its application result, retain session/reservation and quarantine. |
 | `jit-loss` | Verify the stable worker name absent, journal one JIT intent, call once, record a response success boolean, discard JIT/result identity and quarantine the reservation. No worker starts. |
 | `inspect` | Durably classify owned statistics and runner lookup evidence; retain a reference ID only after exact ownership checks. Unsafe observations return quarantine. No observation releases reservations or uncertainty. |
-| `cleanup` | Delete only with an exact create receipt, nonce name/label and group, no work/statistics/runner fence or observed job IDs, no JIT/acquisition attempt, no unresolved session/intent, all-zero statistics and an unchanged complete runner-ID inventory. Verify inventory again afterward. |
+| `cleanup` | Require an exact create receipt, nonce name/label and group, no work/statistics/runner fence or observed job IDs, no JIT/acquisition attempt, no unresolved session/intent, all-zero statistics and an unchanged complete runner-ID inventory. Deletion must use the conditional `ConditionalScaleSetDeleter` contract with a fresh provider version/ETag (or equivalent atomic capability); the pinned SDK's unconditional delete remains quarantined. |
 
 Each SDK/REST operation has a 30-second deadline; each phase is bounded by ten
 minutes and approval expiry, whichever comes first. Each phase is one-shot. An
@@ -77,7 +77,10 @@ Creation requests `RunnerSetting.DisableUpdate=true` using the pinned SDK's
 The returned create object must confirm it; false or omitted settings quarantine
 the uncertain create without retry. The driver reads the owned scale set again
 before session/JIT phases and refuses those effects if updates are enabled.
-Read-only inspection and otherwise verified empty cleanup remain available.
+Read-only inspection remains available. Empty cleanup is only available through
+the conditional deletion contract described in the [live safety follow-up](g01-live-safety-followup.md); inventory-before-delete and
+inventory-after-delete checks alone do not authorize deletion, and the pinned
+SDK adapter therefore remains quarantined for cleanup.
 This closes an update path that an image digest alone cannot constrain; it does
 not prove the service honored the setting or prevent concurrent administrator
 changes after the read. Actual bootstrap/version evidence is still required.

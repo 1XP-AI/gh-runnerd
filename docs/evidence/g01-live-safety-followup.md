@@ -34,3 +34,33 @@ it verifies only that structural guard and does not claim workflow-input
 verification.
 
 The structural guard is not workflow-input verification. That verification remains an explicit unresolved gap and is not claimed by this document. The final command/result and commit are recorded with the local handoff. No live operation or private evidence is represented as passing.
+
+## Conditional cleanup contract follow-up
+
+The controller driver now has a narrow `ConditionalScaleSetDeleter` contract.
+Cleanup first requires that capability, then binds the exact created scale-set
+ID, nonce-derived name, runner-group ID, owner nonce and fresh runner-inventory
+digest to a provider version or ETag returned by `PrepareScaleSetDeletion`.
+`DeleteScaleSetIfOwned` must submit that revision as a server-side conditional
+delete in the same operation; it must never delegate to the existing
+unconditional `DeleteScaleSet` or substitute an observe-then-delete sequence.
+Missing capability, mismatched identity/nonce/inventory, missing freshness or
+an adapter error quarantines the journal and prevents retry. Inventory reads
+before and after deletion remain supporting evidence only, not the atomic fence.
+
+The pinned `github.com/actions/scaleset v0.4.0` adapter still exposes no
+conditional delete, version or ETag contract, so it deliberately does not
+implement `ConditionalScaleSetDeleter`; the real SDK cleanup path remains
+quarantined. Offline tests use a synthetic adapter to prove the exact-match
+path and reject replacement between fence preparation and deletion; no GitHub,
+credential, runner, Docker, Lima, Keychain or launchd operation was run.
+
+The focused TDD evidence for this contract was:
+
+```text
+GOTOOLCHAIN=go1.26.8 go test -count=1 -run 'TestCleanupConditionalFence(AcceptsExactOwnerAndFreshnessMatch|RejectsConcurrentReplacement)$' ./livecanary
+FAIL: exact conditional cleanup was still quarantined; replacement adapter was never called
+
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -run 'Test(CleanupConditionalFence|PinnedSDKDoesNotAdvertiseConditionalCleanup)' ./livecanary
+ok: exact version/ETag match, concurrent replacement, missing freshness, owner mismatch and SDK capability boundary
+```

@@ -16,12 +16,6 @@ func authorizePhase(a Approval, j Journal, phase string) (state, func(), error) 
 	if a.Validate(time.Now()) != nil || !slices.Contains(a.Phases, phase) {
 		return state{}, nil, ErrApproval
 	}
-	// The current SDK adapter exposes only an unconditional DeleteScaleSet.
-	// Until it can carry an atomic owner/freshness precondition, cleanup is a
-	// deliberate quarantine rather than an observation-then-delete race.
-	if phase == "cleanup" {
-		return state{}, nil, ErrQuarantine
-	}
 	if j == nil {
 		return state{}, nil, ErrJournal
 	}
