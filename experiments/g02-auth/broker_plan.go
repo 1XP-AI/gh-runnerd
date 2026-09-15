@@ -319,6 +319,7 @@ type brokerControllerPlan struct {
 	binaryCheck        func() error
 	localPrepare       func(context.Context, string) (brokerPreparationReceipt, error)
 	preparationReceipt brokerPreparationReceipt
+	provenance         *BrokerProvenanceReceipt
 	prepared           *brokerPreparedState
 	worker             *brokerWorkerPlan
 	launch             func(context.Context, []byte, string) error
@@ -395,6 +396,15 @@ func (p *brokerControllerPlan) prepare(a BrokerApproval, j *brokerJournal, now t
 	return p.check()
 }
 func (p *brokerControllerPlan) check() error {
+	if p == nil {
+		return errBroker
+	}
+	if p.provenance != nil {
+		binding := brokerProvenanceBinding{Digest: brokerDigest(*p.provenance), ReceiptNonce: p.provenance.ReceiptNonce, Source: p.provenance.Source}
+		if !binding.valid() {
+			return errBroker
+		}
+	}
 	if _, e := p.binding(); e != nil {
 		return errBroker
 	}

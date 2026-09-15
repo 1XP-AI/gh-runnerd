@@ -17,9 +17,10 @@ import (
 )
 
 type brokerAPI struct {
-	github *GitHubAPI
-	client *http.Client
-	now    func() time.Time
+	github     *GitHubAPI
+	client     *http.Client
+	now        func() time.Time
+	provenance BrokerProvenanceAdapter
 	// Private dependency injection for synthetic tests only; production selects
 	// the fixed native account root and exposes no path override.
 	admissionDirectory func() (string, error)

@@ -42,3 +42,23 @@ go build -tags=g02runtime -o "$G02_PROBE_BINARY" ./cmd/g02-keychain-probe
 `G02_PROBE_BINARY` must be a new absolute path in a private temporary directory. The probe's only other mode is an internal child read of its exact canary in the owned temporary directory. No UI, account creation, global Keychain lock/unlock, default/search-list setter, existing service mutation, screen lock, logout, or reboot occurs.
 
 See the [evidence record](../../docs/evidence/g02-enrollment-evidence.md), [remaining live procedure](../../docs/evidence/g02-live-procedure.md), and [provisional decision](../../docs/decisions/0003-enrollment-and-service-identity.md). Skipped/unperformed live tests are not passing evidence.
+
+## Broker-only workflow provenance gate
+
+Controller and paired-terminal entrypoints require a one-shot signed
+`BrokerProvenanceReceipt` before reading credential input. Its Ed25519 payload
+binds the controller-approval SHA-256, workflow run ID, workflow ref and
+commit, selected outer phase, owner nonce, receipt nonce, and named source.
+The admission ledger retains the receipt digest, receipt nonce, and source so a
+completed receipt cannot be replayed for another claim; direct regular-file,
+FIFO, or tagged-entry paths without a receipt stop before credential input or
+GitHub API effects.
+
+The current GitHub REST response does not attest which workflow input selected
+the controller phase, and the broker does not infer that fact from ordinary
+workflow metadata. `BrokerProvenanceAdapter` is therefore an explicit signed
+fixture/adapter contract: tests may inject a separately held key, while
+production constructs no adapter and keeps controller/paired execution
+quarantined. The existing workflow-run check is also fail-closed for the
+attested ref and runs before token minting; no live workflow or runner
+operation is part of this evidence.

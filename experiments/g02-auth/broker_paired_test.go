@@ -860,7 +860,7 @@ func TestPairedBrokerRealEntrypointUsesPairedPreparationClosure(t *testing.T) {
 	harness := strings.Repeat("c", 40)
 	workflow := strings.Repeat("b", 40)
 	a.Mode, a.Phase, a.AllowVerificationAuthority, a.ExpiresAt, a.ControllerHarnessSHA = "paired-terminal", "paired-terminal", true, now, harness
-	controller := controllerApproval{AppID: a.AppID, InstallationID: a.InstallationID, Organization: a.Organization, Repository: a.Repository, RepositoryID: a.RepositoryID, RunnerGroupID: a.RunnerGroupID, OwnerNonce: a.OwnerNonce, HarnessSHA: harness, WorkflowSHA: workflow, WorkflowPath: ".github/workflows/canary.yml", WorkflowRunID: 7, Controller: "trusted-controller", ExpiresAt: now, ActionsHosts: []string{"fixture.actions.githubusercontent.com"}, Phases: []string{"create", "before-ack", "after-ack", "before-acquire", "inspect", "cleanup"}}
+	controller := controllerApproval{AppID: a.AppID, InstallationID: a.InstallationID, Organization: a.Organization, Repository: a.Repository, RepositoryID: a.RepositoryID, RunnerGroupID: a.RunnerGroupID, OwnerNonce: a.OwnerNonce, HarnessSHA: harness, WorkflowSHA: workflow, WorkflowRef: "refs/heads/main", WorkflowPath: ".github/workflows/canary.yml", WorkflowRunID: 7, Controller: "trusted-controller", ExpiresAt: now, ActionsHosts: []string{"fixture.actions.githubusercontent.com"}, Phases: []string{"create", "before-ack", "after-ack", "before-acquire", "inspect", "cleanup"}}
 	controllerData, err := json.Marshal(controller)
 	if err != nil {
 		t.Fatal("controller approval")
@@ -910,6 +910,10 @@ func TestPairedBrokerRealEntrypointUsesPairedPreparationClosure(t *testing.T) {
 	if err != nil || result.Status != "paired_terminal_completed" || fixture.tokenCalls != 1 {
 		t.Fatalf("real paired entrypoint did not complete one handoff: result=%+v err=%v mints=%d calls=%v", result, err, fixture.tokenCalls, fixture.calls)
 	}
+	ledger, err := os.ReadFile(filepath.Join(fixture.admissionRoot, "broker-admission.jsonl"))
+	if err != nil || !strings.Contains(string(ledger), `"provenance"`) || !strings.Contains(string(ledger), `"receipt_nonce"`) {
+		t.Fatal("paired claim did not retain the broker provenance identity")
+	}
 	retryPath := filepath.Join(parent, "broker-input-retry.json")
 	if err := os.WriteFile(retryPath, inputData, 0600); err != nil {
 		t.Fatal("retry input file")
@@ -943,7 +947,7 @@ func TestPairedBrokerRejectsMalformedWorkerJournalBeforeMint(t *testing.T) {
 	harness := strings.Repeat("c", 40)
 	workflow := strings.Repeat("b", 40)
 	a.Mode, a.Phase, a.AllowVerificationAuthority, a.ExpiresAt, a.ControllerHarnessSHA = "paired-terminal", "paired-terminal", true, now, harness
-	controller := controllerApproval{AppID: a.AppID, InstallationID: a.InstallationID, Organization: a.Organization, Repository: a.Repository, RepositoryID: a.RepositoryID, RunnerGroupID: a.RunnerGroupID, OwnerNonce: a.OwnerNonce, HarnessSHA: harness, WorkflowSHA: workflow, WorkflowPath: ".github/workflows/canary.yml", WorkflowRunID: 7, Controller: "trusted-controller", ExpiresAt: now, ActionsHosts: []string{"fixture.actions.githubusercontent.com"}, Phases: []string{"create", "before-ack", "after-ack", "before-acquire", "inspect", "cleanup"}}
+	controller := controllerApproval{AppID: a.AppID, InstallationID: a.InstallationID, Organization: a.Organization, Repository: a.Repository, RepositoryID: a.RepositoryID, RunnerGroupID: a.RunnerGroupID, OwnerNonce: a.OwnerNonce, HarnessSHA: harness, WorkflowSHA: workflow, WorkflowRef: "refs/heads/main", WorkflowPath: ".github/workflows/canary.yml", WorkflowRunID: 7, Controller: "trusted-controller", ExpiresAt: now, ActionsHosts: []string{"fixture.actions.githubusercontent.com"}, Phases: []string{"create", "before-ack", "after-ack", "before-acquire", "inspect", "cleanup"}}
 	controllerData, err := json.Marshal(controller)
 	if err != nil {
 		t.Fatal("controller approval")
@@ -1020,7 +1024,7 @@ func newPairedBrokerEntryFixture(t *testing.T) pairedBrokerEntryFixture {
 	harness := strings.Repeat("c", 40)
 	workflow := strings.Repeat("b", 40)
 	a.Mode, a.Phase, a.AllowVerificationAuthority, a.ExpiresAt, a.ControllerHarnessSHA = "paired-terminal", "paired-terminal", true, now, harness
-	controller := controllerApproval{AppID: a.AppID, InstallationID: a.InstallationID, Organization: a.Organization, Repository: a.Repository, RepositoryID: a.RepositoryID, RunnerGroupID: a.RunnerGroupID, OwnerNonce: a.OwnerNonce, HarnessSHA: harness, WorkflowSHA: workflow, WorkflowPath: ".github/workflows/canary.yml", WorkflowRunID: 7, Controller: "trusted-controller", ExpiresAt: now, ActionsHosts: []string{"fixture.actions.githubusercontent.com"}, Phases: []string{"create", "before-ack", "after-ack", "before-acquire", "inspect", "cleanup"}}
+	controller := controllerApproval{AppID: a.AppID, InstallationID: a.InstallationID, Organization: a.Organization, Repository: a.Repository, RepositoryID: a.RepositoryID, RunnerGroupID: a.RunnerGroupID, OwnerNonce: a.OwnerNonce, HarnessSHA: harness, WorkflowSHA: workflow, WorkflowRef: "refs/heads/main", WorkflowPath: ".github/workflows/canary.yml", WorkflowRunID: 7, Controller: "trusted-controller", ExpiresAt: now, ActionsHosts: []string{"fixture.actions.githubusercontent.com"}, Phases: []string{"create", "before-ack", "after-ack", "before-acquire", "inspect", "cleanup"}}
 	controllerData, err := json.Marshal(controller)
 	if err != nil {
 		t.Fatal("controller approval")

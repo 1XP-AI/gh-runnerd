@@ -136,8 +136,22 @@ func brokerPairedAuthorityDeadline(parent context.Context, a BrokerApproval, pla
 }
 
 func brokerExecute(parent context.Context, a BrokerApproval, input brokerInput, path string, api *brokerAPI, plan *brokerControllerPlan) (BrokerResult, error) {
+	return brokerExecuteWithProvenance(parent, a, input, path, api, plan, nil)
+}
+
+func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input brokerInput, path string, api *brokerAPI, plan *brokerControllerPlan, provenance *BrokerProvenanceReceipt) (BrokerResult, error) {
 	if parent == nil || api == nil || a.validate(api.now()) != nil || (a.AllowVerificationAuthority && input.VerificationToken == "") || (input.VerificationToken != "" && (!a.AllowVerificationAuthority || !validBrokerToken(input.VerificationToken))) || ((a.Mode == "controller" || a.Mode == "paired-terminal") && plan == nil) || (a.Mode != "controller" && a.Mode != "paired-terminal" && plan != nil) {
 		return BrokerResult{}, errBroker
+	}
+	if provenance != nil {
+		if plan == nil || (a.Mode != "controller" && a.Mode != "paired-terminal") {
+			return BrokerResult{}, errBroker
+		}
+		request, err := brokerProvenanceRequest(a, plan.controller, provenance.Source)
+		if err != nil || provenance.Validate(request, api.now()) != nil || provenance.ExpiresAt.Before(a.ExpiresAt) {
+			return BrokerResult{}, errBroker
+		}
+		plan.provenance = provenance
 	}
 	now := api.now()
 	deadline := minTime(a.ExpiresAt, now.Add(10*time.Minute))
@@ -227,6 +241,19 @@ func brokerExecute(parent context.Context, a BrokerApproval, input brokerInput, 
 	if err != nil || install.ID != a.InstallationID || install.AppID != identity.ID || install.AccountID != a.OrganizationID || install.TargetID != a.OrganizationID || install.Login != a.Organization || install.AccountType != "Organization" || install.TargetType != "Organization" || !install.SuspensionKnown || install.Suspended || !minimalPermissions(install.Permissions) {
 		return BrokerResult{}, errBroker
 	}
+	// Workflow identity is the final controller-authority check. It uses the
+	// already supplied verification credential, but must precede token minting
+	// and every later authenticated effect. A provenance receipt additionally
+	// binds the API result to the signed workflow ref and selected outer phase.
+	if a.Mode == "paired-terminal" || (plan != nil && plan.controller.needsVerification()) {
+		if provenance != nil {
+			if api.verifyWorkflowWithReceipt(ctx, a, plan.controller, input.VerificationToken, provenance) != nil {
+				return BrokerResult{}, errBroker
+			}
+		} else if api.verifyWorkflow(ctx, a, plan.controller, input.VerificationToken) != nil {
+			return BrokerResult{}, errBroker
+		}
+	}
 	if j.append("token_request_started", nil) != nil {
 		return BrokerResult{}, errBroker
 	}
@@ -268,9 +295,6 @@ func brokerExecute(parent context.Context, a BrokerApproval, input brokerInput, 
 	data, _ := json.Marshal(payload)
 	defer clear(data)
 	if len(data) > 16384 || j.append("controller_handoff_started", nil) != nil {
-		return BrokerResult{}, errBroker
-	}
-	if (a.Mode == "paired-terminal" || plan.controller.needsVerification()) && api.verifyWorkflow(ctx, a, plan.controller, input.VerificationToken) != nil {
 		return BrokerResult{}, errBroker
 	}
 	if guardLive() != nil || plan.launch(ctx, data, filepath.Join(path, "controller-approval.json")) != nil || guardPostChild() != nil || j.append("controller_completed", nil) != nil || claim.complete() != nil || guardPostChild() != nil {

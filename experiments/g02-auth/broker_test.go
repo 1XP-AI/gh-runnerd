@@ -78,7 +78,7 @@ func (f *brokerHTTPFixture) RoundTrip(r *http.Request) (*http.Response, error) {
 	case "/orgs/org-a/actions/runner-groups/3/repositories":
 		payload = map[string]any{"total_count": 1, "repositories": []any{repo}}
 	case "/repos/org-a/canary/actions/runs/7":
-		payload = map[string]any{"id": 7, "head_sha": strings.Repeat("b", 40), "path": ".github/workflows/canary.yml", "event": "workflow_dispatch", "run_attempt": 1, "repository": repo, "head_repository": repo}
+		payload = map[string]any{"id": 7, "head_sha": strings.Repeat("b", 40), "ref": "refs/heads/main", "path": ".github/workflows/canary.yml", "event": "workflow_dispatch", "run_attempt": 1, "repository": repo, "head_repository": repo}
 	case "/orgs/org-a/actions/runners/registration-token":
 		status = 201
 		payload = map[string]any{"token": "synthetic-private-registration-token", "expires_at": time.Now().Add(time.Hour)}
@@ -109,6 +109,10 @@ func newBrokerFixture(t *testing.T) (BrokerApproval, Candidate, *brokerAPI, *bro
 	f.admissionRoot = admission
 	api := newBrokerAPI(time.Now, f)
 	api.admissionDirectory = func() (string, error) { return admission, nil }
+	// The test-only adapter is the explicit signed fixture source. Production
+	// newBrokerAPI has no provenance adapter and therefore quarantines controller
+	// and paired execution before reading credentials.
+	api.provenance = newSignedBrokerFixtureAdapter(t)
 	return brokerApprovalFixture(), syntheticCandidate(t), api, f, root
 }
 func TestBrokerDiscoveryUsesOneRestrictedTokenThenScopeBeforeAuth(t *testing.T) {

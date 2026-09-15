@@ -329,7 +329,7 @@ func (f *pairedBrokerBridge) handleGitHub(w http.ResponseWriter, r *http.Request
 			return
 		}
 		repo := bridgeRepository()
-		writeBridgeJSON(w, http.StatusOK, map[string]any{"id": f.workflowRunID, "head_sha": f.workflowSHA, "path": f.workflowPath, "event": "workflow_dispatch", "run_attempt": 1, "repository": repo, "head_repository": repo})
+		writeBridgeJSON(w, http.StatusOK, map[string]any{"id": f.workflowRunID, "head_sha": f.workflowSHA, "ref": "refs/heads/main", "path": f.workflowPath, "event": "workflow_dispatch", "run_attempt": 1, "repository": repo, "head_repository": repo})
 		return
 	}
 	jobsPath := "/repos/" + f.organization + "/" + f.repository + "/actions/runs/7/attempts/1/jobs"
@@ -588,7 +588,7 @@ func TestBrokerRejectsCleanFixtureBinaryBeforeMint(t *testing.T) {
 	now := time.Now()
 	a.Mode, a.Phase, a.ExpiresAt = "controller", "create", now.Add(time.Hour)
 	a.ControllerHarnessSHA, a.ControllerBinarySHA256 = harness, binaryDigest
-	controller := controllerApproval{AppID: a.AppID, InstallationID: a.InstallationID, Organization: a.Organization, Repository: a.Repository, RepositoryID: a.RepositoryID, RunnerGroupID: a.RunnerGroupID, OwnerNonce: a.OwnerNonce, HarnessSHA: harness, WorkflowSHA: strings.Repeat("b", 40), WorkflowPath: ".github/workflows/canary.yml", Controller: "trusted-controller", ExpiresAt: a.ExpiresAt, ActionsHosts: []string{"fixture.actions.githubusercontent.com"}, Phases: []string{"create"}}
+	controller := controllerApproval{AppID: a.AppID, InstallationID: a.InstallationID, Organization: a.Organization, Repository: a.Repository, RepositoryID: a.RepositoryID, RunnerGroupID: a.RunnerGroupID, OwnerNonce: a.OwnerNonce, HarnessSHA: harness, WorkflowSHA: strings.Repeat("b", 40), WorkflowRef: "refs/heads/main", WorkflowPath: ".github/workflows/canary.yml", Controller: "trusted-controller", ExpiresAt: a.ExpiresAt, ActionsHosts: []string{"fixture.actions.githubusercontent.com"}, Phases: []string{"create"}}
 	controllerData, err := json.Marshal(controller)
 	if err != nil {
 		t.Fatal("controller approval")
@@ -705,7 +705,7 @@ func runPairedBrokerBridge(t *testing.T, tags string) time.Duration {
 	now := time.Now()
 	expires := now.Add(20 * time.Minute)
 	workflow := strings.Repeat("b", 40)
-	controller := controllerApproval{AppID: 71, InstallationID: 201, Organization: bridge.organization, Repository: bridge.repository, RepositoryID: 501, RunnerGroupID: bridge.runnerGroupID, OwnerNonce: strings.Repeat("a", 32), HarnessSHA: harness, WorkflowSHA: workflow, WorkflowPath: bridge.workflowPath, WorkflowRunID: bridge.workflowRunID, Controller: "trusted-controller", ExpiresAt: expires, ActionsHosts: []string{"fixture.actions.githubusercontent.com"}, Phases: []string{"create", "before-ack", "after-ack", "before-acquire", "inspect", "cleanup"}}
+	controller := controllerApproval{AppID: 71, InstallationID: 201, Organization: bridge.organization, Repository: bridge.repository, RepositoryID: 501, RunnerGroupID: bridge.runnerGroupID, OwnerNonce: strings.Repeat("a", 32), HarnessSHA: harness, WorkflowSHA: workflow, WorkflowRef: "refs/heads/main", WorkflowPath: bridge.workflowPath, WorkflowRunID: bridge.workflowRunID, Controller: "trusted-controller", ExpiresAt: expires, ActionsHosts: []string{"fixture.actions.githubusercontent.com"}, Phases: []string{"create", "before-ack", "after-ack", "before-acquire", "inspect", "cleanup"}}
 	controllerPath := filepath.Join(parent, "controller-approval.json")
 	controllerData := writePrivateBridgeJSON(t, controllerPath, controller)
 	credentials := map[string]any{"installation_token": bridge.installationToken, "verification_token": bridge.verificationToken, "app_id": 71, "installation_id": 201, "organization": bridge.organization, "expires_at": expires, "organization_self_hosted_runners": "write", "metadata": "read"}
