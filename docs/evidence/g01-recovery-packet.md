@@ -7753,7 +7753,39 @@ def awk_command_violation(tokens):
                 return True
         return False
 
+    def output_redirection(program):
+        """Reject AWK file redirection outside quoted strings/regex literals."""
+        quote = None
+        regex = False
+        escaped = False
+        for character in program:
+            if escaped:
+                escaped = False
+                continue
+            if character == "\\":
+                escaped = True
+                continue
+            if quote is not None:
+                if character == quote:
+                    quote = None
+                continue
+            if character in {"'", '"'}:
+                quote = character
+                continue
+            if character == "/":
+                regex = not regex
+                continue
+            if character == ">" and not regex:
+                return True
+        return False
+
     for token in tokens[1:]:
+        if token in {">", ">>", "1>", "1>>", "2>", "2>>", "&>", "&>>", ">|"}:
+            # The shell redirection is checked by shell_output_redirection_violation;
+            # only the AWK program token itself is parsed below.
+            continue
+        if token.startswith((">", "1>", "2>", "&>")):
+            continue
         if (
             token in {"-f", "--file"}
             or token.startswith("-f=")
@@ -7761,9 +7793,35 @@ def awk_command_violation(tokens):
             or re.search(r"\bsystem\s*\(", token)
             or "getline" in token
             or output_pipe(token)
+            or output_redirection(token)
         ):
             return "awk command delegation is not allowed"
     return None
+
+
+def go_command_violation(tokens):
+    """Require the reviewed go_test_checked/go_vet_checked guard boundary."""
+    if not tokens or executable_basename(tokens[0]) != "go":
+        return None
+    subcommand = next(
+        (executable_basename(token) for token in tokens[1:] if not token.startswith("-")),
+        None,
+    )
+    if tokens[1:] == ["env", "GOFLAGS"]:
+        return None
+    if (
+        len(tokens) >= 6
+        and tokens[1:6] == ["list", "-C", "experiments/g01-scaleset", "-json", "-test"]
+        and "-race" in tokens[6:]
+    ):
+        return None
+    if subcommand in {"test", "vet"}:
+        return f"bare go {subcommand} must use the reviewed guarded wrapper"
+    return (
+        f"go {subcommand or '<missing subcommand>'} is not an approved guarded "
+        "Go operation"
+    )
+
 
 def forbidden_command(tokens, depth=0):
     tokens = list(tokens)
@@ -7813,6 +7871,9 @@ def forbidden_command(tokens, depth=0):
     git_read_only_violation_message = git_read_only_violation(tokens)
     if git_read_only_violation_message:
         return git_read_only_violation_message
+    go_violation = go_command_violation(tokens)
+    if go_violation:
+        return go_violation
     awk_violation = awk_command_violation(tokens)
     if awk_violation:
         return awk_violation
@@ -8088,17 +8149,147 @@ reviewed_python_compile_ast_names = {
 reviewed_python_compile_slice_bases = reviewed_python_compile_source_names
 
 
-def reviewed_python_compile_source(node):
-    """Permit only packet-derived source slices or explicitly selected AST nodes."""
+def python_compile_provenance(tree):
+    """Resolve source/AST provenance before permitting static compile/exec."""
+    source_names = set()
+    ast_names = set()
+    packet_path_names = set()
+
+    def target_names(target):
+        if isinstance(target, ast.Name):
+            return [target.id]
+        if isinstance(target, (ast.Tuple, ast.List)):
+            names = []
+            for element in target.elts:
+                names.extend(target_names(element))
+            return names
+        return []
+
+    def contains_packet_path(node):
+        return any(
+            isinstance(candidate, ast.Constant)
+            and isinstance(candidate.value, str)
+            and "docs/evidence/g01-recovery-packet.md" in candidate.value
+            for candidate in ast.walk(node)
+        ) or any(
+            isinstance(candidate, ast.Name) and candidate.id in packet_path_names
+            for candidate in ast.walk(node)
+        )
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        value = node.value
+        literal_path = (
+            isinstance(value, ast.Constant)
+            and isinstance(value.value, str)
+            and "docs/evidence/g01-recovery-packet.md" in value.value
+        )
+        path_constructor = (
+            isinstance(value, ast.Call)
+            and python_dotted_name(value.func) in {"Path", "pathlib.Path"}
+            and contains_packet_path(value)
+        )
+        if not (literal_path or path_constructor):
+            continue
+        packet_path_names.update(target_names(node.targets[0]))
+
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        literals = {
+            candidate.value
+            for candidate in ast.walk(node)
+            if isinstance(candidate, ast.Constant)
+            and isinstance(candidate.value, str)
+        }
+        if (
+            any('source = Path("docs/evidence/g01-recovery-packet.md")' in value for value in literals)
+            and any("matches = []" in value for value in literals)
+        ):
+            source_names.update(argument.arg for argument in node.args.args)
+
+    def source_value(node):
+        if isinstance(node, ast.Name):
+            return node.id in source_names
+        if isinstance(node, ast.Subscript):
+            return source_value(node.value)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            return source_value(node.left) and source_value(node.right)
+        if isinstance(node, ast.Call):
+            dotted = python_dotted_name(node.func)
+            if (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr == "replace"
+            ):
+                return source_value(node.func.value)
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "read_text":
+                receiver = node.func.value
+                return (
+                    isinstance(receiver, ast.Call)
+                    and python_dotted_name(receiver.func) in {"Path", "pathlib.Path"}
+                    and receiver.args
+                    and contains_packet_path(receiver)
+                ) or (
+                    isinstance(receiver, ast.Name)
+                    and receiver.id in packet_path_names
+                )
+            if dotted == "subprocess.check_output":
+                return contains_packet_path(node)
+        return False
+
+    def ast_value(node):
+        if isinstance(node, ast.Name):
+            return node.id in ast_names
+        if isinstance(node, ast.Call):
+            return python_dotted_name(node.func) in {"ast.parse", "ast.Module"}
+        if isinstance(node, (ast.List, ast.Tuple)):
+            return bool(node.elts) and all(ast_value(element) for element in node.elts)
+        return False
+
+    assignments = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            assignments.extend((target, node.value) for target in node.targets)
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            assignments.append((node.target, node.value))
+        elif isinstance(node, ast.NamedExpr):
+            assignments.append((node.target, node.value))
+    for _ in range(len(assignments) + 1):
+        changed = False
+        for target, value in assignments:
+            names = target_names(target)
+            if source_value(value):
+                for name in names:
+                    if name not in source_names:
+                        source_names.add(name)
+                        changed = True
+            if ast_value(value):
+                for name in names:
+                    if name not in ast_names:
+                        ast_names.add(name)
+                        changed = True
+        if not changed:
+            break
+    return source_names, ast_names
+
+
+def reviewed_python_compile_source(node, provenance=None):
+    """Permit only packet-derived source slices or provenance-checked AST nodes."""
+    source_provenance, ast_provenance = provenance or (set(), set())
     if isinstance(node, ast.Name):
         return (
             node.id in reviewed_python_compile_source_names
-            or node.id in reviewed_python_compile_ast_names
+            and node.id in source_provenance
+        ) or (
+            node.id in reviewed_python_compile_ast_names
+            and node.id in ast_provenance
         )
     if isinstance(node, ast.Subscript):
         if not (
             isinstance(node.value, ast.Name)
             and node.value.id in reviewed_python_compile_slice_bases
+            and node.value.id in source_provenance
             and isinstance(node.slice, ast.Slice)
         ):
             return False
@@ -8107,8 +8298,8 @@ def reviewed_python_compile_source(node):
             for part in (node.slice.lower, node.slice.upper, node.slice.step)
         )
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-        return reviewed_python_compile_source(node.left) and reviewed_python_compile_source(
-            node.right
+        return reviewed_python_compile_source(node.left, provenance) and reviewed_python_compile_source(
+            node.right, provenance
         )
     if not (
         isinstance(node, ast.Call)
@@ -8142,7 +8333,7 @@ def reviewed_python_compile_source(node):
     return True
 
 
-def reviewed_python_exec_call(call, safe_marker):
+def reviewed_python_exec_call(call, safe_marker, tree=None):
     """Allow only the packet's static compile/exec metaprogramming path."""
     if not isinstance(call.func, ast.Name) or call.func.id != "exec":
         return False
@@ -8153,7 +8344,8 @@ def reviewed_python_exec_call(call, safe_marker):
         return False
     if len(compiler.args) != 3 or compiler.keywords:
         return False
-    if not reviewed_python_compile_source(compiler.args[0]):
+    provenance = python_compile_provenance(tree) if tree is not None else (set(), set())
+    if not reviewed_python_compile_source(compiler.args[0], provenance):
         return False
     filename, mode = compiler.args[1:3]
     return (
@@ -8183,7 +8375,7 @@ def python_indirect_execution_violation(tree, parents, safe_marker):
             isinstance(parent, ast.Call)
             and parent.args
             and parent.args[0] is node
-            and reviewed_python_exec_call(parent, safe_marker)
+            and reviewed_python_exec_call(parent, safe_marker, tree)
             for parent in _python_parent_chain(node, parents)
         )
         if not reviewed_parent:
@@ -8202,6 +8394,26 @@ def reviewed_python_import_call(call, safe_marker):
         return False
     module = call.args[0].value
     return isinstance(module, str) and module in reviewed_python_import_modules
+
+
+def python_import_launcher_violation(node):
+    """Reject command-capable modules reached through a dynamic import chain."""
+    for candidate in ast.walk(node):
+        if not (
+            isinstance(candidate, ast.Call)
+            and isinstance(candidate.func, ast.Name)
+            and candidate.func.id == "__import__"
+        ):
+            continue
+        if not candidate.args or not isinstance(candidate.args[0], ast.Constant):
+            return "Python __import__ launcher module is unresolved"
+        module = candidate.args[0].value
+        if module in python_command_modules:
+            return (
+                "Python __import__ launcher chain reaches command-capable "
+                f"module {module!r}"
+            )
+    return None
 
 
 def python_module_name(node, modules):
@@ -8898,6 +9110,9 @@ def python_process_signal_violation(tree, parents):
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
+        import_launcher_violation = python_import_launcher_violation(node)
+        if import_launcher_violation:
+            return f"{import_launcher_violation} on line {node.lineno}"
         dotted = python_dotted_name(node.func)
         if dotted not in python_process_signal_functions:
             continue
@@ -9166,6 +9381,8 @@ def temporary_path_component_safe(value):
 python_filesystem_mutating_methods = {
     "chmod",
     "chown",
+    "hardlink_to",
+    "link_to",
     "mkdir",
     "makedirs",
     "move",
@@ -9173,6 +9390,7 @@ python_filesystem_mutating_methods = {
     "rename",
     "replace",
     "rmdir",
+    "symlink_to",
     "touch",
     "unlink",
     "write_bytes",
@@ -9181,6 +9399,7 @@ python_filesystem_mutating_methods = {
 python_filesystem_mutating_functions = {
     "os.chmod",
     "os.chown",
+    "os.link",
     "os.makedirs",
     "os.mkdir",
     "os.mkfifo",
@@ -9189,6 +9408,7 @@ python_filesystem_mutating_functions = {
     "os.rename",
     "os.replace",
     "os.rmdir",
+    "os.symlink",
     "os.truncate",
     "os.unlink",
     "shutil.copy",
@@ -9230,6 +9450,15 @@ def python_filesystem_mutator_alias_violation(tree, parents):
             ):
                 receiver = value.args[0]
                 method = value.args[1].value
+            elif (
+                isinstance(value, ast.Attribute)
+                and python_dotted_name(value) in python_filesystem_mutating_functions
+            ):
+                return (
+                    "Python heredoc extracts an unowned filesystem mutator "
+                    f"{python_dotted_name(value)!r} into alias {target.id!r} "
+                    f"on line {node.lineno}"
+                )
             if receiver is None:
                 continue
             if not temporary_path_expression(receiver, tree, parents):
@@ -9400,6 +9629,8 @@ def python_filesystem_mutation_violation(tree, parents):
                 continue
             mutation = True
             path_arguments = [node.func.value]
+            if node.func.attr in {"hardlink_to", "link_to", "symlink_to"}:
+                path_arguments.extend(node.args[:1])
         elif dotted in python_filesystem_mutating_functions:
             mutation = True
             path_arguments = list(node.args[:2])
@@ -9613,7 +9844,7 @@ def inspect_python_heredoc(body, safe_marker):
             node.func, dynamic_bindings, unresolved_dynamic_bindings
         )
         if dynamic_target is not None:
-            if reviewed_python_exec_call(node, safe_marker):
+            if reviewed_python_exec_call(node, safe_marker, tree):
                 continue
             if reviewed_python_import_call(node, safe_marker):
                 continue
@@ -9670,7 +9901,9 @@ def inspect_python_heredoc(body, safe_marker):
         literal = python_literal_command(argument)
         if literal is None and isinstance(argument, ast.Name):
             bound = literal_bindings.get(argument.id)
-            if isinstance(bound, list) and bound:
+            if isinstance(bound, str):
+                literal = "shell", bound
+            elif isinstance(bound, list) and bound:
                 literal = "argv", bound
         if literal is None:
             if reviewed_python_dynamic_call(
@@ -19319,4 +19552,251 @@ operation, merge, credential, workflow or production verification is claimed.
 
 ~~~text
 GREEN final packet certification: 390 Markdown fence markers balanced with matching-style parser, 157 packet-local targets checked, backlog JSON valid, changed-boundary ledger valid with 10 data rows and 4 columns, embedded wrapper/scanner/filter/parity AST and compile valid across 79 Python heredoc bodies, full static scanner passed with 290 shell commands and 79 Python heredoc bodies, all six exact-head RED/GREEN/CURRENT boundaries passed, exact review URL ledger present, one-file scope and added-line secret/private-path hygiene clean, and git diff --check passed; no live verification claimed; rollback parent 390c89b5e431a165dfbf8fa986cbf2594e3444ce
+~~~
+
+<a id="fresh-c9f-codex-scanner-correction"></a>
+### Fresh exact-head Codex findings in [review comment 5672627276](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5672627276) against immutable parent `c9f986d0256e47aba7fd273c1ae03993193a39c8`
+
+The six findings below were reported against the exact c9f986d head. TDD starts
+by loading only that immutable packet with `git show` and recording meaningful
+RED witnesses, then loads the current packet scanner for focused GREEN/CURRENT
+checks after the minimal fail-closed policy correction. The scanner now proves
+compiled-source provenance instead of trusting variable names, rejects
+command-capable `__import__` chains, sends literal string bindings through
+`forbidden_command`, classifies symlink/link/hardlink mutations, rejects AWK
+file redirections, and recognizes only the packet's exact guarded Go
+operations. The probe uses in-memory text and AST checks only; it starts no
+Python payload, compiler, Go child, workflow, runner, Docker, Lima, Keychain,
+launchd or credential operation and makes no live qualification.
+
+```sh
+set -euo pipefail
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import re
+import shlex
+import subprocess
+from pathlib import Path
+
+parent_sha = "c9f986d0256e47aba7fd273c1ae03993193a39c8"
+packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
+parent_packet = subprocess.check_output(
+    ["git", "show", f"{parent_sha}:docs/evidence/g01-recovery-packet.md"],
+    text=True,
+)
+
+def load_scanner(text):
+    anchor = text.index("def forbidden_command(tokens, depth=0):")
+    start = text.rfind("source = Path(", 0, anchor)
+    end = text.index("\nmatches = []", anchor)
+    scanner = text[start:end].replace(
+        'source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")',
+        "source = \"\"",
+        1,
+    )
+    namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+    exec(compile(scanner, "<fresh-c9f-scanner>", "exec"), namespace)
+    return namespace
+
+parent = load_scanner(parent_packet)
+current = load_scanner(packet)
+
+python_witnesses = {
+    "compiled source provenance": (
+        'previous = "gh workflow run ci.yml"\n'
+        'exec(compile(previous, "<x>", "exec"))\n'
+    ),
+    "__import__ launcher chain": (
+        'import subprocess\n'
+        '__import__("subprocess").run(["gh", "workflow", "run", "ci.yml"])\n'
+    ),
+    "literal string command binding": (
+        'import subprocess\n'
+        'command = "gh workflow run ci.yml"\n'
+        'subprocess.run(command, shell=True)\n'
+    ),
+    "symlink/link mutation": (
+        'import os\n'
+        'os.symlink("/etc/passwd", "/tmp/outside")\n'
+    ),
+}
+shell_witnesses = {
+    "AWK file redirection": 'awk \'BEGIN { print "x" > "/tmp/outside" }\'',
+    "Go generate": "go generate ./...",
+}
+
+def inspect(namespace, body):
+    return namespace["inspect_python_heredoc"](body, True)
+
+def shell_violation(namespace, command):
+    return next(
+        (
+            namespace["forbidden_command"](
+                namespace["executable_tokens"](segment)
+            )
+            for segment in namespace["shell_token_segments"](command)
+            if namespace["forbidden_command"](
+                namespace["executable_tokens"](segment)
+            ) is not None
+        ),
+        None,
+    )
+
+for label, witness in python_witnesses.items():
+    if inspect(parent, witness) is not None:
+        raise SystemExit(f"RED setup changed: parent rejected {label}")
+    print(f"RED fresh-c9f {label}: immutable parent accepted finding witness")
+    violation = inspect(current, witness)
+    if violation is None:
+        raise SystemExit(f"GREEN failure: current scanner accepted {label}")
+    print(f"GREEN fresh-c9f {label}/CURRENT: current scanner rejected unsafe witness")
+
+for label, witness in shell_witnesses.items():
+    if shell_violation(parent, witness) is not None:
+        raise SystemExit(f"RED setup changed: parent rejected {label}")
+    print(f"RED fresh-c9f {label}: immutable parent accepted finding witness")
+    if shell_violation(current, witness) is None:
+        raise SystemExit(f"GREEN failure: current scanner accepted {label}")
+    print(f"GREEN fresh-c9f {label}/CURRENT: current scanner rejected unsafe witness")
+
+for command in (
+    "go run ./cmd/tool",
+    "go install ./...",
+    "go env -w GOPROXY=off",
+):
+    if shell_violation(current, command) is None:
+        raise SystemExit(f"GREEN failure: current scanner accepted {command}")
+print("GREEN fresh-c9f guarded-Go boundary/CURRENT: generate, run, install and env -w rejected")
+
+safe_python = {
+    "packet-derived compile": (
+        'from pathlib import Path\n'
+        'packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")\n'
+        'start = 0\nend = 1\n'
+        'exec(compile(packet[start:end], "<x>", "exec"))\n'
+    ),
+    "non-launcher __import__": 'import signal\nvalue = __import__("signal").SIGTERM\n',
+    "literal safe command": (
+        'import subprocess\ncommand = "printf safe"\n'
+        'subprocess.run(command, shell=True)\n'
+    ),
+    "temporary symlink": (
+        'from pathlib import Path\nfrom tempfile import TemporaryDirectory\n'
+        'with TemporaryDirectory() as td:\n'
+        '    source = Path(td).joinpath("source")\n'
+        '    source.write_text("x")\n'
+        '    Path(td).joinpath("link").symlink_to(source)\n'
+    ),
+}
+for label, witness in safe_python.items():
+    if inspect(current, witness) is not None:
+        raise SystemExit(f"GREEN failure: reviewed safe control rejected {label}")
+    print(f"GREEN fresh-c9f {label}/CURRENT: reviewed safe control remained accepted")
+for label, command in (
+    ("literal safe AWK", 'awk \'BEGIN { print "safe" }\''),
+    ("reviewed guarded Go wrapper", "go_test_checked 1 deadbeef label package build go test ./..."),
+):
+    if shell_violation(current, command) is not None:
+        raise SystemExit(f"GREEN failure: reviewed safe control rejected {label}")
+    print(f"GREEN fresh-c9f {label}/CURRENT: reviewed safe control remained accepted")
+print("focused fresh-c9f RED/GREEN/CURRENT boundaries: passed")
+PY
+```
+
+Recorded immutable-parent RED and current-head GREEN/CURRENT output:
+
+~~~text
+RED fresh-c9f compiled source provenance: immutable parent accepted finding witness
+GREEN fresh-c9f compiled source provenance/CURRENT: current scanner rejected unsafe witness
+RED fresh-c9f __import__ launcher chain: immutable parent accepted finding witness
+GREEN fresh-c9f __import__ launcher chain/CURRENT: current scanner rejected unsafe witness
+RED fresh-c9f literal string command binding: immutable parent accepted finding witness
+GREEN fresh-c9f literal string command binding/CURRENT: current scanner rejected unsafe witness
+RED fresh-c9f symlink/link mutation: immutable parent accepted finding witness
+GREEN fresh-c9f symlink/link mutation/CURRENT: current scanner rejected unsafe witness
+RED fresh-c9f AWK file redirection: immutable parent accepted finding witness
+GREEN fresh-c9f AWK file redirection/CURRENT: current scanner rejected unsafe witness
+RED fresh-c9f Go generate: immutable parent accepted finding witness
+GREEN fresh-c9f Go generate/CURRENT: current scanner rejected unsafe witness
+GREEN fresh-c9f guarded-Go boundary/CURRENT: generate, run, install and env -w rejected
+GREEN fresh-c9f packet-derived compile/CURRENT: reviewed safe control remained accepted
+GREEN fresh-c9f non-launcher __import__/CURRENT: reviewed safe control remained accepted
+GREEN fresh-c9f literal safe command/CURRENT: reviewed safe control remained accepted
+GREEN fresh-c9f temporary symlink/CURRENT: reviewed safe control remained accepted
+GREEN fresh-c9f literal safe AWK/CURRENT: reviewed safe control remained accepted
+GREEN fresh-c9f reviewed guarded Go wrapper/CURRENT: reviewed safe control remained accepted
+focused fresh-c9f RED/GREEN/CURRENT boundaries: passed
+~~~
+
+| Finding URL and immutable source | Exact finding | Evidence-based current disposition |
+|---|---|---|
+| [review comment 5672627276](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5672627276) | [compiled-source provenance](https://github.com/1XP-AI/gh-runnerd/blob/c9f986d0256e47aba7fd273c1ae03993193a39c8/docs/evidence/g01-recovery-packet.md#L8093-L8097), source `c9f986d0256e47aba7fd273c1ae03993193a39c8` | RED reproduced arbitrary `previous` source acceptance; the current provenance pass requires packet-derived source/AST evidence and rejects the arbitrary variable witness while retaining a packet-derived slice. |
+| [review comment 5672627276](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5672627276) | [__import__ launcher chain](https://github.com/1XP-AI/gh-runnerd/blob/c9f986d0256e47aba7fd273c1ae03993193a39c8/docs/evidence/g01-recovery-packet.md#L8201-L8204), source `c9f986d0256e47aba7fd273c1ae03993193a39c8` | RED reproduced `__import__("subprocess").run(...)`; the current AST pass rejects command-capable modules reached through `__import__` while retaining the non-launcher signal import control. |
+| [review comment 5672627276](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5672627276) | [literal string command binding](https://github.com/1XP-AI/gh-runnerd/blob/c9f986d0256e47aba7fd273c1ae03993193a39c8/docs/evidence/g01-recovery-packet.md#L9040-L9041), source `c9f986d0256e47aba7fd273c1ae03993193a39c8` | RED reproduced a bound `gh workflow run` string; current literal binding resolution routes strings through `forbidden_command`, rejecting the live command while retaining literal `printf`. |
+| [review comment 5672627276](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5672627276) | [link mutation](https://github.com/1XP-AI/gh-runnerd/blob/c9f986d0256e47aba7fd273c1ae03993193a39c8/docs/evidence/g01-recovery-packet.md#L9181-L9185), source `c9f986d0256e47aba7fd273c1ae03993193a39c8` | RED reproduced unowned `os.symlink`; current filesystem policy classifies `os.symlink`/`os.link` and `Path.symlink_to`/`hardlink_to`/`link_to`, requiring temporary ownership while retaining a temporary-owned symlink. |
+| [review comment 5672627276](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5672627276) | [AWK redirection](https://github.com/1XP-AI/gh-runnerd/blob/c9f986d0256e47aba7fd273c1ae03993193a39c8/docs/evidence/g01-recovery-packet.md#L7761-L7763), source `c9f986d0256e47aba7fd273c1ae03993193a39c8` | RED reproduced `awk` `>` file output outside ownership; current AWK parser rejects unquoted `>`/`>>` outside strings/regex while retaining literal `print`. |
+| [review comment 5672627276](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5672627276) | [Go subcommand allowlist](https://github.com/1XP-AI/gh-runnerd/blob/c9f986d0256e47aba7fd273c1ae03993193a39c8/docs/evidence/g01-recovery-packet.md#L7638-L7641), source `c9f986d0256e47aba7fd273c1ae03993193a39c8` | RED reproduced unguarded `go generate`; current Go policy permits only exact read-only metadata forms and the reviewed `go_test_checked`/`go_vet_checked` guard boundary, rejecting `generate`, `run`, `install`, `env -w` while retaining the wrapper control. |
+
+The exact current-review source is c9f986d0256e47aba7fd273c1ae03993193a39c8;
+the six findings are addressed only in this embedded offline scanner policy.
+The exact review comment remains the source ledger above; no live GitHub/App,
+runner, workflow, credential or host qualification is claimed. Rollback is
+packet-only to immutable parent c9f986d0256e47aba7fd273c1ae03993193a39c8.
+
+<a id="historical-codex-url-disposition-31"></a>
+### Compact URL-specific dispositions for 31 stale/superseded Codex findings
+
+The independent audit found these 31 historical inline URLs absent from the
+earlier literal packet ledger. Each row preserves its exact discussion URL and
+immutable source commit; the disposition names a later corrected boundary or
+current certification evidence, and does not use age or staleness as proof of
+resolution.
+
+| URL-specific finding | Immutable source commit | Later corrected boundary and evidence disposition |
+|---|---|---|
+| [4000000818](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000000818) | `36ec84b27c934a25484b0a5391af0a20c7643912` | Source-derived selector audit validates every expected set before guarded rerun; current full scanner/certification is the final evidence. |
+| [4000000822](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000000822) | `104f5eb7b19305015edb8621af8171ba372b2089` | Paired-worker records retain complete reviewed digests; packet ledger and AST/compile/parity certification cover the current boundary. |
+| [4000083308](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000083308) | `82eeef99f9bb5ec85c8cb3bea7a9a5947e8df26a` | Selector guard recognizes separated and equals forms; focused selector audit and current certification cover both. |
+| [4000083312](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000083312) | `82eeef99f9bb5ec85c8cb3bea7a9a5947e8df26a` | Package/build identity binds selector sets to reviewed digests before guarded execution; current parity certification covers the packet. |
+| [4000179677](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000179677) | `87fbad320d2f264200dc539a048d5704220fab3f` | Exact-head lineage and final local/remote/PR parity record the committed packet SHA rather than historical output. |
+| [4000179681](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000179681) | `6b1535ee7b6f08582ff162eca30f1e4294dbf32b` | Selector discovery audits zero-indent, assignment/env/command prefixes and rejects unguarded forms before execution. |
+| [4000179683](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000179683) | `6b1535ee7b6f08582ff162eca30f1e4294dbf32b` | Added-line secret/private-path hygiene is fail-closed and recorded in current certification; no secret-bearing output is retained. |
+| [4000270324](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000270324) | `08ce02f7716c991d088eebf1f7311628e7991f9e` | GOFLAGS and related Go environment controls are bound before metadata; exact scanner and parity checks certify the ordering. |
+| [4000270327](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000270327) | `08ce02f7716c991d088eebf1f7311628e7991f9e` | Executable selector audit includes column-zero commands and rejects unguarded prescriptions before any child. |
+| [4000270331](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000270331) | `36ec84b27c934a25484b0a5391af0a20c7643912` | Source-derived validation covers TestMain/init effects without starting a test binary; the packet records the non-live boundary. |
+| [4000270334](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000270334) | `22a2923033c875ddd4f755774f79f60b94649449` | Drain partitions and race-mode wrapper records are explicitly guarded and source/digest checked before execution. |
+| [4000270337](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000270337) | `08ce02f7716c991d088eebf1f7311628e7991f9e` | Selector helper rejects unsupported Python/Go regexp semantic mismatches before metadata and records focused parity evidence. |
+| [4000270342](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000270342) | `81787b2e90df496a9c5a51fddc7607d3019834b7` | Terminal remainder selector is source-derived, compared against the reviewed partition, and included in selector certification. |
+| [4000339673](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000339673) | `87fbad320d2f264200dc539a048d5704220fab3f` | Exact-head section and final parity certification record the committed packet SHA rather than stale history. |
+| [4000339674](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000339674) | `87fbad320d2f264200dc539a048d5704220fab3f` | Source/init and selector audits cover the normal path without executing package initialization; final scanner/certification remains required. |
+| [4000378347](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000378347) | `36ec84b27c934a25484b0a5391af0a20c7643912` | Selector parsing validates subtest skip forms and binds the source-derived set before guarded execution. |
+| [4000378351](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000378351) | `2a054740580a0ed4872742d39308d373300b6e5e` | Shell parser joins continued commands before executable selector auditing; full scanner certification exercises the boundary. |
+| [4000378355](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000378355) | `390c89b5e431a165dfbf8fa986cbf2594e3444ce` | Wrapper and selector audit reject zero-count prescriptions before a Go child; AST/compile/parity certification covers the check. |
+| [4000378359](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000378359) | `390c89b5e431a165dfbf8fa986cbf2594e3444ce` | Child environment construction uses explicit reviewed variables and excludes inherited control/credential state; hygiene certification records no raw environment. |
+| [4000451597](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000451597) | `36ec84b27c934a25484b0a5391af0a20c7643912` | Package-source/init gate derives exact files and rejects active init before any list/test child; no live operation is claimed. |
+| [4000451605](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000451605) | `adc237902e15898e86a36f8662712da051b5a037` | Selector partitions and skip expressions are source-derived and checked against expected sets/counts before guarded execution. |
+| [4000451612](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000451612) | `390c89b5e431a165dfbf8fa986cbf2594e3444ce` | Child environment pins reviewed race settings and rejects inherited unsafe overrides before Go metadata/children. |
+| [4000451617](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000451617) | `390c89b5e431a165dfbf8fa986cbf2594e3444ce` | Wrapper requires bounded positive deadlines; packet AST/compile/parity certification checks timeout ordering. |
+| [4000451620](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000451620) | `390c89b5e431a165dfbf8fa986cbf2594e3444ce` | Command-shape/selector guards reject unreviewed test-binary selector overrides before Go children. |
+| [4000531480](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000531480) | `3fdd66c54ea07eca1eb22f33e35e8646beb6ed89` | Source cleanliness uses tracked, untracked and ignored matching plus intent-bit checks before metadata. |
+| [4000531482](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000531482) | `3fdd66c54ea07eca1eb22f33e35e8646beb6ed89` | Drain evidence pins reviewed source tree/digest and distinguishes historical PR #72 records from current certification. |
+| [4000531485](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4000531485) | `81787b2e90df496a9c5a51fddc7607d3019834b7` | JSON stream validation requires expected pass events and rejects unexpected/missing results before acceptance. |
+| [4007931711](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4007931711) | `390c89b5e431a165dfbf8fa986cbf2594e3444ce` | Shell executable policy is an explicit reviewed allowlist and rejects unknown launchers fail-closed; full scanner certification records zero violations. |
+| [4007931725](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4007931725) | `67b4bd315c432eebbf0f551ee6ba4cfb1304f34c` | Python AST command/network allowlists reject unresolved command-capable imports/calls; final scanner/parity certification covers the boundary. |
+| [4007931737](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4007931737) | `14f998f32710f122f5861edfac8fdbc89ef95bfb` | Parity evidence requires the canonical remote/ref and exact PR head; no live verification is claimed beyond read-only gh REST. |
+| [4007931755](https://github.com/1XP-AI/gh-runnerd/pull/78#discussion_r4007931755) | `390c89b5e431a165dfbf8fa986cbf2594e3444ce` | Git checks pin config/system/global hooks and disable external filters before source/digest validation. |
+
+<a id="current-packet-certification"></a>
+### Current packet-only certification for the c9f correction
+
+The final certification for this correction reruns the changed scanner
+boundaries above before full Markdown fence/link parity, backlog JSON,
+changed-boundary ledger shape, embedded AST/compile/parity, full static scanner,
+one-file scope, secret/private-path hygiene and `git diff --check`. It claims no
+live GitHub App, runner, Lima, Docker, Keychain, launchd, workflow, credential,
+Go-child or host qualification; rollback remains packet-only to immutable parent
+`c9f986d0256e47aba7fd273c1ae03993193a39c8`.
+
+~~~text
+GREEN current packet certification: 394 Markdown fence markers balanced with matching-style parser, 25 packet-local targets checked, backlog JSON valid, historical 31-row URL/source/disposition ledger present, fresh review comment 5672627276 plus six exact finding links and RED/GREEN/CURRENT transcript present, embedded scanner/parity AST and compile valid across 80 Python bodies, full static scanner passed with 292 shell commands and 80 Python bodies with zero violations, one-file scope and added-line secret/private-path hygiene clean, and git diff --check passed; no live verification claimed; rollback parent c9f986d0256e47aba7fd273c1ae03993193a39c8
 ~~~
