@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   quick:
-    name: Pull request quick checks
+    name: Go checks
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
@@ -35,7 +35,7 @@ jobs:
           set -eu
           changed="$(git diff --name-only "$BASE_SHA...$HEAD_SHA")"
           printf '%s\n' "$changed"
-          if printf '%s\n' "$changed" | grep -Eq '(^|/)(cmd|internal|experiments|scripts)/|(^|/)(Makefile|go.mod|go.sum)$|(^|/).*\.go$|^\.github/workflows/'; then
+          if printf '%s\n' "$changed" | grep -Eq '(^|/)(cmd|internal|experiments|scripts)/|(^|/)(Makefile|LICENSE|go.mod|go.sum)$|^docs/DEPENDENCIES\.md$|(^|/).*\.go$|^\.github/workflows/'; then
             printf 'go=true\n' >> "$GITHUB_OUTPUT"
           else
             printf 'go=false\n' >> "$GITHUB_OUTPUT"
@@ -44,6 +44,11 @@ jobs:
             printf 'tooling=true\n' >> "$GITHUB_OUTPUT"
           else
             printf 'tooling=false\n' >> "$GITHUB_OUTPUT"
+          fi
+          if printf '%s\n' "$changed" | grep -Eq '^\.github/workflows/'; then
+            printf 'workflow=true\n' >> "$GITHUB_OUTPUT"
+          else
+            printf 'workflow=false\n' >> "$GITHUB_OUTPUT"
           fi
 
       - name: Check diff hygiene
@@ -80,6 +85,10 @@ jobs:
       - name: Run changed offline tooling regression
         if: steps.scope.outputs.tooling == 'true'
         run: GOTOOLCHAIN="$GOTOOLCHAIN" go test -run '^TestToolingOfflineModuleSelection$' -count=1 ./scripts
+
+      - name: Run workflow contract tests
+        if: steps.scope.outputs.workflow == 'true'
+        run: GOTOOLCHAIN="$GOTOOLCHAIN" go test -run '^(TestPublicWorkflowCapacityContract|TestPullRequestQuickWorkflowContract)$' -count=1 ./scripts
 
       - name: Compile changed offline modules without executing the suite
         if: steps.scope.outputs.go == 'true'

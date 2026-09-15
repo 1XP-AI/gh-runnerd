@@ -1123,6 +1123,7 @@ func TestPullRequestQuickWorkflowContract(t *testing.T) {
 	workflow := string(workflowData)
 	for _, required := range []string{
 		"name: Pull Request Checks",
+		"name: Go checks",
 		"  pull_request:",
 		"types: [opened, synchronize, reopened]",
 		"cancel-in-progress: true",

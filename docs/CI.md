@@ -28,7 +28,9 @@ has a 15-minute cap, pinned checkout/setup-go actions and `cache: false`. The
 aggregator uses `always()` and fails unless every required result is exactly
 `success`; it does not check out source or run a test itself.
 
-The PR quick workflow is the premerge source gate. The full Public CI matrix is
+The PR quick workflow's job is named `Go checks` so existing branch-protection
+contexts remain valid while the implementation stays bounded. It is the
+premerge source gate. The full Public CI matrix is
 postmerge integration evidence for source-affecting `main` SHAs, not a per-commit
 or per-PR-push gate. During local editing, use focused checks and the opt-in `make
 fast` selector below. After source, documentation and finding-ledger changes are
