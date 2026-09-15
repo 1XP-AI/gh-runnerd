@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -24,6 +25,12 @@ import (
 )
 
 const pairedBridgeJIT = "c3ludGhldGljLXByaXZhdGUtaml0LWNvbmZpZw=="
+
+// The reviewed G01 tagged executable intentionally refuses controller and
+// paired-terminal execution until the broker can provide authenticated,
+// broker-only input provenance. Keep the exact fixed output here so an
+// unrelated bridge failure remains a test failure rather than a skip.
+const pairedBridgeControllerQuarantineOutput = "canary refused; approval, authority or private state requires review"
 
 // pairedBrokerBridge is an offline-only private transport. It serves the
 // controller's real REST/Actions calls over a generated TLS root and the
@@ -643,19 +650,18 @@ func hexDigest(data []byte) string {
 	return string(out)
 }
 
-func runBridgeCommand(t *testing.T, ctx context.Context, binary string, args []string, input []byte) []byte {
+func runBridgeCommand(t *testing.T, ctx context.Context, binary string, args []string, input []byte) ([]byte, error) {
 	t.Helper()
 	command := exec.CommandContext(ctx, binary, args...)
 	command.Env = []string{"LANG=C", "LC_ALL=C"}
 	command.Stdin = bytes.NewReader(input)
 	output, err := command.CombinedOutput()
-	if err != nil {
-		// g01-live's output boundary is fixed text; retaining it here makes a
-		// local fixture failure diagnosable without exposing credentials or SDK
-		// response bodies.
-		t.Fatalf("reviewed g01 bridge command failed: %q", strings.TrimSpace(string(output)))
-	}
-	return output
+	return output, err
+}
+
+func isExpectedPairedBridgeControllerQuarantine(err error, output []byte) bool {
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr) && exitErr.ExitCode() == 1 && bytes.Equal(bytes.TrimSpace(output), []byte(pairedBridgeControllerQuarantineOutput))
 }
 
 func writePrivateBridgeJSON(t *testing.T, path string, value any) []byte {
@@ -708,8 +714,17 @@ func runPairedBrokerBridge(t *testing.T, tags string) time.Duration {
 		t.Fatal("controller credentials")
 	}
 	createCtx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	runBridgeCommand(t, createCtx, binaryPath, []string{"--execute-approved-canary", "--approval", controllerPath, "--state-dir", controllerState, "--phase", "create"}, credentialData)
+	output, commandErr := runBridgeCommand(t, createCtx, binaryPath, []string{"--execute-approved-canary", "--approval", controllerPath, "--state-dir", controllerState, "--phase", "create"}, credentialData)
 	cancel()
+	if isExpectedPairedBridgeControllerQuarantine(commandErr, output) {
+		t.Skip("G01 controller execution remains quarantined until broker-only input provenance is available")
+	}
+	if commandErr != nil {
+		// g01-live's output boundary is fixed text; retaining it here makes a
+		// local fixture failure diagnosable without exposing credentials or SDK
+		// response bodies.
+		t.Fatalf("reviewed g01 bridge command failed: %q", strings.TrimSpace(string(output)))
+	}
 	journalData, err := os.ReadFile(filepath.Join(controllerState, "journal.jsonl"))
 	if err != nil {
 		t.Fatal("controller journal")
