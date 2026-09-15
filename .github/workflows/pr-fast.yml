@@ -35,7 +35,7 @@ jobs:
           set -eu
           changed="$(git diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA")"
           printf '%s\n' "$changed"
-          if printf '%s\n' "$changed" | grep -Eq '(^|/)(cmd|internal|experiments|scripts)/|(^|/)(Makefile|LICENSE|go.mod|go.sum)$|^docs/DEPENDENCIES\.md$|(^|/).*\.go$|^\.github/workflows/'; then
+          if printf '%s\n' "$changed" | grep -Eq '(^|/)(cmd|internal|experiments|scripts)/|(^|/)(Makefile|LICENSE|go.mod|go.sum|go.work|go.work.sum)$|^docs/DEPENDENCIES\.md$|(^|/).*\.go$|^\.github/workflows/'; then
             printf 'go=true\n' >> "$GITHUB_OUTPUT"
           else
             printf 'go=false\n' >> "$GITHUB_OUTPUT"

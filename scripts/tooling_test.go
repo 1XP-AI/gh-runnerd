@@ -1130,6 +1130,8 @@ func TestPullRequestQuickWorkflowContract(t *testing.T) {
 		"permissions:\n  contents: read",
 		"run: git diff --check \"$BASE_SHA...$HEAD_SHA\"",
 		"git diff --name-only --no-renames \"$BASE_SHA...$HEAD_SHA\"",
+		"go.work",
+		"go.work.sum",
 		"run: make toolchain",
 		"run: make build",
 		"run: make fmt-check",
