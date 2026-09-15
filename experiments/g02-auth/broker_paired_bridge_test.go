@@ -329,7 +329,7 @@ func (f *pairedBrokerBridge) handleGitHub(w http.ResponseWriter, r *http.Request
 			return
 		}
 		repo := bridgeRepository()
-		writeBridgeJSON(w, http.StatusOK, map[string]any{"id": f.workflowRunID, "head_sha": f.workflowSHA, "ref": "refs/heads/main", "path": f.workflowPath, "event": "workflow_dispatch", "run_attempt": 1, "repository": repo, "head_repository": repo})
+		writeBridgeJSON(w, http.StatusOK, map[string]any{"id": f.workflowRunID, "head_branch": "main", "head_sha": f.workflowSHA, "path": f.workflowPath, "event": "workflow_dispatch", "run_attempt": 1, "repository": repo, "head_repository": repo})
 		return
 	}
 	jobsPath := "/repos/" + f.organization + "/" + f.repository + "/actions/runs/7/attempts/1/jobs"

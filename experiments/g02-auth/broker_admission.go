@@ -311,6 +311,7 @@ func openBrokerAdmission(directory string, a BrokerApproval, j *brokerJournal, p
 	var binding *brokerControllerBinding
 	var workerBinding *brokerWorkerBinding
 	var authority *brokerControllerAuthority
+	provenanceNonces := map[string]bool{}
 	latestSlot := ""
 	for _, line := range lines[1 : len(lines)-1] {
 		var event brokerClaimEvent
@@ -319,11 +320,15 @@ func openBrokerAdmission(directory string, a BrokerApproval, j *brokerJournal, p
 		}
 		switch event.Kind {
 		case "claim":
-			for previous, receipt := range slots {
-				if (!done[previous] && event.Slot != "inspect" && event.Slot != "cleanup") || receipt.Attempt == event.Attempt || receipt.Journal == event.Journal || (event.Controller != nil && receipt.Controller != nil && receipt.Snapshot == event.Snapshot) || (event.Worker != nil && receipt.Worker != nil && receipt.Worker.State == event.Worker.State) {
+			if event.Provenance != nil {
+				nonce := event.Provenance.ReceiptNonce
+				if provenanceNonces[nonce] {
 					return nil, errBroker
 				}
-				if event.Provenance != nil && receipt.Provenance != nil && event.Provenance.ReceiptNonce == receipt.Provenance.ReceiptNonce {
+				provenanceNonces[nonce] = true
+			}
+			for previous, receipt := range slots {
+				if (!done[previous] && event.Slot != "inspect" && event.Slot != "cleanup") || receipt.Attempt == event.Attempt || receipt.Journal == event.Journal || (event.Controller != nil && receipt.Controller != nil && receipt.Snapshot == event.Snapshot) || (event.Worker != nil && receipt.Worker != nil && receipt.Worker.State == event.Worker.State) {
 					return nil, errBroker
 				}
 			}
@@ -395,7 +400,7 @@ func openBrokerAdmission(directory string, a BrokerApproval, j *brokerJournal, p
 		c.event.Authority = &next
 		if p.provenance != nil {
 			binding := brokerProvenanceBinding{Digest: brokerDigest(*p.provenance), ReceiptNonce: p.provenance.ReceiptNonce, Source: p.provenance.Source}
-			if !binding.valid() {
+			if !binding.valid() || provenanceNonces[binding.ReceiptNonce] {
 				return nil, errBroker
 			}
 			c.event.Provenance = &binding

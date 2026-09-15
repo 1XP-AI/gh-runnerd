@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -262,18 +263,35 @@ func runBrokerWithAPI(ctx context.Context, files BrokerFiles, input *os.File, ap
 func (a *brokerAPI) verifyWorkflow(ctx context.Context, approval BrokerApproval, controller controllerApproval, token string) error {
 	return a.verifyWorkflowWithReceipt(ctx, approval, controller, token, nil)
 }
+
+// GitHub's workflow-run response exposes the selected branch or tag as
+// head_branch. It does not expose enough information in that field to rebuild
+// a refs/pull/<number>/{head,merge} identity, so pull refs remain unsupported
+// and fail closed here.
+func brokerWorkflowRunHeadBranchMatchesRef(headBranch, workflowRef string) bool {
+	if headBranch == "" || !brokerWorkflowRef.MatchString(workflowRef) {
+		return false
+	}
+	for _, prefix := range []string{"refs/heads/", "refs/tags/"} {
+		if strings.HasPrefix(workflowRef, prefix) {
+			return headBranch == strings.TrimPrefix(workflowRef, prefix)
+		}
+	}
+	return false
+}
+
 func (a *brokerAPI) verifyWorkflowWithReceipt(ctx context.Context, approval BrokerApproval, controller controllerApproval, token string, provenance *BrokerProvenanceReceipt) error {
 	var run struct {
 		ID             int64            `json:"id"`
 		HeadSHA        string           `json:"head_sha"`
-		Ref            string           `json:"ref"`
+		HeadBranch     string           `json:"head_branch"`
 		Event          string           `json:"event"`
 		Path           string           `json:"path"`
 		RunAttempt     int              `json:"run_attempt"`
 		Repository     brokerRepository `json:"repository"`
 		HeadRepository brokerRepository `json:"head_repository"`
 	}
-	if a.call(ctx, "GET", "/repos/"+approval.Organization+"/"+approval.Repository+"/actions/runs/"+strconv.FormatInt(controller.WorkflowRunID, 10), "Bearer "+token, nil, 200, &run) != nil || run.ID != controller.WorkflowRunID || run.HeadSHA != controller.WorkflowSHA || run.Path != controller.WorkflowPath || run.Event != "workflow_dispatch" || run.RunAttempt != 1 || !run.Repository.matches(approval) || !run.HeadRepository.matches(approval) || (provenance != nil && (run.Ref == "" || run.Ref != provenance.WorkflowRef)) {
+	if a.call(ctx, "GET", "/repos/"+approval.Organization+"/"+approval.Repository+"/actions/runs/"+strconv.FormatInt(controller.WorkflowRunID, 10), "Bearer "+token, nil, 200, &run) != nil || run.ID != controller.WorkflowRunID || run.HeadSHA != controller.WorkflowSHA || run.Path != controller.WorkflowPath || run.Event != "workflow_dispatch" || run.RunAttempt != 1 || !run.Repository.matches(approval) || !run.HeadRepository.matches(approval) || (provenance != nil && !brokerWorkflowRunHeadBranchMatchesRef(run.HeadBranch, provenance.WorkflowRef)) {
 		return errBroker
 	}
 	return nil
