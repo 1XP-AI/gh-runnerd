@@ -253,8 +253,12 @@ the first Go child and verified through effective `go env`; `GOPRIVATE`,
 private-module bypasses fail closed. Custom inherited or command-supplied
 values fail closed. The wrapper queries effective
 `GOVERSION` before metadata or tests and binds that verified toolchain identity,
-not merely the requested `GOTOOLCHAIN`, into every build identity. The reviewed
-canonical PATH is pinned before the first Git or Go executable lookup. Git
+not merely the requested `GOTOOLCHAIN`, into every build identity. Child
+environments are built only after a comprehensive credential-name deny gate,
+including access-key and secret-access-key families such as
+`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`; no credential-bearing
+inherited or command-prefix name reaches a child map. The reviewed canonical
+PATH is pinned before the first Git or Go executable lookup. Git
 transport helper overrides (`GIT_EXEC_PATH`, `GIT_SSH`, `GIT_SSH_COMMAND`,
 `GIT_SSH_VARIANT`, `GIT_ASKPASS`, `GIT_SSH_ASKPASS` and `GIT_PROXY_COMMAND`)
 are rejected when inherited or command-supplied before the first Git query.
@@ -269,7 +273,14 @@ command-delegation option can hide a workflow, Docker, or other delegated
 command behind an otherwise allowed token. Remote command launchers such as
 `ssh`/`rsync` and command-capable interpreters such as Python's `pty.spawn` are also
 rejected before their operands are classified. Shell wrappers `nice`,
-`timeout` and `setsid` are rejected before their operands are classified.
+`timeout` and `setsid` are rejected before their operands are classified. The
+static scanner validates PATH and dynamic-loader assignments before stripping
+any assignment or `env`/wrapper prefix, rejects `rg --pre` and `--pre-glob`
+preprocessing, rejects POSIX read-write `<>` redirections, and binds signal
+exemptions to the exact reviewed helper shape plus owned
+`Popen(start_new_session=True)` provenance. The guarded Go-child helper
+allowlists its supported process keywords and rejects executable, shell,
+`preexec_fn` and every other unreviewed creation override before `Popen`.
 `GOCACHEPROG` is rejected unless empty and then pinned empty before any Go child;
 `GOAUTH` is rejected unless `off` and then pinned `off`, so executable cache
 hooks and command-form authentication cannot reach module, metadata, vet or
@@ -500,11 +511,23 @@ credential_environment_suffixes = (
     "_PRIVATE_KEY",
     "_CLIENT_SECRET",
 )
+credential_environment_fragments = (
+    "ACCESS_KEY",
+    "SECRET_ACCESS_KEY",
+    "SECRET_KEY",
+    "SESSION_TOKEN",
+)
 
 def credential_environment_name(name):
     normalized = name.upper()
     return normalized in credential_environment_names or normalized.endswith(
         credential_environment_suffixes
+    ) or any(
+        normalized == fragment
+        or normalized.startswith(fragment + "_")
+        or normalized.endswith("_" + fragment)
+        or f"_{fragment}_" in normalized
+        for fragment in credential_environment_fragments
     )
 
 inherited_credential_environment = sorted(
@@ -1361,7 +1384,7 @@ def run_go_child(go_command, **kwargs):
     if not go_command or go_command[0] != "go":
         raise SystemExit(f"{label}: non-Go command passed to Go child runner")
     check = kwargs.pop("check", False)
-    if kwargs.pop("start_new_session", False):
+    if "start_new_session" in kwargs:
         raise SystemExit(f"{label}: Go child session ownership is wrapper-controlled")
     if kwargs.pop("capture_output", False):
         if "stdout" in kwargs or "stderr" in kwargs:
@@ -1371,6 +1394,15 @@ def run_go_child(go_command, **kwargs):
     text_mode = kwargs.pop("text", False) or kwargs.pop("universal_newlines", False)
     encoding = kwargs.pop("encoding", None) or "utf-8"
     errors = kwargs.pop("errors", None) or "strict"
+    allowed_process_kwargs = {"cwd", "env", "stdout", "stderr"}
+    unsupported_process_kwargs = sorted(
+        key for key in kwargs if key not in allowed_process_kwargs
+    )
+    if unsupported_process_kwargs:
+        raise SystemExit(
+            f"{label}: unsupported Go child process-creation keyword(s): "
+            + ", ".join(unsupported_process_kwargs)
+        )
     process = None
     try:
         process = subprocess.Popen(
@@ -6833,6 +6865,30 @@ fence_line = re.compile(r"^( {0,3})(`{3,}|~{3,})(.*)$")
 assignment = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
 heredoc = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 python_interpreter = re.compile(r"python(?:3(?:\.[0-9]+)?)?\Z")
+loader_assignment_names = {
+    "PATH",
+    "LD_PRELOAD",
+    "LD_PRELOAD_32",
+    "LD_PRELOAD_64",
+    "LD_LIBRARY_PATH",
+    "LD_LIBRARY_PATH_32",
+    "LD_LIBRARY_PATH_64",
+    "LD_AUDIT",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FALLBACK_LIBRARY_PATH",
+    "DYLD_FRAMEWORK_PATH",
+    "DYLD_FALLBACK_FRAMEWORK_PATH",
+    "DYLD_ROOT_PATH",
+}
+reviewed_shell_path = "/opt/homebrew/bin:/usr/bin:/bin"
+
+
+def reviewed_loader_assignment(token):
+    if not assignment.fullmatch(token):
+        return True
+    name, value = token.split("=", 1)
+    return name == "PATH" and value == reviewed_shell_path
 
 def parsed_fence(line):
     match = fence_line.match(line)
@@ -7100,7 +7156,13 @@ def shell_token_segments(command):
 def shell_assignment_only(command):
     """Recognize assignments that do not launch a child command."""
     segments = shell_token_segments(command)
-    return bool(segments) and all(
+    return bool(segments) and not any(
+        assignment.fullmatch(token)
+        and token.split("=", 1)[0] in loader_assignment_names
+        and not reviewed_loader_assignment(token)
+        for segment in segments
+        for token in segment
+    ) and all(
         segment and all(assignment.fullmatch(token) for token in segment)
         for segment in segments
     )
@@ -7133,6 +7195,8 @@ def shell_output_redirection_violation(tokens):
         "1>|", "2>|",
     }
     for index, token in enumerate(tokens):
+        if re.match(r"^(?:[0-9]+|\{[A-Za-z_][A-Za-z0-9_]*\})?<>(?:.*)$", token):
+            return "shell POSIX read-write <> redirection is not allowed"
         unknown_descriptor = re.match(
             r"^(?:[0-9]+|\{[A-Za-z_][A-Za-z0-9_]*\})(?:>>?|>&|>\|)",
             token,
@@ -7571,11 +7635,19 @@ def python_command_string(tokens):
 
 
 unsupported_env_wrapper_token = "__g01_unsupported_env_wrapper_option__"
+unsupported_loader_assignment_token = "__g01_unsupported_loader_assignment__"
 
 def executable_tokens(tokens):
     tokens = list(tokens)
     while tokens and tokens[0] in {"if", "then", "else", "elif", "do", "while", "until", "!"}:
         tokens.pop(0)
+    if any(
+        assignment.fullmatch(token)
+        and token.split("=", 1)[0] in loader_assignment_names
+        and not reviewed_loader_assignment(token)
+        for token in tokens
+    ):
+        return [unsupported_loader_assignment_token]
     while tokens and (assignment.fullmatch(tokens[0]) or tokens[0] in {";", "&&", "||", "|"}):
         tokens.pop(0)
     wrappers = {"env", "command", "sudo", "exec", "nohup"}
@@ -7799,6 +7871,19 @@ def awk_command_violation(tokens):
     return None
 
 
+def rg_command_violation(tokens):
+    """Reject ripgrep preprocessing options that spawn an external command."""
+    if not tokens or executable_basename(tokens[0]) != "rg":
+        return None
+    for token in tokens[1:]:
+        if token == "--":
+            break
+        option = token.split("=", 1)[0]
+        if option in {"--pre", "--pre-glob"}:
+            return f"rg {option} preprocessing is not allowed"
+    return None
+
+
 def go_command_violation(tokens):
     """Require the reviewed go_test_checked/go_vet_checked guard boundary."""
     if not tokens or executable_basename(tokens[0]) != "go":
@@ -7854,6 +7939,8 @@ def forbidden_command(tokens, depth=0):
         return None
     if tokens[0] == unsupported_env_wrapper_token:
         return "env wrapper option/operand is not parsed safely"
+    if tokens[0] == unsupported_loader_assignment_token:
+        return "executable-loader environment assignment is not allowed"
     if unresolved_executable(tokens[0]):
         return "unresolved or parameter-expanded executable is not allowed"
     trap_violation = shell_trap_violation(tokens, depth)
@@ -7874,6 +7961,9 @@ def forbidden_command(tokens, depth=0):
     go_violation = go_command_violation(tokens)
     if go_violation:
         return go_violation
+    rg_violation = rg_command_violation(tokens)
+    if rg_violation:
+        return rg_violation
     awk_violation = awk_command_violation(tokens)
     if awk_violation:
         return awk_violation
@@ -8176,10 +8266,7 @@ def python_compile_provenance(tree):
             for candidate in ast.walk(node)
         )
 
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Assign):
-            continue
-        value = node.value
+    def packet_path_value(value):
         literal_path = (
             isinstance(value, ast.Constant)
             and isinstance(value.value, str)
@@ -8190,7 +8277,13 @@ def python_compile_provenance(tree):
             and python_dotted_name(value.func) in {"Path", "pathlib.Path"}
             and contains_packet_path(value)
         )
-        if not (literal_path or path_constructor):
+        return literal_path or path_constructor
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        value = node.value
+        if not packet_path_value(value):
             continue
         packet_path_names.update(target_names(node.targets[0]))
 
@@ -8255,6 +8348,13 @@ def python_compile_provenance(tree):
             assignments.append((node.target, node.value))
         elif isinstance(node, ast.NamedExpr):
             assignments.append((node.target, node.value))
+    tainted_packet_path_names = {
+        name
+        for target, value in assignments
+        for name in target_names(target)
+        if name in packet_path_names and not packet_path_value(value)
+    }
+    packet_path_names.difference_update(tainted_packet_path_names)
     for _ in range(len(assignments) + 1):
         changed = False
         for target, value in assignments:
@@ -8271,6 +8371,20 @@ def python_compile_provenance(tree):
                         changed = True
         if not changed:
             break
+    invalidated_source_names = {
+        name
+        for target, value in assignments
+        for name in target_names(target)
+        if name in source_names and not source_value(value)
+    }
+    invalidated_ast_names = {
+        name
+        for target, value in assignments
+        for name in target_names(target)
+        if name in ast_names and not ast_value(value)
+    }
+    source_names.difference_update(invalidated_source_names)
+    ast_names.difference_update(invalidated_ast_names)
     return source_names, ast_names
 
 
@@ -8427,12 +8541,32 @@ def python_indirect_command(node, modules):
     """Classify getattr/__dict__ launcher indirection through known modules."""
     module_node = None
     attribute_node = None
+    attribute_resolution = False
     if isinstance(node, ast.Call):
-        if not isinstance(node.func, ast.Name) or node.func.id != "getattr":
+        if isinstance(node.func, ast.Name) and node.func.id == "getattr":
+            if len(node.args) < 2:
+                return ("unresolved", "getattr")
+            module_node, attribute_node = node.args[0], node.args[1]
+        elif (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "__getattribute__"
+        ):
+            attribute_resolution = True
+            if node.keywords:
+                return ("unresolved", "__getattribute__")
+            if (
+                isinstance(node.func.value, ast.Name)
+                and node.func.value.id in {"object", "type"}
+            ):
+                if len(node.args) < 2:
+                    return ("unresolved", "__getattribute__")
+                module_node, attribute_node = node.args[0], node.args[1]
+            elif len(node.args) >= 1:
+                module_node, attribute_node = node.func.value, node.args[0]
+            else:
+                return ("unresolved", "__getattribute__")
+        else:
             return None
-        if len(node.args) < 2:
-            return ("unresolved", "getattr")
-        module_node, attribute_node = node.args[0], node.args[1]
     elif isinstance(node, ast.Subscript):
         if not (
             isinstance(node.value, ast.Attribute)
@@ -8447,6 +8581,8 @@ def python_indirect_command(node, modules):
         return None
     module_name = python_module_name(module_node, modules)
     if module_name not in python_command_modules:
+        if attribute_resolution:
+            return ("unresolved", "__getattribute__")
         return None
     if (
         isinstance(attribute_node, ast.Constant)
@@ -8821,6 +8957,36 @@ def python_resolved_name(node, modules, functions):
         return ".".join([module, *parts[1:]])
     return dotted
 
+
+reviewed_guarded_child_keywords = {
+    "check",
+    "capture_output",
+    "text",
+    "universal_newlines",
+    "encoding",
+    "errors",
+    "cwd",
+    "env",
+}
+
+
+def python_guarded_child_kwargs_violation(tree, modules, functions):
+    """Reject unreviewed process-creation overrides at guarded child calls."""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if python_resolved_name(node.func, modules, functions) != "run_go_child":
+            continue
+        for keyword in node.keywords:
+            if keyword.arg is None or keyword.arg not in reviewed_guarded_child_keywords:
+                name = keyword.arg or "**kwargs"
+                return (
+                    "Python guarded Go-child call has an unsupported process-creation "
+                    f"keyword {name!r} on line {node.lineno}"
+                )
+    return None
+
+
 def python_command_argument(call):
     if call.args:
         return call.args[0]
@@ -9050,6 +9216,132 @@ reviewed_python_signal_helpers = {
     "git_query_group_exists",
     "terminate_git_query_group",
 }
+reviewed_python_signal_helper_calls = {
+    "owned_go_process_group_exists": set(),
+    "terminate_go_child_group": {
+        "wait_for_owned_go_process_group_exit",
+        "close_go_child_streams",
+    },
+    "git_query_group_exists": set(),
+    "terminate_git_query_group": {
+        "wait_for_git_query_group_exit",
+        "close_git_query_streams",
+    },
+}
+
+
+def reviewed_python_signal_helper_body(tree, function_name):
+    """Require the exact reviewed signal-helper shape, not just its name."""
+    function_node = next(
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == function_name
+        ),
+        None,
+    )
+    if function_node is None:
+        return False
+    if (
+        len(function_node.args.args) != 1
+        or function_node.args.args[0].arg != "process"
+        or function_node.args.vararg is not None
+        or function_node.args.kwarg is not None
+        or function_node.args.kwonlyargs
+    ):
+        return False
+    kill_signals = set()
+    observed_calls = set()
+    for candidate in ast.walk(function_node):
+        if isinstance(candidate, ast.Call):
+            dotted = python_dotted_name(candidate.func)
+            if dotted:
+                observed_calls.add(dotted.rsplit(".", 1)[-1])
+            if dotted != "os.killpg":
+                continue
+            if len(candidate.args) != 2 or candidate.keywords:
+                return False
+            target, signal_value = candidate.args
+            if not (
+                isinstance(target, ast.Attribute)
+                and target.attr == "pid"
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "process"
+            ):
+                return False
+            if isinstance(signal_value, ast.Constant) and signal_value.value == 0:
+                kill_signals.add("0")
+            else:
+                signal_name = python_dotted_name(signal_value)
+                if signal_name in {"signal.SIGTERM", "signal.SIGKILL"}:
+                    kill_signals.add(signal_name)
+                else:
+                    return False
+    if function_name.endswith("_group_exists"):
+        return kill_signals == {"0"} and "killpg" in observed_calls
+    return (
+        kill_signals == {"signal.SIGTERM", "signal.SIGKILL"}
+        and reviewed_python_signal_helper_calls[function_name].issubset(observed_calls)
+    )
+
+
+def reviewed_python_signal_popen_provenance(tree, function_name):
+    """Require a reviewed helper call fed by an owned new-session Popen."""
+    related_calls = {function_name}
+    if function_name.endswith("_group_exists"):
+        related_calls.update(
+            {
+                "wait_for_owned_go_process_group_exit",
+                "wait_for_git_query_group_exit",
+                "terminate_go_child_group",
+                "terminate_git_query_group",
+            }
+        )
+    for function_node in ast.walk(tree):
+        if not isinstance(function_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        owned_process = False
+        for candidate in ast.walk(function_node):
+            if not isinstance(candidate, ast.Assign):
+                continue
+            if not any(
+                isinstance(target, ast.Name) and target.id == "process"
+                for target in candidate.targets
+            ):
+                continue
+            value = candidate.value
+            if not (
+                isinstance(value, ast.Call)
+                and python_dotted_name(value.func) == "subprocess.Popen"
+            ):
+                continue
+            start_session = next(
+                (
+                    keyword.value
+                    for keyword in value.keywords
+                    if keyword.arg == "start_new_session"
+                ),
+                None,
+            )
+            if isinstance(start_session, ast.Constant) and start_session.value is True:
+                owned_process = True
+                break
+        if not owned_process:
+            continue
+        for candidate in ast.walk(function_node):
+            if not isinstance(candidate, ast.Call):
+                continue
+            if python_dotted_name(candidate.func) not in related_calls:
+                continue
+            if (
+                len(candidate.args) == 1
+                and not candidate.keywords
+                and isinstance(candidate.args[0], ast.Name)
+                and candidate.args[0].id == "process"
+            ):
+                return True
+    return False
 
 
 def reviewed_python_signal_target(node, tree, parents, dotted):
@@ -9063,7 +9355,11 @@ def reviewed_python_signal_target(node, tree, parents, dotted):
         ):
             return False
         function_name = enclosing_python_function(node, parents)
-        if function_name in reviewed_python_signal_helpers:
+        if (
+            function_name in reviewed_python_signal_helpers
+            and reviewed_python_signal_helper_body(tree, function_name)
+            and reviewed_python_signal_popen_provenance(tree, function_name)
+        ):
             return True
         for parent in _python_parent_chain(node, parents):
             if not isinstance(parent, ast.For):
@@ -9635,6 +9931,9 @@ def python_filesystem_mutation_violation(tree, parents):
             mutation = True
             path_arguments = list(node.args[:2])
         elif dotted == "open":
+            unpacked_keyword = any(keyword.arg is None for keyword in node.keywords)
+            if unpacked_keyword:
+                mutation = True
             mode_keyword = next(
                 (keyword.value for keyword in node.keywords if keyword.arg == "mode"),
                 None,
@@ -9643,9 +9942,11 @@ def python_filesystem_mutation_violation(tree, parents):
                 keyword.arg == "mode" for keyword in node.keywords
             )
             mode = node.args[1] if len(node.args) > 1 else mode_keyword
-            if not has_mode:
+            if not has_mode and not unpacked_keyword:
                 continue
-            if not isinstance(mode, ast.Constant) or not isinstance(mode.value, str):
+            if unpacked_keyword:
+                mode = None
+            elif not isinstance(mode, ast.Constant) or not isinstance(mode.value, str):
                 mutation = True
             else:
                 mutation = any(flag in mode.value for flag in ("w", "a", "x", "+"))
@@ -9819,6 +10120,11 @@ def inspect_python_heredoc(body, safe_marker):
         for parent in ast.walk(tree)
         for child in ast.iter_child_nodes(parent)
     }
+    guarded_child_kwargs_violation = python_guarded_child_kwargs_violation(
+        tree, modules, functions
+    )
+    if guarded_child_kwargs_violation:
+        return guarded_child_kwargs_violation
     filesystem_violation = python_filesystem_mutation_violation(tree, parents)
     if filesystem_violation:
         return filesystem_violation
@@ -19799,4 +20105,311 @@ Go-child or host qualification; rollback remains packet-only to immutable parent
 
 ~~~text
 GREEN current packet certification: 394 Markdown fence markers balanced with matching-style parser, 25 packet-local targets checked, backlog JSON valid, historical 31-row URL/source/disposition ledger present, fresh review comment 5672627276 plus six exact finding links and RED/GREEN/CURRENT transcript present, embedded scanner/parity AST and compile valid across 80 Python bodies, full static scanner passed with 292 shell commands and 80 Python bodies with zero violations, one-file scope and added-line secret/private-path hygiene clean, and git diff --check passed; no live verification claimed; rollback parent c9f986d0256e47aba7fd273c1ae03993193a39c8
+~~~
+
+<a id="fresh-f841-codex-nine-finding-correction"></a>
+### Fresh exact-head Codex findings in [review comment 5672974456](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5672974456) against immutable parent `f84113bf38dd77dacb5dd3ea9b6018c2f2d06471`
+
+The nine fresh exact-head findings below were reproduced first against the
+immutable f841 parent, then corrected in this packet's embedded wrapper and
+static scanner with minimal fail-closed controls. The prior six f841 controls,
+their safe boundaries and the 31-row historical URL/source/disposition ledger
+remain unchanged and are rechecked by the packet-wide certification below. The
+focused probe loads only packet text and AST/token helpers; it starts no Python
+payload, compiler, Go child, workflow, runner, Docker, Lima, Keychain, launchd
+or credential operation and claims no live qualification.
+
+~~~sh
+set -euo pipefail
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import re
+import shlex
+import subprocess
+from pathlib import Path
+
+parent_sha = "f84113bf38dd77dacb5dd3ea9b6018c2f2d06471"
+packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
+parent_packet = subprocess.check_output(
+    ["git", "show", f"{parent_sha}:docs/evidence/g01-recovery-packet.md"],
+    text=True,
+)
+
+def load_scanner(text, label):
+    anchor = text.index("def forbidden_command(tokens, depth=0):")
+    start = text.rfind("source = Path(", 0, anchor)
+    end = text.index("\nmatches = []", anchor)
+    scanner = text[start:end].replace(
+        'source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")',
+        'source = ""',
+        1,
+    )
+    namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+    exec(compile(scanner, "<f841-scanner>", "exec"), namespace)
+    return namespace
+
+def wrapper_source(text):
+    start = text.index("\nimport hashlib\n", text.index("go_test_checked()")) + 1
+    end = text.index("\nPY\n}", start)
+    return text[start:end]
+
+parent = load_scanner(parent_packet, "<immutable-parent-f841-scanner>")
+current = load_scanner(packet, "<current-f841-scanner>")
+parent_wrapper = wrapper_source(parent_packet)
+current_wrapper = wrapper_source(packet)
+
+def inspect(namespace, body):
+    return namespace["inspect_python_heredoc"](body, True)
+
+def shell(namespace, command):
+    return [
+        namespace["forbidden_command"](segment)
+        for segment in namespace["shell_token_segments"](command)
+    ]
+
+def rejected(value):
+    return any(item is not None for item in value) if isinstance(value, list) else value is not None
+
+def red(label, value):
+    if rejected(value):
+        raise SystemExit(f"RED setup changed: parent rejected {label}: {value!r}")
+    print(f"RED {label}: immutable parent accepted finding witness")
+
+def green(label, value):
+    if not rejected(value):
+        raise SystemExit(f"GREEN failure: current accepted {label}")
+    print(f"GREEN {label}/CURRENT: current rejected unsafe witness")
+
+def safe(label, value):
+    if rejected(value):
+        raise SystemExit(f"GREEN failure: current rejected safe control {label}: {value!r}")
+    print(f"GREEN {label}/CURRENT: reviewed safe control remained accepted")
+
+if any(token in parent_wrapper for token in ("ACCESS_KEY", "SECRET_ACCESS_KEY")):
+    raise SystemExit("RED setup changed: parent already has the access-key-family guard")
+print("RED 5672974456 credential AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY: immutable parent has no access-key-family deny rule")
+if "credential_environment_fragments" not in current_wrapper:
+    raise SystemExit("GREEN credential family guard missing")
+if current_wrapper.index("credential_environment_fragments") > current_wrapper.index("env = {"):
+    raise SystemExit("GREEN credential family guard appears after child environment construction")
+print("GREEN 5672974456 credential AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/CURRENT: family deny runs before child env construction")
+
+compiled_reassignment = (
+    "from pathlib import Path\n"
+    "packet = Path('docs/evidence/g01-recovery-packet.md').read_text()\n"
+    "previous = packet\n"
+    "previous = 'gh workflow run ci.yml'\n"
+    "exec(compile(previous, '<x>', 'exec'))\n"
+)
+red("5672974456 compiled-source reassignment", inspect(parent, compiled_reassignment))
+green("5672974456 compiled-source reassignment", inspect(current, compiled_reassignment))
+safe(
+    "5672974456 packet-derived compile without reassignment",
+    inspect(
+        current,
+        "from pathlib import Path\n"
+        "packet = Path('docs/evidence/g01-recovery-packet.md').read_text()\n"
+        "start = 0\nend = 1\n"
+        "exec(compile(packet[start:end], '<x>', 'exec'))\n",
+    ),
+)
+
+for label, body in (
+    (
+        "5672974456 subprocess.__getattribute__ launcher",
+        "import subprocess\nsubprocess.__getattribute__('run')(['gh','workflow','run','ci.yml'])\n",
+    ),
+    (
+        "5672974456 object.__getattribute__ launcher",
+        "import subprocess\nobject.__getattribute__(subprocess,'run')(['gh','workflow','run','ci.yml'])\n",
+    ),
+):
+    red(label, inspect(parent, body))
+    green(label, inspect(current, body))
+safe(
+    "5672974456 non-launcher signal __import__",
+    inspect(current, "import signal\nvalue=__import__('signal').SIGTERM\n"),
+)
+
+for label, command in (
+    ("5672974456 PATH assignment prefix", "PATH=/tmp git status"),
+    ("5672974456 PATH env wrapper", "env PATH=/tmp git status"),
+    ("5672974456 PATH sudo wrapper", "sudo PATH=/tmp git status"),
+    ("5672974456 LD_PRELOAD wrapper", "command LD_PRELOAD=/tmp/libshim.dylib git status"),
+):
+    red(label, shell(parent, command))
+    green(label, shell(current, command))
+for label, command in (
+    ("5672974456 reviewed command assignment", "GOTOOLCHAIN=go1.26.8 git status"),
+    ("5672974456 reviewed env assignment", "env GOTOOLCHAIN=go1.26.8 git status"),
+):
+    safe(label, shell(current, command))
+
+signal_name_only = (
+    "import os\n"
+    "def terminate_go_child_group(process):\n"
+    "    os.killpg(process.pid, 9)\n"
+    "terminate_go_child_group(object())\n"
+)
+red("5672974456 signal helper name-only", inspect(parent, signal_name_only))
+green("5672974456 signal helper name-only", inspect(current, signal_name_only))
+owned_signal_helper = (
+    "import os\nimport signal\nimport subprocess\n"
+    "def wait_for_owned_go_process_group_exit(process, deadline):\n    return False\n"
+    "def close_go_child_streams(process):\n    return None\n"
+    "def terminate_go_child_group(process):\n"
+    "    try:\n"
+    "        os.killpg(process.pid, signal.SIGTERM)\n"
+    "        process.wait(timeout=0)\n"
+    "        if not wait_for_owned_go_process_group_exit(process, 0):\n"
+    "            os.killpg(process.pid, signal.SIGKILL)\n"
+    "    finally:\n"
+    "        close_go_child_streams(process)\n"
+    "def launch():\n"
+    "    process = subprocess.Popen(['printf','safe'], start_new_session=True)\n"
+    "    terminate_go_child_group(process)\n"
+    "launch()\n"
+)
+safe("5672974456 owned signal helper with reviewed Popen provenance", inspect(current, owned_signal_helper))
+
+open_unpack = "open('/outside', **{'mode':'w'})\n"
+red("5672974456 builtin open keyword-unpack mode", inspect(parent, open_unpack))
+green("5672974456 builtin open keyword-unpack mode", inspect(current, open_unpack))
+safe(
+    "5672974456 owned builtin open literal mode keyword",
+    inspect(
+        current,
+        "from pathlib import Path\nfrom tempfile import TemporaryDirectory\n"
+        "with TemporaryDirectory() as td:\n    open(Path(td) / 'safe', mode='w')\n",
+    ),
+)
+
+for label, command in (
+    ("5672974456 POSIX read-write redirection", "printf x <>/tmp/out"),
+    ("5672974456 descriptor POSIX read-write redirection", "printf x 3<>/tmp/out"),
+    ("5672974456 brace descriptor POSIX read-write redirection", "printf x {fd}<>/tmp/out"),
+):
+    red(label, shell(parent, command))
+    green(label, shell(current, command))
+safe("5672974456 owned output redirection", shell(current, 'printf x > "$pair_fragment_tmp/output"'))
+
+for option in ("--pre=/tmp/evil", "--pre /tmp/evil", "--pre-glob=/tmp/*.go", "--pre-glob /tmp/*.go"):
+    command = f"rg {option} pattern ."
+    red(f"5672974456 rg preprocessing {option}", shell(parent, command))
+    green(f"5672974456 rg preprocessing {option}", shell(current, command))
+safe("5672974456 reviewed rg search", shell(current, "rg -n 'pattern' docs"))
+
+for keyword, value in (
+    ("executable", "'/tmp/evil'"),
+    ("shell", "True"),
+    ("preexec_fn", "lambda: None"),
+):
+    red(
+        f"5672974456 guarded child {keyword} override",
+        inspect(parent, parent_wrapper + f"\nrun_go_child(['go','env'], {keyword}={value})\n"),
+    )
+    green(
+        f"5672974456 guarded child {keyword} override",
+        inspect(current, current_wrapper + f"\nrun_go_child(['go','env'], {keyword}={value})\n"),
+    )
+safe(
+    "5672974456 guarded child reviewed keyword set",
+    inspect(
+        current,
+        current_wrapper
+        + "\nrun_go_child(['go','env'], cwd=repo_root, env=go_env, text=True, capture_output=True, check=False)\n",
+    ),
+)
+print("focused f841 nine-finding RED/GREEN/CURRENT boundaries: passed")
+PY
+~~~
+
+Recorded immutable-parent RED and current-head GREEN/CURRENT output:
+
+~~~text
+RED 5672974456 credential AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY: immutable parent has no access-key-family deny rule
+GREEN 5672974456 credential AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/CURRENT: family deny runs before child env construction
+RED 5672974456 compiled-source reassignment: immutable parent accepted finding witness
+GREEN 5672974456 compiled-source reassignment/CURRENT: current rejected unsafe witness
+GREEN 5672974456 packet-derived compile without reassignment/CURRENT: reviewed safe control remained accepted
+RED 5672974456 subprocess.__getattribute__ launcher: immutable parent accepted finding witness
+GREEN 5672974456 subprocess.__getattribute__ launcher/CURRENT: current rejected unsafe witness
+RED 5672974456 object.__getattribute__ launcher: immutable parent accepted finding witness
+GREEN 5672974456 object.__getattribute__ launcher/CURRENT: current rejected unsafe witness
+GREEN 5672974456 non-launcher signal __import__/CURRENT: reviewed safe control remained accepted
+RED 5672974456 PATH assignment prefix: immutable parent accepted finding witness
+GREEN 5672974456 PATH assignment prefix/CURRENT: current rejected unsafe witness
+RED 5672974456 PATH env wrapper: immutable parent accepted finding witness
+GREEN 5672974456 PATH env wrapper/CURRENT: current rejected unsafe witness
+RED 5672974456 PATH sudo wrapper: immutable parent accepted finding witness
+GREEN 5672974456 PATH sudo wrapper/CURRENT: current rejected unsafe witness
+RED 5672974456 LD_PRELOAD wrapper: immutable parent accepted finding witness
+GREEN 5672974456 LD_PRELOAD wrapper/CURRENT: current rejected unsafe witness
+GREEN 5672974456 reviewed command assignment/CURRENT: reviewed safe control remained accepted
+GREEN 5672974456 reviewed env assignment/CURRENT: reviewed safe control remained accepted
+RED 5672974456 signal helper name-only: immutable parent accepted finding witness
+GREEN 5672974456 signal helper name-only/CURRENT: current rejected unsafe witness
+GREEN 5672974456 owned signal helper with reviewed Popen provenance/CURRENT: reviewed safe control remained accepted
+RED 5672974456 builtin open keyword-unpack mode: immutable parent accepted finding witness
+GREEN 5672974456 builtin open keyword-unpack mode/CURRENT: current rejected unsafe witness
+GREEN 5672974456 owned builtin open literal mode keyword/CURRENT: reviewed safe control remained accepted
+RED 5672974456 POSIX read-write redirection: immutable parent accepted finding witness
+GREEN 5672974456 POSIX read-write redirection/CURRENT: current rejected unsafe witness
+RED 5672974456 descriptor POSIX read-write redirection: immutable parent accepted finding witness
+GREEN 5672974456 descriptor POSIX read-write redirection/CURRENT: current rejected unsafe witness
+RED 5672974456 brace descriptor POSIX read-write redirection: immutable parent accepted finding witness
+GREEN 5672974456 brace descriptor POSIX read-write redirection/CURRENT: current rejected unsafe witness
+GREEN 5672974456 owned output redirection/CURRENT: reviewed safe control remained accepted
+RED 5672974456 rg preprocessing --pre=/tmp/evil: immutable parent accepted finding witness
+GREEN 5672974456 rg preprocessing --pre=/tmp/evil/CURRENT: current rejected unsafe witness
+RED 5672974456 rg preprocessing --pre /tmp/evil: immutable parent accepted finding witness
+GREEN 5672974456 rg preprocessing --pre /tmp/evil/CURRENT: current rejected unsafe witness
+RED 5672974456 rg preprocessing --pre-glob=/tmp/*.go: immutable parent accepted finding witness
+GREEN 5672974456 rg preprocessing --pre-glob=/tmp/*.go/CURRENT: current rejected unsafe witness
+RED 5672974456 rg preprocessing --pre-glob /tmp/*.go: immutable parent accepted finding witness
+GREEN 5672974456 rg preprocessing --pre-glob /tmp/*.go/CURRENT: current rejected unsafe witness
+GREEN 5672974456 reviewed rg search/CURRENT: reviewed safe control remained accepted
+RED 5672974456 guarded child executable override: immutable parent accepted finding witness
+GREEN 5672974456 guarded child executable override/CURRENT: current rejected unsafe witness
+RED 5672974456 guarded child shell override: immutable parent accepted finding witness
+GREEN 5672974456 guarded child shell override/CURRENT: current rejected unsafe witness
+RED 5672974456 guarded child preexec_fn override: immutable parent accepted finding witness
+GREEN 5672974456 guarded child preexec_fn override/CURRENT: current rejected unsafe witness
+GREEN 5672974456 guarded child reviewed keyword set/CURRENT: reviewed safe control remained accepted
+focused f841 nine-finding RED/GREEN/CURRENT boundaries: passed
+~~~
+
+| Finding URL and immutable source | Exact finding | Evidence-based current disposition |
+|---|---|---|
+| [review comment 5672974456](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5672974456) | [credential allowlist/deny family](https://github.com/1XP-AI/gh-runnerd/blob/f84113bf38dd77dacb5dd3ea9b6018c2f2d06471/docs/evidence/g01-recovery-packet.md#L504-L508), source `f84113bf38dd77dacb5dd3ea9b6018c2f2d06471` | RED reproduced the parent's missing access-key-family deny rule; the current wrapper rejects inherited and command-prefix names matching access-key, secret-access-key, secret-key and session-token families before `env`/`go_env` construction without recording values. |
+| [review comment 5672974456](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5672974456) | [compiled-source provenance reassignment](https://github.com/1XP-AI/gh-runnerd/blob/f84113bf38dd77dacb5dd3ea9b6018c2f2d06471/docs/evidence/g01-recovery-packet.md#L8262-L8265), source `f84113bf38dd77dacb5dd3ea9b6018c2f2d06471` | RED reproduced a reviewed packet source name overwritten with arbitrary workflow text; current provenance invalidates a source/AST name after any non-provenance reassignment while retaining a packet-derived slice. |
+| [review comment 5672974456](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5672974456) | [indirect `__getattribute__` launcher](https://github.com/1XP-AI/gh-runnerd/blob/f84113bf38dd77dacb5dd3ea9b6018c2f2d06471/docs/evidence/g01-recovery-packet.md#L8430-L8432), source `f84113bf38dd77dacb5dd3ea9b6018c2f2d06471` | RED reproduced both bound and unbound `__getattribute__` command resolution; current indirect-call classification rejects command-capable and unresolved attribute-resolution forms while retaining the non-launcher signal import. |
+| [review comment 5672974456](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5672974456) | [PATH/loader assignment prefix](https://github.com/1XP-AI/gh-runnerd/blob/f84113bf38dd77dacb5dd3ea9b6018c2f2d06471/docs/evidence/g01-recovery-packet.md#L7579-L7580), source `f84113bf38dd77dacb5dd3ea9b6018c2f2d06471` | RED reproduced noncanonical PATH and LD_PRELOAD assignments being stripped before executable classification, including `env` and `sudo`; current validation runs before stripping, retains only the reviewed canonical PATH assignment and rejects other loader assignments. |
+| [review comment 5672974456](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5672974456) | [owned signal-helper provenance](https://github.com/1XP-AI/gh-runnerd/blob/f84113bf38dd77dacb5dd3ea9b6018c2f2d06471/docs/evidence/g01-recovery-packet.md#L9065-L9067), source `f84113bf38dd77dacb5dd3ea9b6018c2f2d06471` | RED reproduced helper-name-only `killpg` approval; current signal policy requires the exact reviewed helper shape and a same-tree owned `Popen(start_new_session=True)` process provenance, while retaining the reviewed private-group helper. |
+| [review comment 5672974456](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5672974456) | [builtin `open` keyword unpacking](https://github.com/1XP-AI/gh-runnerd/blob/f84113bf38dd77dacb5dd3ea9b6018c2f2d06471/docs/evidence/g01-recovery-packet.md#L9642-L9646), source `f84113bf38dd77dacb5dd3ea9b6018c2f2d06471` | RED reproduced `open(..., **{'mode':'w'})`; current filesystem policy rejects every unpacked builtin-open keyword before deciding mutation, while retaining literal reviewed mode keywords inside temporary ownership. |
+| [review comment 5672974456](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5672974456) | [POSIX `<>` redirection](https://github.com/1XP-AI/gh-runnerd/blob/f84113bf38dd77dacb5dd3ea9b6018c2f2d06471/docs/evidence/g01-recovery-packet.md#L7131-L7134), source `f84113bf38dd77dacb5dd3ea9b6018c2f2d06471` | RED reproduced `<>`, numeric-descriptor and brace-descriptor read-write redirections; current shell policy rejects the entire POSIX read-write operator before destination ownership checks while retaining reviewed packet-owned output redirection. |
+| [review comment 5672974456](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5672974456) | [`rg` preprocessing options](https://github.com/1XP-AI/gh-runnerd/blob/f84113bf38dd77dacb5dd3ea9b6018c2f2d06471/docs/evidence/g01-recovery-packet.md#L7638-L7641), source `f84113bf38dd77dacb5dd3ea9b6018c2f2d06471` | RED reproduced both separated and equals `--pre`/`--pre-glob` forms; current `rg` policy rejects preprocessing options before the allowlist accepts `rg`, while retaining ordinary reviewed searches. |
+| [review comment 5672974456](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5672974456) | [guarded child process-creation overrides](https://github.com/1XP-AI/gh-runnerd/blob/f84113bf38dd77dacb5dd3ea9b6018c2f2d06471/docs/evidence/g01-recovery-packet.md#L1376-L1379), source `f84113bf38dd77dacb5dd3ea9b6018c2f2d06471` | RED reproduced `executable`, `shell` and `preexec_fn` forwarding through `run_go_child`; current runtime and AST gates allow only the reviewed child keyword set and reject every other process-creation override before `Popen`. |
+
+These nine findings are resolved only for the embedded offline wrapper/scanner
+policy at the current candidate; no live GitHub/App, runner, workflow,
+credential, Docker, Lima, Keychain or launchd qualification is claimed. The
+exact review comment remains the finding source, the prior six controls and
+historical 31-row ledger remain preserved, and rollback is packet-only to
+immutable parent `f84113bf38dd77dacb5dd3ea9b6018c2f2d06471`.
+
+### Final packet certification after exact-head review comment `5672974456`
+
+The final packet-only certification reruns the nine immutable-parent RED and
+current GREEN/CURRENT boundaries above, then performs matching-style Markdown
+fence parity, packet-local link/anchor resolution, backlog JSON validation,
+the ten-row/four-column changed-boundary ledger check, wrapper/scanner/filter/
+parity AST and compile, the full static scanner, prior-control preservation,
+one-file scope, added-line secret/private-path hygiene and `git diff --check`.
+No live operation, workflow replay, credential use, Go test/child, or merge is
+claimed; the post-push local/remote/PR SHA parity is recorded only in the
+worker handoff so this packet does not become self-referential.
+
+~~~text
+GREEN final packet certification: 402 Markdown fence markers balanced with matching-style parser, 157 packet-local targets checked, backlog JSON valid, changed-boundary ledger valid with 10 data rows and 4 columns, embedded wrapper/scanner/filter/parity AST and compile valid across 81 Python heredoc bodies, full static scanner passed with 294 shell commands and 81 Python heredoc bodies with zero violations, prior six f841 controls and historical 31-row URL/source/disposition ledger preserved, all nine fresh exact-head RED/GREEN/CURRENT boundaries passed, exact review comment plus nine finding links present, one-file scope and added-line secret/private-path hygiene clean, and git diff --check passed; no live verification claimed; rollback parent f84113bf38dd77dacb5dd3ea9b6018c2f2d06471
 ~~~
