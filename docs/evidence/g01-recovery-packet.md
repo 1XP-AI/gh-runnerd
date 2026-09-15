@@ -428,6 +428,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from decimal import Decimal
 from pathlib import Path
@@ -933,6 +934,10 @@ repo_root = Path(
 ).resolve()
 if invocation_root != repo_root:
     raise SystemExit(f"{label}: run this selector from the repository root")
+go_repo_root = repo_root
+source_snapshot_directory = None
+source_snapshot_root = None
+source_snapshot_digest = None
 fixture_child_env = {
     "G01_INPUT_CHILD",
     "G01_NAMED_FIFO_CHILD",
@@ -1928,7 +1933,7 @@ def json_objects(raw, phase):
 
 def verify_downloaded_module_sources():
     """Download and cryptographically verify module sources through bounded Go children."""
-    module_root = (repo_root / module_dir).resolve()
+    module_root = (go_repo_root / module_dir).resolve()
     download = run_go_child(
         ["go", "mod", "download", "-json", "all"],
         cwd=module_root,
@@ -1991,6 +1996,7 @@ def git_worktree_matches_pinned_blobs(repo_root, module_dir, env):
     records = [record for record in source_tree.stdout.split(b"\0") if record]
     if not records:
         raise SystemExit(f"{label}: pinned source-blob set was empty")
+    source_blobs = {}
     for record in records:
         try:
             header, path_bytes = record.split(b"\t", 1)
@@ -2024,6 +2030,48 @@ def git_worktree_matches_pinned_blobs(repo_root, module_dir, env):
             raise SystemExit(
                 f"{label}: raw worktree bytes differ from pinned source blob"
             )
+        source_blobs[relative_path] = worktree_bytes
+    return source_blobs
+
+
+def create_immutable_source_snapshot(repo_root, module_dir, env):
+    """Materialize reviewed source bytes into a private read-only test tree."""
+    snapshot_directory = tempfile.TemporaryDirectory()
+    snapshot_root = Path(snapshot_directory.name)
+    source_blobs = git_worktree_matches_pinned_blobs(repo_root, module_dir, env)
+    directories = {Path(module_dir)}
+    for relative_path, payload in sorted(source_blobs.items()):
+        relative = Path(relative_path)
+        if relative.is_absolute() or ".." in relative.parts:
+            snapshot_directory.cleanup()
+            raise SystemExit(f"{label}: reviewed source path escaped the snapshot root")
+        destination = snapshot_root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(payload)
+        destination.chmod(0o444)
+        parent = relative.parent
+        while parent != Path("."):
+            directories.add(parent)
+            parent = parent.parent
+    for directory in sorted(directories, key=lambda path: len(path.parts), reverse=True):
+        if directory == Path("."):
+            continue
+        snapshot_directory_path = snapshot_root / directory
+        if snapshot_directory_path.is_dir():
+            snapshot_directory_path.chmod(0o555)
+    digest = hashlib.sha256()
+    for relative_path, payload in sorted(source_blobs.items()):
+        digest.update(relative_path.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(payload)
+        destination = snapshot_root / relative_path
+        if destination.is_symlink() or destination.read_bytes() != payload:
+            snapshot_directory.cleanup()
+            raise SystemExit(f"{label}: immutable source snapshot verification failed")
+        if destination.stat().st_mode & 0o222:
+            snapshot_directory.cleanup()
+            raise SystemExit(f"{label}: immutable source snapshot remained writable")
+    return snapshot_directory, snapshot_root, digest.hexdigest()
 
 
 def recheck_reviewed_source_checkout(phase):
@@ -2051,6 +2099,7 @@ def recheck_reviewed_source_checkout(phase):
 
 
 def package_initialization_guard():
+    global go_repo_root, source_snapshot_directory, source_snapshot_root, source_snapshot_digest
     source_tree = subprocess.run(
         git_command(["rev-parse", f"HEAD:{module_dir}"]),
         cwd=repo_root,
@@ -2082,6 +2131,12 @@ def package_initialization_guard():
     # Repeat the raw-byte and checkout checks immediately before module access;
     # metadata/download must not rely on an earlier time-of-check.
     recheck_reviewed_source_checkout("before module download")
+    (
+        source_snapshot_directory,
+        source_snapshot_root,
+        source_snapshot_digest,
+    ) = create_immutable_source_snapshot(repo_root, module_dir, env)
+    go_repo_root = source_snapshot_root
     verify_downloaded_module_sources()
     recheck_reviewed_source_checkout("after module download before metadata")
     list_command = ["go", "list", "-C", module_dir, "-json", "-test"]
@@ -2092,7 +2147,7 @@ def package_initialization_guard():
     list_command.append(package_value)
     metadata = run_go_child(
         list_command,
-        cwd=repo_root,
+        cwd=go_repo_root,
         env=go_env,
         text=True,
         capture_output=True,
@@ -2322,9 +2377,9 @@ def source_fuzz_declarations(source_path):
 
 
 def source_fuzz_guard():
-    package_dir = (repo_root / module_dir / package_value).resolve()
+    package_dir = (go_repo_root / module_dir / package_value).resolve()
     try:
-        package_dir.relative_to(repo_root / module_dir)
+        package_dir.relative_to(go_repo_root / module_dir)
     except ValueError:
         raise SystemExit(f"{label}: package source escaped the reviewed module")
     if not package_dir.is_dir():
@@ -2616,7 +2671,7 @@ if is_vet:
     recheck_reviewed_source_checkout("immediately before vet")
     vet_result = run_go_child(
         command,
-        cwd=repo_root,
+        cwd=go_repo_root,
         env=go_env,
         text=True,
         capture_output=True,
@@ -2628,6 +2683,7 @@ if is_vet:
     print(
         f"{label}: bounded vet validation passed; package {actual_package}; "
         f"build {actual_build}; source tree {reviewed_module_tree}; "
+        f"immutable source snapshot {source_snapshot_digest}; "
         f"GOWORK={go_env['GOWORK']}; GODEBUG={godebug_identity}; "
         f"GOMAXPROCS={gomaxprocs_identity}; "
         f"compiler-tools={compiler_tool_identity}"
@@ -2667,6 +2723,7 @@ print(
     f"GOROOT=default; GOFIPS140={go_env['GOFIPS140']}; "
     f"GOWORK={go_env['GOWORK']}; GODEBUG={godebug_identity}; "
     f"GOMAXPROCS={gomaxprocs_identity}; "
+    f"immutable source snapshot {source_snapshot_digest}; "
     f"source-derived candidates {len(listed)}; "
     f"filtered executed {expected_count} names; "
     f"set-sha256 {actual_digest}"
@@ -2732,7 +2789,7 @@ recheck_reviewed_source_checkout("before test execution")
 run_command = command + ["-json"]
 run_result = run_go_child(
     run_command,
-    cwd=repo_root,
+    cwd=go_repo_root,
     env=go_env,
     text=True,
     capture_output=True,
@@ -8571,7 +8628,7 @@ def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen
 
 
 def python_sensitive_value_names(tree, parents):
-    """Resolve simple credential-bearing aliases before checking output sinks."""
+    """Resolve credential aliases and local-helper parameter taint."""
     sensitive_names = set()
     assignments = []
     for node in ast.walk(tree):
@@ -8592,7 +8649,33 @@ def python_sensitive_value_names(tree, parents):
             return names
         return []
 
-    for _ in range(len(assignments) + 1):
+    local_functions = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+    def function_parameters(function):
+        positional = list(function.args.posonlyargs) + list(function.args.args)
+        return positional + list(function.args.kwonlyargs)
+
+    def call_arguments(call, function):
+        parameters = function_parameters(function)
+        bound = []
+        for index, argument in enumerate(call.args):
+            if index >= len(parameters):
+                break
+            bound.append((parameters[index].arg, argument))
+        parameter_by_name = {parameter.arg: parameter.arg for parameter in parameters}
+        for keyword in call.keywords:
+            if keyword.arg in parameter_by_name:
+                bound.append((keyword.arg, keyword.value))
+        return bound
+
+    # Iterate assignments and direct local-helper calls to a fixed point. The
+    # call-site pass closes the exact environment-map laundering gap where a
+    # helper parameter is later indexed or sent to a sink.
+    for _ in range(len(assignments) + len(local_functions) + 1):
         changed = False
         for target, value in assignments:
             if not python_sensitive_value_expression(
@@ -8603,6 +8686,18 @@ def python_sensitive_value_names(tree, parents):
                 if name not in sensitive_names:
                     sensitive_names.add(name)
                     changed = True
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+                continue
+            function = local_functions.get(node.func.id)
+            if function is None:
+                continue
+            for parameter, argument in call_arguments(node, function):
+                if python_sensitive_value_expression(
+                    argument, sensitive_names, tree, parents
+                ) and parameter not in sensitive_names:
+                    sensitive_names.add(parameter)
+                    changed = True
         if not changed:
             break
     return sensitive_names
@@ -8612,6 +8707,7 @@ def python_dynamic_execution_bindings(tree):
     """Track aliases to built-in dynamic execution primitives conservatively."""
     bindings = set(python_dynamic_execution_names)
     unresolved = set()
+    container_values = {}
 
     def target_names(target):
         if isinstance(target, ast.Name):
@@ -8636,7 +8732,88 @@ def python_dynamic_execution_bindings(tree):
         elif isinstance(node, ast.NamedExpr):
             assignment_values.append((node.target, node.value))
 
-    for _ in range(len(assignment_values) + 1):
+    def container_source(node, seen=None):
+        if seen is None:
+            seen = set()
+        if node is None or id(node) in seen:
+            return None
+        seen.add(id(node))
+        if isinstance(node, (ast.List, ast.Tuple, ast.Dict, ast.Set)):
+            return node
+        if isinstance(node, ast.Name) and node.id in container_values:
+            return container_source(container_values[node.id], seen)
+        return None
+
+    def dynamic_state(node, seen=None):
+        """Return safe/dynamic/unresolved/unknown for container alias values."""
+        if seen is None:
+            seen = set()
+        if node is None or id(node) in seen:
+            return "unknown"
+        seen.add(id(node))
+        if isinstance(node, ast.Name):
+            if node.id in bindings:
+                return "dynamic"
+            if node.id in unresolved:
+                return "unresolved"
+            if node.id in container_values:
+                return dynamic_state(container_values[node.id], seen)
+            return "unknown"
+        if isinstance(node, ast.Constant):
+            return "safe"
+        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+            states = [dynamic_state(element, seen.copy()) for element in node.elts]
+            if "dynamic" in states:
+                return "dynamic"
+            if "unresolved" in states:
+                return "unresolved"
+            if "unknown" in states:
+                return "unknown"
+            return "safe"
+        if isinstance(node, ast.Dict):
+            states = [
+                dynamic_state(element, seen.copy())
+                for element in node.values
+                if element is not None
+            ]
+            if "dynamic" in states:
+                return "dynamic"
+            if "unresolved" in states:
+                return "unresolved"
+            if "unknown" in states:
+                return "unknown"
+            return "safe"
+        if isinstance(node, ast.Subscript):
+            source = container_source(node.value, seen.copy())
+            if source is None:
+                return "unknown"
+            key = node.slice
+            if isinstance(key, ast.Index):
+                key = key.value
+            selected = None
+            if isinstance(source, (ast.List, ast.Tuple)):
+                if isinstance(key, ast.Constant) and isinstance(key.value, int):
+                    index = key.value
+                    if -len(source.elts) <= index < len(source.elts):
+                        selected = source.elts[index]
+            elif isinstance(source, ast.Dict):
+                if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                    for candidate, value in zip(source.keys, source.values):
+                        if (
+                            isinstance(candidate, ast.Constant)
+                            and candidate.value == key.value
+                        ):
+                            selected = value
+                            break
+            if selected is not None:
+                return dynamic_state(selected, seen.copy())
+            container_state = dynamic_state(source, seen.copy())
+            if container_state in {"dynamic", "unresolved"}:
+                return "unresolved"
+            return "unknown"
+        return "unknown"
+
+    for _ in range(len(assignment_values) * 2 + 1):
         changed = False
         for target, value in assignment_values:
             dotted = python_dotted_name(value)
@@ -8648,6 +8825,14 @@ def python_dynamic_execution_bindings(tree):
                 and python_dotted_name(value.args[0]) in {"builtins", "__builtins__"}
             )
             for name in target_names(target):
+                prior_container = container_values.get(name)
+                if isinstance(value, (ast.List, ast.Tuple, ast.Dict, ast.Set)) or (
+                    isinstance(value, ast.Name) and value.id in container_values
+                ):
+                    if prior_container is not value:
+                        container_values[name] = value
+                        changed = True
+                state = dynamic_state(value)
                 if (
                     isinstance(value, ast.Name) and value.id in bindings
                 ) or (
@@ -8657,7 +8842,14 @@ def python_dynamic_execution_bindings(tree):
                     if name not in bindings:
                         bindings.add(name)
                         changed = True
+                elif state == "dynamic":
+                    if name not in bindings:
+                        bindings.add(name)
+                        changed = True
                 elif dynamic_getattr and name not in unresolved:
+                    unresolved.add(name)
+                    changed = True
+                elif state == "unresolved" and name not in unresolved:
                     unresolved.add(name)
                     changed = True
         if not changed:
@@ -8686,6 +8878,10 @@ def python_dynamic_execution_target(node, bindings, unresolved):
     if isinstance(node, ast.Subscript) and python_dotted_name(node.value) in {
         "builtins", "__builtins__",
     }:
+        return "unresolved dynamic Python execution primitive"
+    if isinstance(node, ast.Subscript) and isinstance(
+        node.value, (ast.List, ast.Tuple, ast.Dict, ast.Set)
+    ):
         return "unresolved dynamic Python execution primitive"
     return None
 
@@ -10310,6 +10506,81 @@ def temporary_path_component_safe(value):
     return ".." not in normalized.split("/")
 
 
+def reviewed_source_snapshot_path(node, tree, parents, seen=None):
+    """Prove paths belong to the wrapper's private immutable source snapshot."""
+    if seen is None:
+        seen = set()
+    if node is None or id(node) in seen:
+        return False
+    seen.add(id(node))
+    current = node
+    while current is not None and not isinstance(
+        current, (ast.FunctionDef, ast.AsyncFunctionDef)
+    ):
+        current = parents.get(current)
+    if current is None or current.name != "create_immutable_source_snapshot":
+        return False
+    if isinstance(node, ast.Name) and node.id == "snapshot_root":
+        for candidate in ast.walk(current):
+            if not isinstance(candidate, ast.Assign):
+                continue
+            if not any(
+                isinstance(target, ast.Name)
+                and target.id == "snapshot_root"
+                for target in candidate.targets
+            ):
+                continue
+            value = candidate.value
+            if not (
+                isinstance(value, ast.Call)
+                and python_dotted_name(value.func) in {"Path", "pathlib.Path"}
+                and len(value.args) == 1
+                and not value.keywords
+                and isinstance(value.args[0], ast.Attribute)
+                and value.args[0].attr == "name"
+                and isinstance(value.args[0].value, ast.Name)
+                and value.args[0].value.id == "snapshot_directory"
+            ):
+                continue
+            for source_assignment in ast.walk(current):
+                if not isinstance(source_assignment, ast.Assign):
+                    continue
+                if any(
+                    isinstance(target, ast.Name)
+                    and target.id == "snapshot_directory"
+                    for target in source_assignment.targets
+                ) and temporary_directory_call(source_assignment.value):
+                    return True
+        return False
+    if isinstance(node, ast.Name):
+        for candidate in ast.walk(current):
+            if not isinstance(candidate, ast.Assign):
+                continue
+            if not any(
+                isinstance(target, ast.Name) and target.id == node.id
+                for target in candidate.targets
+            ):
+                continue
+            if reviewed_source_snapshot_path(
+                candidate.value, tree, parents, seen.copy()
+            ):
+                return True
+        return False
+    if isinstance(node, ast.Attribute) and node.attr == "parent":
+        return reviewed_source_snapshot_path(node.value, tree, parents, seen)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        if not reviewed_source_snapshot_path(node.left, tree, parents, seen):
+            return False
+        if isinstance(node.right, ast.Constant):
+            return temporary_path_component_safe(node.right.value)
+        return isinstance(node.right, ast.Name) and node.right.id in {
+            "relative_path",
+            "relative_directory",
+            "directory",
+        }
+    return False
+
+
 python_filesystem_mutating_methods = {
     "chmod",
     "chown",
@@ -10496,7 +10767,7 @@ def python_path_receiver_expression(node, tree, parents, seen=None):
                 continue
             if python_path_receiver_expression(candidate.value, tree, parents, seen):
                 return True
-        return node.id.casefold().endswith(("path", "file", "directory", "dir", "root"))
+        return node.id.casefold().endswith(("path", "file", "directory", "dir", "root")) and not python_unassigned_path_parameter(node, parents)
     if isinstance(node, ast.Attribute):
         return python_path_receiver_expression(node.value, tree, parents, seen)
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
@@ -10510,6 +10781,8 @@ def temporary_path_expression(node, tree, parents, seen=None):
         return False
     if seen is None:
         seen = set()
+    if reviewed_source_snapshot_path(node, tree, parents, seen.copy()):
+        return True
     binding = temporary_directory_binding(node, parents)
     if binding is None:
         return False
@@ -10577,6 +10850,8 @@ def temporary_path_expression(node, tree, parents, seen=None):
                 for value in assignment_values
             )
         return False
+    if isinstance(node, ast.Attribute) and node.attr == "parent":
+        return temporary_path_expression(node.value, tree, parents, seen)
     if isinstance(node, ast.Call):
         dotted = python_dotted_name(node.func)
         if dotted in {"Path", "pathlib.Path"} and len(node.args) == 1 and not node.keywords:
@@ -10598,9 +10873,26 @@ def temporary_path_expression(node, tree, parents, seen=None):
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
         return (
             temporary_path_expression(node.left, tree, parents, seen)
-            and isinstance(node.right, ast.Constant)
-            and isinstance(node.right.value, str)
-            and temporary_path_component_safe(node.right.value)
+            and (
+                (
+                    isinstance(node.right, ast.Constant)
+                    and isinstance(node.right.value, str)
+                    and temporary_path_component_safe(node.right.value)
+                )
+                or (
+                    isinstance(node.right, ast.Name)
+                    and node.right.id in {
+                        "relative_path",
+                        "relative_directory",
+                        "directory",
+                    }
+                    and any(
+                        isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        and parent.name == "create_immutable_source_snapshot"
+                        for parent in _python_parent_chain(node, parents)
+                    )
+                )
+            )
         )
     return False
 
@@ -10921,6 +11213,104 @@ python_reviewed_read_path_names = {
     "directory",
 }
 
+# These are the only helper parameters whose path provenance is reviewed by
+# this packet. All other function parameters, including path-like names, are
+# rejected unless the function body assigns them from a reviewed path value.
+python_reviewed_read_path_parameters = {
+    ("anchors", "path"),
+    ("assignment", "path"),
+    ("git_worktree_matches_pinned_blobs", "repo_root"),
+    ("git_worktree_matches_pinned_blobs", "relative_path"),
+    ("source_fuzz_declarations", "source_path"),
+    ("source_test_names", "source_path"),
+}
+
+
+def python_unassigned_path_parameter(node, parents):
+    """Recognize a function parameter that has no reviewed assignment."""
+    if not isinstance(node, ast.Name):
+        return False
+    current = node
+    while current is not None:
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            arguments = (
+                list(current.args.posonlyargs)
+                + list(current.args.args)
+                + list(current.args.kwonlyargs)
+            )
+            return any(argument.arg == node.id for argument in arguments)
+        current = parents.get(current)
+    return False
+
+
+def python_reviewed_read_path_parameter(node, tree, parents):
+    """Permit only named helper parameters with explicit packet provenance."""
+    if not python_unassigned_path_parameter(node, parents):
+        return False
+    current = node
+    while current is not None and not isinstance(
+        current, (ast.FunctionDef, ast.AsyncFunctionDef)
+    ):
+        current = parents.get(current)
+    if current is None:
+        return False
+    return (current.name, node.id) in python_reviewed_read_path_parameters
+
+
+def python_reviewed_markdown_file_value(node, tree):
+    """Prove the link checker Path(name) value came from Git's Markdown list."""
+    if not (
+        isinstance(node, ast.Call)
+        and python_dotted_name(node.func) in {"Path", "pathlib.Path"}
+        and len(node.args) == 1
+        and not node.keywords
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id == "name"
+    ):
+        return False
+    files_from_git = False
+    for candidate in ast.walk(tree):
+        if not isinstance(candidate, ast.Assign):
+            continue
+        if not any(
+            isinstance(target, ast.Name) and target.id == "files"
+            for target in candidate.targets
+        ):
+            continue
+        value = candidate.value
+        if (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Attribute)
+            and value.func.attr == "splitlines"
+            and isinstance(value.func.value, ast.Call)
+        ):
+            value = value.func.value
+        if not (
+            isinstance(value, ast.Call)
+            and python_dotted_name(value.func) == "subprocess.check_output"
+            and value.args
+            and isinstance(value.args[0], (ast.List, ast.Tuple))
+            and [
+                item.value
+                for item in value.args[0].elts
+                if isinstance(item, ast.Constant)
+            ][:3]
+            == ["git", "ls-files", "*.md"]
+        ):
+            continue
+        files_from_git = True
+        break
+    if not files_from_git:
+        return False
+    return any(
+        isinstance(candidate, ast.For)
+        and isinstance(candidate.target, ast.Name)
+        and candidate.target.id == "name"
+        and isinstance(candidate.iter, ast.Name)
+        and candidate.iter.id == "files"
+        for candidate in ast.walk(tree)
+    )
+
 
 def python_reviewed_read_path(node, tree, parents, seen=None):
     """Allow reads only from reviewed repository or owned temporary paths."""
@@ -10960,7 +11350,9 @@ def python_reviewed_read_path(node, tree, parents, seen=None):
                 python_reviewed_read_path(value, tree, parents, seen.copy())
                 for value in assignments
             )
-        return node.id in python_reviewed_read_path_names
+        if python_reviewed_read_path_parameter(node, tree, parents):
+            return True
+        return False
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
         return (
             python_reviewed_read_path(node.left, tree, parents, seen)
@@ -10981,6 +11373,8 @@ def python_reviewed_read_path(node, tree, parents, seen=None):
         )
     if isinstance(node, ast.Call):
         if python_dotted_name(node.func) in {"Path", "pathlib.Path"} and len(node.args) == 1 and not node.keywords:
+            if python_reviewed_markdown_file_value(node, tree):
+                return True
             return python_reviewed_read_path(node.args[0], tree, parents, seen)
         if (
             isinstance(node.func, ast.Attribute)
@@ -19555,6 +19949,375 @@ print("RED 4008765552: exact parent accepted scp/sftp remote-copy launchers and 
 PY
 ~~~
 
+## Fresh P2 remediation for exact-head review comment `5675570465`
+
+The four actionable P2 findings in [fresh Codex review comment
+5675570465](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5675570465)
+are handled by the packet's offline controls only. The immutable parent for
+this correction is `21f258a4215c667c245abb44ea419eb7901de2ad`; the preceding
+fresh 11-row evidence and the f841/393d/b16/755968f9 ledgers remain unchanged
+above, as do the exact prior review records, explicit live gaps, and rollback
+parent records.
+
+### Exact immutable-parent RED probes (run first)
+
+This probe loads the packet and scanner from the exact immutable parent without
+executing any witness. The parent accepts the three newly actionable Python
+witnesses, and its Go wrapper has no immutable snapshot and launches reviewed
+Go children from mutable `repo_root`, which records the documented concurrent
+writer TOCTOU gap rather than claiming live qualification.
+
+```sh
+set -euo pipefail
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
+# g01-safe-python-heredoc: reviewed exact-parent RED probe; witnesses remain strings
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import re
+import shlex
+import subprocess
+from pathlib import Path
+
+parent_sha = "21f258a4215c667c245abb44ea419eb7901de2ad"
+parent_packet = subprocess.check_output(
+    ["git", "show", f"{parent_sha}:docs/evidence/g01-recovery-packet.md"],
+    text=True,
+)
+anchor = parent_packet.index("def forbidden_command(tokens, depth=0):")
+start = parent_packet.rfind("source = Path(", 0, anchor)
+end = parent_packet.index("\nmatches = []", anchor)
+scanner = parent_packet[start:end].replace(
+    'source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")',
+    'source = ""',
+    1,
+)
+namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+exec(compile(scanner, "<exact-parent-21f-scanner>", "exec"), namespace)
+
+def inspect(body):
+    return namespace["inspect_python_heredoc"](body, True)
+
+def rejected(value):
+    return any(item is not None for item in value) if isinstance(value, list) else value is not None
+
+cases = [
+    (
+        "credential helper parameter",
+        'import os\ndef emit(e):\n    print(e["GITHUB_TOKEN"])\nemit(os.environ)\n',
+    ),
+    (
+        "path input helper parameter",
+        'from pathlib import Path\ndef leak(path):\n    return Path(path).read_text()\nprint(leak(input()))\n',
+    ),
+    (
+        "dynamic list subscript alias",
+        'action = [eval][0]\naction(\'__import__("os").system("gh workflow run x")\')\n',
+    ),
+]
+for label, body in cases:
+    result = inspect(body)
+    if rejected(result):
+        raise SystemExit(f"RED setup changed: exact parent rejected {label}: {result!r}")
+    print(f"RED 21f258a {label}: immutable parent accepted unsafe witness")
+
+wrapper_start = parent_packet.index("go_test_checked() {")
+heredoc = parent_packet.index('/opt/homebrew/bin/python3 -I - "$@" <<\'PY\'', wrapper_start)
+body_start = parent_packet.index("\n", heredoc) + 1
+body_end = parent_packet.index("\nPY\n}", body_start)
+wrapper = parent_packet[body_start:body_end]
+ast.parse(wrapper)
+for marker in ("create_immutable_source_snapshot", "TemporaryDirectory", "source_snapshot_digest"):
+    if marker in wrapper:
+        raise SystemExit(f"RED setup changed: exact parent already contains {marker}")
+if "cwd=repo_root" not in wrapper:
+    raise SystemExit("RED setup changed: exact parent no longer uses mutable repo_root")
+print("RED 21f258a immutable Go source input: parent ran reviewed Go children from mutable repo_root without snapshot")
+print("exact-parent 21f258a RED probes: all four fresh P2 findings accepted")
+PY
+```
+
+Recorded exact-parent RED output:
+
+```text
+RED 21f258a credential helper parameter: immutable parent accepted unsafe witness
+RED 21f258a path input helper parameter: immutable parent accepted unsafe witness
+RED 21f258a dynamic list subscript alias: immutable parent accepted unsafe witness
+RED 21f258a immutable Go source input: parent ran reviewed Go children from mutable repo_root without snapshot
+exact-parent 21f258a RED probes: all four fresh P2 findings accepted
+```
+
+### Minimal packet-only controls and refactor
+
+Credential/environment taint now reaches local helper parameters through a
+fixed-point call-argument pass. A sensitive expression passed to a local helper
+marks the corresponding parameter sensitive; credential-key subscripts such as
+`e["GITHUB_TOKEN"]` therefore fail closed at output/error sinks even when the
+environment object is renamed or forwarded through another local helper.
+
+Reviewed path parameters are no longer trusted merely because their names look
+like paths. The allowlist is an exact function/parameter provenance map for
+packet-owned helpers; unassigned or path-like parameters and values from
+`input()` remain rejected, while the existing direct repository-path and
+packet-owned helper controls remain accepted.
+
+Dynamic execution resolution now models literal list, tuple, dictionary and set
+containers plus constant subscript selection, including aliases of those
+containers. A dynamic executor hidden in `[eval][0]`, a container alias, or an
+unresolved index remains dynamic and is rejected before any call; only a
+literal safe container value is accepted.
+
+Reviewed Go test inputs now receive an immutable source snapshot immediately
+after the final mutable-worktree recheck and before module access. The wrapper
+copies the verified HEAD/worktree bytes into a private `TemporaryDirectory`,
+verifies path containment, content bytes and a deterministic digest, makes files
+read-only (`0444`) and directories non-writable (`0555`), then runs module
+download/list, vet and test from the snapshot root. Mutable-worktree status and
+raw-byte checks remain at their existing boundaries; the snapshot closes the
+documented concurrent-writer TOCTOU gap for reviewed inputs, but it is not
+hostile same-user isolation and does not qualify any live runner operation.
+
+The refactor is limited to shared packet predicates and the wrapper's source
+input boundary. No source code, runner, Lima, Docker context, App, Keychain,
+launchd, workflow state, credential, live operation or GitHub comment changed.
+
+### Current GREEN and failure-boundary probes
+
+The current-head probe loads the scanner from this packet and checks the exact
+three Python witnesses, plus an unknown-index container boundary. It checks
+reviewed helper/read/list controls and inspects the wrapper AST and source text
+for snapshot creation, byte/directory permissions, digest verification and
+Go-child cwd pinning; no witness or Go child is executed.
+
+```sh
+set -euo pipefail
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
+# g01-safe-python-heredoc: reviewed current-head four-finding GREEN/boundary probe
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import re
+import shlex
+from pathlib import Path
+
+packet_path = "docs/evidence/g01-recovery-packet.md"
+packet = Path(packet_path).read_text(encoding="utf-8")
+anchor = packet.index("def forbidden_command(tokens, depth=0):")
+start = packet.rfind("source = Path(", 0, anchor)
+end = packet.index("\nmatches = []", anchor)
+scanner = packet[start:end].replace(
+    'source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")',
+    'source = ""',
+    1,
+)
+namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+exec(compile(scanner, "<current-21f-scanner>", "exec"), namespace)
+
+def inspect(body):
+    return namespace["inspect_python_heredoc"](body, True)
+
+def rejected(value):
+    return any(item is not None for item in value) if isinstance(value, list) else value is not None
+
+unsafe = [
+    (
+        "credential helper parameter",
+        'import os\ndef emit(e):\n    print(e["GITHUB_TOKEN"])\nemit(os.environ)\n',
+    ),
+    (
+        "path input helper parameter",
+        'from pathlib import Path\ndef leak(path):\n    return Path(path).read_text()\nprint(leak(input()))\n',
+    ),
+    (
+        "dynamic list subscript alias",
+        'action = [eval][0]\naction(\'__import__("os").system("gh workflow run x")\')\n',
+    ),
+    (
+        "dynamic container unknown index",
+        'box = [eval]\naction = box[input()]\naction(\'__import__("os").system("gh workflow run x")\')\n',
+    ),
+]
+for label, body in unsafe:
+    result = inspect(body)
+    if not rejected(result):
+        raise SystemExit(f"GREEN failure: current accepted {label}: {result!r}")
+    print(f"GREEN 21f258a {label}: current rejected unsafe witness")
+
+safe = [
+    (
+        "reviewed noncredential helper output",
+        'def emit(value):\n    print(value)\nemit("safe")\n',
+    ),
+    (
+        "reviewed repository helper read",
+        'from pathlib import Path\ndef anchors(path):\n    return path.read_text(encoding="utf-8")\nanchors(Path("docs/evidence/g01-recovery-packet.md"))\n',
+    ),
+    ("reviewed safe list alias", 'box = ["safe"]\naction = box[0]\nprint(action)\n'),
+    (
+        "reviewed direct packet read",
+        'from pathlib import Path\nPath("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")\n',
+    ),
+]
+for label, body in safe:
+    result = inspect(body)
+    if rejected(result):
+        raise SystemExit(f"GREEN failure: current rejected {label}: {result!r}")
+    print(f"GREEN 21f258a {label}: reviewed safe control accepted")
+
+wrapper_start = packet.index("go_test_checked() {")
+heredoc = packet.index('/opt/homebrew/bin/python3 -I - "$@" <<\'PY\'', wrapper_start)
+body_start = packet.index("\n", heredoc) + 1
+body_end = packet.index("\nPY\n}", body_start)
+wrapper = packet[body_start:body_end]
+ast.parse(wrapper)
+if wrapper.count("def create_immutable_source_snapshot") != 1:
+    raise SystemExit("immutable source snapshot helper count changed")
+for marker in (
+    "tempfile.TemporaryDirectory()",
+    "destination.write_bytes(payload)",
+    "destination.chmod(0o444)",
+    "snapshot_directory_path.chmod(0o555)",
+    "source_snapshot_digest",
+):
+    if marker not in wrapper:
+        raise SystemExit(f"missing immutable snapshot marker: {marker}")
+snapshot_call = wrapper.index(") = create_immutable_source_snapshot")
+metadata_call = wrapper.index("test_source_paths = package_initialization_guard()")
+if snapshot_call > metadata_call:
+    raise SystemExit("snapshot creation moved after test-source acquisition")
+if wrapper.count("cwd=go_repo_root") < 2:
+    raise SystemExit("Go vet/test no longer run from immutable snapshot root")
+print("GREEN 21f258a immutable Go source input: reviewed bytes copied/read-only and Go vet/test cwd pinned")
+
+boundary = [
+    (
+        "credential helper sink boundary",
+        'import os\ndef emit(value):\n    print(value)\nemit(os.environ["GITHUB_TOKEN"])\n',
+    ),
+    (
+        "unassigned path parameter boundary",
+        'from pathlib import Path\ndef leak(path):\n    return Path(path).read_bytes()\nleak("docs/backlog.json")\n',
+    ),
+    (
+        "dynamic container input-index boundary",
+        'box = [eval]\naction = box[input()]\naction("safe")\n',
+    ),
+]
+for label, body in boundary:
+    result = inspect(body)
+    if not rejected(result):
+        raise SystemExit(f"boundary failure: current accepted {label}: {result!r}")
+    print(f"BOUNDARY 21f258a {label}: expected conservative rejection")
+print("focused 21f258a four-finding GREEN/boundary probes: passed")
+PY
+```
+
+Recorded current GREEN and failure-boundary output:
+
+```text
+GREEN 21f258a credential helper parameter: current rejected unsafe witness
+GREEN 21f258a path input helper parameter: current rejected unsafe witness
+GREEN 21f258a dynamic list subscript alias: current rejected unsafe witness
+GREEN 21f258a dynamic container unknown index: current rejected unsafe witness
+GREEN 21f258a reviewed noncredential helper output: reviewed safe control accepted
+GREEN 21f258a reviewed repository helper read: reviewed safe control accepted
+GREEN 21f258a reviewed safe list alias: reviewed safe control accepted
+GREEN 21f258a reviewed direct packet read: reviewed safe control accepted
+GREEN 21f258a immutable Go source input: reviewed bytes copied/read-only and Go vet/test cwd pinned
+BOUNDARY 21f258a credential helper sink boundary: expected conservative rejection
+BOUNDARY 21f258a unassigned path parameter boundary: expected conservative rejection
+BOUNDARY 21f258a dynamic container input-index boundary: expected conservative rejection
+focused 21f258a four-finding GREEN/boundary probes: passed
+```
+
+### Fresh four-row finding ledger
+
+Each row records the exact review comment, immutable parent and focused
+RED/GREEN/boundary result. The historical changed-boundary 10-row ledger,
+historical 31-row ledger, predecessor fresh 11-row ledger and the
+f841/393d/b16/755968f9 ledgers remain preserved above.
+
+| # | Exact finding URL and immutable source | Finding and parent anchor | RED/GREEN/boundary evidence |
+|---|---|---|---|
+| 1 | [review comment 5675570465](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5675570465); source `21f258a4215c667c245abb44ea419eb7901de2ad` | Credential/environment taint through local helper parameters; [parent scanner lines 8573-8609](https://github.com/1XP-AI/gh-runnerd/blob/21f258a4215c667c245abb44ea419eb7901de2ad/docs/evidence/g01-recovery-packet.md#L8573-L8609) | RED exact `emit(os.environ)` witness reached `print(e["GITHUB_TOKEN"])`; GREEN rejects helper-parameter taint at the sink, with safe noncredential output accepted. |
+| 2 | [review comment 5675570465](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5675570465); source `21f258a4215c667c245abb44ea419eb7901de2ad` | Unproven/path-like `Path` parameters; [parent scanner lines 10925-10967](https://github.com/1XP-AI/gh-runnerd/blob/21f258a4215c667c245abb44ea419eb7901de2ad/docs/evidence/g01-recovery-packet.md#L10925-L10967) | RED exact `leak(input())` witness reached `Path(path).read_text()`; GREEN rejects unassigned/path-like parameters and accepts only exact reviewed helper provenance. |
+| 3 | [review comment 5675570465](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5675570465); source `21f258a4215c667c245abb44ea419eb7901de2ad` | Dynamic executors laundered through containers/subscript aliases; [parent scanner lines 8611-8655](https://github.com/1XP-AI/gh-runnerd/blob/21f258a4215c667c245abb44ea419eb7901de2ad/docs/evidence/g01-recovery-packet.md#L8611-L8655) | RED exact `[eval][0]` witness remained executable; GREEN rejects list/container aliases and unknown-index laundering while retaining literal safe-container acceptance. |
+| 4 | [review comment 5675570465](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5675570465); source `21f258a4215c667c245abb44ea419eb7901de2ad` | Mutable reviewed Go test inputs and concurrent-writer TOCTOU; [parent wrapper lines 2053-2095, 2614-2620 and 2735](https://github.com/1XP-AI/gh-runnerd/blob/21f258a4215c667c245abb44ea419eb7901de2ad/docs/evidence/g01-recovery-packet.md#L2053-L2095) | RED parent had no snapshot and ran Go children with `cwd=repo_root`; GREEN materializes and verifies an immutable read-only source snapshot before module access, then runs vet/test from its root without claiming live qualification. |
+
+These four findings are resolved only in the offline packet scanner and
+reviewed Go-input wrapper. No live GitHub/App, runner, workflow, Docker, Lima,
+Keychain, launchd or credential verification was run or claimed; no GitHub
+comment or review was posted. Rollback is packet-only to immutable parent
+`21f258a4215c667c245abb44ea419eb7901de2ad`, with the prior rollback parents
+and all independent evidence retained above.
+
+### Final packet certification after exact-head review comment `5675570465`
+
+Final certification reruns the exact-parent RED and current GREEN/boundary
+probes above, then checks Markdown fences, local targets/fragments/anchors,
+backlog JSON, every preserved ledger, exact review-record URLs, embedded
+wrapper/scanner AST and compile/parity, the full forbidden-live scanner,
+one-file scope, secret/private-path hygiene and `git diff --check`. Local,
+remote and PR SHA parity is recorded after the candidate push; no live
+verification, workflow replay, credential use, source-code test, merge or
+Codex review is claimed. Rollback parent is exactly
+`21f258a4215c667c245abb44ea419eb7901de2ad`.
+
+```sh
+set -euo pipefail
+# g01-safe-python-heredoc: reviewed final packet-shape certification
+/opt/homebrew/bin/python3 -I - <<'PY'
+import re
+from pathlib import Path
+
+packet_path = "docs/evidence/g01-recovery-packet.md"
+packet = Path(packet_path).read_text(encoding="utf-8")
+fresh_start = packet.index("## Fresh P2 remediation for exact-head review comment `5675570465`")
+fresh_end = packet.index('\n<a id="fresh-755968f-codex-nine-finding-correction"></a>', fresh_start)
+fresh = packet[fresh_start:fresh_end]
+fresh_probe_end = fresh.index("### Fresh four-row finding ledger")
+fresh_probe_section = fresh[:fresh_probe_end]
+fresh_shell_probes = sum(line == "```sh" for line in fresh_probe_section.splitlines())
+if fresh_shell_probes != 2:
+    raise SystemExit(f"fresh shell probe count changed: {fresh_shell_probes}")
+ledger_start = fresh.index("### Fresh four-row finding ledger")
+ledger_end = fresh.index("### Final packet certification", ledger_start)
+ledger = fresh[ledger_start:ledger_end]
+if ledger.count("| 1 |") != 1 or ledger.count("| 2 |") != 1 or ledger.count("| 3 |") != 1 or ledger.count("| 4 |") != 1:
+    raise SystemExit("fresh four-row ledger shape changed")
+rollback_parent = "21f258a4215c667c245abb44ea419eb7901de2ad"
+if fresh.count(rollback_parent) < 4:
+    raise SystemExit("fresh rollback parent or ledger provenance was omitted")
+fences = []
+for line_number, line in enumerate(packet.splitlines(), 1):
+    match = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+    if not match:
+        continue
+    marker, info = match.groups()
+    if fences and marker[0] == fences[-1][0] and len(marker) >= len(fences[-1]) and not info.strip():
+        fences.pop()
+    elif not fences and info.strip():
+        fences.append(marker)
+if fences:
+    raise SystemExit(f"unclosed Markdown fence at packet line {packet.splitlines().__len__()}")
+print(f"GREEN certification shape: {fresh_shell_probes} scoped fresh shell probes (exact-parent RED/current GREEN), four-row ledger, rollback parent {rollback_parent}, Markdown fences balanced")
+PY
+jq empty docs/backlog.json
+git diff --check
+```
+
+Recorded final packet-shape certification output:
+
+```text
+GREEN certification shape: 2 scoped fresh shell probes (exact-parent RED/current GREEN), four-row ledger, rollback parent 21f258a4215c667c245abb44ea419eb7901de2ad, Markdown fences balanced
+```
+
+Recorded final packet certification output:
+
+~~~text
+GREEN final packet certification: 454 Markdown fence markers balanced with matching-style parser, 1016 total links (157 local, 49 fragments, 859 external syntax-skipped), backlog JSON valid, changed-boundary ledger valid with 10 rows x 4 columns, historical URL/source/disposition ledger valid with 31 rows, predecessor fresh 11-row/f841-nine/393d-six/b16a-four/755968f9-nine ledgers preserved, fresh 21f four-row ledger valid, exact-parent RED and current GREEN/boundary probes passed with 2 scoped fresh shell probes plus 1 packet-shape script and 0 script errors, embedded wrapper/scanner/filter/parity AST and compile valid across 91 Python heredoc bodies, full static scanner passed with 319 shell commands and 91 Python heredoc bodies with zero violations, c9f triple-backtick Python heredoc marker remediation passed, one-file scope and added-line secret/private-path hygiene clean, and git diff --check passed; no live verification, workflow replay, credential use, source-code test, merge or Codex review claimed; rollback parent 21f258a4215c667c245abb44ea419eb7901de2ad
+~~~
+
 <a id="fresh-755968f-codex-nine-finding-correction"></a>
 ### Fresh exact-head Codex findings in [review comment 5674030950](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5674030950) against immutable parent `755968f9b4343c860cd8ddeca12a97b277c6e1b5`
 
@@ -21386,6 +22149,7 @@ launchd or credential operation and makes no live qualification.
 
 ```sh
 set -euo pipefail
+# g01-safe-python-heredoc: reviewed c9f six-finding RED/GREEN/CURRENT boundary
 /opt/homebrew/bin/python3 -I - <<'PY'
 import ast
 import re
