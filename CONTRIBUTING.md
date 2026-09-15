@@ -9,8 +9,8 @@ documentation-only changes record why no artificial test is needed. Use
 selectors; it fails closed for missing or no-match selectors and is not the full
 gate. Keep intermediate commits local. Batch source, documentation and
 finding-ledger fixes before pushing one stable review candidate rather than
-launching hosted CI and a review for every local commit. Repeat the full
-candidate gate only after the head or relevant risk boundary changes.
+launching hosted CI and a review for every local commit. Repeat the PR quick gate
+only after the head or relevant risk boundary changes.
 
 Independent reviewers use the immutable candidate source and exact-source CI
 evidence, adding delta/risk probes instead of repeating the complete suite. A
@@ -23,13 +23,15 @@ hardening into follow-up issues; give routine P2/P3/nit findings a one-time
 disposition instead of opening speculative work.
 
 The public baseline is documented in [CI.md](docs/CI.md). `make check` remains the
-complete public validation suite and hosted PR CI remains the required stable
-candidate gate; it is not an automatic per-commit requirement. The final merge
-gate still requires exact-head GitHub Codex review, required CI for that same SHA,
-stale/outdated finding inspection and triage, resolution or rebuttal of every
-blocking finding, linked follow-up issues for valuable non-blocking hardening,
-one-time dispositions for routine findings, and any applicable security second
-pass. Main's postmerge integration run does not replace those premerge checks.
+complete local validation suite, while the hosted PR quick workflow is the required
+stable candidate gate; neither is an automatic per-commit requirement. The full
+Public CI matrix runs once on source-affecting merges to `main` as integration
+evidence rather than on every PR push; documentation-only pushes are filtered
+out. The final merge gate still requires exact-head GitHub Codex
+review, the PR quick check for that same SHA, stale/outdated finding inspection
+and triage, resolution or rebuttal of every blocking finding, linked follow-up
+issues for valuable non-blocking hardening, one-time dispositions for routine
+findings, and any applicable security second pass.
 
 Release, macOS, soak and other trusted/live checks run before the applicable
 release or live qualification only, with an immutable reviewed commit and

@@ -29,8 +29,8 @@ for the complete gate.
 | Writer / edit | Red -> minimal green -> refactor; focused checks and `git diff --check` while iterating. Batch source, docs and finding-ledger changes before one review candidate push. |
 | Independent reviewer(s) | Review the immutable candidate source and shared exact-source CI evidence; run only delta/risk probes. Add the independent Luna max security/recovery pass when the changed boundary warrants it. Do not duplicate the full suite by default. |
 | Coordinator | Audit the contract, changed surface, finding ledger and exact-source CI/review records; coordinate resolution. The coordinator is not a third full-suite tester. |
-| Candidate / premerge | The pushed PR head receives the complete hosted CI matrix once stable. Preserve required job/check names, complete coverage, exact pull-request-head checkout, cache policy and timeouts. |
-| Main / postmerge | The same workflow on `main` is integration evidence after merge; it does not replace the premerge candidate gate or authorize a merge. |
+| Candidate / premerge | The pushed PR head receives one hosted PR quick check once stable. It covers diff hygiene plus source static/compile/dependency/license/vulnerability checks; it intentionally does not run the full unit, race, fuzz or offline matrix. |
+| Main / postmerge | `Public CI` runs the complete root, race, offline-module and vulnerability matrix after a source-affecting merge to `main` (or explicit dispatch). Documentation-only pushes are filtered out. It is integration evidence and does not replace the premerge PR quick gate or authorize a merge. |
 | Release/live qualification | Run release, macOS, soak and other trusted/live profiles only before the applicable release or live qualification, on a reviewed immutable commit with explicit maintainer authorization. Do not defer a mandatory security gate. |
 
 Use one finding ledger per candidate: carry each previously resolved finding with
@@ -43,12 +43,13 @@ follow-up issue; routine P2/P3/nit findings receive a one-time disposition and a
 closed without a fix or issue. Neither class stops the candidate by severity alone.
 A new internal full review is needed only when the changed diff crosses a new risk
 or interface boundary; focused delta review remains required for ordinary fixes.
-GitHub Codex review and the required CI gate are separate and stricter: immediately
-before merge, Codex must have reviewed the exact final HEAD, every finding must be
-triaged, no blocking finding may remain unresolved, required CI must pass for that
-same SHA, and a security second pass remains required where applicable. Do not
-request repetitive Codex reviews mid-edit; after a blocking fix push, request and
-await the fresh exact-head review.
+GitHub Codex review and the required PR quick gate are separate and stricter:
+immediately before merge, Codex must have reviewed the exact final HEAD, every
+finding must be triaged, no blocking finding may remain unresolved, and the PR
+quick check must pass for that same SHA. The full Public CI matrix is postmerge
+integration evidence; it is not a premerge substitute. A security second pass
+remains required where applicable. Do not request repetitive Codex reviews
+mid-edit; after a blocking fix push, request and await the fresh exact-head review.
 
 ### Loop and CI economy
 
@@ -59,15 +60,16 @@ not every commit as a release candidate. Use this bounded cadence:
 |---|---|---|
 | Local edit | `git diff --check`, secret/path scan, and the smallest meaningful red/green or focused boundary test | `make check`, hosted CI or Codex review for every local commit |
 | Candidate preparation | Batch source, docs and finding-ledger changes; run focused normal/race checks once after the batch | Push each fix commit separately |
-| Candidate push | Push one stable head and consume its hosted full matrix once | Re-run the same full matrix while the input SHA and changed risk are unchanged |
-| Review correction | Batch actionable findings, push one correction head, then run CI and request one fresh exact-head Codex review | Ask Codex to review intermediate heads or run a third full-suite pass as coordinator |
-| Merge | Freeze the reviewed SHA, verify CI/reviews, then merge that exact SHA | Add source changes after the final review or use postmerge CI as a substitute |
+| Candidate push | Push one stable head and consume its hosted PR quick check once | Push each fix commit separately or run the full main matrix before merge |
+| Review correction | Batch actionable findings, push one correction head, then run the PR quick check and request one fresh exact-head Codex review | Ask Codex to review intermediate heads or run a full-suite pass before merge |
+| Merge | Freeze the reviewed SHA, verify the PR quick check/reviews, then merge that exact SHA | Add source changes after the final review or use postmerge Public CI as a substitute |
 
 Documentation-only changes use link, diff and secret-pattern checks; they do not
-create artificial Go red tests or trigger a full application suite locally. A
-full check may be repeated only when the input SHA, relevant dependency, toolchain,
-changed risk boundary or prior result changed, or when the earlier run was
-interrupted/inconclusive. Record the reason in the PR evidence.
+create artificial Go red tests or trigger a full application suite locally. A PR
+quick check may be repeated only when the input SHA, relevant dependency,
+toolchain, changed risk boundary or prior result changed, or when the earlier run
+was interrupted/inconclusive. The full matrix belongs to the resulting `main` SHA;
+record any explicit manual rerun reason in the PR or release evidence.
 
 For Orca coordination, consume one delivery once, acknowledge it after processing,
 and use `check --wait` for the next event. Do not poll the same empty mailbox or
@@ -83,7 +85,7 @@ attempt and one evidence ledger are the reusable unit.
 3. Create a dedicated branch/worktree. Keep one issue's behavior in one PR; split only if the issue's acceptance contract requires it.
 4. Follow red -> green -> refactor, with meaningful failure evidence before the fix and relevant automated checks afterward.
 5. Ask the assigned independent reviewer to check invariants and failure cases. Independent review uses `gpt-luna-max` unless the user explicitly selects another allowed route; an implementer override does not silently change the reviewer. Record reviewer/model and outcomes in the PR. This internal review is separate from the GitHub Codex review.
-6. Move Project status to In review. Wait for GitHub Codex to finish reviewing the exact current PR head. Use the configured `codex-review` skill to read both inline reviews and issue-comment findings, including stale/outdated findings. Triage every finding; fix or specifically rebut blocking findings, group only genuinely valuable P2/P3 hardening into linked follow-up issues, and close routine P2/P3/nit findings after recording their disposition. After a blocking fix push, request `@codex review` and wait for the new result. Merge only when required CI and both review paths are complete, no blocking finding remains unresolved, and the issue's existing authorization permits it. Check the current head immediately before merge and constrain the merge to that SHA.
+6. Move Project status to In review. Wait for GitHub Codex to finish reviewing the exact current PR head. Use the configured `codex-review` skill to read both inline reviews and issue-comment findings, including stale/outdated findings. Triage every finding; fix or specifically rebut blocking findings, group only genuinely valuable P2/P3 hardening into linked follow-up issues, and close routine P2/P3/nit findings after recording their disposition. After a blocking fix push, request `@codex review` and wait for the new result. Merge only when the PR quick check and both review paths are complete, no blocking finding remains unresolved, and the issue's existing authorization permits it. Check the current head immediately before merge and constrain the merge to that SHA; record the resulting main Public CI run separately.
 7. Close the issue and mark its goal complete only when all acceptance criteria and evidence are satisfied. If the goal includes merge, a merely opened PR is not completion.
 
 Keep dependent issues blocked until evidence gates pass. Production implementation of #68 is dependent work under that rule and waits for full G01 #1 and G02 #2; completing #67 does not complete G02. Native #68 blockers remain #60/#66/#67 and authorize only reviewed contract and offline evidence work until those gates pass. A blocked issue needs a concrete blocker and an independently useful next step if one exists. Follow the host's actual goal-tool blocked threshold; do not mark a goal blocked after a single inconvenience. GitHub Project Goal text is a durable work specification, not an active Codex goal or an automatic scheduler.
@@ -98,7 +100,7 @@ was complete at merge time.
 
 ## Reusable dispatch text
 
-> Work on ISSUE_URL using `gpt-luna-max` by default or the issue's explicit `grok-high` override, and one active goal equal to its Goal statement. Independent review uses `gpt-luna-max` unless the user explicitly selects another allowed route. Read AGENTS.md and linked design decisions. Verify dependencies first. Use a separate worktree, write the meaningful failing test before implementation, and preserve the no-secrets/no-busy-kill/owned-cleanup invariants. Batch local changes and push one stable candidate; do not run the full suite or request Codex review for every commit. Do not change existing live runners or enroll new Apps unless the issue explicitly authorizes that operation. Open a reviewed PR with commands/results, red evidence, limitations and rollback notes. Update the Project accurately; do not mark the goal complete while required work remains. A missing allowed Project Agent option is a routing failure; do not substitute Astra or silently fall back.
+> Work on ISSUE_URL using `gpt-luna-max` by default or the issue's explicit `grok-high` override, and one active goal equal to its Goal statement. Independent review uses `gpt-luna-max` unless the user explicitly selects another allowed route. Read AGENTS.md and linked design decisions. Verify dependencies first. Use a separate worktree, write the meaningful failing test before implementation, and preserve the no-secrets/no-busy-kill/owned-cleanup invariants. Batch local changes and push one stable candidate; consume the PR quick check once and do not run the full suite or request Codex review for every commit. The complete Public CI matrix runs after source-affecting merges on `main`; documentation-only pushes are filtered out. Do not change existing live runners or enroll new Apps unless the issue explicitly authorizes that operation. Open a reviewed PR with commands/results, red evidence, limitations and rollback notes. Update the Project accurately; do not mark the goal complete while required work remains. A missing allowed Project Agent option is a routing failure; do not substitute Astra or silently fall back.
 
 ## Board fields
 
