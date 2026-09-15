@@ -3017,18 +3017,19 @@ for index, line in enumerate(lines):
     guarded += 1
 if guarded == 0:
     raise SystemExit("no future go test selector prescriptions found")
-with tempfile.NamedTemporaryFile("w+", encoding="utf-8", suffix=".md") as probe:
-    probe.write(
+with tempfile.TemporaryDirectory() as probe_directory:
+    probe = Path(probe_directory) / "probe.md"
+    probe.write_text(
         Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
         + "\ngo test ./livecanary -run ^TestZeroIndentProbe$\n"
         + "GOTOOLCHAIN=go1.26.8 go test ./livecanary -run ^TestAssignmentProbe$\n"
         + "env GOTOOLCHAIN=go1.26.8 go test ./livecanary --skip ^TestZeroIndentProbe$\n"
         + "command go test ./livecanary -run ^TestCommandProbe$\n"
-        + "GOTOOLCHAIN=go1.26.8 command go test ./livecanary -skip=^TestCommandProbe$\n"
+        + "GOTOOLCHAIN=go1.26.8 command go test ./livecanary -skip=^TestCommandProbe$\n",
+        encoding="utf-8",
     )
-    probe.flush()
     try:
-        probe_lines = Path(probe.name).read_text(encoding="utf-8").splitlines()
+        probe_lines = probe.read_text(encoding="utf-8").splitlines()
         for index, line in enumerate(probe_lines):
             if not selector_command.search(line):
                 continue
@@ -7433,7 +7434,9 @@ def normalized_git_config_key(assignment):
 
 
 git_command_delegation_subcommands = {"difftool", "mergetool"}
-git_command_delegation_options = {"--extcmd", "--tool", "--ext-diff", "--textconv"}
+git_command_delegation_options = {
+    "--extcmd", "--tool", "--ext-diff", "--textconv", "--upload-pack",
+}
 git_global_option_values = {
     "-C",
     "--git-dir",
@@ -7903,8 +7906,10 @@ def awk_command_violation(tokens):
             continue
         if (
             token in {"-f", "--file"}
+            or (token.startswith("-f") and len(token) > 2)
             or token.startswith("-f=")
             or token.startswith("--file=")
+            or (token.startswith("--file") and token != "--file")
             or re.search(r"\bsystem\s*\(", token)
             or "getline" in token
             or output_pipe(token)
@@ -10035,8 +10040,21 @@ def python_filesystem_mutation_violation(tree, parents):
             else:
                 mutation = any(flag in mode.value for flag in ("w", "a", "x", "+"))
             path_arguments = list(node.args[:1])
-        elif dotted in {"tempfile.TemporaryDirectory", "tempfile.mkdtemp"}:
+        elif dotted == "tempfile.TemporaryDirectory":
             continue
+        elif dotted in {
+            "tempfile.NamedTemporaryFile",
+            "tempfile.TemporaryFile",
+            "tempfile.SpooledTemporaryFile",
+            "tempfile.mkstemp",
+            "tempfile.mkdtemp",
+        }:
+            mutation = True
+            directory = next(
+                (keyword.value for keyword in node.keywords if keyword.arg == "dir"),
+                None,
+            )
+            path_arguments = [directory] if directory is not None else []
         if not mutation:
             continue
         if path_arguments and all(
@@ -10048,6 +10066,112 @@ def python_filesystem_mutation_violation(tree, parents):
             "Python heredoc contains an unreviewed filesystem mutation "
             f"{dotted or '<call>'!r} on line {node.lineno}"
         )
+    return None
+
+
+python_reviewed_path_values = {
+    "/opt/homebrew/bin:/usr/bin:/bin",
+    "/usr/bin:/bin",
+    "/usr/bin",
+}
+python_reviewed_path_names = {
+    "reviewed_path",
+    "reviewed_shell_path",
+    "inherited_path_previous",
+}
+
+
+def python_path_value_allowed(node):
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value in python_reviewed_path_values
+    return isinstance(node, ast.Name) and node.id in python_reviewed_path_names
+
+
+def python_environment_mapping_state(node, tree, seen=None):
+    """Return safe/unsafe/unknown for literal child-environment PATH maps."""
+    if seen is None:
+        seen = set()
+    if node is None or id(node) in seen:
+        return "unknown"
+    seen.add(id(node))
+    if isinstance(node, ast.Dict):
+        state = "safe"
+        for key, value in zip(node.keys, node.values):
+            if key is None:
+                state = "unknown"
+                continue
+            if not (
+                isinstance(key, ast.Constant)
+                and isinstance(key.value, str)
+            ):
+                state = "unknown"
+                continue
+            if key.value != "PATH":
+                continue
+            if not python_path_value_allowed(value):
+                return "unsafe"
+        return state
+    if isinstance(node, ast.Name):
+        states = []
+        for candidate in ast.walk(tree):
+            if not isinstance(candidate, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+                continue
+            targets = candidate.targets if isinstance(candidate, ast.Assign) else [candidate.target]
+            if any(isinstance(target, ast.Name) and target.id == node.id for target in targets):
+                states.append(python_environment_mapping_state(candidate.value, tree, seen.copy()))
+        if "unsafe" in states:
+            return "unsafe"
+        if states and all(state == "safe" for state in states):
+            return "safe"
+        return "unknown"
+    return "unknown"
+
+
+def python_child_environment_violation(tree, modules, functions):
+    """Reject unreviewed PATH changes before Python child argv approval."""
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if not isinstance(target, ast.Subscript):
+                    continue
+                if python_dotted_name(target.value) != "os.environ":
+                    continue
+                key = target.slice.value if isinstance(target.slice, ast.Constant) else None
+                if key == "PATH" and not python_path_value_allowed(node.value):
+                    return (
+                        "Python child environment changes PATH outside the reviewed "
+                        f"path set on line {node.lineno}"
+                    )
+        if not isinstance(node, ast.Call):
+            continue
+        dotted = python_dotted_name(node.func)
+        if dotted == "os.putenv" and node.args:
+            key = node.args[0].value if isinstance(node.args[0], ast.Constant) else None
+            if key == "PATH" and (len(node.args) < 2 or not python_path_value_allowed(node.args[1])):
+                return (
+                    "Python child environment changes PATH through os.putenv "
+                    f"on line {node.lineno}"
+                )
+        if dotted == "os.environ.update" and node.args:
+            if python_environment_mapping_state(node.args[0], tree) == "unsafe":
+                return (
+                    "Python child environment changes PATH through os.environ.update "
+                    f"on line {node.lineno}"
+                )
+        resolved = python_resolved_name(node.func, modules, functions)
+        if resolved not in python_command_functions:
+            continue
+        if resolved == "run_go_child":
+            continue
+        for keyword in node.keywords:
+            if keyword.arg != "env":
+                continue
+            if python_environment_mapping_state(keyword.value, tree) == "unsafe":
+                return (
+                    "Python child launcher has an unreviewed PATH-bearing env "
+                    f"keyword on line {node.lineno}"
+                )
     return None
 
 
@@ -10220,6 +10344,11 @@ def inspect_python_heredoc(body, safe_marker):
     )
     if guarded_child_kwargs_violation:
         return guarded_child_kwargs_violation
+    child_environment_violation = python_child_environment_violation(
+        tree, modules, functions
+    )
+    if child_environment_violation:
+        return child_environment_violation
     computed_callable_violation = python_computed_callable_violation(tree)
     if computed_callable_violation:
         return computed_callable_violation
@@ -20727,4 +20856,209 @@ handoff so this packet does not become self-referential.
 
 ~~~text
 GREEN final packet certification: 408 Markdown fence markers balanced with matching-style parser, 157 packet-local targets checked, backlog JSON valid, changed-boundary ledger valid with 10 data rows and 4 columns, historical URL/source/disposition ledger valid with 31 rows, six fresh exact-head URL/source/disposition rows and RED/GREEN/CURRENT boundaries present, embedded wrapper/scanner/filter/parity AST and compile valid across 82 Python heredoc bodies, full static scanner passed with 296 shell commands and 82 Python heredoc bodies with zero violations, prior nine and six controls preserved, one-file scope and added-line secret/private-path hygiene clean, and git diff --check passed; no live verification claimed; rollback parent 393d029975139b9d28900d477f62e8de392ace96
+~~~
+
+<a id="fresh-b16d-codex-four-finding-correction"></a>
+### Fresh exact-head Codex findings in [review comment 5673607425](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5673607425) against immutable parent `b16a349509535d6dcb179c9c0bd7a6a313c48bcd`
+
+The four fresh exact-head findings below were reproduced first against the
+immutable packet parent, then corrected in this packet's embedded fail-closed
+scanner. The prior nine f841 controls, six 393d controls and historical
+31-row URL/source/disposition ledger remain preserved. This focused probe
+loads packet text and scanner helpers only; it does not execute a fixture
+payload, compiler, Go child, workflow, runner, Docker, Lima, Keychain,
+launchd, credential or remote operation.
+
+~~~sh
+set -euo pipefail
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import re
+import shlex
+import subprocess
+from pathlib import Path
+
+parent_sha = "b16a349509535d6dcb179c9c0bd7a6a313c48bcd"
+packet_path = "docs/evidence/g01-recovery-packet.md"
+packet = Path(packet_path).read_text(encoding="utf-8")
+parent_packet = subprocess.check_output(
+    ["git", "show", f"{parent_sha}:{packet_path}"], text=True
+)
+
+def load_scanner(text):
+    anchor = text.index("def forbidden_command(tokens, depth=0):")
+    start = text.rfind("source = Path(", 0, anchor)
+    end = text.index("\nmatches = []", anchor)
+    scanner = text[start:end].replace(
+        'source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")',
+        'source = ""',
+        1,
+    )
+    namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+    exec(compile(scanner, "<four-finding-scanner>", "exec"), namespace)
+    return namespace
+
+parent = load_scanner(parent_packet)
+current = load_scanner(packet)
+
+def inspect(namespace, body):
+    return namespace["inspect_python_heredoc"](body, False)
+
+def shell(namespace, command):
+    return [
+        namespace["forbidden_command"](segment)
+        for segment in namespace["shell_token_segments"](command)
+    ]
+
+def rejected(value):
+    return any(item is not None for item in value) if isinstance(value, list) else value is not None
+
+def red(label, value):
+    if rejected(value):
+        raise SystemExit(f"RED setup changed: immutable parent rejected {label}: {value!r}")
+    print(f"RED {label}: immutable parent accepted unsafe witness")
+
+def green(label, value):
+    if not rejected(value):
+        raise SystemExit(f"GREEN failure: current accepted {label}")
+    print(f"GREEN {label}/CURRENT: current rejected unsafe witness")
+
+def safe(label, value):
+    if rejected(value):
+        raise SystemExit(f"GREEN failure: current rejected safe control {label}: {value!r}")
+    print(f"GREEN {label}/CURRENT: reviewed safe control remained accepted")
+
+red("5673607425 Git ls-remote separated --upload-pack", shell(parent, "git ls-remote --upload-pack /tmp/helper ."))
+green("5673607425 Git ls-remote separated --upload-pack", shell(current, "git ls-remote --upload-pack /tmp/helper ."))
+red("5673607425 Git ls-remote equals --upload-pack", shell(parent, "git ls-remote --upload-pack=/tmp/helper ."))
+green("5673607425 Git ls-remote equals --upload-pack", shell(current, "git ls-remote --upload-pack=/tmp/helper ."))
+red(
+    "5673607425 Python child env PATH",
+    inspect(parent, 'import subprocess\nsubprocess.run(["git", "status"], env={"PATH": "/tmp"})'),
+)
+green(
+    "5673607425 Python child env PATH",
+    inspect(current, 'import subprocess\nsubprocess.run(["git", "status"], env={"PATH": "/tmp"})'),
+)
+red(
+    "5673607425 Python os.environ PATH reassignment",
+    inspect(parent, 'import os\nos.environ["PATH"] = "/tmp"\nimport subprocess\nsubprocess.run(["git", "status"])'),
+)
+green(
+    "5673607425 Python os.environ PATH reassignment",
+    inspect(current, 'import os\nos.environ["PATH"] = "/tmp"\nimport subprocess\nsubprocess.run(["git", "status"])'),
+)
+red(
+    "5673607425 NamedTemporaryFile unowned dir",
+    inspect(parent, 'import tempfile\ntempfile.NamedTemporaryFile(dir="docs", delete=False)'),
+)
+green(
+    "5673607425 NamedTemporaryFile unowned dir",
+    inspect(current, 'import tempfile\ntempfile.NamedTemporaryFile(dir="docs", delete=False)'),
+)
+red(
+    "5673607425 mkstemp unowned dir",
+    inspect(parent, 'import tempfile\ntempfile.mkstemp(dir=".")'),
+)
+green(
+    "5673607425 mkstemp unowned dir",
+    inspect(current, 'import tempfile\ntempfile.mkstemp(dir=".")'),
+)
+red(
+    "5673607425 mkdtemp unowned dir",
+    inspect(parent, 'import tempfile\ntempfile.mkdtemp(dir=".")'),
+)
+green(
+    "5673607425 mkdtemp unowned dir",
+    inspect(current, 'import tempfile\ntempfile.mkdtemp(dir=".")'),
+)
+red(
+    "5673607425 attached awk program file",
+    shell(parent, "awk -f/tmp/program.awk docs/backlog.json"),
+)
+green(
+    "5673607425 attached awk program file",
+    shell(current, "awk -f/tmp/program.awk docs/backlog.json"),
+)
+
+safe("5673607425 reviewed Git ls-remote", shell(current, "git ls-remote ."))
+safe(
+    "5673607425 reviewed Python child env",
+    inspect(
+        current,
+        'import subprocess\nfrom tempfile import TemporaryDirectory\nwith TemporaryDirectory() as td:\n    subprocess.run(["git", "status"], cwd=td, env={"PATH": "/usr/bin:/bin"})',
+    ),
+)
+safe(
+    "5673607425 owned NamedTemporaryFile",
+    inspect(
+        current,
+        'import tempfile\nfrom tempfile import TemporaryDirectory\nwith TemporaryDirectory() as td:\n    tempfile.NamedTemporaryFile(dir=td, delete=False)',
+    ),
+)
+safe(
+    "5673607425 reviewed awk",
+    shell(current, 'awk \'BEGIN { print "safe" }\' docs/backlog.json'),
+)
+print("focused 5673607425 four-finding RED/GREEN/CURRENT boundaries: passed")
+PY
+~~~
+
+Recorded immutable-parent RED and current GREEN/CURRENT output:
+
+~~~text
+RED 5673607425 Git ls-remote separated --upload-pack: immutable parent accepted unsafe witness
+GREEN 5673607425 Git ls-remote separated --upload-pack/CURRENT: current rejected unsafe witness
+RED 5673607425 Git ls-remote equals --upload-pack: immutable parent accepted unsafe witness
+GREEN 5673607425 Git ls-remote equals --upload-pack/CURRENT: current rejected unsafe witness
+RED 5673607425 Python child env PATH: immutable parent accepted unsafe witness
+GREEN 5673607425 Python child env PATH/CURRENT: current rejected unsafe witness
+RED 5673607425 Python os.environ PATH reassignment: immutable parent accepted unsafe witness
+GREEN 5673607425 Python os.environ PATH reassignment/CURRENT: current rejected unsafe witness
+RED 5673607425 NamedTemporaryFile unowned dir: immutable parent accepted unsafe witness
+GREEN 5673607425 NamedTemporaryFile unowned dir/CURRENT: current rejected unsafe witness
+RED 5673607425 mkstemp unowned dir: immutable parent accepted unsafe witness
+GREEN 5673607425 mkstemp unowned dir/CURRENT: current rejected unsafe witness
+RED 5673607425 mkdtemp unowned dir: immutable parent accepted unsafe witness
+GREEN 5673607425 mkdtemp unowned dir/CURRENT: current rejected unsafe witness
+RED 5673607425 attached awk program file: immutable parent accepted unsafe witness
+GREEN 5673607425 attached awk program file/CURRENT: current rejected unsafe witness
+GREEN 5673607425 reviewed Git ls-remote/CURRENT: reviewed safe control remained accepted
+GREEN 5673607425 reviewed Python child env/CURRENT: reviewed safe control remained accepted
+GREEN 5673607425 owned NamedTemporaryFile/CURRENT: reviewed safe control remained accepted
+GREEN 5673607425 reviewed awk/CURRENT: reviewed safe control remained accepted
+focused 5673607425 four-finding RED/GREEN/CURRENT boundaries: passed
+~~~
+
+| Finding URL and immutable source | Exact finding | Evidence-based current disposition |
+|---|---|---|
+| [review comment 5673607425](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5673607425) | [Git `ls-remote --upload-pack` delegation](https://github.com/1XP-AI/gh-runnerd/blob/b16a349509535d6dcb179c9c0bd7a6a313c48bcd/docs/evidence/g01-recovery-packet.md#L7436), source `b16a349509535d6dcb179c9c0bd7a6a313c48bcd` | RED reproduced separated and equals `--upload-pack` delegation; current Git policy rejects both forms before read-only `ls-remote` classification while retaining plain `git ls-remote .`. |
+| [review comment 5673607425](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5673607425) | [Python child environment PATH](https://github.com/1XP-AI/gh-runnerd/blob/b16a349509535d6dcb179c9c0bd7a6a313c48bcd/docs/evidence/g01-recovery-packet.md#L10328-L10330), source `b16a349509535d6dcb179c9c0bd7a6a313c48bcd` | RED reproduced a direct child `env={"PATH": "/tmp"}` and a process-visible `os.environ["PATH"] = "/tmp"`; current AST policy rejects PATH-bearing child maps and PATH reassignment before executable allowlisting, while a canonical reviewed PATH remains accepted. |
+| [review comment 5673607425](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5673607425) | [tempfile creators as filesystem mutations](https://github.com/1XP-AI/gh-runnerd/blob/b16a349509535d6dcb179c9c0bd7a6a313c48bcd/docs/evidence/g01-recovery-packet.md#L10038-L10039), source `b16a349509535d6dcb179c9c0bd7a6a313c48bcd` | RED reproduced unowned `NamedTemporaryFile`, `mkstemp` and `mkdtemp`; current filesystem policy treats file/directory tempfile creators as mutations and permits them only when `dir` is proven beneath a literal owned `TemporaryDirectory`. |
+| [review comment 5673607425](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5673607425) | [attached AWK program-file option](https://github.com/1XP-AI/gh-runnerd/blob/b16a349509535d6dcb179c9c0bd7a6a313c48bcd/docs/evidence/g01-recovery-packet.md#L7905-L7907), source `b16a349509535d6dcb179c9c0bd7a6a313c48bcd` | RED reproduced `awk -f/tmp/program.awk`; current AWK policy rejects attached short `-fPATH` and external `--file...` forms before reader allowlisting while retaining a literal print-only AWK program. |
+
+These four findings are resolved only for the embedded offline wrapper/scanner
+policy at the current candidate; no live GitHub/App, runner, workflow,
+credential, Docker, Lima, Keychain or launchd qualification is claimed. The
+prior nine and six controls, their exact source URLs and RED/GREEN/CURRENT
+evidence, and historical 31-row ledger remain preserved. Rollback is
+packet-only to immutable parent `b16a349509535d6dcb179c9c0bd7a6a313c48bcd`.
+
+### Final packet certification after exact-head review comment `5673607425`
+
+The final packet-only certification reruns the four immutable-parent RED and
+current GREEN/CURRENT boundaries above, then performs matching-style Markdown
+fence parity, packet-local link/anchor resolution, backlog JSON validation,
+the ten-row/four-column changed-boundary ledger check, historical 31-row
+URL/source/disposition ledger validation, embedded wrapper/scanner/filter/
+parity AST and compile, the full static scanner, prior-control preservation,
+one-file scope, added-line secret/private-path hygiene and `git diff --check`.
+No live operation, workflow replay, credential use, Go test/child, or merge is
+claimed; post-push local/remote/PR SHA parity is recorded only in the worker
+handoff so this packet does not become self-referential.
+
+~~~text
+GREEN final packet certification: 414 Markdown fence markers balanced with 745 total links (257 local, 38 fragments, 488 external), backlog JSON valid, changed-boundary ledger valid with 10 data rows and 4 columns, historical URL/source/disposition ledger valid with 31 rows, four fresh exact-head URL/source/disposition rows and RED/GREEN/CURRENT boundaries present, embedded wrapper/scanner/filter/parity AST and compile valid across 83 Python heredoc bodies, full static scanner passed with 298 shell commands and 83 Python heredoc bodies with zero violations, prior nine and six controls preserved, one-file scope and added-line secret/private-path hygiene clean, and git diff --check passed; no live verification claimed; rollback parent b16a349509535d6dcb179c9c0bd7a6a313c48bcd
 ~~~
