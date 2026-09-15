@@ -33,7 +33,7 @@ jobs:
         shell: bash
         run: |
           set -eu
-          changed="$(git diff --name-only "$BASE_SHA...$HEAD_SHA")"
+          changed="$(git diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA")"
           printf '%s\n' "$changed"
           if printf '%s\n' "$changed" | grep -Eq '(^|/)(cmd|internal|experiments|scripts)/|(^|/)(Makefile|LICENSE|go.mod|go.sum)$|^docs/DEPENDENCIES\.md$|(^|/).*\.go$|^\.github/workflows/'; then
             printf 'go=true\n' >> "$GITHUB_OUTPUT"
@@ -95,7 +95,7 @@ jobs:
         shell: bash
         run: |
           set -eu
-          changed="$(git diff --name-only "$BASE_SHA...$HEAD_SHA")"
+          changed="$(git diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA")"
           for module in experiments/g01-scaleset experiments/g02-auth experiments/r1-credentials; do
             if printf '%s\n' "$changed" | grep -Eq "^${module}/"; then
               (cd "$module" && GOTOOLCHAIN="$GOTOOLCHAIN" go test -run '^$' -count=1 ./...)

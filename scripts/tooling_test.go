@@ -1129,6 +1129,7 @@ func TestPullRequestQuickWorkflowContract(t *testing.T) {
 		"cancel-in-progress: true",
 		"permissions:\n  contents: read",
 		"run: git diff --check \"$BASE_SHA...$HEAD_SHA\"",
+		"git diff --name-only --no-renames \"$BASE_SHA...$HEAD_SHA\"",
 		"run: make toolchain",
 		"run: make build",
 		"run: make fmt-check",
