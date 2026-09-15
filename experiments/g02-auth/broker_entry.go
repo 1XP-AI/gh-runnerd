@@ -76,15 +76,17 @@ func (c controllerApproval) validate(a BrokerApproval, now time.Time) error {
 	return nil
 }
 
-// A controller approval is one execution input, not a reusable phase bundle.
-// This is only a structural shape guard. It does not attest that workflow
-// input selected the same phase; that capability remains an explicit gate.
-// Paired-terminal intentionally has its own fixed multi-step sequence.
+// A controller approval carries one stable, reviewed authority whose phase set
+// may cover successive controller invocations. This is only a structural
+// shape guard: it requires the requested outer phase to be included, but does
+// not attest that workflow input selected that phase; that capability remains
+// an explicit gate. Paired-terminal intentionally has its own fixed
+// multi-step sequence.
 func controllerApprovalShapeMatchesPhase(a BrokerApproval, c controllerApproval) bool {
 	if a.Mode != "controller" {
 		return true
 	}
-	return len(c.Phases) == 1 && c.Phases[0] == a.Phase
+	return slices.Contains(c.Phases, a.Phase)
 }
 
 func readBrokerPrivateJSON(path string, target any) ([]byte, error) {

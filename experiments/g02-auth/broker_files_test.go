@@ -257,10 +257,50 @@ func TestBrokerControllerApprovalShapeMatchesAuthorityAndSource(t *testing.T) {
 			t.Errorf("unapproved %s accepted", kind)
 		}
 	}
-	ambiguous := c
-	ambiguous.Phases = []string{"before-ack", "after-ack"}
-	if controllerApprovalShapeMatchesPhase(a, ambiguous) {
-		t.Fatal("controller approval with multiple phase authorities accepted by shape guard")
+	multiPhase := c
+	multiPhase.Phases = []string{"before-ack", "after-ack"}
+	if !controllerApprovalShapeMatchesPhase(a, multiPhase) {
+		t.Fatal("controller approval containing the requested phase was refused by shape guard")
+	}
+}
+
+func TestBrokerControllerApprovalStableMultiPhaseAuthorityAcrossSuccessivePhases(t *testing.T) {
+	base := brokerApprovalFixture()
+	base.Mode = "controller"
+	base.Phase = "before-ack"
+	base.AllowVerificationAuthority = true
+	base.ControllerHarnessSHA = strings.Repeat("a", 40)
+	authority := controllerApproval{
+		AppID: base.AppID, InstallationID: base.InstallationID, Organization: base.Organization,
+		Repository: base.Repository, RepositoryID: base.RepositoryID, RunnerGroupID: base.RunnerGroupID,
+		OwnerNonce: base.OwnerNonce, HarnessSHA: base.ControllerHarnessSHA, WorkflowSHA: strings.Repeat("b", 40),
+		WorkflowPath: ".github/workflows/canary.yml", WorkflowRunID: 7, Controller: "trusted-controller",
+		ExpiresAt: base.ExpiresAt, ActionsHosts: []string{"fixture.actions.githubusercontent.com"},
+		Phases: []string{"before-ack", "after-ack", "inspect"},
+	}
+	if authority.validate(base, time.Now()) != nil {
+		t.Fatal("valid stable multi-phase controller authority rejected")
+	}
+	raw, err := json.Marshal(authority)
+	if err != nil {
+		t.Fatal("marshal stable controller authority")
+	}
+	digest := brokerBytesDigest(raw)
+	for _, phase := range []string{"before-ack", "after-ack"} {
+		approval := base
+		approval.Phase = phase
+		approval.ControllerApprovalSHA256 = digest
+		if authority.validate(approval, time.Now()) != nil || approval.ControllerApprovalSHA256 != digest || !controllerApprovalShapeMatchesPhase(approval, authority) {
+			t.Fatalf("stable authority did not authorize successive phase %q", phase)
+		}
+		if brokerBytesDigest(raw) != digest {
+			t.Fatalf("authority digest changed while selecting phase %q", phase)
+		}
+	}
+	mismatch := base
+	mismatch.Phase = "cleanup"
+	if authority.validate(mismatch, time.Now()) == nil || controllerApprovalShapeMatchesPhase(mismatch, authority) {
+		t.Fatal("outer phase absent from stable authority was accepted")
 	}
 }
 func TestBrokerPrivateInputBoundAndCancellation(t *testing.T) {
