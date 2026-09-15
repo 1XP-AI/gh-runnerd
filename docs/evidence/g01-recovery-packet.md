@@ -6071,14 +6071,45 @@ repo_root = Path(
 if invocation_root != repo_root:
     raise SystemExit("run this selector audit from the repository root")
 
+def credential_environment_name(name):
+    normalized = name.upper()
+    return (
+        normalized in {
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "GITHUB_ENTERPRISE_TOKEN",
+            "ACTIONS_RUNNER_INPUT_JITCONFIG",
+            "ACTIONS_RUNTIME_TOKEN",
+            "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+            "ACTIONS_ID_TOKEN_REQUEST_URL",
+            "RUNNER_TOKEN",
+            "JIT_CONFIG",
+            "JITCONFIG",
+            "GITHUB_APP_PRIVATE_KEY",
+        }
+        or normalized.endswith(("_TOKEN", "_PASSWORD", "_PASS", "_SECRET", "_PRIVATE_KEY", "_CLIENT_SECRET"))
+        or any(
+            normalized == fragment
+            or normalized.startswith(fragment + "_")
+            or normalized.endswith("_" + fragment)
+            or f"_{fragment}_" in normalized
+            for fragment in ("ACCESS_KEY", "SECRET_ACCESS_KEY", "SECRET_KEY", "SESSION_TOKEN")
+        )
+    )
+
+
 env = {
-    **os.environ,
+    key: value
+    for key, value in os.environ.items()
+    if not credential_environment_name(key)
+}
+env.update({
     "PATH": "/opt/homebrew/bin:/usr/bin:/bin",
     "CGO_ENABLED": "1",
     "GOEXPERIMENT": "none",
     "GOTOOLCHAIN": "go1.26.8",
     "GOWORK": "off",
-}
+})
 effective_goflags = subprocess.run(
     ["go", "env", "GOFLAGS"], cwd=repo_root, env=env, text=True,
     capture_output=True, check=False, timeout=300,
@@ -6508,8 +6539,39 @@ if os.pathsep != ":" or os.environ.get("PATH") != reviewed_path:
     raise SystemExit("package-init guard: inherited PATH is not the reviewed canonical path")
 if any(key.startswith("GIT_") for key in os.environ):
     raise SystemExit("package-init guard: inherited Git repository-control environment is not allowed")
+def credential_environment_name(name):
+    normalized = name.upper()
+    return (
+        normalized in {
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "GITHUB_ENTERPRISE_TOKEN",
+            "ACTIONS_RUNNER_INPUT_JITCONFIG",
+            "ACTIONS_RUNTIME_TOKEN",
+            "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+            "ACTIONS_ID_TOKEN_REQUEST_URL",
+            "RUNNER_TOKEN",
+            "JIT_CONFIG",
+            "JITCONFIG",
+            "GITHUB_APP_PRIVATE_KEY",
+        }
+        or normalized.endswith(("_TOKEN", "_PASSWORD", "_PASS", "_SECRET", "_PRIVATE_KEY", "_CLIENT_SECRET"))
+        or any(
+            normalized == fragment
+            or normalized.startswith(fragment + "_")
+            or normalized.endswith("_" + fragment)
+            or f"_{fragment}_" in normalized
+            for fragment in ("ACCESS_KEY", "SECRET_ACCESS_KEY", "SECRET_KEY", "SESSION_TOKEN")
+        )
+    )
+
+
 base_env = {
-    **os.environ,
+    key: value
+    for key, value in os.environ.items()
+    if not credential_environment_name(key)
+}
+base_env.update({
     "GOENV": "off",
     "GOOS": "darwin",
     "GOARCH": "arm64",
@@ -6518,7 +6580,7 @@ base_env = {
     "CGO_ENABLED": "1",
     "GOEXPERIMENT": "none",
     "PATH": reviewed_path,
-}
+})
 if subprocess.check_output(
     ["git", "rev-parse", f"HEAD:{module_dir}"], text=True, env=base_env
 ).strip() != reviewed_tree:
@@ -7427,6 +7489,12 @@ def shell_output_redirection_violation(tokens):
 def shell_owned_directory_proof(command):
     """Bind cleanup paths only after the reviewed mkdir ownership proof."""
     for segment in shell_token_segments(command):
+        if executable_basename(segment[0]) == "printf":
+            for index, token in enumerate(segment):
+                if token == "-v" and index + 1 < len(segment):
+                    if segment[index + 1] == "pair_fragment_tmp":
+                        shell_pending_owned_bindings.discard("pair_fragment_tmp")
+                        shell_owned_path_variables.discard("pair_fragment_tmp")
         for token in segment:
             if not assignment.fullmatch(token):
                 continue
@@ -7833,11 +7901,129 @@ def git_subcommand(tokens):
     return None
 
 
+def git_filter_attribute_violation(tokens):
+    """Reject Git filters and external attribute configuration before reads."""
+    if not tokens or executable_basename(tokens[0]) != "git":
+        return None
+    subcommand = git_subcommand(tokens)
+    forbidden_keys = {"core.attributesfile"}
+
+    def config_violation(assignment):
+        key = assignment.split("=", 1)[0].lower()
+        if key.startswith("filter.") or key in forbidden_keys:
+            return "Git filter/external-attributes configuration is not allowed"
+        return None
+
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        assignment = None
+        if token in {"-c", "--config-env"} and index + 1 < len(tokens):
+            assignment = tokens[index + 1]
+            index += 2
+        elif token.startswith("-c="):
+            assignment = token[3:]
+            index += 1
+        elif token.startswith("-c") and len(token) > 2:
+            assignment = token[2:]
+            index += 1
+        elif token.startswith("--config-env="):
+            assignment = token.split("=", 1)[1]
+            index += 1
+        else:
+            index += 1
+        if assignment is not None:
+            violation = config_violation(assignment)
+            if violation:
+                return violation
+
+    if subcommand == "cat-file" and any(
+        token == "--filters" or token.startswith("--filters=")
+        for token in tokens
+    ):
+        return "Git cat-file filter processing is not allowed"
+    if subcommand == "config" and any(
+        token.lower().startswith("filter.")
+        or token.lower() in forbidden_keys
+        for token in tokens
+    ):
+        return "Git filter/external-attributes configuration is not allowed"
+    return None
+
+
+def git_diff_path_violation(tokens):
+    """Require reviewed paths for Git diff --no-index and --output operands."""
+    if not tokens or executable_basename(tokens[0]) != "git":
+        return None
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "-c" or token == "--config-env":
+            index += 2
+            continue
+        if token.startswith(("-c=", "--config-env=")):
+            index += 1
+            continue
+        if token in git_global_option_values:
+            index += 2
+            continue
+        if any(token.startswith(option + "=") for option in git_global_option_values):
+            index += 1
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        break
+    if index >= len(tokens) or executable_basename(tokens[index]) != "diff":
+        return None
+    arguments = tokens[index + 1:]
+    no_index = False
+    output_paths = []
+    path_operands = []
+    after_separator = False
+    position = 0
+    while position < len(arguments):
+        token = arguments[position]
+        if token == "--":
+            after_separator = True
+            path_operands.extend(arguments[position + 1:])
+            break
+        if token == "--no-index":
+            no_index = True
+        elif token == "--output":
+            if position + 1 >= len(arguments):
+                return "Git diff --output requires a reviewed path"
+            output_paths.append(arguments[position + 1])
+            position += 1
+        elif token.startswith("--output="):
+            output_paths.append(token.split("=", 1)[1])
+        elif token.startswith("-"):
+            pass
+        elif not after_separator:
+            path_operands.append(token)
+        position += 1
+    if no_index and len(path_operands) < 2:
+        return "Git diff --no-index requires two reviewed paths"
+    paths = output_paths + (path_operands if no_index else [])
+    for path in paths:
+        if path == "__g01_reviewed_dynamic_path__":
+            continue
+        if not shell_reviewed_reader_path(path):
+            return "Git diff filesystem path is not reviewed or packet-owned"
+    return None
+
+
 def git_read_only_violation(tokens):
     """Allow only the packet's read-only Git queries; reject remote/mutating Git."""
     if not tokens or executable_basename(tokens[0]) != "git":
         return None
     subcommand = git_subcommand(tokens)
+    diff_path_violation = git_diff_path_violation(tokens)
+    if diff_path_violation:
+        return diff_path_violation
+    filter_attribute_violation = git_filter_attribute_violation(tokens)
+    if filter_attribute_violation:
+        return filter_attribute_violation
     if subcommand not in git_read_only_subcommands:
         if subcommand is None:
             return "Git command must name an approved read-only subcommand"
@@ -8555,6 +8741,41 @@ def python_import_path_mutation_violation(tree):
     return None
 
 
+def python_credential_reader_aliases(tree):
+    """Resolve only aliases of credential-bearing environment readers."""
+    reader_names = {
+        "os.getenv",
+        "os.environ.get",
+        "os.environ.setdefault",
+        "os.environ.pop",
+        "os.environ.__getitem__",
+    }
+    aliases = set()
+    assignments = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            assignments.extend((target, node.value) for target in node.targets)
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            assignments.append((node.target, node.value))
+        elif isinstance(node, ast.NamedExpr):
+            assignments.append((node.target, node.value))
+    for _ in range(len(assignments) + 1):
+        changed = False
+        for target, value in assignments:
+            if not isinstance(target, ast.Name):
+                continue
+            dotted = python_dotted_name(value)
+            is_reader = dotted in reader_names or (
+                isinstance(value, ast.Name) and value.id in aliases
+            )
+            if is_reader and target.id not in aliases:
+                aliases.add(target.id)
+                changed = True
+        if not changed:
+            break
+    return aliases
+
+
 def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen=None):
     """Track credential values through aliases without trusting variable names."""
     if node is None:
@@ -8580,6 +8801,12 @@ def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen
         if dotted == "os.getenv":
             return True
         if dotted == "os.environ.get":
+            key = node.args[0].value if node.args and isinstance(node.args[0], ast.Constant) else None
+            return key is None or not isinstance(key, str) or credential_environment_name(key)
+        if (
+            isinstance(node.func, ast.Name)
+            and node.func.id in python_credential_reader_aliases(tree)
+        ):
             key = node.args[0].value if node.args and isinstance(node.args[0], ast.Constant) else None
             return key is None or not isinstance(key, str) or credential_environment_name(key)
         if dotted == "dict" and any(
@@ -9657,6 +9884,62 @@ def python_resolved_name(node, modules, functions):
     return dotted
 
 
+def python_class_command_attribute_violation(tree, modules, functions):
+    """Reject process launchers stored on class attributes before invocation."""
+    attributes = {}
+    class_names = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef)
+    }
+
+    def record(target, value):
+        if not isinstance(target, ast.Attribute):
+            return
+        if (
+            not isinstance(target.value, ast.Name)
+            or target.value.id not in class_names
+            or target.value.id in python_command_modules
+        ):
+            return
+        resolved = python_resolved_name(value, modules, functions)
+        if resolved in python_command_functions:
+            attributes[f"{target.value.id}.{target.attr}"] = resolved
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Attribute):
+                    record(target, node.value)
+        elif isinstance(node, ast.AnnAssign):
+            record(node.target, node.value)
+        elif isinstance(node, ast.ClassDef):
+            if node.name in python_command_modules:
+                continue
+            for statement in node.body:
+                if isinstance(statement, ast.Assign):
+                    for target in statement.targets:
+                        if isinstance(target, ast.Name):
+                            resolved = python_resolved_name(statement.value, modules, functions)
+                            if resolved in python_command_functions:
+                                attributes[f"{node.name}.{target.id}"] = resolved
+                elif isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name):
+                    resolved = python_resolved_name(statement.value, modules, functions)
+                    if resolved in python_command_functions:
+                        attributes[f"{node.name}.{statement.target.id}"] = resolved
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        dotted = python_dotted_name(node.func)
+        if dotted in attributes:
+            return (
+                "Python process launcher stored on a class attribute is not allowed "
+                f"({dotted!r} resolves to {attributes[dotted]!r}) on line {node.lineno}"
+            )
+    return None
+
+
 def python_call_target(node, modules, functions):
     """Resolve callable dunder invocation back to its launcher receiver."""
     if not (isinstance(node, ast.Attribute) and node.attr == "__call__"):
@@ -9687,17 +9970,27 @@ reviewed_guarded_child_keywords = {
     "cwd",
     "env",
 }
+python_process_override_keywords = {"executable", "shell", "preexec_fn"}
 
 
 def python_guarded_child_kwargs_violation(tree, modules, functions):
-    """Reject unreviewed process-creation overrides at guarded child calls."""
+    """Reject process overrides at every recognized process launcher."""
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        if python_resolved_name(node.func, modules, functions) != "run_go_child":
+        resolved = python_resolved_name(node.func, modules, functions)
+        if resolved not in python_command_functions and resolved != "run_go_child":
             continue
         for keyword in node.keywords:
-            if keyword.arg is None or keyword.arg not in reviewed_guarded_child_keywords:
+            if keyword.arg in python_process_override_keywords:
+                name = keyword.arg or "**kwargs"
+                return (
+                    "Python process launcher has an unsupported process-creation "
+                    f"override {name!r} on line {node.lineno}"
+                )
+            if resolved == "run_go_child" and (
+                keyword.arg is None or keyword.arg not in reviewed_guarded_child_keywords
+            ):
                 name = keyword.arg or "**kwargs"
                 return (
                     "Python guarded Go-child call has an unsupported process-creation "
@@ -10335,6 +10628,8 @@ def reviewed_python_dynamic_git_call(argument, tree=None, parents=None):
             return False
     if (
         git_command_delegation(reconstructed) is not None
+        or git_diff_path_violation(reconstructed) is not None
+        or git_filter_attribute_violation(reconstructed) is not None
         or git_read_only_violation(reconstructed) is not None
     ):
         return False
@@ -10851,7 +11146,7 @@ def temporary_path_expression(node, tree, parents, seen=None):
             )
         return False
     if isinstance(node, ast.Attribute) and node.attr == "parent":
-        return temporary_path_expression(node.value, tree, parents, seen)
+        return False
     if isinstance(node, ast.Call):
         dotted = python_dotted_name(node.func)
         if dotted in {"Path", "pathlib.Path"} and len(node.args) == 1 and not node.keywords:
@@ -10902,6 +11197,7 @@ def python_filesystem_mutation_violation(tree, parents):
     alias_violation = python_filesystem_mutator_alias_violation(tree, parents)
     if alias_violation:
         return alias_violation
+    open_aliases = python_open_aliases(tree)
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -10921,7 +11217,9 @@ def python_filesystem_mutation_violation(tree, parents):
         elif dotted in python_filesystem_mutating_functions:
             mutation = True
             path_arguments = list(node.args[:2])
-        elif dotted == "open":
+        elif dotted == "open" or (
+            isinstance(node.func, ast.Name) and node.func.id in open_aliases
+        ):
             unpacked_keyword = any(keyword.arg is None for keyword in node.keywords)
             if unpacked_keyword:
                 mutation = True
@@ -10957,6 +11255,30 @@ def python_filesystem_mutation_violation(tree, parents):
                 None,
             )
             path_arguments = [directory] if directory is not None else []
+        elif dotted == "io.FileIO":
+            path = node.args[0] if node.args else next(
+                (
+                    keyword.value
+                    for keyword in node.keywords
+                    if keyword.arg in {"file", "name"}
+                ),
+                None,
+            )
+            mode = node.args[1] if len(node.args) > 1 else next(
+                (keyword.value for keyword in node.keywords if keyword.arg == "mode"),
+                None,
+            )
+            if mode is None:
+                if path is None or not python_reviewed_read_path(path, tree, parents):
+                    mutation = True
+            elif isinstance(mode, ast.Constant) and isinstance(mode.value, str):
+                if any(flag in mode.value for flag in ("w", "a", "x", "+")):
+                    mutation = True
+                elif path is None or not python_reviewed_read_path(path, tree, parents):
+                    mutation = True
+            else:
+                mutation = True
+            path_arguments = [path] if path is not None else []
         if not mutation:
             continue
         if path_arguments and all(
@@ -11033,10 +11355,8 @@ def python_environment_mapping_state(node, tree, seen=None, parents=None):
                 unpacked_state = python_environment_mapping_state(
                     value, tree, seen.copy(), parents
                 )
-                if unpacked_state == "unsafe":
-                    return "unsafe"
                 if unpacked_state != "safe":
-                    state = unpacked_state
+                    return unpacked_state
                 continue
             if not (
                 isinstance(key, ast.Constant)
@@ -11044,16 +11364,13 @@ def python_environment_mapping_state(node, tree, seen=None, parents=None):
             ):
                 state = "unknown"
                 continue
+            if credential_environment_name(key.value):
+                return "unsafe"
             if key.value != "PATH":
                 continue
             explicit_path = True
             if not python_path_value_allowed(value):
                 return "unsafe"
-        # An explicit reviewed PATH controls the only executable-search
-        # component even when a synthetic fixture intentionally preserves
-        # unrelated inherited variables through a dict unpack.
-        if explicit_path and state == "unknown":
-            return "safe"
         return state
     if isinstance(node, ast.DictComp):
         if (
@@ -11127,7 +11444,7 @@ def python_child_environment_violation(tree, modules, functions, parents=None):
                 node.args[0], tree, parents=parents
             ) == "unsafe":
                 return (
-                    "Python child environment changes PATH through os.environ.update "
+                    "Python child environment mapping for os.environ.update is not safe "
                     f"on line {node.lineno}"
                 )
         resolved = python_resolved_name(node.func, modules, functions)
@@ -11437,6 +11754,7 @@ def python_sensitive_output_sink(node):
 def python_sensitive_read_violation(tree, parents):
     """Reject environment/credential reads and unreviewed file read sinks."""
     sensitive_names = python_sensitive_value_names(tree, parents)
+    credential_reader_aliases = python_credential_reader_aliases(tree)
     for node in ast.walk(tree):
         if isinstance(node, ast.Subscript) and python_dotted_name(node.value) == "os.environ":
             key = node.slice.value if isinstance(node.slice, ast.Constant) else None
@@ -11470,6 +11788,16 @@ def python_sensitive_read_violation(tree, parents):
                     return (
                         "Python credential/environment read through "
                         f"{dotted} is not allowed on line {node.lineno}"
+                    )
+            if (
+                isinstance(node.func, ast.Name)
+                and node.func.id in credential_reader_aliases
+            ):
+                key = node.args[0].value if node.args and isinstance(node.args[0], ast.Constant) else None
+                if key is None or not isinstance(key, str) or credential_environment_name(key):
+                    return (
+                        "Python credential/environment read through callable alias "
+                        f"{node.func.id!r} is not allowed on line {node.lineno}"
                     )
             if python_sensitive_output_sink(node) and any(
                 python_sensitive_value_expression(
@@ -11709,10 +12037,49 @@ def python_callback_command_violation(tree, modules, functions):
     return None
 
 
+def python_open_aliases(tree):
+    """Resolve aliases of builtin/io open so read and write modes are classified."""
+    aliases = set()
+    assignments = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            assignments.extend((target, node.value) for target in node.targets)
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            assignments.append((node.target, node.value))
+        elif isinstance(node, ast.NamedExpr):
+            assignments.append((node.target, node.value))
+        elif isinstance(node, ast.ImportFrom) and node.module in {"builtins", "io"}:
+            for imported in node.names:
+                if imported.name == "open":
+                    aliases.add(imported.asname or imported.name)
+    for _ in range(len(assignments) + 1):
+        changed = False
+        for target, value in assignments:
+            if not isinstance(target, ast.Name):
+                continue
+            dotted = python_dotted_name(value)
+            is_open = dotted in {"builtins.open", "io.open"} or (
+                isinstance(value, ast.Name) and value.id in {"open", *aliases}
+            )
+            if is_open and target.id not in aliases:
+                aliases.add(target.id)
+                changed = True
+        if not changed:
+            break
+    return aliases
+
+
 def python_open_read_violation(tree, parents):
     """Validate readable open paths before iteration/list/constructor consumers."""
+    open_aliases = python_open_aliases(tree)
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or python_dotted_name(node.func) != "open":
+        if not isinstance(node, ast.Call):
+            continue
+        dotted = python_dotted_name(node.func)
+        if not (
+            dotted == "open"
+            or (isinstance(node.func, ast.Name) and node.func.id in open_aliases)
+        ):
             continue
         path = node.args[0] if node.args else next(
             (
@@ -11767,6 +12134,11 @@ def inspect_python_heredoc(body, safe_marker):
         for parent in ast.walk(tree)
         for child in ast.iter_child_nodes(parent)
     }
+    class_command_violation = python_class_command_attribute_violation(
+        tree, modules, functions
+    )
+    if class_command_violation:
+        return class_command_violation
     sensitive_read_violation = python_sensitive_read_violation(tree, parents)
     if sensitive_read_violation:
         return sensitive_read_violation
@@ -16304,7 +16676,7 @@ packet, extracted pure scanner/wrapper helpers, and used synthetic strings plus
 a temporary in-memory environment; it never executed the versioned Python body,
 the parameter-expanded `gh`, a compiler, a Go child or a live operation:
 
-```sh
+~~~sh
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
 [ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
@@ -16396,7 +16768,7 @@ if not calls:
     raise SystemExit("red setup changed: exact parent refused private trust overrides before first child")
 print(f"RED 4003658086: exact parent forwarded GOPRIVATE/GONOPROXY/GONOSUMDB and reached first child {calls[0]!r}")
 PROBE
-```
+~~~
 
 Recorded exact-parent red output:
 
@@ -23784,4 +24156,363 @@ source-code test, merge or Codex review is claimed.
 
 ~~~text
 GREEN final packet certification: 440 Markdown fence markers balanced with matching-style parser, 157 local targets checked including repository-root containment and 49 fragments/anchors, 850 external URLs syntax-skipped, backlog JSON valid, changed-boundary ledger valid with 10 rows x 4 columns, historical URL/source/disposition ledger valid with 31 rows, fresh 7-row ledger valid with 7 rows x 4 columns, predecessor 11-row/f841-nine/393d-six/b16a-four/755968f9-nine finding boundaries preserved, immutable-parent RED plus current GREEN/CURRENT and failure-boundary probes passed, embedded wrapper/scanner/filter/parity AST and compile valid across 88 Python heredoc bodies, full static scanner passed with 309 shell commands and 88 Python heredoc bodies with zero violations, one-file scope and added-line secret/private-path hygiene clean, and git diff --check passed; no live verification, workflow replay, credential use, source-code test, merge or Codex review claimed; rollback parent 518f23c3c875bfda8c8c65239e5171d23c444fc6
+~~~
+
+### Fresh exact-head Codex P2 corrections at `5676290864`
+
+The ten actionable P2 findings in [exact-head review comment
+5676290864](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5676290864)
+are addressed only in this packet's offline shell/AST policy. The immutable
+parent is `2d6a1f700e2fb3aa918f2166e4dd4611601b10be`; all earlier ledgers,
+rollback records, source evidence, explicit live gaps and no-live-operation
+claims remain unchanged above. The controls below do not execute a witness,
+read a credential value, start a compiler/Go child, or contact GitHub/App,
+runner, workflow, Docker, Lima, Keychain or launchd.
+
+#### Exact-parent RED probes
+
+This probe loads only the scanner from immutable parent `2d6a1f7` and evaluates
+synthetic strings in memory. Each RED line records that the exact parent
+accepted the unsafe witness; the `printf -v` row records both the stale
+noncanonical `mkdir -p` setup that the parent rejected before ownership was
+established and the canonical established-proof witness that exposed the
+ownership-retention gap.
+
+~~~sh
+# g01-safe-python-heredoc: reviewed exact-parent 2d6a1f7 ten-finding RED probe
+set -euo pipefail
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import re
+import shlex
+import subprocess
+from pathlib import Path
+
+parent_sha = "2d6a1f700e2fb3aa918f2166e4dd4611601b10be"
+packet_path = "docs/evidence/g01-recovery-packet.md"
+parent_packet = subprocess.check_output(
+    ["git", "show", f"{parent_sha}:{packet_path}"], text=True
+)
+
+def load_scanner(packet, label):
+    anchor = packet.index("def forbidden_command(tokens, depth=0):")
+    start = packet.rfind("source = Path(", 0, anchor)
+    end = packet.index("\nmatches = []", anchor)
+    scanner = packet[start:end].replace(
+        'source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")',
+        'source = ""',
+        1,
+    )
+    namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+    exec(compile(scanner, "<evidence-scanner>", "exec"), namespace)
+    return namespace
+
+parent = load_scanner(parent_packet, "exact-parent-2d6a1f7-scanner")
+
+def inspect(namespace, body):
+    return namespace["inspect_python_heredoc"](body, True)
+
+def shell(namespace, command):
+    return [
+        namespace["forbidden_command"](segment)
+        for segment in namespace["shell_token_segments"](command)
+    ]
+
+def rejected(value):
+    return any(item is not None for item in value) if isinstance(value, list) else value is not None
+
+def parent_accepts(label, value):
+    if rejected(value):
+        raise SystemExit(f"red setup changed: exact parent rejected {label}: {value!r}")
+    print(f"RED 5676290864 {label}: immutable parent accepted unsafe witness")
+
+parent_accepts(
+    "credential-reader callable alias",
+    inspect(parent, 'import os\ngetter = os.environ.get\nprint(getter("GITHUB_TOKEN"))\n'),
+)
+parent_accepts(
+    "class-attribute subprocess launcher",
+    inspect(parent, 'import subprocess\nclass C:\n    f = subprocess.run\nC.f(["printf", "safe"])\n'),
+)
+parent_accepts(
+    "open aliases read/write",
+    inspect(parent, 'reader = open\nreader("/etc/passwd")\nwriter = open\nwriter("/outside", "w")\n'),
+)
+for command in (
+    "git -c filter.synthetic.clean='cat' cat-file --filters HEAD:source.go",
+    "git config --get filter.synthetic.clean",
+    "git -c core.attributesfile=/outside/attributes cat-file --filters HEAD:source.go",
+):
+    parent_accepts(f"Git filter/attributes delegation {command}", shell(parent, command))
+parent_accepts(
+    "unknown environment unpack with explicit PATH",
+    inspect(
+        parent,
+        'import subprocess\n'
+        'unknown = {"GITHUB_TOKEN": "value"}\n'
+        'env = {**unknown, "PATH": "/opt/homebrew/bin:/usr/bin:/bin"}\n'
+        'subprocess.run(["printf", "safe"], env=env)\n',
+    ),
+)
+parent_accepts(
+    "TemporaryDirectory parent traversal",
+    inspect(
+        parent,
+        'from pathlib import Path\n'
+        'from tempfile import TemporaryDirectory\n'
+        'with TemporaryDirectory() as td:\n'
+        '    outside = Path(td).parent / "outside"\n'
+        '    outside.write_text("unsafe")\n',
+    ),
+)
+parent["shell_owned_directory_proof"]("pair_fragment_tmp=/tmp/g01-paired-fragment.$$")
+parent["shell_owned_directory_proof"]("mkdir -p $pair_fragment_tmp")
+if parent["shell_packet_owned_path"]("$pair_fragment_tmp", require_proof=True):
+    raise SystemExit("red setup changed: parent unexpectedly proved mkdir -p ownership")
+print(
+    "RED 5676290864 printf -v stale/already-closed setup: exact parent rejected "
+    "the noncanonical mkdir -p witness before printf -v because ownership was not established"
+)
+parent["shell_owned_directory_proof"]("pair_fragment_tmp=/tmp/g01-paired-fragment.$$")
+parent["shell_owned_directory_proof"]("mkdir $pair_fragment_tmp")
+parent_accepts(
+    "printf -v ownership reassignment",
+    shell(parent, "printf -v pair_fragment_tmp '%s' /outside"),
+)
+if not parent["shell_packet_owned_path"]("$pair_fragment_tmp", require_proof=True):
+    raise SystemExit("red setup changed: canonical parent no longer retained printf -v ownership")
+print("RED 5676290864 printf -v canonical ownership: immutable parent retained unsafe ownership")
+for keyword in ("executable", "shell", "preexec_fn"):
+    parent_accepts(
+        f"subprocess override keyword {keyword}",
+        inspect(parent, f'import subprocess\nsubprocess.run(["printf", "safe"], {keyword}=None)\n'),
+    )
+for command in (
+    "git diff --no-index /outside/left /outside/right",
+    "git diff --output=/outside/patch",
+):
+    parent_accepts(f"filesystem-bearing {command}", shell(parent, command))
+for mode in ("r", "w"):
+    parent_accepts(
+        f"io.FileIO filesystem access mode={mode}",
+        inspect(parent, f'import io\nio.FileIO("/outside/file", "{mode}")\n'),
+    )
+print("exact-parent 2d6a1f7 ten-finding RED probes: all ten findings covered")
+PY
+~~~
+
+Recorded immutable-parent RED output:
+
+~~~text
+RED 5676290864 credential-reader callable alias: immutable parent accepted unsafe witness
+RED 5676290864 class-attribute subprocess launcher: immutable parent accepted unsafe witness
+RED 5676290864 open aliases read/write: immutable parent accepted unsafe witness
+RED 5676290864 Git filter/attributes delegation git -c filter.synthetic.clean='cat' cat-file --filters HEAD:source.go: immutable parent accepted unsafe witness
+RED 5676290864 Git filter/attributes delegation git config --get filter.synthetic.clean: immutable parent accepted unsafe witness
+RED 5676290864 Git filter/attributes delegation git -c core.attributesfile=/outside/attributes cat-file --filters HEAD:source.go: immutable parent accepted unsafe witness
+RED 5676290864 unknown environment unpack with explicit PATH: immutable parent accepted unsafe witness
+RED 5676290864 TemporaryDirectory parent traversal: immutable parent accepted unsafe witness
+RED 5676290864 printf -v stale/already-closed setup: exact parent rejected the noncanonical mkdir -p witness before printf -v because ownership was not established
+RED 5676290864 printf -v ownership reassignment: immutable parent accepted unsafe witness
+RED 5676290864 printf -v canonical ownership: immutable parent retained unsafe ownership
+RED 5676290864 subprocess override keyword executable: immutable parent accepted unsafe witness
+RED 5676290864 subprocess override keyword shell: immutable parent accepted unsafe witness
+RED 5676290864 subprocess override keyword preexec_fn: immutable parent accepted unsafe witness
+RED 5676290864 filesystem-bearing git diff --no-index /outside/left /outside/right: immutable parent accepted unsafe witness
+RED 5676290864 filesystem-bearing git diff --output=/outside/patch: immutable parent accepted unsafe witness
+RED 5676290864 io.FileIO filesystem access mode=r: immutable parent accepted unsafe witness
+RED 5676290864 io.FileIO filesystem access mode=w: immutable parent accepted unsafe witness
+exact-parent 2d6a1f7 ten-finding RED probes: all ten findings covered
+~~~
+
+#### Minimal packet-only controls and refactor
+
+The scanner now resolves credential-reader and `open` callable aliases through
+fixed-point assignment provenance, rejects command launchers stored on declared
+class attributes before `C.f(...)` invocation, and validates readable and
+mutating open modes at the alias call itself. Environment mapping state rejects
+unknown dict unpacking and credential-named keys; reviewed canonical PATH and
+credential-filtered inherited maps remain explicit controls. Temporary-directory
+ownership rejects `.parent` traversal, and `printf -v` clears pending/owned
+proof before cleanup classification.
+
+Git policy now rejects `filter.*`, `core.attributesfile` and `cat-file
+--filters`, and validates filesystem-bearing `diff --no-index`/`--output`
+paths through the shared reviewed/packet-owned path predicate. Every recognized
+Python process launcher rejects `executable`, `shell` and `preexec_fn`; the
+existing `run_go_child` keyword allowlist remains intact. `io.FileIO` is
+classified as reviewed read access or temporary-owned mutation, with unknown or
+unreviewed paths failing closed.
+
+The refactor keeps these controls in shared scanner predicates and leaves the
+selected Scale Set path, source pins, ACK/acquisition/JIT boundaries, ledgers,
+rollback evidence and explicit no-live-operation claims unchanged.
+
+#### Current GREEN/CURRENT and failure-boundary probes
+
+The current probe reruns all ten unsafe boundaries without executing any
+witness, exercises the real fenced-shell ownership state transition, and keeps
+reviewed noncredential aliases, child paths, Git diff paths and `io.FileIO`
+reads as safe controls.
+
+~~~sh
+# g01-safe-python-heredoc: reviewed current 5676290864 ten-finding boundary probe
+set -euo pipefail
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import re
+import shlex
+from pathlib import Path
+
+packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
+anchor = packet.index("def forbidden_command(tokens, depth=0):")
+start = packet.rfind("source = Path(", 0, anchor)
+end = packet.index("\nmatches = []", anchor)
+scanner = packet[start:end].replace(
+    'source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")',
+    'source = ""',
+    1,
+)
+namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+exec(compile(scanner, "<current-5676290864-scanner>", "exec"), namespace)
+
+def inspect(body):
+    return namespace["inspect_python_heredoc"](body, True)
+
+def shell(command):
+    return [
+        namespace["forbidden_command"](segment)
+        for segment in namespace["shell_token_segments"](command)
+    ]
+
+def rejected(value):
+    return any(item is not None for item in value) if isinstance(value, list) else value is not None
+
+def reject(label, value):
+    if not rejected(value):
+        raise SystemExit(f"GREEN failure: current accepted {label}")
+    print(f"GREEN 5676290864 {label}: rejected")
+
+def accept(label, value):
+    if rejected(value):
+        raise SystemExit(f"BOUNDARY failure: current rejected {label}: {value!r}")
+    print(f"BOUNDARY 5676290864 {label}: accepted")
+
+fixture = "~~~sh\npair_fragment_tmp=/tmp/g01-paired-fragment.$$\nmkdir $pair_fragment_tmp\nprintf -v pair_fragment_tmp '%s' /outside\n~~~\n"
+list(namespace["shell_commands"](fixture))
+if namespace["shell_packet_owned_path"]("$pair_fragment_tmp", require_proof=True):
+    raise SystemExit("GREEN failure: printf -v retained packet ownership")
+print("GREEN 5676290864 printf -v ownership: fenced state transition invalidated proof")
+
+reject("credential-reader callable alias", inspect('import os\ngetter = os.environ.get\nprint(getter("GITHUB_TOKEN"))\n'))
+reject("class-attribute subprocess launcher", inspect('import subprocess\nclass C:\n    f = subprocess.run\nC.f(["printf", "safe"])\n'))
+reject("open aliases read/write", inspect('reader = open\nreader("/etc/passwd")\nwriter = open\nwriter("/outside", "w")\n'))
+for command in (
+    "git -c filter.synthetic.clean='cat' cat-file --filters HEAD:source.go",
+    "git config --get filter.synthetic.clean",
+    "git -c core.attributesfile=/outside/attributes cat-file --filters HEAD:source.go",
+    "git cat-file --filters HEAD:source.go",
+):
+    reject("Git filter/attributes " + command, shell(command))
+reject("unknown environment unpack with explicit PATH", inspect(
+    'import subprocess\n'
+    'unknown = {"GITHUB_TOKEN": "value"}\n'
+    'env = {**unknown, "PATH": "/opt/homebrew/bin:/usr/bin:/bin"}\n'
+    'subprocess.run(["printf", "safe"], env=env)\n'
+))
+reject("TemporaryDirectory parent traversal", inspect(
+    'from pathlib import Path\n'
+    'from tempfile import TemporaryDirectory\n'
+    'with TemporaryDirectory() as td:\n'
+    '    outside = Path(td).parent / "outside"\n'
+    '    outside.write_text("unsafe")\n'
+))
+for keyword in ("executable", "shell", "preexec_fn"):
+    reject("subprocess override keyword " + keyword, inspect(f'import subprocess\nsubprocess.run(["printf", "safe"], {keyword}=None)\n'))
+for command in ("git diff --no-index /outside/left /outside/right", "git diff --output=/outside/patch"):
+    reject("filesystem-bearing " + command, shell(command))
+for mode in ("r", "w"):
+    reject("io.FileIO filesystem access mode=" + mode, inspect(f'import io\nio.FileIO("/outside/file", "{mode}")\n'))
+
+accept("noncredential reader alias", inspect('import os\ngetter = os.environ.get\nprint(getter("GOENV"))\n'))
+accept("owned TemporaryDirectory child", inspect('from pathlib import Path\nfrom tempfile import TemporaryDirectory\nwith TemporaryDirectory() as td:\n    Path(td).joinpath("inside").write_text("safe")\n'))
+accept("reviewed Git diff paths", shell("git diff --no-index docs/a.md docs/b.md"))
+accept("reviewed FileIO read", inspect('import io\nio.FileIO("docs/backlog.json", "r")\n'))
+print("focused 5676290864 ten-finding GREEN/CURRENT and safe-boundary probes: passed")
+PY
+~~~
+
+Recorded current GREEN/CURRENT and failure-boundary output:
+
+~~~text
+GREEN 5676290864 printf -v ownership: fenced state transition invalidated proof
+GREEN 5676290864 credential-reader callable alias: rejected
+GREEN 5676290864 class-attribute subprocess launcher: rejected
+GREEN 5676290864 open aliases read/write: rejected
+GREEN 5676290864 Git filter/attributes git -c filter.synthetic.clean='cat' cat-file --filters HEAD:source.go: rejected
+GREEN 5676290864 Git filter/attributes git config --get filter.synthetic.clean: rejected
+GREEN 5676290864 Git filter/attributes git -c core.attributesfile=/outside/attributes cat-file --filters HEAD:source.go: rejected
+GREEN 5676290864 Git filter/attributes git cat-file --filters HEAD:source.go: rejected
+GREEN 5676290864 unknown environment unpack with explicit PATH: rejected
+GREEN 5676290864 TemporaryDirectory parent traversal: rejected
+GREEN 5676290864 subprocess override keyword executable: rejected
+GREEN 5676290864 subprocess override keyword shell: rejected
+GREEN 5676290864 subprocess override keyword preexec_fn: rejected
+GREEN 5676290864 filesystem-bearing git diff --no-index /outside/left /outside/right: rejected
+GREEN 5676290864 filesystem-bearing git diff --output=/outside/patch: rejected
+GREEN 5676290864 io.FileIO filesystem access mode=r: rejected
+GREEN 5676290864 io.FileIO filesystem access mode=w: rejected
+BOUNDARY 5676290864 noncredential reader alias: accepted
+BOUNDARY 5676290864 owned TemporaryDirectory child: accepted
+BOUNDARY 5676290864 reviewed Git diff paths: accepted
+BOUNDARY 5676290864 reviewed FileIO read: accepted
+focused 5676290864 ten-finding GREEN/CURRENT and safe-boundary probes: passed
+~~~
+
+#### Fresh 10-row URL/source/disposition ledger
+
+Each row carries the exact review-comment URL and immutable source. The
+printf-v row explicitly preserves the stale/already-closed noncanonical setup
+observation while recording the canonical parent gap and current fix; no row
+silently drops a finding.
+
+| # | Exact finding URL and immutable source | Finding | Evidence-based disposition |
+|---|---|---|---|
+| 1 | [review comment 5676290864](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5676290864); source `2d6a1f700e2fb3aa918f2166e4dd4611601b10be` | Credential-reader callable aliases such as `getter = os.environ.get` | RED accepted the credential alias; the current fixed-point reader-alias predicate rejects credential/unknown keys before any sink, while a noncredential alias remains a safe boundary. |
+| 2 | [review comment 5676290864](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5676290864); source `2d6a1f700e2fb3aa918f2166e4dd4611601b10be` | Subprocess launcher stored on a class attribute (`C.f = subprocess.run`; `C.f(...)`) | RED accepted the class-attribute launcher; current class-definition/attribute provenance rejects the call before command classification. |
+| 3 | [review comment 5676290864](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5676290864); source `2d6a1f700e2fb3aa918f2166e4dd4611601b10be` | Aliases of `open` used for reads/writes | RED accepted unreviewed read and write aliases; current open-alias resolution validates read paths and mutating modes through the filesystem policy. |
+| 4 | [review comment 5676290864](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5676290864); source `2d6a1f700e2fb3aa918f2166e4dd4611601b10be` | Git `filter.*`/external-attributes configuration with `cat-file --filters` | RED accepted filter config, attributes-file config and `cat-file --filters`; current Git predicates reject all before read-only classification. |
+| 5 | [review comment 5676290864](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5676290864); source `2d6a1f700e2fb3aa918f2166e4dd4611601b10be` | Unknown environment mappings/unpacks with PATH/credential uncertainty | RED accepted an unknown unpack despite reviewed PATH; current mapping state rejects unknown unpack/credential keys and retains only proven credential-filtered/canonical environments. |
+| 6 | [review comment 5676290864](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5676290864); source `2d6a1f700e2fb3aa918f2166e4dd4611601b10be` | `TemporaryDirectory` parent traversal retaining ownership | RED accepted `Path(td).parent` mutation; current temporary ownership predicate rejects `.parent` traversal while retaining owned child paths. |
+| 7 | [review comment 5676290864](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5676290864); source `2d6a1f700e2fb3aa918f2166e4dd4611601b10be` | `printf -v` variable assignment retaining a prior ownership proof | The exact parent rejected the stale/noncanonical `mkdir -p` setup before `printf -v` (already-closed disposition for that form), but accepted the canonical established-proof witness and retained ownership; current shell state transition clears pending/owned proof before cleanup classification, with a real fenced-shell boundary probe passing. |
+| 8 | [review comment 5676290864](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5676290864); source `2d6a1f700e2fb3aa918f2166e4dd4611601b10be` | Process override keywords `executable`, `shell`, `preexec_fn` on launchers beyond `run_go_child` | RED accepted all three on `subprocess.run`; current shared launcher predicate rejects each keyword on every recognized process launcher while preserving reviewed options. |
+| 9 | [review comment 5676290864](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5676290864); source `2d6a1f700e2fb3aa918f2166e4dd4611601b10be` | Filesystem-bearing `git diff --no-index`/`--output` paths | RED accepted outside paths; current shared Git diff path predicate rejects unreviewed operands/output and retains reviewed repository paths. |
+| 10 | [review comment 5676290864](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5676290864); source `2d6a1f700e2fb3aa918f2166e4dd4611601b10be` | `io.FileIO` filesystem access classification | RED accepted unreviewed FileIO reads/writes; current policy permits reviewed reads and temporary-owned writes only, rejecting outside/unknown modes and paths. |
+
+These ten dispositions are packet-only offline evidence. No live GitHub/App,
+runner, workflow, Docker, Lima, Keychain, launchd or credential operation was
+run or inferred; no source code, workflow, runner, PR body, issue, Project or
+other documentation was changed. Rollback is packet-only to immutable parent
+`2d6a1f700e2fb3aa918f2166e4dd4611601b10be`; preserve all independent evidence
+and manually installed runners.
+
+### Final packet certification after exact-head review comment `5676290864`
+
+Final certification reruns the exact-parent RED/current GREEN boundaries and
+then checks actual Markdown fence/style parity, local-link and fragment
+containment, external URL syntax, backlog JSON, the unchanged ten-row
+changed-boundary ledger, historical and predecessor finding ledgers, embedded
+wrapper/scanner/filter/parity AST and compile, full static scanner, one-file
+scope, secret/private-path hygiene and `git diff --check`. Local branch,
+remote-tracking branch, remote-ls and PR SHA parity are recorded in the worker
+handoff after the candidate push so this packet remains non-self-referential.
+No live verification, workflow replay, credential use, source-code test, merge
+or Codex review is claimed here.
+
+~~~text
+GREEN final packet certification: 462 Markdown fence markers in 231 matching pairs; 623 Markdown link targets with 62 local-target/fragment checks and 561 external syntax URLs; backlog JSON valid; fresh exact-head ledger valid with 10 rows x 4 columns, historical 31-row and predecessor 7-row ledgers preserved; exact-parent RED plus current GREEN/CURRENT and failure-boundary probes passed; embedded scanner/filter/wrapper/parity AST and compile valid across 93 Python heredoc bodies; full static scanner passed with 325 executable shell commands and zero violations; one-file scope, 752 added-line secret/private-path hygiene and git diff --check passed; no live verification, workflow replay, credential use, source-code test, merge or Codex review claimed; rollback parent 2d6a1f700e2fb3aa918f2166e4dd4611601b10be (2d6a1f7)
 ~~~
