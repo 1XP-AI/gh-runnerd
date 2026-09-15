@@ -26,7 +26,9 @@ The public baseline is documented in [CI.md](docs/CI.md). `make check` remains t
 complete public validation suite and hosted PR CI remains the required stable
 candidate gate; it is not an automatic per-commit requirement. The final merge
 gate still requires exact-head GitHub Codex review, required CI for that same SHA,
-stale/outdated finding resolution or rebuttal, and any applicable security second
+stale/outdated finding inspection and triage, resolution or rebuttal of every
+blocking finding, linked follow-up issues for valuable non-blocking hardening,
+one-time dispositions for routine findings, and any applicable security second
 pass. Main's postmerge integration run does not replace those premerge checks.
 
 Release, macOS, soak and other trusted/live checks run before the applicable
