@@ -228,7 +228,7 @@ func TestBrokerMissingPolicyFactsAndForgedIssuanceRefuse(t *testing.T) {
 	}
 }
 
-func TestBrokerControllerApprovalBindsPhaseAuthorityAndSource(t *testing.T) {
+func TestBrokerControllerApprovalShapeMatchesAuthorityAndSource(t *testing.T) {
 	a := brokerApprovalFixture()
 	a.Mode = "controller"
 	a.Phase = "before-ack"
@@ -256,6 +256,11 @@ func TestBrokerControllerApprovalBindsPhaseAuthorityAndSource(t *testing.T) {
 		if bad.validate(config, time.Now()) == nil {
 			t.Errorf("unapproved %s accepted", kind)
 		}
+	}
+	ambiguous := c
+	ambiguous.Phases = []string{"before-ack", "after-ack"}
+	if controllerApprovalShapeMatchesPhase(a, ambiguous) {
+		t.Fatal("controller approval with multiple phase authorities accepted by shape guard")
 	}
 }
 func TestBrokerPrivateInputBoundAndCancellation(t *testing.T) {

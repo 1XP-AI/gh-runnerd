@@ -275,8 +275,8 @@ func TestInventoryMalformedStopsLegacyEffects(t *testing.T) {
 				if cleanupErr == nil || deletes.Load() != 0 {
 					t.Fatalf("malformed inventory authorized legacy delete: deletes=%d inventories=%d error=%v", deletes.Load(), inventories.Load(), cleanupErr)
 				}
-			} else if cleanupErr != nil || deletes.Load() != 1 || inventories.Load() != 3 {
-				t.Fatalf("valid empty lifecycle control failed: creates=%d deletes=%d inventory=%d error=%v", creates.Load(), deletes.Load(), inventories.Load(), cleanupErr)
+			} else if !errors.Is(cleanupErr, ErrQuarantine) || deletes.Load() != 0 || inventories.Load() != 1 {
+				t.Fatalf("unfenced empty cleanup was not quarantined: creates=%d deletes=%d inventory=%d error=%v", creates.Load(), deletes.Load(), inventories.Load(), cleanupErr)
 			}
 		})
 	}

@@ -458,19 +458,26 @@ func (d *Driver) Run(ctx context.Context, phase string) error {
 	}
 	ctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	_, err = boundedRead(ctx, func(c context.Context) (bool, error) { return true, d.API.Preflight(c, d.Approval) })
-	if err != nil {
-		return ErrApproval
-	}
-	if phase == "inspect" {
-		return d.inspect(ctx, s)
-	}
 	phaseEvent := Event{Kind: "phase", Operation: phase}
 	if phase == "drain" {
 		// The phase carries the already-created set identity. The journal
 		// sequence assigned to this event is the only sequence a later drain
 		// observation may use to discharge its phase-local fence.
 		phaseEvent.ID = s.setID
+	}
+	if phase == "inspect" {
+		// Consume the singleton inspect slot before preflight as well as before
+		// the read. A failed preflight must not authorize a second attempt.
+		if err := d.record(phaseEvent); err != nil {
+			return err
+		}
+	}
+	_, err = boundedRead(ctx, func(c context.Context) (bool, error) { return true, d.API.Preflight(c, d.Approval) })
+	if err != nil {
+		return ErrApproval
+	}
+	if phase == "inspect" {
+		return d.inspect(ctx, s)
 	}
 	if err := d.record(phaseEvent); err != nil {
 		return err

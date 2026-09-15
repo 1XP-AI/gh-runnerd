@@ -80,8 +80,13 @@ func TestInvalidOwnedProofCannotBeClearedBeforeFirstCleanup(t *testing.T) {
 						d.Journal = file
 					}
 					restarted := Driver{d.Approval, d.Journal, baseAPI}
-					if err := restarted.Run(context.Background(), "inspect"); err != nil {
-						t.Fatalf("later matching zero inspection refused: %v", err)
+					inspectionErr := restarted.Run(context.Background(), "inspect")
+					if phase == "inspect" {
+						if !errors.Is(inspectionErr, ErrQuarantine) {
+							t.Fatalf("second inspection did not retain the one-slot quarantine: %v", inspectionErr)
+						}
+					} else if inspectionErr != nil {
+						t.Fatalf("first inspection after a non-inspect failure refused: %v", inspectionErr)
 					}
 					err := restarted.Run(context.Background(), "cleanup") // First cleanup attempt.
 					if !errors.Is(err, ErrQuarantine) || f.deleteCalls != 0 || !replay(d.Journal.Events()).uncertain {
