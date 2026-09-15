@@ -5816,6 +5816,7 @@ git_environment_override_names = {
     "GIT_COMMON_DIR",
     "GIT_INDEX_FILE",
     "GIT_NAMESPACE",
+    "GIT_PAGER",
     *git_transport_override_names,
     *git_http_tls_override_names,
 }
@@ -6650,6 +6651,7 @@ prior_helper_start = prior_wrapper.index("def skip_source_ignored")
 prior_helper_end = prior_wrapper.index("\nall_test_names = []", prior_helper_start)
 prior_namespace = {"label": "prior-source-name-red"}
 exec(compile(prior_wrapper[prior_helper_start:prior_helper_end], "<prior-source-name>", "exec"), prior_namespace)
+prior_source_test_names = prior_namespace["source_test_names"]
 with TemporaryDirectory() as prior_directory:
     prior_names = Path(prior_directory) / "names_test.go"
     prior_names.write_text(
@@ -6659,7 +6661,7 @@ with TemporaryDirectory() as prior_directory:
         "func Test_Foo(t *testing.T) {}\n",
         encoding="utf-8",
     )
-    if prior_namespace.get("source_test_names")(prior_names) != []:
+    if prior_source_test_names(prior_names) != []:
         raise SystemExit("red reproduction setup changed: prior name parser already accepted all Go isTest forms")
 print(
     f"RED source-name gap: prior {prior_head} omitted Test, Test1 and Test_Foo from source-derived names"
@@ -6679,9 +6681,10 @@ with TemporaryDirectory() as directory:
         "func init() { panic(\"must not execute\") }\n",
         encoding="utf-8",
     )
-    if namespace.get("source_test_names")(root) != ["TestSynthetic"]:
+    source_test_names = namespace["source_test_names"]
+    if source_test_names(root) != ["TestSynthetic"]:
         raise SystemExit("synthetic effectful initializer source derivation failed")
-    if namespace.get("source_test_names")(imported):
+    if source_test_names(imported):
         raise SystemExit("synthetic imported init unexpectedly looked like a test")
     names = Path(directory) / "names_test.go"
     names.write_text(
@@ -7158,8 +7161,13 @@ def shell_assignment_only(command):
     segments = shell_token_segments(command)
     return bool(segments) and not any(
         assignment.fullmatch(token)
-        and token.split("=", 1)[0] in loader_assignment_names
-        and not reviewed_loader_assignment(token)
+        and (
+            (
+                token.split("=", 1)[0] in loader_assignment_names
+                and not reviewed_loader_assignment(token)
+            )
+            or token.split("=", 1)[0] in unsupported_assignment_names
+        )
         for segment in segments
         for token in segment
     ) and all(
@@ -7186,6 +7194,24 @@ def shell_command_substitution(tokens):
 def shell_process_substitution(command):
     """Reject Bash process substitution before shell token classification."""
     return re.search(r"(?<!\\)(?:<|>)\(", command) is not None
+
+
+def shell_input_redirection_violation(tokens):
+    """Reject POSIX network-device input redirection before command allowlisting."""
+    for index, token in enumerate(tokens):
+        destination = None
+        if token in {"<", "0<"} and index + 1 < len(tokens):
+            destination = tokens[index + 1]
+        elif not token.startswith("<<"):
+            match = re.match(r"^(?:[0-9]+)?<(.+)$", token)
+            if match:
+                destination = match.group(1)
+        if destination is None:
+            continue
+        normalized = destination.casefold()
+        if normalized.startswith("/dev/tcp/") or normalized.startswith("/dev/udp/"):
+            return "shell network-device input redirection is not allowed"
+    return None
 
 
 def shell_output_redirection_violation(tokens):
@@ -7425,6 +7451,8 @@ def git_config_delegation(assignment, *, config_env=False):
     else:
         key, value = assignment.split("=", 1)
         key = key.lower()
+    if key == "core.pager" or key == "pager" or key.startswith("pager."):
+        return "Git pager command delegation is not allowed"
     if key in {"core.sshcommand", "credential.helper"}:
         return f"Git {key} command delegation is not allowed"
     if key == "core.fsmonitor" and (config_env or value != "false"):
@@ -7636,6 +7664,9 @@ def python_command_string(tokens):
 
 unsupported_env_wrapper_token = "__g01_unsupported_env_wrapper_option__"
 unsupported_loader_assignment_token = "__g01_unsupported_loader_assignment__"
+unsupported_git_pager_assignment_token = "__g01_unsupported_git_pager_assignment__"
+unsupported_rg_config_assignment_token = "__g01_unsupported_rg_config_assignment__"
+unsupported_assignment_names = {"GIT_PAGER", "RIPGREP_CONFIG_PATH"}
 
 def executable_tokens(tokens):
     tokens = list(tokens)
@@ -7648,6 +7679,18 @@ def executable_tokens(tokens):
         for token in tokens
     ):
         return [unsupported_loader_assignment_token]
+    if any(
+        assignment.fullmatch(token)
+        and token.split("=", 1)[0] == "GIT_PAGER"
+        for token in tokens
+    ):
+        return [unsupported_git_pager_assignment_token]
+    if any(
+        assignment.fullmatch(token)
+        and token.split("=", 1)[0] == "RIPGREP_CONFIG_PATH"
+        for token in tokens
+    ):
+        return [unsupported_rg_config_assignment_token]
     while tokens and (assignment.fullmatch(tokens[0]) or tokens[0] in {";", "&&", "||", "|"}):
         tokens.pop(0)
     wrappers = {"env", "command", "sudo", "exec", "nohup"}
@@ -7884,6 +7927,37 @@ def rg_command_violation(tokens):
     return None
 
 
+reviewed_reader_executables = {"awk", "diff", "grep", "jq", "rg", "tr", "wc"}
+reviewed_reader_path_prefixes = (
+    "docs/",
+    "experiments/",
+    ".github/",
+    "README",
+    "go.mod",
+    "go.sum",
+)
+
+
+def shell_reader_path_violation(tokens):
+    """Reject reader operands outside reviewed repository or owned-temp paths."""
+    if not tokens or executable_basename(tokens[0]) not in reviewed_reader_executables:
+        return None
+    for token in tokens[1:]:
+        if token in {"--", "<<<"} or token.startswith("-"):
+            continue
+        if shell_packet_owned_path(token) or token in {".", "./"}:
+            continue
+        if token.startswith(("~", "$HOME", "${HOME}", "$home", "${home}")):
+            return "reader path is not reviewed or packet-owned"
+        if token.startswith(("/", "../", "..\\")):
+            return "reader path is not reviewed or packet-owned"
+        if token.startswith(reviewed_reader_path_prefixes):
+            continue
+        if token.startswith(".") and token not in {".", "./"}:
+            return "reader path is not reviewed or packet-owned"
+    return None
+
+
 def go_command_violation(tokens):
     """Require the reviewed go_test_checked/go_vet_checked guard boundary."""
     if not tokens or executable_basename(tokens[0]) != "go":
@@ -7925,6 +7999,9 @@ def forbidden_command(tokens, depth=0):
     redirection_violation = shell_output_redirection_violation(tokens)
     if redirection_violation:
         return redirection_violation
+    input_redirection_violation = shell_input_redirection_violation(tokens)
+    if input_redirection_violation:
+        return input_redirection_violation
     if shell_compound_syntax(tokens):
         return "unsupported shell compound syntax is not allowed"
     if python_stdin_command(tokens):
@@ -7941,6 +8018,10 @@ def forbidden_command(tokens, depth=0):
         return "env wrapper option/operand is not parsed safely"
     if tokens[0] == unsupported_loader_assignment_token:
         return "executable-loader environment assignment is not allowed"
+    if tokens[0] == unsupported_git_pager_assignment_token:
+        return "GIT_PAGER delegation is not allowed"
+    if tokens[0] == unsupported_rg_config_assignment_token:
+        return "RIPGREP_CONFIG_PATH configuration is not allowed"
     if unresolved_executable(tokens[0]):
         return "unresolved or parameter-expanded executable is not allowed"
     trap_violation = shell_trap_violation(tokens, depth)
@@ -7964,6 +8045,9 @@ def forbidden_command(tokens, depth=0):
     rg_violation = rg_command_violation(tokens)
     if rg_violation:
         return rg_violation
+    reader_path_violation = shell_reader_path_violation(tokens)
+    if reader_path_violation:
+        return reader_path_violation
     awk_violation = awk_command_violation(tokens)
     if awk_violation:
         return awk_violation
@@ -10097,6 +10181,17 @@ def reviewed_python_synthetic_shell_input(node, value, tree, parents):
     return reviewed_python_shell_body_expression(assignment.value, input_node.id)
 
 
+def python_computed_callable_violation(tree):
+    """Reject calls whose callable target is returned by another call."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Call):
+            return (
+                "Python heredoc contains an unresolved computed callable target "
+                f"on line {node.lineno}"
+            )
+    return None
+
+
 def inspect_python_heredoc(body, safe_marker):
     try:
         tree = ast.parse(body, filename="<python-heredoc>")
@@ -10125,6 +10220,9 @@ def inspect_python_heredoc(body, safe_marker):
     )
     if guarded_child_kwargs_violation:
         return guarded_child_kwargs_violation
+    computed_callable_violation = python_computed_callable_violation(tree)
+    if computed_callable_violation:
+        return computed_callable_violation
     filesystem_violation = python_filesystem_mutation_violation(tree, parents)
     if filesystem_violation:
         return filesystem_violation
@@ -20412,4 +20510,221 @@ worker handoff so this packet does not become self-referential.
 
 ~~~text
 GREEN final packet certification: 402 Markdown fence markers balanced with matching-style parser, 157 packet-local targets checked, backlog JSON valid, changed-boundary ledger valid with 10 data rows and 4 columns, embedded wrapper/scanner/filter/parity AST and compile valid across 81 Python heredoc bodies, full static scanner passed with 294 shell commands and 81 Python heredoc bodies with zero violations, prior six f841 controls and historical 31-row URL/source/disposition ledger preserved, all nine fresh exact-head RED/GREEN/CURRENT boundaries passed, exact review comment plus nine finding links present, one-file scope and added-line secret/private-path hygiene clean, and git diff --check passed; no live verification claimed; rollback parent f84113bf38dd77dacb5dd3ea9b6018c2f2d06471
+~~~
+
+<a id="fresh-393d-codex-six-finding-correction"></a>
+### Fresh exact-head Codex findings in [review comment 5673357101](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5673357101) against immutable parent 393d029975139b9d28900d477f62e8de392ace96
+
+The six fresh exact-head findings below were reproduced first against the
+immutable current-head parent, then corrected in this packet's embedded
+fail-closed scanner and Git-query environment boundary. The prior nine
+f841 controls, prior six f841 controls and the historical 31-row
+URL/source/disposition ledger remain preserved. This focused probe loads packet
+text and scanner helpers only: it does not execute any fixture payload,
+compiler, Go child, workflow, runner, Docker, Lima, Keychain, launchd,
+credential or remote operation.
+
+~~~sh
+set -euo pipefail
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import re
+import shlex
+import subprocess
+from pathlib import Path
+
+parent_sha = "393d029975139b9d28900d477f62e8de392ace96"
+packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
+parent_packet = subprocess.check_output(
+    ["git", "show", f"{parent_sha}:docs/evidence/g01-recovery-packet.md"],
+    text=True,
+)
+
+def load_scanner(text):
+    anchor = text.index("def forbidden_command(tokens, depth=0):")
+    start = text.rfind("source = Path(", 0, anchor)
+    end = text.index("\nmatches = []", anchor)
+    scanner = text[start:end].replace(
+        'source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")',
+        'source = ""',
+        1,
+    )
+    namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+    exec(compile(scanner, "<six-finding-scanner>", "exec"), namespace)
+    return namespace
+
+parent = load_scanner(parent_packet)
+current = load_scanner(packet)
+
+def inspect(namespace, body):
+    return namespace["inspect_python_heredoc"](body, False)
+
+def shell(namespace, command):
+    return [
+        namespace["forbidden_command"](segment)
+        for segment in namespace["shell_token_segments"](command)
+    ]
+
+def rejected(value):
+    return any(item is not None for item in value) if isinstance(value, list) else value is not None
+
+def red(label, value):
+    if rejected(value):
+        raise SystemExit(f"RED setup changed: immutable parent rejected {label}: {value!r}")
+    print(f"RED {label}: immutable parent accepted unsafe witness")
+
+def green(label, value):
+    if not rejected(value):
+        raise SystemExit(f"GREEN failure: current accepted {label}")
+    print(f"GREEN {label}/CURRENT: current rejected unsafe witness")
+
+def safe(label, value):
+    if rejected(value):
+        raise SystemExit(f"GREEN failure: current rejected safe control {label}: {value!r}")
+    print(f"GREEN {label}/CURRENT: reviewed safe control remained accepted")
+
+red(
+    "5673357101 Git pager config delegation",
+    shell(parent, 'git -c core.pager="gh workflow run ci.yml" -p show HEAD'),
+)
+green(
+    "5673357101 Git pager config delegation",
+    shell(current, 'git -c core.pager="gh workflow run ci.yml" -p show HEAD'),
+)
+red(
+    "5673357101 computed command launcher return",
+    inspect(
+        parent,
+        "import subprocess\n"
+        "def launcher():\n"
+        "    return subprocess.run\n"
+        "launcher()(['gh', 'workflow', 'run', 'ci.yml'])\n",
+    ),
+)
+green(
+    "5673357101 computed command launcher return",
+    inspect(
+        current,
+        "import subprocess\n"
+        "def launcher():\n"
+        "    return subprocess.run\n"
+        "launcher()(['gh', 'workflow', 'run', 'ci.yml'])\n",
+    ),
+)
+red(
+    "5673357101 computed filesystem mutator return",
+    inspect(
+        parent,
+        "from pathlib import Path\n"
+        "def writer():\n"
+        "    return Path('/synthetic-unowned').write_text\n"
+        "writer()('x')\n",
+    ),
+)
+green(
+    "5673357101 computed filesystem mutator return",
+    inspect(
+        current,
+        "from pathlib import Path\n"
+        "def writer():\n"
+        "    return Path('/synthetic-unowned').write_text\n"
+        "writer()('x')\n",
+    ),
+)
+red(
+    "5673357101 RIPGREP_CONFIG_PATH preprocessor",
+    shell(parent, "RIPGREP_CONFIG_PATH=/tmp/config rg needle ."),
+)
+green(
+    "5673357101 RIPGREP_CONFIG_PATH preprocessor",
+    shell(current, "RIPGREP_CONFIG_PATH=/tmp/config rg needle ."),
+)
+red(
+    "5673357101 unreviewed tilde reader path",
+    shell(parent, "grep -R . ~"),
+)
+green(
+    "5673357101 unreviewed tilde reader path",
+    shell(current, "grep -R . ~"),
+)
+red(
+    "5673357101 network-device input redirection",
+    shell(parent, "grep x </dev/tcp/example.invalid/80"),
+)
+green(
+    "5673357101 network-device input redirection",
+    shell(current, "grep x </dev/tcp/example.invalid/80"),
+)
+safe(
+    "5673357101 reviewed Git query",
+    shell(current, "git -c core.fsmonitor=false status"),
+)
+safe(
+    "5673357101 reviewed rg search",
+    shell(current, "rg -n pattern docs"),
+)
+safe(
+    "5673357101 reviewed repository reader",
+    shell(current, "grep -R . docs"),
+)
+safe(
+    "5673357101 reviewed local input",
+    shell(current, "grep x < $pair_fragment_tmp/input"),
+)
+print("focused 393d six-finding RED/GREEN/CURRENT boundaries: passed")
+PY
+~~~
+
+Recorded immutable-parent RED and current GREEN/CURRENT output:
+
+~~~text
+RED 5673357101 Git pager config delegation: immutable parent accepted unsafe witness
+GREEN 5673357101 Git pager config delegation/CURRENT: current rejected unsafe witness
+RED 5673357101 computed command launcher return: immutable parent accepted unsafe witness
+GREEN 5673357101 computed command launcher return/CURRENT: current rejected unsafe witness
+RED 5673357101 computed filesystem mutator return: immutable parent accepted unsafe witness
+GREEN 5673357101 computed filesystem mutator return/CURRENT: current rejected unsafe witness
+RED 5673357101 RIPGREP_CONFIG_PATH preprocessor: immutable parent accepted unsafe witness
+GREEN 5673357101 RIPGREP_CONFIG_PATH preprocessor/CURRENT: current rejected unsafe witness
+RED 5673357101 unreviewed tilde reader path: immutable parent accepted unsafe witness
+GREEN 5673357101 unreviewed tilde reader path/CURRENT: current rejected unsafe witness
+RED 5673357101 network-device input redirection: immutable parent accepted unsafe witness
+GREEN 5673357101 network-device input redirection/CURRENT: current rejected unsafe witness
+GREEN 5673357101 reviewed Git query/CURRENT: reviewed safe control remained accepted
+GREEN 5673357101 reviewed rg search/CURRENT: reviewed safe control remained accepted
+GREEN 5673357101 reviewed repository reader/CURRENT: reviewed safe control remained accepted
+GREEN 5673357101 reviewed local input/CURRENT: reviewed safe control remained accepted
+focused 393d six-finding RED/GREEN/CURRENT boundaries: passed
+~~~
+
+| Finding URL and immutable source | Exact finding | Evidence-based current disposition |
+|---|---|---|
+| [review comment 5673357101](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5673357101) | [Git pager/core.pager and pager.* delegation](https://github.com/1XP-AI/gh-runnerd/blob/393d029975139b9d28900d477f62e8de392ace96/docs/evidence/g01-recovery-packet.md#L7428-L7431), source 393d029975139b9d28900d477f62e8de392ace96 | RED reproduced quoted core.pager delegation; current Git config policy rejects core.pager, pager and pager.*; assignment/wrapper forms reject GIT_PAGER; and the Git query environment removes inherited GIT_PAGER before child construction. |
+| [review comment 5673357101](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5673357101) | [computed callable command launcher](https://github.com/1XP-AI/gh-runnerd/blob/393d029975139b9d28900d477f62e8de392ace96/docs/evidence/g01-recovery-packet.md#L10199-L10205), source 393d029975139b9d28900d477f62e8de392ace96 | RED reproduced a callable returned by a helper and immediately invoked; current AST policy rejects unresolved computed callable targets before command classification. |
+| [review comment 5673357101](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5673357101) | [computed callable filesystem mutator](https://github.com/1XP-AI/gh-runnerd/blob/393d029975139b9d28900d477f62e8de392ace96/docs/evidence/g01-recovery-packet.md#L9920), source 393d029975139b9d28900d477f62e8de392ace96 | RED reproduced a returned write_text mutator invoked through a computed callable; the same fail-closed AST boundary rejects it before filesystem mutation classification. |
+| [review comment 5673357101](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5673357101) | [RIPGREP_CONFIG_PATH preprocessing](https://github.com/1XP-AI/gh-runnerd/blob/393d029975139b9d28900d477f62e8de392ace96/docs/evidence/g01-recovery-packet.md#L7878-L7883), source 393d029975139b9d28900d477f62e8de392ace96 | RED reproduced configuration-selected preprocessing; current assignment detection rejects RIPGREP_CONFIG_PATH before wrapper/allowlist stripping while ordinary reviewed rg remains accepted. |
+| [review comment 5673357101](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5673357101) | [reader path outside reviewed scope](https://github.com/1XP-AI/gh-runnerd/blob/393d029975139b9d28900d477f62e8de392ace96/docs/evidence/g01-recovery-packet.md#L7709-L7713), source 393d029975139b9d28900d477f62e8de392ace96 | RED reproduced a tilde-selected home path; current reader policy rejects home, absolute and parent-traversing path operands unless they are reviewed repository or owned-temporary forms. |
+| [review comment 5673357101](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5673357101) | [POSIX network-device input redirection](https://github.com/1XP-AI/gh-runnerd/blob/393d029975139b9d28900d477f62e8de392ace96/docs/evidence/g01-recovery-packet.md#L7213-L7214), source 393d029975139b9d28900d477f62e8de392ace96 | RED reproduced /dev/tcp input redirection; current shell policy rejects /dev/tcp and /dev/udp input destinations, including descriptor forms, before executable allowlisting while retaining reviewed local input. |
+
+These six findings are resolved only for the embedded offline wrapper/scanner
+policy at the current candidate; no live GitHub/App, runner, workflow,
+credential, Docker, Lima, Keychain or launchd qualification is claimed. The
+prior nine and six controls, their exact source URLs and RED/GREEN/CURRENT
+evidence, and the historical 31-row ledger remain preserved. Rollback is
+packet-only to immutable parent 393d029975139b9d28900d477f62e8de392ace96.
+
+### Final packet certification after exact-head review comment 5673357101
+
+The final packet-only certification reruns the six immutable-parent RED and
+current GREEN/CURRENT boundaries above, then performs matching-style Markdown
+fence parity, packet-local link/anchor resolution, backlog JSON validation,
+the ten-row/four-column changed-boundary ledger check, embedded AST and compile
+parity, the full static scanner, prior-control preservation, one-file scope,
+added-line secret/private-path hygiene and git diff --check. No live
+operation, workflow replay, credential use, Go test/child, or merge is claimed;
+the post-push local/remote/PR SHA parity is recorded only in the worker
+handoff so this packet does not become self-referential.
+
+~~~text
+GREEN final packet certification: 408 Markdown fence markers balanced with matching-style parser, 157 packet-local targets checked, backlog JSON valid, changed-boundary ledger valid with 10 data rows and 4 columns, historical URL/source/disposition ledger valid with 31 rows, six fresh exact-head URL/source/disposition rows and RED/GREEN/CURRENT boundaries present, embedded wrapper/scanner/filter/parity AST and compile valid across 82 Python heredoc bodies, full static scanner passed with 296 shell commands and 82 Python heredoc bodies with zero violations, prior nine and six controls preserved, one-file scope and added-line secret/private-path hygiene clean, and git diff --check passed; no live verification claimed; rollback parent 393d029975139b9d28900d477f62e8de392ace96
 ~~~
