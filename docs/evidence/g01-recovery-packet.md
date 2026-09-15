@@ -5319,6 +5319,7 @@ def markdown_outside_fences(markdown):
 
 errors = []
 checked = 0
+repository_root = Path.cwd().resolve()
 for name in files:
     source = Path(name)
     markdown = "\n".join(markdown_outside_fences(source.read_text(encoding="utf-8")))
@@ -5330,7 +5331,16 @@ for name in files:
             path, fragment = source, target[1:]
         else:
             target, separator, fragment = target.partition("#")
-            path, fragment = (source.parent / target).resolve(), fragment if separator else None
+            if Path(target).is_absolute() or target.startswith(("~", "$HOME", "${HOME}")):
+                errors.append(f"{name}: absolute local link target is not allowed {target}")
+                continue
+            path = (source.parent / target).resolve()
+            fragment = fragment if separator else None
+            try:
+                path.relative_to(repository_root)
+            except ValueError:
+                errors.append(f"{name}: local link target escapes repository {target}")
+                continue
         checked += 1
         if not path.is_file():
             errors.append(f"{name}: missing target {target}")
@@ -8434,17 +8444,49 @@ def python_import_path_mutation_violation(tree):
 
     def path_target(node):
         if isinstance(node, ast.Attribute):
-            return python_dotted_name(node) in import_paths
+            dotted = python_dotted_name(node)
+            return any(
+                dotted == path or dotted.startswith(path + ".")
+                for path in import_paths
+            ) if dotted else False
         if isinstance(node, ast.Subscript):
-            return python_dotted_name(node.value) in import_paths
+            return path_target(node.value)
+        if isinstance(node, ast.Call):
+            if (
+                isinstance(node.func, ast.Name)
+                and node.func.id in {"getattr", "setattr", "delattr"}
+                and node.args
+            ):
+                return path_target(node.args[0])
+            if (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr == "__getattribute__"
+            ):
+                return path_target(node.func.value)
         return False
 
     for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-            if path_target(node.func.value) and node.func.attr in mutating_methods:
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Attribute) and path_target(node.func.value):
+                if node.func.attr in mutating_methods or node.func.attr.startswith("__"):
+                    return (
+                        "Python import search path mutation through "
+                        f"{python_dotted_name(node.func)!r} is not allowed on line {node.lineno}"
+                    )
+            if (
+                isinstance(node.func, ast.Name)
+                and node.func.id in {"getattr", "setattr", "delattr"}
+                and node.args
+                and path_target(node.args[0])
+            ):
+                return (
+                    "Python import search path mutation through an indirect "
+                    f"{node.func.id!r} target is not allowed on line {node.lineno}"
+                )
+            if path_target(node.func):
                 return (
                     "Python import search path mutation through "
-                    f"{python_dotted_name(node.func)!r} is not allowed on line {node.lineno}"
+                    f"{python_dotted_name(node.func) or '<indirect>'!r} is not allowed on line {node.lineno}"
                 )
         if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
@@ -10087,6 +10129,19 @@ def reviewed_python_dynamic_git_call(argument, tree=None, parents=None):
         and second.value in git_read_only_subcommands
     ):
         return False
+    reconstructed = []
+    for element in argument.elts:
+        if isinstance(element, ast.Constant) and isinstance(element.value, str):
+            reconstructed.append(element.value)
+        elif reviewed_python_dynamic_path_value(element, tree, parents):
+            reconstructed.append("__g01_reviewed_dynamic_path__")
+        else:
+            return False
+    if (
+        git_command_delegation(reconstructed) is not None
+        or git_read_only_violation(reconstructed) is not None
+    ):
+        return False
     return all(
         isinstance(element, ast.Constant)
         and isinstance(element.value, str)
@@ -10275,7 +10330,13 @@ python_filesystem_mutating_methods = {
 }
 python_filesystem_mutating_functions = {
     "os.chmod",
+    "os.chflags",
     "os.chown",
+    "os.fchmodat",
+    "os.fchownat",
+    "os.lchmod",
+    "os.lchflags",
+    "os.lchown",
     "os.link",
     "os.makedirs",
     "os.mkdir",
@@ -10286,8 +10347,14 @@ python_filesystem_mutating_functions = {
     "os.replace",
     "os.rmdir",
     "os.symlink",
+    "os.setxattr",
+    "os.lsetxattr",
+    "os.removexattr",
+    "os.lremovexattr",
     "os.truncate",
     "os.unlink",
+    "os.utime",
+    "os.utime_ns",
     "shutil.copy",
     "shutil.copy2",
     "shutil.copyfile",
@@ -10299,6 +10366,52 @@ python_filesystem_mutating_functions = {
     "shutil.rmtree",
     "shutil.unpack_archive",
 }
+
+python_reviewed_os_calls = {
+    "os.close",
+    "os.environ.clear",
+    "os.environ.get",
+    "os.environ.items",
+    "os.environ.pop",
+    "os.environ.update",
+    "os.fdopen",
+    "os.fork",
+    "os.fsdecode",
+    "os.getenv",
+    "os.getpgrp",
+    "os.getpid",
+    "os.kill",
+    "os.killpg",
+    "os._exit",
+    "os.path",
+    "os.pipe",
+    "os.read",
+    "os.set_blocking",
+    "os.waitpid",
+    "os.write",
+}
+
+
+def python_unknown_os_call_violation(tree):
+    """Fail closed for OS calls whose path/effect surface is not reviewed."""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        dotted = python_dotted_name(node.func)
+        if not dotted or not dotted.startswith("os."):
+            continue
+        if (
+            dotted in python_filesystem_mutating_functions
+            or dotted in python_reviewed_os_calls
+            or dotted.startswith("os.path.")
+            or dotted.startswith("os.environ.")
+        ):
+            continue
+        return (
+            "Python heredoc contains an unreviewed OS call with possible path/effect "
+            f"surface {dotted!r} on line {node.lineno}"
+        )
+    return None
 
 
 def python_filesystem_mutator_alias_violation(tree, parents):
@@ -10890,6 +11003,43 @@ def python_reviewed_read_path(node, tree, parents, seen=None):
     return False
 
 
+python_sensitive_sink_methods = {
+    "write",
+    "writelines",
+    "write_text",
+    "write_bytes",
+    "dump",
+    "dumps",
+    "error",
+    "exception",
+    "critical",
+    "warning",
+    "warn",
+    "info",
+    "debug",
+    "log",
+}
+
+
+def python_sensitive_output_sink(node):
+    """Recognize output/error sinks without tainting ordinary containers/helpers."""
+    if not isinstance(node, ast.Call):
+        return False
+    dotted = python_dotted_name(node.func)
+    if dotted in {
+        "print",
+        "warnings.warn",
+        "warnings.warn_explicit",
+        "traceback.print_exc",
+        "traceback.print_exception",
+    }:
+        return True
+    return (
+        isinstance(node.func, ast.Attribute)
+        and node.func.attr.casefold() in python_sensitive_sink_methods
+    )
+
+
 def python_sensitive_read_violation(tree, parents):
     """Reject environment/credential reads and unreviewed file read sinks."""
     sensitive_names = python_sensitive_value_names(tree, parents)
@@ -10901,11 +11051,33 @@ def python_sensitive_read_violation(tree, parents):
                     "Python credential/environment subscript is not allowed "
                     f"on line {node.lineno}"
                 )
+        if isinstance(node, ast.Raise):
+            if node.exc is not None and python_sensitive_value_expression(
+                node.exc, sensitive_names, tree, parents
+            ):
+                return (
+                    "Python credential/environment value is sent to an exception "
+                    f"on line {node.lineno}"
+                )
         if isinstance(node, ast.Call):
             dotted = python_dotted_name(node.func)
             if dotted == "os.getenv":
-                return f"Python credential/environment read os.getenv is not allowed on line {node.lineno}"
-            if dotted == "print" and any(
+                key = node.args[0].value if node.args and isinstance(node.args[0], ast.Constant) else None
+                if key is None or not isinstance(key, str) or credential_environment_name(key):
+                    return f"Python credential/environment read os.getenv is not allowed on line {node.lineno}"
+            if dotted in {
+                "os.environ.get",
+                "os.environ.setdefault",
+                "os.environ.pop",
+                "os.environ.__getitem__",
+            }:
+                key = node.args[0].value if node.args and isinstance(node.args[0], ast.Constant) else None
+                if isinstance(key, str) and credential_environment_name(key):
+                    return (
+                        "Python credential/environment read through "
+                        f"{dotted} is not allowed on line {node.lineno}"
+                    )
+            if python_sensitive_output_sink(node) and any(
                 python_sensitive_value_expression(
                     argument, sensitive_names, tree, parents
                 )
@@ -10914,14 +11086,13 @@ def python_sensitive_read_violation(tree, parents):
                     and python_dotted_name(candidate) == "os.environ"
                     for candidate in ast.walk(argument)
                 )
-                or any(
-                    isinstance(candidate, ast.Call)
-                    and python_dotted_name(candidate.func) in {"os.getenv", "os.environ.get"}
-                    for candidate in ast.walk(argument)
-                )
-                for argument in node.args
+                for argument in list(node.args)
+                + [keyword.value for keyword in node.keywords]
             ):
-                return f"Python credential/environment value is sent to print on line {node.lineno}"
+                return (
+                    "Python credential/environment value is sent to an output/error "
+                    f"sink {dotted or '<call>'!r} on line {node.lineno}"
+                )
             if isinstance(node.func, ast.Attribute) and node.func.attr in {"read", "readline", "readlines"}:
                 receiver = node.func.value
                 if isinstance(receiver, ast.Call) and python_dotted_name(receiver.func) == "open":
@@ -11125,6 +11296,10 @@ def python_callback_command_violation(tree, modules, functions):
                 ):
                     continue
                 reference = python_command_reference(candidate, modules, functions)
+                if reference is None and isinstance(candidate, ast.Call):
+                    indirect = python_indirect_command(candidate, modules)
+                    if indirect is not None:
+                        reference = indirect
                 if reference is None:
                     continue
                 kind, name = reference
@@ -11137,6 +11312,38 @@ def python_callback_command_violation(tree, modules, functions):
                     "Python heredoc passes command-capable launcher "
                     f"{name!r} as a callback/target on line {candidate.lineno}"
                 )
+    return None
+
+
+def python_open_read_violation(tree, parents):
+    """Validate readable open paths before iteration/list/constructor consumers."""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or python_dotted_name(node.func) != "open":
+            continue
+        path = node.args[0] if node.args else next(
+            (
+                keyword.value
+                for keyword in node.keywords
+                if keyword.arg in {"file", "path"}
+            ),
+            None,
+        )
+        if path is None:
+            return f"Python open read path is unresolved on line {node.lineno}"
+        mode = node.args[1] if len(node.args) > 1 else next(
+            (keyword.value for keyword in node.keywords if keyword.arg == "mode"),
+            None,
+        )
+        if mode is not None and isinstance(mode, ast.Constant) and isinstance(mode.value, str):
+            if any(flag in mode.value for flag in ("w", "a", "x", "+")):
+                continue
+        elif mode is not None:
+            return f"Python open read mode is unresolved on line {node.lineno}"
+        if not python_reviewed_read_path(path, tree, parents):
+            return (
+                "Python readable open path is not reviewed before iteration/list/"
+                f"constructor consumption on line {node.lineno}"
+            )
     return None
 
 
@@ -11187,6 +11394,12 @@ def inspect_python_heredoc(body, safe_marker):
     )
     if callback_command_violation:
         return callback_command_violation
+    open_read_violation = python_open_read_violation(tree, parents)
+    if open_read_violation:
+        return open_read_violation
+    unknown_os_call_violation = python_unknown_os_call_violation(tree)
+    if unknown_os_call_violation:
+        return unknown_os_call_violation
     filesystem_violation = python_filesystem_mutation_violation(tree, parents)
     if filesystem_violation:
         return filesystem_violation
@@ -22446,4 +22659,365 @@ replay, credential use, source-code test, merge or Codex review is claimed.
 
 ~~~text
 GREEN final packet certification: 430 Markdown fence markers balanced with matching-style parser, 157 local targets checked including 49 fragments/anchors, 835 external URLs syntax-skipped, backlog JSON valid, changed-boundary ledger valid with 10 rows x 4 columns, historical URL/source/disposition ledger valid with 31 rows, fresh finding ledger valid with 11 rows x 4 columns, prior f841 nine-finding, 393d six-finding, b16a four-finding and 755968f9 fresh nine-finding boundaries preserved, exact-parent RED plus current GREEN/CURRENT and labeled boundary probes passed (including the two expected conservative Git-path rejections), embedded wrapper/scanner/filter/parity AST and compile valid across 86 Python heredoc bodies, full static scanner passed with 303 shell commands and 86 Python heredoc bodies with zero violations, one-file scope and added-line secret/private-path hygiene clean, and git diff --check passed; no live verification, workflow replay, credential use, source-code test, merge or Codex review claimed; rollback parent 8958ec9a5c1e8de6c43d29e389a706f1c9ba75dd
+~~~
+
+<a id="fresh-518f23c-codex-seven-finding-correction"></a>
+### Fresh exact-head Codex findings in [review comment 5675188494](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5675188494) against immutable parent `518f23c3c875bfda8c8c65239e5171d23c444fc6`
+
+This packet-only correction follows the required TDD order. The immutable
+parent RED probe below loads only the parent packet scanner and accepts one or
+more unsafe witnesses for each of the seven findings; it never executes a
+witness payload. The current scanner is then corrected with narrow shared
+predicates for credential sinks, computed launchers, import-path provenance,
+readable `open` paths, dynamic Git argv policy, OS-call effects and
+repository-root link containment. The earlier exact-head 11-finding wave and
+its fresh 11-row ledger, the f841 nine-finding, 393d six-finding, b16a
+four-finding and 755968f9 nine-finding evidence, the historical 31-row ledger,
+unchanged source evidence, explicit live gaps and no-live-qualification
+boundary remain preserved.
+
+### Exact-parent RED probes
+
+The RED command reads the immutable parent with `git show`, extracts only its
+offline scanner and evaluates synthetic AST/string witnesses. A RED line means
+the exact parent returned no violation for the unsafe witness. The Markdown
+link RED case evaluates the parent's old `is_file()`-only local-target rule
+against an existing absolute file; no fixture file, payload, credential,
+compiler, Go child, workflow, runner, Docker, Lima, Keychain, launchd or live
+remote operation is started.
+
+~~~sh
+# g01-safe-python-heredoc: reviewed exact-parent 518f23c seven-finding RED probe
+set -euo pipefail
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import re
+import shlex
+import subprocess
+from pathlib import Path
+
+parent_sha = "518f23c3c875bfda8c8c65239e5171d23c444fc6"
+packet_path = "docs/evidence/g01-recovery-packet.md"
+parent_packet = subprocess.check_output(
+    ["git", "show", f"{parent_sha}:{packet_path}"], text=True
+)
+anchor = parent_packet.index("def forbidden_command(tokens, depth=0):")
+start = parent_packet.rfind("source = Path(", 0, anchor)
+end = parent_packet.index("\nmatches = []", anchor)
+scanner = parent_packet[start:end].replace(
+    'source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")',
+    'source = ""',
+    1,
+)
+namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+exec(compile(scanner, "<exact-parent-518f23c-scanner>", "exec"), namespace)
+
+def inspect(body):
+    return namespace["inspect_python_heredoc"](body, True)
+
+def rejected(value):
+    return any(item is not None for item in value) if isinstance(value, list) else value is not None
+
+unsafe = [
+    (
+        "credential stdout.write",
+        inspect('import os, sys\nsecret = os.environ.get("GITHUB_TOKEN")\nsys.stdout.write(secret)'),
+    ),
+    (
+        "credential exception",
+        inspect('import os\nsecret = os.environ.get("GITHUB_TOKEN")\nraise RuntimeError(secret)'),
+    ),
+    (
+        "computed callback",
+        inspect('import subprocess\nlist(map(getattr(subprocess, "run"), [["docker", "ps"]]))'),
+    ),
+    (
+        "computed target",
+        inspect('import subprocess\nfrom threading import Thread\nThread(target=getattr(subprocess, "run"))'),
+    ),
+    (
+        "dunder import-path mutation",
+        inspect('import sys\nsys.path.__setitem__(0, "/tmp")'),
+    ),
+    (
+        "meta-path dunder mutation",
+        inspect('import sys\nsys.meta_path.__delitem__(0)'),
+    ),
+    (
+        "iterated open",
+        inspect('for line in open("/etc/passwd"): pass'),
+    ),
+    (
+        "list-consumed open",
+        inspect('list(open("/etc/passwd"))'),
+    ),
+    (
+        "dynamic Git config mutation",
+        inspect('import subprocess\nparent_sha = f"!gh workflow run ci.yml"\nsubprocess.run(["git", "config", "--global", "--add", "alias.ship", parent_sha])'),
+    ),
+    (
+        "os.chflags",
+        inspect('import os\nos.chflags("/tmp/reviewed", 0)'),
+    ),
+    (
+        "os.setxattr",
+        inspect('import os\nos.setxattr("/tmp/reviewed", "user.x", b"x")'),
+    ),
+]
+for label, result in unsafe:
+    if rejected(result):
+        raise SystemExit(f"RED setup changed: exact parent rejected {label}: {result!r}")
+    print(f"RED 5675188494 {label}: immutable parent accepted unsafe witness")
+
+link_start = parent_packet.index("errors = []", parent_packet.index("### Markdown links, JSON"))
+link_end = parent_packet.index("jq empty docs/backlog.json", link_start)
+old_link_rule = parent_packet[link_start:link_end]
+if "repository_root" in old_link_rule or "relative_to(" in old_link_rule:
+    raise SystemExit("RED setup changed: exact parent already had repository-root link containment")
+absolute_target = (Path("docs/evidence/g01-recovery-packet.md").parent / "/etc/passwd").resolve()
+if not absolute_target.is_file():
+    raise SystemExit("RED setup changed: absolute boundary file unavailable")
+print("RED 5675188494 absolute Markdown local target: immutable parent accepted existing /etc/passwd")
+print("exact-parent 518f23c seven-finding RED probes: all seven findings / 12 unsafe witnesses accepted")
+PY
+~~~
+
+Recorded immutable-parent RED output:
+
+~~~text
+RED 5675188494 credential stdout.write: immutable parent accepted unsafe witness
+RED 5675188494 credential exception: immutable parent accepted unsafe witness
+RED 5675188494 computed callback: immutable parent accepted unsafe witness
+RED 5675188494 computed target: immutable parent accepted unsafe witness
+RED 5675188494 dunder import-path mutation: immutable parent accepted unsafe witness
+RED 5675188494 meta-path dunder mutation: immutable parent accepted unsafe witness
+RED 5675188494 iterated open: immutable parent accepted unsafe witness
+RED 5675188494 list-consumed open: immutable parent accepted unsafe witness
+RED 5675188494 dynamic Git config mutation: immutable parent accepted unsafe witness
+RED 5675188494 os.chflags: immutable parent accepted unsafe witness
+RED 5675188494 os.setxattr: immutable parent accepted unsafe witness
+RED 5675188494 absolute Markdown local target: immutable parent accepted existing /etc/passwd
+exact-parent 518f23c seven-finding RED probes: all seven findings / 12 unsafe witnesses accepted
+~~~
+
+### Minimal packet-only policy/examples
+
+Credential reads now reject credential-named `os.environ.get`,
+`setdefault`, `pop` and `__getitem__` access, and credential provenance is
+checked at every output/error sink method (`print`, stream writes, warning and
+logging-style methods, JSON dumps and file writes) plus exception expressions.
+The scanner still permits reviewed noncredential environment inspection used by
+the packet's own sanitization fixtures.
+
+Computed launcher expressions are resolved through the existing indirect
+module lookup predicate when they appear as callback or target values, so
+`getattr(subprocess, "run")`, `__dict__` lookups and unresolved computed
+launcher references fail closed before higher-order invocation.
+
+Import search-path mutation now follows `sys.path` and `sys.meta_path`
+provenance through subscripts, dunder attributes and `getattr`/`setattr`/
+`delattr` forms. Readable `open` paths are validated at the open call itself,
+before iteration, `list`, `tuple` or other consumers can receive the file
+object; reviewed repository and temporary paths remain accepted.
+
+Dynamic Git argv vectors reconstruct literal and reviewed immutable path
+components into a policy argv and run both the complete delegation and
+read-only/mutation predicates. Thus `git config --global --add ... !gh
+workflow run ...` cannot hide behind a dynamic component. The filesystem
+policy adds `os.chflags`, `os.setxattr`, related extended-attribute/ownership/
+timestamp APIs and fails closed on unknown `os.*` calls except the packet's
+explicitly reviewed nonmutating/process-helper set.
+
+The Markdown checker rejects absolute local targets, rejects resolved targets
+that escape the repository root, and checks local fragments only after
+containment. Existing internal `../decisions/...` links remain a recorded
+safe boundary because their resolved target stays beneath the repository root.
+
+### Refactor after the minimal policy
+
+The correction reuses shared dotted-name, provenance, reviewed-path and
+delegation predicates instead of adding payload-specific exceptions. It keeps
+the packet-only scanner boundary, the selected supported Scale Set path,
+ACK/acquisition/JIT boundary semantics, explicit live gaps and no-live-
+qualification statement unchanged; no source code, workflow, runner or live
+state is touched.
+
+### Current GREEN/CURRENT and failure-boundary probes
+
+The current probe loads the packet scanner from the working tree and checks all
+seven unsafe findings without calling any witness. It also exercises reviewed
+safe controls and near-boundary failures. The link checks use the current
+repository-root guard and read-only path resolution; they do not create files
+or follow an external target.
+
+~~~sh
+# g01-safe-python-heredoc: reviewed current 518f23c seven-finding boundary probe
+set -euo pipefail
+[ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
+[ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
+/opt/homebrew/bin/python3 -I - <<'PY'
+import ast
+import re
+import shlex
+import subprocess
+from pathlib import Path
+
+packet_path = "docs/evidence/g01-recovery-packet.md"
+packet = Path(packet_path).read_text(encoding="utf-8")
+anchor = packet.index("def forbidden_command(tokens, depth=0):")
+start = packet.rfind("source = Path(", 0, anchor)
+end = packet.index("\nmatches = []", anchor)
+scanner = packet[start:end].replace(
+    'source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")',
+    'source = ""',
+    1,
+)
+namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+exec(compile(scanner, "<current-518f23c-scanner>", "exec"), namespace)
+
+def inspect(body):
+    return namespace["inspect_python_heredoc"](body, True)
+
+def rejected(value):
+    return any(item is not None for item in value) if isinstance(value, list) else value is not None
+
+unsafe = [
+    ("credential stdout.write", inspect('import os,sys\nsecret=os.environ.get("GITHUB_TOKEN")\nsys.stdout.write(secret)')),
+    ("credential exception", inspect('import os\nsecret=os.environ.get("GITHUB_TOKEN")\nraise RuntimeError(secret)')),
+    ("computed callback", inspect('import subprocess\nlist(map(getattr(subprocess,"run"), [["docker","ps"]]))')),
+    ("computed target", inspect('import subprocess\nfrom threading import Thread\nThread(target=getattr(subprocess,"run"))')),
+    ("dunder import-path mutation", inspect('import sys\nsys.path.__setitem__(0,"/tmp")')),
+    ("meta-path dunder mutation", inspect('import sys\nsys.meta_path.__delitem__(0)')),
+    ("iterated open", inspect('for line in open("/etc/passwd"): pass')),
+    ("list-consumed open", inspect('list(open("/etc/passwd"))')),
+    ("dynamic Git config mutation", inspect('import subprocess\nparent_sha=f"!gh workflow run ci.yml"\nsubprocess.run(["git","config","--global","--add","alias.ship",parent_sha])')),
+    ("os.chflags", inspect('import os\nos.chflags("/tmp/reviewed",0)')),
+    ("os.setxattr", inspect('import os\nos.setxattr("/tmp/reviewed","user.x",b"x")')),
+]
+for label, result in unsafe:
+    if not rejected(result):
+        raise SystemExit(f"GREEN failure: current accepted {label}: {result!r}")
+    print(f"GREEN 5675188494 {label}/CURRENT: current rejected unsafe witness")
+
+safe = [
+    ("reviewed noncredential stream output", inspect('import os,sys\nvalue=os.environ.get("GOENV")\nsys.stdout.write("safe")')),
+    ("reviewed repository file iteration", inspect('list(open("docs/backlog.json"))')),
+    ("reviewed ordinary callback", inspect('list(map(str, [["safe"]]))')),
+    ("reviewed import-path read", inspect('import sys\nvalue=sys.path[0]')),
+    ("reviewed dynamic Git show", inspect('import subprocess\nparent_sha=f"518f23c3c875bfda8c8c65239e5171d23c444fc6"\nsubprocess.run(["git","show",f"{parent_sha}:docs/evidence/g01-recovery-packet.md"])')),
+    ("reviewed os.path query", inspect('import os\nos.path.basename("docs/backlog.json")')),
+]
+for label, result in safe:
+    if rejected(result):
+        raise SystemExit(f"GREEN failure: current rejected safe control {label}: {result!r}")
+    print(f"GREEN 5675188494 {label}/CURRENT: reviewed safe control remained accepted")
+
+boundary = [
+    ("credential alias through write_text", inspect('import os\nfrom pathlib import Path\nsecret=os.environ.get("GITHUB_TOKEN")\nPath("docs/backlog.json").write_text(secret)')),
+    ("indirect meta-path dunder", inspect('import sys\nsys.meta_path.__delitem__(0)')),
+    ("unknown OS path API", inspect('import os\nos.chdir("/tmp")')),
+    ("unresolved readable open mode", inspect('open("docs/backlog.json", mode=input())')),
+    ("dynamic Git helper path", inspect('import subprocess\npath=input()\nsubprocess.run(["git","show",path])')),
+]
+for label, result in boundary:
+    if not rejected(result):
+        raise SystemExit(f"boundary failure: current accepted {label}: {result!r}")
+    print(f"BOUNDARY 5675188494 {label}/CURRENT: expected conservative rejection")
+
+repository_root = Path.cwd().resolve()
+source = Path(packet_path)
+def link_target_state(target):
+    if Path(target).is_absolute() or target.startswith(("~", "$HOME", "${HOME}")):
+        return "rejected absolute"
+    path = (source.parent / target).resolve()
+    try:
+        path.relative_to(repository_root)
+    except ValueError:
+        return "rejected escape"
+    return "contained"
+
+for target, expected in (
+    ("/etc/passwd", "rejected absolute"),
+    ("../../../../etc/passwd", "rejected escape"),
+    ("../decisions/0002-scaleset-integration.md", "contained"),
+):
+    state = link_target_state(target)
+    if state != expected:
+        raise SystemExit(f"link boundary failure: {target}: {state!r}")
+    print(f"GREEN 5675188494 local link {target}: {state}")
+print("focused 5675188494 seven-finding RED/GREEN/CURRENT boundaries: passed")
+PY
+~~~
+
+Recorded current GREEN/CURRENT and failure-boundary output:
+
+~~~text
+GREEN 5675188494 credential stdout.write/CURRENT: current rejected unsafe witness
+GREEN 5675188494 credential exception/CURRENT: current rejected unsafe witness
+GREEN 5675188494 computed callback/CURRENT: current rejected unsafe witness
+GREEN 5675188494 computed target/CURRENT: current rejected unsafe witness
+GREEN 5675188494 dunder import-path mutation/CURRENT: current rejected unsafe witness
+GREEN 5675188494 meta-path dunder mutation/CURRENT: current rejected unsafe witness
+GREEN 5675188494 iterated open/CURRENT: current rejected unsafe witness
+GREEN 5675188494 list-consumed open/CURRENT: current rejected unsafe witness
+GREEN 5675188494 dynamic Git config mutation/CURRENT: current rejected unsafe witness
+GREEN 5675188494 os.chflags/CURRENT: current rejected unsafe witness
+GREEN 5675188494 os.setxattr/CURRENT: current rejected unsafe witness
+GREEN 5675188494 reviewed noncredential stream output/CURRENT: reviewed safe control remained accepted
+GREEN 5675188494 reviewed repository file iteration/CURRENT: reviewed safe control remained accepted
+GREEN 5675188494 reviewed ordinary callback/CURRENT: reviewed safe control remained accepted
+GREEN 5675188494 reviewed import-path read/CURRENT: reviewed safe control remained accepted
+GREEN 5675188494 reviewed dynamic Git show/CURRENT: reviewed safe control remained accepted
+GREEN 5675188494 reviewed os.path query/CURRENT: reviewed safe control remained accepted
+BOUNDARY 5675188494 credential alias through write_text/CURRENT: expected conservative rejection
+BOUNDARY 5675188494 indirect meta-path dunder/CURRENT: expected conservative rejection
+BOUNDARY 5675188494 unknown OS path API/CURRENT: expected conservative rejection
+BOUNDARY 5675188494 unresolved readable open mode/CURRENT: expected conservative rejection
+BOUNDARY 5675188494 dynamic Git helper path/CURRENT: expected conservative rejection
+GREEN 5675188494 local link /etc/passwd: rejected absolute
+GREEN 5675188494 local link ../../../../etc/passwd: rejected escape
+GREEN 5675188494 local link ../decisions/0002-scaleset-integration.md: contained
+focused 5675188494 seven-finding RED/GREEN/CURRENT boundaries: passed
+~~~
+
+### Fresh 7-row finding ledger
+
+Each row retains the common exact review-comment URL, the immutable-parent
+anchor where the gap existed, and the recorded RED/GREEN/CURRENT result. This
+is a new four-column ledger; all earlier ledgers and evidence remain unchanged.
+
+| # | Exact finding URL and immutable source | Finding and parent anchor | RED/GREEN/CURRENT evidence |
+|---|---|---|---|
+| 1 | [review comment 5675188494](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5675188494); source `518f23c3c875bfda8c8c65239e5171d23c444fc6` | Credential-bearing values through non-print sinks; [parent lines 10905-10909](https://github.com/1XP-AI/gh-runnerd/blob/518f23c3c875bfda8c8c65239e5171d23c444fc6/docs/evidence/g01-recovery-packet.md#L10905-L10909) | RED `os.environ.get("GITHUB_TOKEN")` reached `sys.stdout.write` and an exception; GREEN/CURRENT rejects credential reads and sink propagation before payload execution. |
+| 2 | [review comment 5675188494](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5675188494); source `518f23c3c875bfda8c8c65239e5171d23c444fc6` | Computed command callbacks/targets; [parent lines 11081-11084](https://github.com/1XP-AI/gh-runnerd/blob/518f23c3c875bfda8c8c65239e5171d23c444fc6/docs/evidence/g01-recovery-packet.md#L11081-L11084) | RED `getattr(subprocess, "run")` reached `map` and `Thread(target=...)`; GREEN/CURRENT resolves computed launchers and rejects callbacks/targets before invocation. |
+| 3 | [review comment 5675188494](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5675188494); source `518f23c3c875bfda8c8c65239e5171d23c444fc6` | Indirect/dunder `sys.path` and `sys.meta_path` mutations; [parent lines 8431-8433](https://github.com/1XP-AI/gh-runnerd/blob/518f23c3c875bfda8c8c65239e5171d23c444fc6/docs/evidence/g01-recovery-packet.md#L8431-L8433) | RED direct dunder `sys.path.__setitem__` and `sys.meta_path.__delitem__` were accepted; GREEN/CURRENT rejects dunder and indirect mutation provenance before imports. |
+| 4 | [review comment 5675188494](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5675188494); source `518f23c3c875bfda8c8c65239e5171d23c444fc6` | Readable files consumed by iteration/list/constructors; [parent lines 10925-10929](https://github.com/1XP-AI/gh-runnerd/blob/518f23c3c875bfda8c8c65239e5171d23c444fc6/docs/evidence/g01-recovery-packet.md#L10925-L10929) | RED `for ... in open("/etc/passwd")` and `list(open(...))` were accepted; GREEN/CURRENT validates paths at readable `open` and rejects unreviewed files. |
+| 5 | [review comment 5675188494](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5675188494); source `518f23c3c875bfda8c8c65239e5171d23c444fc6` | Dynamic Git argv mutation/delegation policy; [parent lines 10090-10094](https://github.com/1XP-AI/gh-runnerd/blob/518f23c3c875bfda8c8c65239e5171d23c444fc6/docs/evidence/g01-recovery-packet.md#L10090-L10094) | RED dynamic component hid `git config --global --add ... !gh workflow run`; GREEN/CURRENT reconstructs argv and applies complete Git mutation/delegation policy, rejecting it before any child. |
+| 6 | [review comment 5675188494](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5675188494); source `518f23c3c875bfda8c8c65239e5171d23c444fc6` | Unlisted/path-mutating `os` APIs; [parent lines 10276-10280](https://github.com/1XP-AI/gh-runnerd/blob/518f23c3c875bfda8c8c65239e5171d23c444fc6/docs/evidence/g01-recovery-packet.md#L10276-L10280) | RED `os.chflags` and `os.setxattr` were accepted; GREEN/CURRENT adds mutator coverage and rejects unknown path/effectful `os.*` calls fail-closed. |
+| 7 | [review comment 5675188494](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5675188494); source `518f23c3c875bfda8c8c65239e5171d23c444fc6` | Absolute/escaping local Markdown links; [parent lines 5332-5335](https://github.com/1XP-AI/gh-runnerd/blob/518f23c3c875bfda8c8c65239e5171d23c444fc6/docs/evidence/g01-recovery-packet.md#L5332-L5335) | RED parent `is_file()`-only rule accepted existing `/etc/passwd`; GREEN/CURRENT rejects absolute/escaping targets and requires resolved local links beneath the repository root while retaining safe internal `../decisions/...`. |
+
+These seven findings are resolved only for the embedded offline packet
+scanner and Markdown checker. No live GitHub/App, runner, workflow, Docker,
+Lima, Keychain, launchd or credential verification was run or claimed; no
+Codex review was requested and PR #78 remains open. Rollback is packet-only to
+immutable parent `518f23c3c875bfda8c8c65239e5171d23c444fc6`; preserve all
+independent evidence and manually installed runners.
+
+### Final packet certification after exact-head review comment `5675188494`
+
+Final certification reruns the immutable-parent RED and current GREEN/CURRENT
+boundaries above, then checks Markdown fence/URL/fragment/anchor parity,
+repository-root local-link containment, backlog JSON, the unchanged
+changed-boundary ledger, the historical 31-row ledger, the fresh 7-row ledger,
+all prior exact-head ledgers and control suites, embedded wrapper/scanner AST
+and compile, the full static scanner, one-file scope, secret/private-path
+hygiene and `git diff --check`. Local/remote/PR SHA parity is recorded after
+the one candidate push in the worker handoff, so this packet remains
+non-self-referential. No live verification, workflow replay, credential use,
+source-code test, merge or Codex review is claimed.
+
+~~~text
+GREEN final packet certification: 440 Markdown fence markers balanced with matching-style parser, 157 local targets checked including repository-root containment and 49 fragments/anchors, 850 external URLs syntax-skipped, backlog JSON valid, changed-boundary ledger valid with 10 rows x 4 columns, historical URL/source/disposition ledger valid with 31 rows, fresh 7-row ledger valid with 7 rows x 4 columns, predecessor 11-row/f841-nine/393d-six/b16a-four/755968f9-nine finding boundaries preserved, immutable-parent RED plus current GREEN/CURRENT and failure-boundary probes passed, embedded wrapper/scanner/filter/parity AST and compile valid across 88 Python heredoc bodies, full static scanner passed with 309 shell commands and 88 Python heredoc bodies with zero violations, one-file scope and added-line secret/private-path hygiene clean, and git diff --check passed; no live verification, workflow replay, credential use, source-code test, merge or Codex review claimed; rollback parent 518f23c3c875bfda8c8c65239e5171d23c444fc6
 ~~~
