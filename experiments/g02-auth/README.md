@@ -16,7 +16,8 @@ The library contains:
 
 - A ten-minute, 256-bit state attempt with exact IPv4 loopback Host/path checks, strict query parsing, single conversion consumption, bounded calls, no secret-bearing responses, and explicit manual recovery after failure.
 - A fixed-origin `api.github.com` App-JWT adapter for App identity, organization installation lookup, and one Manifest conversion request. It rejects redirects, normalizes errors, bounds response bodies, and does not retry conversion. It pins supported REST API version `2022-11-28`.
-- An in-memory manual-import boundary that validates the RSA key and all organization/App/installation identities before invoking an atomic storage sink. It refuses suspended installations, missing runner write permission, and extra permissions outside the minimal profile (runner write and optional baseline metadata read).
+- An in-memory manual-import boundary that validates the RSA key and all organization/App/installation identities before invoking an atomic storage sink. It refuses unknown or suspended installations, missing runner write permission, and extra permissions outside the minimal profile (runner write and optional baseline metadata read).
+- `EncodeManifest` for the local registration form: IPv4 loopback `redirect_url` only, webhook delivery disabled, and no OAuth `callback_urls`/`setup_url`. GitHub acceptance of that shape remains a live gap.
 
 A public struct containing a PEM must not become an application logging boundary merely because its formatting/JSON methods redact it. The key still exists in process memory; Go does not guarantee erasure of every copy. Same-UID malicious code is outside the protected trust claim.
 

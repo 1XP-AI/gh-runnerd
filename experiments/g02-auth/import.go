@@ -95,7 +95,7 @@ func ManualImport(ctx context.Context, c Candidate, api API, commit Commit) (Res
 		if err != nil {
 			return Result{}, errors.New("installation verification failed")
 		}
-		if i.ID != b.InstallationID || i.AppID != c.AppID || i.AccountID != b.OrganizationID || !strings.EqualFold(i.Login, b.Login) || i.AccountType != "Organization" || i.TargetID != b.OrganizationID || i.TargetType != "Organization" || i.Suspended || !minimalPermissions(i.Permissions) {
+		if i.ID != b.InstallationID || i.AppID != c.AppID || i.AccountID != b.OrganizationID || !strings.EqualFold(i.Login, b.Login) || i.AccountType != "Organization" || i.TargetID != b.OrganizationID || i.TargetType != "Organization" || !i.SuspensionKnown || i.Suspended || !minimalPermissions(i.Permissions) {
 			return Result{}, errors.New("installation identity or permission mismatch")
 		}
 	}

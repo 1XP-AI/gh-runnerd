@@ -49,8 +49,8 @@ func (f fakeAPI) OrganizationInstallation(_ context.Context, _ Credential, org s
 }
 func validAPI() fakeAPI {
 	return fakeAPI{appID: 71, installations: map[string]Installation{
-		"org-a": {ID: 201, AppID: 71, AccountID: 101, Login: "org-a", AccountType: "Organization", TargetID: 101, TargetType: "Organization", Permissions: map[string]string{"organization_self_hosted_runners": "write", "metadata": "read"}},
-		"org-b": {ID: 202, AppID: 71, AccountID: 102, Login: "org-b", AccountType: "Organization", TargetID: 102, TargetType: "Organization", Permissions: map[string]string{"organization_self_hosted_runners": "write", "metadata": "read"}},
+		"org-a": {ID: 201, AppID: 71, AccountID: 101, Login: "org-a", AccountType: "Organization", TargetID: 101, TargetType: "Organization", Permissions: map[string]string{"organization_self_hosted_runners": "write", "metadata": "read"}, SuspensionKnown: true},
+		"org-b": {ID: 202, AppID: 71, AccountID: 102, Login: "org-b", AccountType: "Organization", TargetID: 102, TargetType: "Organization", Permissions: map[string]string{"organization_self_hosted_runners": "write", "metadata": "read"}, SuspensionKnown: true},
 	}}
 }
 
@@ -87,6 +87,12 @@ func TestManualImportRejectsForgedBindingsBeforeStoringAnyCredential(t *testing.
 		{"suspended", func(c *Candidate, a *fakeAPI) {
 			i := a.installations["org-b"]
 			i.Suspended = true
+			a.installations["org-b"] = i
+		}},
+		{"unknown suspension", func(c *Candidate, a *fakeAPI) {
+			i := a.installations["org-b"]
+			i.Suspended = false
+			i.SuspensionKnown = false
 			a.installations["org-b"] = i
 		}},
 		{"duplicate organization", func(c *Candidate, a *fakeAPI) { c.Organizations[1] = c.Organizations[0] }},
