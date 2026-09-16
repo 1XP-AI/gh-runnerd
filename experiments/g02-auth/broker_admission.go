@@ -120,6 +120,20 @@ type brokerControllerAuthority struct {
 	Approval controllerApproval `json:"approval"`
 }
 
+// The durable ledger records only the receipt identity, not its signature or
+// any credential. A distinct ReceiptNonce makes each signed phase handoff
+// one-shot while the validated receipt remains available to the broker
+// handoff plan.
+type brokerProvenanceBinding struct {
+	Digest       string `json:"digest"`
+	ReceiptNonce string `json:"receipt_nonce"`
+	Source       string `json:"source"`
+}
+
+func (b brokerProvenanceBinding) valid() bool {
+	return brokerSHA256.MatchString(b.Digest) && brokerNonce.MatchString(b.ReceiptNonce) && brokerProvenanceSource.MatchString(b.Source)
+}
+
 type brokerClaimEvent struct {
 	Kind           string                     `json:"kind"`
 	Slot           string                     `json:"slot"`
@@ -128,6 +142,7 @@ type brokerClaimEvent struct {
 	Controller     *brokerControllerBinding   `json:"controller,omitempty"`
 	Worker         *brokerWorkerBinding       `json:"worker,omitempty"`
 	Authority      *brokerControllerAuthority `json:"authority,omitempty"`
+	Provenance     *brokerProvenanceBinding   `json:"provenance,omitempty"`
 	Snapshot       brokerInode                `json:"snapshot"`
 	SnapshotDigest string                     `json:"snapshot_digest,omitempty"`
 }
@@ -296,6 +311,7 @@ func openBrokerAdmission(directory string, a BrokerApproval, j *brokerJournal, p
 	var binding *brokerControllerBinding
 	var workerBinding *brokerWorkerBinding
 	var authority *brokerControllerAuthority
+	provenanceNonces := map[string]bool{}
 	latestSlot := ""
 	for _, line := range lines[1 : len(lines)-1] {
 		var event brokerClaimEvent
@@ -304,6 +320,13 @@ func openBrokerAdmission(directory string, a BrokerApproval, j *brokerJournal, p
 		}
 		switch event.Kind {
 		case "claim":
+			if event.Provenance != nil {
+				nonce := event.Provenance.ReceiptNonce
+				if provenanceNonces[nonce] {
+					return nil, errBroker
+				}
+				provenanceNonces[nonce] = true
+			}
 			for previous, receipt := range slots {
 				if (!done[previous] && event.Slot != "inspect" && event.Slot != "cleanup") || receipt.Attempt == event.Attempt || receipt.Journal == event.Journal || (event.Controller != nil && receipt.Controller != nil && receipt.Snapshot == event.Snapshot) || (event.Worker != nil && receipt.Worker != nil && receipt.Worker.State == event.Worker.State) {
 					return nil, errBroker
@@ -375,6 +398,13 @@ func openBrokerAdmission(directory string, a BrokerApproval, j *brokerJournal, p
 		}
 		c.event.Controller = &b
 		c.event.Authority = &next
+		if p.provenance != nil {
+			binding := brokerProvenanceBinding{Digest: brokerDigest(*p.provenance), ReceiptNonce: p.provenance.ReceiptNonce, Source: p.provenance.Source}
+			if !binding.valid() || provenanceNonces[binding.ReceiptNonce] {
+				return nil, errBroker
+			}
+			c.event.Provenance = &binding
+		}
 		c.event.Snapshot = brokerFileIdentity(p.snapshotInfo)
 		c.event.SnapshotDigest = a.ControllerApprovalSHA256
 		if p.worker != nil {
@@ -420,7 +450,7 @@ func validBrokerClaimEvent(a BrokerApproval, e brokerClaimEvent) bool {
 		return false
 	}
 	if e.Slot == "discover-actions-host" {
-		return e.Controller == nil && e.Worker == nil && e.Authority == nil && e.Snapshot == (brokerInode{}) && e.SnapshotDigest == ""
+		return e.Controller == nil && e.Worker == nil && e.Authority == nil && e.Provenance == nil && e.Snapshot == (brokerInode{}) && e.SnapshotDigest == ""
 	}
 	paired := e.Slot == "paired-terminal"
 	if !brokerSlotAllowed(e.Slot) || e.Slot == "discover-actions-host" || (paired && e.Slot != "paired-terminal") || e.Controller == nil || e.Authority == nil || e.Controller.State.Inode == 0 || e.Snapshot.Inode == 0 || !brokerSHA256.MatchString(e.SnapshotDigest) || !brokerSHA256.MatchString(e.Controller.Ownership) || !brokerSHA256.MatchString(e.Controller.Binary) || !brokerSHA40.MatchString(e.Controller.Harness) {
@@ -431,6 +461,9 @@ func validBrokerClaimEvent(a BrokerApproval, e brokerClaimEvent) bool {
 			return false
 		}
 	} else if e.Worker != nil {
+		return false
+	}
+	if e.Provenance != nil && !e.Provenance.valid() {
 		return false
 	}
 	c := e.Authority.Approval

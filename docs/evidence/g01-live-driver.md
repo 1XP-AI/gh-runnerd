@@ -6,6 +6,9 @@ completion of G01. The original fixture remains permanently loopback-only. The
 separate command requires `-tags=g01_live` at build time, an explicit execution
 flag, an exact private approval and controller-side broker input. Public CI has
 no credentials. SDK `v0.4.0` and Go `1.26.8` remain pinned.
+The `--execute-approved-canary` entrypoint remains quarantined because
+broker-authenticated workflow-input provenance and conditional cleanup are
+still unresolved; the offline `--plan` check does not authorize it.
 
 ## Executable scope
 
@@ -24,7 +27,7 @@ and one unknown reservation exhaust the budget.
 | `acquire-loss` | Journal exactly one request ID/intent, call `AcquireJobs` once, record only a response success boolean, suppress its application result, retain session/reservation and quarantine. |
 | `jit-loss` | Verify the stable worker name absent, journal one JIT intent, call once, record a response success boolean, discard JIT/result identity and quarantine the reservation. No worker starts. |
 | `inspect` | Durably classify owned statistics and runner lookup evidence; retain a reference ID only after exact ownership checks. Unsafe observations return quarantine. No observation releases reservations or uncertainty. |
-| `cleanup` | Delete only with an exact create receipt, nonce name/label and group, no work/statistics/runner fence or observed job IDs, no JIT/acquisition attempt, no unresolved session/intent, all-zero statistics and an unchanged complete runner-ID inventory. Verify inventory again afterward. |
+| `cleanup` | Require an exact create receipt, nonce name/label and group, no work/statistics/runner fence or observed job IDs, no JIT/acquisition attempt, no unresolved session/intent, all-zero statistics and an unchanged complete runner-ID inventory. Deletion must use the conditional `ConditionalScaleSetDeleter` contract with a fresh provider version/ETag (or equivalent atomic capability); the pinned SDK's unconditional delete remains quarantined. |
 
 Each SDK/REST operation has a 30-second deadline; each phase is bounded by ten
 minutes and approval expiry, whichever comes first. Each phase is one-shot. An
@@ -78,7 +81,10 @@ Creation requests `RunnerSetting.DisableUpdate=true` using the pinned SDK's
 The returned create object must confirm it; false or omitted settings quarantine
 the uncertain create without retry. The driver reads the owned scale set again
 before session/JIT phases and refuses those effects if updates are enabled.
-Read-only inspection and otherwise verified empty cleanup remain available.
+Read-only inspection remains available. Empty cleanup is only available through
+the conditional deletion contract described in the [live safety follow-up](g01-live-safety-followup.md); inventory-before-delete and
+inventory-after-delete checks alone do not authorize deletion, and the pinned
+SDK adapter therefore remains quarantined for cleanup.
 This closes an update path that an image digest alone cannot constrain; it does
 not prove the service honored the setting or prevent concurrent administrator
 changes after the read. Actual bootstrap/version evidence is still required.
@@ -183,6 +189,7 @@ an open gate.
   "owner_nonce": "NEW_32_LOWERCASE_HEX_NONCE",
   "harness_sha": "REVIEWED_40_HEX_COMMIT",
   "workflow_sha": "REVIEWED_40_HEX_WORKFLOW_COMMIT",
+  "workflow_ref": "refs/heads/APPROVED_BRANCH",
   "workflow_path": ".github/workflows/canary.yml",
   "workflow_run_id": 0,
   "controller": "APPROVED_TRUSTED_CONTROLLER_ALIAS",
@@ -206,13 +213,28 @@ A local clone of the reviewed repository is sufficient and needs no live API.
 ```sh
 cd experiments/g01-scaleset
 CGO_ENABLED=1 GOTOOLCHAIN=go1.26.8 go build -buildvcs=true -trimpath -tags=g01_live -o "$G01_PRIVATE_BINARY" ./cmd/g01-live
-"$G01_PRIVATE_BINARY" --plan
+"$G01_PRIVATE_BINARY" --plan  # offline plan check; no live authorization
 go version -m "$G01_PRIVATE_BINARY"
 ```
 
+The controller approval schema also accepts the broker's optional
+`workflow_ref` field; strict decoding must preserve this field for the
+broker's approval digest and handoff binding. A missing conditional-deleter
+capability is rejected before journal authorization, while failures after
+durable cleanup preparation remain journaled as unresolved quarantine.
+
 Live execution rejects a mismatched Go version, SDK pin, dirty build or embedded
-VCS revision. Building, merging or running `--plan` is not authorization. The
-build metadata must show the reviewed `vcs.revision` and `vcs.modified=false`.
+VCS revision. Building, merging or running `--plan` is not authorization, and
+`--plan` performs no credential read or remote operation. The
+`--execute-approved-canary` shape below remains quarantined and must not be run
+until the external provenance and cleanup gates are closed. The build metadata
+must show the reviewed `vcs.revision` and `vcs.modified=false`.
+After local approval validation (and paired state validation where applicable),
+the currently quarantined controller and paired execution flags return the
+fixed result
+`canary quarantined; broker provenance is required` before reading credential
+stdin. Other malformed-input refusals retain the separate generic refusal
+result; this distinction is used only to classify offline bridge evidence.
 This was verified offline in a clean local clone at `17a63ffc4604fbec4cc043abd5602a230d35fa8b`;
 the linked-worktree build was correctly missing a usable revision stamp. The
 reviewed controller broker (not implemented here) must provide this private JSON
@@ -231,7 +253,8 @@ on stdin without shell tracing, terminal echo, argv credentials or env dumps:
 }
 ```
 
-After exact authorization, with broker stdin supplied, invoke one phase:
+After exact authorization and closure of the external gates, with broker stdin
+supplied, the reviewed invocation shape for one phase would be:
 
 ```sh
 "$G01_PRIVATE_BINARY" --execute-approved-canary \

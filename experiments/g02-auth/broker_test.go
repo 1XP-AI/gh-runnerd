@@ -78,7 +78,7 @@ func (f *brokerHTTPFixture) RoundTrip(r *http.Request) (*http.Response, error) {
 	case "/orgs/org-a/actions/runner-groups/3/repositories":
 		payload = map[string]any{"total_count": 1, "repositories": []any{repo}}
 	case "/repos/org-a/canary/actions/runs/7":
-		payload = map[string]any{"id": 7, "head_sha": strings.Repeat("b", 40), "path": ".github/workflows/canary.yml", "event": "workflow_dispatch", "run_attempt": 1, "repository": repo, "head_repository": repo}
+		payload = map[string]any{"id": 7, "head_branch": "main", "head_sha": strings.Repeat("b", 40), "path": ".github/workflows/canary.yml", "event": "workflow_dispatch", "run_attempt": 1, "repository": repo, "head_repository": repo}
 	case "/orgs/org-a/actions/runners/registration-token":
 		status = 201
 		payload = map[string]any{"token": "synthetic-private-registration-token", "expires_at": time.Now().Add(time.Hour)}
@@ -93,6 +93,41 @@ func (f *brokerHTTPFixture) RoundTrip(r *http.Request) (*http.Response, error) {
 	data, _ := json.Marshal(payload)
 	return response(status, string(data)), nil
 }
+
+func TestBrokerWorkflowVerificationUsesHeadBranchForAttestedBranchRef(t *testing.T) {
+	f := &brokerHTTPFixture{t: t}
+	api := newBrokerAPI(time.Now, f)
+	a := brokerApprovalFixture()
+	controller := controllerApproval{WorkflowRunID: 7, WorkflowSHA: strings.Repeat("b", 40), WorkflowRef: "refs/heads/main", WorkflowPath: ".github/workflows/canary.yml"}
+	provenance := &BrokerProvenanceReceipt{WorkflowRef: controller.WorkflowRef}
+	if err := api.verifyWorkflowWithReceipt(context.Background(), a, controller, "synthetic-private-workflow-token", provenance); err != nil {
+		t.Fatalf("workflow run with the API's head_branch field was refused: %v", err)
+	}
+}
+
+func TestBrokerWorkflowRunHeadBranchMatchesOnlySupportedRefs(t *testing.T) {
+	for _, tc := range []struct {
+		name, headBranch, workflowRef string
+		want                          bool
+	}{
+		{name: "branch", headBranch: "main", workflowRef: "refs/heads/main", want: true},
+		{name: "nested branch", headBranch: "release/v1", workflowRef: "refs/heads/release/v1", want: true},
+		{name: "tag", headBranch: "v1.2.3", workflowRef: "refs/tags/v1.2.3", want: false},
+		{name: "branch tag collision", headBranch: "main", workflowRef: "refs/tags/main", want: false},
+		{name: "mismatch", headBranch: "main", workflowRef: "refs/heads/release", want: false},
+		{name: "missing branch", headBranch: "", workflowRef: "refs/heads/main", want: false},
+		{name: "pull head", headBranch: "17", workflowRef: "refs/pull/17/head", want: false},
+		{name: "pull merge", headBranch: "17", workflowRef: "refs/pull/17/merge", want: false},
+		{name: "unsupported ref", headBranch: "main", workflowRef: "refs/remotes/origin/main", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := brokerWorkflowRunHeadBranchMatchesRef(tc.headBranch, tc.workflowRef); got != tc.want {
+				t.Fatalf("head_branch=%q workflow_ref=%q matched=%t want=%t", tc.headBranch, tc.workflowRef, got, tc.want)
+			}
+		})
+	}
+}
+
 func newBrokerFixture(t *testing.T) (BrokerApproval, Candidate, *brokerAPI, *brokerHTTPFixture, string) {
 	t.Helper()
 	parent := t.TempDir()
@@ -109,6 +144,10 @@ func newBrokerFixture(t *testing.T) (BrokerApproval, Candidate, *brokerAPI, *bro
 	f.admissionRoot = admission
 	api := newBrokerAPI(time.Now, f)
 	api.admissionDirectory = func() (string, error) { return admission, nil }
+	// The test-only adapter is the explicit signed fixture source. Production
+	// newBrokerAPI has no provenance adapter and therefore quarantines controller
+	// and paired execution before reading credentials.
+	api.provenance = newSignedBrokerFixtureAdapter(t)
 	return brokerApprovalFixture(), syntheticCandidate(t), api, f, root
 }
 func TestBrokerDiscoveryUsesOneRestrictedTokenThenScopeBeforeAuth(t *testing.T) {

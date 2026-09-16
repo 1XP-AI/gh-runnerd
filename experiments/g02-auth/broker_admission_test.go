@@ -2,6 +2,8 @@ package enrollment
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -113,6 +115,72 @@ func TestBrokerLedgerCapacityDerivesFromFiniteSlotSchema(t *testing.T) {
 	}
 	if brokerSlotAllowed("unreviewed-slot") || !brokerSlotAllowed("paired-terminal") || !brokerSlotAllowed("discover-actions-host") {
 		t.Fatal("ledger schema widened beyond the finite reviewed slots")
+	}
+}
+
+func TestBrokerAdmissionRejectsDuplicateProvenanceNonceBeforeAppend(t *testing.T) {
+	a, c, api, f, root := newBrokerFixture(t)
+	parent := filepath.Dir(root)
+	a.Mode, a.Phase = "controller", "create"
+	p := brokerTestPlan(t, &a, parent, func(context.Context, []byte, string) error { return nil })
+	p.controller.WorkflowRef = "refs/heads/main"
+	p.controller.WorkflowRunID = 7
+	p.raw, _ = json.Marshal(p.controller)
+	a.ControllerApprovalSHA256 = brokerBytesDigest(p.raw)
+	p.approval = a
+	request, err := brokerProvenanceRequest(a, p.controller, api.provenance.Source())
+	if err != nil {
+		t.Fatal("first provenance request")
+	}
+	receipt, err := api.provenance.Attest(context.Background(), request)
+	if err != nil {
+		t.Fatal("first provenance receipt")
+	}
+	if _, err := brokerExecuteWithProvenance(context.Background(), a, brokerInput{PEM: string(c.PEM)}, root, api, p, &receipt); err != nil {
+		t.Fatalf("first provenance claim: %v", err)
+	}
+	ledgerPath := filepath.Join(f.admissionRoot, "broker-admission.jsonl")
+	before, err := os.ReadFile(ledgerPath)
+	if err != nil {
+		t.Fatal("read first ledger")
+	}
+
+	a.Phase = "inspect"
+	secondRoot := filepath.Join(parent, "inspect")
+	f.root = secondRoot
+	p2 := brokerTestPlan(t, &a, parent, func(context.Context, []byte, string) error { return nil })
+	p2.controller.WorkflowRef = p.controller.WorkflowRef
+	p2.controller.WorkflowRunID = p.controller.WorkflowRunID
+	p2.raw, _ = json.Marshal(p2.controller)
+	a.ControllerApprovalSHA256 = brokerBytesDigest(p2.raw)
+	p2.approval = a
+	request2, err := brokerProvenanceRequest(a, p2.controller, api.provenance.Source())
+	if err != nil {
+		t.Fatal("second provenance request")
+	}
+	duplicate, err := api.provenance.Attest(context.Background(), request2)
+	if err != nil {
+		t.Fatal("second provenance receipt")
+	}
+	duplicate.ReceiptNonce = receipt.ReceiptNonce
+	fixtureAdapter, ok := api.provenance.(*signedBrokerFixtureAdapter)
+	if !ok {
+		t.Fatal("signed fixture adapter")
+	}
+	duplicate.Signature = base64.RawURLEncoding.EncodeToString(ed25519.Sign(fixtureAdapter.private, duplicate.SigningBytes()))
+	if err := fixtureAdapter.Verify(context.Background(), request2, duplicate); err != nil {
+		t.Fatal("second provenance receipt signature")
+	}
+	callsBefore, tokensBefore := len(f.calls), f.tokenCalls
+	if _, err := brokerExecuteWithProvenance(context.Background(), a, brokerInput{PEM: string(c.PEM)}, secondRoot, api, p2, &duplicate); err == nil {
+		t.Fatal("duplicate provenance nonce accepted")
+	}
+	after, err := os.ReadFile(ledgerPath)
+	if err != nil {
+		t.Fatal("read duplicate ledger")
+	}
+	if string(after) != string(before) || len(f.calls) != callsBefore || f.tokenCalls != tokensBefore {
+		t.Fatal("duplicate provenance nonce changed the ledger or reached an authenticated effect")
 	}
 }
 

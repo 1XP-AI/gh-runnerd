@@ -6,10 +6,10 @@ import (
 	"encoding/hex"
 	"io"
 	"os"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -26,6 +26,7 @@ type controllerApproval struct {
 	OwnerNonce     string    `json:"owner_nonce"`
 	HarnessSHA     string    `json:"harness_sha"`
 	WorkflowSHA    string    `json:"workflow_sha"`
+	WorkflowRef    string    `json:"workflow_ref"`
 	WorkflowPath   string    `json:"workflow_path"`
 	WorkflowRunID  int64     `json:"workflow_run_id"`
 	Controller     string    `json:"controller"`
@@ -75,6 +76,20 @@ func (c controllerApproval) validate(a BrokerApproval, now time.Time) error {
 	}
 	return nil
 }
+
+// A controller approval carries one stable, reviewed authority whose phase set
+// may cover successive controller invocations. This is only a structural
+// shape guard: it requires the requested outer phase to be included, but does
+// not attest that workflow input selected that phase; that capability remains
+// an explicit gate. Paired-terminal intentionally has its own fixed
+// multi-step sequence.
+func controllerApprovalShapeMatchesPhase(a BrokerApproval, c controllerApproval) bool {
+	if a.Mode != "controller" {
+		return true
+	}
+	return slices.Contains(c.Phases, a.Phase)
+}
+
 func readBrokerPrivateJSON(path string, target any) ([]byte, error) {
 	file, err := openBrokerPrivateFile(path, 0600, 16384)
 	if err != nil {
@@ -111,13 +126,67 @@ func readBrokerInput(parent context.Context, input *os.File) (brokerInput, error
 	return result, nil
 }
 
+const brokerProvenanceMaximumDuration = 10 * time.Minute
+
+func brokerProvenanceContext(parent context.Context, a BrokerApproval, c controllerApproval, now time.Time) (context.Context, context.CancelFunc, error) {
+	if parent == nil || parent.Err() != nil || now.IsZero() || a.ExpiresAt.IsZero() || c.ExpiresAt.IsZero() || !a.ExpiresAt.After(now) || !c.ExpiresAt.After(now) {
+		return nil, nil, errBroker
+	}
+	deadline := now.Add(brokerProvenanceMaximumDuration)
+	deadline = minTime(deadline, a.ExpiresAt)
+	deadline = minTime(deadline, c.ExpiresAt)
+	if parentDeadline, ok := parent.Deadline(); ok {
+		deadline = minTime(deadline, parentDeadline)
+	}
+	if !deadline.After(now) {
+		return nil, nil, errBroker
+	}
+	ctx, cancel := context.WithDeadline(parent, deadline)
+	return ctx, cancel, nil
+}
+
+func brokerWorkflowReceipt(ctx context.Context, api *brokerAPI, a BrokerApproval, c controllerApproval, controllerDigest string, claimed ...*brokerJournal) (*BrokerProvenanceReceipt, error) {
+	if ctx == nil || ctx.Err() != nil || api == nil || api.provenance == nil {
+		return nil, errBroker
+	}
+	if len(claimed) > 1 || (len(claimed) == 1 && (claimed[0] == nil || claimed[0].check() != nil)) {
+		return nil, errBroker
+	}
+	claimCheck := func() error {
+		if len(claimed) == 1 {
+			return claimed[0].check()
+		}
+		return nil
+	}
+	request, err := brokerProvenanceRequest(a, c, api.provenance.Source())
+	if err != nil || request.ControllerApprovalSHA256 != controllerDigest {
+		return nil, errBroker
+	}
+	provenanceCtx, cancel, err := brokerProvenanceContext(ctx, a, c, api.now())
+	if err != nil {
+		return nil, errBroker
+	}
+	defer cancel()
+	if claimCheck() != nil {
+		return nil, errBroker
+	}
+	receipt, err := api.provenance.Attest(provenanceCtx, request)
+	if err != nil || provenanceCtx.Err() != nil || claimCheck() != nil || receipt.Validate(request, api.now()) != nil || receipt.ExpiresAt.Before(a.ExpiresAt) {
+		return nil, errBroker
+	}
+	if provenanceCtx.Err() != nil || claimCheck() != nil || api.provenance.Verify(provenanceCtx, request, receipt) != nil || provenanceCtx.Err() != nil || claimCheck() != nil {
+		return nil, errBroker
+	}
+	return &receipt, nil
+}
+
 // RunBroker is network-lazy until all private approval/input checks succeed.
 // Calling this function with live credentials requires separate exact approval.
 func RunBroker(ctx context.Context, files BrokerFiles, input *os.File) (BrokerResult, error) {
 	return runBrokerWithAPI(ctx, files, input, newBrokerAPI(time.Now, nil))
 }
 func runBrokerWithAPI(ctx context.Context, files BrokerFiles, input *os.File, api *brokerAPI) (BrokerResult, error) {
-	if ctx == nil || api == nil || !filepath.IsAbs(files.StateDirectory) {
+	if ctx == nil || api == nil || !brokerCanonicalPath(files.StateDirectory) {
 		return BrokerResult{}, errBroker
 	}
 	var approval BrokerApproval
@@ -138,6 +207,7 @@ func runBrokerWithAPI(ctx context.Context, files BrokerFiles, input *os.File, ap
 	var controllerData []byte
 	var controllerRoot *os.Root
 	var workerPlan *brokerWorkerPlan
+	var provenance *BrokerProvenanceReceipt
 	if approval.Mode == "controller" || approval.Mode == "paired-terminal" {
 		if !brokerSHA256.MatchString(approval.ControllerBinarySHA256) || !brokerSHA256.MatchString(approval.ControllerApprovalSHA256) || !brokerSHA40.MatchString(approval.ControllerHarnessSHA) {
 			return BrokerResult{}, errBroker
@@ -145,7 +215,7 @@ func runBrokerWithAPI(ctx context.Context, files BrokerFiles, input *os.File, ap
 		var err error
 		controllerData, err = readBrokerPrivateJSON(files.ControllerApproval, &controller)
 		digest := sha256.Sum256(controllerData)
-		if err != nil || hex.EncodeToString(digest[:]) != approval.ControllerApprovalSHA256 || controller.validate(approval, api.now()) != nil {
+		if err != nil || hex.EncodeToString(digest[:]) != approval.ControllerApprovalSHA256 || controller.validate(approval, api.now()) != nil || !controllerApprovalShapeMatchesPhase(approval, controller) {
 			return BrokerResult{}, errBroker
 		}
 		binary, err = brokerBinaryOpener(files.ControllerBinary, approval)
@@ -168,8 +238,28 @@ func runBrokerWithAPI(ctx context.Context, files BrokerFiles, input *os.File, ap
 	} else if files.ControllerBinary != "" || files.ControllerApproval != "" || files.ControllerStateDirectory != "" || files.WorkerApproval != "" || files.WorkerStateDirectory != "" || approval.ControllerBinarySHA256 != "" || approval.ControllerApprovalSHA256 != "" || approval.ControllerHarnessSHA != "" {
 		return BrokerResult{}, errBroker
 	}
+	attempt, err := openBrokerJournal(files.StateDirectory, approval)
+	if err != nil {
+		return BrokerResult{}, errBroker
+	}
+	defer attempt.close()
+	if approval.Mode == "controller" || approval.Mode == "paired-terminal" {
+		if attempt.check() != nil {
+			return BrokerResult{}, errBroker
+		}
+		provenance, err = brokerWorkflowReceipt(ctx, api, approval, controller, approval.ControllerApprovalSHA256, attempt)
+		if err != nil || attempt.check() != nil {
+			return BrokerResult{}, errBroker
+		}
+	}
+	if attempt.check() != nil {
+		return BrokerResult{}, errBroker
+	}
 	credentialInput, err := readBrokerInput(ctx, input)
 	if err != nil || (approval.AllowVerificationAuthority && credentialInput.VerificationToken == "") {
+		return BrokerResult{}, errBroker
+	}
+	if attempt.check() != nil {
 		return BrokerResult{}, errBroker
 	}
 
@@ -191,6 +281,7 @@ func runBrokerWithAPI(ctx context.Context, files BrokerFiles, input *os.File, ap
 		if err != nil {
 			return BrokerResult{}, errBroker
 		}
+		plan.provenance = provenance
 		plan.localPrepare = func(ctx context.Context, snapshotPath string) (brokerPreparationReceipt, error) {
 			if approval.Mode == "paired-terminal" {
 				return invokeBrokerPairedPreparation(ctx, binary, files.StateDirectory, snapshotPath, files.ControllerStateDirectory)
@@ -204,19 +295,39 @@ func runBrokerWithAPI(ctx context.Context, files BrokerFiles, input *os.File, ap
 			}
 		}
 	}
-	return brokerExecute(ctx, approval, credentialInput, files.StateDirectory, api, plan)
+	return brokerExecuteWithProvenance(ctx, approval, credentialInput, files.StateDirectory, api, plan, provenance, attempt)
 }
 func (a *brokerAPI) verifyWorkflow(ctx context.Context, approval BrokerApproval, controller controllerApproval, token string) error {
+	return a.verifyWorkflowWithReceipt(ctx, approval, controller, token, nil)
+}
+
+// GitHub's workflow-run response exposes the selected branch or tag as
+// head_branch. It does not expose enough information in that field to rebuild
+// a refs/pull/<number>/{head,merge} identity, so pull refs remain unsupported
+// and fail closed here.
+func brokerWorkflowRunHeadBranchMatchesRef(headBranch, workflowRef string) bool {
+	if headBranch == "" || !brokerWorkflowRef.MatchString(workflowRef) {
+		return false
+	}
+	const branchPrefix = "refs/heads/"
+	if !strings.HasPrefix(workflowRef, branchPrefix) {
+		return false
+	}
+	return headBranch == strings.TrimPrefix(workflowRef, branchPrefix)
+}
+
+func (a *brokerAPI) verifyWorkflowWithReceipt(ctx context.Context, approval BrokerApproval, controller controllerApproval, token string, provenance *BrokerProvenanceReceipt) error {
 	var run struct {
 		ID             int64            `json:"id"`
 		HeadSHA        string           `json:"head_sha"`
+		HeadBranch     string           `json:"head_branch"`
 		Event          string           `json:"event"`
 		Path           string           `json:"path"`
 		RunAttempt     int              `json:"run_attempt"`
 		Repository     brokerRepository `json:"repository"`
 		HeadRepository brokerRepository `json:"head_repository"`
 	}
-	if a.call(ctx, "GET", "/repos/"+approval.Organization+"/"+approval.Repository+"/actions/runs/"+strconv.FormatInt(controller.WorkflowRunID, 10), "Bearer "+token, nil, 200, &run) != nil || run.ID != controller.WorkflowRunID || run.HeadSHA != controller.WorkflowSHA || run.Path != controller.WorkflowPath || run.Event != "workflow_dispatch" || run.RunAttempt != 1 || !run.Repository.matches(approval) || !run.HeadRepository.matches(approval) {
+	if a.call(ctx, "GET", "/repos/"+approval.Organization+"/"+approval.Repository+"/actions/runs/"+strconv.FormatInt(controller.WorkflowRunID, 10), "Bearer "+token, nil, 200, &run) != nil || run.ID != controller.WorkflowRunID || run.HeadSHA != controller.WorkflowSHA || run.Path != controller.WorkflowPath || run.Event != "workflow_dispatch" || run.RunAttempt != 1 || !run.Repository.matches(approval) || !run.HeadRepository.matches(approval) || (provenance != nil && !brokerWorkflowRunHeadBranchMatchesRef(run.HeadBranch, provenance.WorkflowRef)) {
 		return errBroker
 	}
 	return nil

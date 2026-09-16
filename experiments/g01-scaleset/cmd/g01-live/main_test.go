@@ -167,7 +167,7 @@ func TestPreparationCommandNeverReadsCredentialsOrRunsRemotePhase(t *testing.T) 
 	}
 }
 
-func TestPairedTerminalModeReadsControllerInputAfterAllGates(t *testing.T) {
+func TestPairedTerminalModeQuarantinesBeforeControllerInput(t *testing.T) {
 	a := livecanary.Approval{AppID: 11, InstallationID: 12, Organization: "fixture-org", Repository: "canary", RepositoryID: 42, RunnerGroupID: 3, OwnerNonce: strings.Repeat("a", 32), HarnessSHA: strings.Repeat("b", 40), WorkflowSHA: strings.Repeat("c", 40), WorkflowPath: ".github/workflows/canary.yml", WorkflowRunID: 5, Controller: "fixture-controller", ExpiresAt: time.Now().Add(time.Hour), ActionsHosts: []string{"fixture.actions.githubusercontent.com"}, Phases: []string{"create", "before-ack", "after-ack", "before-acquire", "acquire-loss", "inspect", "cleanup", "jit-loss"}}
 	worker := liveworker.Approval{RunnerUpdatesDisabled: true, HarnessSHA: a.HarnessSHA, WorkflowSHA: a.WorkflowSHA, OwnerNonce: a.OwnerNonce, Controller: a.Controller, Endpoint: "/tmp/g01-paired-docker.sock", DaemonID: "fixture-daemon", ImageID: "sha256:" + strings.Repeat("d", 64), Image: liveworker.ImageReference, ExpiresAt: a.ExpiresAt, Phases: []string{"create", "start", "inspect", "cleanup"}}
 	root := t.TempDir()
@@ -203,8 +203,8 @@ func TestPairedTerminalModeReadsControllerInputAfterAllGates(t *testing.T) {
 		t.Fatal("paired mode entered controller-only preparation")
 		return livecanary.PreparationReceipt{}, nil
 	})
-	if code == 0 || input.reads != 3 || input.eofs != 1 || input.readsAfterEOF != 0 {
-		t.Fatalf("paired mode did not consume one logical controller input: code=%d reads=%d eofs=%d rereads=%d output=%q", code, input.reads, input.eofs, input.readsAfterEOF, out.String())
+	if code == 0 || input.reads != 0 || input.eofs != 0 || input.readsAfterEOF != 0 {
+		t.Fatalf("paired mode crossed quarantined controller-input boundary: code=%d reads=%d eofs=%d rereads=%d output=%q", code, input.reads, input.eofs, input.readsAfterEOF, out.String())
 	}
 }
 

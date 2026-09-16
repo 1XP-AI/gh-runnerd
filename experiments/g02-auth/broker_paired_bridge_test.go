@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -24,6 +25,23 @@ import (
 )
 
 const pairedBridgeJIT = "c3ludGhldGljLXByaXZhdGUtaml0LWNvbmZpZw=="
+
+// The reviewed G01 tagged executable intentionally refuses controller and
+// paired-terminal execution until the broker can provide authenticated,
+// broker-only input provenance. Keep the exact fixed output here so an
+// unrelated bridge failure remains a test failure rather than a skip.
+const pairedBridgeControllerQuarantineOutput = "canary quarantined; broker provenance is required"
+const pairedBridgeControllerGenericRejectOutput = "canary refused; approval, authority or private state requires review"
+
+func TestPairedBridgeDoesNotTreatGenericRejectAsQuarantine(t *testing.T) {
+	err := exec.Command("false").Run()
+	if err == nil {
+		t.Fatal("false command unexpectedly succeeded")
+	}
+	if isExpectedPairedBridgeControllerQuarantine(err, []byte(pairedBridgeControllerGenericRejectOutput)) {
+		t.Fatal("generic reject output was treated as an expected quarantine")
+	}
+}
 
 // pairedBrokerBridge is an offline-only private transport. It serves the
 // controller's real REST/Actions calls over a generated TLS root and the
@@ -322,7 +340,7 @@ func (f *pairedBrokerBridge) handleGitHub(w http.ResponseWriter, r *http.Request
 			return
 		}
 		repo := bridgeRepository()
-		writeBridgeJSON(w, http.StatusOK, map[string]any{"id": f.workflowRunID, "head_sha": f.workflowSHA, "path": f.workflowPath, "event": "workflow_dispatch", "run_attempt": 1, "repository": repo, "head_repository": repo})
+		writeBridgeJSON(w, http.StatusOK, map[string]any{"id": f.workflowRunID, "head_branch": "main", "head_sha": f.workflowSHA, "path": f.workflowPath, "event": "workflow_dispatch", "run_attempt": 1, "repository": repo, "head_repository": repo})
 		return
 	}
 	jobsPath := "/repos/" + f.organization + "/" + f.repository + "/actions/runs/7/attempts/1/jobs"
@@ -581,7 +599,7 @@ func TestBrokerRejectsCleanFixtureBinaryBeforeMint(t *testing.T) {
 	now := time.Now()
 	a.Mode, a.Phase, a.ExpiresAt = "controller", "create", now.Add(time.Hour)
 	a.ControllerHarnessSHA, a.ControllerBinarySHA256 = harness, binaryDigest
-	controller := controllerApproval{AppID: a.AppID, InstallationID: a.InstallationID, Organization: a.Organization, Repository: a.Repository, RepositoryID: a.RepositoryID, RunnerGroupID: a.RunnerGroupID, OwnerNonce: a.OwnerNonce, HarnessSHA: harness, WorkflowSHA: strings.Repeat("b", 40), WorkflowPath: ".github/workflows/canary.yml", Controller: "trusted-controller", ExpiresAt: a.ExpiresAt, ActionsHosts: []string{"fixture.actions.githubusercontent.com"}, Phases: []string{"create"}}
+	controller := controllerApproval{AppID: a.AppID, InstallationID: a.InstallationID, Organization: a.Organization, Repository: a.Repository, RepositoryID: a.RepositoryID, RunnerGroupID: a.RunnerGroupID, OwnerNonce: a.OwnerNonce, HarnessSHA: harness, WorkflowSHA: strings.Repeat("b", 40), WorkflowRef: "refs/heads/main", WorkflowPath: ".github/workflows/canary.yml", Controller: "trusted-controller", ExpiresAt: a.ExpiresAt, ActionsHosts: []string{"fixture.actions.githubusercontent.com"}, Phases: []string{"create"}}
 	controllerData, err := json.Marshal(controller)
 	if err != nil {
 		t.Fatal("controller approval")
@@ -643,19 +661,18 @@ func hexDigest(data []byte) string {
 	return string(out)
 }
 
-func runBridgeCommand(t *testing.T, ctx context.Context, binary string, args []string, input []byte) []byte {
+func runBridgeCommand(t *testing.T, ctx context.Context, binary string, args []string, input []byte) ([]byte, error) {
 	t.Helper()
 	command := exec.CommandContext(ctx, binary, args...)
 	command.Env = []string{"LANG=C", "LC_ALL=C"}
 	command.Stdin = bytes.NewReader(input)
 	output, err := command.CombinedOutput()
-	if err != nil {
-		// g01-live's output boundary is fixed text; retaining it here makes a
-		// local fixture failure diagnosable without exposing credentials or SDK
-		// response bodies.
-		t.Fatalf("reviewed g01 bridge command failed: %q", strings.TrimSpace(string(output)))
-	}
-	return output
+	return output, err
+}
+
+func isExpectedPairedBridgeControllerQuarantine(err error, output []byte) bool {
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr) && exitErr.ExitCode() == 1 && bytes.Equal(bytes.TrimSpace(output), []byte(pairedBridgeControllerQuarantineOutput))
 }
 
 func writePrivateBridgeJSON(t *testing.T, path string, value any) []byte {
@@ -699,7 +716,7 @@ func runPairedBrokerBridge(t *testing.T, tags string) time.Duration {
 	now := time.Now()
 	expires := now.Add(20 * time.Minute)
 	workflow := strings.Repeat("b", 40)
-	controller := controllerApproval{AppID: 71, InstallationID: 201, Organization: bridge.organization, Repository: bridge.repository, RepositoryID: 501, RunnerGroupID: bridge.runnerGroupID, OwnerNonce: strings.Repeat("a", 32), HarnessSHA: harness, WorkflowSHA: workflow, WorkflowPath: bridge.workflowPath, WorkflowRunID: bridge.workflowRunID, Controller: "trusted-controller", ExpiresAt: expires, ActionsHosts: []string{"fixture.actions.githubusercontent.com"}, Phases: []string{"create", "before-ack", "after-ack", "before-acquire", "inspect", "cleanup"}}
+	controller := controllerApproval{AppID: 71, InstallationID: 201, Organization: bridge.organization, Repository: bridge.repository, RepositoryID: 501, RunnerGroupID: bridge.runnerGroupID, OwnerNonce: strings.Repeat("a", 32), HarnessSHA: harness, WorkflowSHA: workflow, WorkflowRef: "refs/heads/main", WorkflowPath: bridge.workflowPath, WorkflowRunID: bridge.workflowRunID, Controller: "trusted-controller", ExpiresAt: expires, ActionsHosts: []string{"fixture.actions.githubusercontent.com"}, Phases: []string{"create", "before-ack", "after-ack", "before-acquire", "inspect", "cleanup"}}
 	controllerPath := filepath.Join(parent, "controller-approval.json")
 	controllerData := writePrivateBridgeJSON(t, controllerPath, controller)
 	credentials := map[string]any{"installation_token": bridge.installationToken, "verification_token": bridge.verificationToken, "app_id": 71, "installation_id": 201, "organization": bridge.organization, "expires_at": expires, "organization_self_hosted_runners": "write", "metadata": "read"}
@@ -708,8 +725,17 @@ func runPairedBrokerBridge(t *testing.T, tags string) time.Duration {
 		t.Fatal("controller credentials")
 	}
 	createCtx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	runBridgeCommand(t, createCtx, binaryPath, []string{"--execute-approved-canary", "--approval", controllerPath, "--state-dir", controllerState, "--phase", "create"}, credentialData)
+	output, commandErr := runBridgeCommand(t, createCtx, binaryPath, []string{"--execute-approved-canary", "--approval", controllerPath, "--state-dir", controllerState, "--phase", "create"}, credentialData)
 	cancel()
+	if isExpectedPairedBridgeControllerQuarantine(commandErr, output) {
+		t.Skip("G01 controller execution remains quarantined until broker-only input provenance is available")
+	}
+	if commandErr != nil {
+		// g01-live's output boundary is fixed text; retaining it here makes a
+		// local fixture failure diagnosable without exposing credentials or SDK
+		// response bodies.
+		t.Fatalf("reviewed g01 bridge command failed: %q", strings.TrimSpace(string(output)))
+	}
 	journalData, err := os.ReadFile(filepath.Join(controllerState, "journal.jsonl"))
 	if err != nil {
 		t.Fatal("controller journal")

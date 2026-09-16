@@ -32,6 +32,7 @@ type Approval struct {
 	OwnerNonce     string    `json:"owner_nonce"`
 	HarnessSHA     string    `json:"harness_sha"`
 	WorkflowSHA    string    `json:"workflow_sha"`
+	WorkflowRef    string    `json:"workflow_ref,omitempty"`
 	WorkflowPath   string    `json:"workflow_path"`
 	WorkflowRunID  int64     `json:"workflow_run_id"`
 	Controller     string    `json:"controller"`
@@ -76,7 +77,6 @@ type API interface {
 	FindScaleSet(context.Context, string, int) (*scaleset.RunnerScaleSet, error)
 	GetScaleSet(context.Context, int) (*scaleset.RunnerScaleSet, error)
 	CreateScaleSet(context.Context, *scaleset.RunnerScaleSet) (*scaleset.RunnerScaleSet, error)
-	DeleteScaleSet(context.Context, int) error
 	OpenSession(context.Context, int, string) (Session, error)
 	FindRunner(context.Context, string) (*scaleset.RunnerReference, error)
 	GenerateJIT(context.Context, int, string) (*scaleset.RunnerScaleSetJitRunnerConfig, error)
@@ -447,6 +447,18 @@ func (d *Driver) owned(ctx context.Context, id int) (*scaleset.RunnerScaleSet, e
 // A second process uses the durable journal to retain unknown reservations;
 // session credentials cannot be rehydrated using the supported SDK API.
 func (d *Driver) Run(ctx context.Context, phase string) error {
+	// Cleanup is never allowed to reach the journal or API unless the concrete
+	// adapter advertises the conditional-delete contract. SDKAPI retains its
+	// legacy DeleteScaleSet method for the paired baseline, but that method is
+	// intentionally absent from this driver's API contract.
+	if phase == "cleanup" {
+		if d == nil || d.API == nil {
+			return ErrQuarantine
+		}
+		if _, ok := d.API.(ConditionalScaleSetDeleter); !ok {
+			return ErrQuarantine
+		}
+	}
 	s, release, err := authorizePhase(d.Approval, d.Journal, phase)
 	if err != nil {
 		return err
@@ -458,19 +470,26 @@ func (d *Driver) Run(ctx context.Context, phase string) error {
 	}
 	ctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	_, err = boundedRead(ctx, func(c context.Context) (bool, error) { return true, d.API.Preflight(c, d.Approval) })
-	if err != nil {
-		return ErrApproval
-	}
-	if phase == "inspect" {
-		return d.inspect(ctx, s)
-	}
 	phaseEvent := Event{Kind: "phase", Operation: phase}
 	if phase == "drain" {
 		// The phase carries the already-created set identity. The journal
 		// sequence assigned to this event is the only sequence a later drain
 		// observation may use to discharge its phase-local fence.
 		phaseEvent.ID = s.setID
+	}
+	if phase == "inspect" {
+		// Consume the singleton inspect slot before preflight as well as before
+		// the read. A failed preflight must not authorize a second attempt.
+		if err := d.record(phaseEvent); err != nil {
+			return err
+		}
+	}
+	_, err = boundedRead(ctx, func(c context.Context) (bool, error) { return true, d.API.Preflight(c, d.Approval) })
+	if err != nil {
+		return ErrApproval
+	}
+	if phase == "inspect" {
+		return d.inspect(ctx, s)
 	}
 	if err := d.record(phaseEvent); err != nil {
 		return err
@@ -531,7 +550,24 @@ func (d *Driver) Run(ctx context.Context, phase string) error {
 		if s.inventory == "" || inventory != s.inventory {
 			return ErrQuarantine
 		}
-		if err := d.effect(ctx, "delete", nil, func(c context.Context) (Event, error) { return Event{}, d.API.DeleteScaleSet(c, s.setID) }); err != nil {
+		deleter, ok := d.API.(ConditionalScaleSetDeleter)
+		if !ok {
+			return ErrQuarantine
+		}
+		expectation := ScaleSetDeletionExpectation{ScaleSetID: s.setID, ScaleSetName: set.Name, RunnerGroupID: set.RunnerGroupID, OwnerNonce: d.Approval.OwnerNonce, OwnershipLabel: d.Approval.setName(), Statistics: *set.Statistics, InventoryDigest: inventory}
+		if !expectation.matches(d.Approval, set) {
+			return ErrQuarantine
+		}
+		if err := d.effect(ctx, "delete", nil, func(c context.Context) (Event, error) {
+			fence, err := deleter.PrepareScaleSetDeletion(c, expectation)
+			if err != nil || !fence.matches(expectation) {
+				return Event{}, ErrRemote
+			}
+			if err := c.Err(); err != nil {
+				return Event{}, err
+			}
+			return Event{}, deleter.DeleteScaleSetIfOwned(c, fence)
+		}); err != nil {
 			return err
 		}
 		after, err := boundedRead(ctx, d.API.Inventory)
@@ -581,6 +617,11 @@ func (d *Driver) inspect(ctx context.Context, s state) error {
 	set, err := d.owned(ctx, s.setID)
 	if err != nil {
 		return err
+	}
+	if s.deleted && set != nil {
+		// A durable delete result contradicts a surviving owned set. Keep the
+		// owned read receipt, but never record the set as safe inspection.
+		return ErrQuarantine
 	}
 	ref, err := d.runner(ctx, s.setID)
 	if err != nil {
