@@ -2675,3 +2675,153 @@ separate documentation-only append. Source rollback is recoverable with
 `git revert --no-edit 0f36583535a7f26644e6b58815c8dd0b85b45b8b`; revert this
 documentation append separately if needed. No live App/runner/canary evidence
 is claimed; the unresolved live G01 gate, CI and merge remain coordinator-owned.
+
+## Exact-head P1 audit: live API set for `f5560ba950f77343e57034cc1cf85dc67f5ac922`
+
+On 2026-09-16 UTC, the live GitHub API was re-queried before this evidence
+update. The PR head was still
+`f5560ba950f77343e57034cc1cf85dc67f5ac922`. Review comments whose
+`commit_id` equals that SHA were treated as current even when their creation
+date or wording made them look historical; older commit IDs were not
+redispatched. The current-head P1 comments below are all addressed by the
+existing source corrections and regressions already present at that SHA. The
+live API uses `r3996893012` for the session-origin finding; the previously
+written `r3976893012` spelling is not a live comment ID and is not treated as
+authority.
+
+The evidence is bounded and offline. No request body, queue URL, token, JIT
+value, raw SDK error, personal path or private log is included here. “Red”
+means the historical or isolated pre-fix regression recorded in the linked
+section; “green” names the current regression that was rerun on the exact
+source head. A green result proves only the client-side invariant and does not
+prove server receipt or an atomic remote drain.
+
+| Live finding | Red reproduction and current resolution evidence |
+|---|---|
+| [r3965776826](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3965776826) cancellation join | The cancellation regression previously allowed the listener goroutine to outlive the phase. `runDrainListener` now cancels, releases the held response, and joins on every context-exit path; `TestDrainRejectsEffectsAfterCancellationAndRecordsMarker`, `TestDrainCancellationAfterIntentRejectsEffect`, and `TestDrainCancellationBeforeSnapshotRecordsMarker` pass. |
+| [r3966125441](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3966125441) runner continuity | The runner replacement/missing-identity regression is retained in `TestDriverDrainThroughPinnedSDKAndPollHook`, `TestPinnedSDKDrainRejectsRunnerSnapshotOriginMismatchBeforeListener`, and the replay contract tests. Observed evidence requires two equal non-nil runner identities and retains uncertainty otherwise. |
+| [r3966362990](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3966362990) durable drain uncertainty | The crash-before-final-observation history is rejected by `TestDrainPhaseStartRetainsCrashUncertainty`, `TestReplayDrainFenceRetainsInconclusiveOutcome`, and the FileJournal reopen tests. The phase fence is recorded before remote polling and is discharged only by one matching valid observation. |
+| [r3967496305](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3967496305) finding ledger | This audit supplies the missing current-head URL ledger, red/green references, source-resolution evidence and the explicit live-operation gap. |
+| [r3972526881](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3972526881) embedded job body | The duplicate/case-folded embedded identity regression is covered by `TestPinnedSDKDrainRejectsAmbiguousEmbeddedJobIdentityBeforeEffects`. The bounded poll adapter strictly decodes the embedded message and compares it with the SDK object before `VerifyRun`, ACK or acquisition. |
+| [r3972911049](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3972911049) withdrawn-poll body | The 202-with-message regression is covered by `TestPinnedSDKDrainRejectsWithdrawnPollBodyBeforeAbsent`; a lossy SDK nil cannot be classified as absent unless the bounded wire shape proves no message. |
+| [r3972911056](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3972911056) acquisition response | Duplicate, missing, mismatched and case-folded count/value responses are covered by `TestPinnedSDKDrainAcquisitionRequiresStrictWireResponse`. The bounded adapter requires strict count/value facts before acquisition success. |
+| [r3972911063](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3972911063) scale-set snapshots | Duplicate/case-folded snapshot fields are covered by `TestPinnedSDKDrainSnapshotsRequireStrictWireFacts` and `TestPinnedSDKDrainRejectsAmbiguousRunnerSnapshot`; set and runner evidence is bounded, strict and origin/prefix-bound before it is journaled. |
+| [r3972911082](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3972911082) workflow-run authorization | `TestPinnedSDKDrainVerifyRunRejectsAmbiguousWireFieldsBeforeEffects` covers duplicate/case-folded authorization fields. `VerifyRun` uses the strict bounded observation adapter and cannot authorize effects from ambiguous JSON. |
+| [r3973406553](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3973406553) drain session response | `TestPinnedSDKDrainRejectsAmbiguousSessionResponse` covers duplicate/case-folded session identity, queue, token and statistics fields. `OpenDrainSession` captures and strictly validates the response before exposing a session to the listener. |
+| [r3973406571](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3973406571) physical ACK | `TestPinnedSDKDrainBindsACKToPhysicalDelete` and the marked ACK mismatch/cardinality tests require the exact queue origin/path, cursor, set/session identity and one physical DELETE before ACK success is journaled. |
+| [r3973406578](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3973406578) poll read completion | `TestPinnedSDKDrainRejectsNonEOFPollReadError` and `TestPinnedSDKDrainRejectsPollCloseErrorBeforeEffects` force poll wire facts unknown on any non-EOF read or close failure before later effects. |
+| [r3974007586](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3974007586) physical session close | `TestPinnedSDKDrainBindsSessionCloseToPhysicalDelete` and `TestBaselineMarkedSessionCloseMismatchStopsBeforeInner` require the captured session/set route, origin, tenant prefix, authorization and one-shot DELETE plus a clean 204 before clearing the session fence. |
+| [r3974562078](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3974562078) session-open target | `TestBaselineSessionOpenTargetMismatchStopsBeforeInner` exercises host, route, set, method and query mutations. Marked non-bootstrap session-open candidates are rejected before the inner transport; the narrow registration bootstrap allowlist remains explicit. |
+| [r3976171401](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3976171401) acquisition/session origin | `TestBaselineAcquireTargetRequiresCapturedSessionOrigin`, `TestBaselineAcquireOriginMismatchStopsBeforeInner`, and `TestPinnedSDKDrainBindsAcquireToPhysicalRequestBody` require acquisition to use the exact captured session-open origin, not merely an approved-host member. |
+| [r3976536000](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3976536000) session-open body | `TestBaselineSessionOpenBodyMustMatchOwnerBeforeInner` rejects malformed, duplicate, case-folded and wrong-owner bounded bodies before forwarding; no usable session identity is persisted on failure. |
+| [r3976535985](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3976535985) acquisition pre-effect fence | `TestBaselineAcquireTargetMismatchStopsBeforeInner`, `TestBaselineAcquireTargetIsActionsOnly`, and the pinned-SDK target mutation matrix reject queue-shaped, wrong-host, wrong-set/path and wrong-method requests before the inner transport. |
+| [r3976535994](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3976535994) snapshot origin | `TestBaselineSnapshotRequestsRequireExactOriginBeforeInner` and the pinned snapshot-origin regressions require before/after set and runner reads to use the captured origin and tenant prefix. |
+| [r3976536008](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3976536008) finding URLs | The linked correction section records the red mutation matrix, green normal/race commands and rollback scope for the acquisition-origin, snapshot-origin and session-open-body findings. |
+| [r3996893012](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3996893012) drain-session origin | `TestPinnedSDKDrainRejectsSessionOriginMismatchBeforeListener` rejects a session opened on a different origin than the before snapshot before any listener poll. |
+| [r3996992592](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3996992592) duplicate session-open | `TestBaselineSessionOpenRejectsDuplicateMarkedPOSTBeforeInner` reserves the marked session-open one-shot before forwarding and rejects every duplicate. |
+| [r3997097883](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3997097883) ACK target | `TestBaselineMarkedACKMismatchStopsBeforeInner` and `TestBaselineMarkedACKRequiresIdentityAndOneShotCardinality` reject rewritten queue/message targets before the inner transport. |
+| [r3997211059](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3997211059) Host authority | `TestMarkedRequestHostOverrideStopsBeforeInner` rejects a non-empty `Request.Host` unless it canonically equals `URL.Host`; `TestMarkedRequestHostMatchingURLHostPreservesForwarding` preserves the valid control, including the marked-poll boundary. |
+| [r3997312693](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3997312693) opaque target | `TestMarkedRequestOpaqueStopsBeforeInner` and `TestMarkedPollOpaqueStopsBeforeInner` reject every non-empty marked `URL.Opaque` before the final physical transport; unmarked forwarding remains unchanged. |
+| [r3997904130](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3997904130) runner response completion | `TestGuardBaselineResponseRejectsRunnerFactsWhenBodyCloseFails` invalidates runner facts on response body close failure before continuity or observation evidence can use them. |
+| [r3997904133](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3997904133) marker propagation | `TestBaselineMarkedBoundariesRejectReplacementContextBeforeInner`, `TestBaselineWireMarkerIsRemovedBeforeInner`, and the case-folded marker regressions require exactly one valid marker at the final boundary and remove it before physical forwarding. |
+| [r3998020455](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3998020455) successful DELETE completion | `TestGuardBaselineResponseRejectsTerminalCloseWhenBodyCloseFails` invalidates expected-204 ACK/session-close captures on body-close failure; status alone cannot publish success. |
+| [r3998106048](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3998106048) JIT tuple | `TestBaselineMarkedJITRequestRejectsPhysicalTupleMutationBeforeInner` rejects JIT origin, tenant-prefix and strict body mutations before forwarding; valid marked and unmarked controls remain green. |
+| [r3998189095](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r3998189095) verification completion | This is the same close-completion boundary as issue comment [5649825382](https://github.com/1XP-AI/gh-runnerd/pull/72#issuecomment-5649825382). `TestPinnedSDKDrainRejectsVerifyRunCloseErrorBeforeEffects` rejects a matching workflow-run body whose `Close` fails before ACK/acquisition. |
+
+The current source audit was rerun with these offline commands on the exact
+source head before this documentation-only append:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^(TestDrain|TestReplay|TestBaseline|TestMarked|TestUnmarked|TestPinnedSDKDrain|TestGuardBaselineResponseRejects|TestDriverRoutesDrainBeforeNoWorkerStatisticsQuarantine|TestValidatePairedApprovalsAcceptsDrainVerification)$' -count=1 -timeout=300s
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -run '^(TestDrain|TestReplay|TestBaseline|TestMarked|TestUnmarked|TestPinnedSDKDrain|TestGuardBaselineResponseRejects|TestDriverRoutesDrainBeforeNoWorkerStatisticsQuarantine|TestValidatePairedApprovalsAcceptsDrainVerification)$' -count=1 -timeout=360s
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -count=1 -timeout=360s
+```
+
+All three commands exited 0 (focused normal 0.473s, focused race 1.334s,
+package normal 29.423s). The package race run also exited 0 in 55.684s with no
+race diagnostics. These additional checks exited 0: `go vet ./livecanary`,
+`bash scripts/gofmt.sh check`, `git diff --check`, and
+`bash scripts/check-offline-experiments.sh` (which printed
+`offline experiment checks passed: 2 module(s)`). The changed documentation
+diff secret/private-path scan also exited 0 and printed
+`diff secret/private-path scan passed`.
+
+No live GitHub Actions call, runner, Scale Set, session, JIT, workflow,
+Docker/Lima, Keychain, launchd, credential or cleanup operation was run. The
+explicit unresolved gap is therefore live validation and server receipt: these
+client-side tests cannot establish an atomic remote drain, and the independent
+NO-GO safety findings recorded in
+[issue-comment 5680387706](https://github.com/1XP-AI/gh-runnerd/pull/72#issuecomment-5680387706)
+remain quarantined in stacked PR #81 rather than silently claimed as fixed by
+this offline PR.
+
+### Exact-head follow-up: reject incomplete preflight responses before draining
+
+Date: 2026-09-16. This correction starts from exact PR #72 head
+`cd480d81312110e83404bb050254d14be84b54ff` and addresses the Codex P1 finding
+at [discussion_r4022441222](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r4022441222).
+The finding identified that `SDKAPI.get` deferred `response.Body.Close` and
+could authorize preflight from complete-looking JSON even when close reported
+an error. `SDKAPI.get` has two callers: the preflight authority checks and the
+legacy inventory reader; both retain their existing fixed error categories.
+No Issue, Project, goal, dependency, live-operation or runner state was
+changed.
+
+#### Red-first reproduction
+
+The regression used the existing offline loopback HTTP fixture. Before the
+source correction, the first preflight response returned complete valid JSON
+but its body returned `io.ErrClosedPipe` from `Close`; `Run("drain")` proceeded
+past preflight and attempted the first drain snapshot. This focused command
+exited 1 as expected:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^TestPreflightRejectsCompleteResponseWhenBodyCloseFailsBeforeDrain$' -count=1 -v -timeout=60s
+```
+
+The bounded failure was:
+
+```text
+sdk_test.go:134: preflight body close error = state uncertain; quarantine and inspect only, want approval rejection
+```
+
+The regression retains only the fixed approval/quarantine categories, a drain
+snapshot call count and journal length; it records no response body, token,
+URL, raw SDK error or private log.
+
+#### Minimal correction and green evidence
+
+`SDKAPI.get` now explicitly closes successful responses after the bounded
+`io.ReadAll` and rejects any read or close completion error before JSON can
+authorize a caller. Non-200 responses still close and return the existing
+opaque `ErrRemote`; the 1 MiB response limit and JSON validation are unchanged.
+The regression passed normally in 0.133s and under race in 1.328s with no race
+diagnostics:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^TestPreflightRejectsCompleteResponseWhenBodyCloseFailsBeforeDrain$' -count=1 -v -timeout=60s
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -run '^TestPreflightRejectsCompleteResponseWhenBodyCloseFailsBeforeDrain$' -count=1 -timeout=60s
+```
+
+The full `livecanary` package passed normally in 25.121s and under race in
+41.019s:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -count=1 -timeout=360s
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -count=1 -timeout=420s
+```
+
+The source/test correction was first captured in focused commit
+`21b67c5eeaf7e087a2b76a1c147105276b65b5fb`; the final single
+implementation/docs commit is the exact branch `HEAD` reported at delivery
+(verify with `git rev-parse HEAD`), and its rollback is
+`git revert --no-edit HEAD`. No live GitHub call, App enrollment, runner/Scale
+Set operation, workflow replay, Docker/Lima, Keychain or launchd operation was
+run. The live-validation gap is explicitly retained: these offline tests prove
+only the client-side fail-closed boundary and cannot prove remote server
+receipt or an atomic live drain; independent exact-head Codex review, CI and
+maintainer-authorized live validation remain coordinator-owned.

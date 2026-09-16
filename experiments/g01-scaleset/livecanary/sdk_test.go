@@ -3,6 +3,8 @@ package livecanary
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -80,6 +82,62 @@ func TestAuthoritySplitAndPolicyRejection(t *testing.T) {
 				t.Fatal("remote approval boundary failed")
 			}
 		})
+	}
+}
+
+type preflightDrainProbe struct {
+	*SDKAPI
+	drainCalls int
+}
+
+func (p *preflightDrainProbe) drainGetScaleSet(context.Context, int, *baselineWireCapture) (*scaleset.RunnerScaleSet, error) {
+	p.drainCalls++
+	return nil, ErrRemote
+}
+
+func TestPreflightRejectsCompleteResponseWhenBodyCloseFailsBeforeDrain(t *testing.T) {
+	a := approval()
+	a.Phases = append(a.Phases, "drain")
+	c := credentials(a)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		repo := map[string]any{"id": a.RepositoryID, "full_name": a.Organization + "/" + a.Repository, "private": true, "fork": false}
+		var body any
+		switch {
+		case r.URL.Path == "/installation/repositories":
+			body = map[string]any{"total_count": 1, "repositories": []any{repo}}
+		case strings.HasSuffix(r.URL.Path, "/repositories"):
+			body = map[string]any{"total_count": 1, "repositories": []any{repo}}
+		case strings.Contains(r.URL.Path, "/runner-groups/"):
+			body = map[string]any{"id": a.RunnerGroupID, "visibility": "selected", "default": false, "allows_public_repositories": false, "inherited": false}
+		default:
+			body = repo
+		}
+		if r.Method != http.MethodGet || r.Header.Get("Authorization") != "Bearer "+c.InstallationToken {
+			t.Error("authority crossed endpoint boundary or preflight wrote")
+		}
+		_ = json.NewEncoder(w).Encode(body)
+	}))
+	defer server.Close()
+
+	client := server.Client()
+	client.Transport = sdkResponseBodyFaultRoundTripper{
+		inner:    client.Transport,
+		path:     "/installation/repositories",
+		closeErr: io.ErrClosedPipe,
+	}
+	api := &preflightDrainProbe{
+		SDKAPI: &SDKAPI{rest: client, baseURL: server.URL, approval: a, credentials: c},
+	}
+	j := &memoryJournal{events: append([]Event(nil), drainReplayPrefix()[:3]...)}
+	d := Driver{Approval: a, Journal: j, API: api}
+	if err := d.Run(context.Background(), "drain"); !errors.Is(err, ErrApproval) {
+		t.Fatalf("preflight body close error = %v, want approval rejection", err)
+	}
+	if api.drainCalls != 0 {
+		t.Fatalf("body close error entered drain snapshot: calls=%d", api.drainCalls)
+	}
+	if len(j.Events()) != 3 {
+		t.Fatalf("body close error appended drain phase: events=%d, want 3", len(j.Events()))
 	}
 }
 

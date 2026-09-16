@@ -79,7 +79,23 @@ Public PR checks run in GitHub-hosted standard environments without credentials.
 
 Issue [#66](https://github.com/1XP-AI/gh-runnerd/issues/66) records the maintainer-accepted split. Placement on a release means that release needs the **complete original scope**. It is not a claim that no safe subset is required earlier, and it is not permission to mark a parent Done. Where an original issue mixed internal-MVP and later acceptance, explicit children hold the R1 subset; parents stay open until their own criteria pass.
 
-The live 36-item map is in [ISSUES.md](ISSUES.md). Production implementation of dependency-blocked full-scope issues is not authorized by this planning change. R1 placement of #68 is user-visible release scope, not a waiver of the full G01/G02 production gates. Because full G02 remains classified R3, R1 is not independently deliverable until that pre-release evidence gate passes.
+The live 38-item map is in [ISSUES.md](ISSUES.md). Production implementation of dependency-blocked full-scope issues is not authorized by this planning change. R1 placement of #68 is user-visible release scope, not a waiver of the full G01/G02 production gates. Because full G02 remains classified R3, R1 is not independently deliverable until that pre-release evidence gate passes.
+
+### G01 Goal synchronization
+
+The current active Goal for issue [#1](https://github.com/1XP-AI/gh-runnerd/issues/1)
+and its one parent active goal is:
+
+> Select and pin one supported Scale Set integration path and produce a reusable evidence packet for recovery at message acknowledgement, acquisition and JIT boundaries, rerunning only changed-boundary checks while keeping unchanged evidence and live gaps explicit.
+
+The previous wording is retained explicitly for historical provenance, not as the
+current objective to copy into an active goal:
+
+> Select and pin a supported Scale Set integration path with demonstrated recovery at message acknowledgement, acquisition and JIT boundaries.
+
+Child [#71](https://github.com/1XP-AI/gh-runnerd/issues/71) remains bounded
+experiment-only work under this single parent Goal and does not create a second
+active Goal or close the G01 evidence gate.
 
 ### R1 — Internal MVP
 
@@ -91,9 +107,10 @@ Foreground only. `cmd/gh-runnerd` is still an empty entry point; unattended daem
 
 | Issue | R1 role versus original acceptance |
 |---|---|
-| [#1](https://github.com/1XP-AI/gh-runnerd/issues/1) G01 | **Full original Goal** remains: "Select and pin a supported Scale Set integration path with demonstrated recovery at message acknowledgement, acquisition and JIT boundaries." In progress. No false completion from child merges or a happy-path job. |
+| [#1](https://github.com/1XP-AI/gh-runnerd/issues/1) G01 | **Current active Goal**: "Select and pin one supported Scale Set integration path and produce a reusable evidence packet for recovery at message acknowledgement, acquisition and JIT boundaries, rerunning only changed-boundary checks while keeping unchanged evidence and live gaps explicit." In progress. The pre-optimization wording above is historical provenance only; child merges and a happy-path job do not complete G01. |
 | [#67](https://github.com/1XP-AI/gh-runnerd/issues/67) | R1 subset of [#2](https://github.com/1XP-AI/gh-runnerd/issues/2): manual single-organization credentials. Ready; no live App/Keychain/launchd authorization. Parent #2 stays In progress on R3. |
-| [#60](https://github.com/1XP-AI/gh-runnerd/issues/60) G01g | Bounded broker handoff for the paired Linux-container path. In progress in a separate worktree. |
+| [#60](https://github.com/1XP-AI/gh-runnerd/issues/60) G01g | Bounded broker handoff for the paired Linux-container path. Done via merged PR #62; its evidence is a slice and does not close G01. |
+| [#71](https://github.com/1XP-AI/gh-runnerd/issues/71) G01h | Experiment-only idle-drain observation under the single current G01 Goal. In progress; it does not create a second Goal or close the parent evidence gate. |
 | [#66](https://github.com/1XP-AI/gh-runnerd/issues/66) | Planning and documentation synchronization. |
 | [#68](https://github.com/1XP-AI/gh-runnerd/issues/68) | R1 subset of [#13](https://github.com/1XP-AI/gh-runnerd/issues/13), coordinated slice of #4–#15. Native blockers remain #60, #66 and #67; do not add #1/#2 without an explicit ask. **Until full G01 [#1](https://github.com/1XP-AI/gh-runnerd/issues/1) and G02 [#2](https://github.com/1XP-AI/gh-runnerd/issues/2) pass, authorized work is a reviewed minimal contract and offline evidence only**, not `cmd/gh-runnerd` production behavior and not a G04/G13 bypass. Production implementation starts only after those full gates pass; it may then reuse the reviewed G01 paired Linux-container path (#54/#60) and R1 credentials (#67). Completing #67 does not complete G02. Completing #68 does not complete #4–#15 or claim G01 or G02 complete. |
 | [#69](https://github.com/1XP-AI/gh-runnerd/issues/69) | R1 subset of [#16](https://github.com/1XP-AI/gh-runnerd/issues/16): authorized real private job plus required ACK/acquisition/JIT recovery. Blocked by **full** [#1](https://github.com/1XP-AI/gh-runnerd/issues/1) and #68. A passing happy-path job is not sufficient. This is the G01 recovery gate for the R1 operator exit. |

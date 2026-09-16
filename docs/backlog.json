@@ -13,7 +13,7 @@
       "stage": "M0 - Evidence gates",
       "agent": "Luna max",
       "dependencies": [],
-      "goal": "Select and pin a supported Scale Set integration path with demonstrated recovery at message acknowledgement, acquisition and JIT boundaries.",
+      "goal": "Select and pin one supported Scale Set integration path and produce a reusable evidence packet for recovery at message acknowledgement, acquisition and JIT boundaries, rerunning only changed-boundary checks while keeping unchanged evidence and live gaps explicit.",
       "scope": "Isolated protocol spike and ADR; compare release v0.4.0 with audited commit cb0405b2d874500e75ae34eff8d582ab75956b45. Do not implement production providers or copy the demo shutdown policy.",
       "tdd": [
         "Red: fake session server reproduces ACK-before-callback crash and missing lifecycle callback.",
