@@ -51,7 +51,7 @@ func TestManualExecutableSyntheticAdapterAndPrivateStdin(t *testing.T) {
 				org = 102
 				inst = 202
 			}
-			body = fmt.Sprintf(`{"id":%d,"app_id":71,"target_id":%d,"target_type":"Organization","account":{"id":%d,"login":%q,"type":"Organization"},"permissions":{"organization_self_hosted_runners":"write","metadata":"read"}}`, inst, org, org, login)
+			body = fmt.Sprintf(`{"id":%d,"app_id":71,"target_id":%d,"target_type":"Organization","account":{"id":%d,"login":%q,"type":"Organization"},"permissions":{"organization_self_hosted_runners":"write","metadata":"read"},"suspended_at":null}`, inst, org, org, login)
 		default:
 			t.Fatal("unexpected API destination")
 		}

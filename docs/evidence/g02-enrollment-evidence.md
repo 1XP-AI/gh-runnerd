@@ -2,6 +2,8 @@
 
 Status on 2026-09-07: **offline harness and limited current-login synthetic runtime probe complete; required live GitHub and target service-identity gates remain open**. This record does not mark issue G02 Done.
 
+Later offline increment: [g02-offline-packet.md](g02-offline-packet.md) records fail-closed unknown suspension and the Manifest payload contract on current main. Live enrollment and reboot/lock evidence remain open.
+
 ## Environment and scope
 
 The harness was developed on Darwin ARM64, macOS 26.6.2 (25G83). Initial red tests used installed Go 1.25.8; final verification uses the isolated module's pinned Go 1.26.8. No third-party dependencies were added. The host's equivalence to the intended deployment Mac/controller account is not inferred from matching hardware specifications.

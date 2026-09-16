@@ -362,7 +362,11 @@ func (d *Driver) renderHome(w http.ResponseWriter) {
 var manifestTemplate = template.Must(template.New("manifest").Parse(`<!doctype html><html lang="en"><meta charset="utf-8"><title>Register approved disposable App</title><h1>Register {{.Name}}</h1><p>This creates one public GitHub App with organization self-hosted runners write and metadata read permissions. Webhook delivery is disabled. Keep the approved name unchanged. Submit once; if interrupted, inspect the existing App and use manual import.</p><form method="post" action="{{.Action}}"><input type="hidden" name="manifest" value="{{.Manifest}}"><button>Continue to GitHub</button></form></html>`))
 
 func (d *Driver) renderManifest(w http.ResponseWriter) {
-	manifest, _ := json.Marshal(map[string]any{"name": d.proposal.AppName, "url": "https://github.com/1XP-AI/gh-runnerd", "redirect_url": d.baseURL + callbackPath, "public": true, "hook_attributes": map[string]any{"active": false, "url": "https://example.invalid/gh-runnerd-g02-unused"}, "default_permissions": map[string]string{"organization_self_hosted_runners": "write", "metadata": "read"}, "default_events": []string{}, "request_oauth_on_install": false})
+	manifest, err := EncodeManifest(d.proposal.AppName, d.baseURL+callbackPath)
+	if err != nil {
+		http.Error(w, "invalid Manifest", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = manifestTemplate.Execute(w, struct{ Name, Action, Manifest string }{d.proposal.AppName, "https://github.com/organizations/" + d.proposal.Owner + "/settings/apps/new?state=" + url.QueryEscape(d.attempt.State()), string(manifest)})
 }
