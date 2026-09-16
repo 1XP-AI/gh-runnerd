@@ -127,6 +127,25 @@ func readBrokerInput(parent context.Context, input *os.File) (brokerInput, error
 	return result, nil
 }
 
+const brokerProvenanceMaximumDuration = 10 * time.Minute
+
+func brokerProvenanceContext(parent context.Context, a BrokerApproval, c controllerApproval, now time.Time) (context.Context, context.CancelFunc, error) {
+	if parent == nil || parent.Err() != nil || now.IsZero() || a.ExpiresAt.IsZero() || c.ExpiresAt.IsZero() || !a.ExpiresAt.After(now) || !c.ExpiresAt.After(now) {
+		return nil, nil, errBroker
+	}
+	deadline := now.Add(brokerProvenanceMaximumDuration)
+	deadline = minTime(deadline, a.ExpiresAt)
+	deadline = minTime(deadline, c.ExpiresAt)
+	if parentDeadline, ok := parent.Deadline(); ok {
+		deadline = minTime(deadline, parentDeadline)
+	}
+	if !deadline.After(now) {
+		return nil, nil, errBroker
+	}
+	ctx, cancel := context.WithDeadline(parent, deadline)
+	return ctx, cancel, nil
+}
+
 func brokerWorkflowReceipt(ctx context.Context, api *brokerAPI, a BrokerApproval, c controllerApproval, controllerDigest string) (*BrokerProvenanceReceipt, error) {
 	if ctx == nil || ctx.Err() != nil || api == nil || api.provenance == nil {
 		return nil, errBroker
@@ -135,8 +154,16 @@ func brokerWorkflowReceipt(ctx context.Context, api *brokerAPI, a BrokerApproval
 	if err != nil || request.ControllerApprovalSHA256 != controllerDigest {
 		return nil, errBroker
 	}
-	receipt, err := api.provenance.Attest(ctx, request)
-	if err != nil || receipt.Validate(request, api.now()) != nil || receipt.ExpiresAt.Before(a.ExpiresAt) || api.provenance.Verify(request, receipt) != nil {
+	provenanceCtx, cancel, err := brokerProvenanceContext(ctx, a, c, api.now())
+	if err != nil {
+		return nil, errBroker
+	}
+	defer cancel()
+	receipt, err := api.provenance.Attest(provenanceCtx, request)
+	if err != nil || provenanceCtx.Err() != nil || receipt.Validate(request, api.now()) != nil || receipt.ExpiresAt.Before(a.ExpiresAt) {
+		return nil, errBroker
+	}
+	if provenanceCtx.Err() != nil || api.provenance.Verify(provenanceCtx, request, receipt) != nil || provenanceCtx.Err() != nil {
 		return nil, errBroker
 	}
 	return &receipt, nil
@@ -272,12 +299,14 @@ func brokerWorkflowRunHeadBranchMatchesRef(headBranch, workflowRef string) bool 
 	if headBranch == "" || !brokerWorkflowRef.MatchString(workflowRef) {
 		return false
 	}
-	for _, prefix := range []string{"refs/heads/", "refs/tags/"} {
-		if strings.HasPrefix(workflowRef, prefix) {
-			return headBranch == strings.TrimPrefix(workflowRef, prefix)
-		}
+	// The workflow-run response has no authoritative ref type: head_branch is
+	// the same value for a branch and a tag with the same name. Accept only the
+	// branch form until a provider field that proves the type is available.
+	const branchPrefix = "refs/heads/"
+	if !strings.HasPrefix(workflowRef, branchPrefix) {
+		return false
 	}
-	return false
+	return headBranch == strings.TrimPrefix(workflowRef, branchPrefix)
 }
 
 func (a *brokerAPI) verifyWorkflowWithReceipt(ctx context.Context, approval BrokerApproval, controller controllerApproval, token string, provenance *BrokerProvenanceReceipt) error {

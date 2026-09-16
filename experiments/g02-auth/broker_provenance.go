@@ -52,7 +52,7 @@ type BrokerProvenanceReceipt struct {
 type BrokerProvenanceAdapter interface {
 	Source() string
 	Attest(context.Context, BrokerProvenanceRequest) (BrokerProvenanceReceipt, error)
-	Verify(BrokerProvenanceRequest, BrokerProvenanceReceipt) error
+	Verify(context.Context, BrokerProvenanceRequest, BrokerProvenanceReceipt) error
 }
 
 var brokerProvenanceSource = regexp.MustCompile(`^[a-z][a-z0-9._/-]{0,63}$`)

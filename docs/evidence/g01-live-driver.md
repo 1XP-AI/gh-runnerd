@@ -188,6 +188,7 @@ an open gate.
   "owner_nonce": "NEW_32_LOWERCASE_HEX_NONCE",
   "harness_sha": "REVIEWED_40_HEX_COMMIT",
   "workflow_sha": "REVIEWED_40_HEX_WORKFLOW_COMMIT",
+  "workflow_ref": "refs/heads/APPROVED_BRANCH",
   "workflow_path": ".github/workflows/canary.yml",
   "workflow_run_id": 0,
   "controller": "APPROVED_TRUSTED_CONTROLLER_ALIAS",
@@ -215,12 +216,24 @@ CGO_ENABLED=1 GOTOOLCHAIN=go1.26.8 go build -buildvcs=true -trimpath -tags=g01_l
 go version -m "$G01_PRIVATE_BINARY"
 ```
 
+The controller approval schema also accepts the broker's optional
+`workflow_ref` field; strict decoding must preserve this field for the
+broker's approval digest and handoff binding. A missing conditional-deleter
+capability is rejected before journal authorization, while failures after
+durable cleanup preparation remain journaled as unresolved quarantine.
+
 Live execution rejects a mismatched Go version, SDK pin, dirty build or embedded
 VCS revision. Building, merging or running `--plan` is not authorization, and
 `--plan` performs no credential read or remote operation. The
 `--execute-approved-canary` shape below remains quarantined and must not be run
 until the external provenance and cleanup gates are closed. The build metadata
 must show the reviewed `vcs.revision` and `vcs.modified=false`.
+After local approval validation (and paired state validation where applicable),
+the currently quarantined controller and paired execution flags return the
+fixed result
+`canary quarantined; broker provenance is required` before reading credential
+stdin. Other malformed-input refusals retain the separate generic refusal
+result; this distinction is used only to classify offline bridge evidence.
 This was verified offline in a clean local clone at `17a63ffc4604fbec4cc043abd5602a230d35fa8b`;
 the linked-worktree build was correctly missing a usable revision stamp. The
 reviewed controller broker (not implemented here) must provide this private JSON

@@ -63,8 +63,8 @@ func (a *signedBrokerFixtureAdapter) Attest(ctx context.Context, request BrokerP
 	return receipt, nil
 }
 
-func (a *signedBrokerFixtureAdapter) Verify(request BrokerProvenanceRequest, receipt BrokerProvenanceReceipt) error {
-	if receipt.Validate(request, time.Now()) != nil {
+func (a *signedBrokerFixtureAdapter) Verify(ctx context.Context, request BrokerProvenanceRequest, receipt BrokerProvenanceReceipt) error {
+	if ctx == nil || ctx.Err() != nil || receipt.Validate(request, time.Now()) != nil {
 		return errBroker
 	}
 	signature, err := base64.RawURLEncoding.DecodeString(receipt.Signature)
@@ -72,6 +72,118 @@ func (a *signedBrokerFixtureAdapter) Verify(request BrokerProvenanceRequest, rec
 		return errBroker
 	}
 	return nil
+}
+
+type blockingBrokerProvenanceAdapter struct {
+	fixture       *signedBrokerFixtureAdapter
+	attestStarted chan context.Context
+	verifyStarted chan context.Context
+	waitAttest    bool
+	waitVerify    bool
+}
+
+func (a *blockingBrokerProvenanceAdapter) Source() string { return a.fixture.Source() }
+
+func (a *blockingBrokerProvenanceAdapter) Attest(ctx context.Context, request BrokerProvenanceRequest) (BrokerProvenanceReceipt, error) {
+	a.attestStarted <- ctx
+	if a.waitAttest {
+		<-ctx.Done()
+		return BrokerProvenanceReceipt{}, ctx.Err()
+	}
+	return a.fixture.Attest(ctx, request)
+}
+
+func (a *blockingBrokerProvenanceAdapter) Verify(ctx context.Context, request BrokerProvenanceRequest, receipt BrokerProvenanceReceipt) error {
+	a.verifyStarted <- ctx
+	if a.waitVerify {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return a.fixture.Verify(ctx, request, receipt)
+}
+
+func brokerProvenanceDeadlineInputs(now time.Time) (BrokerApproval, controllerApproval) {
+	a := brokerApprovalFixture()
+	a.Mode, a.Phase = "controller", "create"
+	a.ExpiresAt = now.Add(150 * time.Millisecond)
+	a.ControllerApprovalSHA256 = strings.Repeat("a", 64)
+	c := controllerApproval{
+		AppID: a.AppID, InstallationID: a.InstallationID, Organization: a.Organization,
+		Repository: a.Repository, RepositoryID: a.RepositoryID, RunnerGroupID: a.RunnerGroupID,
+		OwnerNonce: a.OwnerNonce, HarnessSHA: strings.Repeat("b", 40), WorkflowSHA: strings.Repeat("c", 40),
+		WorkflowRef: "refs/heads/main", WorkflowPath: ".github/workflows/canary.yml", WorkflowRunID: 7,
+		Controller: "trusted-controller", ExpiresAt: a.ExpiresAt, ActionsHosts: []string{"fixture.actions.githubusercontent.com"},
+		Phases: []string{"create"},
+	}
+	return a, c
+}
+
+func TestBrokerWorkflowReceiptBoundsAttestToApprovalDeadline(t *testing.T) {
+	now := time.Now().UTC()
+	a, c := brokerProvenanceDeadlineInputs(now)
+	adapter := &blockingBrokerProvenanceAdapter{fixture: newSignedBrokerFixtureAdapter(t), attestStarted: make(chan context.Context, 1), verifyStarted: make(chan context.Context, 1), waitAttest: true}
+	api := newBrokerAPI(func() time.Time { return now }, nil)
+	api.provenance = adapter
+
+	started := time.Now()
+	if _, err := brokerWorkflowReceipt(context.Background(), api, a, c, a.ControllerApprovalSHA256); err == nil {
+		t.Fatal("deadline-bound attestation unexpectedly succeeded")
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("attestation exceeded bounded deadline: %s", elapsed)
+	}
+	select {
+	case callContext := <-adapter.attestStarted:
+		deadline, ok := callContext.Deadline()
+		if !ok || deadline.After(a.ExpiresAt) || deadline.Sub(a.ExpiresAt) > time.Millisecond {
+			t.Fatalf("attestation context deadline = %v, want approval deadline %v", deadline, a.ExpiresAt)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("attestation was not invoked")
+	}
+}
+
+func TestBrokerWorkflowReceiptBoundsVerifyToApprovalDeadline(t *testing.T) {
+	now := time.Now().UTC()
+	a, c := brokerProvenanceDeadlineInputs(now)
+	adapter := &blockingBrokerProvenanceAdapter{fixture: newSignedBrokerFixtureAdapter(t), attestStarted: make(chan context.Context, 1), verifyStarted: make(chan context.Context, 1), waitVerify: true}
+	api := newBrokerAPI(func() time.Time { return now }, nil)
+	api.provenance = adapter
+
+	started := time.Now()
+	if _, err := brokerWorkflowReceipt(context.Background(), api, a, c, a.ControllerApprovalSHA256); err == nil {
+		t.Fatal("deadline-bound verification unexpectedly succeeded")
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("verification exceeded bounded deadline: %s", elapsed)
+	}
+	select {
+	case callContext := <-adapter.verifyStarted:
+		deadline, ok := callContext.Deadline()
+		if !ok || deadline.After(a.ExpiresAt) || deadline.Sub(a.ExpiresAt) > time.Millisecond {
+			t.Fatalf("verification context deadline = %v, want approval deadline %v", deadline, a.ExpiresAt)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("verification was not invoked")
+	}
+}
+
+func TestBrokerWorkflowReceiptRejectsCanceledContextBeforeAdapter(t *testing.T) {
+	now := time.Now().UTC()
+	a, c := brokerProvenanceDeadlineInputs(now)
+	adapter := &blockingBrokerProvenanceAdapter{fixture: newSignedBrokerFixtureAdapter(t), attestStarted: make(chan context.Context, 1), verifyStarted: make(chan context.Context, 1)}
+	api := newBrokerAPI(func() time.Time { return now }, nil)
+	api.provenance = adapter
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := brokerWorkflowReceipt(ctx, api, a, c, a.ControllerApprovalSHA256); err == nil {
+		t.Fatal("canceled provenance context unexpectedly succeeded")
+	}
+	select {
+	case <-adapter.attestStarted:
+		t.Fatal("canceled context invoked attestation")
+	default:
+	}
 }
 
 func mutateBrokerProvenanceReceipt(receipt BrokerProvenanceReceipt, kind string) BrokerProvenanceReceipt {
@@ -109,13 +221,13 @@ func TestBrokerProvenanceReceiptBindsApprovalWorkflowPhaseNonceAndSource(t *test
 		Source:                   adapter.Source(),
 	}
 	receipt, err := adapter.Attest(context.Background(), request)
-	if err != nil || receipt.Validate(request, time.Now()) != nil || adapter.Verify(request, receipt) != nil {
+	if err != nil || receipt.Validate(request, time.Now()) != nil || adapter.Verify(context.Background(), request, receipt) != nil {
 		t.Fatal("signed fixture receipt was not accepted")
 	}
 	for _, kind := range []string{"approval digest", "workflow run", "workflow ref", "workflow commit", "phase", "owner nonce", "source", "signature"} {
 		t.Run(kind, func(t *testing.T) {
 			forged := mutateBrokerProvenanceReceipt(receipt, kind)
-			if adapter.Verify(request, forged) == nil {
+			if adapter.Verify(context.Background(), request, forged) == nil {
 				t.Fatalf("forged %s receipt accepted", kind)
 			}
 		})

@@ -112,7 +112,8 @@ func TestBrokerWorkflowRunHeadBranchMatchesOnlySupportedRefs(t *testing.T) {
 	}{
 		{name: "branch", headBranch: "main", workflowRef: "refs/heads/main", want: true},
 		{name: "nested branch", headBranch: "release/v1", workflowRef: "refs/heads/release/v1", want: true},
-		{name: "tag", headBranch: "v1.2.3", workflowRef: "refs/tags/v1.2.3", want: true},
+		{name: "tag", headBranch: "v1.2.3", workflowRef: "refs/tags/v1.2.3", want: false},
+		{name: "branch tag collision", headBranch: "main", workflowRef: "refs/tags/main", want: false},
 		{name: "mismatch", headBranch: "main", workflowRef: "refs/heads/release", want: false},
 		{name: "missing branch", headBranch: "", workflowRef: "refs/heads/main", want: false},
 		{name: "pull head", headBranch: "17", workflowRef: "refs/pull/17/head", want: false},

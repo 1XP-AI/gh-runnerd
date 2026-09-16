@@ -10,7 +10,7 @@ This follow-up starts from the exact PR #72 head `f5560ba950f77343e57034cc1cf85d
 | Direct FIFO/controller input without broker provenance | Tagged controller and paired-terminal execution are quarantined before reading stdin. The existing stdin boundary cannot independently attest that its caller is the broker. No synthetic environment, flag, token field, or process convention was added as an attestation. |
 | Tagged controller entry outside the broker-only path | The tagged execution flags remain disabled at the command boundary. Preparation and plan-only paths remain local and non-executing. |
 | Workflow phase not bound to controller phase | The change adds only a structural approval-shape guard: a non-paired controller approval carries one stable multi-phase authority membership set, and the selected outer phase must be a member of that set. It does not verify that workflow input selected that phase; workflow input-to-controller-phase binding remains an explicit unresolved gap, so tagged controller execution stays quarantined. Paired-terminal keeps its separate fixed sequence but is also blocked at the tagged controller entry. |
-| Cleanup lacks atomic ownership/freshness fence | The current adapter exposes only unconditional `DeleteScaleSet(context, id)`, so controller cleanup is quarantined before journal/API access. Re-enabling requires a reviewed adapter capability that performs ownership and freshness validation atomically with deletion; inventory-before-delete and inventory-after-delete reads are not such a fence. |
+| Cleanup lacks atomic ownership/freshness fence | The current adapter exposes only unconditional `DeleteScaleSet(context, id)`. The driver rejects a missing `ConditionalScaleSetDeleter` before journal authorization or API access, so this pre-journal refusal does not write a quarantine record or claim to quarantine a journal. Once the capability is present and cleanup has authorized the journal, a failed preparation/conditional delete records unresolved intent and quarantines the journal; inventory-before-delete and inventory-after-delete reads are not such a fence. |
 
 The exact blockers are therefore capability-level, not unverified attestation claims: the controller has no authenticated broker provenance channel, workflow input is not yet bound to the controller phase, and the SDK adapter has no conditional owner/freshness delete operation. Those paths remain disabled until a new reviewed design and adapter contract provide these properties.
 
@@ -64,6 +64,23 @@ ok
 This is an evidence-based stale-finding rebuttal; no production guard change
 was required.
 
+## PR #81 exact-head Codex finding follow-up
+
+The following corrections were reproduced against the exact review head
+`92f60da67b7b31646f492ae229c3327436d7e0ad` with offline fixtures only:
+
+| Discussion | Reproduction and correction |
+|---|---|
+| `discussion_r4021411205` | `head_branch` alone cannot distinguish `refs/heads/main` from `refs/tags/main`. The workflow-run adapter now accepts only attested `refs/heads/...` until an authoritative ref-type field exists; the branch/tag-collision regression rejects the tag. |
+| `discussion_r4021411208` | `TestCleanupMissingConditionalDeleterStopsBeforeJournalAuthorization` confirms the missing capability returns quarantine with no journal authorization, event or delete. Post-authorization preparation/conditional-delete failures remain durable unknown state and cannot retry; the evidence below does not call the pre-journal type assertion a journal quarantine. |
+| `discussion_r4021411210` | The live controller approval schema now recognizes the broker's optional `workflow_ref` field under strict decoding, retains it in the approval digest, and has a focused `ReadApproval` regression. This changes no live gate: the tagged controller and paired entrypoints remain quarantined. |
+| `discussion_r4021411215` | The tagged live command emits the explicit fixed result `canary quarantined; broker provenance is required` only after local approval/state validation. The paired bridge checks that result; `TestPairedBridgeDoesNotTreatGenericRejectAsQuarantine` proves the generic refusal cannot silently produce a skip. |
+| `discussion_r4021411222` | Provenance `Attest` and `Verify` receive a derived context bounded by the parent deadline, approval/controller expiry and a ten-minute maximum. Timeout and canceled-context regressions verify that blocked adapters cannot outlive the authority context. |
+
+The earlier stale nonce audit (`discussion_r4021079691`) and the exact
+live-entrypoint quarantine remain in force. No workflow replay, GitHub App/API
+call, credential mint, runner operation or live validation was performed.
+
 ## Remaining external G01 gates
 
 The workflow-input gate remains blocked by a capability, not by the signed
@@ -92,9 +109,13 @@ digest to a provider version or ETag returned by `PrepareScaleSetDeletion`.
 `DeleteScaleSetIfOwned` must submit that revision as a server-side conditional
 delete in the same operation; it must never delegate to the existing
 unconditional `DeleteScaleSet` or substitute an observe-then-delete sequence.
-Missing capability, mismatched identity/nonce/inventory, missing freshness or
-an adapter error quarantines the journal and prevents retry. Inventory reads
-before and after deletion remain supporting evidence only, not the atomic fence.
+Missing capability is a separate pre-journal refusal: `Run("cleanup")` checks
+for `ConditionalScaleSetDeleter` before `authorizePhase`, so it does not append
+an event or quarantine a journal. After journal authorization and durable
+delete intent, mismatched identity/nonce/inventory, missing freshness or an
+adapter error records unresolved state, quarantines the journal and prevents
+retry. Inventory reads before and after deletion remain supporting evidence
+only, not the atomic fence.
 
 The pinned `github.com/actions/scaleset v0.4.0` adapter still exposes no
 conditional delete, version or ETag contract, so it deliberately does not
@@ -111,4 +132,7 @@ FAIL: exact conditional cleanup was still quarantined; replacement adapter was n
 
 GOTOOLCHAIN=go1.26.8 go test -race -count=1 -run 'Test(CleanupConditionalFence|PinnedSDKDoesNotAdvertiseConditionalCleanup)' ./livecanary
 ok: exact version/ETag match, concurrent replacement, missing freshness, owner mismatch and SDK capability boundary
+
+GOTOOLCHAIN=go1.26.8 go test -count=1 -run '^TestCleanupMissingConditionalDeleterStopsBeforeJournalAuthorization$' ./livecanary
+ok: missing capability returned quarantine before journal authorization, with no journal event or unconditional delete
 ```

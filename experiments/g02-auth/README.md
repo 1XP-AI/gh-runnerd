@@ -55,10 +55,17 @@ FIFO, or tagged-entry paths without a receipt stop before credential input or
 GitHub API effects.
 
 The current GitHub REST response does not attest which workflow input selected
-the controller phase, and the broker does not infer that fact from ordinary
-workflow metadata. `BrokerProvenanceAdapter` is therefore an explicit signed
-fixture/adapter contract: tests may inject a separately held key, while
-production constructs no adapter and keeps controller/paired execution
-quarantined. The existing workflow-run check is also fail-closed for the
-attested ref and runs before token minting; no live workflow or runner
-operation is part of this evidence.
+the controller phase or whether an ambiguous `head_branch` names a branch or a
+tag, and the broker does not infer those facts from ordinary workflow metadata.
+`BrokerProvenanceAdapter` is therefore an explicit signed fixture/adapter
+contract: tests may inject a separately held key, while production constructs
+no adapter and keeps controller/paired execution quarantined. The existing
+workflow-run check is fail-closed for attested refs by accepting only
+`refs/heads/...` until an authoritative ref-type field is available; tags and
+pull refs are rejected. This check runs before token minting; no live workflow
+or runner operation is part of this evidence.
+
+Both provenance adapter calls receive the bounded approval/deadline context;
+an adapter that waits for cancellation cannot outlive the parent, approval
+expiry or the ten-minute provenance budget. Verification is therefore not a
+context-free signature hook.

@@ -24,6 +24,16 @@ type cleanupFenceAPI struct {
 	gotFence            ScaleSetDeletionFence
 }
 
+type authorizationCountingJournal struct {
+	Journal
+	authorizeCalls int
+}
+
+func (j *authorizationCountingJournal) authorize(a Approval) (func(), error) {
+	j.authorizeCalls++
+	return j.Journal.authorize(a)
+}
+
 func (a *cleanupFenceAPI) PrepareScaleSetDeletion(_ context.Context, expected ScaleSetDeletionExpectation) (ScaleSetDeletionFence, error) {
 	a.prepareCalls++
 	a.gotExpectation = expected
@@ -80,6 +90,20 @@ func TestCleanupConditionalFenceAcceptsExactOwnerAndFreshnessMatch(t *testing.T)
 	}
 	if !replay(j.Events()).deleted {
 		t.Fatal("successful conditional delete was not durably recorded")
+	}
+}
+
+func TestCleanupMissingConditionalDeleterStopsBeforeJournalAuthorization(t *testing.T) {
+	d, f, j := created(t)
+	counting := &authorizationCountingJournal{Journal: j}
+	d.Journal = counting
+	before := len(j.Events())
+
+	if err := d.Run(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) {
+		t.Fatalf("missing conditional deleter cleanup = %v, want quarantine", err)
+	}
+	if counting.authorizeCalls != 0 || len(j.Events()) != before || f.deleteCalls != 0 {
+		t.Fatalf("missing conditional deleter changed journal/authorization: authorizations=%d events=%d before=%d unconditional=%d", counting.authorizeCalls, len(j.Events()), before, f.deleteCalls)
 	}
 }
 

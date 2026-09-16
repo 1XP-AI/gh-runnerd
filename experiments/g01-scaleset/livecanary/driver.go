@@ -32,6 +32,7 @@ type Approval struct {
 	OwnerNonce     string    `json:"owner_nonce"`
 	HarnessSHA     string    `json:"harness_sha"`
 	WorkflowSHA    string    `json:"workflow_sha"`
+	WorkflowRef    string    `json:"workflow_ref,omitempty"`
 	WorkflowPath   string    `json:"workflow_path"`
 	WorkflowRunID  int64     `json:"workflow_run_id"`
 	Controller     string    `json:"controller"`

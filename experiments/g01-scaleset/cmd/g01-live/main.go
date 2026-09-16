@@ -56,6 +56,7 @@ var runPairedTerminalForCommand = func(ctx context.Context, files livecanary.Pai
 // itself evidence of broker provenance, so accepting it here would preserve
 // both the direct FIFO and tagged-entry bypasses under review.
 const controllerExecutionQuarantined = true
+const controllerExecutionQuarantineMessage = "canary quarantined; broker provenance is required"
 
 func run(args []string, in io.Reader, out io.Writer) int {
 	return runWithPreparation(args, in, out, buildRevision, livecanary.PrepareJournal)
@@ -117,9 +118,6 @@ func runWithPreparation(args []string, in io.Reader, out io.Writer, revisionForB
 	if modeCount != 1 || *plan || *approvalPath == "" || *statePath == "" {
 		return reject()
 	}
-	if controllerExecutionQuarantined && (*execute || *pairedExecute) {
-		return reject()
-	}
 	if *prepareWorker {
 		if *phase != "" || workerInputs || *pairedBinding != "" || prepareWorkerJournalForCommand == nil {
 			return reject()
@@ -169,6 +167,13 @@ func runWithPreparation(args []string, in io.Reader, out io.Writer, revisionForB
 		if livecanary.DecodeStrict([]byte(*pairedBinding), &binding) != nil || livecanary.ValidatePairedTerminalBinding(livecanary.PairedTerminalFiles{ControllerApprovalPath: *approvalPath, ControllerStateDirectory: *statePath, WorkerApprovalPath: *workerApprovalPath, WorkerStateDirectory: *workerStatePath}, binding) != nil {
 			return reject()
 		}
+	}
+	// Validate all local approval/state identities before returning the explicit
+	// quarantine result. An unrelated malformed approval must remain a generic
+	// refusal and must never be mistaken for this feature gate by bridge tests.
+	if controllerExecutionQuarantined && (*execute || *pairedExecute) {
+		fmt.Fprintln(out, controllerExecutionQuarantineMessage)
+		return 1
 	}
 	if *pairedPrepare {
 		receipt, e := pairedPrepareJournalForCommand(*statePath, a)

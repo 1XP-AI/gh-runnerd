@@ -30,7 +30,18 @@ const pairedBridgeJIT = "c3ludGhldGljLXByaXZhdGUtaml0LWNvbmZpZw=="
 // paired-terminal execution until the broker can provide authenticated,
 // broker-only input provenance. Keep the exact fixed output here so an
 // unrelated bridge failure remains a test failure rather than a skip.
-const pairedBridgeControllerQuarantineOutput = "canary refused; approval, authority or private state requires review"
+const pairedBridgeControllerQuarantineOutput = "canary quarantined; broker provenance is required"
+const pairedBridgeControllerGenericRejectOutput = "canary refused; approval, authority or private state requires review"
+
+func TestPairedBridgeDoesNotTreatGenericRejectAsQuarantine(t *testing.T) {
+	err := exec.Command("false").Run()
+	if err == nil {
+		t.Fatal("false command unexpectedly succeeded")
+	}
+	if isExpectedPairedBridgeControllerQuarantine(err, []byte(pairedBridgeControllerGenericRejectOutput)) {
+		t.Fatal("generic reject output was treated as an expected quarantine")
+	}
+}
 
 // pairedBrokerBridge is an offline-only private transport. It serves the
 // controller's real REST/Actions calls over a generated TLS root and the

@@ -168,7 +168,7 @@ func TestBrokerAdmissionRejectsDuplicateProvenanceNonceBeforeAppend(t *testing.T
 		t.Fatal("signed fixture adapter")
 	}
 	duplicate.Signature = base64.RawURLEncoding.EncodeToString(ed25519.Sign(fixtureAdapter.private, duplicate.SigningBytes()))
-	if err := fixtureAdapter.Verify(request2, duplicate); err != nil {
+	if err := fixtureAdapter.Verify(context.Background(), request2, duplicate); err != nil {
 		t.Fatal("second provenance receipt signature")
 	}
 	callsBefore, tokensBefore := len(f.calls), f.tokenCalls
