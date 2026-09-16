@@ -168,9 +168,6 @@ func runWithPreparation(args []string, in io.Reader, out io.Writer, revisionForB
 			return reject()
 		}
 	}
-	// Validate all local approval/state identities before returning the explicit
-	// quarantine result. An unrelated malformed approval must remain a generic
-	// refusal and must never be mistaken for this feature gate by bridge tests.
 	if controllerExecutionQuarantined && (*execute || *pairedExecute) {
 		fmt.Fprintln(out, controllerExecutionQuarantineMessage)
 		return 1

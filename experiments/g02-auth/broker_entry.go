@@ -299,9 +299,6 @@ func brokerWorkflowRunHeadBranchMatchesRef(headBranch, workflowRef string) bool 
 	if headBranch == "" || !brokerWorkflowRef.MatchString(workflowRef) {
 		return false
 	}
-	// The workflow-run response has no authoritative ref type: head_branch is
-	// the same value for a branch and a tag with the same name. Accept only the
-	// branch form until a provider field that proves the type is available.
 	const branchPrefix = "refs/heads/"
 	if !strings.HasPrefix(workflowRef, branchPrefix) {
 		return false
