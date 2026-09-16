@@ -136,6 +136,40 @@ func TestPlanWorkerLaunchRejectsExternallyMutatedValidatedBinding(t *testing.T) 
 	}
 }
 
+func TestPlanWorkerLaunchRejectsExternallyMutatedPermissions(t *testing.T) {
+	t.Run("mutated permission value", func(t *testing.T) {
+		binding := externalValidatedBinding(t)
+		binding.Permissions["metadata"] = "write"
+		plan, err := credentials.PlanWorkerLaunch(credentials.WorkerLaunchRequest{Binding: binding})
+		if !errors.Is(err, credentials.ErrConfig) || !reflect.DeepEqual(plan, credentials.WorkerLaunchPlan{}) {
+			t.Fatalf("mutated permission value crossed the worker launch boundary: plan=%+v err=%v permissions=%v", plan, err, binding.Permissions)
+		}
+	})
+	t.Run("replaced permissions map", func(t *testing.T) {
+		binding := externalValidatedBinding(t)
+		binding.Permissions = map[string]string{"administration": "write"}
+		plan, err := credentials.PlanWorkerLaunch(credentials.WorkerLaunchRequest{Binding: binding})
+		if !errors.Is(err, credentials.ErrConfig) || !reflect.DeepEqual(plan, credentials.WorkerLaunchPlan{}) {
+			t.Fatalf("replaced permissions crossed the worker launch boundary: plan=%+v err=%v permissions=%v", plan, err, binding.Permissions)
+		}
+	})
+}
+
+func TestPlanWorkerLaunchRejectsExternalForgedBindingWithArbitraryPermissions(t *testing.T) {
+	config := externalFixtureConfig()
+	forged := credentials.ValidatedBinding{
+		AppID:          config.AppID,
+		Organization:   config.Organization,
+		InstallationID: config.InstallationID,
+		Repository:     config.Repository,
+		Permissions:    map[string]string{"administration": "write", "contents": "write"},
+	}
+	plan, err := credentials.PlanWorkerLaunch(credentials.WorkerLaunchRequest{Binding: forged})
+	if !errors.Is(err, credentials.ErrConfig) || !reflect.DeepEqual(plan, credentials.WorkerLaunchPlan{}) {
+		t.Fatalf("forged binding with arbitrary permissions crossed the worker launch boundary: plan=%+v err=%v", plan, err)
+	}
+}
+
 func TestPlanWorkerLaunchAcceptsExternallyHeldValidatedBinding(t *testing.T) {
 	binding := externalValidatedBinding(t)
 	plan, err := credentials.PlanWorkerLaunch(credentials.WorkerLaunchRequest{Binding: binding})

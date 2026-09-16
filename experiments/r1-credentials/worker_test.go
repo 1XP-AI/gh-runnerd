@@ -65,6 +65,8 @@ func TestPlanWorkerLaunchRejectsManagementCredentialAndJITMaterial(t *testing.T)
 		{name: "forged binding", req: WorkerLaunchRequest{Binding: forgedValidatedBinding()}, want: ErrConfig},
 		{name: "mutated binding", req: WorkerLaunchRequest{Binding: mutatedValidatedBinding(session.Binding)}, want: ErrConfig},
 		{name: "forged binding with jit", req: WorkerLaunchRequest{Binding: forgedValidatedBinding(), JIT: pemBytes}, want: ErrConfig},
+		{name: "forged binding with arbitrary permissions", req: WorkerLaunchRequest{Binding: forgedValidatedBindingWithPermissions(map[string]string{"administration": "write"})}, want: ErrConfig},
+		{name: "replaced permissions map", req: WorkerLaunchRequest{Binding: replacedPermissions(session.Binding)}, want: ErrConfig},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			plan, err := PlanWorkerLaunch(tc.req)
@@ -76,6 +78,31 @@ func TestPlanWorkerLaunchRejectsManagementCredentialAndJITMaterial(t *testing.T)
 			}
 		})
 	}
+}
+
+func TestPlanWorkerLaunchRejectsMutatedPermissions(t *testing.T) {
+	t.Run("mutated permission value", func(t *testing.T) {
+		session, err := PrepareForeground(context.Background(), fixtureDocument(), fixtureSource(t), fixtureAPIValue(), nil)
+		if err != nil {
+			t.Fatalf("foreground preparation rejected: %v", err)
+		}
+		session.Binding.Permissions["metadata"] = "write"
+		plan, err := PlanWorkerLaunch(WorkerLaunchRequest{Binding: session.Binding})
+		if !errors.Is(err, ErrConfig) || !reflect.DeepEqual(plan, WorkerLaunchPlan{}) {
+			t.Fatalf("mutated permission value crossed the worker launch boundary: plan=%+v err=%v permissions=%v", plan, err, session.Binding.Permissions)
+		}
+	})
+	t.Run("replaced permissions map", func(t *testing.T) {
+		session, err := PrepareForeground(context.Background(), fixtureDocument(), fixtureSource(t), fixtureAPIValue(), nil)
+		if err != nil {
+			t.Fatalf("foreground preparation rejected: %v", err)
+		}
+		session.Binding.Permissions = map[string]string{"administration": "write"}
+		plan, err := PlanWorkerLaunch(WorkerLaunchRequest{Binding: session.Binding})
+		if !errors.Is(err, ErrConfig) || !reflect.DeepEqual(plan, WorkerLaunchPlan{}) {
+			t.Fatalf("replaced permissions crossed the worker launch boundary: plan=%+v err=%v permissions=%v", plan, err, session.Binding.Permissions)
+		}
+	})
 }
 
 func TestPlanWorkerLaunchRejectsDirectlyConstructedLaunchMaterial(t *testing.T) {
@@ -124,5 +151,16 @@ func forgedValidatedBinding() ValidatedBinding {
 
 func mutatedValidatedBinding(binding ValidatedBinding) ValidatedBinding {
 	binding.AppID = 999
+	return binding
+}
+
+func forgedValidatedBindingWithPermissions(permissions map[string]string) ValidatedBinding {
+	binding := forgedValidatedBinding()
+	binding.Permissions = permissions
+	return binding
+}
+
+func replacedPermissions(binding ValidatedBinding) ValidatedBinding {
+	binding.Permissions = map[string]string{"administration": "write"}
 	return binding
 }

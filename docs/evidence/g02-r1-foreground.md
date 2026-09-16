@@ -88,7 +88,9 @@ run. No GitHub SDK dependency was added.
 | File/environment/Keychain persistence | Passing parse/prepare tests | Implicit storage refused |
 | Launchd/daemon lifecycle | Passing parse/prepare tests | Unattended service refused |
 | Management credentials in worker env/argv/files | Passing worker tests; process env canary not inherited | Offline isolation verified |
-| Forged or mutated `ValidatedBinding` | Passing external and package tests; `PlanWorkerLaunch` returns `ErrConfig` | Offline capability boundary verified |
+| Caller-forged `ValidatedBinding` without provenance | Passing external and package tests; `PlanWorkerLaunch` returns `ErrConfig` | Offline capability boundary verified |
+| Mutated identity fields on a validated binding | Passing external and package tests; `PlanWorkerLaunch` returns `ErrConfig` | Offline capability boundary verified |
+| Mutated or replaced `Permissions` map on a validated binding | Passing external and package tests; `PlanWorkerLaunch` returns `ErrConfig` | Offline capability boundary verified |
 | Direct `WorkerLaunchPlan` env/argv/files/JIT construction | Fields are unexported; package-private proof required | Offline capability boundary verified |
 | Per-worker JIT bootstrap | `PlanWorkerLaunch` returns `ErrJIT` for any envelope | G01 live gap remains |
 | Authorized GitHub App/API path (`GET /app`, `GET /orgs/{org}/installation`, installation-token repository corroboration) | `NewLiveGitHubAPI` returns `ErrLiveUnauthorized` and a nil API | Fail closed; no JWT, socket or SDK |
@@ -119,7 +121,9 @@ Actual red result: FAIL (exit 1). Observable missing behavior, not a setup error
 
 The implementation adds package-private identity provenance on
 `ValidatedBinding`, unexports `WorkerLaunchPlan` env/argv/files/JIT, and makes
-`PlanWorkerLaunch` return only a proof-marked plan.
+`PlanWorkerLaunch` return only a proof-marked plan. That identity proof did not
+cover the exported `Permissions` map; the follow-up correction below binds the
+complete permissions content.
 
 Green commands from `experiments/r1-credentials` after the implementation:
 
@@ -148,6 +152,59 @@ gofmt -d experiments/r1-credentials/credentials.go experiments/r1-credentials/cr
 The full repository suite, Public CI, Codex review, push, PR and live profiles
 were not run.
 
+## P1 permissions-provenance correction
+
+Independent Luna max review of candidate
+`f1fcc04cf2ddb7d25e0bc18fbe90d5b27481bbc0` found a residual blocking P1:
+`ValidatedBinding.Permissions` is an exported mutable map omitted from
+`validatedBindingProof`, so a caller could mutate or replace permissions on an
+otherwise valid binding and `PlanWorkerLaunch` still returned nil.
+
+The red command, run from `experiments/r1-credentials` after adding regression
+tests and before binding permissions into the proof, was:
+
+```sh
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=45s -run 'TestPlanWorkerLaunchRejectsExternallyMutatedPermissions|TestPlanWorkerLaunchRejectsExternalForgedBindingWithArbitraryPermissions|TestPlanWorkerLaunchRejectsMutatedPermissions|TestPlanWorkerLaunchRejectsManagementCredentialAndJITMaterial' ./...
+```
+
+Actual red result: FAIL (exit 1). Observable missing behavior, not a setup error:
+
+- in-place mutation of `Permissions["metadata"]` was accepted (`err=<nil>`)
+- replacing `Permissions` with `administration=write` was accepted (`err=<nil>`)
+- a caller-forged binding with arbitrary permissions remained rejected (`ErrConfig`)
+
+The implementation stores an independent clone of the complete permissions map
+in package-private provenance and makes `hasValidatedProvenance` require exact
+map equality. Identity proof and unexported `WorkerLaunchPlan` launch surfaces
+are unchanged.
+
+Green commands from `experiments/r1-credentials` after the implementation:
+
+```text
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=45s -run 'TestPlanWorkerLaunchRejectsExternallyMutatedPermissions|TestPlanWorkerLaunchRejectsExternalForgedBindingWithArbitraryPermissions|TestPlanWorkerLaunchRejectsMutatedPermissions|TestPlanWorkerLaunchRejectsManagementCredentialAndJITMaterial|TestPlanWorkerLaunchAcceptsExternallyHeldValidatedBinding|TestCommitReceivesIndependentMetadataSnapshot' ./...
+  PASS  0.627s
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=45s ./...
+  PASS  4.622s
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s ./...
+  PASS  7.323s
+GOTOOLCHAIN=go1.26.8 go vet ./...
+  PASS
+```
+
+From repository root, after this correction:
+
+```text
+OFFLINE_EXPERIMENT_MODULE=experiments/r1-credentials bash scripts/check-offline-experiments.sh
+  PASS  offline experiment checks passed: 1 module(s)  7.332s
+git diff --check
+  PASS
+gofmt -d experiments/r1-credentials/credentials.go experiments/r1-credentials/credentials_external_test.go experiments/r1-credentials/worker_test.go
+  PASS  (no output)
+```
+
+The full repository suite, Public CI, Codex review, push, PR and live profiles
+were not run.
+
 ## P2 triage (non-blocking)
 
 These Luna max P2 findings were read and are not part of this fix:
@@ -158,8 +215,8 @@ These Luna max P2 findings were read and are not part of this fix:
 
 ## Rollback
 
-Revert the local commit on `orca/r1-credential-grok` that adds the foreground
-slice and this capability-boundary correction. Do not use global Docker prune,
+Revert the local commits on `orca/r1-credential-grok` that add the foreground
+slice and the capability-boundary corrections. Do not use global Docker prune,
 process kill, Keychain/launchd mutation, runner deletion or workflow replay.
 There are no live resources created by this change.
 

@@ -124,9 +124,10 @@ file/environment/Keychain persistence, launchd/daemon lifecycle, public
 repositories and incomplete identity are rejected before a source is read.
 `PrepareForeground` then reuses `Validate` and returns a metadata-only session
 that declares `foreground-controller` identity. `PlanWorkerLaunch` copies that
-identity metadata from a provenance-marked binding, refuses extra env/argv/files,
-inherited process environment and any JIT envelope, and returns a plan whose
-env/argv/files/JIT fields are not externally constructible. `NewLiveGitHubAPI`
+identity metadata from a provenance-marked binding whose complete permissions
+map is bound into the proof, refuses extra env/argv/files, inherited process
+environment and any JIT envelope, and returns a plan whose env/argv/files/JIT
+fields are not externally constructible. `NewLiveGitHubAPI`
 is fail-closed and does not pin an SDK, open sockets or mint tokens.
 
 Exact commands and rollback for this slice are in
