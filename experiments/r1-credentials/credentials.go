@@ -210,12 +210,57 @@ type API interface {
 // ValidatedBinding is intentionally metadata-only. It has no private key,
 // source, JWT, token or worker bootstrap field, so a commit callback cannot
 // receive management credentials through this R1 boundary.
+//
+// Exported identity fields remain readable for the current package, but a
+// caller-constructed or mutated value is not a validated capability: only
+// Validate sets the package-private provenance, and PlanWorkerLaunch rejects
+// bindings whose exported identity or permissions no longer match that proof.
 type ValidatedBinding struct {
 	AppID          int64
 	Organization   Organization
 	InstallationID int64
 	Repository     Repository
 	Permissions    map[string]string
+	proof          validatedBindingProof
+}
+
+type validatedBindingProof struct {
+	bound          bool
+	appID          int64
+	organization   Organization
+	installationID int64
+	repository     Repository
+	permissions    map[string]string
+}
+
+func newValidatedBinding(config Config, permissions map[string]string) ValidatedBinding {
+	exported := clonePermissions(permissions)
+	return ValidatedBinding{
+		AppID:          config.AppID,
+		Organization:   config.Organization,
+		InstallationID: config.InstallationID,
+		Repository:     config.Repository,
+		Permissions:    exported,
+		proof: validatedBindingProof{
+			bound:          true,
+			appID:          config.AppID,
+			organization:   config.Organization,
+			installationID: config.InstallationID,
+			repository:     config.Repository,
+			permissions:    clonePermissionMap(exported),
+		},
+	}
+}
+
+func (b ValidatedBinding) hasValidatedProvenance() bool {
+	if !b.proof.bound {
+		return false
+	}
+	return b.proof.appID == b.AppID &&
+		b.proof.organization == b.Organization &&
+		b.proof.installationID == b.InstallationID &&
+		b.proof.repository == b.Repository &&
+		permissionMapsEqual(b.proof.permissions, b.Permissions)
 }
 
 // Commit receives an all-or-nothing metadata binding after every identity
@@ -308,13 +353,7 @@ func validateWithClock(ctx context.Context, now func() time.Time, config Config,
 		return ValidatedBinding{}, ErrRepository
 	}
 
-	binding := ValidatedBinding{
-		AppID:          config.AppID,
-		Organization:   config.Organization,
-		InstallationID: config.InstallationID,
-		Repository:     config.Repository,
-		Permissions:    clonePermissions(installation.Permissions),
-	}
+	binding := newValidatedBinding(config, installation.Permissions)
 	if err := boundedBoundaryStatus(ctx, validationCtx, now, expiresAt); err != nil {
 		return ValidatedBinding{}, err
 	}
@@ -513,4 +552,27 @@ func clonePermissions(permissions map[string]string) map[string]string {
 		"organization_self_hosted_runners": permissions["organization_self_hosted_runners"],
 		"metadata":                         permissions["metadata"],
 	}
+}
+
+func clonePermissionMap(permissions map[string]string) map[string]string {
+	if permissions == nil {
+		return nil
+	}
+	cloned := make(map[string]string, len(permissions))
+	for key, value := range permissions {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func permissionMapsEqual(left, right map[string]string) bool {
+	if len(left) == 0 || len(left) != len(right) {
+		return false
+	}
+	for key, value := range left {
+		if right[key] != value {
+			return false
+		}
+	}
+	return true
 }
