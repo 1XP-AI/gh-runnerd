@@ -1,10 +1,12 @@
 # G01 reusable recovery evidence packet
 
-Date: 2026-09-14. Issue: [G01 / #1](https://github.com/1XP-AI/gh-runnerd/issues/1).
-Status: **selected path recorded; offline/source evidence only; live gate
-unresolved**. This packet is a sanitized index and changed-boundary ledger. It
-does not replace the linked records, authorize a canary, or claim production
-completion.
+Date: 2026-09-14; infrastructure observation 2026-09-16. Issue:
+[G01 / #1](https://github.com/1XP-AI/gh-runnerd/issues/1).
+Status: **selected path recorded; offline/source evidence retained; private
+canary runner-group/identity/heartbeat infrastructure observed; product live
+gate unresolved**. This packet is a sanitized index and changed-boundary
+ledger. It does not replace the linked records, authorize additional product
+canary phases, or claim production completion.
 
 The active G01 Goal is:
 
@@ -49,8 +51,13 @@ Use these classifications throughout the packet:
 - **Fixture** — an offline synthetic HTTP, TLS, Unix-socket, subprocess or file
   test. It can exercise the pinned client and local recovery code, but fixture
   queue/response/commit behavior is not a GitHub service result.
-- **Live** — an authorized private GitHub/runner/Docker observation. No live
-  result is recorded in this packet.
+- **Live** — an authorized private GitHub/runner/Docker observation. This
+  packet records one authorized, sanitized private canary
+  runner-group/identity/heartbeat infrastructure observation. That
+  observation does not prove product Scale Set SDK listener, ACK,
+  acquisition, JIT, drain, App/API authority, or cleanup behavior. Live
+  reuse requires the recorded authorization/review gate and the same public
+  aliases, source fingerprint, attempt and target.
 
 | Existing record | Classification and reusable scope | Immutable evidence reference |
 |---|---|---|
@@ -66,12 +73,79 @@ Use these classifications throughout the packet:
 | [Worker/JIT harness](g01-worker-harness.md) | Source + fixture: worker profile and secret boundary; no image startup, JIT mint, workflow or Docker result. | [c1c0b6a6f2f94651546f533576eb3bbe8a4089b4](https://github.com/1XP-AI/gh-runnerd/blob/c1c0b6a6f2f94651546f533576eb3bbe8a4089b4/docs/evidence/g01-worker-harness.md) |
 | [Paired collection](g01-paired-baseline.md) and [terminal path](g01-paired-terminal.md) | Fixture: serialized controller/worker receipts and terminal correlation; no live cleanup or success claim. | [8dd64adc551ba5174892807a678e8bc614d0a474](https://github.com/1XP-AI/gh-runnerd/blob/8dd64adc551ba5174892807a678e8bc614d0a474/docs/evidence/g01-paired-baseline.md), [cf67d4aeb511116fee0de31a4ac38409f28fa29f](https://github.com/1XP-AI/gh-runnerd/blob/cf67d4aeb511116fee0de31a4ac38409f28fa29f/docs/evidence/g01-paired-terminal.md) |
 | G01 evidence base | The selected safety/evidence base is the immutable merge below; this row intentionally does not identify a moving branch tip, and historical records retain their original source pins. | [G01 safety merge `070268968e440e52f11c7f3dea3cd9bff4eb0c34`](https://github.com/1XP-AI/gh-runnerd/commit/070268968e440e52f11c7f3dea3cd9bff4eb0c34) |
+| [Private canary infrastructure observation](#private-canary-infrastructure-observation) | Live infrastructure: authorized runner-group/identity/heartbeat only; public aliases only; not product Scale Set SDK listener, ACK, acquisition, JIT, drain, App/API authority, or cleanup. | Public aliases `canary-run-20260916-01` / `canary-job-runner-baseline-20260916-01`; source fingerprint `canary-workflow-source-20260916-01`; maintainer authorization [issue comment 5697441477](https://github.com/1XP-AI/gh-runnerd/issues/1#issuecomment-5697441477); private mapping not included |
 
 The idle-drain link intentionally points at the historical PR #72 review head
 and is not copied into this base worktree. PR #72 merged as
 `e496086c6c8478007aefb74e149fe09dda0a5199`; do not turn its offline result
 into a current-main or live result, and do not infer its final merge evidence
 from the historical fixture record.
+
+The private canary infrastructure observation is recorded in the following
+section. It does not convert the idle-drain fixture, the live-canary plan, or
+any product ACK/acquisition/JIT/drain row into a live product result.
+
+## Private canary infrastructure observation
+
+Observation date: 2026-09-16. This section follows the public-report
+sanitization boundary in [the live-canary plan](g01-live-canary.md): only
+stable public aliases, operation kind, bounded relative time, attempt,
+status/category, booleans and counts. Private repository/name, runner
+group/name/ID/labels, run/job IDs, and private GitHub run/job/API/commit/blob
+URLs are not published here. The private mapping and source records remain
+maintainer-only and are not included. This packet does not invent or claim
+public verification of that mapping.
+
+### Authorization and review gate
+
+Classification as live/reusable infrastructure evidence requires the
+authorization/review gate below. Jobs-API facts alone do not authorize reuse.
+
+| Field | Public record |
+|---|---|
+| Maintainer authorization | [issue comment 5697441477](https://github.com/1XP-AI/gh-runnerd/issues/1#issuecomment-5697441477) on [G01 / #1](https://github.com/1XP-AI/gh-runnerd/issues/1). That public comment states the private canary was separately authorized and the reviewed manual workflow passed. |
+| Authorized scope | Infrastructure-only runner-group/identity/heartbeat. Not product Scale Set SDK listener, ACK, acquisition, JIT, drain, App/API authority, or cleanup. |
+| Reviewed workflow/source fingerprint | Opaque alias `canary-workflow-source-20260916-01`. The private SHA/blob mapping is retained in the maintainer-only record and is not included here. |
+| Reuse bound | Reuse only for these same public aliases, source fingerprint, run attempt, and authorized infrastructure target. No reuse if alias, source, attempt, or target changes. |
+| Product phases | The authorization comment does not prove product ACK, acquisition, JIT, drain, session replacement, or cleanup phases. |
+
+After that gate, this packet classifies the observation as **live
+runner-group/identity/heartbeat infrastructure evidence**. It remains
+non-reusable as product live-canary evidence.
+
+### Sanitized jobs-API observation
+
+Proof source: authorized maintainer jobs-API read of the private canary
+workflow. The API URL and private identifiers are not included.
+
+| Field | Public alias / non-sensitive fact |
+|---|---|
+| Private repository | `private-canary-repository` |
+| Workflow | `canary-workflow-20260916-01` |
+| Workflow/source fingerprint | `canary-workflow-source-20260916-01` |
+| Event | `workflow_dispatch` |
+| Run | `canary-run-20260916-01` |
+| Run attempt | `1` |
+| Run conclusion | `success` |
+| Job | `canary-job-runner-baseline-20260916-01` |
+| Job status / conclusion | `completed` / `success` |
+| Runner group | `canary-runner-group-01` |
+| Runner | `canary-runner-01` |
+| Runner class | `canary-macos-arm64` |
+| Observation time | 2026-09-16; completed within a one-minute window |
+| Allowlisted job steps | `Set up job`, `Verify runner identity`, `Bounded heartbeat`, `Complete job`; each `completed` / `success` |
+
+The authorized jobs-API read showed that alias
+`canary-job-runner-baseline-20260916-01` used runner group
+`canary-runner-group-01`, runner `canary-runner-01`, runner class
+`canary-macos-arm64`, and succeeded. Step names and conclusions are
+allowlisted jobs-API facts; this packet does not quote job logs, JIT values,
+credentials, App installation payloads, private URLs, or personal paths.
+
+This observation replaces only the earlier zero-runner read for this private
+canary infrastructure boundary, under the aliases and authorization above.
+It does not authorize additional product canary phases, does not implement
+or exercise the tagged controller driver, and does not close G01.
 
 ## Exact pins and transport choices
 
@@ -123,13 +197,19 @@ version pin alone does not prove the running binary or disable runner updates.
 | Terminal identity and completion | [identity reconciliation](g01-identity-reconciliation.md), [exact observations](g01-exact-observations.md), [paired baseline](g01-paired-baseline.md) and [terminal path](g01-paired-terminal.md). | Source + fixture | Keep SDK request/job IDs, REST job/runner IDs, run attempt, runner identity and local exit distinct; bind an exact tuple before classifying. No live job eligibility, successful execution, per-request release or cleanup proof is claimed. |
 | Secret and error boundary | Contract runner/JIT section, [worker harness](g01-worker-harness.md), and driver redaction rules. | Source + fixture | No secrets, JIT values, raw bodies or raw SDK errors belong in this packet. Environment transport remains exposed to trusted same-user/process/container surfaces; modes and same-user ownership are not hostile-code isolation. |
 | Rollback and preservation | ADR 0002 and [live-canary exit/cleanup](g01-live-canary.md#exit-evidence-and-cleanup). | Source + plan | Historical packet-creation anchor `dce795a871865a8a2ee728151cb161e55081c8b7` predates this packet path. For the current merged tree, revert only the reviewed documentation correction after verifying its exact target; do not remove the packet from `main` with `git rm`, and preserve independent safety corrections in `g01-live-driver.md` and `docs/reviews/team-review.md`. For any future live run: stop new admission, let owned busy work finish, quarantine uncertainty, and remove only individually verified disposable resources; preserve manual runners and never force-kill, prune or replay. |
+| Private canary runner-group/identity/heartbeat infrastructure | [Private canary infrastructure observation](#private-canary-infrastructure-observation); authorized jobs-API observation for aliases `canary-run-20260916-01` / `canary-job-runner-baseline-20260916-01` at source fingerprint `canary-workflow-source-20260916-01`. | Live infrastructure | After the recorded authorization/review gate, the authorized maintainer jobs-API read shows runner group `canary-runner-group-01`, runner `canary-runner-01`, class `canary-macos-arm64`, and job success. It does not prove product Scale Set SDK listener, ACK, acquisition, JIT, drain, App/API authority, or cleanup. Private mapping is maintainer-only. |
 
-No row above is a live result. In particular, this packet makes no exactly-once
-or idempotency claim.
+The product-boundary rows above remain without live Scale Set SDK listener,
+ACK, acquisition, JIT, drain, App/API authority, or cleanup results. The
+private canary infrastructure row is live runner-group/identity/heartbeat
+evidence only and does not convert those product rows. In particular, this
+packet makes no exactly-once or idempotency claim.
 
 ## Live gaps and authorization gates
 
-The following are explicit open gates, not implied by the fixture records:
+The following are explicit open product gates. They are not implied by the
+fixture records and are not closed by the private canary infrastructure
+observation:
 
 1. Obtain an independent `gpt-luna-max` protocol/recovery review of the exact
    candidate source and this packet. New work follows the current
@@ -137,6 +217,13 @@ The following are explicit open gates, not implied by the fixture records:
 2. Name one disposable private repository, selected-only runner group,
    reviewed workflow/run attempt/source/head/path, owner nonce and immutable
    harness/workflow commits. Record an unchanged manual-runner inventory.
+   The infrastructure observation records public aliases
+   `private-canary-repository`, `canary-runner-group-01`,
+   `canary-workflow-20260916-01`, `canary-run-20260916-01` (attempt `1`),
+   `canary-job-runner-baseline-20260916-01`, and source fingerprint
+   `canary-workflow-source-20260916-01`; the private mapping remains
+   maintainer-only. It does not record an owner nonce, unchanged
+   manual-runner inventory, or product harness authorization.
 3. Approve distinct controller and Actions-read authorities, exact App/org
    installation permissions, broker issuance metadata and expiry. Keep
    credentials outside commits, logs, worker input and public evidence.
@@ -150,9 +237,11 @@ The following are explicit open gates, not implied by the fixture records:
    assignment/removal probes and owned cleanup. The offline fixture must never
    be pointed at GitHub by changing its endpoint.
 6. Publish sanitized live results for ACK/redelivery, acquisition acceptance or
-   reoffer, JIT discoverability, session replacement, runner/job identity,
-   idle assignment, busy-safe deregistration and cleanup. Until then, G01 and
-   dependent production integration remain unresolved.
+   reoffer, JIT discoverability, session replacement, product runner/job
+   identity, idle assignment, busy-safe deregistration and cleanup. The
+   infrastructure jobs-API runner identity above does not satisfy this product
+   identity/recovery gate. Until then, G01 and dependent production
+   integration remain unresolved.
 
 ## Changed-boundary ledger
 
@@ -177,7 +266,7 @@ the count includes the actual live-canary gate row.
 | Tagged controller/JIT input and credential transport boundary | `g01_live` source, input reader, credential attestation and transport refusal tests are unchanged. | Run the tagged command below plus the livecanary credential/transport selector below, including `TestAuthoritySplitAndPolicyRejection`, `TestSDKTransportOwnership`, `TestCredentialAttestationMismatchAndExpiredTokenRejected` and `TestTransportRejectsPlaintextOffHostAndProxyBeforeNetwork`. | Fixture: record no-secret/no-echo/refusal result; no credential or live phase. |
 | Idle drain and withdrawal | Only reuse the historical PR #72 review head `f5560ba950f77343e57034cc1cf85dc67f5ac922` and its unchanged fixture/source. | On a checkout of that historical PR #72 review head, run the guarded `drain-pr72` and `drain-pr72-race` commands below; both carry the same exact selector/package digest, with `default+norace+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8` and `default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8` metadata respectively. | Fixture/source: record physical-write markers as client facts and inconclusive server receipt; never reuse as live assignment/drain evidence. |
 | Paired terminal/worker support | paired journal/lease, worker profile, `liveworker` runtime source/implementation, image/runtime pins and terminal selectors are unchanged. | See the exact controller update-policy and worker runtime commands plus the tagged partition commands below; the worker runtime selector includes the direct Docker state/inspection, mutation-EOF and changed-daemon contracts, while tagged partition commands retain `go1.26.8`, `-race`, `-count=1` and `-timeout=120s`, the complete worker `^TestPaired` partition is included, and the controller-side terminal groups remain exhaustive/disjoint. | Fixture: record receipt/identity checks only; no live worker or terminal success claim. |
-| Actual live canary | There is no live evidence to reuse today. A future result is reusable only for the same immutable workflow/run attempt, source/head, resources, authority scope and approved observation boundary. | Rebuild/plan the exact reviewed tagged binary, then run only the explicitly authorized phase from [the driver](g01-live-driver.md); never substitute fixture commands or broaden phases. | Live: record sanitized server observations, authorization and unresolved outcomes; any changed target or boundary requires a fresh approval/rerun. |
+| Actual live canary | Reuse the sanitized infrastructure observation only for the same public aliases (`private-canary-repository`, `canary-workflow-20260916-01`, `canary-run-20260916-01`, `canary-job-runner-baseline-20260916-01`, `canary-runner-group-01`, `canary-runner-01`, `canary-macos-arm64`), source fingerprint `canary-workflow-source-20260916-01`, run attempt `1`, and the runner-group/identity/heartbeat boundary, after the recorded authorization/review gate. It is not reusable as product Scale Set SDK listener, ACK, acquisition, JIT, drain, App/API authority, or cleanup evidence. No reuse if alias, source, attempt, or target changes. Product live phases still have no reusable live result. | Product phases: rebuild/plan the exact reviewed tagged binary, then run only the explicitly authorized phase from [the driver](g01-live-driver.md); never substitute fixture commands, this infrastructure observation, or broaden phases. | Live infrastructure: sanitized authorized jobs-API runner-group/identity/heartbeat facts for aliases `canary-run-20260916-01` / `canary-job-runner-baseline-20260916-01` at fingerprint `canary-workflow-source-20260916-01`. Product live: still record sanitized server observations, authorization and unresolved outcomes; any changed target or boundary requires a fresh approval/rerun. |
 
 The two drain prescriptions intentionally bind a different reviewed source tree
 from the other packet commands. The default/root, tagged and paired commands
