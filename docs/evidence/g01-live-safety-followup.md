@@ -35,6 +35,54 @@ verification.
 
 The structural guard is not workflow-input verification. That verification remains an explicit unresolved gap and is not claimed by this document. The final command/result and commit are recorded with the local handoff. No live operation or private evidence is represented as passing.
 
+## Exact-head Codex finding audit
+
+The inline finding on PR #81 (`discussion_r4021079691`) was audited against its
+named exact head `4ecd46d`. Its premise is stale: admission reconstructs
+`provenanceNonces` from every prior ledger claim, builds the new
+`brokerProvenanceBinding`, rejects `provenanceNonces[binding.ReceiptNonce]`, and
+only then appends `c.event`. The sequential regression
+`TestBrokerAdmissionRejectsDuplicateProvenanceNonceBeforeAppend` fails in both
+normal and `-race` modes under a controlled mutant that removes that
+before-append check, with the observed assertion `duplicate provenance nonce
+accepted`; both modes pass with the exact-head guard restored:
+
+```text
+GOTOOLCHAIN=go1.26.8 go test -count=1 -run '^TestBrokerAdmissionRejectsDuplicateProvenanceNonceBeforeAppend$' .
+FAIL: broker_admission_test.go:177: duplicate provenance nonce accepted
+
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -run '^TestBrokerAdmissionRejectsDuplicateProvenanceNonceBeforeAppend$' .
+FAIL: broker_admission_test.go:177: duplicate provenance nonce accepted
+
+# Guard restored:
+GOTOOLCHAIN=go1.26.8 go test -count=1 -run '^TestBrokerAdmissionRejectsDuplicateProvenanceNonceBeforeAppend$' .
+ok
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -run '^TestBrokerAdmissionRejectsDuplicateProvenanceNonceBeforeAppend$' .
+ok
+```
+
+This is an evidence-based stale-finding rebuttal; no production guard change
+was required.
+
+## Remaining external G01 gates
+
+The workflow-input gate remains blocked by a capability, not by the signed
+fixture tests: `BrokerProvenanceAdapter` has no broker-authenticated workflow
+source, and the GitHub workflow-run response cannot attest which input selected
+the controller phase. Re-enabling tagged controller or paired execution
+requires a reviewed broker channel that authenticates that input-to-phase
+binding before credential input and API effects; production therefore remains
+quarantined.
+
+The cleanup gate remains blocked by the pinned `github.com/actions/scaleset
+v0.4.0` client: `SDKAPI.DeleteScaleSet` is unconditional and exposes no
+provider version, ETag, or equivalent atomic conditional-delete operation. The
+existing `ConditionalScaleSetDeleter` contract and synthetic tests are the
+minimal offline evidence; a reviewed provider adapter implementing the
+server-side owner/freshness condition in the delete operation is required
+before any live cleanup authorization. No credentials or live operation were
+used here.
+
 ## Conditional cleanup contract follow-up
 
 The controller driver now has a narrow `ConditionalScaleSetDeleter` contract.

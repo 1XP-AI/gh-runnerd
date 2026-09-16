@@ -6,6 +6,9 @@ completion of G01. The original fixture remains permanently loopback-only. The
 separate command requires `-tags=g01_live` at build time, an explicit execution
 flag, an exact private approval and controller-side broker input. Public CI has
 no credentials. SDK `v0.4.0` and Go `1.26.8` remain pinned.
+The `--execute-approved-canary` entrypoint remains quarantined because
+broker-authenticated workflow-input provenance and conditional cleanup are
+still unresolved; the offline `--plan` check does not authorize it.
 
 ## Executable scope
 
@@ -208,13 +211,16 @@ A local clone of the reviewed repository is sufficient and needs no live API.
 ```sh
 cd experiments/g01-scaleset
 CGO_ENABLED=1 GOTOOLCHAIN=go1.26.8 go build -buildvcs=true -trimpath -tags=g01_live -o "$G01_PRIVATE_BINARY" ./cmd/g01-live
-"$G01_PRIVATE_BINARY" --plan
+"$G01_PRIVATE_BINARY" --plan  # offline plan check; no live authorization
 go version -m "$G01_PRIVATE_BINARY"
 ```
 
 Live execution rejects a mismatched Go version, SDK pin, dirty build or embedded
-VCS revision. Building, merging or running `--plan` is not authorization. The
-build metadata must show the reviewed `vcs.revision` and `vcs.modified=false`.
+VCS revision. Building, merging or running `--plan` is not authorization, and
+`--plan` performs no credential read or remote operation. The
+`--execute-approved-canary` shape below remains quarantined and must not be run
+until the external provenance and cleanup gates are closed. The build metadata
+must show the reviewed `vcs.revision` and `vcs.modified=false`.
 This was verified offline in a clean local clone at `17a63ffc4604fbec4cc043abd5602a230d35fa8b`;
 the linked-worktree build was correctly missing a usable revision stamp. The
 reviewed controller broker (not implemented here) must provide this private JSON
@@ -233,7 +239,8 @@ on stdin without shell tracing, terminal echo, argv credentials or env dumps:
 }
 ```
 
-After exact authorization, with broker stdin supplied, invoke one phase:
+After exact authorization and closure of the external gates, with broker stdin
+supplied, the reviewed invocation shape for one phase would be:
 
 ```sh
 "$G01_PRIVATE_BINARY" --execute-approved-canary \
