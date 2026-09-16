@@ -225,6 +225,13 @@ func fixtureSource(t *testing.T) CredentialSource {
 	return NewManualSource(fixtureAppID, fixturePEM(t))
 }
 
+func fixtureValidatedBinding() ValidatedBinding {
+	return newValidatedBinding(fixtureConfig(), map[string]string{
+		"organization_self_hosted_runners": "write",
+		"metadata":                         "read",
+	})
+}
+
 func TestValidateManualSingleOrganizationBindsIdentityBeforeCommit(t *testing.T) {
 	source := fixtureSource(t)
 	api := fixtureAPIValue()

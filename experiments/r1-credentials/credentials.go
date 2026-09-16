@@ -210,12 +210,53 @@ type API interface {
 // ValidatedBinding is intentionally metadata-only. It has no private key,
 // source, JWT, token or worker bootstrap field, so a commit callback cannot
 // receive management credentials through this R1 boundary.
+//
+// Exported identity fields remain readable for the current package, but a
+// caller-constructed or mutated value is not a validated capability: only
+// Validate sets the package-private provenance, and PlanWorkerLaunch rejects
+// bindings whose exported metadata no longer matches that proof.
 type ValidatedBinding struct {
 	AppID          int64
 	Organization   Organization
 	InstallationID int64
 	Repository     Repository
 	Permissions    map[string]string
+	proof          validatedBindingProof
+}
+
+type validatedBindingProof struct {
+	appID          int64
+	organization   Organization
+	installationID int64
+	repository     Repository
+}
+
+func newValidatedBinding(config Config, permissions map[string]string) ValidatedBinding {
+	return ValidatedBinding{
+		AppID:          config.AppID,
+		Organization:   config.Organization,
+		InstallationID: config.InstallationID,
+		Repository:     config.Repository,
+		Permissions:    clonePermissions(permissions),
+		proof: validatedBindingProof{
+			appID:          config.AppID,
+			organization:   config.Organization,
+			installationID: config.InstallationID,
+			repository:     config.Repository,
+		},
+	}
+}
+
+func (b ValidatedBinding) hasValidatedProvenance() bool {
+	if b.proof == (validatedBindingProof{}) {
+		return false
+	}
+	return b.proof == validatedBindingProof{
+		appID:          b.AppID,
+		organization:   b.Organization,
+		installationID: b.InstallationID,
+		repository:     b.Repository,
+	}
 }
 
 // Commit receives an all-or-nothing metadata binding after every identity
@@ -308,13 +349,7 @@ func validateWithClock(ctx context.Context, now func() time.Time, config Config,
 		return ValidatedBinding{}, ErrRepository
 	}
 
-	binding := ValidatedBinding{
-		AppID:          config.AppID,
-		Organization:   config.Organization,
-		InstallationID: config.InstallationID,
-		Repository:     config.Repository,
-		Permissions:    clonePermissions(installation.Permissions),
-	}
+	binding := newValidatedBinding(config, installation.Permissions)
 	if err := boundedBoundaryStatus(ctx, validationCtx, now, expiresAt); err != nil {
 		return ValidatedBinding{}, err
 	}

@@ -93,13 +93,7 @@ func TestPrepareForegroundBindsManualIdentityWithoutRetainingCredentials(t *test
 	if err != nil {
 		t.Fatalf("foreground preparation rejected: %v", err)
 	}
-	want := ValidatedBinding{
-		AppID:          fixtureAppID,
-		Organization:   Organization{Login: "acme", ID: 101},
-		InstallationID: 201,
-		Repository:     Repository{ID: 301, OwnerID: 101, OwnerLogin: "acme", Name: "private-runner-fixture", Private: true},
-		Permissions:    map[string]string{"organization_self_hosted_runners": "write", "metadata": "read"},
-	}
+	want := fixtureValidatedBinding()
 	if !reflect.DeepEqual(session.Binding, want) {
 		t.Fatalf("foreground binding mismatch: got=%+v want=%+v", session.Binding, want)
 	}

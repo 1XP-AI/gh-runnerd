@@ -26,10 +26,10 @@ func TestPlanWorkerLaunchKeepsManagementCredentialsOutOfWorkerSurfaces(t *testin
 	if plan.AppID != session.Binding.AppID || plan.Organization != session.Binding.Organization || plan.InstallationID != session.Binding.InstallationID || plan.Repository != session.Binding.Repository {
 		t.Fatalf("worker plan dropped binding metadata: plan=%+v binding=%+v", plan, session.Binding)
 	}
-	if plan.HasJIT || len(plan.Env) != 0 || len(plan.Argv) != 0 || len(plan.Files) != 0 {
-		t.Fatalf("worker plan carried launch material: env=%d argv=%d files=%d jit=%t", len(plan.Env), len(plan.Argv), len(plan.Files), plan.HasJIT)
+	if !plan.hasValidatedConstruction() || plan.hasJIT || len(plan.env) != 0 || len(plan.argv) != 0 || len(plan.files) != 0 {
+		t.Fatalf("worker plan carried launch material: env=%d argv=%d files=%d jit=%t", len(plan.env), len(plan.argv), len(plan.files), plan.hasJIT)
 	}
-	joined := strings.Join(append(append([]string{}, plan.Env...), plan.Argv...), "\x00")
+	joined := strings.Join(append(append([]string{}, plan.env...), plan.argv...), "\x00")
 	if strings.Contains(joined, canary) || strings.Contains(joined, "PRIVATE KEY") {
 		t.Fatal("worker plan inherited process environment or credential material")
 	}
@@ -62,6 +62,9 @@ func TestPlanWorkerLaunchRejectsManagementCredentialAndJITMaterial(t *testing.T)
 		{name: "jit envelope", req: WorkerLaunchRequest{Binding: session.Binding, JIT: []byte("synthetic-jit-envelope")}, want: ErrJIT},
 		{name: "management key as jit", req: WorkerLaunchRequest{Binding: session.Binding, JIT: pemBytes}, want: ErrJIT},
 		{name: "zero binding", req: WorkerLaunchRequest{}, want: ErrConfig},
+		{name: "forged binding", req: WorkerLaunchRequest{Binding: forgedValidatedBinding()}, want: ErrConfig},
+		{name: "mutated binding", req: WorkerLaunchRequest{Binding: mutatedValidatedBinding(session.Binding)}, want: ErrConfig},
+		{name: "forged binding with jit", req: WorkerLaunchRequest{Binding: forgedValidatedBinding(), JIT: pemBytes}, want: ErrConfig},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			plan, err := PlanWorkerLaunch(tc.req)
@@ -73,4 +76,53 @@ func TestPlanWorkerLaunchRejectsManagementCredentialAndJITMaterial(t *testing.T)
 			}
 		})
 	}
+}
+
+func TestPlanWorkerLaunchRejectsDirectlyConstructedLaunchMaterial(t *testing.T) {
+	session, err := PrepareForeground(context.Background(), fixtureDocument(), fixtureSource(t), fixtureAPIValue(), nil)
+	if err != nil {
+		t.Fatalf("foreground preparation rejected: %v", err)
+	}
+	plan, err := PlanWorkerLaunch(WorkerLaunchRequest{Binding: session.Binding})
+	if err != nil {
+		t.Fatalf("validated worker launch plan rejected: %v", err)
+	}
+	if !plan.hasValidatedConstruction() {
+		t.Fatalf("plan missing validated construction: %+v", plan)
+	}
+
+	forged := WorkerLaunchPlan{
+		AppID:          session.Binding.AppID,
+		Organization:   session.Binding.Organization,
+		InstallationID: session.Binding.InstallationID,
+		Repository:     session.Binding.Repository,
+		env:            []string{"GITHUB_APP_PRIVATE_KEY=fixture-private-key"},
+		argv:           []string{"--app-private-key", "fixture-private-key"},
+		files:          map[string][]byte{"app.pem": []byte("fixture-private-key")},
+		hasJIT:         true,
+	}
+	if forged.hasValidatedConstruction() {
+		t.Fatal("directly constructed launch plan was treated as validated")
+	}
+	mutated := plan
+	mutated.AppID = 999
+	if mutated.hasValidatedConstruction() {
+		t.Fatal("mutated worker launch plan retained validated construction")
+	}
+}
+
+func forgedValidatedBinding() ValidatedBinding {
+	config := fixtureConfig()
+	return ValidatedBinding{
+		AppID:          config.AppID,
+		Organization:   config.Organization,
+		InstallationID: config.InstallationID,
+		Repository:     config.Repository,
+		Permissions:    map[string]string{"organization_self_hosted_runners": "write", "metadata": "read"},
+	}
+}
+
+func mutatedValidatedBinding(binding ValidatedBinding) ValidatedBinding {
+	binding.AppID = 999
+	return binding
 }
