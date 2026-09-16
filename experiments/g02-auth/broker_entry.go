@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"io"
 	"os"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -146,9 +145,18 @@ func brokerProvenanceContext(parent context.Context, a BrokerApproval, c control
 	return ctx, cancel, nil
 }
 
-func brokerWorkflowReceipt(ctx context.Context, api *brokerAPI, a BrokerApproval, c controllerApproval, controllerDigest string) (*BrokerProvenanceReceipt, error) {
+func brokerWorkflowReceipt(ctx context.Context, api *brokerAPI, a BrokerApproval, c controllerApproval, controllerDigest string, claimed ...*brokerJournal) (*BrokerProvenanceReceipt, error) {
 	if ctx == nil || ctx.Err() != nil || api == nil || api.provenance == nil {
 		return nil, errBroker
+	}
+	if len(claimed) > 1 || (len(claimed) == 1 && (claimed[0] == nil || claimed[0].check() != nil)) {
+		return nil, errBroker
+	}
+	claimCheck := func() error {
+		if len(claimed) == 1 {
+			return claimed[0].check()
+		}
+		return nil
 	}
 	request, err := brokerProvenanceRequest(a, c, api.provenance.Source())
 	if err != nil || request.ControllerApprovalSHA256 != controllerDigest {
@@ -159,28 +167,17 @@ func brokerWorkflowReceipt(ctx context.Context, api *brokerAPI, a BrokerApproval
 		return nil, errBroker
 	}
 	defer cancel()
-	receipt, err := api.provenance.Attest(provenanceCtx, request)
-	if err != nil || provenanceCtx.Err() != nil || receipt.Validate(request, api.now()) != nil || receipt.ExpiresAt.Before(a.ExpiresAt) {
+	if claimCheck() != nil {
 		return nil, errBroker
 	}
-	if provenanceCtx.Err() != nil || api.provenance.Verify(provenanceCtx, request, receipt) != nil || provenanceCtx.Err() != nil {
+	receipt, err := api.provenance.Attest(provenanceCtx, request)
+	if err != nil || provenanceCtx.Err() != nil || claimCheck() != nil || receipt.Validate(request, api.now()) != nil || receipt.ExpiresAt.Before(a.ExpiresAt) {
+		return nil, errBroker
+	}
+	if provenanceCtx.Err() != nil || claimCheck() != nil || api.provenance.Verify(provenanceCtx, request, receipt) != nil || provenanceCtx.Err() != nil || claimCheck() != nil {
 		return nil, errBroker
 	}
 	return &receipt, nil
-}
-
-// A completed broker journal is the durable one-shot fence for a provenance
-// receipt. Check it before reading controller credentials so a replayed receipt
-// cannot turn a direct regular-file/FIFO input into another controller attempt.
-func brokerAttemptUnused(path string) error {
-	if !filepath.IsAbs(path) {
-		return errBroker
-	}
-	_, err := os.Lstat(filepath.Join(path, "broker.jsonl"))
-	if err == nil || !os.IsNotExist(err) {
-		return errBroker
-	}
-	return nil
 }
 
 // RunBroker is network-lazy until all private approval/input checks succeed.
@@ -189,7 +186,7 @@ func RunBroker(ctx context.Context, files BrokerFiles, input *os.File) (BrokerRe
 	return runBrokerWithAPI(ctx, files, input, newBrokerAPI(time.Now, nil))
 }
 func runBrokerWithAPI(ctx context.Context, files BrokerFiles, input *os.File, api *brokerAPI) (BrokerResult, error) {
-	if ctx == nil || api == nil || !filepath.IsAbs(files.StateDirectory) {
+	if ctx == nil || api == nil || !brokerCanonicalPath(files.StateDirectory) {
 		return BrokerResult{}, errBroker
 	}
 	var approval BrokerApproval
@@ -238,18 +235,31 @@ func runBrokerWithAPI(ctx context.Context, files BrokerFiles, input *os.File, ap
 			}
 			defer workerPlan.close()
 		}
-		if brokerAttemptUnused(files.StateDirectory) != nil {
-			return BrokerResult{}, errBroker
-		}
-		provenance, err = brokerWorkflowReceipt(ctx, api, approval, controller, approval.ControllerApprovalSHA256)
-		if err != nil {
-			return BrokerResult{}, errBroker
-		}
 	} else if files.ControllerBinary != "" || files.ControllerApproval != "" || files.ControllerStateDirectory != "" || files.WorkerApproval != "" || files.WorkerStateDirectory != "" || approval.ControllerBinarySHA256 != "" || approval.ControllerApprovalSHA256 != "" || approval.ControllerHarnessSHA != "" {
+		return BrokerResult{}, errBroker
+	}
+	attempt, err := openBrokerJournal(files.StateDirectory, approval)
+	if err != nil {
+		return BrokerResult{}, errBroker
+	}
+	defer attempt.close()
+	if approval.Mode == "controller" || approval.Mode == "paired-terminal" {
+		if attempt.check() != nil {
+			return BrokerResult{}, errBroker
+		}
+		provenance, err = brokerWorkflowReceipt(ctx, api, approval, controller, approval.ControllerApprovalSHA256, attempt)
+		if err != nil || attempt.check() != nil {
+			return BrokerResult{}, errBroker
+		}
+	}
+	if attempt.check() != nil {
 		return BrokerResult{}, errBroker
 	}
 	credentialInput, err := readBrokerInput(ctx, input)
 	if err != nil || (approval.AllowVerificationAuthority && credentialInput.VerificationToken == "") {
+		return BrokerResult{}, errBroker
+	}
+	if attempt.check() != nil {
 		return BrokerResult{}, errBroker
 	}
 
@@ -285,7 +295,7 @@ func runBrokerWithAPI(ctx context.Context, files BrokerFiles, input *os.File, ap
 			}
 		}
 	}
-	return brokerExecuteWithProvenance(ctx, approval, credentialInput, files.StateDirectory, api, plan, provenance)
+	return brokerExecuteWithProvenance(ctx, approval, credentialInput, files.StateDirectory, api, plan, provenance, attempt)
 }
 func (a *brokerAPI) verifyWorkflow(ctx context.Context, approval BrokerApproval, controller controllerApproval, token string) error {
 	return a.verifyWorkflowWithReceipt(ctx, approval, controller, token, nil)

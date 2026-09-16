@@ -6,15 +6,18 @@ import (
 	"github.com/actions/scaleset"
 )
 
-// ScaleSetDeletionExpectation is the immutable identity and fresh runner
-// inventory that a cleanup adapter must bind to its conditional delete.
-// OwnerNonce is kept separate from ScaleSetName so an adapter cannot silently
-// reduce the owner check to a provider name comparison.
+// ScaleSetDeletionExpectation is the immutable identity, final ownership proof
+// and fresh runner inventory that a cleanup adapter must bind to its
+// conditional delete. Statistics is the exact all-zero predicate captured by
+// the final owned read. OwnerNonce is kept separate from ScaleSetName so an
+// adapter cannot silently reduce the owner check to a provider name comparison.
 type ScaleSetDeletionExpectation struct {
 	ScaleSetID      int
 	ScaleSetName    string
 	RunnerGroupID   int
 	OwnerNonce      string
+	OwnershipLabel  string
+	Statistics      scaleset.RunnerScaleSetStatistic
 	InventoryDigest string
 }
 
@@ -26,6 +29,8 @@ type ScaleSetDeletionFence struct {
 	ScaleSetName    string
 	RunnerGroupID   int
 	OwnerNonce      string
+	OwnershipLabel  string
+	Statistics      scaleset.RunnerScaleSetStatistic
 	InventoryDigest string
 	Version         string
 	ETag            string
@@ -44,9 +49,24 @@ type ConditionalScaleSetDeleter interface {
 }
 
 func (e ScaleSetDeletionExpectation) matches(a Approval, set *scaleset.RunnerScaleSet) bool {
-	return set != nil && e.ScaleSetID > 0 && e.ScaleSetID == set.ID && e.ScaleSetName != "" && e.ScaleSetName == set.Name && e.ScaleSetName == a.setName() && e.RunnerGroupID > 0 && e.RunnerGroupID == set.RunnerGroupID && e.RunnerGroupID == a.RunnerGroupID && e.OwnerNonce != "" && e.OwnerNonce == a.OwnerNonce && e.InventoryDigest != ""
+	if set == nil || e.ScaleSetID <= 0 || e.ScaleSetID != set.ID || e.ScaleSetName == "" || e.ScaleSetName != set.Name || e.ScaleSetName != a.setName() || e.RunnerGroupID <= 0 || e.RunnerGroupID != set.RunnerGroupID || e.RunnerGroupID != a.RunnerGroupID || e.OwnerNonce == "" || e.OwnerNonce != a.OwnerNonce || e.OwnershipLabel == "" || e.OwnershipLabel != e.ScaleSetName || e.Statistics != (scaleset.RunnerScaleSetStatistic{}) || set.Statistics == nil || *set.Statistics != e.Statistics || e.InventoryDigest == "" {
+		return false
+	}
+	return hasScaleSetLabel(set, e.OwnershipLabel)
+}
+
+func hasScaleSetLabel(set *scaleset.RunnerScaleSet, name string) bool {
+	if set == nil || name == "" {
+		return false
+	}
+	for _, label := range set.Labels {
+		if label.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 func (f ScaleSetDeletionFence) matches(e ScaleSetDeletionExpectation) bool {
-	return f.ScaleSetID == e.ScaleSetID && f.ScaleSetName == e.ScaleSetName && f.RunnerGroupID == e.RunnerGroupID && f.OwnerNonce == e.OwnerNonce && f.InventoryDigest == e.InventoryDigest && (f.Version != "" || f.ETag != "")
+	return e.ScaleSetID > 0 && e.ScaleSetName != "" && e.RunnerGroupID > 0 && e.OwnerNonce != "" && e.OwnershipLabel == e.ScaleSetName && e.Statistics == (scaleset.RunnerScaleSetStatistic{}) && e.InventoryDigest != "" && f.ScaleSetID == e.ScaleSetID && f.ScaleSetName == e.ScaleSetName && f.RunnerGroupID == e.RunnerGroupID && f.OwnerNonce == e.OwnerNonce && f.OwnershipLabel == e.OwnershipLabel && f.Statistics == e.Statistics && f.InventoryDigest == e.InventoryDigest && (f.Version != "" || f.ETag != "")
 }

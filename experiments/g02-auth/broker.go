@@ -139,8 +139,11 @@ func brokerExecute(parent context.Context, a BrokerApproval, input brokerInput, 
 	return brokerExecuteWithProvenance(parent, a, input, path, api, plan, nil)
 }
 
-func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input brokerInput, path string, api *brokerAPI, plan *brokerControllerPlan, provenance *BrokerProvenanceReceipt) (BrokerResult, error) {
-	if parent == nil || api == nil || a.validate(api.now()) != nil || (a.AllowVerificationAuthority && input.VerificationToken == "") || (input.VerificationToken != "" && (!a.AllowVerificationAuthority || !validBrokerToken(input.VerificationToken))) || ((a.Mode == "controller" || a.Mode == "paired-terminal") && plan == nil) || (a.Mode != "controller" && a.Mode != "paired-terminal" && plan != nil) {
+func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input brokerInput, path string, api *brokerAPI, plan *brokerControllerPlan, provenance *BrokerProvenanceReceipt, claimed ...*brokerJournal) (BrokerResult, error) {
+	if parent == nil || api == nil || !brokerCanonicalPath(path) || a.validate(api.now()) != nil || (a.AllowVerificationAuthority && input.VerificationToken == "") || (input.VerificationToken != "" && (!a.AllowVerificationAuthority || !validBrokerToken(input.VerificationToken))) || ((a.Mode == "controller" || a.Mode == "paired-terminal") && plan == nil) || (a.Mode != "controller" && a.Mode != "paired-terminal" && plan != nil) {
+		return BrokerResult{}, errBroker
+	}
+	if len(claimed) > 1 || (len(claimed) == 1 && (claimed[0] == nil || claimed[0].path != path || claimed[0].check() != nil)) {
 		return BrokerResult{}, errBroker
 	}
 	if provenance != nil {
@@ -165,6 +168,17 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 	}
 	ctx, cancel := context.WithDeadline(parent, deadline)
 	defer cancel()
+	var j *brokerJournal
+	if len(claimed) == 1 {
+		j = claimed[0]
+	} else {
+		var err error
+		j, err = openBrokerJournal(path, a)
+		if err != nil {
+			return BrokerResult{}, errBroker
+		}
+		defer j.close()
+	}
 	candidate := Candidate{AppID: a.AppID, PEM: []byte(input.PEM)}
 	defer clear(candidate.PEM)
 	cred, err := parseCredential(candidate)
@@ -178,11 +192,6 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 	if e != nil {
 		return BrokerResult{}, errBroker
 	}
-	j, err := openBrokerJournal(path, a)
-	if err != nil {
-		return BrokerResult{}, errBroker
-	}
-	defer j.close()
 	if plan != nil {
 		defer plan.close()
 		if plan.prepare(a, j, api.now()) != nil {

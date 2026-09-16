@@ -102,6 +102,40 @@ func (a *blockingBrokerProvenanceAdapter) Verify(ctx context.Context, request Br
 	return a.fixture.Verify(ctx, request, receipt)
 }
 
+type attemptClaimProbeAdapter struct {
+	fixture     *signedBrokerFixtureAdapter
+	attemptPath string
+	attestHeld  bool
+	verifyHeld  bool
+}
+
+func (a *attemptClaimProbeAdapter) Source() string { return a.fixture.Source() }
+
+func (a *attemptClaimProbeAdapter) claimHeld() bool {
+	file, err := os.OpenFile(filepath.Join(a.attemptPath, "broker.jsonl"), os.O_RDWR, 0)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	return syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil
+}
+
+func (a *attemptClaimProbeAdapter) Attest(ctx context.Context, request BrokerProvenanceRequest) (BrokerProvenanceReceipt, error) {
+	a.attestHeld = a.claimHeld()
+	if !a.attestHeld {
+		return BrokerProvenanceReceipt{}, errBroker
+	}
+	return a.fixture.Attest(ctx, request)
+}
+
+func (a *attemptClaimProbeAdapter) Verify(ctx context.Context, request BrokerProvenanceRequest, receipt BrokerProvenanceReceipt) error {
+	a.verifyHeld = a.claimHeld()
+	if !a.verifyHeld {
+		return errBroker
+	}
+	return a.fixture.Verify(ctx, request, receipt)
+}
+
 func brokerProvenanceDeadlineInputs(now time.Time) (BrokerApproval, controllerApproval) {
 	a := brokerApprovalFixture()
 	a.Mode, a.Phase = "controller", "create"
@@ -304,5 +338,15 @@ func TestBrokerControllerFrontDoorRejectsDirectFIFOBeforeRead(t *testing.T) {
 		case <-time.After(2 * time.Second):
 			t.Fatal("direct FIFO refusal remained blocked")
 		}
+	}
+}
+
+func TestBrokerControllerClaimsAttemptBeforeProvenanceSideEffects(t *testing.T) {
+	e := newPairedBrokerEntryFixture(t)
+	adapter := &attemptClaimProbeAdapter{fixture: newSignedBrokerFixtureAdapter(t), attemptPath: e.files.StateDirectory}
+	e.api.provenance = adapter
+	result, err := e.run(t, e.files.ControllerStateDirectory, e.files.WorkerStateDirectory)
+	if err != nil || result.Status != "paired_terminal_completed" || !adapter.attestHeld || !adapter.verifyHeld {
+		t.Fatalf("provenance adapter ran without a held attempt claim: result=%+v err=%v attest=%t verify=%t", result, err, adapter.attestHeld, adapter.verifyHeld)
 	}
 }

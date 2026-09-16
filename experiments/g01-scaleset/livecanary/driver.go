@@ -554,7 +554,7 @@ func (d *Driver) Run(ctx context.Context, phase string) error {
 		if !ok {
 			return ErrQuarantine
 		}
-		expectation := ScaleSetDeletionExpectation{ScaleSetID: s.setID, ScaleSetName: set.Name, RunnerGroupID: set.RunnerGroupID, OwnerNonce: d.Approval.OwnerNonce, InventoryDigest: inventory}
+		expectation := ScaleSetDeletionExpectation{ScaleSetID: s.setID, ScaleSetName: set.Name, RunnerGroupID: set.RunnerGroupID, OwnerNonce: d.Approval.OwnerNonce, OwnershipLabel: d.Approval.setName(), Statistics: *set.Statistics, InventoryDigest: inventory}
 		if !expectation.matches(d.Approval, set) {
 			return ErrQuarantine
 		}

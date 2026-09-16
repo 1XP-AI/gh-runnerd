@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/actions/scaleset"
 )
 
 // cleanupFenceAPI models the adapter contract that a real provider must satisfy.
@@ -20,6 +22,7 @@ type cleanupFenceAPI struct {
 	prepareCalls        int
 	conditionalCalls    int
 	mutateFence         func(*ScaleSetDeletionFence)
+	mutateBeforePrepare func(*scaleset.RunnerScaleSet)
 	deleteErr           error
 	gotExpectation      ScaleSetDeletionExpectation
 	gotFence            ScaleSetDeletionFence
@@ -35,14 +38,23 @@ func (j *authorizationCountingJournal) authorize(a Approval) (func(), error) {
 	return j.Journal.authorize(a)
 }
 
-func (a *cleanupFenceAPI) PrepareScaleSetDeletion(_ context.Context, expected ScaleSetDeletionExpectation) (ScaleSetDeletionFence, error) {
+func (a *cleanupFenceAPI) PrepareScaleSetDeletion(ctx context.Context, expected ScaleSetDeletionExpectation) (ScaleSetDeletionFence, error) {
 	a.prepareCalls++
 	a.gotExpectation = expected
+	if a.mutateBeforePrepare != nil {
+		a.mutateBeforePrepare(a.fakeAPI.set)
+	}
+	current, err := a.fakeAPI.GetScaleSet(ctx, expected.ScaleSetID)
+	if err != nil || ctx.Err() != nil || !expected.matches(a.approval, current) {
+		return ScaleSetDeletionFence{}, ErrQuarantine
+	}
 	fence := ScaleSetDeletionFence{
 		ScaleSetID:      expected.ScaleSetID,
 		ScaleSetName:    expected.ScaleSetName,
 		RunnerGroupID:   expected.RunnerGroupID,
 		OwnerNonce:      expected.OwnerNonce,
+		OwnershipLabel:  expected.OwnershipLabel,
+		Statistics:      expected.Statistics,
 		InventoryDigest: expected.InventoryDigest,
 		Version:         a.currentVersion,
 		ETag:            a.currentETag,
@@ -68,7 +80,7 @@ func (a *cleanupFenceAPI) DeleteScaleSetIfOwned(_ context.Context, fence ScaleSe
 		return a.deleteErr
 	}
 	revisionMatches := fence.Version != "" && fence.Version == a.currentVersion || fence.ETag != "" && fence.ETag == a.currentETag
-	if a.fakeAPI.set == nil || fence.ScaleSetID != a.fakeAPI.set.ID || fence.ScaleSetName != a.fakeAPI.set.Name || fence.RunnerGroupID != a.fakeAPI.set.RunnerGroupID || fence.OwnerNonce != a.approval.OwnerNonce || !revisionMatches {
+	if a.fakeAPI.set == nil || fence.ScaleSetID != a.fakeAPI.set.ID || fence.ScaleSetName != a.fakeAPI.set.Name || fence.RunnerGroupID != a.fakeAPI.set.RunnerGroupID || fence.OwnerNonce != a.approval.OwnerNonce || fence.OwnershipLabel != a.approval.setName() || fence.Statistics != (scaleset.RunnerScaleSetStatistic{}) || a.fakeAPI.set.Statistics == nil || *a.fakeAPI.set.Statistics != fence.Statistics || !hasScaleSetLabel(a.fakeAPI.set, fence.OwnershipLabel) || !revisionMatches {
 		return ErrQuarantine
 	}
 	return nil
@@ -88,12 +100,37 @@ func TestCleanupConditionalFenceAcceptsExactOwnerAndFreshnessMatch(t *testing.T)
 	if f.deleteCalls != 0 {
 		t.Fatalf("conditional cleanup called legacy unconditional delete %d times", f.deleteCalls)
 	}
-	want := ScaleSetDeletionExpectation{ScaleSetID: 7, ScaleSetName: d.Approval.setName(), RunnerGroupID: d.Approval.RunnerGroupID, OwnerNonce: d.Approval.OwnerNonce, InventoryDigest: "fixture-inventory"}
-	if adapter.gotExpectation != want || adapter.gotFence.Version != "v1" || adapter.gotFence.ScaleSetID != want.ScaleSetID || adapter.gotFence.ScaleSetName != want.ScaleSetName || adapter.gotFence.RunnerGroupID != want.RunnerGroupID || adapter.gotFence.OwnerNonce != want.OwnerNonce || adapter.gotFence.InventoryDigest != want.InventoryDigest {
+	want := ScaleSetDeletionExpectation{ScaleSetID: 7, ScaleSetName: d.Approval.setName(), RunnerGroupID: d.Approval.RunnerGroupID, OwnerNonce: d.Approval.OwnerNonce, OwnershipLabel: d.Approval.setName(), Statistics: scaleset.RunnerScaleSetStatistic{}, InventoryDigest: "fixture-inventory"}
+	if adapter.gotExpectation != want || adapter.gotFence.Version != "v1" || adapter.gotFence.ScaleSetID != want.ScaleSetID || adapter.gotFence.ScaleSetName != want.ScaleSetName || adapter.gotFence.RunnerGroupID != want.RunnerGroupID || adapter.gotFence.OwnerNonce != want.OwnerNonce || adapter.gotFence.OwnershipLabel != want.OwnershipLabel || adapter.gotFence.Statistics != want.Statistics || adapter.gotFence.InventoryDigest != want.InventoryDigest {
 		t.Fatalf("conditional cleanup fence = expectation=%+v fence=%+v, want %+v and exact v1 fence", adapter.gotExpectation, adapter.gotFence, want)
 	}
 	if !replay(j.Events()).deleted {
 		t.Fatal("successful conditional delete was not durably recorded")
+	}
+}
+
+func TestCleanupPreparationRereadsFinalOwnershipAndZeroStatistics(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*scaleset.RunnerScaleSet)
+	}{
+		{name: "ownership label", mutate: func(set *scaleset.RunnerScaleSet) { set.Labels = nil }},
+		{name: "idle statistics", mutate: func(set *scaleset.RunnerScaleSet) {
+			set.Statistics = &scaleset.RunnerScaleSetStatistic{TotalIdleRunners: 1}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, f, j := created(t)
+			adapter := &cleanupFenceAPI{fakeAPI: f, approval: d.Approval, currentVersion: "v1", mutateBeforePrepare: tc.mutate}
+			d.API = adapter
+
+			if err := d.Run(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) {
+				t.Fatalf("cleanup after final predicate changed = %v, want quarantine", err)
+			}
+			if adapter.prepareCalls != 1 || adapter.conditionalCalls != 0 || f.deleteCalls != 0 || !replay(j.Events()).uncertain {
+				t.Fatalf("final predicate change crossed deletion fence: prepare=%d conditional=%d unconditional=%d uncertain=%t", adapter.prepareCalls, adapter.conditionalCalls, f.deleteCalls, replay(j.Events()).uncertain)
+			}
+		})
 	}
 }
 
