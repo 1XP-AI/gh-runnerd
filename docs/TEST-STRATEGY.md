@@ -41,7 +41,13 @@ Do not manufacture red evidence after implementation, count snapshots as safety 
 
 ## CI policy
 
-Bootstrap public PR checks on GitHub-hosted standard Linux: format/vet, meaningful unit tests, race tests where supported, fuzz smoke, dependency/license checks and `govulncheck`. Pin action commits and dependency versions. Split deterministic tests from credentialed hardware suites; skipped tests must be visible and never count as passing evidence.
+Bootstrap public PR checks on GitHub-hosted standard Linux with diff hygiene,
+format/vet, build, compile-only package checks, dependency/license checks and
+`govulncheck`. Run the complete unit, race, fuzz and offline-experiment matrix on
+source-affecting merges to `main`, not on every PR push; documentation-only
+pushes are filtered out. Pin action commits and dependency versions. Split
+deterministic tests from credentialed hardware suites; skipped tests must be
+visible and never count as passing evidence.
 
 Trusted hardware tests use reviewed immutable commits, maintainer-triggered runs and scoped credentials on a dedicated pool. No public-fork `pull_request_target` checkout onto local runners. Test the Linux provider on ARM64 hardware. A hosted check must not require the unreleased runner manager itself to work.
 

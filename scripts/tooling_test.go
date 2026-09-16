@@ -979,7 +979,7 @@ func TestPublicWorkflowCapacityContract(t *testing.T) {
 	}
 	workflow := string(workflowData)
 	jobs := toolingWorkflowJobs(t, workflow)
-	requiredJobs := []string{"root", "offline", "vuln", "checks"}
+	requiredJobs := []string{"root", "race", "offline", "vuln", "checks"}
 	for _, job := range requiredJobs {
 		if _, ok := jobs[job]; !ok {
 			t.Fatalf("workflow is missing required job %q; got jobs %v", job, toolingWorkflowJobNames(jobs))
@@ -1008,13 +1008,27 @@ func TestPublicWorkflowCapacityContract(t *testing.T) {
 			t.Errorf("make %s appears %d times in hosted workflow, want exactly once", command, got)
 		}
 	}
-	for _, command := range commands[:9] {
+	for _, command := range []string{"toolchain", "build", "fmt-check", "vet", "test", "fuzz-smoke", "deps", "licenses"} {
 		if !strings.Contains(jobs["root"], "run: make "+command) {
 			t.Errorf("root job omits make %s", command)
 		}
 	}
+	if !strings.Contains(jobs["race"], "run: make test-race") {
+		t.Error("race job omits make test-race")
+	}
+	if strings.Contains(jobs["root"], "run: make test-race") {
+		t.Error("root job redundantly runs make test-race")
+	}
 	if !strings.Contains(jobs["offline"], "run: make experiments") {
 		t.Error("offline job omits make experiments")
+	}
+	for _, module := range []string{"experiments/g01-scaleset", "experiments/g02-auth", "experiments/r1-credentials"} {
+		if !strings.Contains(jobs["offline"], module) {
+			t.Errorf("offline matrix omits %s", module)
+		}
+	}
+	if !strings.Contains(jobs["offline"], "OFFLINE_EXPERIMENT_MODULE: ${{ matrix.module }}") {
+		t.Error("offline matrix does not select its module")
 	}
 	if !strings.Contains(jobs["vuln"], "run: make vuln") {
 		t.Error("vulnerability job omits make vuln")
@@ -1023,11 +1037,11 @@ func TestPublicWorkflowCapacityContract(t *testing.T) {
 	const (
 		checkout = "uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"
 		setupGo  = "uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5"
-		prHead   = "ref: ${{ github.event.pull_request.head.sha || github.sha }}"
+		mainHead = "ref: ${{ github.sha }}"
 	)
-	for _, job := range []string{"root", "offline", "vuln"} {
+	for _, job := range []string{"root", "race", "offline", "vuln"} {
 		block := jobs[job]
-		for _, required := range []string{checkout, setupGo, "timeout-minutes: 15", "persist-credentials: false", "cache: false", prHead} {
+		for _, required := range []string{checkout, setupGo, "timeout-minutes: 15", "persist-credentials: false", "cache: false", mainHead} {
 			if !strings.Contains(block, required) {
 				t.Errorf("job %s is missing %q", job, required)
 			}
@@ -1047,18 +1061,21 @@ func TestPublicWorkflowCapacityContract(t *testing.T) {
 			t.Errorf("hosted workflow contains forbidden %q", forbidden)
 		}
 	}
+	if strings.Contains(workflow, "  pull_request:\n") || !strings.Contains(workflow, "  workflow_dispatch:\n") {
+		t.Error("Public CI must run on main pushes/manual dispatch, not pull requests")
+	}
 
 	aggregator := jobs["checks"]
 	if !strings.Contains(aggregator, "name: Go checks") {
 		t.Error("required public check name Go checks is not preserved")
 	}
-	if !strings.Contains(aggregator, "needs: [root, offline, vuln]") {
+	if !strings.Contains(aggregator, "needs: [root, race, offline, vuln]") {
 		t.Error("Go checks aggregator does not depend on every required job")
 	}
 	if !strings.Contains(aggregator, "if: ${{ always() }}") {
 		t.Error("Go checks aggregator must inspect dependencies after failure, cancellation, or skip")
 	}
-	for _, job := range []string{"root", "offline", "vuln"} {
+	for _, job := range []string{"root", "race", "offline", "vuln"} {
 		if !strings.Contains(aggregator, "needs."+job+".result") {
 			t.Errorf("Go checks aggregator does not inspect %s result", job)
 		}
@@ -1074,18 +1091,20 @@ func TestPublicWorkflowCapacityContract(t *testing.T) {
 	}
 	aggregatorScript := toolingWorkflowRunScript(t, aggregator)
 	for _, tc := range []struct {
-		name                string
-		root, offline, vuln string
-		succeeds            bool
+		name                      string
+		root, race, offline, vuln string
+		succeeds                  bool
 	}{
-		{name: "all success", root: "success", offline: "success", vuln: "success", succeeds: true},
-		{name: "root failure", root: "failure", offline: "success", vuln: "success", succeeds: false},
-		{name: "offline cancellation", root: "success", offline: "cancelled", vuln: "success", succeeds: false},
-		{name: "vulnerability skipped", root: "success", offline: "success", vuln: "skipped", succeeds: false},
+		{name: "all success", root: "success", race: "success", offline: "success", vuln: "success", succeeds: true},
+		{name: "root failure", root: "failure", race: "success", offline: "success", vuln: "success", succeeds: false},
+		{name: "race cancellation", root: "success", race: "cancelled", offline: "success", vuln: "success", succeeds: false},
+		{name: "offline cancellation", root: "success", race: "success", offline: "cancelled", vuln: "success", succeeds: false},
+		{name: "vulnerability skipped", root: "success", race: "success", offline: "success", vuln: "skipped", succeeds: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out, err := toolingRun(t, t.TempDir(), []string{
 				"ROOT_RESULT=" + tc.root,
+				"RACE_RESULT=" + tc.race,
 				"OFFLINE_RESULT=" + tc.offline,
 				"VULN_RESULT=" + tc.vuln,
 			}, "bash", "-c", aggregatorScript)
@@ -1093,6 +1112,51 @@ func TestPublicWorkflowCapacityContract(t *testing.T) {
 				t.Fatalf("aggregator status with root=%s offline=%s vuln=%s: success=%t err=%v output=%s", tc.root, tc.offline, tc.vuln, got, err, out)
 			}
 		})
+	}
+}
+
+func TestPullRequestQuickWorkflowContract(t *testing.T) {
+	workflowData, err := os.ReadFile("../.github/workflows/pr-fast.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow := string(workflowData)
+	for _, required := range []string{
+		"name: Pull Request Checks",
+		"name: Go checks",
+		"  pull_request:",
+		"types: [opened, synchronize, reopened]",
+		"cancel-in-progress: true",
+		"permissions:\n  contents: read",
+		"run: git diff --check \"$BASE_SHA...$HEAD_SHA\"",
+		"git diff --name-only --no-renames \"$BASE_SHA...$HEAD_SHA\"",
+		"go.work",
+		"go.work.sum",
+		"run: make toolchain",
+		"run: make build",
+		"run: make fmt-check",
+		"run: make vet",
+		"go test -run '^$' -count=1 ./...",
+		"run: make deps",
+		"run: make licenses",
+		"run: make vuln",
+	} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("PR quick workflow is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"run: make test\n",
+		"run: make test-race\n",
+		"run: make fuzz-smoke\n",
+		"run: make experiments\n",
+		"pull_request_target:",
+		"self-hosted",
+		"secrets.",
+	} {
+		if strings.Contains(workflow, forbidden) {
+			t.Errorf("PR quick workflow contains full/live check %q", forbidden)
+		}
 	}
 }
 
@@ -1189,6 +1253,29 @@ func TestToolingEstablishedModulesAreRequired(t *testing.T) {
 		if out, err := toolingRun(t, root, nil, "bash", "scripts/check-offline-experiments.sh"); err == nil {
 			t.Errorf("missing established %s passed: %s", module, out)
 		}
+	}
+}
+
+func TestToolingOfflineModuleSelection(t *testing.T) {
+	root := toolingFixture(t)
+	out, err := toolingRun(t, root, []string{"OFFLINE_EXPERIMENT_MODULE=experiments/r1-credentials"}, "bash", "scripts/check-offline-experiments.sh")
+	if err != nil {
+		t.Fatalf("selected offline module failed: %s", out)
+	}
+	if !strings.Contains(out, "offline experiment: experiments/r1-credentials") || !strings.Contains(out, "offline experiment checks passed: 1 module(s)") {
+		t.Fatalf("selected offline module was not isolated: %s", out)
+	}
+	if strings.Contains(out, "g01-scaleset") || strings.Contains(out, "g02-auth") {
+		t.Fatalf("selected offline module ran an unrelated module: %s", out)
+	}
+	if out, err := toolingRun(t, root, []string{"OFFLINE_EXPERIMENT_MODULE=unsupported"}, "bash", "scripts/check-offline-experiments.sh"); err == nil || !strings.Contains(out, "unsupported module") {
+		t.Fatalf("unsupported offline module was accepted: %s", out)
+	}
+	if err := os.Rename(filepath.Join(root, "experiments", "g01-scaleset", "go.mod"), filepath.Join(root, "experiments", "g01-scaleset", "absent.mod")); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := toolingRun(t, root, []string{"OFFLINE_EXPERIMENT_MODULE=experiments/r1-credentials"}, "bash", "scripts/check-offline-experiments.sh"); err == nil || !strings.Contains(out, "required module experiments/g01-scaleset is missing") {
+		t.Fatalf("selected offline module skipped inventory validation: %s", out)
 	}
 }
 

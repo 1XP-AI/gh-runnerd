@@ -10,27 +10,35 @@ version into its normal per-user toolchain cache. The hosted workflow uses
 Conventional settings such as `make GOFLAGS=-mod=readonly build` are exported
 through Go's environment, rather than placed before its subcommand.
 
-The public workflow runs on a GitHub-hosted `ubuntu-24.04` environment for `pull_request` and pushes to `main`. It grants only `contents: read`, disables checkout credential persistence, and pins every external action to a reviewed commit. It does not use `pull_request_target`, self-hosted runners, secrets, Docker, the local runner manager or any privileged hardware. A fork can therefore run the same checks without access to organization credentials or local runners.
+The repository uses two hosted CI cadences on `ubuntu-24.04`. `pr-fast.yml` runs
+for opened, synchronized and reopened pull requests with `contents: read`, no
+secrets, no privileged hardware and pinned external actions. It always checks diff
+hygiene; source changes additionally run toolchain, build, formatting, vet,
+test-package compilation, dependency, license and vulnerability checks. It does
+not run the full unit, race, fuzz or offline-experiment suites. A fork can run it
+without access to organization credentials or local runners.
 
-The hosted workflow keeps the required public check name `Go checks` as a
-status aggregator over three bounded jobs: `Root and tooling checks` runs the
-root Make checks through `make licenses`, `Offline experiment checks` runs
-`make experiments`, and `Vulnerability check` runs `make vuln`. Every
-test-bearing job has its own 15-minute cap, the same pinned checkout/setup-go
-actions, an explicit immutable pull-request head ref, and setup-go caching
-disabled. The aggregator uses `always()` so a failed, cancelled, or skipped
-required job is observed, then fails unless all three dependency results are
-exactly `success`; it does not check out source or run a test itself.
+`ci.yml` (`Public CI`) runs after source-affecting pushes to `main` or by explicit
+`workflow_dispatch`; documentation-only pushes are intentionally filtered out.
+Its `root`, `race`, three parallel `offline` matrix legs and `vuln` jobs feed the
+`Go checks` aggregator. The root job runs the complete root unit/tooling, fuzz,
+dependency and license checks; the race job runs the root race suite; each
+offline leg selects exactly one reviewed experiment module. Every test-bearing job
+has a 15-minute cap, pinned checkout/setup-go actions and `cache: false`. The
+aggregator uses `always()` and fails unless every required result is exactly
+`success`; it does not check out source or run a test itself.
 
-The pull-request workflow is the premerge source gate. The identical workflow on
-`main` is postmerge integration evidence; a green postmerge run cannot substitute
-for the exact-head premerge gate. During local editing, use focused checks and the
-opt-in `make fast` selector below. After source, documentation and finding-ledger
-changes are batched into one stable candidate, hosted CI supplies the complete
-matrix; reviewers and the coordinator use that exact-source evidence rather than
-rerunning the full suite independently. Release, macOS, soak and other trusted
-profiles run only before an applicable release/live qualification, with explicit
-maintainer authorization, and are not implied by this hosted check.
+The PR quick workflow's job is named `Go checks` so existing branch-protection
+contexts remain valid while the implementation stays bounded. It is the
+premerge source gate. The full Public CI matrix is
+postmerge integration evidence for source-affecting `main` SHAs, not a per-commit
+or per-PR-push gate. During local editing, use focused checks and the opt-in `make
+fast` selector below. After source, documentation and finding-ledger changes are
+batched into one stable candidate, consume the PR quick check once; reviewers and
+the coordinator use that exact-source evidence rather than rerunning the full
+suite independently. Release, macOS, soak and other trusted profiles run only
+before an applicable release/live qualification, with explicit maintainer
+authorization.
 
 ### Issue #73 audit evidence
 
@@ -40,10 +48,12 @@ This audit was captured from `origin/main` at
 
 | Surface | Measured observation | Policy consequence |
 | --- | --- | --- |
-| Main CI | `ci.yml` has three parallel test-bearing jobs (`root`, `offline`, `vuln`) plus the required `Go checks` aggregator; each remains capped at 15 minutes, with pinned actions and `cache: false`. | Preserve the current complete coverage, job/check names, cache policy and timeouts; no path classifier or cache shortcut was added. |
+| Main CI | Current `ci.yml` runs automatically for source-affecting `main` pushes (or manual dispatch): root checks, root race checks, three parallel offline-module legs and vulnerability checks feed the `Go checks` aggregator. Each test-bearing job remains capped at 15 minutes, with pinned actions and `cache: false`. | Keep the full postmerge coverage, but parallelize independent work so a merge does not serialize unit/race or all offline modules. |
+| PR quick CI | Current `pr-fast.yml` always checks diff hygiene; source changes add static, build, compile-only, dependency, license and vulnerability checks. Docs-only changes do not install Go or run source tests. | Use this bounded check as the premerge gate; do not run the postmerge full matrix on every PR push. |
 | Makefile | Existing `check` prerequisites remain `toolchain`, formatting, build, vet, unit/race, fuzz, dependency, license, offline-experiment and vulnerability checks. New `fast` is an opt-in target and is not a `check` prerequisite. | Keep `make check` complete and unchanged as the local public gate; focused iteration cannot silently weaken it. |
 | [PR #72 review history](https://github.com/1XP-AI/gh-runnerd/pull/72) | Audit snapshot through immutable PR #72 head `116beda04dc2bf69280cdefc4de4ef2fef397ef3`, captured 2026-09-10. Review records and public checkpoints do not measure actor-side full-suite run counts; the checkpoint comments identify focused/offline or focused race regressions. | Batch findings, source and docs before one candidate push; reviewers perform delta/risk probes against shared CI evidence, and the coordinator audits rather than acting as a third tester. |
-| [PR #72 hosted critical path](https://github.com/1XP-AI/gh-runnerd/actions/runs/34419651240) | `gh run view 34419651240 --json jobs` measured workflow start `00:04:06Z`, required jobs finishing by `00:15:14Z`, and aggregator completion at `00:15:18Z`; `00:15:19Z` is a workflow metadata update, not completion. Start-to-aggregator completion was 11m12s. Root ran 11m06s, offline 8m49s, vulnerability 33s, aggregator 2s. | No workflow critical-path speedup is claimed or changed; full CI remains the stable candidate gate. |
+| [PR #72 hosted critical path](https://github.com/1XP-AI/gh-runnerd/actions/runs/34419651240) | Historical full-matrix run: workflow start `00:04:06Z`, aggregator completion `00:15:18Z`, for an 11m12s critical path. Root ran 11m06s, offline 8m49s, vulnerability 33s, aggregator 2s. | Retain the coverage after merge, but no longer spend this full-matrix cost on each PR push. |
+| [PR #80 baseline](https://github.com/1XP-AI/gh-runnerd/actions/runs/34951234756) | Historical PR full matrix: root ran 11m27s, offline 8m11s; root's 339.131s unit/tooling and 322.354s race steps were serialized in one job. | This measured serialization and trigger waste justify the PR quick/main-only cadence and parallel main jobs. |
 | Focused local command | Warmed direct baseline: `env GOTOOLCHAIN=go1.26.8 GOWORK=off go test -count=1 -run '^TestFixedTarget$' ./internal/scheduler/capacity` → `real 0.32s`. New entry point: `env FAST_MODULE=. FAST_PACKAGE=./internal/scheduler/capacity FAST_TEST='^TestFixedTarget$' make fast` → `real 0.34s`; both passed. | This one local pair demonstrates bounded behavior only; it does not claim a speedup or predict CI duration. |
 
 ```console
@@ -65,13 +75,14 @@ make check
 ```
 
 `make check` remains the complete local public gate, but it is not a per-commit
-requirement; use it on demand when the environment supports it and rely on hosted
-CI for the stable candidate gate. A local commit does not justify a hosted run:
-keep intermediate commits local, batch the source/docs/finding changes, and push
-once for the stable candidate. After a review fix, batch all actionable fixes into
-one new head before starting the next full CI/Codex cycle. Repeat a full run only
-when the head, relevant dependency/toolchain, changed risk boundary or prior
-result changed, or the previous run was inconclusive.
+requirement; use it on demand when the environment supports it. The PR quick
+workflow is the stable candidate gate. A local commit does not justify a hosted
+run: keep intermediate commits local, batch the source/docs/finding changes, and
+push once for the stable candidate. After a review fix, batch all actionable fixes
+into one new head before the next PR quick/Codex cycle. The full matrix runs after
+the merge on the new `main` SHA, or by explicit manual dispatch; repeat it only
+when that SHA, the relevant dependency/toolchain, changed risk boundary or prior
+result warrants a recheck.
 
 Individual commands are available when iterating:
 
@@ -86,7 +97,7 @@ Individual commands are available when iterating:
 | `make fuzz-smoke` | Run each discovered fuzz target for a fixed one-second smoke window, or print an explicit `SKIPPED` result when no target exists. |
 | `make deps` | Require a clean `go mod tidy -diff`, verified module sums and a read-only dependency load. |
 | `make licenses` | Compare the exact runtime module/version/replacement graph with its inventory and require a top-level license file. |
-| `make experiments` | Require both established G01/G02 modules, run their static-partitioned default race/vet suites, then exercise the two explicitly reviewed G01 CLI packages with `g01_live,g01_worker` tags and the reviewed `g01_pair_fixture` livecanary collection/listener and terminal partitions with tagged vet. |
+| `make experiments` | Require both established G01/G02 modules, run their static-partitioned default race/vet suites, then exercise the two explicitly reviewed G01 CLI packages with `g01_live,g01_worker` tags and the reviewed `g01_pair_fixture` livecanary collection/listener and terminal partitions with tagged vet. Set `OFFLINE_EXPERIMENT_MODULE` to run one allowlisted module for the parallel Public CI matrix; omit it to run all modules. |
 | `make vuln` | Run the exact `golang.org/x/vuln/cmd/govulncheck@v1.7.0` tool. |
 | `make fast FAST_MODULE=... FAST_PACKAGE=... FAST_TEST=...` | Run one explicit test selector in one selected module/package. All three selectors are required and invalid/no-match selectors fail closed; this is focused evidence only, never the complete gate. |
 
