@@ -11,8 +11,9 @@ import (
 	"github.com/actions/scaleset"
 )
 
-// Pointer facts retain missing/null separately from explicit zero/false. No
-// queue/acquisition URL, token, arbitrary display text or raw response is kept.
+// Pointer facts retain missing/null separately from explicit zero/false.
+// Persistent facts omit queue/acquisition URLs, tokens, arbitrary display text
+// and raw responses.
 type baselineStatistics struct {
 	Available  *int `json:"total_available_jobs"`
 	Acquired   *int `json:"total_acquired_jobs"`
@@ -55,11 +56,66 @@ type baselineSessionFacts struct {
 	SetID            int                 `json:"set_id"`
 	SetName          string              `json:"set_name"`
 	GroupID          int                 `json:"group_id"`
+	queueURL         string              `json:"-"` // ephemeral drain validation only; never serialized
+	authorization    string              `json:"-"` // ephemeral drain validation only; never serialized
 }
+
+// baselineRunnerFacts retains only the bounded fields needed to compare the
+// pinned SDK's runner lookup result with the exact wire response. The list
+// count is kept separately because the SDK collapses count==0 to nil and
+// otherwise returns only the first value.
+type baselineRunnerFacts struct {
+	Count      int
+	ID         int
+	Name       string
+	ScaleSetID int
+}
+
+func decodeBaselineRunner(data []byte) (*baselineRunnerFacts, error) {
+	var w struct {
+		Count *int `json:"count"`
+		Value *[]struct {
+			ID         *int    `json:"id"`
+			Name       *string `json:"name"`
+			ScaleSetID *int    `json:"runnerScaleSetId"`
+		} `json:"value"`
+	}
+	if !uniqueKeys(json.NewDecoder(strings.NewReader(string(data)))) || json.Unmarshal(data, &w) != nil || w.Count == nil || w.Value == nil || *w.Count < 0 || *w.Count > 1 || *w.Count != len(*w.Value) {
+		return nil, ErrRemote
+	}
+	facts := &baselineRunnerFacts{Count: *w.Count}
+	if facts.Count == 0 {
+		return facts, nil
+	}
+	candidate := (*w.Value)[0]
+	if candidate.ID == nil || *candidate.ID <= 0 || candidate.Name == nil || !baselineText(*candidate.Name, 256) || candidate.ScaleSetID == nil || *candidate.ScaleSetID <= 0 {
+		return nil, ErrRemote
+	}
+	facts.ID = *candidate.ID
+	facts.Name = *candidate.Name
+	facts.ScaleSetID = *candidate.ScaleSetID
+	return facts, nil
+}
+
+func (r *baselineRunnerFacts) matches(v *scaleset.RunnerReference) bool {
+	if r == nil {
+		return false
+	}
+	if r.Count == 0 {
+		return v == nil
+	}
+	return r.Count == 1 && v != nil && r.ID == v.ID && r.Name == v.Name && r.ScaleSetID == v.RunnerScaleSetID
+}
+
 type baselineAccepted struct {
 	Count *int    `json:"count"`
 	IDs   []int64 `json:"ids"`
 }
+
+func (a *baselineAccepted) matches(ids []int64) bool {
+	return a != nil && a.Count != nil && *a.Count == len(ids) && slices.Equal(a.IDs, ids)
+}
+
 type baselineSetFacts struct {
 	ID            int                 `json:"id"`
 	Name          string              `json:"name"`
@@ -95,7 +151,27 @@ func decodeBaselineSet(data []byte) (*baselineSetFacts, error) {
 	return &baselineSetFacts{w.ID, w.Name, w.Group, w.Labels, w.Setting.Disabled, s}, nil
 }
 func (s *baselineSetFacts) eligible(a Approval, id int) bool {
-	if s == nil || s.ID != id || s.Name != a.setName() || s.GroupID != a.RunnerGroupID || s.DisableUpdate == nil || !*s.DisableUpdate || !s.Statistics.eligible(false) {
+	return s.eligibleWithStats(a, id, false)
+}
+
+func (s *baselineSetFacts) eligibleForDrain(a Approval, id int) bool {
+	if !s.matchesOwner(a, id) || s.Statistics == nil {
+		return false
+	}
+	for _, p := range []*int{s.Statistics.Available, s.Statistics.Acquired, s.Statistics.Assigned, s.Statistics.Running, s.Statistics.Registered, s.Statistics.Busy, s.Statistics.Idle} {
+		if p == nil || *p < 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *baselineSetFacts) eligibleWithStats(a Approval, id int, acquired bool) bool {
+	return s.matchesOwner(a, id) && s.Statistics.eligible(acquired)
+}
+
+func (s *baselineSetFacts) matchesOwner(a Approval, id int) bool {
+	if s == nil || s.ID != id || s.Name != a.setName() || s.GroupID != a.RunnerGroupID || s.DisableUpdate == nil || !*s.DisableUpdate {
 		return false
 	}
 	for _, l := range s.Labels {
@@ -104,6 +180,17 @@ func (s *baselineSetFacts) eligible(a Approval, id int) bool {
 		}
 	}
 	return false
+}
+
+// matches compares the bounded facts captured by the strict wire reader with
+// the SDK value returned from the same request. A caller may use eligible to
+// establish approved identity, but must also prove that the lossy SDK object
+// did not disagree with those wire facts.
+func (s *baselineSetFacts) matches(v *scaleset.RunnerScaleSet) bool {
+	if s == nil || v == nil || s.ID != v.ID || s.Name != v.Name || s.GroupID != v.RunnerGroupID || s.DisableUpdate == nil || *s.DisableUpdate != v.RunnerSetting.DisableUpdate || !slices.Equal(s.Labels, v.Labels) {
+		return false
+	}
+	return s.Statistics.matches(v.Statistics)
 }
 func baselineText(s string, limit int) bool {
 	if len(s) > limit || !utf8.ValidString(s) {
@@ -116,6 +203,14 @@ func baselineText(s string, limit int) bool {
 	}
 	return true
 }
+
+// validDrainAuthorizationToken accepts only a bounded, header-safe opaque
+// token. The value is retained solely in memory to corroborate the pinned SDK
+// session and bind later marked runtime requests.
+func validDrainAuthorizationToken(value string) bool {
+	return value != "" && baselineText(value, 4096) && strings.TrimSpace(value) == value && !strings.ContainsAny(value, "\r\n\x00")
+}
+
 func baselineStats(data json.RawMessage) (*baselineStatistics, error) {
 	if len(data) == 0 || string(data) == "null" {
 		return nil, nil
@@ -156,6 +251,19 @@ func (s *baselineStatistics) matches(sdk *scaleset.RunnerScaleSetStatistic) bool
 		}
 	}
 	return true
+}
+
+func (s *baselineStatistics) completeDrain() bool {
+	if s == nil {
+		return false
+	}
+	values := []*int{s.Available, s.Acquired, s.Assigned, s.Running, s.Registered, s.Busy, s.Idle}
+	for _, value := range values {
+		if value == nil || *value < 0 {
+			return false
+		}
+	}
+	return validKnownDrainStatistics(drainStatistics{Available: *s.Available, Acquired: *s.Acquired, Assigned: *s.Assigned, Running: *s.Running, Registered: *s.Registered, Busy: *s.Busy, Idle: *s.Idle})
 }
 func decodeBaselineItem(data []byte, index int) (baselineItem, error) {
 	var w struct {
@@ -264,7 +372,7 @@ func decodeBaselineSession(data []byte) (*baselineSessionFacts, error) {
 	if err != nil {
 		return nil, err
 	}
-	x := &baselineSessionFacts{SessionID: w.ID, Owner: w.Owner, Statistics: s}
+	x := &baselineSessionFacts{SessionID: w.ID, Owner: w.Owner, Statistics: s, queueURL: w.URL, authorization: w.Token}
 	if len(w.Set) > 0 && string(w.Set) != "null" {
 		// Set contains SDK-defined fields not used here; ambiguity is rejected,
 		// but unrelated forward-compatible set metadata is not copied to history.
