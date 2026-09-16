@@ -139,12 +139,13 @@ func (a *SDKAPI) get(ctx context.Context, path, token string, target any) error 
 	if err != nil {
 		return ErrRemote
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		_ = resp.Body.Close()
 		return ErrRemote
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20+1))
-	if err != nil || len(data) > 1<<20 || json.Unmarshal(data, target) != nil {
+	data, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20+1))
+	closeErr := resp.Body.Close()
+	if readErr != nil || closeErr != nil || len(data) > 1<<20 || json.Unmarshal(data, target) != nil {
 		return ErrRemote
 	}
 	return nil

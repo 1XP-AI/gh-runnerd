@@ -2755,3 +2755,73 @@ NO-GO safety findings recorded in
 [issue-comment 5680387706](https://github.com/1XP-AI/gh-runnerd/pull/72#issuecomment-5680387706)
 remain quarantined in stacked PR #81 rather than silently claimed as fixed by
 this offline PR.
+
+### Exact-head follow-up: reject incomplete preflight responses before draining
+
+Date: 2026-09-16. This correction starts from exact PR #72 head
+`cd480d81312110e83404bb050254d14be84b54ff` and addresses the Codex P1 finding
+at [discussion_r4022441222](https://github.com/1XP-AI/gh-runnerd/pull/72#discussion_r4022441222).
+The finding identified that `SDKAPI.get` deferred `response.Body.Close` and
+could authorize preflight from complete-looking JSON even when close reported
+an error. `SDKAPI.get` has two callers: the preflight authority checks and the
+legacy inventory reader; both retain their existing fixed error categories.
+No Issue, Project, goal, dependency, live-operation or runner state was
+changed.
+
+#### Red-first reproduction
+
+The regression used the existing offline loopback HTTP fixture. Before the
+source correction, the first preflight response returned complete valid JSON
+but its body returned `io.ErrClosedPipe` from `Close`; `Run("drain")` proceeded
+past preflight and attempted the first drain snapshot. This focused command
+exited 1 as expected:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^TestPreflightRejectsCompleteResponseWhenBodyCloseFailsBeforeDrain$' -count=1 -v -timeout=60s
+```
+
+The bounded failure was:
+
+```text
+sdk_test.go:134: preflight body close error = state uncertain; quarantine and inspect only, want approval rejection
+```
+
+The regression retains only the fixed approval/quarantine categories, a drain
+snapshot call count and journal length; it records no response body, token,
+URL, raw SDK error or private log.
+
+#### Minimal correction and green evidence
+
+`SDKAPI.get` now explicitly closes successful responses after the bounded
+`io.ReadAll` and rejects any read or close completion error before JSON can
+authorize a caller. Non-200 responses still close and return the existing
+opaque `ErrRemote`; the 1 MiB response limit and JSON validation are unchanged.
+The regression passed normally in 0.133s and under race in 1.328s with no race
+diagnostics:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^TestPreflightRejectsCompleteResponseWhenBodyCloseFailsBeforeDrain$' -count=1 -v -timeout=60s
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -run '^TestPreflightRejectsCompleteResponseWhenBodyCloseFailsBeforeDrain$' -count=1 -timeout=60s
+```
+
+The full `livecanary` package passed normally in 25.121s and under race in
+41.019s:
+
+```text
+cd experiments/g01-scaleset
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -count=1 -timeout=360s
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -count=1 -timeout=420s
+```
+
+The source/test correction was first captured in focused commit
+`21b67c5eeaf7e087a2b76a1c147105276b65b5fb`; the final single
+implementation/docs commit is the exact branch `HEAD` reported at delivery
+(verify with `git rev-parse HEAD`), and its rollback is
+`git revert --no-edit HEAD`. No live GitHub call, App enrollment, runner/Scale
+Set operation, workflow replay, Docker/Lima, Keychain or launchd operation was
+run. The live-validation gap is explicitly retained: these offline tests prove
+only the client-side fail-closed boundary and cannot prove remote server
+receipt or an atomic live drain; independent exact-head Codex review, CI and
+maintainer-authorized live validation remain coordinator-owned.
