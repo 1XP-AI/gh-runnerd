@@ -208,3 +208,63 @@ Rollback is a normal revert of the follow-up commit (for example, `git revert
 replay cleanup, and do not alter live runners, credentials, provider context,
 or other external state. No live operation, GitHub access, credential mint,
 runner operation, Docker, Lima, Keychain or launchd operation was performed.
+
+## PR #81 exact-head Codex P2 follow-up
+
+The source change boundary started at the requested exact PR #81 head
+`e124872d13d8fd8d3cf5032b0b13ff20fd8bb55f`. The implementation and regression
+tests are in commit `026833ac82908b0a453a0e96683a3a094039f1b6`; this evidence
+update is a separate documentation boundary so the source SHA remains exact.
+
+| Finding | RED reproduction at the exact starting head | Correction and triage |
+|---|---|---|
+| Codex P2 `r4022996388` ([discussion](https://github.com/1XP-AI/gh-runnerd/pull/81#discussion_r4022996388)) | `GOTOOLCHAIN=go1.26.8 go test -count=1 -run '^TestBrokerControllerClaimsAttemptBeforeProvenanceSideEffects$' .` failed: the provenance adapter observed `broker.jsonl` absent/unlocked (`attest=false`, `verify=false`) because `brokerAttemptUnused` was only an absence check and `openBrokerJournal` happened later. | `runBrokerWithAPI` now requires a canonical absolute attempt path, opens and locks the durable journal before provenance, checks that claim around both adapter calls and before/after credential input, and passes the held journal into execution. `openBrokerJournal` rejects noncanonical paths and documents the claim-before-input boundary. The regression uses only a signed offline fixture adapter and a synthetic private input. |
+| Codex P2 `r4022996398` ([discussion](https://github.com/1XP-AI/gh-runnerd/pull/81#discussion_r4022996398)) | `GOTOOLCHAIN=go1.26.8 go test -count=1 -run '^TestCleanupPreparationRereadsFinalOwnershipAndZeroStatistics$' ./livecanary` failed: mutating the final ownership label or idle statistics immediately before preparation still returned nil and crossed to conditional deletion. | `ScaleSetDeletionExpectation` and `ScaleSetDeletionFence` now carry the final ownership label and exact all-zero statistics. The synthetic conditional adapter rereads the set in `PrepareScaleSetDeletion` and verifies those predicates before returning a fence; the driver requires the fence to bind both values, and the adapter's conditional delete checks them again. The pinned SDK remains without this capability and therefore remains quarantined. |
+
+The RED commands above were run before commit `026833a`; their failures are the
+prior unsafe behaviors, not skipped tests. After the implementation, focused
+normal and race checks passed:
+
+```text
+GOTOOLCHAIN=go1.26.8 go test -count=1 -run '^TestBroker(ControllerClaimsAttemptBeforeProvenanceSideEffects|ControllerFrontDoorRequiresBrokerProvenance|ControllerFrontDoorRejectsDirectFIFOBeforeRead|WorkflowReceiptBounds(Attest|Verify)ToApprovalDeadline)$' .
+ok   github.com/1XP-AI/gh-runnerd/experiments/g02-auth  1.371s
+
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -run '^TestBroker(ControllerClaimsAttemptBeforeProvenanceSideEffects|ControllerFrontDoorRequiresBrokerProvenance|ControllerFrontDoorRejectsDirectFIFOBeforeRead|WorkflowReceiptBounds(Attest|Verify)ToApprovalDeadline)$' .
+ok   github.com/1XP-AI/gh-runnerd/experiments/g02-auth  5.538s
+
+GOTOOLCHAIN=go1.26.8 go test -count=1 -run '^Test(CleanupPreparationRereadsFinalOwnershipAndZeroStatistics|CleanupConditionalFence|CleanupCancellationDuringPrepare|InspectQuarantinesSurvivingSetAfterDurableDelete|PinnedSDKDoesNotAdvertiseConditionalCleanup)$' ./livecanary
+ok   github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/livecanary  0.301s
+
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -run '^Test(CleanupPreparationRereadsFinalOwnershipAndZeroStatistics|CleanupConditionalFence|CleanupCancellationDuringPrepare|InspectQuarantinesSurvivingSetAfterDurableDelete|PinnedSDKDoesNotAdvertiseConditionalCleanup)$' ./livecanary
+ok   github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/livecanary  1.320s
+```
+
+The complete offline normal package checks also passed at this change boundary:
+`GOTOOLCHAIN=go1.26.8 go test -count=1 ./...` in `experiments/g02-auth`
+(`46.735s`, including `cmd/g01-broker` and `cmd/g02-enroll`) and in
+`experiments/g01-scaleset` (`0.300s` root, `34.654s` livecanary, `8.269s`
+liveworker). Targeted formatting, vet, diff, and secret/private-path checks
+were run locally with these results:
+
+```text
+gofmt -l experiments/g01-scaleset/livecanary/cleanup_fence.go experiments/g01-scaleset/livecanary/cleanup_fence_test.go experiments/g01-scaleset/livecanary/driver.go experiments/g02-auth/broker.go experiments/g02-auth/broker_entry.go experiments/g02-auth/broker_journal.go experiments/g02-auth/broker_provenance_test.go
+(empty output; exit 0)
+GOTOOLCHAIN=go1.26.8 go vet ./...   # experiments/g02-auth
+(empty output; exit 0)
+GOTOOLCHAIN=go1.26.8 go vet ./...   # experiments/g01-scaleset
+(empty output; exit 0)
+git diff --check
+(empty output; exit 0)
+secret/private-path scan over the changed Go/evidence files
+secret/private-path scan passed: no raw secret or personal path patterns
+```
+
+None of these checks exercised GitHub, Actions, Scale Set, runner, Docker,
+Lima, Keychain, launchd or self-hosted-runner operations.
+
+Remaining live gaps are unchanged and explicit: the provenance adapter is only
+an offline signed fixture and has no broker-authenticated workflow-input source;
+tagged controller and paired entrypoints remain quarantined. The pinned
+`github.com/actions/scaleset v0.4.0` adapter still exposes only unconditional
+`DeleteScaleSet`, so no live conditional cleanup authorization or live
+verification is claimed.
