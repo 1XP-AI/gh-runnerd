@@ -169,3 +169,42 @@ preparation. Rollback is a normal revert of the follow-up commit (for example,
 `git revert <follow-up-commit-sha>` after verifying the exact target head); do
 not reset or replay cleanup, and do not alter live runners, credentials,
 provider context, or other external state.
+
+## PR #81 surviving-set-after-delete follow-up
+
+The exact-head finding `discussion_r4022877174` identified a contradiction in
+the one allowed recovery inspect: after a successful conditional delete result,
+the durable state permits that inspect slot, but a surviving owned scale set
+could be recorded as an ordinary successful inspection. The offline regression
+performs a successful fenced cleanup while the synthetic API intentionally keeps
+the owned zero-stat set, then verifies that inspect returns `ErrQuarantine`,
+retains the `observe-owned` read receipt, and does not append a safe inspect
+observation. The driver now checks `s.deleted && set != nil` immediately after
+the owned read and quarantines this contradiction without discarding the read
+evidence.
+
+The required TDD red/green evidence was:
+
+```text
+GOTOOLCHAIN=go1.26.8 go test -count=1 -run '^TestInspectQuarantinesSurvivingSetAfterDurableDelete$' .
+FAIL: safety_gate_followup_test.go:105: inspect accepted a surviving set after durable delete: <nil>
+
+GOTOOLCHAIN=go1.26.8 go test -count=1 -run '^TestInspectQuarantinesSurvivingSetAfterDurableDelete$' .
+ok  github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/livecanary  0.350s
+```
+
+Focused normal and race verification after the fix was:
+
+```text
+GOTOOLCHAIN=go1.26.8 go test -count=1 -run '^Test(Inspect|CleanupConditionalFence|PinnedSDKDoesNotAdvertiseConditionalCleanup)' .
+ok  github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/livecanary  0.126s
+
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -run '^Test(Inspect|CleanupConditionalFence|PinnedSDKDoesNotAdvertiseConditionalCleanup)' .
+ok  github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/livecanary  1.320s
+```
+
+Rollback is a normal revert of the follow-up commit (for example, `git revert
+<follow-up-commit-sha>` after verifying the exact target head); do not reset or
+replay cleanup, and do not alter live runners, credentials, provider context,
+or other external state. No live operation, GitHub access, credential mint,
+runner operation, Docker, Lima, Keychain or launchd operation was performed.

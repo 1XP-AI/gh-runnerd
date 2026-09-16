@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/actions/scaleset"
 )
 
 func TestInspectConsumesSingleDurablePhaseSlot(t *testing.T) {
@@ -79,6 +81,44 @@ func TestInspectAllowsOneRecoveryReadAfterDurableDelete(t *testing.T) {
 	}
 	if len(j.Events()) != got {
 		t.Fatal("repeated post-delete inspect appended durable evidence or retried the read")
+	}
+}
+
+func TestInspectQuarantinesSurvivingSetAfterDurableDelete(t *testing.T) {
+	d, f, j := created(t)
+	adapter := &cleanupFenceAPI{fakeAPI: f, approval: d.Approval, currentVersion: "v1"}
+	d.API = adapter
+	if err := d.Run(context.Background(), "cleanup"); err != nil {
+		t.Fatalf("fenced cleanup: %v", err)
+	}
+	if f.set == nil || f.set.Statistics == nil || *f.set.Statistics != (scaleset.RunnerScaleSetStatistic{}) {
+		t.Fatalf("fenced cleanup did not leave the zero-stat scale set for inspection: %+v", f.set)
+	}
+	ownedReadsBefore := 0
+	for _, event := range j.Events() {
+		if event.Kind == "result" && event.Operation == "observe-owned" {
+			ownedReadsBefore++
+		}
+	}
+
+	if err := d.Run(context.Background(), "inspect"); !errors.Is(err, ErrQuarantine) {
+		t.Fatalf("inspect accepted a surviving set after durable delete: %v", err)
+	}
+
+	ownedReads, inspectObservations := 0, 0
+	for _, event := range j.Events() {
+		if event.Kind == "result" && event.Operation == "observe-owned" {
+			ownedReads++
+		}
+		if event.Kind == "observation" && event.Operation == "inspect" {
+			inspectObservations++
+		}
+	}
+	if ownedReads != ownedReadsBefore+1 {
+		t.Fatalf("surviving-set inspect did not preserve its owned read evidence: reads=%d before=%d", ownedReads, ownedReadsBefore)
+	}
+	if inspectObservations != 0 {
+		t.Fatalf("surviving set was recorded as a safe inspection: observations=%d", inspectObservations)
 	}
 }
 

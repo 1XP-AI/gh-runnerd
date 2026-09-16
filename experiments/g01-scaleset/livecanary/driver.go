@@ -618,6 +618,11 @@ func (d *Driver) inspect(ctx context.Context, s state) error {
 	if err != nil {
 		return err
 	}
+	if s.deleted && set != nil {
+		// A durable delete result contradicts a surviving owned set. Keep the
+		// owned read receipt, but never record the set as safe inspection.
+		return ErrQuarantine
+	}
 	ref, err := d.runner(ctx, s.setID)
 	if err != nil {
 		return err
