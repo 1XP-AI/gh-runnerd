@@ -96,10 +96,13 @@ authentication and must corroborate those identities with the same key
 fingerprint. It does not grant, inspect or change GitHub ACLs, and native
 same-user workdirs or Keychain access would not isolate hostile code.
 
-It does not implement the foreground command, worker handoff, JIT or live
-App/installation/repository verification, and does not satisfy the broader G02
-Manifest, multi-organization or launchd evidence gate. A reviewed maintainer
-dispatch is still required for any real Mac or self-hosted runner test.
+The 2026-09-16 slice adds offline foreground document parsing, lifecycle
+declaration, fail-closed live-adapter construction and a metadata-only worker
+launch plan. It still does not implement `cmd/gh-runnerd`, live App/API
+verification, worker process start, JIT minting or the broader G02 Manifest,
+multi-organization or launchd evidence gate. A reviewed maintainer dispatch is
+still required for any real Mac or self-hosted runner test. The 2026-09-16
+canary runner dispatch is not evidence for this path.
 
 The metadata commit callback receives a context bounded by the earlier caller
 deadline and non-zero credential `ExpiresAt`; it must observe cancellation or
@@ -112,3 +115,19 @@ precedence and cannot roll back an external side effect. The caller should
 discard any partial or unknown local state, revalidate the credential and
 identities, and retry only through an independently reviewed transactional
 adapter. No automatic workflow replay or live rollback is performed here.
+
+## Foreground configuration slice (2026-09-16)
+
+`ParseForegroundDocument` accepts only an explicit manual, non-persistent,
+foreground identity document. Extra organizations, embedded credential fields,
+file/environment/Keychain persistence, launchd/daemon lifecycle, public
+repositories and incomplete identity are rejected before a source is read.
+`PrepareForeground` then reuses `Validate` and returns a metadata-only session
+that declares `foreground-controller` identity. `PlanWorkerLaunch` copies that
+identity metadata and refuses extra env/argv/files, inherited process
+environment and any JIT envelope. `NewLiveGitHubAPI` is fail-closed and does
+not pin an SDK, open sockets or mint tokens.
+
+Exact commands and rollback for this slice are in
+[docs/evidence/g02-r1-foreground.md](../../docs/evidence/g02-r1-foreground.md).
+This does not complete issue #67 or G02 #2.
