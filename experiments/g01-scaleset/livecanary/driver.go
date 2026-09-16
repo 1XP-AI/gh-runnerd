@@ -563,6 +563,9 @@ func (d *Driver) Run(ctx context.Context, phase string) error {
 			if err != nil || !fence.matches(expectation) {
 				return Event{}, ErrRemote
 			}
+			if err := c.Err(); err != nil {
+				return Event{}, err
+			}
 			return Event{}, deleter.DeleteScaleSetIfOwned(c, fence)
 		}); err != nil {
 			return err

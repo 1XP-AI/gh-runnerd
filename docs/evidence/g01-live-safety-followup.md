@@ -136,3 +136,36 @@ ok: exact version/ETag match, concurrent replacement, missing freshness, owner m
 GOTOOLCHAIN=go1.26.8 go test -count=1 -run '^TestCleanupMissingConditionalDeleterStopsBeforeJournalAuthorization$' ./livecanary
 ok: missing capability returned quarantine before journal authorization, with no journal event or unconditional delete
 ```
+
+## PR #81 cancellation-during-prepare follow-up
+
+The exact-head finding `discussion_r4022781337` identified a gap after
+`PrepareScaleSetDeletion` returned: the cleanup callback passed its context
+directly to `DeleteScaleSetIfOwned`, even when preparation had canceled or
+expired that context. The offline regression cancels the parent context from
+inside a synthetic prepare adapter that otherwise returns a valid fence. The
+driver now checks `c.Err()` between preparation and conditional deletion; a
+canceled context returns through `effect`, which records the durable unknown
+delete intent and quarantines the journal before the adapter's delete method
+can run.
+
+The required TDD red/green evidence was:
+
+```text
+GOTOOLCHAIN=go1.26.8 go test -count=1 -run '^TestCleanupCancellationDuringPrepareDoesNotDeleteAndRetainsUncertainty$' ./livecanary
+FAIL: cleanup_fence_test.go:195: canceled prepare cleanup = <nil>, want quarantine
+
+GOTOOLCHAIN=go1.26.8 go test -count=1 -run '^Test(CleanupConditionalFence|CleanupCancellationDuringPrepare|PinnedSDKDoesNotAdvertiseConditionalCleanup)' ./livecanary
+ok: github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/livecanary 0.365s
+
+GOTOOLCHAIN=go1.26.8 go test -race -count=1 -run '^Test(CleanupConditionalFence|CleanupCancellationDuringPrepare|PinnedSDKDoesNotAdvertiseConditionalCleanup)' ./livecanary
+ok: github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/livecanary 1.323s
+```
+
+The regression also verifies that `DeleteScaleSetIfOwned` and the legacy
+unconditional delete are both called zero times, replay retains durable
+uncertainty, and a subsequent cleanup attempt is rejected without retrying
+preparation. Rollback is a normal revert of the follow-up commit (for example,
+`git revert <follow-up-commit-sha>` after verifying the exact target head); do
+not reset or replay cleanup, and do not alter live runners, credentials,
+provider context, or other external state.

@@ -16,6 +16,7 @@ type cleanupFenceAPI struct {
 	currentVersion      string
 	currentETag         string
 	replaceBeforeDelete bool
+	cancelDuringPrepare context.CancelFunc
 	prepareCalls        int
 	conditionalCalls    int
 	mutateFence         func(*ScaleSetDeletionFence)
@@ -48,6 +49,9 @@ func (a *cleanupFenceAPI) PrepareScaleSetDeletion(_ context.Context, expected Sc
 	}
 	if a.mutateFence != nil {
 		a.mutateFence(&fence)
+	}
+	if a.cancelDuringPrepare != nil {
+		a.cancelDuringPrepare()
 	}
 	return fence, nil
 }
@@ -177,6 +181,24 @@ func TestCleanupConditionalFenceFailureRetainsUnknownAndCannotRetry(t *testing.T
 	}
 	if err := d.Run(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) || adapter.prepareCalls != 1 || adapter.conditionalCalls != 1 || f.deleteCalls != 0 {
 		t.Fatalf("conditional failure cleanup retried: error=%v prepare=%d conditional=%d unconditional=%d", err, adapter.prepareCalls, adapter.conditionalCalls, f.deleteCalls)
+	}
+}
+
+func TestCleanupCancellationDuringPrepareDoesNotDeleteAndRetainsUncertainty(t *testing.T) {
+	d, f, j := created(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	adapter := &cleanupFenceAPI{fakeAPI: f, approval: d.Approval, currentVersion: "v1", cancelDuringPrepare: cancel}
+	d.API = adapter
+
+	if err := d.Run(ctx, "cleanup"); !errors.Is(err, ErrQuarantine) {
+		t.Fatalf("canceled prepare cleanup = %v, want quarantine", err)
+	}
+	if adapter.prepareCalls != 1 || adapter.conditionalCalls != 0 || f.deleteCalls != 0 || !replay(j.Events()).uncertain {
+		t.Fatalf("canceled prepare state = prepare %d conditional %d unconditional %d uncertain %t, want 1/0/0/true", adapter.prepareCalls, adapter.conditionalCalls, f.deleteCalls, replay(j.Events()).uncertain)
+	}
+	if err := d.Run(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) || adapter.prepareCalls != 1 || adapter.conditionalCalls != 0 || f.deleteCalls != 0 || !replay(j.Events()).uncertain {
+		t.Fatalf("canceled prepare cleanup retried or lost uncertainty: error=%v prepare=%d conditional=%d unconditional=%d uncertain=%t", err, adapter.prepareCalls, adapter.conditionalCalls, f.deleteCalls, replay(j.Events()).uncertain)
 	}
 }
 
