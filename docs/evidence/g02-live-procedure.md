@@ -6,7 +6,7 @@ This is the reviewed procedure and sanitized record for the 2026-09-17 live run.
 
 | Field | Used value / required access |
 |---|---|
-| App owner | `1XP-AI` (organization ID `258160258`), proposed and not yet created |
+| App owner | `1XP-AI` (organization ID `258160258`), created once for the run and deleted after verification |
 | App name | `gh-runnerd-gate-deab34`; inventory this exact name before/after |
 | Homepage | `https://github.com/1XP-AI/gh-runnerd` |
 | Visibility | Any account (`public: true`) so the same App can be installed in both nominated test organizations |
@@ -62,7 +62,7 @@ go build -tags=g02runtime -o "$G02_PROBE_BINARY" ./cmd/g02-keychain-probe
 
 Prepare `G02_PROBE_BINARY` as a new absolute path in a private temporary build directory. Confirm the exact source commit and binary code-signing identity with `codesign`; an ad-hoc source build is a separate matrix row from a Developer ID release. The probe creates a private Keychain/canary, restricts reads to that explicit Keychain, runs fresh child reads through unique transient `gui/<current-uid>` jobs, locks only its own Keychain, verifies the Keychain lock bit and expects an explicit `errSecAuthFailed` or `errSecInteractionNotAllowed` denial, then deletes its exact Keychain/jobs/temp state. Its output contains status codes and booleans; cleanup failure also reports a non-secret recovery directory basename. If any exact service absence remains unknown, the probe attempts to lock its owned Keychain and preserves the private directory, captured Keychain marker and exact service-label plists. Resolve only those exact labels, verify absence, delete only the captured synthetic Keychain, and remove that captured directory after review; do not search for or kill unrelated services. Failure to preserve Keychain preferences or clean up is failure, not a passing access result.
 
-Independent Astra review approved this concrete probe's ownership, no-UI handling, explicit paths, cleanup and narrow platform bridge before execution. Its limited actual result is recorded in [G02 evidence](g02-enrollment-evidence.md). Re-running the same reviewed probe is within the same non-disruptive authorization. This experiment does not require or establish screen lock, logout, reboot, a system daemon or target-controller identity.
+Independent Astra review approved this concrete probe's ownership, no-UI handling, explicit paths, cleanup and narrow platform bridge before execution. Its earlier limited result is recorded in [G02 evidence](g02-enrollment-evidence.md). Re-running the same reviewed probe was within the same non-disruptive authorization. This probe invocation itself does not perform screen lock, logout or reboot; the separate current-login matrix reran it under an exact GUI `launchd` parent across those authorized transitions, with results recorded in [the driver record](g02-live-driver.md). Neither the earlier probe nor that matrix establishes a system daemon, production persistence or target-controller identity.
 
 ## C. Remaining target identity and product startup gates
 
