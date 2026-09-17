@@ -1,6 +1,28 @@
 # G02 verify-only enrollment driver
 
-Status: implemented and tested offline on Darwin ARM64 with Go 1.26.8; **live GitHub enrollment has not been executed**. This advances [issue #2](https://github.com/1XP-AI/gh-runnerd/issues/2) without closing its live, target-identity or persistent-credential gates. No App, installation, runner, Keychain item or launchd service was created by this continuation.
+Status: implemented and tested offline on Darwin ARM64 with Go 1.26.8; the approved live GitHub enrollment and same-App manual fallback were executed on 2026-09-17. This advances [issue #2](https://github.com/1XP-AI/gh-runnerd/issues/2) without closing its target-identity or persistent-credential gates. The disposable App and its installations were removed after verification; the pre-existing test App, runner, Keychain items and launchd services were not changed.
+
+## Recorded live run (2026-09-17)
+
+- The reviewed source `25f7e7e2ced2291a750bb63f1933f1aeed86b18f` was built and run on the intended arm64 macOS host. The existing self-hosted runner remained available throughout the run.
+- The approved disposable App was created once with the disabled webhook, loopback Manifest and minimal organization-runner/metadata permissions. The strict same-port loopback request was accepted. Native browser form forwarding initially failed the exact Host/Origin contract; the generated one-time Manifest page completed the same reviewed flow without weakening validation or creating a duplicate App.
+- The Manifest process reached `app_received`. After its bounded lifetime, a replacement key was passed through the protected manual input boundary for the same journal and App. App identity and both nominated organization installations, including account/target identity, suspension and minimal permissions, verified successfully: `verified_organizations=2`, `credentials_not_persisted=true`.
+- Both exact disposable installations were removed and the disposable App registration was deleted by its owner. Follow-up organization inventory showed zero disposable installations; the pre-existing `1xp-gh-runnerd-test` installation remained untouched. The replacement PEM and probe-owned temporary access were removed after verification.
+- This run does not establish production credential persistence, a distinct controller/job UID or release-signing continuity.
+
+## Recorded current-login matrix (2026-09-17)
+
+The reviewed source `25f7e7e2ced2291a750bb63f1933f1aeed86b18f` was exercised on the intended ARM64 macOS host. The synthetic probe ran from an exact one-shot GUI `launchd` parent with an owned transient label; direct SSH execution was not used as evidence because it has a different audit session. Every row started with no busy runner worker, and no existing runner configuration or service was changed.
+
+| Row | GUI state | Direct read | GUI launchd unlocked | GUI launchd after synthetic Keychain lock | Cleanup |
+|---|---|---|---|---|---|
+| Current login baseline | Unlocked | `0`, match | `0`, match, same UID | `-25293`, no match, same UID | Complete |
+| Screen lock | Locked | `0`, match | `0`, match, same UID | `-25293`, no match, same UID | Complete |
+| Unlock/resume | Unlocked | `0`, match | `0`, match, same UID | `-25293`, no match, same UID | Complete |
+| Logout/login | Unlocked | `0`, match | `0`, match, same UID | `-25293`, no match, same UID | Complete |
+| Reboot/login | Unlocked | `0`, match | `0`, match, same UID | `-25293`, no match, same UID | Complete |
+
+The synthetic Keychain lock bit and unchanged Keychain preferences were verified in every row. Listener count changed from three to two after logout/reboot without a runner configuration change; no worker was present. This proves the reviewed source-build synthetic current-login contract across the authorized maintenance transitions for the selected single-login pilot. It does not prove hostile-code isolation, a persistent product launch agent/system daemon, pre-login cold-boot operation or production credential persistence.
 
 ## Implemented boundary
 
@@ -22,9 +44,9 @@ The journal directory must be a current-UID directory with mode `0700`; a symlin
 
 Recovery is deliberately operator-driven: inspect the recorded owner/App name in GitHub; identify the one existing App and both installations; use its existing or replacement key through manual mode. If a `record.next` file exists, reconcile its non-secret inventory against GitHub and the original record before a separately reviewed correction. The driver does not auto-delete or auto-create remote resources. Browser back/reload can resubmit a remote form outside the local handler's control; submit once and reconcile any ambiguity. Keep the journal until exact remote cleanup is verified.
 
-## Concrete proposal for later approval
+## Concrete procedure and approved resource shape
 
-These are the root-owned proposal's nominated resources, not evidence of their creation:
+These values were used for the 2026-09-17 disposable evidence run. The remote resources were cleaned up afterward; retain the shape as the repeatable procedure for a separately authorized run:
 
 | Item | Proposed value |
 |---|---|
@@ -38,7 +60,7 @@ These are the root-owned proposal's nominated resources, not evidence of their c
 | Redirect | Actual ephemeral `http://127.0.0.1:<port>/manifest/callback` |
 | Additional authority | None: no user OAuth, repository Actions/contents/admin, tokens, runner registration or workflow dispatch |
 
-An owner for both organizations must review this exact permission set. Parent coordination has read-only evidence that the current GitHub account is an administrator of both. Actual host identity is still unconfirmed; this driver can test only the current session. Before live execution, record the exact reviewed source SHA, build binary, new private journal parent and existing owner App/installation inventory. Set `G02_PRIVATE_PARENT` to that explicitly selected existing private directory; do not place private inputs inside the checkout or public output directory. Use a fresh binary path and retain the journal across restarts.
+An owner for both organizations must review this exact permission set. Parent coordination has read-only evidence that the current GitHub account is an administrator of both. The live run confirmed the intended host/session; distinct controller/job identity remains unconfirmed. Before any later live execution, record the exact reviewed source SHA, build binary, new private journal parent and existing owner App/installation inventory. Set `G02_PRIVATE_PARENT` to that explicitly selected existing private directory; do not place private inputs inside the checkout or public output directory. Use a fresh binary path and retain the journal across restarts.
 
 From `experiments/g02-auth`, build after independent review:
 
@@ -46,7 +68,7 @@ From `experiments/g02-auth`, build after independent review:
 GOTOOLCHAIN=go1.26.8 go build -o "$G02_PRIVATE_PARENT/g02-enroll-deab34" ./cmd/g02-enroll
 ```
 
-The proposed creation command, to execute **only after final resource/permission approval**, is:
+The exact creation command used for the live run, and to execute only after final resource/permission approval on any later run, is:
 
 ```sh
 "$G02_PRIVATE_PARENT/g02-enroll-deab34" manifest --live-github \
@@ -57,7 +79,7 @@ The proposed creation command, to execute **only after final resource/permission
 
 Open only the printed bare local URL. Submit the local preparation form, then the remote GitHub form once, preserving the approved App name. Confirm GitHub accepted the disabled webhook shape and minimal permissions. After the callback, install the same App in the two nominated organizations through GitHub's owner UI; record each installation ID privately and enter them into the local verification form. Do not capture callback URLs, form state, network bodies or credential screens in logs/screenshots. The command exits after verification; its key is unavailable for later G01 use.
 
-For the separate manual-fallback test, have the owner obtain a key for this **same** disposable App into an existing protected private input, with confirmed non-secret IDs in the variables below. The harness does not create that file or recover its discarded Manifest key:
+For a manual-fallback test, have the owner obtain a key for this **same** disposable App into an existing protected private input, with confirmed non-secret IDs in the variables below. The harness does not create that file or recover its discarded Manifest key:
 
 ```sh
 "$G02_PRIVATE_PARENT/g02-enroll-deab34" manual --live-github \
@@ -80,4 +102,4 @@ All fixture keys were freshly generated synthetic RSA keys. HTTP integration tes
 
 GitHub's [Manifest contract](https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest) documents organization registration, state, redirect and code exchange. The authenticated [App endpoint](https://docs.github.com/en/rest/apps/apps?apiVersion=2022-11-28#get-the-authenticated-app) supplies App/owner identity using the App JWT. These contracts justify the adapter shape; they do not prove the proposed disabled `.invalid` webhook, random loopback redirect, two-org installation or browser Origin behavior was accepted live.
 
-Remaining gates: independent review and hosted Linux validation of this continuation; actual GitHub Manifest/manual fallback in both organizations; production persistent credential storage; confirmed target/controller identity; release-signing and distinct-job-UID denial; lock/logout/reboot startup matrix. Prior limited synthetic Keychain evidence is unchanged. G02, G08 and G15 must not treat this verify-only result as installed-product support.
+Remaining gates: independent review and hosted Linux validation of this live continuation; production persistent credential storage; confirmed target/controller identity; release-signing and distinct-job-UID denial; persistent product startup/pre-login cold-boot behavior. The current-login maintenance matrix above is complete, but no persistent product service was installed. Prior limited synthetic Keychain evidence is unchanged. G02, G08 and G15 must not treat this verify-only result as installed-product support.
