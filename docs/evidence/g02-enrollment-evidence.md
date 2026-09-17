@@ -1,8 +1,8 @@
 # G02 enrollment and credential evidence
 
-Status on 2026-09-07: **offline harness and limited current-login synthetic runtime probe complete; required live GitHub and target service-identity gates remain open**. This record does not mark issue G02 Done.
+Status on 2026-09-07: **historical offline harness and limited current-login synthetic runtime probe record; required live GitHub and target service-identity gates were then open**. This record does not mark issue G02 Done. The later 2026-09-17 live enrollment and selected same-UID maintenance matrix are recorded in [the current driver record](g02-live-driver.md) and [the live procedure](g02-live-procedure.md); unperformed rows below describe this earlier increment only.
 
-Later offline increment: [g02-offline-packet.md](g02-offline-packet.md) records fail-closed unknown suspension and the Manifest payload contract on current main. Live enrollment and reboot/lock evidence remain open.
+Later offline increment: [g02-offline-packet.md](g02-offline-packet.md) records fail-closed unknown suspension and the Manifest payload contract on current main. Its live-gap statements are historical; current live status is recorded in the driver and procedure linked above.
 
 ## Environment and scope
 
@@ -67,7 +67,7 @@ After integrating the latest merged main, `make check` passed from the repositor
 
 The local ten-minute state lifetime is intentionally shorter than GitHub's documented one-hour Manifest exchange limit. Normal top-level redirect GETs may omit Origin; state and exact Host/path are mandatory regardless. Accepting an absent Origin is not authorization. IPv6, localhost aliases, GHES/GHE.com, proxies, persistent setup listeners and cross-process resumable Manifest attempts are not covered.
 
-## Actual limited macOS runtime experiment
+## Historical limited macOS runtime experiment
 
 Independent Astra xhigh review approved the narrow synthetic-only cgo/unsafe exception and each behavior-changing probe revision before execution. Final reviewed source: `50696dbb3cf435e5155a48fdf9673403efe9c682`. The executed artifact was an ARM64 Go 1.26.8 source build. An earlier probe build at `c316e0e` was inspected with `codesign -d -v`, which reported linker-generated **ad-hoc** signing, no Team Identifier and no bound application Info.plist. The same private binary path was rebuilt for later reviewed revisions, but the final `50696db` artifact's signing metadata was not separately inspected before cleanup. That earlier observation is not claimed as verification of the final binary's signing identity. This is source-build evidence only; Developer ID release, system-daemon, intended-controller and protected-native-worker identities remain unverified.
 

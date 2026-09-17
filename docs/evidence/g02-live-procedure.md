@@ -1,12 +1,12 @@
 # G02 remaining live procedure
 
-This is a concrete experiment proposal, not a report that these checks passed. Use reviewed immutable code, a dedicated trusted environment, explicit authorization for these exact resources and an organization owner available for both installations. The `g02-enroll` verify-only driver now connects `Attempt`, `GitHubAPI.Convert`, and `ManualImport`, with an in-memory atomic sink and a private non-secret journal. Its executable command and offline evidence are in [the driver record](g02-live-driver.md). It has not been run against GitHub. Independent review and explicit approval of the exact live resources remain required; a persistent real-key importer is still unimplemented.
+This is the reviewed procedure and sanitized record for the 2026-09-17 live run. Use reviewed immutable code, a dedicated trusted environment, explicit authorization for these exact resources and an organization owner available for both installations. The `g02-enroll` verify-only driver connects `Attempt`, `GitHubAPI.Convert`, and `ManualImport`, with an in-memory atomic sink and a private non-secret journal. Its executable command, offline evidence and live result are in [the driver record](g02-live-driver.md). The disposable App and installations were removed after verification; a persistent real-key importer is still unimplemented.
 
-## A. Disposable GitHub enrollment proposal
+## A. Disposable GitHub enrollment procedure
 
-| Field | Proposed value / required access |
+| Field | Used value / required access |
 |---|---|
-| App owner | `1XP-AI` (organization ID `258160258`), proposed and not yet created |
+| App owner | `1XP-AI` (organization ID `258160258`), created once for the run and deleted after verification |
 | App name | `gh-runnerd-gate-deab34`; inventory this exact name before/after |
 | Homepage | `https://github.com/1XP-AI/gh-runnerd` |
 | Visibility | Any account (`public: true`) so the same App can be installed in both nominated test organizations |
@@ -62,11 +62,11 @@ go build -tags=g02runtime -o "$G02_PROBE_BINARY" ./cmd/g02-keychain-probe
 
 Prepare `G02_PROBE_BINARY` as a new absolute path in a private temporary build directory. Confirm the exact source commit and binary code-signing identity with `codesign`; an ad-hoc source build is a separate matrix row from a Developer ID release. The probe creates a private Keychain/canary, restricts reads to that explicit Keychain, runs fresh child reads through unique transient `gui/<current-uid>` jobs, locks only its own Keychain, verifies the Keychain lock bit and expects an explicit `errSecAuthFailed` or `errSecInteractionNotAllowed` denial, then deletes its exact Keychain/jobs/temp state. Its output contains status codes and booleans; cleanup failure also reports a non-secret recovery directory basename. If any exact service absence remains unknown, the probe attempts to lock its owned Keychain and preserves the private directory, captured Keychain marker and exact service-label plists. Resolve only those exact labels, verify absence, delete only the captured synthetic Keychain, and remove that captured directory after review; do not search for or kill unrelated services. Failure to preserve Keychain preferences or clean up is failure, not a passing access result.
 
-Independent Astra review approved this concrete probe's ownership, no-UI handling, explicit paths, cleanup and narrow platform bridge before execution. Its limited actual result is recorded in [G02 evidence](g02-enrollment-evidence.md). Re-running the same reviewed probe is within the same non-disruptive authorization. This experiment does not require or establish screen lock, logout, reboot, a system daemon or target-controller identity.
+Independent Astra review approved this concrete probe's ownership, no-UI handling, explicit paths, cleanup and narrow platform bridge before execution. Its earlier limited result is recorded in [G02 evidence](g02-enrollment-evidence.md). Re-running the same reviewed probe was within the same non-disruptive authorization. This probe invocation itself does not perform screen lock, logout or reboot; the separate current-login matrix reran it under an exact GUI `launchd` parent across those authorized transitions, with results recorded in [the driver record](g02-live-driver.md). Neither the earlier probe nor that matrix establishes a system daemon, production persistence or target-controller identity.
 
-## C. Target identity and startup matrix still required
+## C. Remaining target identity and product startup gates
 
-Required access: confirmed intended host; confirmed dedicated non-root controller and distinct job accounts already provisioned by an authorized administrator; maintainer-controlled reviewed source and release-signed binaries; signing identity/provisioning access if data-protection Keychain is chosen; and an operator present for explicitly scheduled lock/logout/reboot checks. Creating these accounts, installing a persistent service/helper, unlocking existing Keychains or changing FileVault is outside the current probe authorization.
+The 2026-09-17 matrix completed the selected single-login synthetic current-login checks across baseline, screen lock, unlock, logout/login and reboot/login. It did not establish a distinct controller/job identity, a persistent product service, a release-signed binary, production credential persistence or pre-login cold-boot behavior. Creating separate accounts, installing a persistent service/helper, unlocking existing Keychains or changing FileVault remains outside the completed probe authorization.
 
 1. Inventory the intended UID, launchd domain, selected Keychain implementation and executable signing requirement privately. Record only role aliases and `same/different UID` booleans publicly. Use a fresh synthetic item with the same item access-control policy and service identity the product will use; an arbitrary terminal or `security` CLI read does not stand in for this binary.
 2. As the real controller launchd process, read while unlocked with interaction disallowed; verify a signing operation against the corresponding synthetic public key without printing the key. Test denied access from the distinct job identity; never broaden the ACL to make it pass.
@@ -76,4 +76,4 @@ Required access: confirmed intended host; confirmed dedicated non-root controlle
 6. Repeat source build, stable signed release, and updated binary identity. Verify that an update neither silently broadens trust nor loses access without a clear recoverable status. A system-daemon row is a separate file-Keychain experiment and needs its own reviewed service installation and authorization.
 7. Remove only test items, owned service entries and test directories; restore the original reviewed service configuration if this maintenance explicitly changed it. Verify original runner/service availability and publish a sanitized matrix with every failed/skipped case visible.
 
-G02 remains open until required live evidence, independent review and repository publication/merge criteria are satisfied. G08/G15 and protected native work must not treat this procedure as passing results.
+G02 remains open until independent review, repository publication/merge criteria and the remaining production identity/persistence gates are satisfied. The live enrollment and selected same-UID current-login matrix are recorded evidence, not installed-product support. G08/G15 and protected native work must not treat this procedure as passing results.
