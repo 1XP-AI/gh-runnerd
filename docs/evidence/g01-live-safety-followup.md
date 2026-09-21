@@ -268,3 +268,38 @@ tagged controller and paired entrypoints remain quarantined. The pinned
 `github.com/actions/scaleset v0.4.0` adapter still exposes only unconditional
 `DeleteScaleSet`, so no live conditional cleanup authorization or live
 verification is claimed.
+## Exact-head cancellation-before-delete follow-up
+
+The current exact-head review finding
+[`discussion_r4022781337`](https://github.com/1XP-AI/gh-runnerd/pull/81#discussion_r4022781337)
+identified a
+remaining local race: a context-insensitive `PrepareScaleSetDeletion` could
+return a valid fence after the approval deadline or parent cancellation, and
+the driver would then call `DeleteScaleSetIfOwned` with that already-canceled
+context. This is distinct from the provider's required server-side
+version/ETag condition; it is the last local check before invoking that
+destructive adapter method.
+
+The red regression used a synthetic adapter that cancels immediately after
+returning a valid fence and ignores context in its delete method:
+
+```text
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test ./livecanary -run '^TestCleanupConditionalFenceRechecksCancellationBeforeDelete$' -count=1
+FAIL: cancellation after conditional prepare = <nil>, want quarantine
+```
+
+The driver now rechecks `c.Err()` after fence identity/freshness validation
+and before `DeleteScaleSetIfOwned`; the callback returns an internal failure so
+`effect` durably records an unknown delete outcome and the adapter is not
+called. The focused boundary/failure suite passed under the race detector:
+
+```text
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -race ./livecanary -run '^(TestCleanupConditionalFence|TestCleanupMissingConditionalDeleterStopsBeforeJournalAuthorization|TestPinnedSDKDoesNotAdvertiseConditionalCleanup)' -count=1
+ok   github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/livecanary  1.447s
+```
+
+This narrows the local cancellation race only; it cannot revoke a request
+already accepted by a remote provider. The production cleanup gate remains
+closed because the pinned SDK still lacks an atomic owner/freshness delete
+operation, and production controller execution remains quarantined because no
+trusted broker workflow-input provenance source or trust-root design exists.

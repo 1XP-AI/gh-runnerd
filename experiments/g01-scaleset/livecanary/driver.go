@@ -563,8 +563,12 @@ func (d *Driver) Run(ctx context.Context, phase string) error {
 			if err != nil || !fence.matches(expectation) {
 				return Event{}, ErrRemote
 			}
-			if err := c.Err(); err != nil {
-				return Event{}, err
+			// Preparation may be slow or context-insensitive. Recheck the
+			// cancellation fence after it returns so a stale approval cannot
+			// reach a context-insensitive conditional delete implementation.
+			// effect records the durable unknown outcome for this callback error.
+			if c == nil || c.Err() != nil {
+				return Event{}, ErrRemote
 			}
 			return Event{}, deleter.DeleteScaleSetIfOwned(c, fence)
 		}); err != nil {

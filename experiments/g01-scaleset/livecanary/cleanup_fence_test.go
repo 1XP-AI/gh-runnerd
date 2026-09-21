@@ -86,6 +86,35 @@ func (a *cleanupFenceAPI) DeleteScaleSetIfOwned(_ context.Context, fence ScaleSe
 	return nil
 }
 
+type cancellationAfterPrepareCleanupAPI struct {
+	*cleanupFenceAPI
+	cancel context.CancelFunc
+}
+
+func (a *cancellationAfterPrepareCleanupAPI) PrepareScaleSetDeletion(ctx context.Context, expected ScaleSetDeletionExpectation) (ScaleSetDeletionFence, error) {
+	fence, err := a.cleanupFenceAPI.PrepareScaleSetDeletion(ctx, expected)
+	a.cancel()
+	return fence, err
+}
+
+func TestCleanupConditionalFenceRechecksCancellationBeforeDelete(t *testing.T) {
+	d, f, j := created(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	base := &cleanupFenceAPI{fakeAPI: f, approval: d.Approval, currentVersion: "v1"}
+	adapter := &cancellationAfterPrepareCleanupAPI{cleanupFenceAPI: base, cancel: cancel}
+	d.API = adapter
+
+	if err := d.Run(ctx, "cleanup"); !errors.Is(err, ErrQuarantine) {
+		t.Fatalf("cancellation after conditional prepare = %v, want quarantine", err)
+	}
+	if adapter.prepareCalls != 1 || adapter.conditionalCalls != 0 || f.deleteCalls != 0 {
+		t.Fatalf("cancellation after prepare calls = prepare %d conditional %d unconditional %d, want 1/0/0", adapter.prepareCalls, adapter.conditionalCalls, f.deleteCalls)
+	}
+	if !replay(j.Events()).uncertain {
+		t.Fatal("cancellation after prepare did not retain an uncertain deletion reservation")
+	}
+}
+
 func TestCleanupConditionalFenceAcceptsExactOwnerAndFreshnessMatch(t *testing.T) {
 	d, f, j := created(t)
 	adapter := &cleanupFenceAPI{fakeAPI: f, approval: d.Approval, currentVersion: "v1"}
