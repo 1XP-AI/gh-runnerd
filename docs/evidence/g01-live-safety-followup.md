@@ -315,3 +315,31 @@ revision and whose delete submits that revision plus the durable owner identity
 as one server-side conditional operation; no observe-then-delete fallback is
 authorized. No live API, credential, runner, Scale Set, workflow, Docker,
 Lima, Keychain or launchd operation was performed.
+
+## Codex P1 trust-root triage and fix — 2026-09-22
+
+Codex review of the first PR head reproduced a P1: the adapter supplied
+`TrustRoot()`, so an adapter could sign with a replacement key and nominate
+that same key as the verification root. The first red test for the fix was
+added before implementation:
+
+```text
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test . -run '^TestBrokerWorkflowReceiptRejectsAdapterSelectedRootBeforeCredentialInput$' -count=1
+./broker_provenance_test.go:395:8: e.api.provenanceRoot undefined (type *brokerAPI has no field or method provenanceRoot)
+FAIL: build failed
+```
+
+The minimal fix moves the pinned root into broker-owned `brokerAPI` configuration
+through a separate constructor, removes `TrustRoot()` from the adapter contract,
+and verifies receipts only against that independently configured root. The
+attacker-signed fixture receipt is now rejected before the credential FIFO read,
+token mint or API call. The production constructor still has an empty root and
+therefore preserves controller quarantine until a reviewed provisioning and
+handoff protocol exists.
+
+The focused regression passed after the fix:
+
+```text
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test . -run '^TestBrokerWorkflowReceiptRejectsAdapterSelectedRootBeforeCredentialInput$' -count=1
+ok   github.com/1XP-AI/gh-runnerd/experiments/g02-auth  0.465s
+```

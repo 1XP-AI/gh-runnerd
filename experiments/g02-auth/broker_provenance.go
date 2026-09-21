@@ -55,7 +55,6 @@ type BrokerProvenanceReceipt struct {
 // fixture as GitHub workflow-input verification.
 type BrokerProvenanceAdapter interface {
 	Source() string
-	TrustRoot() BrokerProvenanceTrustRoot
 	Attest(context.Context, BrokerProvenanceRequest) (BrokerProvenanceReceipt, error)
 	Verify(context.Context, BrokerProvenanceRequest, BrokerProvenanceReceipt) error
 }

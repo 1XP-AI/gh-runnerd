@@ -149,7 +149,7 @@ func brokerWorkflowReceipt(ctx context.Context, api *brokerAPI, a BrokerApproval
 	if ctx == nil || ctx.Err() != nil || api == nil || api.provenance == nil {
 		return nil, errBroker
 	}
-	root := api.provenance.TrustRoot()
+	root := api.provenanceRoot
 	if !root.valid() {
 		return nil, errBroker
 	}

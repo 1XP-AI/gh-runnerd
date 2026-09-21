@@ -142,12 +142,13 @@ func newBrokerFixture(t *testing.T) (BrokerApproval, Candidate, *brokerAPI, *bro
 	}
 	admission, _ = filepath.EvalSymlinks(admission)
 	f.admissionRoot = admission
-	api := newBrokerAPI(time.Now, f)
+	adapter := newSignedBrokerFixtureAdapter(t)
+	api := newBrokerAPIWithProvenanceRoot(time.Now, f, adapter.root)
 	api.admissionDirectory = func() (string, error) { return admission, nil }
 	// The test-only adapter is the explicit signed fixture source. Production
 	// newBrokerAPI has no provenance adapter and therefore quarantines controller
 	// and paired execution before reading credentials.
-	api.provenance = newSignedBrokerFixtureAdapter(t)
+	api.provenance = adapter
 	return brokerApprovalFixture(), syntheticCandidate(t), api, f, root
 }
 func TestBrokerDiscoveryUsesOneRestrictedTokenThenScopeBeforeAuth(t *testing.T) {

@@ -38,8 +38,7 @@ func newSignedBrokerFixtureAdapter(t *testing.T) *signedBrokerFixtureAdapter {
 	return &signedBrokerFixtureAdapter{private: private, public: public, root: root}
 }
 
-func (a *signedBrokerFixtureAdapter) Source() string                       { return brokerFixtureProvenanceSource }
-func (a *signedBrokerFixtureAdapter) TrustRoot() BrokerProvenanceTrustRoot { return a.root }
+func (a *signedBrokerFixtureAdapter) Source() string { return brokerFixtureProvenanceSource }
 
 func (a *signedBrokerFixtureAdapter) Attest(ctx context.Context, request BrokerProvenanceRequest) (BrokerProvenanceReceipt, error) {
 	if ctx == nil || ctx.Err() != nil {
@@ -91,9 +90,6 @@ type blockingBrokerProvenanceAdapter struct {
 }
 
 func (a *blockingBrokerProvenanceAdapter) Source() string { return a.fixture.Source() }
-func (a *blockingBrokerProvenanceAdapter) TrustRoot() BrokerProvenanceTrustRoot {
-	return a.fixture.TrustRoot()
-}
 
 func (a *blockingBrokerProvenanceAdapter) Attest(ctx context.Context, request BrokerProvenanceRequest) (BrokerProvenanceReceipt, error) {
 	a.attestStarted <- ctx
@@ -121,9 +117,6 @@ type attemptClaimProbeAdapter struct {
 }
 
 func (a *attemptClaimProbeAdapter) Source() string { return a.fixture.Source() }
-func (a *attemptClaimProbeAdapter) TrustRoot() BrokerProvenanceTrustRoot {
-	return a.fixture.TrustRoot()
-}
 
 func (a *attemptClaimProbeAdapter) claimHeld() bool {
 	file, err := os.OpenFile(filepath.Join(a.attemptPath, "broker.jsonl"), os.O_RDWR, 0)
@@ -156,9 +149,6 @@ type rootlessBrokerProvenanceAdapter struct {
 }
 
 func (a *rootlessBrokerProvenanceAdapter) Source() string { return a.fixture.Source() }
-func (a *rootlessBrokerProvenanceAdapter) TrustRoot() BrokerProvenanceTrustRoot {
-	return BrokerProvenanceTrustRoot{}
-}
 func (a *rootlessBrokerProvenanceAdapter) Attest(ctx context.Context, request BrokerProvenanceRequest) (BrokerProvenanceReceipt, error) {
 	a.called = true
 	return a.fixture.Attest(ctx, request)
@@ -190,6 +180,7 @@ func TestBrokerWorkflowReceiptBoundsAttestToApprovalDeadline(t *testing.T) {
 	adapter := &blockingBrokerProvenanceAdapter{fixture: newSignedBrokerFixtureAdapter(t), attestStarted: make(chan context.Context, 1), verifyStarted: make(chan context.Context, 1), waitAttest: true}
 	api := newBrokerAPI(func() time.Time { return now }, nil)
 	api.provenance = adapter
+	api.provenanceRoot = adapter.fixture.root
 
 	started := time.Now()
 	if _, err := brokerWorkflowReceipt(context.Background(), api, a, c, a.ControllerApprovalSHA256); err == nil {
@@ -215,6 +206,7 @@ func TestBrokerWorkflowReceiptBoundsVerifyToApprovalDeadline(t *testing.T) {
 	adapter := &blockingBrokerProvenanceAdapter{fixture: newSignedBrokerFixtureAdapter(t), attestStarted: make(chan context.Context, 1), verifyStarted: make(chan context.Context, 1), waitVerify: true}
 	api := newBrokerAPI(func() time.Time { return now }, nil)
 	api.provenance = adapter
+	api.provenanceRoot = adapter.fixture.root
 
 	started := time.Now()
 	if _, err := brokerWorkflowReceipt(context.Background(), api, a, c, a.ControllerApprovalSHA256); err == nil {
@@ -240,6 +232,7 @@ func TestBrokerWorkflowReceiptRejectsCanceledContextBeforeAdapter(t *testing.T) 
 	adapter := &blockingBrokerProvenanceAdapter{fixture: newSignedBrokerFixtureAdapter(t), attestStarted: make(chan context.Context, 1), verifyStarted: make(chan context.Context, 1)}
 	api := newBrokerAPI(func() time.Time { return now }, nil)
 	api.provenance = adapter
+	api.provenanceRoot = adapter.fixture.root
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := brokerWorkflowReceipt(ctx, api, a, c, a.ControllerApprovalSHA256); err == nil {
@@ -355,6 +348,7 @@ func TestBrokerWorkflowReceiptRejectsMissingPinnedRootBeforeCredentialInput(t *t
 	e := newPairedBrokerEntryFixture(t)
 	adapter := &rootlessBrokerProvenanceAdapter{fixture: newSignedBrokerFixtureAdapter(t)}
 	e.api.provenance = adapter
+	e.api.provenanceRoot = BrokerProvenanceTrustRoot{}
 	fifo := filepath.Join(e.parent, "rootless-input.fifo")
 	if err := syscall.Mkfifo(fifo, 0600); err != nil {
 		t.Fatal("FIFO setup")
@@ -383,6 +377,44 @@ func TestBrokerWorkflowReceiptRejectsMissingPinnedRootBeforeCredentialInput(t *t
 			t.Fatal("rootless provenance reached the blocking credential read")
 		case <-time.After(2 * time.Second):
 			t.Fatal("rootless provenance refusal remained blocked")
+		}
+	}
+}
+
+func TestBrokerWorkflowReceiptRejectsAdapterSelectedRootBeforeCredentialInput(t *testing.T) {
+	e := newPairedBrokerEntryFixture(t)
+	expected := e.api.provenance.(*signedBrokerFixtureAdapter)
+	attacker := newSignedBrokerFixtureAdapter(t)
+	e.api.provenance = attacker
+	e.api.provenanceRoot = expected.root
+	fifo := filepath.Join(e.parent, "attacker-root-input.fifo")
+	if err := syscall.Mkfifo(fifo, 0600); err != nil {
+		t.Fatal("FIFO setup")
+	}
+	input, err := os.OpenFile(fifo, os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal("FIFO open")
+	}
+	defer input.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := runBrokerWithAPI(ctx, e.files, input, e.api)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil || e.fixture.tokenCalls != 0 || len(e.fixture.calls) != 0 {
+			t.Fatalf("adapter-selected root crossed a credential/API boundary: err=%v mints=%d calls=%v", err, e.fixture.tokenCalls, e.fixture.calls)
+		}
+	case <-time.After(300 * time.Millisecond):
+		cancel()
+		select {
+		case <-done:
+			t.Fatal("adapter-selected root reached the blocking credential read")
+		case <-time.After(2 * time.Second):
+			t.Fatal("adapter-selected root refusal remained blocked")
 		}
 	}
 }
@@ -464,6 +496,7 @@ func TestBrokerControllerClaimsAttemptBeforeProvenanceSideEffects(t *testing.T) 
 	e := newPairedBrokerEntryFixture(t)
 	adapter := &attemptClaimProbeAdapter{fixture: newSignedBrokerFixtureAdapter(t), attemptPath: e.files.StateDirectory}
 	e.api.provenance = adapter
+	e.api.provenanceRoot = adapter.fixture.root
 	result, err := e.run(t, e.files.ControllerStateDirectory, e.files.WorkerStateDirectory)
 	if err != nil || result.Status != "paired_terminal_completed" || !adapter.attestHeld || !adapter.verifyHeld {
 		t.Fatalf("provenance adapter ran without a held attempt claim: result=%+v err=%v attest=%t verify=%t", result, err, adapter.attestHeld, adapter.verifyHeld)
