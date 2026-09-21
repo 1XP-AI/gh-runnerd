@@ -1,6 +1,6 @@
 # gh-runnerd agent handoff
 
-Latest continuation checkpoint: [2026-09-12](handoffs/2026-09-12.md).
+Latest continuation checkpoint: [2026-09-22](handoffs/2026-09-22.md).
 Read that checkpoint before the older snapshot below; recheck live GitHub state
 before acting on either document.
 
