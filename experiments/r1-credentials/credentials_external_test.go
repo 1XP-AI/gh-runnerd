@@ -10,6 +10,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -109,4 +110,126 @@ func TestValidateRejectsExternalEmbeddedFileBackedManualSource(t *testing.T) {
 	if !errors.Is(err, credentials.ErrSource) || source.reads != 0 || len(api.calls) != 0 {
 		t.Fatalf("external file-backed source crossed the manual-source boundary: err=%v reads=%d calls=%v", err, source.reads, api.calls)
 	}
+}
+
+func TestPlanWorkerLaunchRejectsExternalForgedValidatedBinding(t *testing.T) {
+	config := externalFixtureConfig()
+	forged := credentials.ValidatedBinding{
+		AppID:          config.AppID,
+		Organization:   config.Organization,
+		InstallationID: config.InstallationID,
+		Repository:     config.Repository,
+		Permissions:    map[string]string{"organization_self_hosted_runners": "write", "metadata": "read"},
+	}
+	plan, err := credentials.PlanWorkerLaunch(credentials.WorkerLaunchRequest{Binding: forged})
+	if !errors.Is(err, credentials.ErrConfig) || !reflect.DeepEqual(plan, credentials.WorkerLaunchPlan{}) {
+		t.Fatalf("external forged binding crossed the worker launch boundary: plan=%+v err=%v", plan, err)
+	}
+}
+
+func TestPlanWorkerLaunchRejectsExternallyMutatedValidatedBinding(t *testing.T) {
+	binding := externalValidatedBinding(t)
+	binding.AppID = 999
+	plan, err := credentials.PlanWorkerLaunch(credentials.WorkerLaunchRequest{Binding: binding})
+	if !errors.Is(err, credentials.ErrConfig) || !reflect.DeepEqual(plan, credentials.WorkerLaunchPlan{}) {
+		t.Fatalf("mutated binding crossed the worker launch boundary: plan=%+v err=%v", plan, err)
+	}
+}
+
+func TestPlanWorkerLaunchRejectsExternallyMutatedPermissions(t *testing.T) {
+	t.Run("mutated permission value", func(t *testing.T) {
+		binding := externalValidatedBinding(t)
+		binding.Permissions["metadata"] = "write"
+		plan, err := credentials.PlanWorkerLaunch(credentials.WorkerLaunchRequest{Binding: binding})
+		if !errors.Is(err, credentials.ErrConfig) || !reflect.DeepEqual(plan, credentials.WorkerLaunchPlan{}) {
+			t.Fatalf("mutated permission value crossed the worker launch boundary: plan=%+v err=%v permissions=%v", plan, err, binding.Permissions)
+		}
+	})
+	t.Run("replaced permissions map", func(t *testing.T) {
+		binding := externalValidatedBinding(t)
+		binding.Permissions = map[string]string{"administration": "write"}
+		plan, err := credentials.PlanWorkerLaunch(credentials.WorkerLaunchRequest{Binding: binding})
+		if !errors.Is(err, credentials.ErrConfig) || !reflect.DeepEqual(plan, credentials.WorkerLaunchPlan{}) {
+			t.Fatalf("replaced permissions crossed the worker launch boundary: plan=%+v err=%v permissions=%v", plan, err, binding.Permissions)
+		}
+	})
+}
+
+func TestPlanWorkerLaunchRejectsExternalForgedBindingWithArbitraryPermissions(t *testing.T) {
+	config := externalFixtureConfig()
+	forged := credentials.ValidatedBinding{
+		AppID:          config.AppID,
+		Organization:   config.Organization,
+		InstallationID: config.InstallationID,
+		Repository:     config.Repository,
+		Permissions:    map[string]string{"administration": "write", "contents": "write"},
+	}
+	plan, err := credentials.PlanWorkerLaunch(credentials.WorkerLaunchRequest{Binding: forged})
+	if !errors.Is(err, credentials.ErrConfig) || !reflect.DeepEqual(plan, credentials.WorkerLaunchPlan{}) {
+		t.Fatalf("forged binding with arbitrary permissions crossed the worker launch boundary: plan=%+v err=%v", plan, err)
+	}
+}
+
+func TestPlanWorkerLaunchAcceptsExternallyHeldValidatedBinding(t *testing.T) {
+	binding := externalValidatedBinding(t)
+	plan, err := credentials.PlanWorkerLaunch(credentials.WorkerLaunchRequest{Binding: binding})
+	if err != nil {
+		t.Fatalf("validated binding rejected at worker launch: %v", err)
+	}
+	if plan.AppID != binding.AppID || plan.Organization != binding.Organization || plan.InstallationID != binding.InstallationID || plan.Repository != binding.Repository {
+		t.Fatalf("worker plan dropped binding metadata: plan=%+v binding=%+v", plan, binding)
+	}
+}
+
+func TestValidatedBindingAndWorkerLaunchPlanCapabilitiesAreNotExternallyForgeable(t *testing.T) {
+	bindingType := reflect.TypeOf(credentials.ValidatedBinding{})
+	if unexportedFieldCount(bindingType) == 0 {
+		t.Fatal("ValidatedBinding has no package-private provenance state")
+	}
+	for _, name := range []string{"AppID", "Organization", "InstallationID", "Repository", "Permissions"} {
+		if !exportedField(bindingType, name) {
+			t.Fatalf("safe binding metadata %s is not accessible", name)
+		}
+	}
+
+	planType := reflect.TypeOf(credentials.WorkerLaunchPlan{})
+	if unexportedFieldCount(planType) == 0 {
+		t.Fatal("WorkerLaunchPlan has no package-private construction state")
+	}
+	for _, name := range []string{"Env", "Argv", "Files", "HasJIT"} {
+		if exportedField(planType, name) {
+			t.Fatalf("WorkerLaunchPlan.%s is exported and forgeable", name)
+		}
+	}
+	for _, name := range []string{"AppID", "Organization", "InstallationID", "Repository"} {
+		if !exportedField(planType, name) {
+			t.Fatalf("safe worker plan metadata %s is not accessible", name)
+		}
+	}
+}
+
+func externalValidatedBinding(t *testing.T) credentials.ValidatedBinding {
+	t.Helper()
+	pemBytes, fingerprint := externalFixturePEM(t)
+	api := &externalFixtureAPI{expectedFingerprint: fingerprint}
+	binding, err := credentials.Validate(context.Background(), externalFixtureConfig(), credentials.NewManualSource(externalFixtureAppID, pemBytes), api, nil)
+	if err != nil {
+		t.Fatalf("fixture validation rejected: %v", err)
+	}
+	return binding
+}
+
+func exportedField(typ reflect.Type, name string) bool {
+	field, ok := typ.FieldByName(name)
+	return ok && field.IsExported()
+}
+
+func unexportedFieldCount(typ reflect.Type) int {
+	count := 0
+	for i := 0; i < typ.NumField(); i++ {
+		if !typ.Field(i).IsExported() {
+			count++
+		}
+	}
+	return count
 }
