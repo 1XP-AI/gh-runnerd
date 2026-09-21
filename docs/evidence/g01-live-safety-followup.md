@@ -268,3 +268,50 @@ tagged controller and paired entrypoints remain quarantined. The pinned
 `github.com/actions/scaleset v0.4.0` adapter still exposes only unconditional
 `DeleteScaleSet`, so no live conditional cleanup authorization or live
 verification is claimed.
+
+## G01 trust-root contract slice — 2026-09-21
+
+The first red test for the next blocker was added before implementation:
+
+```text
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test . -run '^TestBrokerProvenanceRequiresExplicitPinnedTrustRoot$' -count=1
+FAIL: broker_provenance_test.go:287: undefined: NewBrokerProvenanceTrustRoot
+```
+
+The minimal offline contract now provides `BrokerProvenanceTrustRoot`, which
+copies one explicitly supplied Ed25519 public key and key ID and verifies the
+receipt against the controller-derived request. The request therefore binds
+the controller-approval digest, repository/ref/workflow/run tuple, selected
+phase, owner nonce, source and receipt expiry; the receipt cannot select its
+own verification key. The broker requires a valid root before invoking the
+provenance adapter and before reading credential input. A rootless adapter is
+rejected before a blocking FIFO read, token mint or API call.
+
+Focused normal and race checks passed:
+
+```text
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test . -run '^TestBroker(Provenance|WorkflowReceipt|Controller(FrontDoor|ClaimsAttempt))' -count=1
+PASS
+GOWORK=off GOTOOLCHAIN=go1.26.8 go test -race . -run '^TestBroker(Provenance|WorkflowReceipt|Controller(FrontDoor|ClaimsAttempt))' -count=1
+PASS
+```
+
+This does not close the live gate. The repository has no production
+broker-authenticated workflow-input source, no reviewed key provisioning or
+rotation authority, and no authenticated controller handoff that delivers and
+verifies this receipt before credential parsing. The concrete next contract is
+an operator-approved broker authority that pins the root key ID/fingerprint,
+attests the verified private repository/ref/workflow/run and selected phase,
+and hands the signed receipt to a controller that has the same pinned root;
+until that contract and source exist, tagged controller and paired execution
+remain quarantined.
+
+The cleanup blocker is likewise unchanged: pinned Scale Set SDK `v0.4.0`
+exposes only unconditional `DeleteRunnerScaleSet(ctx, id)` and no version/ETag
+read or conditional delete operation. The existing offline
+`ConditionalScaleSetDeleter` remains the safe boundary. Its concrete next
+contract is a reviewed provider adapter whose final owned read returns a server
+revision and whose delete submits that revision plus the durable owner identity
+as one server-side conditional operation; no observe-then-delete fallback is
+authorized. No live API, credential, runner, Scale Set, workflow, Docker,
+Lima, Keychain or launchd operation was performed.

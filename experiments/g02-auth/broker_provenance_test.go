@@ -21,6 +21,7 @@ const brokerFixtureProvenanceSource = "signed-fixture-v1"
 type signedBrokerFixtureAdapter struct {
 	private ed25519.PrivateKey
 	public  ed25519.PublicKey
+	root    BrokerProvenanceTrustRoot
 	mu      sync.Mutex
 }
 
@@ -30,10 +31,15 @@ func newSignedBrokerFixtureAdapter(t *testing.T) *signedBrokerFixtureAdapter {
 	if err != nil {
 		t.Fatal("fixture provenance key")
 	}
-	return &signedBrokerFixtureAdapter{private: private, public: public}
+	root, err := NewBrokerProvenanceTrustRoot("fixture-ed25519-v1", public)
+	if err != nil {
+		t.Fatal("fixture provenance root")
+	}
+	return &signedBrokerFixtureAdapter{private: private, public: public, root: root}
 }
 
-func (a *signedBrokerFixtureAdapter) Source() string { return brokerFixtureProvenanceSource }
+func (a *signedBrokerFixtureAdapter) Source() string                       { return brokerFixtureProvenanceSource }
+func (a *signedBrokerFixtureAdapter) TrustRoot() BrokerProvenanceTrustRoot { return a.root }
 
 func (a *signedBrokerFixtureAdapter) Attest(ctx context.Context, request BrokerProvenanceRequest) (BrokerProvenanceReceipt, error) {
 	if ctx == nil || ctx.Err() != nil {
@@ -49,9 +55,11 @@ func (a *signedBrokerFixtureAdapter) Attest(ctx context.Context, request BrokerP
 		Algorithm:                "ed25519",
 		KeyID:                    "fixture-ed25519-v1",
 		ControllerApprovalSHA256: request.ControllerApprovalSHA256,
+		Repository:               request.Repository,
 		WorkflowRunID:            request.WorkflowRunID,
 		WorkflowRef:              request.WorkflowRef,
 		WorkflowSHA:              request.WorkflowSHA,
+		WorkflowPath:             request.WorkflowPath,
 		Phase:                    request.Phase,
 		OwnerNonce:               request.OwnerNonce,
 		ReceiptNonce:             hex.EncodeToString(digest[:16]),
@@ -83,6 +91,9 @@ type blockingBrokerProvenanceAdapter struct {
 }
 
 func (a *blockingBrokerProvenanceAdapter) Source() string { return a.fixture.Source() }
+func (a *blockingBrokerProvenanceAdapter) TrustRoot() BrokerProvenanceTrustRoot {
+	return a.fixture.TrustRoot()
+}
 
 func (a *blockingBrokerProvenanceAdapter) Attest(ctx context.Context, request BrokerProvenanceRequest) (BrokerProvenanceReceipt, error) {
 	a.attestStarted <- ctx
@@ -110,6 +121,9 @@ type attemptClaimProbeAdapter struct {
 }
 
 func (a *attemptClaimProbeAdapter) Source() string { return a.fixture.Source() }
+func (a *attemptClaimProbeAdapter) TrustRoot() BrokerProvenanceTrustRoot {
+	return a.fixture.TrustRoot()
+}
 
 func (a *attemptClaimProbeAdapter) claimHeld() bool {
 	file, err := os.OpenFile(filepath.Join(a.attemptPath, "broker.jsonl"), os.O_RDWR, 0)
@@ -133,6 +147,24 @@ func (a *attemptClaimProbeAdapter) Verify(ctx context.Context, request BrokerPro
 	if !a.verifyHeld {
 		return errBroker
 	}
+	return a.fixture.Verify(ctx, request, receipt)
+}
+
+type rootlessBrokerProvenanceAdapter struct {
+	fixture *signedBrokerFixtureAdapter
+	called  bool
+}
+
+func (a *rootlessBrokerProvenanceAdapter) Source() string { return a.fixture.Source() }
+func (a *rootlessBrokerProvenanceAdapter) TrustRoot() BrokerProvenanceTrustRoot {
+	return BrokerProvenanceTrustRoot{}
+}
+func (a *rootlessBrokerProvenanceAdapter) Attest(ctx context.Context, request BrokerProvenanceRequest) (BrokerProvenanceReceipt, error) {
+	a.called = true
+	return a.fixture.Attest(ctx, request)
+}
+func (a *rootlessBrokerProvenanceAdapter) Verify(ctx context.Context, request BrokerProvenanceRequest, receipt BrokerProvenanceReceipt) error {
+	a.called = true
 	return a.fixture.Verify(ctx, request, receipt)
 }
 
@@ -225,10 +257,14 @@ func mutateBrokerProvenanceReceipt(receipt BrokerProvenanceReceipt, kind string)
 	switch kind {
 	case "approval digest":
 		mutated.ControllerApprovalSHA256 = strings.Repeat("b", 64)
+	case "repository":
+		mutated.Repository = "fixture-org/attacker"
 	case "workflow run":
 		mutated.WorkflowRunID++
 	case "workflow ref":
 		mutated.WorkflowRef = "refs/heads/attacker"
+	case "workflow path":
+		mutated.WorkflowPath = ".github/workflows/attacker.yml"
 	case "workflow commit":
 		mutated.WorkflowSHA = strings.Repeat("d", 40)
 	case "phase":
@@ -247,9 +283,11 @@ func TestBrokerProvenanceReceiptBindsApprovalWorkflowPhaseNonceAndSource(t *test
 	adapter := newSignedBrokerFixtureAdapter(t)
 	request := BrokerProvenanceRequest{
 		ControllerApprovalSHA256: strings.Repeat("a", 64),
+		Repository:               "fixture-org/canary",
 		WorkflowRunID:            7,
 		WorkflowRef:              "refs/heads/main",
 		WorkflowSHA:              strings.Repeat("b", 40),
+		WorkflowPath:             ".github/workflows/canary.yml",
 		Phase:                    "before-ack",
 		OwnerNonce:               strings.Repeat("c", 32),
 		Source:                   adapter.Source(),
@@ -258,13 +296,94 @@ func TestBrokerProvenanceReceiptBindsApprovalWorkflowPhaseNonceAndSource(t *test
 	if err != nil || receipt.Validate(request, time.Now()) != nil || adapter.Verify(context.Background(), request, receipt) != nil {
 		t.Fatal("signed fixture receipt was not accepted")
 	}
-	for _, kind := range []string{"approval digest", "workflow run", "workflow ref", "workflow commit", "phase", "owner nonce", "source", "signature"} {
+	for _, kind := range []string{"approval digest", "repository", "workflow run", "workflow ref", "workflow path", "workflow commit", "phase", "owner nonce", "source", "signature"} {
 		t.Run(kind, func(t *testing.T) {
 			forged := mutateBrokerProvenanceReceipt(receipt, kind)
 			if adapter.Verify(context.Background(), request, forged) == nil {
 				t.Fatalf("forged %s receipt accepted", kind)
 			}
 		})
+	}
+}
+
+func TestBrokerProvenanceRequiresExplicitPinnedTrustRoot(t *testing.T) {
+	adapter := newSignedBrokerFixtureAdapter(t)
+	request := BrokerProvenanceRequest{
+		ControllerApprovalSHA256: strings.Repeat("a", 64),
+		Repository:               "fixture-org/canary",
+		WorkflowRunID:            7,
+		WorkflowRef:              "refs/heads/main",
+		WorkflowSHA:              strings.Repeat("b", 40),
+		WorkflowPath:             ".github/workflows/canary.yml",
+		Phase:                    "before-ack",
+		OwnerNonce:               strings.Repeat("c", 32),
+		Source:                   adapter.Source(),
+	}
+	receipt, err := adapter.Attest(context.Background(), request)
+	if err != nil {
+		t.Fatal("signed fixture receipt", err)
+	}
+
+	root, err := NewBrokerProvenanceTrustRoot(receipt.KeyID, adapter.public)
+	if err != nil {
+		t.Fatal("pinned trust root", err)
+	}
+	if err := root.Verify(request, receipt, time.Now()); err != nil {
+		t.Fatalf("valid receipt rejected by pinned root: %v", err)
+	}
+
+	for _, name := range []string{"missing key", "wrong key id", "wrong public key"} {
+		t.Run(name, func(t *testing.T) {
+			candidate := root
+			switch name {
+			case "missing key":
+				candidate, err = NewBrokerProvenanceTrustRoot(receipt.KeyID, nil)
+			case "wrong key id":
+				candidate, err = NewBrokerProvenanceTrustRoot("other-root", adapter.public)
+			case "wrong public key":
+				other := newSignedBrokerFixtureAdapter(t)
+				candidate, err = NewBrokerProvenanceTrustRoot(receipt.KeyID, other.public)
+			}
+			if err == nil && candidate.Verify(request, receipt, time.Now()) == nil {
+				t.Fatal("receipt accepted without the exact pinned trust root")
+			}
+		})
+	}
+}
+
+func TestBrokerWorkflowReceiptRejectsMissingPinnedRootBeforeCredentialInput(t *testing.T) {
+	e := newPairedBrokerEntryFixture(t)
+	adapter := &rootlessBrokerProvenanceAdapter{fixture: newSignedBrokerFixtureAdapter(t)}
+	e.api.provenance = adapter
+	fifo := filepath.Join(e.parent, "rootless-input.fifo")
+	if err := syscall.Mkfifo(fifo, 0600); err != nil {
+		t.Fatal("FIFO setup")
+	}
+	input, err := os.OpenFile(fifo, os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal("FIFO open")
+	}
+	defer input.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := runBrokerWithAPI(ctx, e.files, input, e.api)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil || adapter.called || e.fixture.tokenCalls != 0 || len(e.fixture.calls) != 0 {
+			t.Fatalf("rootless provenance crossed a credential/API boundary: err=%v adapter_called=%t mints=%d calls=%v", err, adapter.called, e.fixture.tokenCalls, e.fixture.calls)
+		}
+	case <-time.After(300 * time.Millisecond):
+		cancel()
+		select {
+		case <-done:
+			t.Fatal("rootless provenance reached the blocking credential read")
+		case <-time.After(2 * time.Second):
+			t.Fatal("rootless provenance refusal remained blocked")
+		}
 	}
 }
 

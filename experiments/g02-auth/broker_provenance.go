@@ -15,9 +15,11 @@ import (
 // the controller phase.
 type BrokerProvenanceRequest struct {
 	ControllerApprovalSHA256 string `json:"controller_approval_sha256"`
+	Repository               string `json:"repository"`
 	WorkflowRunID            int64  `json:"workflow_run_id"`
 	WorkflowRef              string `json:"workflow_ref"`
 	WorkflowSHA              string `json:"workflow_sha"`
+	WorkflowPath             string `json:"workflow_path"`
 	Phase                    string `json:"phase"`
 	OwnerNonce               string `json:"owner_nonce"`
 	Source                   string `json:"source"`
@@ -32,9 +34,11 @@ type BrokerProvenanceReceipt struct {
 	Algorithm                string    `json:"algorithm"`
 	KeyID                    string    `json:"key_id"`
 	ControllerApprovalSHA256 string    `json:"controller_approval_sha256"`
+	Repository               string    `json:"repository"`
 	WorkflowRunID            int64     `json:"workflow_run_id"`
 	WorkflowRef              string    `json:"workflow_ref"`
 	WorkflowSHA              string    `json:"workflow_sha"`
+	WorkflowPath             string    `json:"workflow_path"`
 	Phase                    string    `json:"phase"`
 	OwnerNonce               string    `json:"owner_nonce"`
 	ReceiptNonce             string    `json:"receipt_nonce"`
@@ -51,11 +55,51 @@ type BrokerProvenanceReceipt struct {
 // fixture as GitHub workflow-input verification.
 type BrokerProvenanceAdapter interface {
 	Source() string
+	TrustRoot() BrokerProvenanceTrustRoot
 	Attest(context.Context, BrokerProvenanceRequest) (BrokerProvenanceReceipt, error)
 	Verify(context.Context, BrokerProvenanceRequest, BrokerProvenanceReceipt) error
 }
 
+// BrokerProvenanceTrustRoot is an explicitly configured verification root for
+// broker receipts. The private fields prevent a receipt or an untrusted wire
+// value from selecting the verification key. Callers must construct it from a
+// separately pinned key and key ID.
+type BrokerProvenanceTrustRoot struct {
+	keyID     string
+	publicKey ed25519.PublicKey
+}
+
+// NewBrokerProvenanceTrustRoot copies and validates the public key so later
+// caller mutation cannot change the trust root used for a receipt.
+func NewBrokerProvenanceTrustRoot(keyID string, publicKey ed25519.PublicKey) (BrokerProvenanceTrustRoot, error) {
+	root := BrokerProvenanceTrustRoot{keyID: keyID, publicKey: append(ed25519.PublicKey(nil), publicKey...)}
+	if !root.valid() {
+		return BrokerProvenanceTrustRoot{}, errBroker
+	}
+	return root, nil
+}
+
+func (r BrokerProvenanceTrustRoot) valid() bool {
+	return brokerComponent.MatchString(r.keyID) && len(r.publicKey) == ed25519.PublicKeySize
+}
+
+// Verify checks the receipt against the pinned root and the exact request.
+// The request is supplied by the controller approval, never reconstructed from
+// receipt fields, so repository/ref/workflow/run, phase, nonce and expiry stay
+// bound to that approval before credential input is accepted.
+func (r BrokerProvenanceTrustRoot) Verify(req BrokerProvenanceRequest, receipt BrokerProvenanceReceipt, now time.Time) error {
+	if !r.valid() || receipt.KeyID != r.keyID || receipt.Validate(req, now) != nil {
+		return errBroker
+	}
+	signature, err := base64.RawURLEncoding.DecodeString(receipt.Signature)
+	if err != nil || !ed25519.Verify(r.publicKey, receipt.SigningBytes(), signature) {
+		return errBroker
+	}
+	return nil
+}
+
 var brokerProvenanceSource = regexp.MustCompile(`^[a-z][a-z0-9._/-]{0,63}$`)
+var brokerRepositoryFullName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$`)
 var brokerWorkflowRef = regexp.MustCompile(`^refs/(?:heads|tags)/[A-Za-z0-9._/-]+$|^refs/pull/[1-9][0-9]*/(?:head|merge)$`)
 
 type brokerProvenanceSignedPayload struct {
@@ -63,9 +107,11 @@ type brokerProvenanceSignedPayload struct {
 	Algorithm                string    `json:"algorithm"`
 	KeyID                    string    `json:"key_id"`
 	ControllerApprovalSHA256 string    `json:"controller_approval_sha256"`
+	Repository               string    `json:"repository"`
 	WorkflowRunID            int64     `json:"workflow_run_id"`
 	WorkflowRef              string    `json:"workflow_ref"`
 	WorkflowSHA              string    `json:"workflow_sha"`
+	WorkflowPath             string    `json:"workflow_path"`
 	Phase                    string    `json:"phase"`
 	OwnerNonce               string    `json:"owner_nonce"`
 	ReceiptNonce             string    `json:"receipt_nonce"`
@@ -80,9 +126,11 @@ func (r BrokerProvenanceReceipt) signedPayload() brokerProvenanceSignedPayload {
 		Algorithm:                r.Algorithm,
 		KeyID:                    r.KeyID,
 		ControllerApprovalSHA256: r.ControllerApprovalSHA256,
+		Repository:               r.Repository,
 		WorkflowRunID:            r.WorkflowRunID,
 		WorkflowRef:              r.WorkflowRef,
 		WorkflowSHA:              r.WorkflowSHA,
+		WorkflowPath:             r.WorkflowPath,
 		Phase:                    r.Phase,
 		OwnerNonce:               r.OwnerNonce,
 		ReceiptNonce:             r.ReceiptNonce,
@@ -100,7 +148,7 @@ func (r BrokerProvenanceReceipt) SigningBytes() []byte {
 }
 
 func (r BrokerProvenanceReceipt) Validate(req BrokerProvenanceRequest, now time.Time) error {
-	if !brokerProvenanceRequestValid(req) || r.Version != 1 || r.Algorithm != "ed25519" || !brokerComponent.MatchString(r.KeyID) || r.ControllerApprovalSHA256 != req.ControllerApprovalSHA256 || r.WorkflowRunID != req.WorkflowRunID || r.WorkflowRef != req.WorkflowRef || r.WorkflowSHA != req.WorkflowSHA || r.Phase != req.Phase || r.OwnerNonce != req.OwnerNonce || r.Source != req.Source || !brokerNonce.MatchString(r.ReceiptNonce) || r.ReceiptNonce == r.OwnerNonce || r.IssuedAt.IsZero() || r.ExpiresAt.IsZero() || r.IssuedAt.After(now.Add(30*time.Second)) || !r.ExpiresAt.After(now) || !r.ExpiresAt.After(r.IssuedAt) || r.ExpiresAt.After(now.Add(24*time.Hour)) {
+	if !brokerProvenanceRequestValid(req) || r.Version != 1 || r.Algorithm != "ed25519" || !brokerComponent.MatchString(r.KeyID) || r.ControllerApprovalSHA256 != req.ControllerApprovalSHA256 || r.Repository != req.Repository || r.WorkflowRunID != req.WorkflowRunID || r.WorkflowRef != req.WorkflowRef || r.WorkflowSHA != req.WorkflowSHA || r.WorkflowPath != req.WorkflowPath || r.Phase != req.Phase || r.OwnerNonce != req.OwnerNonce || r.Source != req.Source || !brokerNonce.MatchString(r.ReceiptNonce) || r.ReceiptNonce == r.OwnerNonce || r.IssuedAt.IsZero() || r.ExpiresAt.IsZero() || r.IssuedAt.After(now.Add(30*time.Second)) || !r.ExpiresAt.After(now) || !r.ExpiresAt.After(r.IssuedAt) || r.ExpiresAt.After(now.Add(24*time.Hour)) {
 		return errBroker
 	}
 	signature, err := base64.RawURLEncoding.DecodeString(r.Signature)
@@ -111,7 +159,7 @@ func (r BrokerProvenanceReceipt) Validate(req BrokerProvenanceRequest, now time.
 }
 
 func (r BrokerProvenanceReceipt) VerifyEd25519(publicKey ed25519.PublicKey) error {
-	if len(publicKey) != ed25519.PublicKeySize || r.Validate(BrokerProvenanceRequest{ControllerApprovalSHA256: r.ControllerApprovalSHA256, WorkflowRunID: r.WorkflowRunID, WorkflowRef: r.WorkflowRef, WorkflowSHA: r.WorkflowSHA, Phase: r.Phase, OwnerNonce: r.OwnerNonce, Source: r.Source}, time.Now()) != nil {
+	if len(publicKey) != ed25519.PublicKeySize || r.Validate(BrokerProvenanceRequest{ControllerApprovalSHA256: r.ControllerApprovalSHA256, Repository: r.Repository, WorkflowRunID: r.WorkflowRunID, WorkflowRef: r.WorkflowRef, WorkflowSHA: r.WorkflowSHA, WorkflowPath: r.WorkflowPath, Phase: r.Phase, OwnerNonce: r.OwnerNonce, Source: r.Source}, time.Now()) != nil {
 		return errBroker
 	}
 	signature, err := base64.RawURLEncoding.DecodeString(r.Signature)
@@ -122,7 +170,7 @@ func (r BrokerProvenanceReceipt) VerifyEd25519(publicKey ed25519.PublicKey) erro
 }
 
 func brokerProvenanceRequestValid(req BrokerProvenanceRequest) bool {
-	return brokerSHA256.MatchString(req.ControllerApprovalSHA256) && req.WorkflowRunID > 0 && brokerWorkflowRef.MatchString(req.WorkflowRef) && brokerSHA40.MatchString(req.WorkflowSHA) && brokerSlotAllowed(req.Phase) && brokerNonce.MatchString(req.OwnerNonce) && brokerProvenanceSource.MatchString(req.Source)
+	return brokerSHA256.MatchString(req.ControllerApprovalSHA256) && brokerRepositoryFullName.MatchString(req.Repository) && req.WorkflowRunID > 0 && brokerWorkflowRef.MatchString(req.WorkflowRef) && brokerSHA40.MatchString(req.WorkflowSHA) && brokerWorkflow.MatchString(req.WorkflowPath) && brokerSlotAllowed(req.Phase) && brokerNonce.MatchString(req.OwnerNonce) && brokerProvenanceSource.MatchString(req.Source)
 }
 
 func brokerProvenanceRequest(a BrokerApproval, c controllerApproval, source string) (BrokerProvenanceRequest, error) {
@@ -130,7 +178,7 @@ func brokerProvenanceRequest(a BrokerApproval, c controllerApproval, source stri
 	if a.Mode == "paired-terminal" {
 		phase = "paired-terminal"
 	}
-	request := BrokerProvenanceRequest{ControllerApprovalSHA256: a.ControllerApprovalSHA256, WorkflowRunID: c.WorkflowRunID, WorkflowRef: c.WorkflowRef, WorkflowSHA: c.WorkflowSHA, Phase: phase, OwnerNonce: a.OwnerNonce, Source: source}
+	request := BrokerProvenanceRequest{ControllerApprovalSHA256: a.ControllerApprovalSHA256, Repository: a.Organization + "/" + a.Repository, WorkflowRunID: c.WorkflowRunID, WorkflowRef: c.WorkflowRef, WorkflowSHA: c.WorkflowSHA, WorkflowPath: c.WorkflowPath, Phase: phase, OwnerNonce: a.OwnerNonce, Source: source}
 	if a.Mode != "controller" && a.Mode != "paired-terminal" || !brokerProvenanceRequestValid(request) {
 		return BrokerProvenanceRequest{}, errBroker
 	}
