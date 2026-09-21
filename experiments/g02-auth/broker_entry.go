@@ -149,6 +149,10 @@ func brokerWorkflowReceipt(ctx context.Context, api *brokerAPI, a BrokerApproval
 	if ctx == nil || ctx.Err() != nil || api == nil || api.provenance == nil {
 		return nil, errBroker
 	}
+	root := api.provenanceRoot
+	if !root.valid() {
+		return nil, errBroker
+	}
 	if len(claimed) > 1 || (len(claimed) == 1 && (claimed[0] == nil || claimed[0].check() != nil)) {
 		return nil, errBroker
 	}
@@ -174,7 +178,7 @@ func brokerWorkflowReceipt(ctx context.Context, api *brokerAPI, a BrokerApproval
 	if err != nil || provenanceCtx.Err() != nil || claimCheck() != nil || receipt.Validate(request, api.now()) != nil || receipt.ExpiresAt.Before(a.ExpiresAt) {
 		return nil, errBroker
 	}
-	if provenanceCtx.Err() != nil || claimCheck() != nil || api.provenance.Verify(provenanceCtx, request, receipt) != nil || provenanceCtx.Err() != nil || claimCheck() != nil {
+	if provenanceCtx.Err() != nil || claimCheck() != nil || root.Verify(request, receipt, api.now()) != nil || api.provenance.Verify(provenanceCtx, request, receipt) != nil || provenanceCtx.Err() != nil || claimCheck() != nil {
 		return nil, errBroker
 	}
 	return &receipt, nil
