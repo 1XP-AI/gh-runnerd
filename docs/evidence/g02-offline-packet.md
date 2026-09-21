@@ -1,6 +1,8 @@
 # G02 offline enrollment packet
 
-Status on 2026-09-17: **offline callback/adapter/import packet is implemented and tested; live GitHub Manifest enrollment, intended controller identity, and lock/logout/reboot evidence remain open**. This record does not mark issue [#2](https://github.com/1XP-AI/gh-runnerd/issues/2) Done and does not claim live enrollment or reboot/lock evidence passed.
+Status at this historical increment on 2026-09-17: **offline callback/adapter/import packet was implemented and tested; live GitHub Manifest enrollment, intended controller identity, and lock/logout/reboot evidence were then open**. This record does not mark issue [#2](https://github.com/1XP-AI/gh-runnerd/issues/2) Done.
+
+> **Superseded live-status note:** The later 2026-09-17 records in [the live driver](g02-live-driver.md) and [the live procedure](g02-live-procedure.md) supersede the unrun-status statements in this historical packet for disposable Manifest/manual fallback and the selected same-UID current-login matrix. The TDD red/green history and offline results below remain historical evidence; production persistence, distinct identities and persistent startup remain open.
 
 This increment sits on current `main` after the earlier harness in [g02-enrollment-evidence.md](g02-enrollment-evidence.md) and the verify-only driver in [g02-live-driver.md](g02-live-driver.md). It does not replace those records.
 
@@ -88,7 +90,7 @@ Actual results: focused race `ok` 1.260s; skip-paired `ok` 14.744s; enroll comma
 
 Manual import does not create an App. The operator supplies an existing App ID, PEM through a protected input, and independently confirmed organization/installation IDs. The adapter authenticates as that App, then `GET /app` and `GET /orgs/{org}/installation` must match App ID, installation ID, account ID/login/type, target ID/type, known non-suspended state, and the minimal permission profile (`organization_self_hosted_runners=write` and optional `metadata=read`) before the in-memory commit. A mismatch, unknown suspension, extra permission, or storage error stores nothing. Interrupted Manifest conversion uses this same import path; it must not start another registration.
 
-## Skipped live gaps
+## Skipped live gaps at this increment (historical)
 
 - GitHub accepting `hook_attributes.active=false` with `https://example.invalid/gh-runnerd-g02-unused`.
 - Browser redirect to the ephemeral `http://127.0.0.1:<port>/manifest/callback`.

@@ -17,13 +17,13 @@ The library contains:
 - A ten-minute, 256-bit state attempt with exact IPv4 loopback Host/path checks, strict query parsing, single conversion consumption, bounded calls, no secret-bearing responses, and explicit manual recovery after failure.
 - A fixed-origin `api.github.com` App-JWT adapter for App identity, organization installation lookup, and one Manifest conversion request. It rejects redirects, normalizes errors, bounds response bodies, and does not retry conversion. It pins supported REST API version `2022-11-28`.
 - An in-memory manual-import boundary that validates the RSA key and all organization/App/installation identities before invoking an atomic storage sink. It refuses unknown or suspended installations, missing runner write permission, and extra permissions outside the minimal profile (runner write and optional baseline metadata read).
-- `EncodeManifest` for the local registration form: IPv4 loopback `redirect_url` only, webhook delivery disabled, and no OAuth `callback_urls`/`setup_url`. GitHub acceptance of that shape remains a live gap.
+- `EncodeManifest` for the local registration form: IPv4 loopback `redirect_url` only, webhook delivery disabled, and no OAuth `callback_urls`/`setup_url`. The approved 2026-09-17 disposable run accepted that shape; production enrollment guarantees remain unproven.
 
 A public struct containing a PEM must not become an application logging boundary merely because its formatting/JSON methods redact it. The key still exists in process memory; Go does not guarantee erasure of every copy. Same-UID malicious code is outside the protected trust claim.
 
 ## Verify-only enrollment driver
 
-`go run ./cmd/g02-enroll --help` describes the executable Manifest/manual-input boundary. Its live modes require `--live-github` and later explicit approval of the exact App and two organization installations. No live enrollment has been executed. Tests run the loopback browser flow, GitHub adapter, private stdin boundary and crash recovery using only generated synthetic keys and local responses.
+`go run ./cmd/g02-enroll --help` describes the executable Manifest/manual-input boundary. Its live modes require `--live-github` and explicit approval of the exact App and two organization installations. The approved 2026-09-17 disposable run completed Manifest enrollment and same-App manual fallback for both organizations; credentials were not persisted and all disposable remote resources were removed. Production credential persistence remains unimplemented. Tests run the loopback browser flow, GitHub adapter, private stdin boundary and crash recovery using only generated synthetic keys and local responses.
 
 The journal directory must be owned by the current UID, mode `0700`, and not itself a symlink. The driver holds an exclusive file lock and retains only a non-secret App/organization inventory in `0600` files. Any existing attempt blocks new Manifest registration; matching manual import can recover the same App. Credentials are held only in memory until verification or exit. Normal output reports `credentials_not_persisted`; this is not a secure-memory-erasure guarantee.
 
