@@ -12,14 +12,14 @@ This is the reviewed procedure and sanitized record for the 2026-09-17 live run.
 | Visibility | Any account (`public: true`) so the same App can be installed in both nominated test organizations |
 | Permissions | Organization self-hosted runners read/write, baseline metadata read; no repository Administration, Actions, contents or user permissions |
 | Events / webhook | No events; `hook_attributes.active: false` |
-| Initial webhook URL shape | Include `https://example.invalid/gh-runnerd-g02-unused` to honor the documented required URL while targeting no real receiver; record whether GitHub accepts this exact disabled shape |
+| Initial webhook URL shape | `https://example.invalid/gh-runnerd-g02-unused`; accepted by GitHub for this disposable run on 2026-09-17; re-verify the exact shape on any future run |
 | Redirect | Actual address of one already-bound `tcp4`, `127.0.0.1:0` listener, with `/manifest/callback`; no proxy, localhost alias or OAuth callback |
 | Authorization extras | No `callback_urls`, `setup_url`, user OAuth-on-install, client secret flow or public receiver |
 | Network operations | Browser creation POST once, one code conversion POST, App-auth GETs for App and each org installation; do not request runner registration/JIT credentials |
 | Installations | `1XP-AI` (`258160258`) and `1XP-Inc` (`149097057`); owners authorize the same App in each and independently record both installation IDs |
 | Cleanup | Owner uninstalls the two exact installation IDs, deletes the one exact disposable App, verifies absence, removes only its probe credentials/state |
 
-A disabled webhook URL using `.invalid` is a deliberate safe test input, **not** a claim that GitHub accepts it. If GitHub refuses that shape before registration, record the refusal and inspect the nominated owner's App inventory. Do not silently resubmit a changed Manifest. A follow-up no-URL shape (`hook_attributes: {"active": false}`) is a separate explicit experiment after confirming no App was created. If neither shape works, manual registration with the Webhook Active box cleared is the fallback; do not add a publicly reachable webhook server to make the test pass.
+A disabled webhook URL using `.invalid` is a deliberate safe test input. GitHub accepted this exact shape during the 2026-09-17 disposable run; that result is run-specific evidence, not a guarantee for a later GitHub registration. If GitHub refuses the exact shape on a future run, record the refusal and inspect the nominated owner's App inventory. Do not silently resubmit a changed Manifest. A follow-up no-URL shape (`hook_attributes: {"active": false}`) is a separate explicit experiment after confirming no App was created. If neither shape works, manual registration with the Webhook Active box cleared is the fallback; do not add a publicly reachable webhook server to make the test pass.
 
 Exact initial Manifest, substituting only the recorded name and actual listener port:
 
