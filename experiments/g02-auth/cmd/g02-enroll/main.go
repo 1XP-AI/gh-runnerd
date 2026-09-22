@@ -21,6 +21,22 @@ import (
 
 type orgFlags []string
 
+type processIdentity struct {
+	uid  int
+	euid int
+}
+
+func (identity processIdentity) valid() bool {
+	if identity.uid <= 0 || identity.euid <= 0 || identity.uid != identity.euid {
+		return false
+	}
+	return uint64(identity.uid) < uint64(^uint32(0))
+}
+
+func currentProcessIdentity() processIdentity {
+	return processIdentity{uid: os.Getuid(), euid: os.Geteuid()}
+}
+
 func (v *orgFlags) String() string { return "organization binding" }
 func (v *orgFlags) Set(s string) error {
 	if len(*v) >= 2 {
@@ -58,6 +74,10 @@ func privateInput(input *os.File) bool {
 	return (info.Mode().IsRegular() && stat.Nlink == 1) || info.Mode()&os.ModeNamedPipe != 0
 }
 func run(ctx context.Context, args []string, input *os.File, out, diagnostics io.Writer, api enrollment.DriverAPI) int {
+	return runWithIdentity(ctx, args, input, out, diagnostics, api, currentProcessIdentity())
+}
+
+func runWithIdentity(ctx context.Context, args []string, input *os.File, out, diagnostics io.Writer, api enrollment.DriverAPI, identity processIdentity) int {
 	bad := func() int {
 		fmt.Fprintln(diagnostics, "invalid invocation; use --help; private inputs and argument values are not echoed")
 		return 2
@@ -65,6 +85,9 @@ func run(ctx context.Context, args []string, input *os.File, out, diagnostics io
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
 		fmt.Fprint(out, usage)
 		return 0
+	}
+	if !identity.valid() {
+		return bad()
 	}
 	if len(args) == 0 || (args[0] != "manifest" && args[0] != "manual") {
 		return bad()
