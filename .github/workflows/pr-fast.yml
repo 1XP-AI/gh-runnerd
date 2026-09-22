@@ -97,7 +97,12 @@ jobs:
           set -eu
           changed="$(git diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA")"
           for module in experiments/g01-scaleset experiments/g02-auth experiments/r1-credentials; do
-            if printf '%s\n' "$changed" | grep -Eq "^${module}/"; then
+            if [[ "$module" == "experiments/g01-scaleset" ]]; then
+              module_change_pattern='^(experiments/g01-scaleset/|experiments/g02-auth/handoff/)'
+            else
+              module_change_pattern="^${module}/"
+            fi
+            if printf '%s\n' "$changed" | grep -Eq "$module_change_pattern"; then
               (cd "$module" && GOTOOLCHAIN="$GOTOOLCHAIN" go test -run '^$' -count=1 ./...)
             fi
           done

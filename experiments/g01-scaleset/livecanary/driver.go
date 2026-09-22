@@ -42,22 +42,23 @@ type Approval struct {
 }
 
 type Event struct {
-	Baseline           *baselineRecord   `json:"baseline,omitempty"`
-	Drain              *drainObservation `json:"drain,omitempty"`
-	DrainSnapshot      *drainSnapshot    `json:"drain_snapshot,omitempty"`
-	DrainMarker        string            `json:"drain_marker,omitempty"`
-	DrainSnapshotStage string            `json:"drain_snapshot_stage,omitempty"`
-	Authority          *phaseAuthority   `json:"authority,omitempty"`
-	Sequence           int               `json:"sequence"`
-	Kind               string            `json:"kind"`
-	Operation          string            `json:"operation,omitempty"`
-	ID                 int               `json:"id,omitempty"`
-	SessionID          string            `json:"session_id,omitempty"`
-	RequestIDs         []int64           `json:"request_ids,omitempty"`
-	Count              int               `json:"count,omitempty"`
-	Digest             string            `json:"digest,omitempty"`
-	Succeeded          bool              `json:"succeeded,omitempty"`
-	Work               string            `json:"work,omitempty"`
+	Baseline           *baselineRecord               `json:"baseline,omitempty"`
+	ControllerHandoff  *controllerHandoffConsumption `json:"controller_handoff,omitempty"`
+	Drain              *drainObservation             `json:"drain,omitempty"`
+	DrainSnapshot      *drainSnapshot                `json:"drain_snapshot,omitempty"`
+	DrainMarker        string                        `json:"drain_marker,omitempty"`
+	DrainSnapshotStage string                        `json:"drain_snapshot_stage,omitempty"`
+	Authority          *phaseAuthority               `json:"authority,omitempty"`
+	Sequence           int                           `json:"sequence"`
+	Kind               string                        `json:"kind"`
+	Operation          string                        `json:"operation,omitempty"`
+	ID                 int                           `json:"id,omitempty"`
+	SessionID          string                        `json:"session_id,omitempty"`
+	RequestIDs         []int64                       `json:"request_ids,omitempty"`
+	Count              int                           `json:"count,omitempty"`
+	Digest             string                        `json:"digest,omitempty"`
+	Succeeded          bool                          `json:"succeeded,omitempty"`
+	Work               string                        `json:"work,omitempty"`
 }
 
 type Journal interface {

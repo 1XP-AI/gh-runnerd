@@ -1130,6 +1130,8 @@ func TestPullRequestQuickWorkflowContract(t *testing.T) {
 		"permissions:\n  contents: read",
 		"run: git diff --check \"$BASE_SHA...$HEAD_SHA\"",
 		"git diff --name-only --no-renames \"$BASE_SHA...$HEAD_SHA\"",
+		"module_change_pattern='^(experiments/g01-scaleset/|experiments/g02-auth/handoff/)'",
+		"cd \"$module\" && GOTOOLCHAIN=\"$GOTOOLCHAIN\" go test -run '^$' -count=1 ./...",
 		"go.work",
 		"go.work.sum",
 		"run: make toolchain",
@@ -1157,6 +1159,23 @@ func TestPullRequestQuickWorkflowContract(t *testing.T) {
 		if strings.Contains(workflow, forbidden) {
 			t.Errorf("PR quick workflow contains full/live check %q", forbidden)
 		}
+	}
+}
+
+func TestG01SDKComparisonDropsUnusedLocalHandoffModuleEdge(t *testing.T) {
+	scriptData, err := os.ReadFile("../experiments/g01-scaleset/compare-sdk.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(scriptData)
+	dropEdge := "go mod edit -droprequire=github.com/1XP-AI/gh-runnerd/experiments/g02-auth -dropreplace=github.com/1XP-AI/gh-runnerd/experiments/g02-auth"
+	dropIndex := strings.Index(script, dropEdge)
+	tidyIndex := strings.Index(script, "go mod tidy")
+	if dropIndex < 0 || tidyIndex < 0 || dropIndex > tidyIndex {
+		t.Fatal("SDK comparison must remove the unused local G02 edge before tidying its standalone copy")
+	}
+	if !strings.Contains(script, `go mod edit -require="github.com/actions/scaleset@$sdk_version"`) {
+		t.Fatal("SDK comparison no longer selects the requested SDK version")
 	}
 }
 

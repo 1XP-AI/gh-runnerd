@@ -11,6 +11,7 @@ for sdk_version in v0.4.0 v0.4.1-0.20260721134647-cb0405b2d874; do
     cp "$experiment_dir/go.mod" "$experiment_dir/go.sum" "$experiment_dir/"*.go "$comparison_dir/$sdk_version/"
     (
         cd "$comparison_dir/$sdk_version"
+        go mod edit -droprequire=github.com/1XP-AI/gh-runnerd/experiments/g02-auth -dropreplace=github.com/1XP-AI/gh-runnerd/experiments/g02-auth
         go mod edit -require="github.com/actions/scaleset@$sdk_version"
         go mod tidy
         go list -m github.com/actions/scaleset

@@ -1,6 +1,7 @@
 package enrollment
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
@@ -14,6 +15,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/1XP-AI/gh-runnerd/experiments/g02-auth/handoff"
 )
 
 const brokerFixtureProvenanceSource = "signed-fixture-v1"
@@ -296,6 +299,61 @@ func TestBrokerProvenanceReceiptBindsApprovalWorkflowPhaseNonceAndSource(t *test
 				t.Fatalf("forged %s receipt accepted", kind)
 			}
 		})
+	}
+}
+
+func TestBrokerProvenanceAdapterPreservesSharedDeterministicV1Fixture(t *testing.T) {
+	seed := make([]byte, ed25519.SeedSize)
+	for index := range seed {
+		seed[index] = byte(index)
+	}
+	privateKey := ed25519.NewKeyFromSeed(seed)
+	publicKey := privateKey.Public().(ed25519.PublicKey)
+	now := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
+	request := BrokerProvenanceRequest{
+		ControllerApprovalSHA256: "1343ffdc5440d65d48e2b1916e6aff470f1d11cdfa30aefe54b63293f15ecdf3",
+		Repository:               "fixture-org/canary",
+		WorkflowRunID:            7,
+		WorkflowRef:              "refs/heads/main",
+		WorkflowSHA:              strings.Repeat("b", 40),
+		WorkflowPath:             ".github/workflows/canary.yml",
+		Phase:                    "before-ack",
+		OwnerNonce:               strings.Repeat("c", 32),
+		Source:                   "signed-fixture-v1",
+	}
+	receipt := BrokerProvenanceReceipt{
+		Version:                  1,
+		Algorithm:                "ed25519",
+		KeyID:                    "fixture-ed25519-v1",
+		ControllerApprovalSHA256: request.ControllerApprovalSHA256,
+		Repository:               request.Repository,
+		WorkflowRunID:            request.WorkflowRunID,
+		WorkflowRef:              request.WorkflowRef,
+		WorkflowSHA:              request.WorkflowSHA,
+		WorkflowPath:             request.WorkflowPath,
+		Phase:                    request.Phase,
+		OwnerNonce:               request.OwnerNonce,
+		ReceiptNonce:             strings.Repeat("d", 32),
+		Source:                   request.Source,
+		IssuedAt:                 now,
+		ExpiresAt:                now.Add(time.Hour),
+	}
+	want := []byte(`{"version":1,"algorithm":"ed25519","key_id":"fixture-ed25519-v1","controller_approval_sha256":"1343ffdc5440d65d48e2b1916e6aff470f1d11cdfa30aefe54b63293f15ecdf3","repository":"fixture-org/canary","workflow_run_id":7,"workflow_ref":"refs/heads/main","workflow_sha":"` + strings.Repeat("b", 40) + `","workflow_path":".github/workflows/canary.yml","phase":"before-ack","owner_nonce":"` + strings.Repeat("c", 32) + `","receipt_nonce":"` + strings.Repeat("d", 32) + `","source":"signed-fixture-v1","issued_at":"2026-09-22T12:00:00Z","expires_at":"2026-09-22T13:00:00Z"}`)
+	if !bytes.Equal(receipt.SigningBytes(), want) {
+		t.Fatalf("G02 adapter alias changed shared v1 payload: %s", receipt.SigningBytes())
+	}
+	receipt.Signature = base64.RawURLEncoding.EncodeToString(ed25519.Sign(privateKey, receipt.SigningBytes()))
+	root, err := NewBrokerProvenanceTrustRoot(receipt.KeyID, publicKey)
+	if err != nil || root.Verify(request, receipt, now) != nil {
+		t.Fatalf("G02 adapter alias did not verify shared v1 fixture: %v", err)
+	}
+	encoded, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal("marshal shared v1 receipt")
+	}
+	decoded, err := handoff.DecodeStrictReceipt(encoded)
+	if err != nil || !bytes.Equal(decoded.SigningBytes(), want) {
+		t.Fatalf("shared strict decoder changed G02 v1 payload: %v", err)
 	}
 }
 

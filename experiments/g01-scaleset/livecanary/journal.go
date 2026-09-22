@@ -33,6 +33,7 @@ type FileJournal struct {
 	approval      Approval
 	writeFailed   bool
 	syncFile      func(*os.File) error // nil in production; tests gate a real file fsync
+	writeFile     func(*os.File, []byte) (int, error)
 }
 
 func privateFile(info os.FileInfo, mode os.FileMode) bool {
@@ -217,6 +218,9 @@ func openJournalAtAdmission(directory string, a Approval, admissionDirectory str
 			}
 			j.events = append(j.events, e)
 		}
+		if validateControllerHandoffReplay(j.events) != nil {
+			return nil, ErrJournal
+		}
 	}
 	if incoming.Digest != j.authority.Digest {
 		if !incoming.renews(j.authority) {
@@ -259,6 +263,9 @@ func openJournalAtAdmission(directory string, a Approval, admissionDirectory str
 }
 
 func validEvent(e Event) bool {
+	if e.ControllerHandoff != nil || e.Kind == "controller-handoff-consumed" {
+		return validControllerHandoffEvent(e)
+	}
 	if e.Operation == "observe-poll" && len(e.RequestIDs) > 1 {
 		return false
 	}
@@ -339,7 +346,11 @@ func (j *FileJournal) write(e any) error {
 	if statErr != nil || info.Size()+int64(len(data)) > baselineJournalLimit {
 		return ErrJournal
 	}
-	n, err := j.file.Write(data)
+	writeFile := j.writeFile
+	if writeFile == nil {
+		writeFile = func(file *os.File, data []byte) (int, error) { return file.Write(data) }
+	}
+	n, err := writeFile(j.file, data)
 	syncFile := j.syncFile
 	if syncFile == nil {
 		syncFile = func(f *os.File) error { return f.Sync() }

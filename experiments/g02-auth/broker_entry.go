@@ -150,7 +150,7 @@ func brokerWorkflowReceipt(ctx context.Context, api *brokerAPI, a BrokerApproval
 		return nil, errBroker
 	}
 	root := api.provenanceRoot
-	if !root.valid() {
+	if !root.Valid() {
 		return nil, errBroker
 	}
 	if len(claimed) > 1 || (len(claimed) == 1 && (claimed[0] == nil || claimed[0].check() != nil)) {
