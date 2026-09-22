@@ -5,6 +5,8 @@ set -euo pipefail
 go_cmd="${GO:-go}"
 exact_toolchain="go1.26.8"
 default_heavy_test_regex='^TestBaselineStatisticsPresenceAndEligibility$'
+default_handoff_test_regex='^TestControllerHandoff'
+default_heavy_and_handoff_skip_regex='^Test(BaselineStatisticsPresenceAndEligibility|ControllerHandoff.*)$'
 paired_collection_regex='^TestPaired'
 storage_regex='^TestPairedTerminal(Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$'
 terminal_heavy_regex='^TestPairedTerminal(FinalResultCapacity|PendingChildCapacity|EligibilityUsesFreshExactFacts|CapturedAcknowledgementCancellation|MissingAcknowledgementsAndPostchecks)$'
@@ -52,13 +54,13 @@ for module_dir in "${selected_modules[@]}"; do
 	(
 		cd "${module_dir}"
 		if [[ "${module_dir}" == "experiments/g01-scaleset" ]]; then
-			# Run the known cumulative-cost test family through the same package
-			# discovery as the remainder. This keeps same-name tests in another
-			# package in the selected partition rather than silently skipping them.
+			# Keep the baseline-statistics and expanded controller-handoff families
+			# in separate bounded processes while retaining ./... discovery.
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -run "${default_heavy_test_regex}" ./...
+			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -run "${default_handoff_test_regex}" ./...
 			# Keep the remainder unfiltered so examples and fuzz seeds execute;
-			# the exact heavy name is the only member of the first partition.
-			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -skip "${default_heavy_test_regex}" ./...
+			# skip exactly the disjoint union of the two named partitions.
+			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -skip "${default_heavy_and_handoff_skip_regex}" ./...
 		elif [[ "${module_dir}" == "experiments/g02-auth" ]]; then
 			# Bounded fixture clone/build is a separate 45-second process so the
 			# cadence partition keeps the production seven-times-five-second wait

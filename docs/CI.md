@@ -142,11 +142,14 @@ selectors.
 No hardware, live GitHub, Docker or daemon suite is part of this public check. Those profiles remain explicit future or maintainer-controlled runs; they are not silently converted into passing tests here. G04 introduces the first application behavior contracts and should add meaningful unit and fuzz targets before claiming those forms of coverage.
 
 The default untagged G01 and G02 race suites keep their existing 45-second
-per-process deadline. G01 uses two sequential static partitions: the exact
-`TestBaselineStatisticsPresenceAndEligibility` name through `./...`, then an
-unfiltered `./...` with only that exact name skipped. G02 uses four sequential
-static partitions, all with `-race -count=1 -timeout=45s` and `./...` package
-discovery: the exact `TestPairedBrokerPrepareReviewedG01LiveBinary` fixture
+per-process deadline. G01 uses three sequential static partitions, all with
+`-race -count=1 -timeout=45s` and `./...` package discovery: the exact
+`TestBaselineStatisticsPresenceAndEligibility` name; the `^TestControllerHandoff`
+family; then an unfiltered `./...` skipping exactly the union of those two
+selectors. These partitions are disjoint and exhaustive, including same-named
+tests across packages; the unfiltered complement still executes Example Output
+and fuzz seeds. G02 uses four sequential static partitions: the exact
+`TestPairedBrokerPrepareReviewedG01LiveBinary` fixture
 clone/build of the distinct `g01_live,g01_pair_fixture` and
 `g01_live,g01_pair_fixture,g01_pair_real_cadence` tagged variants; the exact
 `TestPairedBrokerRealCadenceChildExceedsThirtySeconds` name; the remaining
@@ -168,12 +171,14 @@ production seven-times-five-second wait stays inside the cadence partition;
 clone/build is a separate bounded process.
 
 The tooling regression matrix generates positive and independent failing
-witnesses for each G02 partition boundary: the named fixture-prep test, the
-named cadence test, the remaining `TestPaired` family, remainder, another
-package, a same-name prep test in another package, a same-name cadence test in
-another package, a same-name remaining `TestPaired` test in another package, an
-Example Output and a fuzz seed. Each witness must execute exactly once, and
-each failing witness must propagate a nonzero offline-gate result. Owned G02
+witnesses for the G01 and G02 partition boundaries. G01 covers the baseline
+test, controller-handoff family, remainder, unrelated package, same-name
+baseline and handoff tests in another package, Example Output and a fuzz seed.
+G02 covers the named fixture-prep test, named cadence test, remaining
+`TestPaired` family, remainder, unrelated package, same-name prep and cadence
+tests, a same-name remaining `TestPaired` test in another package, Example
+Output and a fuzz seed. Each witness must execute exactly once, and each
+failing witness must propagate a nonzero offline-gate result. Owned G02
 prep cleanup is covered by success, `exit 91`, ordinary prep failure, and
 generated-fixture SIGTERM/SIGINT/SIGHUP cases that assert status 0, 91, 143,
 130, or 129 and remove only that mktemp directory.

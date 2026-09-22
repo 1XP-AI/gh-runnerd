@@ -1808,10 +1808,13 @@ func toolingLivecanarySkipCheck(t *testing.T, run, skip string) string {
 func TestToolingDefaultG01PartitionsRun(t *testing.T) {
 	root := toolingFixture(t)
 	const heavyName = "TestBaselineStatisticsPresenceAndEligibility"
+	const handoffName = "TestControllerHandoffFixture"
 	const heavySentinel = "default-g01-heavy-regression"
+	const handoffSentinel = "default-g01-handoff-regression"
 	const remainderSentinel = "default-g01-remainder-regression"
 	const otherPackageSentinel = "default-g01-other-package-regression"
 	const sameNameOtherPackageSentinel = "default-g01-same-name-other-package-regression"
+	const sameNameHandoffOtherPackageSentinel = "default-g01-same-name-handoff-other-package-regression"
 	const exampleSentinel = "default-g01-example-output-regression"
 	const fuzzSentinel = "default-g01-fuzz-seed-regression"
 	livecanaryBase := "experiments/g01-scaleset/livecanary"
@@ -1843,6 +1846,43 @@ func ` + testName + `(t *testing.T) {
 	if _, err := file.WriteString("` + marker + `\n"); err != nil {
 		t.Fatal(err)
 	}` + failureLine + `
+}
+`
+	}
+	defaultHandoffTestSource := func(pkg, marker, failure string) string {
+		failureLine := ""
+		if failure != "" {
+			failureLine = "\n\tt.Fatal(\"" + failure + "\")"
+		}
+		return `//go:build !g01_pair_fixture && !g01_live && !g01_worker
+
+package ` + pkg + `
+
+import (
+	"os"
+	"strings"
+	"testing"
+)
+
+func ` + handoffName + `(t *testing.T) {
+	for _, arg := range os.Args {
+		if strings.HasPrefix(arg, "-test.run=^TestControllerHandoff") {
+			path := os.Getenv("TOOLING_SENTINEL_LOG")
+			if path == "" {
+				t.Fatal("TOOLING_SENTINEL_LOG is not set")
+			}
+			file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer file.Close()
+			if _, err := file.WriteString("` + marker + `\n"); err != nil {
+				t.Fatal(err)
+			}` + failureLine + `
+			return
+		}
+	}
+	t.Fatal("controller handoff fixture did not run in its isolated partition")
 }
 `
 	}
@@ -1919,6 +1959,13 @@ func FuzzDefaultG01Fixture(f *testing.F) {
 			failureSource:  defaultTestSource("livecanary", heavyName, heavySentinel, heavySentinel),
 		},
 		{
+			name:           "handoff",
+			path:           livecanaryBase + "/default_handoff_regression_test.go",
+			marker:         handoffSentinel,
+			positiveSource: defaultHandoffTestSource("livecanary", handoffSentinel, ""),
+			failureSource:  defaultHandoffTestSource("livecanary", handoffSentinel, handoffSentinel),
+		},
+		{
 			name:           "remainder",
 			path:           livecanaryBase + "/default_remainder_regression_test.go",
 			marker:         remainderSentinel,
@@ -1938,6 +1985,13 @@ func FuzzDefaultG01Fixture(f *testing.F) {
 			marker:         sameNameOtherPackageSentinel,
 			positiveSource: defaultTestSource("otherfixture", heavyName, sameNameOtherPackageSentinel, ""),
 			failureSource:  defaultTestSource("otherfixture", heavyName, sameNameOtherPackageSentinel, sameNameOtherPackageSentinel),
+		},
+		{
+			name:           "same-name handoff other package",
+			path:           otherPackageBase + "/default_same_name_handoff_regression_test.go",
+			marker:         sameNameHandoffOtherPackageSentinel,
+			positiveSource: defaultHandoffTestSource("otherfixture", sameNameHandoffOtherPackageSentinel, ""),
+			failureSource:  defaultHandoffTestSource("otherfixture", sameNameHandoffOtherPackageSentinel, sameNameHandoffOtherPackageSentinel),
 		},
 		{
 			name:           "Example Output",
@@ -1993,7 +2047,8 @@ func FuzzDefaultG01Fixture(f *testing.F) {
 	lines := strings.Split(strings.TrimSpace(log), "\n")
 	for _, invocation := range []string{
 		"go1.26.8\ttest -race -count=1 -timeout=45s -run ^TestBaselineStatisticsPresenceAndEligibility$ ./...",
-		"go1.26.8\ttest -race -count=1 -timeout=45s -skip ^TestBaselineStatisticsPresenceAndEligibility$ ./...",
+		"go1.26.8\ttest -race -count=1 -timeout=45s -run ^TestControllerHandoff ./...",
+		"go1.26.8\ttest -race -count=1 -timeout=45s -skip ^Test(BaselineStatisticsPresenceAndEligibility|ControllerHandoff.*)$ ./...",
 		"go1.26.8\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerPrepareReviewedG01LiveBinary$ ./...",
 		"go1.26.8\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
 		"go1.26.8\ttest -race -count=1 -timeout=45s -run ^TestPaired -skip ^TestPairedBroker(PrepareReviewedG01LiveBinary|RealCadenceChildExceedsThirtySeconds)$ ./...",
