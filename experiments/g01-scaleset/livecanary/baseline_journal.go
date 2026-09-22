@@ -110,6 +110,10 @@ func controllerEventRef(identity controllerJournalIdentity, e Event) controllerR
 	return controllerRecordRef{e.Sequence, hex.EncodeToString(h.Sum(nil))}
 }
 func cloneEvent(e Event) Event {
+	if e.ControllerHandoff != nil {
+		x := *e.ControllerHandoff
+		e.ControllerHandoff = &x
+	}
 	if e.Authority != nil {
 		x := *e.Authority
 		x.Phases = slices.Clone(x.Phases)
@@ -159,6 +163,9 @@ func (j *FileJournal) appendRecord(e Event) (controllerRecordRef, error) {
 // the admission claim is opened; that path returns no domain-bound reference.
 func (j *FileJournal) appendStored(e Event) (Event, error) {
 	if j.writeFailed || !validEvent(e) {
+		return Event{}, ErrJournal
+	}
+	if e.ControllerHandoff != nil && controllerHandoffNonceUsed(j.events, e.ControllerHandoff.ReceiptNonce) {
 		return Event{}, ErrJournal
 	}
 	if e.Baseline == nil && e.Kind != "authority" && slices.ContainsFunc(j.events, func(old Event) bool { return old.Baseline != nil }) {
