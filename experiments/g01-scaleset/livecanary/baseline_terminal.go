@@ -24,7 +24,10 @@ func runPairedTerminal(ctx context.Context, d *Driver, w *liveworker.Driver) (pa
 	return runPairedTerminalWithCadence(ctx, d, w, realBaselineCadence())
 }
 func runPairedTerminalWithCadence(ctx context.Context, d *Driver, w *liveworker.Driver, cadence pairedBaselineCadence) (pairedBaselineTerminalResult, error) {
-	out, err := runPairedBaselineMode(ctx, d, w, cadence, true)
+	return runPairedTerminalWithBinding(ctx, d, w, cadence, nil)
+}
+func runPairedTerminalWithBinding(ctx context.Context, d *Driver, w *liveworker.Driver, cadence pairedBaselineCadence, bindingCheck func() error) (pairedBaselineTerminalResult, error) {
+	out, err := runPairedBaselineModeWithBinding(ctx, d, w, cadence, true, bindingCheck)
 	result := pairedBaselineTerminalResult{Collection: out, Terminal: terminalUnresolved}
 	if out.Terminal != nil && err == nil {
 		result.Terminal = out.Terminal.Outcome
@@ -128,7 +131,12 @@ func (s *pairedBaselineScope) terminalStepCall(stage string) error {
 		r.Terminal.Roster = &observation
 		known = e == nil && state.rosterMatches(&observation, func(ref controllerRecordRef) *Event { return s.event(workerRef(ref)) })
 	case stage == "terminal-set" || stage == "terminal-set-recheck" || stage == "terminal-set-absence":
-		capture := &baselineWireCapture{stage: stage, setID: s.setID}
+		origin := s.listener.capturedOrigin()
+		runtimePathPrefix, runtimePathPrefixSet := s.listener.capturedRuntimePathPrefix()
+		if origin == "" || !runtimePathPrefixSet {
+			return ErrQuarantine
+		}
+		capture := &baselineWireCapture{stage: stage, setID: s.setID, organization: s.approval.Organization, origin: origin, runtimePathPrefix: runtimePathPrefix, runtimePathPrefixSet: runtimePathPrefixSet, allowedHosts: baselineWireAllowedHosts(s.approval, s.captured.drainEndpointHost())}
 		ctx, cancel := context.WithTimeout(s.ctx, operationTimeout)
 		set, e := s.captured.GetScaleSet(capture.context(ctx), s.setID)
 		callErr = e
@@ -148,7 +156,12 @@ func (s *pairedBaselineScope) terminalStepCall(stage string) error {
 		if s.listener.session == nil || s.listener.session.Session().SessionID.String() != state.sessionID {
 			return ErrQuarantine
 		}
-		capture := &baselineWireCapture{stage: stage, setID: s.setID, sessionID: state.sessionID}
+		origin := s.listener.capturedOrigin()
+		runtimePathPrefix, runtimePathPrefixSet := s.listener.capturedRuntimePathPrefix()
+		if origin == "" || !runtimePathPrefixSet {
+			return ErrQuarantine
+		}
+		capture := &baselineWireCapture{stage: stage, setID: s.setID, sessionID: state.sessionID, origin: origin, runtimePathPrefix: runtimePathPrefix, runtimePathPrefixSet: runtimePathPrefixSet}
 		ctx, cancel := context.WithTimeout(s.ctx, operationTimeout)
 		callErr = s.listener.session.Close(capture.context(ctx))
 		cancel()
@@ -164,7 +177,12 @@ func (s *pairedBaselineScope) terminalStepCall(stage string) error {
 		}
 		known = e == nil && r.Terminal.Deletion != nil && receipt.AbsenceResult != nil
 	case stage == "terminal-set-delete":
-		capture := &baselineWireCapture{stage: stage, setID: s.setID}
+		origin := s.listener.capturedOrigin()
+		runtimePathPrefix, runtimePathPrefixSet := s.listener.capturedRuntimePathPrefix()
+		if origin == "" || !runtimePathPrefixSet {
+			return ErrQuarantine
+		}
+		capture := &baselineWireCapture{stage: stage, setID: s.setID, organization: s.approval.Organization, origin: origin, runtimePathPrefix: runtimePathPrefix, runtimePathPrefixSet: runtimePathPrefixSet, allowedHosts: baselineWireAllowedHosts(s.approval, s.captured.drainEndpointHost())}
 		ctx, cancel := context.WithTimeout(s.ctx, operationTimeout)
 		callErr = s.captured.DeleteScaleSet(capture.context(ctx), s.setID)
 		cancel()

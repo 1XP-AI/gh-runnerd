@@ -42,6 +42,7 @@ type pairedBaselineScope struct {
 	observedWorkerDeletion *liveworker.DeletionReceipt
 	terminalEnabled        bool
 	cadence                pairedBaselineCadence
+	bindingCheck           func() error
 
 	ctx                 context.Context
 	driver              *Driver
@@ -71,9 +72,12 @@ func runPairedBaseline(ctx context.Context, d *Driver, w *liveworker.Driver) (pa
 // The production entry fixes the real clock. Tests can advance only cadence;
 // approval, network and scope deadlines always use their original real context.
 func runPairedBaselineWithCadence(ctx context.Context, d *Driver, w *liveworker.Driver, cadence pairedBaselineCadence) (pairedBaselineCollection, error) {
-	return runPairedBaselineMode(ctx, d, w, cadence, false)
+	return runPairedBaselineModeWithBinding(ctx, d, w, cadence, false, nil)
 }
 func runPairedBaselineMode(ctx context.Context, d *Driver, w *liveworker.Driver, cadence pairedBaselineCadence, terminal bool) (out pairedBaselineCollection, err error) {
+	return runPairedBaselineModeWithBinding(ctx, d, w, cadence, terminal, nil)
+}
+func runPairedBaselineModeWithBinding(ctx context.Context, d *Driver, w *liveworker.Driver, cadence pairedBaselineCadence, terminal bool, bindingCheck func() error) (out pairedBaselineCollection, err error) {
 	out = pairedBaselineCollection{Outcome: collectionUnresolved, OutstandingSession: sessionNone}
 	if ctx == nil || ctx.Err() != nil || d == nil || w == nil || cadence.now == nil || cadence.wait == nil {
 		return out, ErrApproval
@@ -122,7 +126,7 @@ func runPairedBaselineMode(ctx context.Context, d *Driver, w *liveworker.Driver,
 	}
 	outer, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	s := &pairedBaselineScope{terminalEnabled: terminal, cadence: cadence, ctx: outer, driver: d, workerDriver: w, approval: a, workerApproval: wa, api: api, captured: initial.api, docker: docker, journal: j, workerJournal: wj, identity: initial.identity, creation: initial.creation, setID: history.setID, listener: initial}
+	s := &pairedBaselineScope{terminalEnabled: terminal, cadence: cadence, bindingCheck: bindingCheck, ctx: outer, driver: d, workerDriver: w, approval: a, workerApproval: wa, api: api, captured: initial.api, docker: docker, journal: j, workerJournal: wj, identity: initial.identity, creation: initial.creation, setID: history.setID, listener: initial}
 	for _, e := range j.Events() {
 		if e.Kind == "inventory" {
 			if s.inventory.Sequence != 0 {
@@ -154,6 +158,9 @@ func runPairedBaselineMode(ctx context.Context, d *Driver, w *liveworker.Driver,
 	return out, nil
 }
 func (s *pairedBaselineScope) current() error {
+	if s.bindingCheck != nil && s.bindingCheck() != nil {
+		return ErrQuarantine
+	}
 	if s.ctx.Err() != nil || s.driver.Journal != s.journal || s.driver.API != s.api || s.workerDriver.Journal != s.workerJournal || s.workerDriver.Runtime != s.docker || approvalDigest(s.driver.Approval) != approvalDigest(s.approval) || workerApprovalDigest(s.workerDriver.Approval) != workerApprovalDigest(s.workerApproval) || s.api.client != s.captured.client || s.api.rest != s.captured.rest || s.api.baseURL != s.captured.baseURL || s.api.credentials != s.captured.credentials || approvalDigest(s.api.approval) != approvalDigest(s.approval) {
 		return ErrQuarantine
 	}

@@ -106,8 +106,23 @@ func TestGitHubAdapterParsesIdentityAndRejectsFailedResponses(t *testing.T) {
 		return response(200, `{"id":201,"app_id":71,"account":{"id":101,"login":"org-a","type":"Organization"},"target_id":101,"target_type":"Organization","permissions":{"organization_self_hosted_runners":"write","metadata":"read"},"suspended_at":null}`), nil
 	}))
 	i, err := api.OrganizationInstallation(context.Background(), cred, "org-a")
-	if err != nil || i.ID != 201 || i.AccountID != 101 || i.AppID != 71 || i.Suspended {
+	if err != nil || i.ID != 201 || i.AccountID != 101 || i.AppID != 71 || i.Suspended || !i.SuspensionKnown {
 		t.Fatal("lost installation identity")
+	}
+}
+
+func TestGitHubAdapterTreatsOmittedSuspendedAtAsUnknown(t *testing.T) {
+	c := syntheticCandidate(t)
+	cred, err := parseCredential(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := NewGitHubAPI(time.Now, transportFunc(func(*http.Request) (*http.Response, error) {
+		return response(200, `{"id":201,"app_id":71,"account":{"id":101,"login":"org-a","type":"Organization"},"target_id":101,"target_type":"Organization","permissions":{"organization_self_hosted_runners":"write"}}`), nil
+	}))
+	i, err := api.OrganizationInstallation(context.Background(), cred, "org-a")
+	if err != nil || i.Suspended || i.SuspensionKnown {
+		t.Fatalf("omitted suspended_at must stay unknown: suspended=%v known=%v err=%v", i.Suspended, i.SuspensionKnown, err)
 	}
 }
 

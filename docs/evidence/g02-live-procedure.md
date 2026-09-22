@@ -1,25 +1,25 @@
 # G02 remaining live procedure
 
-This is a concrete experiment proposal, not a report that these checks passed. Use reviewed immutable code, a dedicated trusted environment, explicit authorization for these exact resources and an organization owner available for both installations. The `g02-enroll` verify-only driver now connects `Attempt`, `GitHubAPI.Convert`, and `ManualImport`, with an in-memory atomic sink and a private non-secret journal. Its executable command and offline evidence are in [the driver record](g02-live-driver.md). It has not been run against GitHub. Independent review and explicit approval of the exact live resources remain required; a persistent real-key importer is still unimplemented.
+This is the reviewed procedure and sanitized record for the 2026-09-17 live run. Use reviewed immutable code, a dedicated trusted environment, explicit authorization for these exact resources and an organization owner available for both installations. The `g02-enroll` verify-only driver connects `Attempt`, `GitHubAPI.Convert`, and `ManualImport`, with an in-memory atomic sink and a private non-secret journal. Its executable command, offline evidence and live result are in [the driver record](g02-live-driver.md). The disposable App and installations were removed after verification; a persistent real-key importer is still unimplemented.
 
-## A. Disposable GitHub enrollment proposal
+## A. Disposable GitHub enrollment procedure
 
-| Field | Proposed value / required access |
+| Field | Used value / required access |
 |---|---|
-| App owner | `1XP-AI` (organization ID `258160258`), proposed and not yet created |
+| App owner | `1XP-AI` (organization ID `258160258`), created once for the run and deleted after verification |
 | App name | `gh-runnerd-gate-deab34`; inventory this exact name before/after |
 | Homepage | `https://github.com/1XP-AI/gh-runnerd` |
 | Visibility | Any account (`public: true`) so the same App can be installed in both nominated test organizations |
 | Permissions | Organization self-hosted runners read/write, baseline metadata read; no repository Administration, Actions, contents or user permissions |
 | Events / webhook | No events; `hook_attributes.active: false` |
-| Initial webhook URL shape | Include `https://example.invalid/gh-runnerd-g02-unused` to honor the documented required URL while targeting no real receiver; record whether GitHub accepts this exact disabled shape |
+| Initial webhook URL shape | `https://example.invalid/gh-runnerd-g02-unused`; accepted by GitHub for this disposable run on 2026-09-17; re-verify the exact shape on any future run |
 | Redirect | Actual address of one already-bound `tcp4`, `127.0.0.1:0` listener, with `/manifest/callback`; no proxy, localhost alias or OAuth callback |
 | Authorization extras | No `callback_urls`, `setup_url`, user OAuth-on-install, client secret flow or public receiver |
 | Network operations | Browser creation POST once, one code conversion POST, App-auth GETs for App and each org installation; do not request runner registration/JIT credentials |
 | Installations | `1XP-AI` (`258160258`) and `1XP-Inc` (`149097057`); owners authorize the same App in each and independently record both installation IDs |
 | Cleanup | Owner uninstalls the two exact installation IDs, deletes the one exact disposable App, verifies absence, removes only its probe credentials/state |
 
-A disabled webhook URL using `.invalid` is a deliberate safe test input, **not** a claim that GitHub accepts it. If GitHub refuses that shape before registration, record the refusal and inspect the nominated owner's App inventory. Do not silently resubmit a changed Manifest. A follow-up no-URL shape (`hook_attributes: {"active": false}`) is a separate explicit experiment after confirming no App was created. If neither shape works, manual registration with the Webhook Active box cleared is the fallback; do not add a publicly reachable webhook server to make the test pass.
+A disabled webhook URL using `.invalid` is a deliberate safe test input. GitHub accepted this exact shape during the 2026-09-17 disposable run; that result is run-specific evidence, not a guarantee for a later GitHub registration. If GitHub refuses the exact shape on a future run, record the refusal and inspect the nominated owner's App inventory. Do not silently resubmit a changed Manifest. A follow-up no-URL shape (`hook_attributes: {"active": false}`) is a separate explicit experiment after confirming no App was created. If neither shape works, manual registration with the Webhook Active box cleared is the fallback; do not add a publicly reachable webhook server to make the test pass.
 
 Exact initial Manifest, substituting only the recorded name and actual listener port:
 
@@ -62,11 +62,11 @@ go build -tags=g02runtime -o "$G02_PROBE_BINARY" ./cmd/g02-keychain-probe
 
 Prepare `G02_PROBE_BINARY` as a new absolute path in a private temporary build directory. Confirm the exact source commit and binary code-signing identity with `codesign`; an ad-hoc source build is a separate matrix row from a Developer ID release. The probe creates a private Keychain/canary, restricts reads to that explicit Keychain, runs fresh child reads through unique transient `gui/<current-uid>` jobs, locks only its own Keychain, verifies the Keychain lock bit and expects an explicit `errSecAuthFailed` or `errSecInteractionNotAllowed` denial, then deletes its exact Keychain/jobs/temp state. Its output contains status codes and booleans; cleanup failure also reports a non-secret recovery directory basename. If any exact service absence remains unknown, the probe attempts to lock its owned Keychain and preserves the private directory, captured Keychain marker and exact service-label plists. Resolve only those exact labels, verify absence, delete only the captured synthetic Keychain, and remove that captured directory after review; do not search for or kill unrelated services. Failure to preserve Keychain preferences or clean up is failure, not a passing access result.
 
-Independent Astra review approved this concrete probe's ownership, no-UI handling, explicit paths, cleanup and narrow platform bridge before execution. Its limited actual result is recorded in [G02 evidence](g02-enrollment-evidence.md). Re-running the same reviewed probe is within the same non-disruptive authorization. This experiment does not require or establish screen lock, logout, reboot, a system daemon or target-controller identity.
+Independent Astra review approved this concrete probe's ownership, no-UI handling, explicit paths, cleanup and narrow platform bridge before execution. Its earlier limited result is recorded in [G02 evidence](g02-enrollment-evidence.md). Re-running the same reviewed probe was within the same non-disruptive authorization. This probe invocation itself does not perform screen lock, logout or reboot; the separate current-login matrix reran it under an exact GUI `launchd` parent across those authorized transitions, with results recorded in [the driver record](g02-live-driver.md). Neither the earlier probe nor that matrix establishes a system daemon, production persistence or target-controller identity.
 
-## C. Target identity and startup matrix still required
+## C. Remaining target identity and product startup gates
 
-Required access: confirmed intended host; confirmed dedicated non-root controller and distinct job accounts already provisioned by an authorized administrator; maintainer-controlled reviewed source and release-signed binaries; signing identity/provisioning access if data-protection Keychain is chosen; and an operator present for explicitly scheduled lock/logout/reboot checks. Creating these accounts, installing a persistent service/helper, unlocking existing Keychains or changing FileVault is outside the current probe authorization.
+The 2026-09-17 matrix completed the selected single-login synthetic current-login checks across baseline, screen lock, unlock, logout/login and reboot/login. It did not establish a distinct controller/job identity, a persistent product service, a release-signed binary, production credential persistence or pre-login cold-boot behavior. Creating separate accounts, installing a persistent service/helper, unlocking existing Keychains or changing FileVault remains outside the completed probe authorization.
 
 1. Inventory the intended UID, launchd domain, selected Keychain implementation and executable signing requirement privately. Record only role aliases and `same/different UID` booleans publicly. Use a fresh synthetic item with the same item access-control policy and service identity the product will use; an arbitrary terminal or `security` CLI read does not stand in for this binary.
 2. As the real controller launchd process, read while unlocked with interaction disallowed; verify a signing operation against the corresponding synthetic public key without printing the key. Test denied access from the distinct job identity; never broaden the ACL to make it pass.
@@ -76,4 +76,4 @@ Required access: confirmed intended host; confirmed dedicated non-root controlle
 6. Repeat source build, stable signed release, and updated binary identity. Verify that an update neither silently broadens trust nor loses access without a clear recoverable status. A system-daemon row is a separate file-Keychain experiment and needs its own reviewed service installation and authorization.
 7. Remove only test items, owned service entries and test directories; restore the original reviewed service configuration if this maintenance explicitly changed it. Verify original runner/service availability and publish a sanitized matrix with every failed/skipped case visible.
 
-G02 remains open until required live evidence, independent review and repository publication/merge criteria are satisfied. G08/G15 and protected native work must not treat this procedure as passing results.
+G02 remains open until independent review, repository publication/merge criteria and the remaining production identity/persistence gates are satisfied. The live enrollment and selected same-UID current-login matrix are recorded evidence, not installed-product support. G08/G15 and protected native work must not treat this procedure as passing results.

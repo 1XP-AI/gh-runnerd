@@ -23,7 +23,7 @@ func (syntheticAPI) OrganizationInstallation(_ context.Context, _ enrollment.Cre
 	if org == "g02-synthetic-b" {
 		id, installation = 102, 202
 	}
-	return enrollment.Installation{ID: installation, AppID: 71, AccountID: id, TargetID: id, Login: org, AccountType: "Organization", TargetType: "Organization", Permissions: map[string]string{"organization_self_hosted_runners": "write", "metadata": "read"}}, nil
+	return enrollment.Installation{ID: installation, AppID: 71, AccountID: id, TargetID: id, Login: org, AccountType: "Organization", TargetType: "Organization", Permissions: map[string]string{"organization_self_hosted_runners": "write", "metadata": "read"}, SuspensionKnown: true}, nil
 }
 func run() error {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)

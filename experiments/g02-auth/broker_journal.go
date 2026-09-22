@@ -16,8 +16,13 @@ type brokerJournal struct {
 	directoryInfo, fileInfo os.FileInfo
 }
 
+// openBrokerJournal durably claims one exact attempt path and holds its
+// exclusive journal lock until the caller closes the returned claim. No
+// credential parsing or authenticated/provenance effect may precede this call.
 func openBrokerJournal(path string, a BrokerApproval) (j *brokerJournal, err error) {
-	path = filepath.Clean(path)
+	if !brokerCanonicalPath(path) {
+		return nil, errBroker
+	}
 	name := filepath.Base(path)
 	if name == "." || name == ".." || name == string(filepath.Separator) {
 		return nil, errBroker

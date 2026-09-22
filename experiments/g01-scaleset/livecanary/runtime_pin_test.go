@@ -60,10 +60,10 @@ func TestUpdateSettingDriftStopsBeforeSessionOrJIT(t *testing.T) {
 	}
 }
 
-func TestUpdateSettingDriftDoesNotBlockSafeEmptyCleanup(t *testing.T) {
+func TestUpdateSettingDriftDoesNotBypassCleanupQuarantine(t *testing.T) {
 	d, f, _ := created(t)
 	f.set.RunnerSetting.DisableUpdate = false
-	if err := d.Run(context.Background(), "cleanup"); err != nil || f.deleteCalls != 1 {
-		t.Fatal("update setting alone prevented otherwise verified empty cleanup")
+	if err := d.Run(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) || f.deleteCalls != 0 {
+		t.Fatal("update setting drift bypassed cleanup quarantine")
 	}
 }

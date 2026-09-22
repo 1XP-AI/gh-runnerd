@@ -2,6 +2,8 @@ package enrollment
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -103,6 +105,151 @@ func TestBrokerFinitePhasesAndUnknownRetention(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestBrokerLedgerCapacityDerivesFromFiniteSlotSchema(t *testing.T) {
+	want := 1 + 2*(len(brokerPhases)+len(brokerSpecialSlots)) + 1
+	if got := brokerLedgerMaxLines(); got != want || got != 24 {
+		t.Fatalf("ledger line bound=%d want schema-derived %d", got, want)
+	}
+	if brokerSlotAllowed("unreviewed-slot") || !brokerSlotAllowed("paired-terminal") || !brokerSlotAllowed("discover-actions-host") {
+		t.Fatal("ledger schema widened beyond the finite reviewed slots")
+	}
+}
+
+func TestBrokerAdmissionRejectsDuplicateProvenanceNonceBeforeAppend(t *testing.T) {
+	a, c, api, f, root := newBrokerFixture(t)
+	parent := filepath.Dir(root)
+	a.Mode, a.Phase = "controller", "create"
+	p := brokerTestPlan(t, &a, parent, func(context.Context, []byte, string) error { return nil })
+	p.controller.WorkflowRef = "refs/heads/main"
+	p.controller.WorkflowRunID = 7
+	p.raw, _ = json.Marshal(p.controller)
+	a.ControllerApprovalSHA256 = brokerBytesDigest(p.raw)
+	p.approval = a
+	request, err := brokerProvenanceRequest(a, p.controller, api.provenance.Source())
+	if err != nil {
+		t.Fatal("first provenance request")
+	}
+	receipt, err := api.provenance.Attest(context.Background(), request)
+	if err != nil {
+		t.Fatal("first provenance receipt")
+	}
+	if _, err := brokerExecuteWithProvenance(context.Background(), a, brokerInput{PEM: string(c.PEM)}, root, api, p, &receipt); err != nil {
+		t.Fatalf("first provenance claim: %v", err)
+	}
+	ledgerPath := filepath.Join(f.admissionRoot, "broker-admission.jsonl")
+	before, err := os.ReadFile(ledgerPath)
+	if err != nil {
+		t.Fatal("read first ledger")
+	}
+
+	a.Phase = "inspect"
+	secondRoot := filepath.Join(parent, "inspect")
+	f.root = secondRoot
+	p2 := brokerTestPlan(t, &a, parent, func(context.Context, []byte, string) error { return nil })
+	p2.controller.WorkflowRef = p.controller.WorkflowRef
+	p2.controller.WorkflowRunID = p.controller.WorkflowRunID
+	p2.raw, _ = json.Marshal(p2.controller)
+	a.ControllerApprovalSHA256 = brokerBytesDigest(p2.raw)
+	p2.approval = a
+	request2, err := brokerProvenanceRequest(a, p2.controller, api.provenance.Source())
+	if err != nil {
+		t.Fatal("second provenance request")
+	}
+	duplicate, err := api.provenance.Attest(context.Background(), request2)
+	if err != nil {
+		t.Fatal("second provenance receipt")
+	}
+	duplicate.ReceiptNonce = receipt.ReceiptNonce
+	fixtureAdapter, ok := api.provenance.(*signedBrokerFixtureAdapter)
+	if !ok {
+		t.Fatal("signed fixture adapter")
+	}
+	duplicate.Signature = base64.RawURLEncoding.EncodeToString(ed25519.Sign(fixtureAdapter.private, duplicate.SigningBytes()))
+	if err := fixtureAdapter.Verify(context.Background(), request2, duplicate); err != nil {
+		t.Fatal("second provenance receipt signature")
+	}
+	callsBefore, tokensBefore := len(f.calls), f.tokenCalls
+	if _, err := brokerExecuteWithProvenance(context.Background(), a, brokerInput{PEM: string(c.PEM)}, secondRoot, api, p2, &duplicate); err == nil {
+		t.Fatal("duplicate provenance nonce accepted")
+	}
+	after, err := os.ReadFile(ledgerPath)
+	if err != nil {
+		t.Fatal("read duplicate ledger")
+	}
+	if string(after) != string(before) || len(f.calls) != callsBefore || f.tokenCalls != tokensBefore {
+		t.Fatal("duplicate provenance nonce changed the ledger or reached an authenticated effect")
+	}
+}
+
+func TestBrokerPairedAdmissionAcceptsHistoricalControllerClaim(t *testing.T) {
+	a, c, api, f, root := newBrokerFixture(t)
+	parent := filepath.Dir(root)
+	a.Mode, a.Phase, a.AllowVerificationAuthority = "controller", "create", true
+	controllerPlan := brokerTestPlan(t, &a, parent, func(context.Context, []byte, string) error { return nil })
+	controllerPlan.controller.Phases = []string{"create", "before-ack", "after-ack", "before-acquire", "acquire-loss", "inspect", "cleanup"}
+	controllerPlan.controller.WorkflowRunID = 7
+	controllerPlan.raw, _ = json.Marshal(controllerPlan.controller)
+	a.ControllerApprovalSHA256 = brokerBytesDigest(controllerPlan.raw)
+	controllerPlan.approval = a
+	if _, err := brokerExecute(context.Background(), a, brokerInput{PEM: string(c.PEM), VerificationToken: "synthetic-private-workflow-token"}, root, api, controllerPlan); err != nil {
+		t.Fatalf("controller prerequisite claim: %v", err)
+	}
+
+	// The paired attempt reuses the same controller identity and durable ledger,
+	// as the real controller-create -> paired-terminal sequence does.
+	a.Mode, a.Phase = "paired-terminal", "paired-terminal"
+	pairedRoot := filepath.Join(parent, "paired-attempt")
+	pairedPlan := brokerTestPlan(t, &a, parent, func(context.Context, []byte, string) error { return nil })
+	pairedPlan.controller.Phases = append([]string(nil), controllerPlan.controller.Phases...)
+	pairedPlan.controller.WorkflowRunID = controllerPlan.controller.WorkflowRunID
+	pairedPlan.raw, _ = json.Marshal(pairedPlan.controller)
+	a.ControllerApprovalSHA256 = brokerBytesDigest(pairedPlan.raw)
+	pairedPlan.approval = a
+	workerState := filepath.Join(parent, "paired-worker-state")
+	if err := os.Mkdir(workerState, 0700); err != nil {
+		t.Fatal("worker state")
+	}
+	worker := pairedWorkerApproval{RunnerUpdatesDisabled: true, HarnessSHA: pairedPlan.controller.HarnessSHA, WorkflowSHA: pairedPlan.controller.WorkflowSHA, OwnerNonce: pairedPlan.controller.OwnerNonce, Controller: pairedPlan.controller.Controller, Endpoint: "/tmp/g01-paired-admission.sock", DaemonID: "fixture-daemon", ImageID: "sha256:" + strings.Repeat("d", 64), Image: pairedWorkerImage, ExpiresAt: pairedPlan.controller.ExpiresAt, Phases: []string{"create", "start", "inspect", "cleanup"}}
+	workerData, err := json.Marshal(worker)
+	if err != nil {
+		t.Fatal("worker approval")
+	}
+	workerPath := filepath.Join(parent, "paired-worker-approval.json")
+	if err := os.WriteFile(workerPath, workerData, 0600); err != nil {
+		t.Fatal("worker approval file")
+	}
+	pairedPlan.worker, err = openBrokerWorkerPlan(workerPath, workerState, pairedPlan.statePath, a, pairedPlan.controller)
+	if err != nil {
+		t.Fatalf("paired worker plan: %v", err)
+	}
+	brokerAttachSyntheticWorkerPreparation(t, pairedPlan, filepath.Join(parent, "paired-worker-admission"))
+	defer pairedPlan.worker.close()
+	if _, err := brokerExecute(context.Background(), a, brokerInput{PEM: string(c.PEM), VerificationToken: "synthetic-private-workflow-token"}, pairedRoot, api, pairedPlan); err != nil {
+		t.Fatalf("paired attempt rejected historical controller claim: %v", err)
+	}
+	if f.tokenCalls != 2 {
+		t.Fatalf("historical controller claim blocked current paired issuance: mints=%d", f.tokenCalls)
+	}
+	ledger, err := os.ReadFile(filepath.Join(f.admissionRoot, "broker-admission.jsonl"))
+	if err != nil {
+		t.Fatal("paired ledger")
+	}
+	lines := strings.Split(strings.TrimSpace(string(ledger)), "\n")
+	var pairedEvent brokerClaimEvent
+	for _, line := range lines {
+		var candidate brokerClaimEvent
+		if json.Unmarshal([]byte(line), &candidate) == nil && candidate.Slot == "paired-terminal" && candidate.Kind == "claim" {
+			pairedEvent = candidate
+			break
+		}
+	}
+	controllerView := a
+	controllerView.Mode, controllerView.Phase = "controller", "inspect"
+	if pairedEvent.Slot == "" || !validBrokerClaimEvent(controllerView, pairedEvent) {
+		t.Fatal("historical paired claim was rejected under the reciprocal controller mode")
 	}
 }
 func TestBrokerAdmissionFailureBeforeAPIAndResync(t *testing.T) {

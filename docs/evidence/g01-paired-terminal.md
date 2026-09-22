@@ -194,17 +194,20 @@ Sync-error fixtures inject failures at actual file-write/sync boundaries and do
 not claim physical power-loss durability. The trust model remains reviewed Go
 code and private local files, not hostile same-UID code or copying a used mutex.
 
-The independently reviewed Luna tooling fragment runs four complementary tagged
-partitions: paired collection, remaining collection/listener work, terminal
-excluding the explicitly named persistence tests, and those persistence tests.
-Each retains the exact toolchain, race detector, count one and a 120-second
-timeout, plus one tagged vet pass:
+The independently reviewed Luna tooling fragment runs five complementary tagged
+partitions: paired collection, remaining collection/listener work, the five
+heavy terminal names, the complementary remainder of `TestPairedTerminal`, and
+the named persistence tests. Each retains the exact toolchain, race detector,
+count one and a 120-second timeout, plus one tagged vet pass:
 
 ```sh
+terminal_heavy_tests='^TestPairedTerminal(FinalResultCapacity|PendingChildCapacity|EligibilityUsesFreshExactFacts|CapturedAcknowledgementCancellation|MissingAcknowledgementsAndPostchecks)$'
+terminal_remainder_skip='^TestPairedTerminal(FinalResultCapacity|PendingChildCapacity|EligibilityUsesFreshExactFacts|CapturedAcknowledgementCancellation|MissingAcknowledgementsAndPostchecks|Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$'
 terminal_storage_tests='^TestPairedTerminal(Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$'
 GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run '^TestPaired' -skip '^TestPairedTerminal'
 GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -skip '^TestPaired'
-GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run '^TestPairedTerminal' -skip "$terminal_storage_tests"
+GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run "$terminal_heavy_tests"
+GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run '^TestPairedTerminal' -skip "$terminal_remainder_skip"
 GOTOOLCHAIN=go1.26.8 go test -C experiments/g01-scaleset -tags=g01_pair_fixture -race -count=1 -timeout=120s ./livecanary -run "$terminal_storage_tests"
 GOTOOLCHAIN=go1.26.8 go vet -C experiments/g01-scaleset -tags=g01_pair_fixture ./livecanary
 ```
@@ -213,9 +216,10 @@ GOTOOLCHAIN=go1.26.8 go vet -C experiments/g01-scaleset -tags=g01_pair_fixture .
 `scripts/check-offline-experiments.sh` and is the `STORAGE` alias in issue #54.
 The generated tooling sentinel is named `TestPairedTerminalFixtureStorageFailure`,
 so its top-level regex term is `FixtureStorageFailure`; it must remain in the
-storage-only group. The two terminal groups remain exhaustive and disjoint:
-every other top-level `TestPairedTerminal` test stays in terminal behavior,
-while only the named persistence tests stay in storage. The two
+storage-only group. The three terminal groups remain exhaustive and disjoint:
+the five named heavy tests, every other current top-level `TestPairedTerminal`
+test, and the named persistence tests. A future top-level terminal name lands
+in the remainder. The two
 collection/listener groups are likewise exhaustive and disjoint: non-terminal
 `TestPaired*` tests stay in paired collection, and every other test, example or
 fuzz seed stays in remaining collection/listener. The unrestricted remaining

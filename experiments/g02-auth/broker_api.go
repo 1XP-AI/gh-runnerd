@@ -17,9 +17,11 @@ import (
 )
 
 type brokerAPI struct {
-	github *GitHubAPI
-	client *http.Client
-	now    func() time.Time
+	github         *GitHubAPI
+	client         *http.Client
+	now            func() time.Time
+	provenance     BrokerProvenanceAdapter
+	provenanceRoot BrokerProvenanceTrustRoot
 	// Private dependency injection for synthetic tests only; production selects
 	// the fixed native account root and exposes no path override.
 	admissionDirectory func() (string, error)
@@ -57,6 +59,10 @@ func (t brokerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	return res, nil
 }
 func newBrokerAPI(now func() time.Time, fixture http.RoundTripper) *brokerAPI {
+	return newBrokerAPIWithProvenanceRoot(now, fixture, BrokerProvenanceTrustRoot{})
+}
+
+func newBrokerAPIWithProvenanceRoot(now func() time.Time, fixture http.RoundTripper, provenanceRoot BrokerProvenanceTrustRoot) *brokerAPI {
 	if now == nil {
 		now = time.Now
 	}
@@ -79,7 +85,7 @@ func newBrokerAPI(now func() time.Time, fixture http.RoundTripper) *brokerAPI {
 		fixture = transport
 	}
 	transport := brokerTransport{fixture}
-	return &brokerAPI{github: NewGitHubAPI(now, transport), client: &http.Client{Transport: transport, Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, now: now, admissionDirectory: brokerAdmissionDirectory, syncDirectory: syncDirectory}
+	return &brokerAPI{github: NewGitHubAPI(now, transport), client: &http.Client{Transport: transport, Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, now: now, provenanceRoot: provenanceRoot, admissionDirectory: brokerAdmissionDirectory, syncDirectory: syncDirectory}
 }
 func (a *brokerAPI) call(ctx context.Context, method, path, authorization string, body any, status int, out any) error {
 	var data []byte

@@ -24,6 +24,9 @@ runtime graph contains only the local module; nested experiments remain separate
 Go standard library: `go1.26.8`, BSD-3-Clause, the language/runtime baseline;
 [official release history](https://go.dev/doc/devel/release).
 
+The selector matcher helper adapted from the Go standard library is documented
+in the [Go testing matcher adaptation notice](third-party/go-testing-matcher.md).
+
 ## Public CI actions
 
 Action refs are immutable commit pins. The version labels are recorded for human review; the workflow uses the full SHA.

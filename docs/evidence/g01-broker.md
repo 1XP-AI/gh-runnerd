@@ -41,20 +41,26 @@ The broker accepts only that receipt from its exact pinned command. Under short 
 
 The preparation subprocess gets empty stdin, only `LANG=C`/`LC_ALL=C`, a thirty-second cancellation deadline, at most4KiB stdout and the shared8KiB stderr budget. Missing/duplicate/unknown/malformed receipt JSON, a mismatched receipt or arbitrary exit0 is insufficient. Use a reviewed controller build containing this command; older otherwise valid metadata cannot bypass the missing preparation mode.
 
-Only these fixed invocations are available:
+Only these fixed invocation shapes are defined. The execution entrypoint
+`--execute-approved-canary` remains quarantined until the broker-authenticated
+workflow-input provenance and conditional cleanup gates are independently
+closed; the shape below is not live authorization:
 
 ```text
 <verified-absolute-binary> --prepare-approved-journal --approval <private-snapshot> --state-dir <private-controller-state> --phase <one-approved-phase>
 <verified-absolute-binary> --execute-approved-canary --approval <private-snapshot> --state-dir <private-controller-state> --phase <one-approved-phase>
 ```
 
-There is no shell, PATH executable lookup, `gh`, arbitrary argument list, Docker or worker child. Each invocation starts only the exact controller binary with `LANG=C` and `LC_ALL=C` in its environment. For execution, an internal stdin pipe carries the existing reviewed G01 credential JSON schema. PEM never crosses that pipe. Token values never enter normal stdout, argv, environment, files or broker logs. The execution child's stdout/stderr are discarded under a shared 8 KiB budget; overflow cancels that exact child. Deadline cancellation kills only that owned controller process. The reviewed controller launches no children; general process-tree/worker management is not implemented here. Execution exit is reported using a fixed category, never the child's text, panic value or SDK error.
+There is no shell, PATH executable lookup, `gh`, arbitrary argument list, Docker or worker child. Each invocation starts only the exact controller binary with `LANG=C` and `LC_ALL=C` in its environment. If the quarantined execution shape is later re-enabled, its internal stdin pipe must carry the existing reviewed G01 credential JSON schema. PEM never crosses that pipe. Token values never enter normal stdout, argv, environment, files or broker logs. The execution child's stdout/stderr are discarded under a shared 8 KiB budget; overflow cancels that exact child. Deadline cancellation kills only that owned controller process. The reviewed controller launches no children; general process-tree/worker management is not implemented here. Execution exit is reported using a fixed category, never the child's text, panic value or SDK error.
 
 If the controller approval includes an ACK/acquisition workflow-verification phase, it must explicitly authorize the separate verification authority. The private input must supply a distinct token. The broker uses it only for the approved workflow-run GET, verifies the expected run/head/path/repository/event/first-attempt facts and then passes it only to the controller, whose own pre-ACK check remains authoritative. No worker receives it. GitHub does not offer generic token-permission introspection: the operator's separately approved authority must actually be suitably read-only; a successful run GET is not proof of its complete permission set.
 
 ## Private inputs and durable inventory
 
-The command requires `--execute-approved-broker`; `--plan` performs no credential reads or network operations. Approval files are current-UID, regular, singly linked, mode `0600`, in current-UID `0700` directories. Inputs are limited to 16 KiB for each approval, 64 KiB for the stdin JSON, 32 KiB for PEM and 1 KiB for the optional verification token. Stdin must be an owned protected regular descriptor or private pipe; terminals and group/other-accessible inputs are refused. Inherited pipes use the reviewed owned duplicate, close-on-exec, nonblocking Go-poller handle and bounded deadline probes, covering cancellation and delayed FIFO EOF. The input deadline is thirty seconds. Protected regular files retain their byte/ownership bounds; no wall-clock guarantee is claimed for an uninterruptible filesystem read. Deadlines bound cancellable pipe/network/child work; local regular-file/hash/fsync operations do not promise completion through a filesystem stall. A redirected descriptor cannot establish the already-resolved original filename; no original-path symlink guarantee is claimed for stdin.
+The command requires `--execute-approved-broker`; `--plan` is an offline,
+no-input/no-network plan check only, not a live entrypoint or authorization.
+The tagged `--execute-approved-canary` path remains quarantined until its
+external provenance and cleanup gates close. Approval files are current-UID, regular, singly linked, mode `0600`, in current-UID `0700` directories. Inputs are limited to 16 KiB for each approval, 64 KiB for the stdin JSON, 32 KiB for PEM and 1 KiB for the optional verification token. Stdin must be an owned protected regular descriptor or private pipe; terminals and group/other-accessible inputs are refused. Inherited pipes use the reviewed owned duplicate, close-on-exec, nonblocking Go-poller handle and bounded deadline probes, covering cancellation and delayed FIFO EOF. The input deadline is thirty seconds. Protected regular files retain their byte/ownership bounds; no wall-clock guarantee is claimed for an uninterruptible filesystem read. Deadlines bound cancellable pipe/network/child work; local regular-file/hash/fsync operations do not promise completion through a filesystem stall. A redirected descriptor cannot establish the already-resolved original filename; no original-path symlink guarantee is claimed for stdin.
 
 The stdin JSON schema contains only `pem` and optional `verification_token`. Supply it through a trusted private pipe or an existing owner-only input file; the broker does not generate or save a credentials file. Do not place values in arguments, environment variables, shell tracing, clipboard, chat, screenshots or source control. Go/RSA/HTTP strings and memory copies are not guaranteed to be securely erased; clearing owned buffers and ending the process is not a stronger claim.
 
@@ -99,7 +105,7 @@ Build only the reviewed broker source; these path variables are non-secret opera
 ```sh
 cd experiments/g02-auth
 CGO_ENABLED=1 GOTOOLCHAIN=go1.26.8 go build -trimpath -o "$G01_BROKER_BINARY" ./cmd/g01-broker
-"$G01_BROKER_BINARY" --plan
+"$G01_BROKER_BINARY" --plan  # offline plan check; no live authorization
 ```
 
 After separate explicit approval of one token mint and the two discovery authentication requests:

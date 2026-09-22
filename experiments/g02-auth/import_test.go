@@ -11,16 +11,30 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+)
+
+var (
+	syntheticCandidateOnce sync.Once
+	syntheticCandidatePEM  []byte
+	syntheticCandidateErr  error
 )
 
 func syntheticCandidate(t *testing.T) Candidate {
 	t.Helper()
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatal(err)
+	syntheticCandidateOnce.Do(func() {
+		key, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			syntheticCandidateErr = err
+			return
+		}
+		syntheticCandidatePEM = pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	})
+	if syntheticCandidateErr != nil {
+		t.Fatal(syntheticCandidateErr)
 	}
-	return Candidate{AppID: 71, PEM: pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}), Organizations: []Binding{{Login: "org-a", OrganizationID: 101, InstallationID: 201}, {Login: "org-b", OrganizationID: 102, InstallationID: 202}}}
+	return Candidate{AppID: 71, PEM: append([]byte(nil), syntheticCandidatePEM...), Organizations: []Binding{{Login: "org-a", OrganizationID: 101, InstallationID: 201}, {Login: "org-b", OrganizationID: 102, InstallationID: 202}}}
 }
 
 type fakeAPI struct {
@@ -35,8 +49,8 @@ func (f fakeAPI) OrganizationInstallation(_ context.Context, _ Credential, org s
 }
 func validAPI() fakeAPI {
 	return fakeAPI{appID: 71, installations: map[string]Installation{
-		"org-a": {ID: 201, AppID: 71, AccountID: 101, Login: "org-a", AccountType: "Organization", TargetID: 101, TargetType: "Organization", Permissions: map[string]string{"organization_self_hosted_runners": "write", "metadata": "read"}},
-		"org-b": {ID: 202, AppID: 71, AccountID: 102, Login: "org-b", AccountType: "Organization", TargetID: 102, TargetType: "Organization", Permissions: map[string]string{"organization_self_hosted_runners": "write", "metadata": "read"}},
+		"org-a": {ID: 201, AppID: 71, AccountID: 101, Login: "org-a", AccountType: "Organization", TargetID: 101, TargetType: "Organization", Permissions: map[string]string{"organization_self_hosted_runners": "write", "metadata": "read"}, SuspensionKnown: true},
+		"org-b": {ID: 202, AppID: 71, AccountID: 102, Login: "org-b", AccountType: "Organization", TargetID: 102, TargetType: "Organization", Permissions: map[string]string{"organization_self_hosted_runners": "write", "metadata": "read"}, SuspensionKnown: true},
 	}}
 }
 
@@ -73,6 +87,12 @@ func TestManualImportRejectsForgedBindingsBeforeStoringAnyCredential(t *testing.
 		{"suspended", func(c *Candidate, a *fakeAPI) {
 			i := a.installations["org-b"]
 			i.Suspended = true
+			a.installations["org-b"] = i
+		}},
+		{"unknown suspension", func(c *Candidate, a *fakeAPI) {
+			i := a.installations["org-b"]
+			i.Suspended = false
+			i.SuspensionKnown = false
 			a.installations["org-b"] = i
 		}},
 		{"duplicate organization", func(c *Candidate, a *fakeAPI) { c.Organizations[1] = c.Organizations[0] }},

@@ -1,21 +1,37 @@
 name: Public CI
 
 on:
-  pull_request:
   push:
     branches:
       - main
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'go.work'
+      - 'go.work.sum'
+      - '**/go.mod'
+      - '**/go.sum'
+      - '**/go.work'
+      - '**/go.work.sum'
+      - 'LICENSE'
+      - 'docs/DEPENDENCIES.md'
+      - 'Makefile'
+      - 'scripts/**'
+      - 'experiments/**'
+      - '.github/workflows/**'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: public-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: public-ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  checks:
-    name: Go checks
+  root:
+    name: Root and tooling checks
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
@@ -25,13 +41,14 @@ jobs:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
-          cache: true
+          cache: false
           cache-dependency-path: go.mod
 
       - name: Verify toolchain
@@ -49,9 +66,6 @@ jobs:
       - name: Run unit and tooling regression tests
         run: make test
 
-      - name: Run race tests
-        run: make test-race
-
       - name: Run fuzz smoke (explicit skip when no targets exist)
         run: make fuzz-smoke
 
@@ -61,8 +75,103 @@ jobs:
       - name: Check license inventory
         run: make licenses
 
+  race:
+    name: Root race checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      # Match Make's explicit selection even if the installed default changes.
+      GOTOOLCHAIN: go1.26.8
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+          cache-dependency-path: go.mod
+
+      - name: Run race tests
+        run: make test-race
+
+  offline:
+    name: Offline experiment checks (${{ matrix.module }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - experiments/g01-scaleset
+          - experiments/g02-auth
+          - experiments/r1-credentials
+    env:
+      GOTOOLCHAIN: go1.26.8
+      OFFLINE_EXPERIMENT_MODULE: ${{ matrix.module }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+          cache-dependency-path: go.mod
+
       - name: Run reviewed offline experiment checks
         run: make experiments
 
+  vuln:
+    name: Vulnerability check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      # Match Make's explicit selection even if the installed default changes.
+      GOTOOLCHAIN: go1.26.8
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+          cache-dependency-path: go.mod
+
       - name: Run govulncheck
         run: make vuln
+
+  checks:
+    name: Go checks
+    if: ${{ always() }}
+    needs: [root, race, offline, vuln]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      ROOT_RESULT: ${{ needs.root.result }}
+      RACE_RESULT: ${{ needs.race.result }}
+      OFFLINE_RESULT: ${{ needs.offline.result }}
+      VULN_RESULT: ${{ needs.vuln.result }}
+    steps:
+      - name: Require every required job to succeed
+        run: |
+          set -eu
+          for result in "$ROOT_RESULT" "$RACE_RESULT" "$OFFLINE_RESULT" "$VULN_RESULT"; do
+            if [ "$result" != success ]; then
+              echo "required CI job did not succeed: $result" >&2
+              exit 1
+            fi
+          done
