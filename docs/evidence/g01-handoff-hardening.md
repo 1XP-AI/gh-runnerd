@@ -7,9 +7,9 @@ Base: `7e4d46e8762f327c03f1f80d726e040b9ba7f0a6`
 Scope: offline receipt acquisition, approval-bound create-prefix validation,
 and dependent G01 compile selection for G02 root metadata.
 
-This evidence is for an unpublished local candidate. It does not establish an
-immutable review SHA, PR, merge, hosted quick check, exact-head GitHub Codex
-review, or post-merge Public CI. The correction remains unconnected to a live
+This evidence is for a locally committed but unpublished candidate. It does not
+establish independent review, a PR, merge, hosted quick check, exact-head GitHub
+Codex review, or post-merge Public CI. The correction remains unconnected to a live
 controller, CLI, receipt transport, credential store, App, runner, or Scale Set.
 The full G01/G02 evidence and live-operation authorization gates remain open.
 
