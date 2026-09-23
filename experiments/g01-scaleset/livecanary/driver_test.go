@@ -3,6 +3,7 @@ package livecanary
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -10,17 +11,46 @@ import (
 )
 
 type memoryJournal struct {
+	mu     sync.Mutex
 	events []Event
 	fail   bool
 }
 
-func (j *memoryJournal) Events() []Event { return append([]Event(nil), j.events...) }
+func (j *memoryJournal) Events() []Event {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	events := make([]Event, len(j.events))
+	for i, event := range j.events {
+		events[i] = cloneEvent(event)
+	}
+	return events
+}
+
 func (j *memoryJournal) Append(e Event) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.appendLocked(e)
+}
+
+func (j *memoryJournal) withEventsLocked(fn func([]Event, func(Event) error) error) error {
+	if fn == nil {
+		return ErrJournal
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	events := make([]Event, len(j.events))
+	for i, event := range j.events {
+		events[i] = cloneEvent(event)
+	}
+	return fn(events, j.appendLocked)
+}
+
+func (j *memoryJournal) appendLocked(e Event) error {
 	if j.fail {
 		return errors.New("synthetic journal failure")
 	}
 	e.Sequence = len(j.events) + 1
-	j.events = append(j.events, e)
+	j.events = append(j.events, cloneEvent(e))
 	return nil
 }
 

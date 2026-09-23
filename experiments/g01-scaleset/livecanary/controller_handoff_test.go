@@ -833,6 +833,143 @@ func TestControllerHandoffUnknownHistoryDuringReadsCannotReachCreate(t *testing.
 	}
 }
 
+type appendAfterCreateIntentSnapshotJournal struct {
+	*FileJournal
+	injected  bool
+	appendErr error
+}
+
+func (j *appendAfterCreateIntentSnapshotJournal) Events() []Event {
+	events := j.FileJournal.Events()
+	if j.injected || len(events) == 0 {
+		return events
+	}
+	last := events[len(events)-1]
+	if last.Kind != "intent" || last.Operation != "create" {
+		return events
+	}
+	j.injected = true
+	appended := make(chan error, 1)
+	go func() {
+		appended <- j.FileJournal.Append(Event{Kind: "unknown", Operation: "create"})
+	}()
+	j.appendErr = <-appended
+	return events
+}
+
+func (j *appendAfterCreateIntentSnapshotJournal) withEventsLocked(fn func([]Event, func(Event) error) error) error {
+	return j.FileJournal.withEventsLocked(func(events []Event, appendLocked func(Event) error) error {
+		if !j.injected && len(events) != 0 {
+			last := events[len(events)-1]
+			if last.Kind == "intent" && last.Operation == "create" {
+				j.injected = true
+				unknown := Event{Sequence: len(events) + 1, Kind: "unknown", Operation: "create"}
+				j.appendErr = appendLocked(unknown)
+				if j.appendErr == nil {
+					events = append(events, unknown)
+				}
+			}
+		}
+		return fn(events, appendLocked)
+	})
+}
+
+func TestControllerHandoffCreateRechecksHistoryAtomicallyWithEffect(t *testing.T) {
+	fixture, fileJournal := openCreateControllerHandoff(t)
+	journal := &appendAfterCreateIntentSnapshotJournal{FileJournal: fileJournal}
+	fake := &fakeAPI{}
+	driver := Driver{fixture.approval, journal, handoffValidInventoryAPI{fake}}
+	err := driver.runWithHandoff(context.Background(), "create", nil)
+	if !journal.injected || journal.appendErr != nil {
+		t.Fatalf("concurrent unknown-history injection failed: injected=%v appendErr=%v", journal.injected, journal.appendErr)
+	}
+	if fake.createCalls != 0 {
+		t.Fatalf("unknown/create appended after the final history snapshot reached %d create calls", fake.createCalls)
+	}
+	if !errors.Is(err, ErrQuarantine) {
+		t.Fatalf("unknown/create appended after the final history snapshot was not quarantined: %v", err)
+	}
+}
+
+type handoffBlockingCreateAPI struct {
+	handoffValidInventoryAPI
+	started chan struct{}
+	release chan struct{}
+}
+
+func (api handoffBlockingCreateAPI) CreateScaleSet(ctx context.Context, set *scaleset.RunnerScaleSet) (*scaleset.RunnerScaleSet, error) {
+	close(api.started)
+	select {
+	case <-api.release:
+		return api.fakeAPI.CreateScaleSet(ctx, set)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func TestControllerHandoffCreateSerializesConcurrentJournalAppend(t *testing.T) {
+	fixture, journal := openCreateControllerHandoff(t)
+	fake := &fakeAPI{}
+	api := handoffBlockingCreateAPI{
+		handoffValidInventoryAPI: handoffValidInventoryAPI{fake},
+		started:                  make(chan struct{}),
+		release:                  make(chan struct{}),
+	}
+	var releaseOnce sync.Once
+	releaseCreate := func() { releaseOnce.Do(func() { close(api.release) }) }
+	defer releaseCreate()
+	driver := Driver{fixture.approval, journal, api}
+	runDone := make(chan error, 1)
+	go func() { runDone <- driver.runWithHandoff(context.Background(), "create", nil) }()
+	select {
+	case <-api.started:
+	case <-time.After(time.Second):
+		releaseCreate()
+		t.Fatal("create call did not reach the blocking fake")
+	}
+
+	appendStarted := make(chan struct{})
+	appendDone := make(chan error, 1)
+	go func() {
+		close(appendStarted)
+		appendDone <- journal.Append(Event{Kind: "unknown", Operation: "create"})
+	}()
+	<-appendStarted
+	journalLockHeld := !journal.mu.TryLock()
+	if !journalLockHeld {
+		journal.mu.Unlock()
+	}
+	appendFinishedDuringCreate := false
+	var appendErr error
+	select {
+	case err := <-appendDone:
+		appendErr = err
+		appendFinishedDuringCreate = true
+	default:
+	}
+	releaseCreate()
+	runErr := <-runDone
+	if !appendFinishedDuringCreate {
+		appendErr = <-appendDone
+	}
+	if runErr != nil {
+		t.Fatalf("serialized create failed: %v", runErr)
+	}
+	if appendErr != nil {
+		t.Fatalf("concurrent journal append failed: %v", appendErr)
+	}
+	if appendFinishedDuringCreate {
+		t.Fatal("concurrent unknown history appended while the create call was in flight")
+	}
+	if !journalLockHeld {
+		t.Fatal("create call did not retain the journal mutex across its effect boundary")
+	}
+	events := journal.Events()
+	if len(events) < 2 || events[len(events)-2].Kind != "result" || events[len(events)-2].Operation != "create" || events[len(events)-1].Kind != "unknown" || events[len(events)-1].Operation != "create" {
+		t.Fatalf("create result was not serialized before the concurrent append: %+v", events)
+	}
+}
+
 func TestControllerHandoffCreatePrefixRejectsUnrelatedAndPendingHistory(t *testing.T) {
 	for _, event := range []Event{
 		{Kind: "observation", Operation: "inspect"},

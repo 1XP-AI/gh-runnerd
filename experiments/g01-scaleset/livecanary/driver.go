@@ -65,6 +65,7 @@ type Journal interface {
 	authorize(Approval) (func(), error)
 	Events() []Event
 	Append(Event) error
+	withEventsLocked(func([]Event, func(Event) error) error) error
 }
 
 type Session interface {
@@ -380,10 +381,10 @@ func (d *Driver) cancellationFence(ctx context.Context, operation string) error 
 // result can reveal work that must survive restart, so it has the same ordering.
 // A valid create/session identity and its work category share one result record.
 func (d *Driver) effect(ctx context.Context, op string, ids []int64, call func(context.Context) (Event, error)) error {
-	return d.effectWithPreCall(ctx, op, ids, nil, call)
+	return d.effectWithIntent(ctx, op, ids, call)
 }
 
-func (d *Driver) effectWithPreCall(ctx context.Context, op string, ids []int64, preCall func() error, call func(context.Context) (Event, error)) error {
+func (d *Driver) effectWithIntent(ctx context.Context, op string, ids []int64, call func(context.Context) (Event, error)) error {
 	if err := d.cancellationFence(ctx, op); err != nil {
 		return err
 	}
@@ -397,11 +398,6 @@ func (d *Driver) effectWithPreCall(ctx context.Context, op string, ids []int64, 
 	defer cancel()
 	if err := d.cancellationFence(bounded, op); err != nil {
 		return err
-	}
-	if preCall != nil {
-		if err := preCall(); err != nil {
-			return err
-		}
 	}
 	e, err := call(bounded)
 	if err != nil {
@@ -419,6 +415,57 @@ func (d *Driver) effectWithPreCall(ctx context.Context, op string, ids []int64, 
 		return ErrQuarantine
 	}
 	return nil
+}
+
+// effectWithLockedHistory serializes the final exact-history check, the
+// external create call, and its durable result against every journal append.
+// A concurrent append is therefore either visible to the check and rejected,
+// or ordered after the create result; it cannot slip between a snapshot and
+// the API boundary.
+
+func (d *Driver) createEffectWithLockedHistory(ctx context.Context, preCall func([]Event) error, call func(context.Context) (Event, error)) error {
+	const op = "create"
+	if err := d.cancellationFence(ctx, op); err != nil {
+		return err
+	}
+	if err := d.record(Event{Kind: "intent", Operation: op}); err != nil {
+		return err
+	}
+	if err := d.cancellationFence(ctx, op); err != nil {
+		return err
+	}
+	bounded, cancel := context.WithTimeout(ctx, operationTimeout)
+	defer cancel()
+	if err := d.cancellationFence(bounded, op); err != nil {
+		return err
+	}
+	return d.Journal.withEventsLocked(func(events []Event, appendLocked func(Event) error) error {
+		if err := preCall(events); err != nil {
+			return err
+		}
+		if bounded.Err() != nil || controllerHandoffParentCanceled(ctx) {
+			if appendLocked(Event{Kind: "unknown", Operation: op}) != nil {
+				return ErrJournal
+			}
+			return ErrQuarantine
+		}
+		e, err := call(bounded)
+		if err != nil {
+			if appendLocked(Event{Kind: "unknown", Operation: op}) != nil {
+				return ErrJournal
+			}
+			return ErrQuarantine
+		}
+		e.Kind = "result"
+		e.Operation = op
+		if appendLocked(e) != nil {
+			return ErrJournal
+		}
+		if e.Work == workUnresolved {
+			return ErrQuarantine
+		}
+		return nil
+	})
 }
 
 func boundedRead[T any](ctx context.Context, read func(context.Context) (T, error)) (T, error) {
@@ -540,8 +587,8 @@ func (d *Driver) runWithHandoff(ctx context.Context, phase string, proof *contro
 		if validateCreatePreEffectHistory(d.Approval, d.Journal, ctx, proof, inventory, false, d.Journal.Events()) != nil {
 			return ErrQuarantine
 		}
-		return d.effectWithPreCall(ctx, "create", nil, func() error {
-			return validateCreatePreEffectHistory(d.Approval, d.Journal, ctx, proof, inventory, true, d.Journal.Events())
+		return d.createEffectWithLockedHistory(ctx, func(events []Event) error {
+			return validateCreatePreEffectHistory(d.Approval, d.Journal, ctx, proof, inventory, true, events)
 		}, func(c context.Context) (Event, error) {
 			set, err := d.API.CreateScaleSet(c, &scaleset.RunnerScaleSet{Name: d.Approval.setName(), RunnerGroupID: d.Approval.RunnerGroupID, Labels: []scaleset.Label{{Name: d.Approval.setName(), Type: "System"}}, RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true}})
 			if err != nil || set == nil || set.ID <= 0 || set.Name != d.Approval.setName() || set.RunnerGroupID != d.Approval.RunnerGroupID || !set.RunnerSetting.DisableUpdate {

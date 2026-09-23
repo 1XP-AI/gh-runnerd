@@ -52,6 +52,24 @@ produced its expected failure:
   and a nil error. The correction checks the exact phase/inventory/discovery
   event grammar after those reads and again after the durable create intent,
   immediately before the API call.
+- A fresh independent security/recovery review of exact HEAD
+  `1c98292c40cb67e1e766228c5826c29edfd05c0f` found a second P1 window: the
+  final `Events()` snapshot released `FileJournal.mu` before
+  `CreateScaleSet`, allowing a concurrent same-process `Append` to persist
+  `unknown/create` between validation and the call. The reviewer identified
+  this interleaving by source inspection and had not dynamically reproduced it.
+  `TestControllerHandoffCreateRechecksHistoryAtomicallyWithEffect` was added
+  before the source correction and failed on that source with one fake Create
+  call. Its append runs concurrently after the snapshot but before the
+  validation callback returns. Exact red command from
+  `experiments/g01-scaleset`:
+
+  ```text
+  GOTOOLCHAIN=go1.26.8 GOWORK=off go test -count=1 -timeout=30s -run '^TestControllerHandoffCreateRechecksHistoryAtomicallyWithEffect$' ./livecanary
+  ```
+
+  Observed failure: `unknown/create appended after the final history snapshot
+  reached 1 create calls`.
 
 These are synthetic offline tests and controlled source mutations; no remote
 operation was attempted. The create-prefix mutations are regression evidence,
@@ -73,6 +91,14 @@ not evidence that those tests were originally run on the unchanged main source.
   event, and current per-open journal identity. Both create gates use the same
   exact event grammar. Unknown, pending, replayed, mismatched, expired,
   canceled, or reopened proof paths stay quarantined.
+- The final create-history check, `CreateScaleSet` call, and durable create
+  result are serialized under the journal event mutex. A concurrent append is
+  therefore either in the locked snapshot and rejected or ordered after the
+  create result; it cannot land between the check and call. This is cooperative
+  same-process serialization, not hostile-code isolation. The journal append
+  mutex remains held across the bounded Create API call, so the adapter must
+  honor its operation context and concurrent journal writers wait for the call
+  to return.
 - The PR quick-check path predicate selects G01 for G02 handoff code and root
   `go.mod`/`go.sum` changes, with positive and near-miss negative path tests.
 
@@ -88,23 +114,53 @@ GOTOOLCHAIN=go1.26.8 GOWORK=off go test -count=1 -timeout=30s -run '^(TestG01Wor
 git diff --check
 ```
 
-The commands above passed after the create-boundary correction. The final
-changed-boundary race check also passed:
+The commands above passed after the first create-boundary correction. After
+the additional journal-append serialization fix, these checks also passed:
 
 ```text
 cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 GOWORK=off go test -count=1 -timeout=120s ./...
 GOTOOLCHAIN=go1.26.8 GOWORK=off go test -race -count=1 -timeout=120s ./livecanary
+
+cd <repository-root>
+GOTOOLCHAIN=go1.26.8 GOWORK=off go test -count=1 -timeout=30s -run '^(TestG01WorkflowModuleSelectionPredicate|TestPullRequestQuickWorkflowContract)$' ./scripts
+git diff --check
 ```
+
+The new interleaving regression was red on the pre-fix source with one fake
+Create call, then passed after the locked-history correction. The separate
+concurrent-append test verifies a writer cannot append while Create is in
+flight and that the create result is durable first. No full repository matrix
+was run. No workflow was dispatched or replayed. Public CI on the base SHA is
+not candidate evidence.
+
+The two changed-boundary tests were also repeated 20 times:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 GOWORK=off go test -count=20 -timeout=120s -run '^TestControllerHandoffCreate(RechecksHistoryAtomicallyWithEffect|SerializesConcurrentJournalAppend)$' ./livecanary
+```
+
+They passed in 2.048s; the same two tests passed under `-race` in 1.468s.
 
 No full repository matrix was run. No workflow was dispatched or replayed.
 Public CI on the base SHA is not candidate evidence.
 
 ## Review and remaining gates
 
-The independent GPT-6-Luna max contract review of the prior candidate found the
-P1 described above. Its correction has a failing-then-passing synthetic test;
-fresh exact-head contract and security/recovery delta reviews of the corrected
-candidate remain pending. No finding is claimed resolved by writer tests alone.
+The independent GPT-6-Luna max contract review of exact HEAD
+`1c98292c40cb67e1e766228c5826c29edfd05c0f` reported no new P0-P3 findings and
+confirmed the synchronous Inventory/Discovery P1 was resolved. The independent
+security/recovery review of that same exact HEAD confirmed those synchronous
+cases but found the additional concurrent-append P1 above. The new regression
+reproduced it against the pre-fix source, and source plus the serializing test
+were added afterward. Fresh exact-head contract and security/recovery reviews
+of the new candidate are still required; writer tests alone do not close the
+finding.
+
+The security/recovery reviewer ran
+`GOTOOLCHAIN=go1.26.8 GOWORK=off go test -race -count=1 -timeout=120s -run '^TestControllerHandoff' ./livecanary` on the reviewed
+HEAD; it passed in 3.159s but did not exercise the identified interleaving.
 
 The independent GPT-6-Luna max security/recovery review of the prior candidate
 also reported one P2: because the durable nonce is intentionally committed
