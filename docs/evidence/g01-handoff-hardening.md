@@ -7,9 +7,11 @@ Base: `7e4d46e8762f327c03f1f80d726e040b9ba7f0a6`
 Scope: offline receipt acquisition, approval-bound create-prefix validation,
 and dependent G01 compile selection for G02 root metadata.
 
-This evidence is for a locally committed but unpublished candidate. It does not
-establish independent review, a PR, merge, hosted quick check, exact-head GitHub
-Codex review, or post-merge Public CI. The correction remains unconnected to a live
+This evidence is for a locally committed but unpublished candidate. Independent
+GPT-6-Luna max contract and security/recovery reviews completed on exact HEAD
+`cf9ace198bb1cf36bbc01dc6e71744aacf5a32d9`; neither found an open P0/P1. This
+does not establish a PR, merge, hosted quick check, exact-head GitHub Codex
+review, or post-merge Public CI. The correction remains unconnected to a live
 controller, CLI, receipt transport, credential store, App, runner, or Scale Set.
 The full G01/G02 evidence and live-operation authorization gates remain open.
 
@@ -194,9 +196,41 @@ PR-workflow-contract checks; `git diff --check` passed and the worktree was
 clean. The security/recovery reviewer passed the same two changed-boundary
 tests under `-race` in 1.366s and also verified a clean exact HEAD. Neither ran
 the full module suite or live operations; the coordinator's full module and
-`livecanary` race results are recorded above. The new API contract comment and
-this disposition were added after those reviews, so another exact-head delta
-review remains required.
+`livecanary` race results are recorded above.
+
+Fresh independent contract and security/recovery delta reviews then verified
+the API-contract/evidence-only change at exact HEAD
+`cf9ace198bb1cf36bbc01dc6e71744aacf5a32d9`, with a clean worktree. Both found
+no open P0/P1 and confirmed the concurrent-append P1 remains resolved. The
+contract reviewer retained a conditional P2 classification for a violating
+reentrant adapter; the security reviewer classified that same source-inferred
+hazard as P3 and accepted it for the configured `SDKAPI`, which has no Journal
+reference. Both reviews retained the fail-closed P2 limitation that credential
+input failure after durable nonce consumption burns that journal's signed-create
+slot. These limits are accepted only for this offline, unconnected slice; the
+reentry contract and future recovery gate remain explicit. Since this final
+review delta changed only an API comment and evidence, the reviewers ran no
+tests. Their exact-head dispositions were recorded in the [#94 update](https://github.com/1XP-AI/gh-runnerd/issues/94#issuecomment-5792259911).
+
+The coordinator revalidated exact HEAD `cf9ace198bb1cf36bbc01dc6e71744aacf5a32d9`
+on 2026-09-23. From `experiments/g01-scaleset`, these both passed:
+
+```text
+GOTOOLCHAIN=go1.26.8 GOWORK=off go test -count=1 -timeout=120s ./...
+GOTOOLCHAIN=go1.26.8 GOWORK=off go test -race -count=1 -timeout=120s ./livecanary
+```
+
+From the repository root, the metadata-selection and PR-workflow-contract tests
+also passed:
+
+```text
+GOTOOLCHAIN=go1.26.8 GOWORK=off go test -count=1 -timeout=30s -run '^(TestG01WorkflowModuleSelectionPredicate|TestPullRequestQuickWorkflowContract)$' ./scripts
+git diff --check 7e4d46e8762f327c03f1f80d726e040b9ba7f0a6...HEAD
+```
+
+The worktree was clean after these checks. This does not include the full
+repository matrix, hosted PR quick check, GitHub Codex review, live operations,
+or post-merge Public CI.
 
 The independent GPT-6-Luna max security/recovery review of the prior candidate
 also reported one P2: because the durable nonce is intentionally committed
