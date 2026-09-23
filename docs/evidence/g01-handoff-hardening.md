@@ -100,10 +100,15 @@ GitHub Codex reviewed exact head
   for worktree agents; this is the task-local user setting referenced by the
   final “Do not override an explicit current user setting” instruction in
   `AGENTS.md`, while `docs/EXECUTION.md` continues to describe GPT-5.6-Luna max
-  as the repository default and canonical route. The attribution is therefore
-  not silently relabeled. Fresh review-task launch requests must specify
-  `gpt-6-luna`/`max`, and the effective launch model/effort must be verified
-  before their findings count as review evidence.
+  as the repository default and canonical route. The user's task-local
+  instruction was “use GPT-6-Luna max for worktree work”; it did not change the
+  repository-wide default. Orca's supervised model/effort preflight rejected
+  `gpt-6-luna`/`max` as unsupported, so no worker was claimed from that failed
+  request. The reviews were then launched through Orca-managed Codex terminals
+  with `codex --model gpt-6-luna -c model_reasoning_effort="max"`; both
+  terminal previews displayed `GPT-6-Luna · max`, and their dispatch records
+  identified provider `codex`, model `gpt-6-luna`. Thus the effective route and
+  historical attribution were checked rather than relabeled.
 - **P2, hosted workflow omitted its path-predicate regression test**
   ([finding](https://github.com/1XP-AI/gh-runnerd/pull/97#discussion_r4082160691)).
   `TestPullRequestQuickWorkflowContract` now requires
@@ -138,6 +143,43 @@ timeout did **not** pass: it timed out in the unrelated
 tooling process. The hosted workflow invokes only the three named contract
 tests above; the timeout is retained as an unpassed broader-suite result, not
 reported as a regression pass.
+
+Fresh independent GPT-6-Luna max contract and security/recovery reviews then
+read exact HEAD `39221a7959f9ad7da10776dde4fc511bbec02520` with no edits. The
+contract review passed the new real-journal regression 20 times and the three
+hosted workflow contract tests; it confirmed the failed-append P1 and workflow
+selector P2 are resolved, with no actionable source finding. It separately
+questioned whether the task-local model override and effective route were
+evidenced against the repository default. Coordinator triage: this was an
+explicit current-user instruction, `AGENTS.md` says not to override such a
+setting, and the actual terminal metadata/previews and dispatch records above
+confirm GPT-6-Luna max. The evidence preserves GPT-5.6-Luna max as the
+repository-wide default and records GPT-6 only for this user-directed work; no
+repository-wide model-policy change is implied.
+
+The independent security/recovery review found no actionable P0-P3 source
+finding on that exact HEAD. It passed focused journal/create replay tests, the
+same tests under `-race`, and the three workflow contract tests. It source-
+traced that failed result append/fsync remains fail-closed but did not inject
+that post-effect failure; there is no automatic reconciliation for an already
+created remote Scale Set if local result durability fails. The bounded offline
+slice retains this limitation and the documented no-synchronous-journal-
+reentry adapter contract; no live operation or credential access was performed.
+
+Reviewer-run commands on that exact source HEAD:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 GOWORK=off go test -count=20 -timeout=60s -run '^TestFailedConcurrentAppendStopsBeforeRealJournalCreate$' ./livecanary
+GOTOOLCHAIN=go1.26.8 GOWORK=off go test -count=1 -timeout=45s -run '^(TestFailedConcurrentAppendStopsBeforeRealJournalCreate|TestControllerHandoffCreateSerializesConcurrentJournalAppend|TestControllerHandoffAmbiguousCreateOutcomeIsNeverRetried|TestAmbiguousCreateNeverRetriesAfterRestart)$' ./livecanary
+GOTOOLCHAIN=go1.26.8 GOWORK=off go test -race -count=1 -timeout=45s -run '^(TestFailedConcurrentAppendStopsBeforeRealJournalCreate|TestControllerHandoffCreateSerializesConcurrentJournalAppend|TestControllerHandoffAmbiguousCreateOutcomeIsNeverRetried)$' ./livecanary
+
+cd <repository-root>
+GOTOOLCHAIN=go1.26.8 GOWORK=off go test -count=1 -timeout=30s -run '^(TestPublicWorkflowCapacityContract|TestPullRequestQuickWorkflowContract|TestG01WorkflowModuleSelectionPredicate)$' ./scripts
+```
+
+All four reviewer-run commands passed; the first was repeated 20 times. The
+source review SHA predates only this evidence-only update.
 
 ## Implemented contract and checks
 
@@ -309,10 +351,12 @@ or authorized here. The reviewer also noted that the legacy no-proof
 accepted offline slice, not production signed-handoff enforcement.
 
 The maintainer authorized pushing this correction and opening PR #97, but did
-not authorize merge. Obtain fresh independent contract and security/recovery
-reviews on the corrected exact head, push the reviewed candidate, wait for its
-hosted PR quick check, then request and complete GitHub Codex review of that
-exact pushed head. Record all new finding triage before asking about merge
+not authorize merge. The fresh independent contract and security/recovery
+reviews above cover the source correction at exact HEAD
+`39221a7959f9ad7da10776dde4fc511bbec02520`; the subsequent evidence-only
+update must be pushed together with the source correction. Wait for the hosted
+PR quick check, then request and complete GitHub Codex review of the exact
+pushed head. Record all new finding triage before asking about merge
 authorization. Only a separately authorized, reviewed merge can produce the
 automatic main Public CI evidence.
 
