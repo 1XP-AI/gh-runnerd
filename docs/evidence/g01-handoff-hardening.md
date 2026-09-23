@@ -181,6 +181,28 @@ GOTOOLCHAIN=go1.26.8 GOWORK=off go test -count=1 -timeout=30s -run '^(TestPublic
 All four reviewer-run commands passed; the first was repeated 20 times. The
 source review SHA predates only this evidence-only update.
 
+## Published PR result
+
+At PR head `2ba7010cea8f27ec465730afbda8ce8e2c24ba47`, the hosted PR Go checks
+passed ([run](https://github.com/1XP-AI/gh-runnerd/actions/runs/35861088783)).
+GitHub Codex completed review of that exact head and reported no major issues
+([review result](https://github.com/1XP-AI/gh-runnerd/pull/97#issuecomment-5794938014)).
+The earlier P1 failed-journal finding is fixed and has a red/green regression
+([finding](https://github.com/1XP-AI/gh-runnerd/pull/97#discussion_r4082160685),
+[disposition](https://github.com/1XP-AI/gh-runnerd/pull/97#discussion_r4082493253)).
+The earlier P1 model-route finding is rebutted as a task-local explicit user
+override with the effective GPT-6-Luna max route recorded above
+([finding](https://github.com/1XP-AI/gh-runnerd/pull/97#discussion_r4082160672),
+[disposition](https://github.com/1XP-AI/gh-runnerd/pull/97#discussion_r4082493265)).
+The earlier P2 hosted-selector finding is fixed and the exact workflow
+expression is tested
+([finding](https://github.com/1XP-AI/gh-runnerd/pull/97#discussion_r4082160691),
+[disposition](https://github.com/1XP-AI/gh-runnerd/pull/97#discussion_r4082493256)).
+All three original inline findings were authored on `b53820a6a59850ad85943ebc5e5b1bb1547fc3f5`; the latest exact-head review added no major finding.
+
+The Project item for #94 remains **In review**. PR #97 is open and unmerged;
+merge authorization has not been given. No post-merge Public CI evidence exists.
+
 ## Implemented contract and checks
 
 - Receipt input is a concrete private source: bounded memory bytes for offline
@@ -351,14 +373,15 @@ or authorized here. The reviewer also noted that the legacy no-proof
 accepted offline slice, not production signed-handoff enforcement.
 
 The maintainer authorized pushing this correction and opening PR #97, but did
-not authorize merge. The fresh independent contract and security/recovery
-reviews above cover the source correction at exact HEAD
-`39221a7959f9ad7da10776dde4fc511bbec02520`; the subsequent evidence-only
-update must be pushed together with the source correction. Wait for the hosted
-PR quick check, then request and complete GitHub Codex review of the exact
-pushed head. Record all new finding triage before asking about merge
-authorization. Only a separately authorized, reviewed merge can produce the
-automatic main Public CI evidence.
+not authorize merge. The source correction at
+`39221a7959f9ad7da10776dde4fc511bbec02520` has fresh independent contract and
+security/recovery reviews; PR head `2ba7010cea8f27ec465730afbda8ce8e2c24ba47`
+has a passing hosted quick check and exact-head Codex review with no major
+issues. This evidence-only record will advance the branch head, so obtain a
+fresh exact-head Codex review after publishing it; the source is unchanged and
+the repository filters documentation-only pushes from PR checks. Keep #94 In
+review and do not merge until the maintainer separately authorizes it. Only an
+authorized merge can produce the automatic main Public CI evidence.
 
 The previous HOLD draft `2b40bd6` remains preserved on its original branch.
 No credential access, App/token enrollment, live runner/Scale Set operation,
