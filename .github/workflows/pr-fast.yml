@@ -88,7 +88,7 @@ jobs:
 
       - name: Run workflow contract tests
         if: steps.scope.outputs.workflow == 'true'
-        run: GOTOOLCHAIN="$GOTOOLCHAIN" go test -run '^(TestPublicWorkflowCapacityContract|TestPullRequestQuickWorkflowContract)$' -count=1 ./scripts
+        run: GOTOOLCHAIN="$GOTOOLCHAIN" go test -run '^(TestPublicWorkflowCapacityContract|TestPullRequestQuickWorkflowContract|TestG01WorkflowModuleSelectionPredicate)$' -count=1 ./scripts
 
       - name: Compile changed offline modules without executing the suite
         if: steps.scope.outputs.go == 'true'
@@ -98,7 +98,7 @@ jobs:
           changed="$(git diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA")"
           for module in experiments/g01-scaleset experiments/g02-auth experiments/r1-credentials; do
             if [[ "$module" == "experiments/g01-scaleset" ]]; then
-              module_change_pattern='^(experiments/g01-scaleset/|experiments/g02-auth/handoff/)'
+              module_change_pattern='^(experiments/g01-scaleset/|experiments/g02-auth/handoff/|experiments/g02-auth/(go\.mod|go\.sum)$)'
             else
               module_change_pattern="^${module}/"
             fi

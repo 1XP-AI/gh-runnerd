@@ -375,6 +375,31 @@ func (j *FileJournal) Events() []Event {
 	}
 	return events
 }
+
+// withEventsLocked keeps the history snapshot and any callback-owned appends
+// under the same mutex. Create uses it across its final pre-effect check,
+// remote call, and durable result so concurrent appends cannot invalidate the
+// checked prefix before the effect begins.
+func (j *FileJournal) withEventsLocked(fn func([]Event, func(Event) error) error) error {
+	if fn == nil {
+		return ErrJournal
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.writeFailed {
+		return ErrJournal
+	}
+	events := make([]Event, len(j.events))
+	for i, event := range j.events {
+		events[i] = cloneEvent(event)
+	}
+	appendLocked := func(event Event) error {
+		_, err := j.appendStored(event)
+		return err
+	}
+	return fn(events, appendLocked)
+}
+
 func (j *FileJournal) Close() error {
 	j.life.Lock()
 	defer j.life.Unlock()

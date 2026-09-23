@@ -9,13 +9,16 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/1XP-AI/gh-runnerd/experiments/g02-auth/handoff"
+	"github.com/actions/scaleset"
 )
 
 func TestControllerHandoffConsumptionEventHasStrictTypedJournalShape(t *testing.T) {
@@ -139,7 +142,7 @@ func requireHandoffReaderUntouched(t *testing.T, approvalSnapshot []byte, phase,
 	}
 	defer journal.Close()
 	reads := 0
-	_, err = consumeControllerHandoff(context.Background(), journal, approvalSnapshot, phase, source, bytes.NewReader(receiptBytes), root, func() time.Time { return now }, func(context.Context) ([]byte, error) {
+	_, err = consumeControllerHandoff(context.Background(), journal, approvalSnapshot, phase, source, newControllerHandoffMemorySource(receiptBytes), root, func() time.Time { return now }, func(context.Context) ([]byte, error) {
 		reads++
 		return []byte("synthetic-credential"), nil
 	})
@@ -284,7 +287,7 @@ func TestControllerHandoffRejectsParserTrustAndTupleFailuresBeforeReader(t *test
 				modifiedApproval.WorkflowRunID = 0
 			}
 			var reads int
-			_, err := consumeControllerHandoff(context.Background(), nil, controllerHandoffSnapshot(t, modifiedApproval), "before-ack", "signed-fixture-v1", bytes.NewReader(valid), fixture.root, func() time.Time { return fixture.now }, func(context.Context) ([]byte, error) { reads++; return nil, nil })
+			_, err := consumeControllerHandoff(context.Background(), nil, controllerHandoffSnapshot(t, modifiedApproval), "before-ack", "signed-fixture-v1", newControllerHandoffMemorySource(valid), fixture.root, func() time.Time { return fixture.now }, func(context.Context) ([]byte, error) { reads++; return nil, nil })
 			if err == nil || reads != 0 {
 				t.Fatal("request lacking run/ref crossed the credential boundary")
 			}
@@ -304,7 +307,7 @@ func TestControllerHandoffFsyncsBeforeReadAndConsumesNonceGlobally(t *testing.T)
 		syncs++
 		return file.Sync()
 	}
-	credentials, err := consumeControllerHandoff(context.Background(), journal, fixture.snapshot, "before-ack", "signed-fixture-v1", bytes.NewReader(fixture.receiptBytes), fixture.root, func() time.Time { return fixture.now }, func(context.Context) ([]byte, error) {
+	credentials, err := consumeControllerHandoff(context.Background(), journal, fixture.snapshot, "before-ack", "signed-fixture-v1", newControllerHandoffMemorySource(fixture.receiptBytes), fixture.root, func() time.Time { return fixture.now }, func(context.Context) ([]byte, error) {
 		if syncs != 1 {
 			t.Fatalf("credential reader ran before receipt fsync: syncs=%d", syncs)
 		}
@@ -332,14 +335,14 @@ func TestControllerHandoffFsyncsBeforeReadAndConsumesNonceGlobally(t *testing.T)
 	defer reopened.Close()
 	reads := 0
 	reader := func(context.Context) ([]byte, error) { reads++; return []byte("synthetic-credential"), nil }
-	if _, err := consumeControllerHandoff(context.Background(), reopened, fixture.snapshot, "before-ack", "signed-fixture-v1", bytes.NewReader(fixture.receiptBytes), fixture.root, func() time.Time { return fixture.now }, reader); err == nil || reads != 0 {
+	if _, err := consumeControllerHandoff(context.Background(), reopened, fixture.snapshot, "before-ack", "signed-fixture-v1", newControllerHandoffMemorySource(fixture.receiptBytes), fixture.root, func() time.Time { return fixture.now }, reader); err == nil || reads != 0 {
 		t.Fatal("same nonce replay crossed reader after reopen")
 	}
 	otherPhaseRequest := fixture.request
 	otherPhaseRequest.Phase = "after-ack"
 	otherPhaseReceipt := signedControllerReceipt(t, otherPhaseRequest, fixture.now, fixture.receipt.ReceiptNonce, fixture.privateKey)
 	otherPhaseBytes, _ := json.Marshal(otherPhaseReceipt)
-	if _, err := consumeControllerHandoff(context.Background(), reopened, fixture.snapshot, "after-ack", "signed-fixture-v1", bytes.NewReader(otherPhaseBytes), fixture.root, func() time.Time { return fixture.now }, reader); err == nil || reads != 0 {
+	if _, err := consumeControllerHandoff(context.Background(), reopened, fixture.snapshot, "after-ack", "signed-fixture-v1", newControllerHandoffMemorySource(otherPhaseBytes), fixture.root, func() time.Time { return fixture.now }, reader); err == nil || reads != 0 {
 		t.Fatal("same nonce under a different phase crossed reader after reopen")
 	}
 	if got := reopened.Events(); len(got) != 1 {
@@ -350,7 +353,7 @@ func TestControllerHandoffFsyncsBeforeReadAndConsumesNonceGlobally(t *testing.T)
 	if err != nil {
 		t.Fatal("marshal fresh same-phase receipt")
 	}
-	if got, err := consumeControllerHandoff(context.Background(), reopened, fixture.snapshot, "before-ack", "signed-fixture-v1", bytes.NewReader(freshNonceBytes), fixture.root, func() time.Time { return fixture.now }, reader); err != nil || string(got) != "synthetic-credential" || reads != 1 {
+	if got, err := consumeControllerHandoff(context.Background(), reopened, fixture.snapshot, "before-ack", "signed-fixture-v1", newControllerHandoffMemorySource(freshNonceBytes), fixture.root, func() time.Time { return fixture.now }, reader); err != nil || string(got) != "synthetic-credential" || reads != 1 {
 		t.Fatalf("fresh nonce in an already-consumed phase was incorrectly claimed exactly once: credentials=%q reads=%d err=%v", got, reads, err)
 	}
 	_ = credentials
@@ -374,7 +377,7 @@ func TestControllerHandoffRejectsSecondOpenerAndParallelSameHandle(t *testing.T)
 	var readerCalls int
 	var mu sync.Mutex
 	go func() {
-		_, err := consumeControllerHandoff(context.Background(), journal, fixture.snapshot, "before-ack", "signed-fixture-v1", bytes.NewReader(fixture.receiptBytes), fixture.root, func() time.Time { return fixture.now }, func(context.Context) ([]byte, error) {
+		_, err := consumeControllerHandoff(context.Background(), journal, fixture.snapshot, "before-ack", "signed-fixture-v1", newControllerHandoffMemorySource(fixture.receiptBytes), fixture.root, func() time.Time { return fixture.now }, func(context.Context) ([]byte, error) {
 			mu.Lock()
 			readerCalls++
 			mu.Unlock()
@@ -385,8 +388,15 @@ func TestControllerHandoffRejectsSecondOpenerAndParallelSameHandle(t *testing.T)
 		firstDone <- err
 	}()
 	<-started
+	releaseLease, leaseErr := journal.authorize(fixture.approval)
+	if leaseErr != nil {
+		close(release)
+		<-firstDone
+		t.Fatalf("credential callback retained the journal lifecycle lease: %v", leaseErr)
+	}
+	releaseLease()
 	var secondReads int
-	if _, err := consumeControllerHandoff(context.Background(), journal, fixture.snapshot, "before-ack", "signed-fixture-v1", bytes.NewReader(fixture.receiptBytes), fixture.root, func() time.Time { return fixture.now }, func(context.Context) ([]byte, error) {
+	if _, err := consumeControllerHandoff(context.Background(), journal, fixture.snapshot, "before-ack", "signed-fixture-v1", newControllerHandoffMemorySource(fixture.receiptBytes), fixture.root, func() time.Time { return fixture.now }, func(context.Context) ([]byte, error) {
 		secondReads++
 		return nil, nil
 	}); err == nil || secondReads != 0 {
@@ -439,7 +449,7 @@ func TestControllerHandoffCancellationAndExpirySuppressReaderResults(t *testing.
 				}
 				return secretBuffer, nil
 			}
-			credentials, err := consumeControllerHandoff(ctx, journal, fixture.snapshot, "before-ack", "signed-fixture-v1", bytes.NewReader(fixture.receiptBytes), fixture.root, func() time.Time { return currentTime }, read)
+			credentials, err := consumeControllerHandoff(ctx, journal, fixture.snapshot, "before-ack", "signed-fixture-v1", newControllerHandoffMemorySource(fixture.receiptBytes), fixture.root, func() time.Time { return currentTime }, read)
 			if testCase == "cancel before reader" || testCase == "receipt expires before reader" {
 				if err == nil || readerCalls != 0 {
 					t.Fatalf("authorization ended before reader but read proceeded: calls=%d err=%v", readerCalls, err)
@@ -506,7 +516,7 @@ func TestControllerHandoffJournalFailuresDenyBeforeReader(t *testing.T) {
 				}
 			}
 			reads := 0
-			_, err = consumeControllerHandoff(context.Background(), journal, fixture.snapshot, "before-ack", "signed-fixture-v1", bytes.NewReader(fixture.receiptBytes), fixture.root, func() time.Time { return fixture.now }, func(context.Context) ([]byte, error) {
+			_, err = consumeControllerHandoff(context.Background(), journal, fixture.snapshot, "before-ack", "signed-fixture-v1", newControllerHandoffMemorySource(fixture.receiptBytes), fixture.root, func() time.Time { return fixture.now }, func(context.Context) ([]byte, error) {
 				reads++
 				return []byte("synthetic-credential"), nil
 			})
@@ -531,7 +541,7 @@ func TestControllerHandoffJournalFailuresDenyBeforeReader(t *testing.T) {
 					t.Fatalf("reopen sync-failure journal without rollback: %v", err)
 				}
 				defer reopened.Close()
-				if _, err := consumeControllerHandoff(context.Background(), reopened, fixture.snapshot, "before-ack", "signed-fixture-v1", bytes.NewReader(fixture.receiptBytes), fixture.root, func() time.Time { return fixture.now }, func(context.Context) ([]byte, error) {
+				if _, err := consumeControllerHandoff(context.Background(), reopened, fixture.snapshot, "before-ack", "signed-fixture-v1", newControllerHandoffMemorySource(fixture.receiptBytes), fixture.root, func() time.Time { return fixture.now }, func(context.Context) ([]byte, error) {
 					reads++
 					return nil, nil
 				}); err == nil || reads != 0 {
@@ -539,5 +549,569 @@ func TestControllerHandoffJournalFailuresDenyBeforeReader(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func newTestPipeControllerHandoffSource() (*controllerHandoffReceiptSource, *io.PipeWriter) {
+	reader, writer := io.Pipe()
+	return &controllerHandoffReceiptSource{pipeReader: reader, pipeWriter: writer}, writer
+}
+
+func TestControllerHandoffCancellationClosesOwnedSourceAndReleasesLease(t *testing.T) {
+	fixture := newControllerHandoffFixture(t, "before-ack")
+	journal, err := openTestJournal(t, privateDir(t), fixture.approval)
+	if err != nil {
+		t.Fatal("open synthetic journal")
+	}
+	defer journal.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	source, writer := newTestPipeControllerHandoffSource()
+	firstWrite := make(chan error, 1)
+	go func() {
+		_, err := writer.Write([]byte("receipt-prefix"))
+		firstWrite <- err
+	}()
+	done := make(chan error, 1)
+	go func() {
+		_, err := consumeControllerHandoff(ctx, journal, fixture.snapshot, "before-ack", "signed-fixture-v1", source, fixture.root, func() time.Time { return fixture.now }, func(context.Context) ([]byte, error) {
+			return []byte("synthetic-credential"), nil
+		})
+		done <- err
+	}()
+	select {
+	case err := <-firstWrite:
+		if err != nil {
+			cancel()
+			t.Fatalf("owned test pipe did not reach the receipt reader: %v", err)
+		}
+	case <-time.After(time.Second):
+		cancel()
+		source.close()
+		t.Fatal("receipt source was not reached")
+	}
+
+	cancel()
+	var consumeErr error
+	select {
+	case consumeErr = <-done:
+	case <-time.After(500 * time.Millisecond):
+		source.close()
+		<-done
+		t.Fatal("cancellation did not close and join the owned receipt source")
+	}
+	if consumeErr == nil {
+		t.Fatal("canceled receipt acquisition was not refused")
+	}
+	if _, writeErr := writer.Write([]byte("after-cancel")); writeErr == nil {
+		t.Fatal("owned pipe writer remained open after cancellation")
+	}
+	release, err := journal.authorize(fixture.approval)
+	if err != nil {
+		t.Fatalf("canceled receipt acquisition retained its lifecycle lease: %v", err)
+	}
+	release()
+}
+
+func TestControllerHandoffPreReadRefusalClosesOwnedPipe(t *testing.T) {
+	fixture := newControllerHandoffFixture(t, "before-ack")
+	journal, err := openTestJournal(t, privateDir(t), fixture.approval)
+	if err != nil {
+		t.Fatal("open synthetic journal")
+	}
+	defer journal.Close()
+
+	source, writer := newTestPipeControllerHandoffSource()
+	writerDone := make(chan error, 1)
+	go func() {
+		_, err := writer.Write([]byte("synthetic-receipt"))
+		writerDone <- err
+	}()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, consumeErr := consumeControllerHandoff(ctx, journal, fixture.snapshot, "before-ack", "signed-fixture-v1", source, fixture.root, func() time.Time { return fixture.now }, func(context.Context) ([]byte, error) {
+		t.Fatal("pre-read refusal crossed the credential boundary")
+		return nil, nil
+	})
+	if consumeErr == nil {
+		source.close()
+		t.Fatal("canceled receipt acquisition was accepted")
+	}
+	select {
+	case err := <-writerDone:
+		if err == nil {
+			t.Fatal("owned pipe unexpectedly accepted receipt bytes")
+		}
+	case <-time.After(500 * time.Millisecond):
+		source.close()
+		<-writerDone
+		t.Fatal("pre-read refusal left the owned receipt pipe open")
+	}
+}
+
+func openCreateControllerHandoff(t *testing.T) (controllerHandoffFixture, *FileJournal) {
+	t.Helper()
+	now := time.Now().UTC().Truncate(time.Second)
+	approval := controllerHandoffApprovalAt(now)
+	approval.Phases = []string{"create", "before-ack", "after-ack"}
+	fixture := controllerHandoffFixtureForApproval(t, approval, "create", now)
+	journal, err := openTestJournal(t, privateDir(t), fixture.approval)
+	if err != nil {
+		t.Fatal("open synthetic create journal")
+	}
+	t.Cleanup(func() { _ = journal.Close() })
+	return fixture, journal
+}
+
+func consumeCreateControllerHandoff(t *testing.T, fixture controllerHandoffFixture, journal *FileJournal, parent context.Context) controllerHandoffProof {
+	t.Helper()
+	_, proof, err := consumeControllerHandoffWithProof(parent, journal, fixture.snapshot, "create", "signed-fixture-v1", newControllerHandoffMemorySource(fixture.receiptBytes), fixture.root, func() time.Time { return fixture.now }, func(context.Context) ([]byte, error) {
+		return []byte("synthetic-credential"), nil
+	})
+	if err != nil {
+		t.Fatalf("valid create handoff setup failed: %v", err)
+	}
+	return proof
+}
+
+func TestControllerHandoffCreatePrefixAllowsVerifiedCreate(t *testing.T) {
+	fixture, journal := openCreateControllerHandoff(t)
+	proof := consumeCreateControllerHandoff(t, fixture, journal, context.Background())
+	fake := &fakeAPI{}
+	driver := Driver{fixture.approval, journal, handoffValidInventoryAPI{fake}}
+	if err := driver.runWithHandoff(context.Background(), "create", &proof); err != nil {
+		t.Fatalf("verified create handoff was rejected: %v", err)
+	}
+	if fake.createCalls != 1 {
+		t.Fatalf("verified create made %d create calls, want 1", fake.createCalls)
+	}
+}
+
+func TestControllerHandoffCreatePrefixRejectsProofMismatchesBeforeEffects(t *testing.T) {
+	for _, testCase := range []struct {
+		name    string
+		mutate  func(*controllerHandoffProof)
+		cancel  bool
+		missing bool
+	}{
+		{name: "missing proof", missing: true},
+		{name: "zero proof", mutate: func(proof *controllerHandoffProof) { *proof = controllerHandoffProof{} }},
+		{name: "raw approval mismatch", mutate: func(proof *controllerHandoffProof) { proof.RawApprovalSHA256 = strings.Repeat("a", 64) }},
+		{name: "canonical approval mismatch", mutate: func(proof *controllerHandoffProof) { proof.CanonicalApprovalDigest = strings.Repeat("b", 64) }},
+		{name: "receipt nonce mismatch", mutate: func(proof *controllerHandoffProof) { proof.ReceiptNonce = strings.Repeat("e", 32) }},
+		{name: "receipt hash mismatch", mutate: func(proof *controllerHandoffProof) { proof.ReceiptSHA256 = strings.Repeat("c", 64) }},
+		{name: "wrong phase", mutate: func(proof *controllerHandoffProof) { proof.Phase = "before-ack" }},
+		{name: "wrong key", mutate: func(proof *controllerHandoffProof) { proof.KeyID = "other-key-v1" }},
+		{name: "wrong sequence", mutate: func(proof *controllerHandoffProof) { proof.HandoffSequence = 2 }},
+		{name: "expired proof", mutate: func(proof *controllerHandoffProof) {
+			proof.ReceiptExpiresAt = time.Now().Add(-time.Second)
+			proof.EffectiveDeadline = proof.ReceiptExpiresAt
+		}},
+		{name: "canceled original context", cancel: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture, journal := openCreateControllerHandoff(t)
+			parent, cancelParent := context.WithCancel(context.Background())
+			defer cancelParent()
+			proof := consumeCreateControllerHandoff(t, fixture, journal, parent)
+			before := journal.Events()
+			if testCase.cancel {
+				cancelParent()
+			} else if testCase.mutate != nil {
+				testCase.mutate(&proof)
+			}
+			fake := &fakeAPI{}
+			var proofArg *controllerHandoffProof
+			if !testCase.missing {
+				proofArg = &proof
+			}
+			driver := Driver{fixture.approval, journal, fake}
+			if err := driver.runWithHandoff(context.Background(), "create", proofArg); !errors.Is(err, ErrQuarantine) {
+				t.Fatalf("invalid create authority was not quarantined: %v", err)
+			}
+			if fake.createCalls != 0 || !reflect.DeepEqual(journal.Events(), before) {
+				t.Fatalf("invalid proof changed effects/history: creates=%d", fake.createCalls)
+			}
+		})
+	}
+}
+
+type handoffBlockingInventoryAPI struct {
+	*fakeAPI
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+type handoffValidInventoryAPI struct{ *fakeAPI }
+
+func (handoffValidInventoryAPI) Inventory(context.Context) (string, error) {
+	return strings.Repeat("a", 64), nil
+}
+
+type handoffInjectingInventoryAPI struct {
+	handoffValidInventoryAPI
+	journal *FileJournal
+}
+
+func (api handoffInjectingInventoryAPI) Inventory(context.Context) (string, error) {
+	if err := api.journal.Append(Event{Kind: "unknown", Operation: "create"}); err != nil {
+		return "", err
+	}
+	return strings.Repeat("a", 64), nil
+}
+
+type handoffInjectingDiscoveryAPI struct {
+	handoffValidInventoryAPI
+	journal *FileJournal
+}
+
+func (api handoffInjectingDiscoveryAPI) FindScaleSet(context.Context, string, int) (*scaleset.RunnerScaleSet, error) {
+	if err := api.journal.Append(Event{Kind: "unknown", Operation: "create"}); err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
+type handoffInjectingPreflightAPI struct {
+	handoffValidInventoryAPI
+	journal *FileJournal
+}
+
+func (api handoffInjectingPreflightAPI) Preflight(context.Context, Approval) error {
+	return api.journal.Append(Event{Kind: "observation", Operation: "inspect"})
+}
+
+func (api *handoffBlockingInventoryAPI) Inventory(context.Context) (string, error) {
+	api.once.Do(func() { close(api.started) })
+	<-api.release
+	return strings.Repeat("a", 64), nil
+}
+
+func TestControllerHandoffCreatePrefixRechecksAfterPhaseAppend(t *testing.T) {
+	fixture, journal := openCreateControllerHandoff(t)
+	proof := consumeCreateControllerHandoff(t, fixture, journal, context.Background())
+	fake := &fakeAPI{}
+	driver := Driver{fixture.approval, journal, handoffInjectingPreflightAPI{
+		handoffValidInventoryAPI: handoffValidInventoryAPI{fakeAPI: fake},
+		journal:                  journal,
+	}}
+	if err := driver.runWithHandoff(context.Background(), "create", &proof); !errors.Is(err, ErrQuarantine) {
+		t.Fatalf("changed create prefix was not quarantined after phase append: %v", err)
+	}
+	if fake.createCalls != 0 {
+		t.Fatalf("create prefix changed during preflight but reached %d create calls", fake.createCalls)
+	}
+	events := journal.Events()
+	if len(events) != 3 || events[1].Kind != "observation" || events[2].Kind != "phase" || events[2].Operation != "create" {
+		t.Fatalf("unexpected phase-boundary journal history: %+v", events)
+	}
+}
+
+func TestControllerHandoffUnknownHistoryDuringReadsCannotReachCreate(t *testing.T) {
+	for _, stage := range []string{"inventory", "discovery"} {
+		t.Run(stage, func(t *testing.T) {
+			fixture, journal := openCreateControllerHandoff(t)
+			proof := consumeCreateControllerHandoff(t, fixture, journal, context.Background())
+			fake := &fakeAPI{}
+			var api API
+			switch stage {
+			case "inventory":
+				api = handoffInjectingInventoryAPI{handoffValidInventoryAPI{fake}, journal}
+			case "discovery":
+				api = handoffInjectingDiscoveryAPI{handoffValidInventoryAPI{fake}, journal}
+			}
+			driver := Driver{fixture.approval, journal, api}
+			err := driver.runWithHandoff(context.Background(), "create", &proof)
+			if fake.createCalls != 0 {
+				t.Fatalf("unknown history appended during %s reached %d create calls: err=%v", stage, fake.createCalls, err)
+			}
+			if !errors.Is(err, ErrQuarantine) {
+				t.Fatalf("unknown history appended during %s was not quarantined: %v", stage, err)
+			}
+		})
+	}
+}
+
+type appendAfterCreateIntentSnapshotJournal struct {
+	*FileJournal
+	injected  bool
+	appendErr error
+}
+
+func (j *appendAfterCreateIntentSnapshotJournal) Events() []Event {
+	events := j.FileJournal.Events()
+	if j.injected || len(events) == 0 {
+		return events
+	}
+	last := events[len(events)-1]
+	if last.Kind != "intent" || last.Operation != "create" {
+		return events
+	}
+	j.injected = true
+	appended := make(chan error, 1)
+	go func() {
+		appended <- j.FileJournal.Append(Event{Kind: "unknown", Operation: "create"})
+	}()
+	j.appendErr = <-appended
+	return events
+}
+
+func (j *appendAfterCreateIntentSnapshotJournal) withEventsLocked(fn func([]Event, func(Event) error) error) error {
+	return j.FileJournal.withEventsLocked(func(events []Event, appendLocked func(Event) error) error {
+		if !j.injected && len(events) != 0 {
+			last := events[len(events)-1]
+			if last.Kind == "intent" && last.Operation == "create" {
+				j.injected = true
+				unknown := Event{Sequence: len(events) + 1, Kind: "unknown", Operation: "create"}
+				j.appendErr = appendLocked(unknown)
+				if j.appendErr == nil {
+					events = append(events, unknown)
+				}
+			}
+		}
+		return fn(events, appendLocked)
+	})
+}
+
+func TestControllerHandoffCreateRechecksHistoryAtomicallyWithEffect(t *testing.T) {
+	fixture, fileJournal := openCreateControllerHandoff(t)
+	journal := &appendAfterCreateIntentSnapshotJournal{FileJournal: fileJournal}
+	fake := &fakeAPI{}
+	driver := Driver{fixture.approval, journal, handoffValidInventoryAPI{fake}}
+	err := driver.runWithHandoff(context.Background(), "create", nil)
+	if !journal.injected || journal.appendErr != nil {
+		t.Fatalf("concurrent unknown-history injection failed: injected=%v appendErr=%v", journal.injected, journal.appendErr)
+	}
+	if fake.createCalls != 0 {
+		t.Fatalf("unknown/create appended after the final history snapshot reached %d create calls", fake.createCalls)
+	}
+	if !errors.Is(err, ErrQuarantine) {
+		t.Fatalf("unknown/create appended after the final history snapshot was not quarantined: %v", err)
+	}
+}
+
+type handoffBlockingCreateAPI struct {
+	handoffValidInventoryAPI
+	started chan struct{}
+	release chan struct{}
+}
+
+func (api handoffBlockingCreateAPI) CreateScaleSet(ctx context.Context, set *scaleset.RunnerScaleSet) (*scaleset.RunnerScaleSet, error) {
+	close(api.started)
+	select {
+	case <-api.release:
+		return api.fakeAPI.CreateScaleSet(ctx, set)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func TestControllerHandoffCreateSerializesConcurrentJournalAppend(t *testing.T) {
+	fixture, journal := openCreateControllerHandoff(t)
+	fake := &fakeAPI{}
+	api := handoffBlockingCreateAPI{
+		handoffValidInventoryAPI: handoffValidInventoryAPI{fake},
+		started:                  make(chan struct{}),
+		release:                  make(chan struct{}),
+	}
+	var releaseOnce sync.Once
+	releaseCreate := func() { releaseOnce.Do(func() { close(api.release) }) }
+	defer releaseCreate()
+	driver := Driver{fixture.approval, journal, api}
+	runDone := make(chan error, 1)
+	go func() { runDone <- driver.runWithHandoff(context.Background(), "create", nil) }()
+	select {
+	case <-api.started:
+	case <-time.After(time.Second):
+		releaseCreate()
+		t.Fatal("create call did not reach the blocking fake")
+	}
+
+	appendStarted := make(chan struct{})
+	appendDone := make(chan error, 1)
+	go func() {
+		close(appendStarted)
+		appendDone <- journal.Append(Event{Kind: "unknown", Operation: "create"})
+	}()
+	<-appendStarted
+	journalLockHeld := !journal.mu.TryLock()
+	if !journalLockHeld {
+		journal.mu.Unlock()
+	}
+	appendFinishedDuringCreate := false
+	var appendErr error
+	select {
+	case err := <-appendDone:
+		appendErr = err
+		appendFinishedDuringCreate = true
+	default:
+	}
+	releaseCreate()
+	runErr := <-runDone
+	if !appendFinishedDuringCreate {
+		appendErr = <-appendDone
+	}
+	if runErr != nil {
+		t.Fatalf("serialized create failed: %v", runErr)
+	}
+	if appendErr != nil {
+		t.Fatalf("concurrent journal append failed: %v", appendErr)
+	}
+	if appendFinishedDuringCreate {
+		t.Fatal("concurrent unknown history appended while the create call was in flight")
+	}
+	if !journalLockHeld {
+		t.Fatal("create call did not retain the journal mutex across its effect boundary")
+	}
+	events := journal.Events()
+	if len(events) < 2 || events[len(events)-2].Kind != "result" || events[len(events)-2].Operation != "create" || events[len(events)-1].Kind != "unknown" || events[len(events)-1].Operation != "create" {
+		t.Fatalf("create result was not serialized before the concurrent append: %+v", events)
+	}
+}
+
+func TestControllerHandoffCreatePrefixRejectsUnrelatedAndPendingHistory(t *testing.T) {
+	for _, event := range []Event{
+		{Kind: "observation", Operation: "inspect"},
+		{Kind: "intent", Operation: "create"},
+		{Kind: "unknown", Operation: "create"},
+	} {
+		t.Run(event.Kind+"-"+event.Operation, func(t *testing.T) {
+			fixture, journal := openCreateControllerHandoff(t)
+			proof := consumeCreateControllerHandoff(t, fixture, journal, context.Background())
+			if err := journal.Append(event); err != nil {
+				t.Fatal("append synthetic unrelated/pending history")
+			}
+			fake := &fakeAPI{}
+			driver := Driver{fixture.approval, journal, handoffValidInventoryAPI{fake}}
+			if err := driver.runWithHandoff(context.Background(), "create", &proof); !errors.Is(err, ErrQuarantine) {
+				t.Fatalf("noncanonical create history was not quarantined: %v", err)
+			}
+			if fake.createCalls != 0 {
+				t.Fatalf("noncanonical create history reached %d create calls", fake.createCalls)
+			}
+		})
+	}
+}
+
+func TestControllerHandoffCreateProofCannotCrossJournalReopen(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	approval := controllerHandoffApprovalAt(now)
+	approval.Phases = []string{"create", "before-ack", "after-ack"}
+	fixture := controllerHandoffFixtureForApproval(t, approval, "create", now)
+	directory := privateDir(t)
+	journal, err := openTestJournal(t, directory, fixture.approval)
+	if err != nil {
+		t.Fatal("open synthetic journal")
+	}
+	proof := consumeCreateControllerHandoff(t, fixture, journal, context.Background())
+	if err := journal.Close(); err != nil {
+		t.Fatal("close consumed journal")
+	}
+	reopened, err := openTestJournal(t, directory, fixture.approval)
+	if err != nil {
+		t.Fatal("reopen consumed journal")
+	}
+	defer reopened.Close()
+	fake := &fakeAPI{}
+	driver := Driver{fixture.approval, reopened, handoffValidInventoryAPI{fake}}
+	if err := driver.runWithHandoff(context.Background(), "create", &proof); !errors.Is(err, ErrQuarantine) {
+		t.Fatalf("reopened journal reconstructed an in-memory create proof: %v", err)
+	}
+	if fake.createCalls != 0 || len(reopened.Events()) != 1 {
+		t.Fatalf("replayed proof changed effects/history: create calls=%d events=%d", fake.createCalls, len(reopened.Events()))
+	}
+}
+
+func TestControllerHandoffAmbiguousCreateOutcomeIsNeverRetried(t *testing.T) {
+	fixture, journal := openCreateControllerHandoff(t)
+	proof := consumeCreateControllerHandoff(t, fixture, journal, context.Background())
+	fake := &fakeAPI{createErr: errors.New("synthetic ambiguous remote outcome")}
+	driver := Driver{fixture.approval, journal, handoffValidInventoryAPI{fake}}
+	if err := driver.runWithHandoff(context.Background(), "create", &proof); !errors.Is(err, ErrQuarantine) {
+		t.Fatalf("ambiguous create result was not quarantined: %v", err)
+	}
+	events := journal.Events()
+	if fake.createCalls != 1 || len(events) < 5 || events[len(events)-1].Kind != "unknown" || events[len(events)-1].Operation != "create" {
+		t.Fatalf("ambiguous create was not durably fenced: calls=%d events=%+v", fake.createCalls, events)
+	}
+	if err := driver.runWithHandoff(context.Background(), "create", &proof); !errors.Is(err, ErrQuarantine) || fake.createCalls != 1 {
+		t.Fatalf("ambiguous create was retried: err=%v calls=%d", err, fake.createCalls)
+	}
+}
+
+func TestControllerHandoffOriginalParentCancellationFencesCreate(t *testing.T) {
+	fixture, journal := openCreateControllerHandoff(t)
+	parent, cancelParent := context.WithCancel(context.Background())
+	defer cancelParent()
+	proof := consumeCreateControllerHandoff(t, fixture, journal, parent)
+	fake := &fakeAPI{}
+	api := &handoffBlockingInventoryAPI{fakeAPI: fake, started: make(chan struct{}), release: make(chan struct{})}
+	done := make(chan error, 1)
+	go func() {
+		driver := Driver{fixture.approval, journal, api}
+		done <- driver.runWithHandoff(context.Background(), "create", &proof)
+	}()
+	select {
+	case <-api.started:
+	case <-time.After(time.Second):
+		close(api.release)
+		t.Fatal("create did not reach the synchronized inventory boundary")
+	}
+	cancelParent()
+	close(api.release)
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrQuarantine) || fake.createCalls != 0 {
+			t.Fatalf("replacement context bypassed original-parent cancellation: err=%v create calls=%d", err, fake.createCalls)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("create did not return after the inventory barrier was released")
+	}
+}
+
+func TestControllerHandoffNonceAppendResamplesAfterJournalLock(t *testing.T) {
+	now := time.Now().UTC()
+	approval := controllerHandoffApprovalAt(now)
+	approval.ExpiresAt = now.Add(300 * time.Millisecond)
+	fixture := controllerHandoffFixtureForApproval(t, approval, "before-ack", now)
+	journal, err := openTestJournal(t, privateDir(t), fixture.approval)
+	if err != nil {
+		t.Fatal("open synthetic journal")
+	}
+	defer journal.Close()
+	consumption := controllerHandoffConsumption{ReceiptNonce: fixture.receipt.ReceiptNonce, Phase: "before-ack", ApprovalSHA256: fixture.request.ControllerApprovalSHA256, ReceiptSHA256: strings.Repeat("a", 64), KeyID: fixture.root.KeyID()}
+	appendTimeSampled := make(chan struct{}, 1)
+	done := make(chan error, 1)
+	journal.mu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			journal.mu.Unlock()
+		}
+	}()
+	go func() {
+		_, err := journal.consumeControllerHandoffAt(context.Background(), fixture.approval, consumption, fixture.approval.ExpiresAt, func() time.Time {
+			appendTimeSampled <- struct{}{}
+			return time.Now().UTC()
+		}, func(at time.Time) bool { return fixture.approval.Validate(at) == nil })
+		done <- err
+	}()
+	select {
+	case <-appendTimeSampled:
+		journal.mu.Unlock()
+		locked = false
+		<-done
+		t.Fatal("nonce authorization time was sampled before acquiring the journal lock")
+	case <-time.After(40 * time.Millisecond):
+	}
+	if wait := time.Until(fixture.approval.ExpiresAt) + 10*time.Millisecond; wait > 0 {
+		time.Sleep(wait)
+	}
+	journal.mu.Unlock()
+	locked = false
+	appendErr := <-done
+	if appendErr == nil || len(journal.Events()) != 0 {
+		t.Fatalf("expired authorization consumed a durable nonce: err=%v events=%+v", appendErr, journal.Events())
 	}
 }

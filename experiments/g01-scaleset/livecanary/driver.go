@@ -65,6 +65,7 @@ type Journal interface {
 	authorize(Approval) (func(), error)
 	Events() []Event
 	Append(Event) error
+	withEventsLocked(func([]Event, func(Event) error) error) error
 }
 
 type Session interface {
@@ -77,6 +78,9 @@ type API interface {
 	Inventory(context.Context) (string, error)
 	FindScaleSet(context.Context, string, int) (*scaleset.RunnerScaleSet, error)
 	GetScaleSet(context.Context, int) (*scaleset.RunnerScaleSet, error)
+	// CreateScaleSet runs while the journal event mutex is held through the
+	// durable result append. Implementations must not synchronously call back
+	// into the Driver's Journal from this method.
 	CreateScaleSet(context.Context, *scaleset.RunnerScaleSet) (*scaleset.RunnerScaleSet, error)
 	OpenSession(context.Context, int, string) (Session, error)
 	FindRunner(context.Context, string) (*scaleset.RunnerReference, error)
@@ -367,7 +371,7 @@ func (d *Driver) record(e Event) error {
 // the local race and keeps context-insensitive SDK fakes from running after a
 // cancellation observed by this process.
 func (d *Driver) cancellationFence(ctx context.Context, operation string) error {
-	if ctx != nil && ctx.Err() == nil {
+	if ctx != nil && ctx.Err() == nil && !controllerHandoffParentCanceled(ctx) {
 		return nil
 	}
 	if d.record(Event{Kind: "unknown", Operation: operation}) != nil {
@@ -380,6 +384,10 @@ func (d *Driver) cancellationFence(ctx context.Context, operation string) error 
 // result can reveal work that must survive restart, so it has the same ordering.
 // A valid create/session identity and its work category share one result record.
 func (d *Driver) effect(ctx context.Context, op string, ids []int64, call func(context.Context) (Event, error)) error {
+	return d.effectWithIntent(ctx, op, ids, call)
+}
+
+func (d *Driver) effectWithIntent(ctx context.Context, op string, ids []int64, call func(context.Context) (Event, error)) error {
 	if err := d.cancellationFence(ctx, op); err != nil {
 		return err
 	}
@@ -410,6 +418,57 @@ func (d *Driver) effect(ctx context.Context, op string, ids []int64, call func(c
 		return ErrQuarantine
 	}
 	return nil
+}
+
+// effectWithLockedHistory serializes the final exact-history check, the
+// external create call, and its durable result against every journal append.
+// A concurrent append is therefore either visible to the check and rejected,
+// or ordered after the create result; it cannot slip between a snapshot and
+// the API boundary.
+
+func (d *Driver) createEffectWithLockedHistory(ctx context.Context, preCall func([]Event) error, call func(context.Context) (Event, error)) error {
+	const op = "create"
+	if err := d.cancellationFence(ctx, op); err != nil {
+		return err
+	}
+	if err := d.record(Event{Kind: "intent", Operation: op}); err != nil {
+		return err
+	}
+	if err := d.cancellationFence(ctx, op); err != nil {
+		return err
+	}
+	bounded, cancel := context.WithTimeout(ctx, operationTimeout)
+	defer cancel()
+	if err := d.cancellationFence(bounded, op); err != nil {
+		return err
+	}
+	return d.Journal.withEventsLocked(func(events []Event, appendLocked func(Event) error) error {
+		if err := preCall(events); err != nil {
+			return err
+		}
+		if bounded.Err() != nil || controllerHandoffParentCanceled(ctx) {
+			if appendLocked(Event{Kind: "unknown", Operation: op}) != nil {
+				return ErrJournal
+			}
+			return ErrQuarantine
+		}
+		e, err := call(bounded)
+		if err != nil {
+			if appendLocked(Event{Kind: "unknown", Operation: op}) != nil {
+				return ErrJournal
+			}
+			return ErrQuarantine
+		}
+		e.Kind = "result"
+		e.Operation = op
+		if appendLocked(e) != nil {
+			return ErrJournal
+		}
+		if e.Work == workUnresolved {
+			return ErrQuarantine
+		}
+		return nil
+	})
 }
 
 func boundedRead[T any](ctx context.Context, read func(context.Context) (T, error)) (T, error) {
@@ -448,6 +507,13 @@ func (d *Driver) owned(ctx context.Context, id int) (*scaleset.RunnerScaleSet, e
 // A second process uses the durable journal to retain unknown reservations;
 // session credentials cannot be rehydrated using the supported SDK API.
 func (d *Driver) Run(ctx context.Context, phase string) error {
+	return d.runWithHandoff(ctx, phase, nil)
+}
+
+func (d *Driver) runWithHandoff(ctx context.Context, phase string, proof *controllerHandoffProof) error {
+	if ctx == nil {
+		return ErrApproval
+	}
 	// Cleanup is never allowed to reach the journal or API unless the concrete
 	// adapter advertises the conditional-delete contract. SDKAPI retains its
 	// legacy DeleteScaleSet method for the paired baseline, but that method is
@@ -460,7 +526,7 @@ func (d *Driver) Run(ctx context.Context, phase string) error {
 			return ErrQuarantine
 		}
 	}
-	s, release, err := authorizePhase(d.Approval, d.Journal, phase)
+	s, release, err := authorizePhaseWithProof(d.Approval, d.Journal, phase, ctx, proof)
 	if err != nil {
 		return err
 	}
@@ -469,8 +535,16 @@ func (d *Driver) Run(ctx context.Context, phase string) error {
 	if d.Approval.ExpiresAt.Before(deadline) {
 		deadline = d.Approval.ExpiresAt
 	}
+	if proof != nil && proof.EffectiveDeadline.Before(deadline) {
+		deadline = proof.EffectiveDeadline
+	}
 	ctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
+	if proof != nil {
+		stopParent := context.AfterFunc(proof.parent, cancel)
+		defer stopParent()
+		ctx = context.WithValue(ctx, controllerHandoffParentContextKey{}, proof.parent)
+	}
 	phaseEvent := Event{Kind: "phase", Operation: phase}
 	if phase == "drain" {
 		// The phase carries the already-created set identity. The journal
@@ -496,7 +570,7 @@ func (d *Driver) Run(ctx context.Context, phase string) error {
 		return err
 	}
 	if phase == "create" {
-		if s.setID != 0 || len(d.Journal.Events()) > 1 {
+		if validateCreatePrefix(d.Approval, d.Journal, phase, ctx, proof, true, d.Journal.Events()) != nil {
 			return ErrQuarantine
 		}
 		inventory, err := boundedRead(ctx, d.API.Inventory)
@@ -513,7 +587,12 @@ func (d *Driver) Run(ctx context.Context, phase string) error {
 		if existing != nil {
 			return ErrQuarantine
 		}
-		return d.effect(ctx, "create", nil, func(c context.Context) (Event, error) {
+		if validateCreatePreEffectHistory(d.Approval, d.Journal, ctx, proof, inventory, false, d.Journal.Events()) != nil {
+			return ErrQuarantine
+		}
+		return d.createEffectWithLockedHistory(ctx, func(events []Event) error {
+			return validateCreatePreEffectHistory(d.Approval, d.Journal, ctx, proof, inventory, true, events)
+		}, func(c context.Context) (Event, error) {
 			set, err := d.API.CreateScaleSet(c, &scaleset.RunnerScaleSet{Name: d.Approval.setName(), RunnerGroupID: d.Approval.RunnerGroupID, Labels: []scaleset.Label{{Name: d.Approval.setName(), Type: "System"}}, RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true}})
 			if err != nil || set == nil || set.ID <= 0 || set.Name != d.Approval.setName() || set.RunnerGroupID != d.Approval.RunnerGroupID || !set.RunnerSetting.DisableUpdate {
 				return Event{}, ErrRemote

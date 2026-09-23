@@ -1,10 +1,12 @@
 package livecanary
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
 	"os"
+	"reflect"
 	"slices"
 	"syscall"
 	"time"
@@ -13,6 +15,10 @@ import (
 // authorizePhase is the canonical local gate shared by preparation and Run.
 // It returns a held execution lease. It never records a phase or contacts APIs.
 func authorizePhase(a Approval, j Journal, phase string) (state, func(), error) {
+	return authorizePhaseWithProof(a, j, phase, context.Background(), nil)
+}
+
+func authorizePhaseWithProof(a Approval, j Journal, phase string, ctx context.Context, proof *controllerHandoffProof) (state, func(), error) {
 	if a.Validate(time.Now()) != nil || !slices.Contains(a.Phases, phase) {
 		return state{}, nil, ErrApproval
 	}
@@ -24,6 +30,10 @@ func authorizePhase(a Approval, j Journal, phase string) (state, func(), error) 
 		return state{}, nil, ErrJournal
 	}
 	events := j.Events()
+	if err := validateCreatePrefix(a, j, phase, ctx, proof, false, events); err != nil {
+		release()
+		return state{}, nil, err
+	}
 	s := replayWithApproval(events, &a)
 	// Every approved phase, including the read-only inspect slot, is consumed
 	// by its durable phase record. A second inspect must not become a fresh
@@ -32,8 +42,9 @@ func authorizePhase(a Approval, j Journal, phase string) (state, func(), error) 
 	// state; its own phase record then prevents another attempt. Deletion still
 	// fences every phase that could perform a further effect.
 	invalid := (phase != "inspect" && s.uncertain) || s.phaseSeen[phase] || (s.deleted && phase != "inspect")
-	// Run has not appended its phase record yet: an eligible create has no events.
-	invalid = invalid || (phase == "create" && (s.setID != 0 || len(events) != 0))
+	// The create prefix has already been checked. A verified handoff is the
+	// sole exact one-event exception to the empty legacy prefix.
+	invalid = invalid || (phase == "create" && s.setID != 0)
 	invalid = invalid || (phase != "create" && phase != "inspect" && (s.setID <= 0 || s.reserved))
 	invalid = invalid || (phase == "cleanup" && (s.workObserved || len(s.observedJobs) != 0 || s.inventory == ""))
 	if invalid {
@@ -41,6 +52,70 @@ func authorizePhase(a Approval, j Journal, phase string) (state, func(), error) 
 		return state{}, nil, ErrQuarantine
 	}
 	return s, release, nil
+}
+
+// validateCreatePrefix is the exact create-event grammar shared by the
+// pre-phase authorization check and Driver's post-phase check.
+func validateCreatePrefix(a Approval, j Journal, phase string, ctx context.Context, proof *controllerHandoffProof, post bool, events []Event) error {
+	if phase != "create" {
+		if proof != nil {
+			return ErrQuarantine
+		}
+		return nil
+	}
+	if proof == nil {
+		if !post && len(events) == 0 {
+			return nil
+		}
+		if post && len(events) == 1 && reflect.DeepEqual(events[0], Event{Sequence: 1, Kind: "phase", Operation: "create"}) {
+			return nil
+		}
+		return ErrQuarantine
+	}
+	if !proof.validAt(ctx, a, j, time.Now()) {
+		return ErrQuarantine
+	}
+	if !post {
+		if len(events) == 1 && proof.matchesEvent(events[0]) {
+			return nil
+		}
+		return ErrQuarantine
+	}
+	if len(events) == 2 && proof.matchesEvent(events[0]) && reflect.DeepEqual(events[1], Event{Sequence: 2, Kind: "phase", Operation: "create"}) {
+		return nil
+	}
+	return ErrQuarantine
+}
+
+// validateCreatePreEffectHistory fences observations made after the phase
+// gate. It is checked before and after the durable create intent so an
+// unrelated or uncertain event cannot be hidden by inventory/discovery.
+func validateCreatePreEffectHistory(a Approval, j Journal, ctx context.Context, proof *controllerHandoffProof, inventory string, createIntentRecorded bool, events []Event) error {
+	offset := 0
+	if proof != nil {
+		if !proof.validAt(ctx, a, j, time.Now()) || len(events) == 0 || !proof.matchesEvent(events[0]) {
+			return ErrQuarantine
+		}
+		offset = 1
+	}
+	expected := []Event{
+		{Sequence: offset + 1, Kind: "phase", Operation: "create"},
+		{Sequence: offset + 2, Kind: "inventory", Digest: inventory},
+		{Sequence: offset + 3, Kind: "intent", Operation: "observe-discovery"},
+		{Sequence: offset + 4, Kind: "result", Operation: "observe-discovery"},
+	}
+	if createIntentRecorded {
+		expected = append(expected, Event{Sequence: offset + 5, Kind: "intent", Operation: "create"})
+	}
+	if len(events) != offset+len(expected) {
+		return ErrQuarantine
+	}
+	for index, event := range expected {
+		if !reflect.DeepEqual(events[offset+index], event) {
+			return ErrQuarantine
+		}
+	}
+	return nil
 }
 
 type PreparedIdentity struct {
