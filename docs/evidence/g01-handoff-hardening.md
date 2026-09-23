@@ -43,6 +43,15 @@ produced its expected failure:
 - Allowing a third unrelated event in the post-phase prefix made
   `TestControllerHandoffCreatePrefixRechecksAfterPhaseAppend` fail because
   changed history reached the create boundary.
+- The independent contract review of prior candidate
+  `19e31e46c1a8a092a16ab8619b4facd88a097d8a` found that a valid `unknown/create`
+  event appended during Inventory or Discovery could arrive after the
+  post-phase gate and still reach Create. The new
+  `TestControllerHandoffUnknownHistoryDuringReadsCannotReachCreate` reproduced
+  both paths before correction: each subtest failed with one fake Create call
+  and a nil error. The correction checks the exact phase/inventory/discovery
+  event grammar after those reads and again after the durable create intent,
+  immediately before the API call.
 
 These are synthetic offline tests and controlled source mutations; no remote
 operation was attempted. The create-prefix mutations are regression evidence,
@@ -79,7 +88,8 @@ GOTOOLCHAIN=go1.26.8 GOWORK=off go test -count=1 -timeout=30s -run '^(TestG01Wor
 git diff --check
 ```
 
-The commands above passed. The final changed-boundary race check also passed:
+The commands above passed after the create-boundary correction. The final
+changed-boundary race check also passed:
 
 ```text
 cd experiments/g01-scaleset
@@ -91,13 +101,30 @@ Public CI on the base SHA is not candidate evidence.
 
 ## Review and remaining gates
 
-Independent contract and security/recovery review are pending for the stable
-candidate. No findings are claimed resolved by internal tests alone. The
-candidate must remain offline-only and unpushed until the maintainer authorizes
-the next publication step. If later authorized, batch the stable source/evidence
-candidate, obtain the required independent reviews, hosted PR quick check, and
-exact-head GitHub Codex review; record all finding triage. Only a reviewed,
-authorized merge can produce the separate automatic main Public CI evidence.
+The independent GPT-6-Luna max contract review of the prior candidate found the
+P1 described above. Its correction has a failing-then-passing synthetic test;
+fresh exact-head contract and security/recovery delta reviews of the corrected
+candidate remain pending. No finding is claimed resolved by writer tests alone.
+
+The independent GPT-6-Luna max security/recovery review of the prior candidate
+also reported one P2: because the durable nonce is intentionally committed
+before credential input, a credential-reader failure leaves the create slot
+unusable in that journal; a later nonce would have sequence 2 and cannot form
+the exact sequence-1 create proof. This is confirmed fail-closed behavior: no
+create is authorized, no nonce rollback occurs, and there is no same-journal
+retry. It is triaged once as a nonblocking limitation of this offline,
+unconnected helper, consistent with fsync-before-credentials and replay
+rejection. Any future controller/CLI wiring must define and review a controlled
+re-provisioning/recovery procedure before using this path; none is implemented
+or authorized here. The reviewer also noted that the legacy no-proof
+`Driver.Run` create path remains available; that is an explicit boundary of the
+accepted offline slice, not production signed-handoff enforcement.
+
+The candidate must remain offline-only and unpushed until the maintainer
+authorizes the next publication step. If later authorized, obtain the required
+independent reviews on the final exact head, hosted PR quick check, and exact-head
+GitHub Codex review; record all finding triage. Only a reviewed, authorized merge
+can produce the separate automatic main Public CI evidence.
 
 The previous HOLD draft `2b40bd6` remains preserved on its original branch.
 No credential access, App/token enrollment, live runner/Scale Set operation,

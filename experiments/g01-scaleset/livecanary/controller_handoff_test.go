@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/1XP-AI/gh-runnerd/experiments/g02-auth/handoff"
+	"github.com/actions/scaleset"
 )
 
 func TestControllerHandoffConsumptionEventHasStrictTypedJournalShape(t *testing.T) {
@@ -748,6 +749,30 @@ func (handoffValidInventoryAPI) Inventory(context.Context) (string, error) {
 	return strings.Repeat("a", 64), nil
 }
 
+type handoffInjectingInventoryAPI struct {
+	handoffValidInventoryAPI
+	journal *FileJournal
+}
+
+func (api handoffInjectingInventoryAPI) Inventory(context.Context) (string, error) {
+	if err := api.journal.Append(Event{Kind: "unknown", Operation: "create"}); err != nil {
+		return "", err
+	}
+	return strings.Repeat("a", 64), nil
+}
+
+type handoffInjectingDiscoveryAPI struct {
+	handoffValidInventoryAPI
+	journal *FileJournal
+}
+
+func (api handoffInjectingDiscoveryAPI) FindScaleSet(context.Context, string, int) (*scaleset.RunnerScaleSet, error) {
+	if err := api.journal.Append(Event{Kind: "unknown", Operation: "create"}); err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
 type handoffInjectingPreflightAPI struct {
 	handoffValidInventoryAPI
 	journal *FileJournal
@@ -780,6 +805,31 @@ func TestControllerHandoffCreatePrefixRechecksAfterPhaseAppend(t *testing.T) {
 	events := journal.Events()
 	if len(events) != 3 || events[1].Kind != "observation" || events[2].Kind != "phase" || events[2].Operation != "create" {
 		t.Fatalf("unexpected phase-boundary journal history: %+v", events)
+	}
+}
+
+func TestControllerHandoffUnknownHistoryDuringReadsCannotReachCreate(t *testing.T) {
+	for _, stage := range []string{"inventory", "discovery"} {
+		t.Run(stage, func(t *testing.T) {
+			fixture, journal := openCreateControllerHandoff(t)
+			proof := consumeCreateControllerHandoff(t, fixture, journal, context.Background())
+			fake := &fakeAPI{}
+			var api API
+			switch stage {
+			case "inventory":
+				api = handoffInjectingInventoryAPI{handoffValidInventoryAPI{fake}, journal}
+			case "discovery":
+				api = handoffInjectingDiscoveryAPI{handoffValidInventoryAPI{fake}, journal}
+			}
+			driver := Driver{fixture.approval, journal, api}
+			err := driver.runWithHandoff(context.Background(), "create", &proof)
+			if fake.createCalls != 0 {
+				t.Fatalf("unknown history appended during %s reached %d create calls: err=%v", stage, fake.createCalls, err)
+			}
+			if !errors.Is(err, ErrQuarantine) {
+				t.Fatalf("unknown history appended during %s was not quarantined: %v", stage, err)
+			}
+		})
 	}
 }
 

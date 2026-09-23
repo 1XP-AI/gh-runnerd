@@ -380,6 +380,10 @@ func (d *Driver) cancellationFence(ctx context.Context, operation string) error 
 // result can reveal work that must survive restart, so it has the same ordering.
 // A valid create/session identity and its work category share one result record.
 func (d *Driver) effect(ctx context.Context, op string, ids []int64, call func(context.Context) (Event, error)) error {
+	return d.effectWithPreCall(ctx, op, ids, nil, call)
+}
+
+func (d *Driver) effectWithPreCall(ctx context.Context, op string, ids []int64, preCall func() error, call func(context.Context) (Event, error)) error {
 	if err := d.cancellationFence(ctx, op); err != nil {
 		return err
 	}
@@ -393,6 +397,11 @@ func (d *Driver) effect(ctx context.Context, op string, ids []int64, call func(c
 	defer cancel()
 	if err := d.cancellationFence(bounded, op); err != nil {
 		return err
+	}
+	if preCall != nil {
+		if err := preCall(); err != nil {
+			return err
+		}
 	}
 	e, err := call(bounded)
 	if err != nil {
@@ -528,7 +537,12 @@ func (d *Driver) runWithHandoff(ctx context.Context, phase string, proof *contro
 		if existing != nil {
 			return ErrQuarantine
 		}
-		return d.effect(ctx, "create", nil, func(c context.Context) (Event, error) {
+		if validateCreatePreEffectHistory(d.Approval, d.Journal, ctx, proof, inventory, false, d.Journal.Events()) != nil {
+			return ErrQuarantine
+		}
+		return d.effectWithPreCall(ctx, "create", nil, func() error {
+			return validateCreatePreEffectHistory(d.Approval, d.Journal, ctx, proof, inventory, true, d.Journal.Events())
+		}, func(c context.Context) (Event, error) {
 			set, err := d.API.CreateScaleSet(c, &scaleset.RunnerScaleSet{Name: d.Approval.setName(), RunnerGroupID: d.Approval.RunnerGroupID, Labels: []scaleset.Label{{Name: d.Approval.setName(), Type: "System"}}, RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true}})
 			if err != nil || set == nil || set.ID <= 0 || set.Name != d.Approval.setName() || set.RunnerGroupID != d.Approval.RunnerGroupID || !set.RunnerSetting.DisableUpdate {
 				return Event{}, ErrRemote

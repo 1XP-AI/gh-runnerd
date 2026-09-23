@@ -87,6 +87,37 @@ func validateCreatePrefix(a Approval, j Journal, phase string, ctx context.Conte
 	return ErrQuarantine
 }
 
+// validateCreatePreEffectHistory fences observations made after the phase
+// gate. It is checked before and after the durable create intent so an
+// unrelated or uncertain event cannot be hidden by inventory/discovery.
+func validateCreatePreEffectHistory(a Approval, j Journal, ctx context.Context, proof *controllerHandoffProof, inventory string, createIntentRecorded bool, events []Event) error {
+	offset := 0
+	if proof != nil {
+		if !proof.validAt(ctx, a, j, time.Now()) || len(events) == 0 || !proof.matchesEvent(events[0]) {
+			return ErrQuarantine
+		}
+		offset = 1
+	}
+	expected := []Event{
+		{Sequence: offset + 1, Kind: "phase", Operation: "create"},
+		{Sequence: offset + 2, Kind: "inventory", Digest: inventory},
+		{Sequence: offset + 3, Kind: "intent", Operation: "observe-discovery"},
+		{Sequence: offset + 4, Kind: "result", Operation: "observe-discovery"},
+	}
+	if createIntentRecorded {
+		expected = append(expected, Event{Sequence: offset + 5, Kind: "intent", Operation: "create"})
+	}
+	if len(events) != offset+len(expected) {
+		return ErrQuarantine
+	}
+	for index, event := range expected {
+		if !reflect.DeepEqual(events[offset+index], event) {
+			return ErrQuarantine
+		}
+	}
+	return nil
+}
+
 type PreparedIdentity struct {
 	Device uint64 `json:"device"`
 	Inode  uint64 `json:"inode"`
