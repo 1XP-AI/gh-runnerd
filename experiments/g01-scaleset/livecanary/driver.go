@@ -78,6 +78,9 @@ type API interface {
 	Inventory(context.Context) (string, error)
 	FindScaleSet(context.Context, string, int) (*scaleset.RunnerScaleSet, error)
 	GetScaleSet(context.Context, int) (*scaleset.RunnerScaleSet, error)
+	// CreateScaleSet runs while the journal event mutex is held through the
+	// durable result append. Implementations must not synchronously call back
+	// into the Driver's Journal from this method.
 	CreateScaleSet(context.Context, *scaleset.RunnerScaleSet) (*scaleset.RunnerScaleSet, error)
 	OpenSession(context.Context, int, string) (Session, error)
 	FindRunner(context.Context, string) (*scaleset.RunnerReference, error)

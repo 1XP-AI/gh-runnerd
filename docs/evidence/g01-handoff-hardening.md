@@ -97,8 +97,10 @@ not evidence that those tests were originally run on the unchanged main source.
   create result; it cannot land between the check and call. This is cooperative
   same-process serialization, not hostile-code isolation. The journal append
   mutex remains held across the bounded Create API call, so the adapter must
-  honor its operation context and concurrent journal writers wait for the call
-  to return.
+  honor its operation context, must not synchronously reenter the Driver's
+  Journal, and concurrent journal writers wait for the call to return. The
+  `API.CreateScaleSet` contract now states this restriction. The configured
+  `SDKAPI` forwards the bounded context to the SDK and has no journal reference.
 - The PR quick-check path predicate selects G01 for G02 handoff code and root
   `go.mod`/`go.sum` changes, with positive and near-miss negative path tests.
 
@@ -161,6 +163,40 @@ finding.
 The security/recovery reviewer ran
 `GOTOOLCHAIN=go1.26.8 GOWORK=off go test -race -count=1 -timeout=120s -run '^TestControllerHandoff' ./livecanary` on the reviewed
 HEAD; it passed in 3.159s but did not exercise the identified interleaving.
+
+Fresh independent GPT-6-Luna max reviews of exact HEAD
+`58ace4594c428b827b299faab2fddd64b6aa4350` both confirmed that the concurrent-
+append P1 is resolved. The contract reviewer additionally classified
+reentrant-adapter deadlock as P2; the security/recovery reviewer classified the
+same source-inferred risk as P3. Neither dynamically reproduced it. The trace
+is that `CreateScaleSet` runs inside `FileJournal.withEventsLocked`, so a custom
+adapter that synchronously calls `Events` or `Append` on that same journal
+waits on the mutex it is already inside. The configured `SDKAPI` has no journal
+reference and simply forwards the bounded context and create request to the
+pinned SDK. This is triaged once as an accepted nonblocking adapter-contract
+restriction for the offline, unconnected slice: the interface now explicitly
+forbids synchronous journal reentry. No follow-up issue is warranted for the
+current adapter; any future adapter/controller wiring must preserve that
+restriction or replace and re-review the lock boundary first.
+
+The reviewers also source-traced cancellation visible at the final check,
+ambiguous Create errors, and partial result-write/fsync failures. A visible
+cancellation prevents the call and records unknown/create; cancellation can
+still race after that check and is passed to the bounded API context. Ambiguous
+remote errors quarantine without retry. A failed result append leaves the
+journal unusable or torn/pending so replay cannot retry, but there is no
+automated reconciliation if the remote create already happened. The review
+did not dynamically exercise those narrow failure timings.
+
+On `58ace4594c428b827b299faab2fddd64b6aa4350`, the contract reviewer passed
+the focused create/handoff, atomic-history race, G02 workflow-selection, and
+PR-workflow-contract checks; `git diff --check` passed and the worktree was
+clean. The security/recovery reviewer passed the same two changed-boundary
+tests under `-race` in 1.366s and also verified a clean exact HEAD. Neither ran
+the full module suite or live operations; the coordinator's full module and
+`livecanary` race results are recorded above. The new API contract comment and
+this disposition were added after those reviews, so another exact-head delta
+review remains required.
 
 The independent GPT-6-Luna max security/recovery review of the prior candidate
 also reported one P2: because the durable nonce is intentionally committed
