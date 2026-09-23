@@ -1130,7 +1130,7 @@ func TestPullRequestQuickWorkflowContract(t *testing.T) {
 		"permissions:\n  contents: read",
 		"run: git diff --check \"$BASE_SHA...$HEAD_SHA\"",
 		"git diff --name-only --no-renames \"$BASE_SHA...$HEAD_SHA\"",
-		"module_change_pattern='^(experiments/g01-scaleset/|experiments/g02-auth/handoff/)'",
+		"module_change_pattern='^(experiments/g01-scaleset/|experiments/g02-auth/handoff/|experiments/g02-auth/(go\\.mod|go\\.sum)$)'",
 		"cd \"$module\" && GOTOOLCHAIN=\"$GOTOOLCHAIN\" go test -run '^$' -count=1 ./...",
 		"go.work",
 		"go.work.sum",
@@ -1158,6 +1158,49 @@ func TestPullRequestQuickWorkflowContract(t *testing.T) {
 	} {
 		if strings.Contains(workflow, forbidden) {
 			t.Errorf("PR quick workflow contains full/live check %q", forbidden)
+		}
+	}
+}
+
+func TestG01WorkflowModuleSelectionPredicate(t *testing.T) {
+	workflowData, err := os.ReadFile("../.github/workflows/pr-fast.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignment := regexp.MustCompile(`(?m)^\s*module_change_pattern='([^']+)'`).FindStringSubmatch(string(workflowData))
+	if len(assignment) != 2 || assignment[1] == "" {
+		t.Fatal("could not extract the G01 module_change_pattern assignment")
+	}
+	matches := func(path string) bool {
+		t.Helper()
+		_, err := toolingRun(t, "..", []string{
+			"G01_MODULE_CHANGE_PATTERN=" + assignment[1],
+			"G01_SYNTHETIC_PATH=" + path,
+		}, "bash", "-c", `printf '%s\n' "$G01_SYNTHETIC_PATH" | grep -Eq "$G01_MODULE_CHANGE_PATTERN"`)
+		return err == nil
+	}
+	for _, path := range []string{
+		"experiments/g01-scaleset/livecanary/controller_handoff.go",
+		"experiments/g02-auth/handoff/handoff.go",
+		"experiments/g02-auth/go.mod",
+		"experiments/g02-auth/go.sum",
+	} {
+		if !matches(path) {
+			t.Errorf("G01 selection predicate rejected required path %q", path)
+		}
+	}
+	for _, path := range []string{
+		"experiments/g02-auth/broker.go",
+		"experiments/r1-credentials/go.mod",
+		"docs/EXECUTION.md",
+		"experiments/g02-auth/go.mod.bak",
+		"experiments/g02-auth/go.sum.sig",
+		"experiments/g02-auth/go.mod/nested",
+		"experiments/g02-auth/go.sum/nested",
+		"experiments/g02-auth/nested/go.mod",
+	} {
+		if matches(path) {
+			t.Errorf("G01 selection predicate accepted forbidden path %q", path)
 		}
 	}
 }

@@ -98,7 +98,7 @@ jobs:
           changed="$(git diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA")"
           for module in experiments/g01-scaleset experiments/g02-auth experiments/r1-credentials; do
             if [[ "$module" == "experiments/g01-scaleset" ]]; then
-              module_change_pattern='^(experiments/g01-scaleset/|experiments/g02-auth/handoff/)'
+              module_change_pattern='^(experiments/g01-scaleset/|experiments/g02-auth/handoff/|experiments/g02-auth/(go\.mod|go\.sum)$)'
             else
               module_change_pattern="^${module}/"
             fi

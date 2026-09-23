@@ -57,10 +57,14 @@ func (p phaseAuthority) renews(previous phaseAuthority) bool {
 // The lease keeps journal/claim ownership held until this one Driver.Run exits.
 // This is approved-code discipline, not isolation against hostile Go callers.
 func (j *FileJournal) authorize(a Approval) (func(), error) {
+	return j.authorizeAt(a, time.Now())
+}
+
+func (j *FileJournal) authorizeAt(a Approval, now time.Time) (func(), error) {
 	if !j.life.TryLock() {
 		return nil, ErrJournal
 	}
-	if !j.authorityHeld(a) {
+	if !j.authorityHeldAt(a, now) {
 		j.life.Unlock()
 		return nil, ErrJournal
 	}
@@ -70,7 +74,11 @@ func (j *FileJournal) authorize(a Approval) (func(), error) {
 // Called only by approved code already holding life; never reacquire it from
 // a scoped listener or continuation. Close cannot release the claim meanwhile.
 func (j *FileJournal) authorityHeld(a Approval) bool {
-	return !j.closed && !j.writeFailed && j.claim != nil && j.claim.matches(j) && j.ownsCurrentJournal() && a.Validate(time.Now()) == nil && j.ownership == ownershipDigest(a) && j.authority.Digest == approvalDigest(a)
+	return j.authorityHeldAt(a, time.Now())
+}
+
+func (j *FileJournal) authorityHeldAt(a Approval, now time.Time) bool {
+	return !j.closed && !j.writeFailed && j.claim != nil && j.claim.matches(j) && j.ownsCurrentJournal() && a.Validate(now) == nil && j.ownership == ownershipDigest(a) && j.authority.Digest == approvalDigest(a)
 }
 
 func (j *FileJournal) ownsCurrentJournal() bool {

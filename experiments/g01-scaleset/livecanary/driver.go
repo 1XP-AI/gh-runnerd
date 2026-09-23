@@ -367,7 +367,7 @@ func (d *Driver) record(e Event) error {
 // the local race and keeps context-insensitive SDK fakes from running after a
 // cancellation observed by this process.
 func (d *Driver) cancellationFence(ctx context.Context, operation string) error {
-	if ctx != nil && ctx.Err() == nil {
+	if ctx != nil && ctx.Err() == nil && !controllerHandoffParentCanceled(ctx) {
 		return nil
 	}
 	if d.record(Event{Kind: "unknown", Operation: operation}) != nil {
@@ -448,6 +448,13 @@ func (d *Driver) owned(ctx context.Context, id int) (*scaleset.RunnerScaleSet, e
 // A second process uses the durable journal to retain unknown reservations;
 // session credentials cannot be rehydrated using the supported SDK API.
 func (d *Driver) Run(ctx context.Context, phase string) error {
+	return d.runWithHandoff(ctx, phase, nil)
+}
+
+func (d *Driver) runWithHandoff(ctx context.Context, phase string, proof *controllerHandoffProof) error {
+	if ctx == nil {
+		return ErrApproval
+	}
 	// Cleanup is never allowed to reach the journal or API unless the concrete
 	// adapter advertises the conditional-delete contract. SDKAPI retains its
 	// legacy DeleteScaleSet method for the paired baseline, but that method is
@@ -460,7 +467,7 @@ func (d *Driver) Run(ctx context.Context, phase string) error {
 			return ErrQuarantine
 		}
 	}
-	s, release, err := authorizePhase(d.Approval, d.Journal, phase)
+	s, release, err := authorizePhaseWithProof(d.Approval, d.Journal, phase, ctx, proof)
 	if err != nil {
 		return err
 	}
@@ -469,8 +476,16 @@ func (d *Driver) Run(ctx context.Context, phase string) error {
 	if d.Approval.ExpiresAt.Before(deadline) {
 		deadline = d.Approval.ExpiresAt
 	}
+	if proof != nil && proof.EffectiveDeadline.Before(deadline) {
+		deadline = proof.EffectiveDeadline
+	}
 	ctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
+	if proof != nil {
+		stopParent := context.AfterFunc(proof.parent, cancel)
+		defer stopParent()
+		ctx = context.WithValue(ctx, controllerHandoffParentContextKey{}, proof.parent)
+	}
 	phaseEvent := Event{Kind: "phase", Operation: phase}
 	if phase == "drain" {
 		// The phase carries the already-created set identity. The journal
@@ -496,7 +511,7 @@ func (d *Driver) Run(ctx context.Context, phase string) error {
 		return err
 	}
 	if phase == "create" {
-		if s.setID != 0 || len(d.Journal.Events()) > 1 {
+		if validateCreatePrefix(d.Approval, d.Journal, phase, ctx, proof, true, d.Journal.Events()) != nil {
 			return ErrQuarantine
 		}
 		inventory, err := boundedRead(ctx, d.API.Inventory)
