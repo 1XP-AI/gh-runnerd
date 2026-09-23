@@ -7,13 +7,15 @@ Base: `7e4d46e8762f327c03f1f80d726e040b9ba7f0a6`
 Scope: offline receipt acquisition, approval-bound create-prefix validation,
 and dependent G01 compile selection for G02 root metadata.
 
-This evidence is for a locally committed but unpublished candidate. Independent
-GPT-6-Luna max contract and security/recovery reviews completed on exact HEAD
-`cf9ace198bb1cf36bbc01dc6e71744aacf5a32d9`; neither found an open P0/P1. This
-does not establish a PR, merge, hosted quick check, exact-head GitHub Codex
-review, or post-merge Public CI. The correction remains unconnected to a live
-controller, CLI, receipt transport, credential store, App, runner, or Scale Set.
-The full G01/G02 evidence and live-operation authorization gates remain open.
+This record began as evidence for a locally committed candidate. It now tracks
+PR [#97](https://github.com/1XP-AI/gh-runnerd/pull/97), opened after the
+maintainer authorized publication. Its pre-correction head
+`b53820a6a59850ad85943ebc5e5b1bb1547fc3f5` passed the hosted PR quick check and
+received exact-head GitHub Codex review; the review findings and current
+dispositions are recorded below. The PR remains unmerged, and merge was not
+authorized. The correction remains unconnected to a live controller, CLI,
+receipt transport, credential store, App, runner, or Scale Set. Full G01/G02
+evidence and live-operation authorization gates remain open.
 
 ## Red evidence
 
@@ -76,6 +78,66 @@ produced its expected failure:
 These are synthetic offline tests and controlled source mutations; no remote
 operation was attempted. The create-prefix mutations are regression evidence,
 not evidence that those tests were originally run on the unchanged main source.
+
+## PR #97 exact-head review findings and correction
+
+GitHub Codex reviewed exact head
+`b53820a6a59850ad85943ebc5e5b1bb1547fc3f5` and reported:
+
+- **P1, failed journal append could still reach CreateScaleSet**
+  ([finding](https://github.com/1XP-AI/gh-runnerd/pull/97#discussion_r4082160685)).
+  After the durable create intent, a concurrent append could fail and poison
+  `FileJournal`; `withEventsLocked` nevertheless passed the old canonical
+  snapshot to the effect callback. A real-`FileJournal` regression now injects
+  that write failure before the locked-history callback. Before the source fix
+  it failed with `createCalls=1`; after the fix it passes with the journal
+  poisoned and `createCalls=0`. `withEventsLocked` now rejects a poisoned
+  journal while holding `mu`, before exposing history or invoking the effect.
+- **P1, review model attribution/route**
+  ([finding](https://github.com/1XP-AI/gh-runnerd/pull/97#discussion_r4082160672)).
+  Historical GPT-6-Luna max review attribution is retained as actually
+  produced. For this task the maintainer explicitly required GPT-6-Luna max
+  for worktree agents; this is the task-local user setting referenced by the
+  final “Do not override an explicit current user setting” instruction in
+  `AGENTS.md`, while `docs/EXECUTION.md` continues to describe GPT-5.6-Luna max
+  as the repository default and canonical route. The attribution is therefore
+  not silently relabeled. Fresh review-task launch requests must specify
+  `gpt-6-luna`/`max`, and the effective launch model/effort must be verified
+  before their findings count as review evidence.
+- **P2, hosted workflow omitted its path-predicate regression test**
+  ([finding](https://github.com/1XP-AI/gh-runnerd/pull/97#discussion_r4082160691)).
+  `TestPullRequestQuickWorkflowContract` now requires
+  `TestG01WorkflowModuleSelectionPredicate` in the hosted workflow selector;
+  that contract test failed against the previous workflow command. The hosted
+  selector now runs the predicate test with the other workflow contract tests.
+
+These are offline code/test changes only. They do not expand production or
+live-operation authority.
+
+Correction validation on the current local delta:
+
+```text
+cd experiments/g01-scaleset
+GOTOOLCHAIN=go1.26.8 GOWORK=off go test -count=1 -timeout=120s ./...
+GOTOOLCHAIN=go1.26.8 GOWORK=off go test -race -count=1 -timeout=120s ./livecanary
+GOTOOLCHAIN=go1.26.8 GOWORK=off go test -count=1 -timeout=30s -run '^TestFailedConcurrentAppendStopsBeforeRealJournalCreate$' ./livecanary
+
+cd experiments/g02-auth
+GOTOOLCHAIN=go1.26.8 GOWORK=off go test -run '^$' -count=1 -timeout=120s ./...
+
+cd <repository-root>
+GOTOOLCHAIN=go1.26.8 GOWORK=off go test -count=1 -timeout=30s -run '^(TestPublicWorkflowCapacityContract|TestPullRequestQuickWorkflowContract|TestG01WorkflowModuleSelectionPredicate)$' ./scripts
+git diff --check
+```
+
+All commands in this block passed. The targeted journal test was first observed
+failing before the guard (`createCalls=1`) and passed afterward (`createCalls=0`).
+An additional full `go test ./scripts` attempt with a 120-second package
+timeout did **not** pass: it timed out in the unrelated
+`TestToolingTaggedPairFixturePartitionsRun` while waiting for its nested
+tooling process. The hosted workflow invokes only the three named contract
+tests above; the timeout is retained as an unpassed broader-suite result, not
+reported as a regression pass.
 
 ## Implemented contract and checks
 
@@ -246,11 +308,13 @@ or authorized here. The reviewer also noted that the legacy no-proof
 `Driver.Run` create path remains available; that is an explicit boundary of the
 accepted offline slice, not production signed-handoff enforcement.
 
-The candidate must remain offline-only and unpushed until the maintainer
-authorizes the next publication step. If later authorized, obtain the required
-independent reviews on the final exact head, hosted PR quick check, and exact-head
-GitHub Codex review; record all finding triage. Only a reviewed, authorized merge
-can produce the separate automatic main Public CI evidence.
+The maintainer authorized pushing this correction and opening PR #97, but did
+not authorize merge. Obtain fresh independent contract and security/recovery
+reviews on the corrected exact head, push the reviewed candidate, wait for its
+hosted PR quick check, then request and complete GitHub Codex review of that
+exact pushed head. Record all new finding triage before asking about merge
+authorization. Only a separately authorized, reviewed merge can produce the
+automatic main Public CI evidence.
 
 The previous HOLD draft `2b40bd6` remains preserved on its original branch.
 No credential access, App/token enrollment, live runner/Scale Set operation,

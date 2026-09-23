@@ -386,6 +386,9 @@ func (j *FileJournal) withEventsLocked(fn func([]Event, func(Event) error) error
 	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	if j.writeFailed {
+		return ErrJournal
+	}
 	events := make([]Event, len(j.events))
 	for i, event := range j.events {
 		events[i] = cloneEvent(event)

@@ -2,6 +2,7 @@ package livecanary
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -109,6 +110,47 @@ func TestRealJournalCreateFailureBlocksRetryAndContainsNoErrorBody(t *testing.T)
 	d.Journal = j
 	if d.Run(context.Background(), "create") == nil || f.createCalls != 1 {
 		t.Fatal("durable ambiguity fence lost")
+	}
+}
+
+type failAppendBeforeCreateHistoryJournal struct {
+	*FileJournal
+	failNextWrite *bool
+}
+
+func (j *failAppendBeforeCreateHistoryJournal) withEventsLocked(fn func([]Event, func(Event) error) error) error {
+	*j.failNextWrite = true
+	if err := j.FileJournal.Append(Event{Kind: "unknown", Operation: "create"}); err == nil {
+		return errors.New("synthetic append unexpectedly succeeded")
+	}
+	return j.FileJournal.withEventsLocked(fn)
+}
+
+func TestFailedConcurrentAppendStopsBeforeRealJournalCreate(t *testing.T) {
+	dir := privateDir(t)
+	a := approval()
+	j, err := openTestJournal(t, dir, a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer j.Close()
+	failNextWrite := false
+	writeFailed := false
+	j.writeFile = func(file *os.File, data []byte) (int, error) {
+		if failNextWrite {
+			failNextWrite = false
+			writeFailed = true
+			return 0, errors.New("synthetic journal write failure")
+		}
+		return file.Write(data)
+	}
+	f := &inventoryAPI{fakeAPI: &fakeAPI{}}
+	d := Driver{a, &failAppendBeforeCreateHistoryJournal{FileJournal: j, failNextWrite: &failNextWrite}, f}
+	if err := d.Run(context.Background(), "create"); err == nil {
+		t.Fatal("create accepted after a journal append failed")
+	}
+	if !writeFailed || !j.writeFailed || f.createCalls != 0 {
+		t.Fatalf("failed append did not fence create: writeFailed=%t journalPoisoned=%t createCalls=%d", writeFailed, j.writeFailed, f.createCalls)
 	}
 }
 

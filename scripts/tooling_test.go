@@ -1139,6 +1139,7 @@ func TestPullRequestQuickWorkflowContract(t *testing.T) {
 		"run: make fmt-check",
 		"run: make vet",
 		"go test -run '^$' -count=1 ./...",
+		"run: GOTOOLCHAIN=\"$GOTOOLCHAIN\" go test -run '^(TestPublicWorkflowCapacityContract|TestPullRequestQuickWorkflowContract|TestG01WorkflowModuleSelectionPredicate)$' -count=1 ./scripts",
 		"run: make deps",
 		"run: make licenses",
 		"run: make vuln",
