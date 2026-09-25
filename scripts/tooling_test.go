@@ -972,12 +972,262 @@ func TestToolingCheckRequiresExecutableLink(t *testing.T) {
 	}
 }
 
+func toolingActiveYAMLLine(line string) string {
+	line = strings.TrimRight(line, "\r\n")
+	if strings.HasPrefix(strings.TrimSpace(line), "#") {
+		return ""
+	}
+	if comment := strings.Index(line, " #"); comment >= 0 {
+		line = line[:comment]
+	}
+	if comment := strings.Index(line, "\t#"); comment >= 0 {
+		line = line[:comment]
+	}
+	return strings.TrimRight(line, " \t")
+}
+
+func toolingActiveYAMLLineStart(block, wanted string) int {
+	offset := 0
+	for _, line := range strings.SplitAfter(block, "\n") {
+		if line == "" {
+			continue
+		}
+		if toolingActiveYAMLLine(line) == wanted {
+			return offset
+		}
+		offset += len(line)
+	}
+	return -1
+}
+
+func toolingHasActiveYAMLLine(block, wanted string) bool {
+	return toolingActiveYAMLLineStart(block, wanted) >= 0
+}
+
+func toolingYAMLDirectMappingLines(document, parent string) []string {
+	parentIndent := -1
+	var entries []string
+	for _, rawLine := range strings.Split(document, "\n") {
+		line := toolingActiveYAMLLine(rawLine)
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		indent := len(line) - len(strings.TrimLeft(line, " "))
+		if parentIndent < 0 {
+			if indent == 0 && strings.TrimSpace(line) == parent+":" {
+				parentIndent = indent
+			}
+			continue
+		}
+		if indent <= parentIndent {
+			break
+		}
+		if indent == parentIndent+2 {
+			entries = append(entries, strings.TrimSpace(line))
+		}
+	}
+	return entries
+}
+
+func toolingPublicWorkflowTriggersValid(workflow string) bool {
+	events := toolingYAMLDirectMappingLines(workflow, "on")
+	if len(events) != 2 {
+		return false
+	}
+	push, dispatch := false, false
+	for _, event := range events {
+		key, _, found := strings.Cut(event, ":")
+		if !found {
+			return false
+		}
+		switch strings.TrimSpace(key) {
+		case "push":
+			push = true
+		case "workflow_dispatch":
+			dispatch = true
+		default:
+			return false
+		}
+	}
+	return push && dispatch
+}
+
+func toolingPRWorkflowCancelsInProgress(workflow string) bool {
+	for _, entry := range toolingYAMLDirectMappingLines(workflow, "concurrency") {
+		key, value, found := strings.Cut(entry, ":")
+		if found && strings.TrimSpace(key) == "cancel-in-progress" && strings.TrimSpace(value) == "true" {
+			return true
+		}
+	}
+	return false
+}
+
+func TestToolingPublicWorkflowTriggersRejectExtraEvents(t *testing.T) {
+	workflow := `name: Public CI
+on:
+  push:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * *'`
+	if toolingPublicWorkflowTriggersValid(workflow) {
+		t.Fatal("Public CI trigger contract accepted the extra schedule event")
+	}
+}
+
+func TestToolingPRWorkflowCancellationIgnoresCommentedTrue(t *testing.T) {
+	workflow := `name: Pull Request Checks
+concurrency:
+  group: pr-checks
+  # cancel-in-progress: true
+  cancel-in-progress: false`
+	if toolingPRWorkflowCancelsInProgress(workflow) {
+		t.Fatal("PR quick cancellation contract accepted commented true with active false")
+	}
+}
+
+func toolingWorkflowSequenceItems(t *testing.T, block, key string) []string {
+	t.Helper()
+	marker := "    " + key + ":"
+	lines := strings.Split(block, "\n")
+	start := -1
+	for i, line := range lines {
+		if toolingActiveYAMLLine(line) == marker {
+			start = i + 1
+			break
+		}
+	}
+	if start < 0 {
+		t.Fatalf("workflow block is missing %q sequence", key)
+	}
+	var items []string
+	for _, line := range lines[start:] {
+		line = toolingActiveYAMLLine(line)
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		indent := len(line) - len(strings.TrimLeft(line, " "))
+		if indent <= 4 {
+			break
+		}
+		if strings.HasPrefix(line, "      - ") {
+			items = append(items, strings.Trim(strings.TrimPrefix(line, "      - "), "'\""))
+		}
+	}
+	if len(items) == 0 {
+		t.Fatalf("workflow %q sequence is empty", key)
+	}
+	return items
+}
+
+func TestToolingWorkflowSequenceItemsIgnoresCommentedYAML(t *testing.T) {
+	block := `#     branches:
+#       - fake-commented-branch
+    branches:
+      - main
+      # - fake-commented-item
+      - release
+    paths:
+      - "**.go"`
+
+	got := toolingWorkflowSequenceItems(t, block, "branches")
+	if strings.Join(got, ",") != "main,release" {
+		t.Fatalf("workflow branches = %v, want [main release]", got)
+	}
+}
+
+func TestToolingActiveYAMLLineIgnoresComments(t *testing.T) {
+	fixture := `#   workflow_dispatch:
+  workflow_dispatch: # active manual trigger
+#   cancel-in-progress: true
+  cancel-in-progress: false # preserve active run`
+	for _, line := range []string{"  workflow_dispatch:", "  cancel-in-progress: false"} {
+		if !toolingHasActiveYAMLLine(fixture, line) {
+			t.Errorf("active YAML line %q was not found", line)
+		}
+	}
+	for _, line := range []string{"  cancel-in-progress: true", "  workflow_dispatch: # commented out"} {
+		if toolingHasActiveYAMLLine("#"+line, line) {
+			t.Errorf("commented YAML line %q was treated as active", line)
+		}
+	}
+}
+
+func toolingContainsString(values []string, wanted string) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
+}
+
 func TestPublicWorkflowCapacityContract(t *testing.T) {
 	workflowData, err := os.ReadFile("../.github/workflows/ci.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
 	workflow := string(workflowData)
+	pushStart := toolingActiveYAMLLineStart(workflow, "  push:")
+	dispatchStart := toolingActiveYAMLLineStart(workflow, "  workflow_dispatch:")
+	if pushStart < 0 || dispatchStart < 0 || dispatchStart <= pushStart {
+		t.Fatal("Public CI must keep push and workflow_dispatch triggers")
+	}
+	pushTrigger := workflow[pushStart:dispatchStart]
+	branches := toolingWorkflowSequenceItems(t, pushTrigger, "branches")
+	if len(branches) != 1 || branches[0] != "main" {
+		t.Errorf("Public CI push branches = %v, want [main]", branches)
+	}
+	paths := toolingWorkflowSequenceItems(t, pushTrigger, "paths")
+	expectedPaths := []string{
+		"**.go",
+		"go.mod",
+		"go.sum",
+		"go.work",
+		"go.work.sum",
+		"**/go.mod",
+		"**/go.sum",
+		"**/go.work",
+		"**/go.work.sum",
+		"LICENSE",
+		"docs/DEPENDENCIES.md",
+		"Makefile",
+		"scripts/**",
+		"experiments/**",
+		".github/workflows/**",
+	}
+	for _, expectedPath := range expectedPaths {
+		if !toolingContainsString(paths, expectedPath) {
+			t.Errorf("Public CI push path filters omit %q", expectedPath)
+		}
+	}
+	if len(paths) != len(expectedPaths) {
+		t.Errorf("Public CI push path filters changed unexpectedly: got %v, want %v", paths, expectedPaths)
+	}
+	for _, path := range paths {
+		if !toolingContainsString(expectedPaths, path) {
+			t.Errorf("Public CI push path filters contain unexpected pattern %q", path)
+		}
+		if strings.HasPrefix(path, "docs/") && path != "docs/DEPENDENCIES.md" {
+			t.Errorf("Public CI must filter docs-only paths other than docs/DEPENDENCIES.md; found %q", path)
+		}
+	}
+
+	concurrencyStart := toolingActiveYAMLLineStart(workflow, "concurrency:")
+	jobsStart := toolingActiveYAMLLineStart(workflow, "jobs:")
+	if concurrencyStart < 0 || jobsStart <= concurrencyStart {
+		t.Fatal("Public CI is missing its workflow concurrency block")
+	}
+	concurrency := workflow[concurrencyStart:jobsStart]
+	if !toolingHasActiveYAMLLine(concurrency, "  group: public-ci-${{ github.workflow }}-${{ github.ref }}") {
+		t.Error("Public CI must preserve its workflow/ref concurrency group")
+	}
+	if !toolingHasActiveYAMLLine(concurrency, "  cancel-in-progress: false") {
+		t.Error("Public CI must not cancel an active run when a newer main push arrives")
+	}
+	if regexp.MustCompile(`(?m)^\s+queue:`).MatchString(concurrency) {
+		t.Error("Public CI must keep the default one-running/one-pending concurrency queue")
+	}
+
 	jobs := toolingWorkflowJobs(t, workflow)
 	requiredJobs := []string{"root", "race", "offline", "vuln", "checks"}
 	for _, job := range requiredJobs {
@@ -1061,7 +1311,7 @@ func TestPublicWorkflowCapacityContract(t *testing.T) {
 			t.Errorf("hosted workflow contains forbidden %q", forbidden)
 		}
 	}
-	if strings.Contains(workflow, "  pull_request:\n") || !strings.Contains(workflow, "  workflow_dispatch:\n") {
+	if !toolingPublicWorkflowTriggersValid(workflow) {
 		t.Error("Public CI must run on main pushes/manual dispatch, not pull requests")
 	}
 
@@ -1126,7 +1376,6 @@ func TestPullRequestQuickWorkflowContract(t *testing.T) {
 		"name: Go checks",
 		"  pull_request:",
 		"types: [opened, synchronize, reopened]",
-		"cancel-in-progress: true",
 		"permissions:\n  contents: read",
 		"run: git diff --check \"$BASE_SHA...$HEAD_SHA\"",
 		"git diff --name-only --no-renames \"$BASE_SHA...$HEAD_SHA\"",
@@ -1147,6 +1396,9 @@ func TestPullRequestQuickWorkflowContract(t *testing.T) {
 		if !strings.Contains(workflow, required) {
 			t.Errorf("PR quick workflow is missing %q", required)
 		}
+	}
+	if !toolingPRWorkflowCancelsInProgress(workflow) {
+		t.Error("PR quick workflow must cancel in-progress runs")
 	}
 	for _, forbidden := range []string{
 		"run: make test\n",

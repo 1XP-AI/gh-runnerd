@@ -27,7 +27,7 @@ permissions:
 
 concurrency:
   group: public-ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   root:
