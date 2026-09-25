@@ -1004,6 +1004,402 @@ func toolingHasActiveYAMLLine(block, wanted string) bool {
 	return toolingActiveYAMLLineStart(block, wanted) >= 0
 }
 
+func toolingG01CanaryMappingEntry(line string) (string, string, bool) {
+	key, value, found := strings.Cut(strings.TrimSpace(line), ":")
+	if !found {
+		return "", "", false
+	}
+	key = strings.TrimSpace(key)
+	if len(key) >= 2 && ((key[0] == '"' && key[len(key)-1] == '"') || (key[0] == '\'' && key[len(key)-1] == '\'')) {
+		key = key[1 : len(key)-1]
+	}
+	return key, strings.TrimSpace(value), true
+}
+
+func toolingG01CanaryDispatchStart(workflow string) (int, int, bool) {
+	onFound := false
+	onChildIndent := -1
+	offset := 0
+	for _, rawLine := range strings.SplitAfter(workflow, "\n") {
+		line := toolingG01CanaryActiveYAMLLine(rawLine)
+		if strings.TrimSpace(line) == "" {
+			offset += len(rawLine)
+			continue
+		}
+		indent := len(line) - len(strings.TrimLeft(line, " "))
+		key, value, found := toolingG01CanaryMappingEntry(line)
+		if !onFound {
+			if indent == 0 && found && key == "on" {
+				if value != "" {
+					return 0, 0, false
+				}
+				onFound = true
+			}
+			offset += len(rawLine)
+			continue
+		}
+		if indent == 0 {
+			return 0, 0, false
+		}
+		if onChildIndent < 0 {
+			onChildIndent = indent
+		}
+		if indent == onChildIndent && found && key == "workflow_dispatch" {
+			if value != "" {
+				return 0, 0, false
+			}
+			return offset, indent, true
+		}
+		offset += len(rawLine)
+	}
+	return 0, 0, false
+}
+
+func toolingG01CanaryWorkflowPhaseAgnostic(workflow string) bool {
+	dispatchStart, dispatchIndent, found := toolingG01CanaryDispatchStart(workflow)
+	if !found {
+		return false
+	}
+
+	dispatch := workflow[dispatchStart:]
+	childIndent := -1
+	for _, rawLine := range strings.Split(dispatch, "\n")[1:] {
+		line := toolingG01CanaryActiveYAMLLine(rawLine)
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		indent := len(line) - len(strings.TrimLeft(line, " "))
+		if indent <= dispatchIndent {
+			break
+		}
+		if childIndent < 0 {
+			childIndent = indent
+		}
+		if indent == childIndent {
+			key, _, found := strings.Cut(strings.TrimSpace(line), ":")
+			if found && strings.Trim(strings.TrimSpace(key), "\"'") == "inputs" {
+				return false
+			}
+		}
+	}
+
+	if toolingG01CanaryHasPhaseInterpolation(workflow) {
+		return false
+	}
+	return true
+}
+
+func TestG01CanaryWorkflowIsPhaseAgnostic(t *testing.T) {
+	workflowData, err := os.ReadFile("../experiments/g01-canary-assets/canary.yml.template")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !toolingG01CanaryWorkflowPhaseAgnostic(string(workflowData)) {
+		t.Fatal("G01 canary template must keep workflow_dispatch without phase inputs or interpolation")
+	}
+}
+
+func TestToolingG01CanaryPhaseDetectorHandlesQuotedKeysAndComments(t *testing.T) {
+	workflowDispatchJobWithoutTrigger := `on:
+  push:
+jobs:
+  workflow_dispatch:
+    runs-on: ubuntu-latest
+    steps: []`
+	if toolingG01CanaryWorkflowPhaseAgnostic(workflowDispatchJobWithoutTrigger) {
+		t.Error("G01 canary contract accepted a job identifier as a workflow_dispatch trigger")
+	}
+
+	quotedPhaseInput := `on:
+  workflow_dispatch:
+    inputs:
+      "phase":
+        required: true
+        type: choice`
+	if toolingG01CanaryWorkflowPhaseAgnostic(quotedPhaseInput) {
+		t.Error("G01 canary contract accepted a quoted phase input key")
+	}
+
+	deeplyIndentedPhaseInput := `on:
+  workflow_dispatch:
+      inputs:
+        phase:
+          required: true
+          type: choice`
+	if toolingG01CanaryWorkflowPhaseAgnostic(deeplyIndentedPhaseInput) {
+		t.Error("G01 canary contract accepted a phase input at a valid non-default indentation")
+	}
+
+	commentedInterpolation := `# run-name: G01 ${{ inputs.phase }}
+on:
+  workflow_dispatch:`
+	if !toolingG01CanaryWorkflowPhaseAgnostic(commentedInterpolation) {
+		t.Error("G01 canary contract treated a commented phase interpolation as active YAML")
+	}
+
+	quotedScalarInterpolation := `run-name: "G01 # ${{ inputs.phase }}"
+on:
+  workflow_dispatch:`
+	if toolingG01CanaryWorkflowPhaseAgnostic(quotedScalarInterpolation) {
+		t.Error("G01 canary contract missed phase interpolation after # inside a quoted scalar")
+	}
+
+	blockScalarInterpolation := `on:
+  workflow_dispatch:
+run: |
+  # ${{ inputs.phase }}`
+	if toolingG01CanaryWorkflowPhaseAgnostic(blockScalarInterpolation) {
+		t.Error("G01 canary contract missed phase interpolation inside a YAML block scalar")
+	}
+
+	nestedBraceInterpolation := `run-name: ${{ format('{0}', inputs.phase) }}
+on:
+  workflow_dispatch:`
+	if toolingG01CanaryWorkflowPhaseAgnostic(nestedBraceInterpolation) {
+		t.Error("G01 canary contract missed a phase reference after a nested expression brace")
+	}
+
+	multilineInterpolation := `run-name: "${{
+  inputs.phase
+}}"
+on:
+  workflow_dispatch:`
+	if toolingG01CanaryWorkflowPhaseAgnostic(multilineInterpolation) {
+		t.Error("G01 canary contract missed a phase interpolation folded across quoted YAML lines")
+	}
+
+	multilineQuotedCommentInterpolation := `run-name: "G01
+  # ${{ inputs.phase }}"
+on:
+  workflow_dispatch:`
+	if toolingG01CanaryWorkflowPhaseAgnostic(multilineQuotedCommentInterpolation) {
+		t.Error("G01 canary contract treated a comment marker inside a multiline quoted scalar as YAML comment")
+	}
+
+	stringLiteralOnly := `run-name: ${{ format('{0}', 'inputs.phase') }}
+on:
+  workflow_dispatch:`
+	if !toolingG01CanaryWorkflowPhaseAgnostic(stringLiteralOnly) {
+		t.Error("G01 canary contract treated a string literal as a phase reference")
+	}
+}
+
+func toolingG01CanaryActiveYAMLLine(line string) string {
+	var quote byte
+	var escaped bool
+	return toolingG01CanaryActiveYAMLLineWithQuoteState(line, &quote, &escaped)
+}
+
+func toolingG01CanaryActiveYAMLLineWithQuoteState(line string, quote *byte, escaped *bool) string {
+	line = strings.TrimRight(line, "\r\n")
+	for i := 0; i < len(line); i++ {
+		current := line[i]
+		if *quote == '"' {
+			if *escaped {
+				*escaped = false
+				continue
+			}
+			switch current {
+			case '\\':
+				*escaped = true
+			case '"':
+				*quote = 0
+			}
+			continue
+		}
+		if *quote == '\'' {
+			if current == '\'' {
+				if i+1 < len(line) && line[i+1] == '\'' {
+					i++
+					continue
+				}
+				*quote = 0
+			}
+			continue
+		}
+
+		switch current {
+		case '"':
+			if i == 0 || strings.ContainsRune(" \t:[{,-", rune(line[i-1])) {
+				*quote = '"'
+			}
+		case '\'':
+			if i == 0 || strings.ContainsRune(" \t:[{,-", rune(line[i-1])) {
+				*quote = '\''
+			}
+		case '#':
+			if i == 0 || line[i-1] == ' ' || line[i-1] == '\t' {
+				return strings.TrimRight(line[:i], " \t")
+			}
+		}
+	}
+	return strings.TrimRight(line, " \t")
+}
+
+func toolingG01CanaryBlockScalarIndicator(line string) bool {
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return false
+	}
+	indicator := fields[len(fields)-1]
+	if indicator[0] != '|' && indicator[0] != '>' {
+		return false
+	}
+	for _, char := range indicator[1:] {
+		if char != '+' && char != '-' && (char < '0' || char > '9') {
+			return false
+		}
+	}
+	return true
+}
+
+func toolingG01CanaryWordByte(char byte) bool {
+	return char == '_' || char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9'
+}
+
+func toolingG01CanaryReadExpressionString(source string, start int) (string, int, bool) {
+	if start >= len(source) || (source[start] != '\'' && source[start] != '"') {
+		return "", start, false
+	}
+	quote := source[start]
+	var value strings.Builder
+	for i := start + 1; i < len(source); {
+		char := source[i]
+		if quote == '"' && char == '\\' && i+1 < len(source) {
+			value.WriteByte(source[i+1])
+			i += 2
+			continue
+		}
+		if char == quote {
+			if quote == '\'' && i+1 < len(source) && source[i+1] == '\'' {
+				value.WriteByte('\'')
+				i += 2
+				continue
+			}
+			return value.String(), i + 1, true
+		}
+		value.WriteByte(char)
+		i++
+	}
+	return "", len(source), false
+}
+
+func toolingG01CanaryExpressionReferencesPhase(expression string) bool {
+	for i := 0; i < len(expression); {
+		if expression[i] == '\'' || expression[i] == '"' {
+			_, next, ok := toolingG01CanaryReadExpressionString(expression, i)
+			if !ok {
+				return false
+			}
+			i = next
+			continue
+		}
+		if !strings.HasPrefix(expression[i:], "inputs") || (i > 0 && toolingG01CanaryWordByte(expression[i-1])) {
+			i++
+			continue
+		}
+		next := i + len("inputs")
+		if next < len(expression) && toolingG01CanaryWordByte(expression[next]) {
+			i++
+			continue
+		}
+		for next < len(expression) && (expression[next] == ' ' || expression[next] == '\t' || expression[next] == '\n') {
+			next++
+		}
+		if next < len(expression) && expression[next] == '.' {
+			next++
+			for next < len(expression) && (expression[next] == ' ' || expression[next] == '\t' || expression[next] == '\n') {
+				next++
+			}
+			phaseEnd := next + len("phase")
+			if phaseEnd <= len(expression) && expression[next:phaseEnd] == "phase" && (phaseEnd == len(expression) || !toolingG01CanaryWordByte(expression[phaseEnd])) {
+				return true
+			}
+		} else if next < len(expression) && expression[next] == '[' {
+			next++
+			for next < len(expression) && (expression[next] == ' ' || expression[next] == '\t' || expression[next] == '\n') {
+				next++
+			}
+			value, afterValue, ok := toolingG01CanaryReadExpressionString(expression, next)
+			if ok && value == "phase" {
+				next = afterValue
+				for next < len(expression) && (expression[next] == ' ' || expression[next] == '\t' || expression[next] == '\n') {
+					next++
+				}
+				if next < len(expression) && expression[next] == ']' {
+					return true
+				}
+			}
+		}
+		i++
+	}
+	return false
+}
+
+func toolingG01CanaryExpressionEnd(line string, start int) int {
+	for i := start; i < len(line); {
+		if line[i] == '\'' || line[i] == '"' {
+			_, next, ok := toolingG01CanaryReadExpressionString(line, i)
+			if !ok {
+				return -1
+			}
+			i = next
+			continue
+		}
+		if line[i] == '}' && i+1 < len(line) && line[i+1] == '}' {
+			return i
+		}
+		i++
+	}
+	return -1
+}
+
+func toolingG01CanaryLineHasPhaseInterpolation(line string) bool {
+	for offset := 0; offset < len(line); {
+		start := strings.Index(line[offset:], "${{")
+		if start < 0 {
+			return false
+		}
+		bodyStart := offset + start + len("${{")
+		bodyEnd := toolingG01CanaryExpressionEnd(line, bodyStart)
+		if bodyEnd < 0 {
+			return toolingG01CanaryExpressionReferencesPhase(line[bodyStart:])
+		}
+		if toolingG01CanaryExpressionReferencesPhase(line[bodyStart:bodyEnd]) {
+			return true
+		}
+		offset = bodyEnd + len("}}")
+	}
+	return false
+}
+
+func toolingG01CanaryHasPhaseInterpolation(workflow string) bool {
+	blockIndent := -1
+	var yamlQuote byte
+	var yamlEscaped bool
+	var activeDocument strings.Builder
+	for _, rawLine := range strings.Split(workflow, "\n") {
+		line := strings.TrimRight(rawLine, "\r\n")
+		indent := len(line) - len(strings.TrimLeft(line, " "))
+		if blockIndent >= 0 {
+			if strings.TrimSpace(line) == "" || indent > blockIndent {
+				activeDocument.WriteString(line)
+				activeDocument.WriteByte('\n')
+				continue
+			}
+			blockIndent = -1
+		}
+
+		activeLine := toolingG01CanaryActiveYAMLLineWithQuoteState(line, &yamlQuote, &yamlEscaped)
+		activeDocument.WriteString(activeLine)
+		activeDocument.WriteByte('\n')
+		if toolingG01CanaryBlockScalarIndicator(activeLine) {
+			blockIndent = indent
+		}
+	}
+	return toolingG01CanaryLineHasPhaseInterpolation(activeDocument.String())
+}
+
 func toolingYAMLDirectMappingLines(document, parent string) []string {
 	parentIndent := -1
 	var entries []string

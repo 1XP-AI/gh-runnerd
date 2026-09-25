@@ -9,10 +9,10 @@ This follow-up starts from the exact PR #72 head `f5560ba950f77343e57034cc1cf85d
 | Repeated `inspect` despite one slot | `inspect` now consumes a durable `phase` record before its read path. Replay rejects a second inspect as quarantined, including after a failed or partially observed attempt. |
 | Direct FIFO/controller input without broker provenance | Tagged controller and paired-terminal execution are quarantined before reading stdin. The existing stdin boundary cannot independently attest that its caller is the broker. No synthetic environment, flag, token field, or process convention was added as an attestation. |
 | Tagged controller entry outside the broker-only path | The tagged execution flags remain disabled at the command boundary. Preparation and plan-only paths remain local and non-executing. |
-| Workflow phase not bound to controller phase | The change adds only a structural approval-shape guard: a non-paired controller approval carries one stable multi-phase authority membership set, and the selected outer phase must be a member of that set. It does not verify that workflow input selected that phase; workflow input-to-controller-phase binding remains an explicit unresolved gap, so tagged controller execution stays quarantined. Paired-terminal keeps its separate fixed sequence but is also blocked at the tagged controller entry. |
+| Workflow phase provenance | The inactive canary template is phase-agnostic: it keeps `workflow_dispatch`, defines no phase input and puts no phase in `run-name`. Do not infer phase from `run-name` or workflow inputs. The controller approval identifies one exact workflow run ID and an allowed phase set; the offline signed broker provenance receipt binds the approval digest, run ID and selected controller phase for an invocation. This fixture contract is not production provenance evidence: the authenticated source and reviewed trust-root provisioning/rotation remain unresolved, so tagged controller execution stays quarantined. Paired-terminal remains blocked at the tagged controller entry. |
 | Cleanup lacks atomic ownership/freshness fence | The current adapter exposes only unconditional `DeleteScaleSet(context, id)`. The driver rejects a missing `ConditionalScaleSetDeleter` before journal authorization or API access, so this pre-journal refusal does not write a quarantine record or claim to quarantine a journal. Once the capability is present and cleanup has authorized the journal, a failed preparation/conditional delete records unresolved intent and quarantines the journal; inventory-before-delete and inventory-after-delete reads are not such a fence. |
 
-The exact blockers are therefore capability-level, not unverified attestation claims: the controller has no authenticated broker provenance channel, workflow input is not yet bound to the controller phase, and the SDK adapter has no conditional owner/freshness delete operation. Those paths remain disabled until a new reviewed design and adapter contract provide these properties.
+The exact blockers remain capability-level: there is no authenticated production broker provenance source and reviewed trust-root authority that bind the exact workflow run to the controller phase, and the SDK adapter has no conditional owner/freshness delete operation. Offline receipt fixtures do not establish either production capability. Those paths remain disabled until a reviewed source/trust-root design and conditional-delete adapter contract provide the required evidence.
 
 ## TDD and offline verification
 
@@ -83,13 +83,16 @@ call, credential mint, runner operation or live validation was performed.
 
 ## Remaining external G01 gates
 
-The workflow-input gate remains blocked by a capability, not by the signed
-fixture tests: `BrokerProvenanceAdapter` has no broker-authenticated workflow
-source, and the GitHub workflow-run response cannot attest which input selected
-the controller phase. Re-enabling tagged controller or paired execution
-requires a reviewed broker channel that authenticates that input-to-phase
-binding before credential input and API effects; production therefore remains
-quarantined.
+The production provenance gate remains blocked by a capability, not by the
+signed fixture tests: `BrokerProvenanceAdapter` has no broker-authenticated
+workflow source and there is no reviewed trust-root provisioning/rotation
+authority. The offline signed receipt binds the controller-approval digest, one
+exact workflow run ID and the selected controller phase, but does not prove that
+a production source can authenticate that binding. The template is
+phase-agnostic; never infer phase from `run-name` or workflow inputs. Re-enabling
+tagged controller or paired execution requires a reviewed production provenance
+source and trust-root handoff before credential input and API effects; those
+paths therefore remain quarantined.
 
 The cleanup gate remains blocked by the pinned `github.com/actions/scaleset
 v0.4.0` client: `SDKAPI.DeleteScaleSet` is unconditional and exposes no
