@@ -1010,7 +1010,13 @@ func toolingG01CanaryMappingEntry(line string) (string, string, bool) {
 		return "", "", false
 	}
 	key = strings.TrimSpace(key)
-	if len(key) >= 2 && ((key[0] == '"' && key[len(key)-1] == '"') || (key[0] == '\'' && key[len(key)-1] == '\'')) {
+	if len(key) >= 2 && key[0] == '"' && key[len(key)-1] == '"' {
+		decoded, err := strconv.Unquote(key)
+		if err != nil {
+			return "", "", false
+		}
+		key = decoded
+	} else if len(key) >= 2 && key[0] == '\'' && key[len(key)-1] == '\'' {
 		key = key[1 : len(key)-1]
 	}
 	return key, strings.TrimSpace(value), true
@@ -1076,8 +1082,8 @@ func toolingG01CanaryWorkflowPhaseAgnostic(workflow string) bool {
 			childIndent = indent
 		}
 		if indent == childIndent {
-			key, _, found := strings.Cut(strings.TrimSpace(line), ":")
-			if found && strings.Trim(strings.TrimSpace(key), "\"'") == "inputs" {
+			key, _, found := toolingG01CanaryMappingEntry(line)
+			if found && key == "inputs" {
 				return false
 			}
 		}
@@ -1120,6 +1126,16 @@ jobs:
 		t.Error("G01 canary contract accepted a quoted phase input key")
 	}
 
+	escapedQuotedPhaseInput := `on:
+  workflow_dispatch:
+    "inp\u0075ts":
+      phase:
+        required: true
+        type: choice`
+	if toolingG01CanaryWorkflowPhaseAgnostic(escapedQuotedPhaseInput) {
+		t.Error("G01 canary contract accepted a YAML-escaped quoted inputs key")
+	}
+
 	deeplyIndentedPhaseInput := `on:
   workflow_dispatch:
       inputs:
@@ -1157,6 +1173,13 @@ on:
   workflow_dispatch:`
 	if toolingG01CanaryWorkflowPhaseAgnostic(nestedBraceInterpolation) {
 		t.Error("G01 canary contract missed a phase reference after a nested expression brace")
+	}
+
+	bracketStyleContextInterpolation := `run-name: ${{ github['event']['inputs']['phase'] }}
+on:
+  workflow_dispatch:`
+	if toolingG01CanaryWorkflowPhaseAgnostic(bracketStyleContextInterpolation) {
+		t.Error("G01 canary contract missed a phase reference through bracket-style context paths")
 	}
 
 	multilineInterpolation := `run-name: "${{
@@ -1257,6 +1280,60 @@ func toolingG01CanaryWordByte(char byte) bool {
 	return char == '_' || char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9'
 }
 
+func toolingG01CanaryExpressionPathSegment(expression string, start int, segment string) (int, bool) {
+	for start < len(expression) && (expression[start] == ' ' || expression[start] == '\t' || expression[start] == '\n') {
+		start++
+	}
+	if start < len(expression) && expression[start] == '.' {
+		start++
+		for start < len(expression) && (expression[start] == ' ' || expression[start] == '\t' || expression[start] == '\n') {
+			start++
+		}
+		end := start + len(segment)
+		if end > len(expression) || expression[start:end] != segment || (end < len(expression) && toolingG01CanaryWordByte(expression[end])) {
+			return start, false
+		}
+		return end, true
+	}
+	if start < len(expression) && expression[start] == '[' {
+		start++
+		for start < len(expression) && (expression[start] == ' ' || expression[start] == '\t' || expression[start] == '\n') {
+			start++
+		}
+		value, end, ok := toolingG01CanaryReadExpressionString(expression, start)
+		if !ok || value != segment {
+			return start, false
+		}
+		for end < len(expression) && (expression[end] == ' ' || expression[end] == '\t' || expression[end] == '\n') {
+			end++
+		}
+		if end >= len(expression) || expression[end] != ']' {
+			return end, false
+		}
+		return end + 1, true
+	}
+	return start, false
+}
+
+func toolingG01CanaryGitHubEventInputPhase(expression string, start int) bool {
+	const context = "github"
+	if !strings.HasPrefix(expression[start:], context) {
+		return false
+	}
+	next := start + len(context)
+	if next < len(expression) && toolingG01CanaryWordByte(expression[next]) {
+		return false
+	}
+	for _, segment := range []string{"event", "inputs", "phase"} {
+		var ok bool
+		next, ok = toolingG01CanaryExpressionPathSegment(expression, next, segment)
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
 func toolingG01CanaryReadExpressionString(source string, start int) (string, int, bool) {
 	if start >= len(source) || (source[start] != '\'' && source[start] != '"') {
 		return "", start, false
@@ -1293,6 +1370,9 @@ func toolingG01CanaryExpressionReferencesPhase(expression string) bool {
 			}
 			i = next
 			continue
+		}
+		if (i == 0 || !toolingG01CanaryWordByte(expression[i-1])) && toolingG01CanaryGitHubEventInputPhase(expression, i) {
+			return true
 		}
 		if !strings.HasPrefix(expression[i:], "inputs") || (i > 0 && toolingG01CanaryWordByte(expression[i-1])) {
 			i++
