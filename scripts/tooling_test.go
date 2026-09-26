@@ -1787,8 +1787,8 @@ func TestPublicWorkflowCapacityContract(t *testing.T) {
 	}
 
 	const (
-		checkout = "uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"
-		setupGo  = "uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5"
+		checkout = "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+		setupGo  = "uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e"
 		mainHead = "ref: ${{ github.sha }}"
 	)
 	for _, job := range []string{"root", "race", "offline", "vuln"} {
