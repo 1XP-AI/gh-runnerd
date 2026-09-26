@@ -5825,6 +5825,7 @@ from pathlib import Path
 git_query_deadline_seconds = 30
 git_query_termination_grace_seconds = 5
 git_query_output_max_bytes = 64 * 1024
+git_query_packet_blob_output_max_bytes = 8 * 1024 * 1024
 git_query_stream_chunk_bytes = 4096
 
 
@@ -5962,7 +5963,19 @@ def capture_git_query_output(process, git_command, output_limit, input_bytes=Non
         selector.close()
 
 
-def run_bounded_git_query(command, *, cwd, env, input_bytes=None):
+def run_bounded_git_query(
+    command,
+    *,
+    cwd,
+    env,
+    input_bytes=None,
+    output_limit=git_query_output_max_bytes,
+):
+    if output_limit not in {
+        git_query_output_max_bytes,
+        git_query_packet_blob_output_max_bytes,
+    }:
+        raise SystemExit("Git query output budget was not reviewed")
     process = None
     try:
         process = subprocess.Popen(
@@ -5976,7 +5989,7 @@ def run_bounded_git_query(command, *, cwd, env, input_bytes=None):
         )
         try:
             stdout, stderr = capture_git_query_output(
-                process, command, git_query_output_max_bytes, input_bytes
+                process, command, output_limit, input_bytes
             )
         except subprocess.TimeoutExpired:
             terminate_git_query_group(process)
@@ -6007,6 +6020,48 @@ def git_query(arguments):
         "core.hooksPath=/dev/null",
         *arguments,
     ]
+
+
+def run_bounded_git_packet_blob_query(blob_spec, *, cwd, env):
+    """Capture only the reviewed packet's HEAD blob under its separate cap."""
+    expected_path = "docs/evidence/g01-recovery-packet.md"
+    if not isinstance(blob_spec, str) or ":" not in blob_spec:
+        raise SystemExit("Git packet blob revision/path was malformed")
+    revision, path = blob_spec.split(":", 1)
+    if path != expected_path or not (
+        revision == "HEAD"
+        or (
+            len(revision) in {40, 64}
+            and all(character in "0123456789abcdefABCDEF" for character in revision)
+        )
+    ):
+        raise SystemExit("Git packet blob query was outside the reviewed revision/path")
+    command = git_query(["show", blob_spec])
+    return run_bounded_git_query(
+        command,
+        cwd=cwd,
+        env=env,
+        output_limit=git_query_packet_blob_output_max_bytes,
+    )
+
+
+def require_packet_head_parity(intent_output, head_blob, worktree_bytes):
+    """Bind the reviewed packet path and bytes to the current HEAD blob."""
+    expected_path = b"docs/evidence/g01-recovery-packet.md"
+    if not isinstance(intent_output, bytes):
+        raise SystemExit("post-correction packet intent output was not bytes")
+    records = intent_output.split(b"\0")
+    if records[-1] != b"" or len(records) != 2:
+        raise SystemExit("post-correction packet intent output was malformed")
+    record = records[0]
+    if len(record) < 3 or record[1:2] != b" " or record[2:] != expected_path:
+        raise SystemExit("post-correction packet index entry was missing or malformed")
+    if record[:1] in {b"S", b"s", b"h"}:
+        raise SystemExit("post-correction packet has skip-worktree or assume-unchanged intent")
+    if not isinstance(head_blob, bytes) or not isinstance(worktree_bytes, bytes):
+        raise SystemExit("post-correction packet byte comparison was not binary")
+    if head_blob != worktree_bytes:
+        raise SystemExit("post-correction packet bytes differ from the current HEAD blob")
 
 
 git_transport_override_names = {
@@ -6064,11 +6119,13 @@ if git_http_tls_environment_overrides:
         "before authenticated remote parity: "
         + ", ".join(git_http_tls_environment_overrides)
     )
+git_child_environment_names = ("PATH", "LANG", "LC_ALL")
+if "PATH" not in os.environ or not os.environ["PATH"]:
+    raise SystemExit("post-correction reviewed PATH is missing")
 git_environment = {
-    key: value
-    for key, value in os.environ.items()
-    if key not in git_environment_override_names
-    and not key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))
+    key: os.environ[key]
+    for key in git_child_environment_names
+    if key in os.environ
 }
 git_environment.update(
     {
@@ -6151,13 +6208,6 @@ if paths:
         _path, attribute, value = fields[index:index + 3]
         if attribute != b"filter" or value != b"unspecified":
             raise SystemExit("post-correction active Git filter attribute is not allowed")
-status = run_bounded_git_query(
-    git_query(["status", "--porcelain=v1", "--untracked-files=all"]),
-    cwd=Path.cwd(),
-    env=git_environment,
-)
-if status.returncode != 0 or status.stderr or status.stdout.decode("utf-8").strip():
-    raise SystemExit("post-correction worktree is not clean")
 local_result = run_bounded_git_query(
     git_query(["rev-parse", "HEAD"]),
     cwd=Path.cwd(),
@@ -6166,6 +6216,37 @@ local_result = run_bounded_git_query(
 if local_result.returncode != 0 or local_result.stderr:
     raise SystemExit("post-correction local head query failed")
 local = local_result.stdout.decode("utf-8").strip()
+packet_path = Path("docs/evidence/g01-recovery-packet.md")
+intent_result = run_bounded_git_query(
+    git_query(["ls-files", "-v", "-z", "--", packet_path.as_posix()]),
+    cwd=Path.cwd(),
+    env=git_environment,
+)
+if intent_result.returncode != 0 or intent_result.stderr:
+    raise SystemExit("post-correction packet intent-bit query failed")
+packet_blob_result = run_bounded_git_packet_blob_query(
+    f"{local}:{packet_path.as_posix()}",
+    cwd=Path.cwd(),
+    env=git_environment,
+)
+if packet_blob_result.returncode != 0 or packet_blob_result.stderr:
+    raise SystemExit("post-correction packet HEAD blob query failed")
+try:
+    packet_worktree_bytes = packet_path.read_bytes()
+except OSError:
+    raise SystemExit("post-correction packet worktree bytes could not be read")
+require_packet_head_parity(
+    intent_result.stdout,
+    packet_blob_result.stdout,
+    packet_worktree_bytes,
+)
+status = run_bounded_git_query(
+    git_query(["status", "--porcelain=v1", "--untracked-files=all"]),
+    cwd=Path.cwd(),
+    env=git_environment,
+)
+if status.returncode != 0 or status.stderr or status.stdout.decode("utf-8").strip():
+    raise SystemExit("post-correction worktree is not clean")
 remote_environment = {
     key: value
     for key, value in git_environment.items()
@@ -8073,6 +8154,14 @@ def git_subcommand(tokens):
     return None
 
 
+def git_config_include_key(key):
+    """Recognize include directives that can load executable Git config."""
+    normalized = key.casefold()
+    return normalized == "include.path" or re.fullmatch(
+        r"includeif\..+\.path", normalized
+    ) is not None
+
+
 def git_filter_attribute_violation(tokens):
     """Reject Git filters and external attribute configuration before reads."""
     if not tokens or executable_basename(tokens[0]) != "git":
@@ -8082,6 +8171,8 @@ def git_filter_attribute_violation(tokens):
 
     def config_violation(assignment):
         key = assignment.split("=", 1)[0].lower()
+        if git_config_include_key(key):
+            return "Git configuration includes are not allowed before read-only commands"
         if key.startswith("filter.") or key in forbidden_keys:
             return "Git filter/external-attributes configuration is not allowed"
         return None
@@ -8120,6 +8211,11 @@ def git_filter_attribute_violation(tokens):
         for token in tokens
     ):
         return "Git filter/external-attributes configuration is not allowed"
+    if subcommand == "config" and any(
+        git_config_include_key(token.split("=", 1)[0])
+        for token in tokens[1:]
+    ):
+        return "Git configuration includes are not allowed before read-only commands"
     return None
 
 
@@ -8611,6 +8707,40 @@ def go_command_violation(tokens):
     )
 
 
+reviewed_shell_export_assignments = {
+    "PATH=/opt/homebrew/bin:/usr/bin:/bin",
+    "GIT_CONFIG_NOSYSTEM=1",
+    "GIT_CONFIG_GLOBAL=/dev/null",
+    "GIT_CONFIG_SYSTEM=/dev/null",
+    "GIT_CONFIG_COUNT=2",
+    "GIT_CONFIG_KEY_0=core.fsmonitor",
+    "GIT_CONFIG_VALUE_0=false",
+    "GIT_CONFIG_KEY_1=core.hooksPath",
+    "GIT_CONFIG_VALUE_1=/dev/null",
+    "GIT_ATTR_NOSYSTEM=1",
+}
+
+
+def shell_environment_builtin_violation(tokens):
+    """Reject shell builtins that can print inherited variables."""
+    if not tokens:
+        return None
+    executable = executable_basename(tokens[0])
+    if executable == "set":
+        if tokens == ["set", "-euo", "pipefail"]:
+            return None
+        return "shell set is allowed only as the exact reviewed 'set -euo pipefail' form"
+    if executable == "export":
+        assignments = tokens[1:]
+        if not assignments or any(
+            not assignment.fullmatch(value)
+            or value not in reviewed_shell_export_assignments
+            for value in assignments
+        ):
+            return "shell export requires explicit reviewed assignments"
+    return None
+
+
 def forbidden_command(tokens, depth=0):
     tokens = list(tokens)
     if not tokens:
@@ -8644,6 +8774,9 @@ def forbidden_command(tokens, depth=0):
     tokens = executable_tokens(tokens)
     if not tokens:
         return None
+    environment_builtin_violation = shell_environment_builtin_violation(tokens)
+    if environment_builtin_violation:
+        return environment_builtin_violation
     if tokens[0] == "[":
         return None
     if tokens[0] == unsupported_env_wrapper_token:
@@ -9037,6 +9170,10 @@ def python_sensitive_value_names(tree, parents):
             assignments.append((node.target, node.value))
         elif isinstance(node, ast.NamedExpr):
             assignments.append((node.target, node.value))
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+            # Values yielded from an environment iterator remain sensitive in
+            # both loop bodies and comprehension elements.
+            assignments.append((node.target, node.iter))
 
     def target_names(target):
         if isinstance(target, ast.Name):
@@ -9967,15 +10104,104 @@ def python_import_bindings(tree):
                 for bound_target, bound_value in binding_pairs(target, value)
             )
 
+    assigned_values = {}
+    for target, value, _destructured in assignment_bindings:
+        if isinstance(target, ast.Name) and value is not None:
+            assigned_values.setdefault(target.id, []).append(value)
+
+    iterable_bindings = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.For, ast.AsyncFor)):
+            target, value = node.target, node.iter
+        elif isinstance(node, ast.comprehension):
+            target, value = node.target, node.iter
+        else:
+            continue
+        iterable_bindings.extend(
+            (bound_target, value)
+            for bound_target in target_names(target)
+        )
+
     # Only names that could denote a command-capable launcher are tracked.
     # Ordinary direct callable assignments (for example `validator =
     # namespace.get`) remain outside this map. Destructured assignments are
     # tracked conservatively because an unresolved element cannot be proven
     # non-launching; such names remain mapped to None and fail closed.
     candidate_aliases = set()
-    for _ in range(len(assignment_bindings) + 1):
+
+    def iterable_may_contain_launcher(value, seen_names=None, seen_nodes=None):
+        if value is None:
+            return False
+        if seen_names is None:
+            seen_names = set()
+        if seen_nodes is None:
+            seen_nodes = set()
+        if id(value) in seen_nodes:
+            return False
+        seen_nodes.add(id(value))
+        if isinstance(value, ast.Name):
+            resolved = python_resolved_name(value, modules, functions)
+            if resolved in python_command_functions or value.id in candidate_aliases:
+                return True
+            if value.id in modules:
+                return False
+            if value.id in functions and functions[value.id] is None:
+                return True
+            if value.id in seen_names:
+                return False
+            seen_names.add(value.id)
+            return any(
+                iterable_may_contain_launcher(candidate, seen_names, seen_nodes)
+                for candidate in assigned_values.get(value.id, ())
+            )
+        if isinstance(value, ast.Attribute):
+            resolved = python_resolved_name(value, modules, functions)
+            if resolved in python_command_functions:
+                return True
+            dotted = python_dotted_name(value)
+            if dotted and dotted.rsplit(".", 1)[-1] in python_command_leaf_names:
+                root = dotted.split(".", 1)[0]
+                return root in modules or root in candidate_aliases or root in functions
+            return False
+        if python_call_derived_command_alias(value, modules):
+            return True
+        if isinstance(
+            value,
+            (
+                ast.List,
+                ast.Tuple,
+                ast.Set,
+                ast.Dict,
+                ast.ListComp,
+                ast.SetComp,
+                ast.DictComp,
+                ast.GeneratorExp,
+                ast.Subscript,
+                ast.IfExp,
+                ast.BinOp,
+                ast.BoolOp,
+            ),
+        ):
+            return any(
+                iterable_may_contain_launcher(child, seen_names, seen_nodes)
+                for child in ast.iter_child_nodes(value)
+                if not isinstance(
+                    child,
+                    (ast.expr_context, ast.operator, ast.unaryop, ast.boolop, ast.cmpop),
+                )
+            )
+        return False
+
+    candidate_bindings = [
+        (target, value, destructured, False)
+        for target, value, destructured in assignment_bindings
+    ] + [
+        (target, value, False, True)
+        for target, value in iterable_bindings
+    ]
+    for _ in range(len(candidate_bindings) + 1):
         changed = False
-        for target, value, destructured in assignment_bindings:
+        for target, value, destructured, iterable_target in candidate_bindings:
             if not isinstance(target, ast.Name):
                 continue
             dotted = python_dotted_name(value) if value is not None else None
@@ -9991,6 +10217,26 @@ def python_import_bindings(tree):
                 or (isinstance(value, ast.Name) and value.id in candidate_aliases)
                 or (isinstance(value, ast.Name) and value.id in modules)
                 or (isinstance(value, ast.Name) and value.id in functions)
+                or (
+                    (
+                        iterable_target
+                        or isinstance(
+                            value,
+                            (
+                                ast.List,
+                                ast.Tuple,
+                                ast.Set,
+                                ast.Dict,
+                                ast.ListComp,
+                                ast.SetComp,
+                                ast.DictComp,
+                                ast.GeneratorExp,
+                                ast.Subscript,
+                            ),
+                        )
+                    )
+                    and iterable_may_contain_launcher(value)
+                )
             ) and target.id not in candidate_aliases:
                 candidate_aliases.add(target.id)
                 changed = True
@@ -11240,7 +11486,7 @@ def python_filesystem_mutator_alias_violation(tree, parents):
 
 
 def python_path_receiver_expression(node, tree, parents, seen=None):
-    """Recognize a Path-like receiver for ambiguous mutating method names."""
+    """Recognize Path-like receivers through constructors and annotations."""
     if node is None:
         return False
     if seen is None:
@@ -11255,6 +11501,12 @@ def python_path_receiver_expression(node, tree, parents, seen=None):
         if dotted in {"Path", "pathlib.Path"}:
             return True
         if (
+            dotted in {"Path.cwd", "pathlib.Path.cwd"}
+            and not node.args
+            and not node.keywords
+        ):
+            return True
+        if (
             isinstance(node.func, ast.Attribute)
             and node.func.attr == "joinpath"
         ):
@@ -11262,14 +11514,23 @@ def python_path_receiver_expression(node, tree, parents, seen=None):
         return False
     if isinstance(node, ast.Name):
         for candidate in ast.walk(tree):
-            if not isinstance(candidate, ast.Assign):
+            if isinstance(candidate, ast.Assign):
+                targets = candidate.targets
+                value = candidate.value
+            elif isinstance(candidate, ast.AnnAssign) and candidate.value is not None:
+                targets = [candidate.target]
+                value = candidate.value
+            elif isinstance(candidate, ast.NamedExpr):
+                targets = [candidate.target]
+                value = candidate.value
+            else:
                 continue
             if not any(
                 isinstance(target, ast.Name) and target.id == node.id
-                for target in candidate.targets
+                for target in targets
             ):
                 continue
-            if python_path_receiver_expression(candidate.value, tree, parents, seen):
+            if python_path_receiver_expression(value, tree, parents, seen):
                 return True
         return node.id.casefold().endswith(("path", "file", "directory", "dir", "root")) and not python_unassigned_path_parameter(node, parents)
     if isinstance(node, ast.Attribute):
@@ -11985,11 +12246,268 @@ def python_sensitive_output_sink(node):
     )
 
 
+def python_path_division_names(node):
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        return python_path_division_names(node.left) + python_path_division_names(
+            node.right
+        )
+    return [node.id] if isinstance(node, ast.Name) else []
+
+
+def python_reviewed_go_package_directory(node, tree, parents):
+    """Accept source enumeration only after the packet's package-root guard."""
+    scope = python_enclosing_scope(node, parents)
+    if not (
+        isinstance(node, ast.Name)
+        and node.id == "package_dir"
+        and isinstance(scope, ast.FunctionDef)
+        and scope.name == "source_fuzz_guard"
+    ):
+        return False
+    expected_package = ["go_repo_root", "module_dir", "package_value"]
+    package_assignment = False
+    for candidate in ast.walk(scope):
+        if python_enclosing_scope(candidate, parents) is not scope:
+            continue
+        if not isinstance(candidate, ast.Assign) or not any(
+            isinstance(target, ast.Name) and target.id == "package_dir"
+            for target in candidate.targets
+        ):
+            continue
+        value = candidate.value
+        if not (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Attribute)
+            and value.func.attr == "resolve"
+            and not value.args
+            and not value.keywords
+            and python_path_division_names(value.func.value) == expected_package
+        ):
+            return False
+        package_assignment = True
+    if not package_assignment:
+        return False
+    expected_root = ["go_repo_root", "module_dir"]
+    for candidate in ast.walk(scope):
+        if not isinstance(candidate, ast.Try) or candidate.end_lineno >= node.lineno:
+            continue
+        if python_enclosing_scope(candidate, parents) is not scope:
+            continue
+        guarded = any(
+            isinstance(call, ast.Call)
+            and python_dotted_name(call.func) == "package_dir.relative_to"
+            and len(call.args) == 1
+            and python_path_division_names(call.args[0]) == expected_root
+            for statement in candidate.body
+            for call in ast.walk(statement)
+        )
+        fail_closed = any(
+            isinstance(handler.type, ast.Name)
+            and handler.type.id == "ValueError"
+            and any(isinstance(statement, ast.Raise) for statement in handler.body)
+            for handler in candidate.handlers
+        )
+        if guarded and fail_closed:
+            return True
+    return False
+
+
+def python_reviewed_go_module_metadata_path(node, tree, parents):
+    """Prove a module metadata path came from the reviewed Go module query."""
+    if not (
+        isinstance(node, ast.Call)
+        and python_dotted_name(node.func) in {"Path", "pathlib.Path"}
+        and len(node.args) == 1
+        and not node.keywords
+        and isinstance(node.args[0], ast.Subscript)
+        and isinstance(node.args[0].value, ast.Name)
+        and node.args[0].value.id == "module"
+        and isinstance(node.args[0].slice, ast.Constant)
+        and node.args[0].slice.value in {"GoMod", "Dir"}
+    ):
+        return False
+    scope = python_enclosing_scope(node, parents)
+    if not isinstance(scope, ast.FunctionDef) or scope.name != "verify_downloaded_module_sources":
+        return False
+    module_loop = any(
+        isinstance(candidate, ast.For)
+        and isinstance(candidate.target, ast.Name)
+        and candidate.target.id == "module"
+        and isinstance(candidate.iter, ast.Name)
+        and candidate.iter.id == "modules"
+        and python_enclosing_scope(candidate, parents) is scope
+        for candidate in ast.walk(scope)
+    )
+    modules_from_json = False
+    download_from_go_list = False
+    for candidate in ast.walk(scope):
+        if not isinstance(candidate, ast.Assign):
+            continue
+        targets = {
+            target.id for target in candidate.targets if isinstance(target, ast.Name)
+        }
+        value = candidate.value
+        if (
+            "modules" in targets
+            and isinstance(value, ast.Call)
+            and python_dotted_name(value.func) == "json_objects"
+            and value.args
+            and isinstance(value.args[0], ast.Attribute)
+            and isinstance(value.args[0].value, ast.Name)
+            and value.args[0].value.id == "download"
+            and value.args[0].attr == "stdout"
+        ):
+            modules_from_json = True
+        if (
+            "download" in targets
+            and isinstance(value, ast.Call)
+            and python_dotted_name(value.func) == "run_go_child"
+            and value.args
+            and isinstance(value.args[0], (ast.List, ast.Tuple))
+        ):
+            argv = [
+                item.value for item in value.args[0].elts if isinstance(item, ast.Constant)
+            ]
+            download_from_go_list = argv == ["go", "mod", "download", "-json", "all"]
+    return module_loop and modules_from_json and download_from_go_list
+
+
+def python_reviewed_markdown_link_target_path(node, tree, parents):
+    """Allow link-target existence checks only after repository-root containment."""
+    if not isinstance(node, ast.Name) or node.id != "path":
+        return False
+    link_loop = None
+    current = node
+    while current is not None:
+        if (
+            isinstance(current, ast.For)
+            and isinstance(current.target, ast.Name)
+            and current.target.id == "match"
+            and isinstance(current.iter, ast.Call)
+            and python_dotted_name(current.iter.func) == "link.finditer"
+            and current.iter.args
+            and isinstance(current.iter.args[0], ast.Name)
+            and current.iter.args[0].id == "markdown"
+        ):
+            link_loop = current
+            break
+        current = parents.get(current)
+    if link_loop is None:
+        return False
+    source_loop = next(
+        (
+            candidate
+            for candidate in ast.walk(tree)
+            if isinstance(candidate, ast.For)
+            and isinstance(candidate.target, ast.Name)
+            and candidate.target.id == "name"
+            and isinstance(candidate.iter, ast.Name)
+            and candidate.iter.id == "files"
+            and python_enclosing_scope(candidate, parents)
+            is python_enclosing_scope(link_loop, parents)
+        ),
+        None,
+    )
+    source_from_git_markdown = source_loop is not None and any(
+        isinstance(candidate, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "source"
+            for target in candidate.targets
+        )
+        and isinstance(candidate.value, ast.Call)
+        and python_reviewed_markdown_file_value(candidate.value, tree)
+        for candidate in ast.walk(source_loop)
+    )
+    target_from_link_text = any(
+        isinstance(candidate, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "target"
+            for target in candidate.targets
+        )
+        and any(
+            isinstance(call, ast.Call)
+            and python_dotted_name(call.func) == "match.group"
+            and call.args
+            and isinstance(call.args[0], ast.Constant)
+            and call.args[0].value == 1
+            for call in ast.walk(candidate.value)
+        )
+        for candidate in ast.walk(link_loop)
+    )
+    target_path_assignment = any(
+        isinstance(candidate, ast.Assign)
+        and candidate.end_lineno < node.lineno
+        and any(
+            isinstance(target, ast.Name) and target.id == "path"
+            for target in candidate.targets
+        )
+        and isinstance(candidate.value, ast.Call)
+        and isinstance(candidate.value.func, ast.Attribute)
+        and candidate.value.func.attr == "resolve"
+        and not candidate.value.args
+        and not candidate.value.keywords
+        and isinstance(candidate.value.func.value, ast.BinOp)
+        and isinstance(candidate.value.func.value.op, ast.Div)
+        and isinstance(candidate.value.func.value.left, ast.Attribute)
+        and candidate.value.func.value.left.attr == "parent"
+        and isinstance(candidate.value.func.value.left.value, ast.Name)
+        and candidate.value.func.value.left.value.id == "source"
+        and isinstance(candidate.value.func.value.right, ast.Name)
+        and candidate.value.func.value.right.id == "target"
+        for candidate in ast.walk(link_loop)
+    )
+    guarded = False
+    for candidate in ast.walk(link_loop):
+        if not isinstance(candidate, ast.Try) or candidate.end_lineno >= node.lineno:
+            continue
+        checks_repository_root = any(
+            isinstance(call, ast.Call)
+            and python_dotted_name(call.func) == "path.relative_to"
+            and len(call.args) == 1
+            and isinstance(call.args[0], ast.Name)
+            and call.args[0].id == "repository_root"
+            for statement in candidate.body
+            for call in ast.walk(statement)
+        )
+        skips_outside_paths = any(
+            isinstance(handler.type, ast.Name)
+            and handler.type.id == "ValueError"
+            and any(isinstance(statement, ast.Continue) for statement in handler.body)
+            for handler in candidate.handlers
+        )
+        if checks_repository_root and skips_outside_paths:
+            guarded = True
+            break
+    return (
+        source_loop is not None
+        and source_from_git_markdown
+        and target_from_link_text
+        and target_path_assignment
+        and guarded
+    )
+
+
+def python_reviewed_path_reader(node, method, tree, parents):
+    if python_reviewed_read_path(node, tree, parents):
+        return True
+    if method in {"glob", "rglob", "iterdir", "walk", "is_dir"} and (
+        python_reviewed_go_package_directory(node, tree, parents)
+    ):
+        return True
+    if method in {"is_file", "is_dir"} and python_reviewed_go_module_metadata_path(
+        node, tree, parents
+    ):
+        return True
+    return method == "is_file" and python_reviewed_markdown_link_target_path(
+        node, tree, parents
+    )
+
+
 def python_sensitive_read_violation(tree, parents):
     """Reject environment/credential reads and unreviewed file read sinks."""
     sensitive_names = python_sensitive_value_names(tree, parents)
     credential_reader_aliases = python_credential_reader_aliases(tree)
-    path_reader_aliases = python_path_reader_aliases(tree)
+    path_reader_aliases = python_path_reader_aliases(tree, parents)
     for alias, receiver in path_reader_aliases.items():
         if not python_reviewed_read_path(receiver, tree, parents):
             return f"Python unreviewed Path reader alias {alias!r} is not allowed"
@@ -12070,11 +12588,27 @@ def python_sensitive_read_violation(tree, parents):
                     path = receiver.args[0] if receiver.args else None
                     if not python_reviewed_read_path(path, tree, parents):
                         return f"Python unreviewed file read through open on line {node.lineno}"
-            if isinstance(node.func, ast.Attribute) and node.func.attr in {"read_text", "read_bytes"}:
-                if not python_reviewed_read_path(node.func.value, tree, parents):
+            if (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr in python_path_filesystem_read_methods
+                and python_path_receiver_expression(
+                    node.func.value, tree, parents
+                )
+            ):
+                if not python_reviewed_path_reader(
+                    node.func.value, node.func.attr, tree, parents
+                ):
                     return (
-                        f"Python unreviewed Path.{node.func.attr} file read "
+                        f"Python unreviewed Path.{node.func.attr} filesystem read "
                         f"on line {node.lineno}"
+                    )
+                if node.func.attr == "samefile" and any(
+                    not python_reviewed_read_path(argument, tree, parents)
+                    for argument in node.args
+                ):
+                    return (
+                        "Python Path.samefile filesystem read has an unreviewed "
+                        f"peer path on line {node.lineno}"
                     )
     return None
 
@@ -12318,8 +12852,35 @@ def python_open_aliases(tree):
     return aliases
 
 
-def python_path_reader_aliases(tree):
-    """Resolve Path.read_text/read_bytes callable aliases to their receivers."""
+python_path_filesystem_read_methods = {
+    "open",
+    "read_text",
+    "read_bytes",
+    "readlink",
+    "iterdir",
+    "glob",
+    "rglob",
+    "walk",
+    "stat",
+    "lstat",
+    "exists",
+    "is_file",
+    "is_dir",
+    "is_symlink",
+    "is_mount",
+    "is_socket",
+    "is_fifo",
+    "is_block_device",
+    "is_char_device",
+    "is_junction",
+    "samefile",
+    "owner",
+    "group",
+}
+
+
+def python_path_reader_aliases(tree, parents):
+    """Resolve aliases for Path methods that inspect filesystem state."""
     aliases = {}
     assignments = []
     for node in ast.walk(tree):
@@ -12335,7 +12896,11 @@ def python_path_reader_aliases(tree):
             if not isinstance(target, ast.Name):
                 continue
             receiver = None
-            if isinstance(value, ast.Attribute) and value.attr in {"read_text", "read_bytes"}:
+            if (
+                isinstance(value, ast.Attribute)
+                and value.attr in python_path_filesystem_read_methods
+                and python_path_receiver_expression(value.value, tree, parents)
+            ):
                 receiver = value.value
             elif isinstance(value, ast.Name) and value.id in aliases:
                 receiver = aliases[value.id]
@@ -25183,19 +25748,91 @@ test was claimed. Rollback is packet-only to immutable parent
 `f44a4871f87c1a8165593549d58ece6ffee61bf2`; preserve historical evidence,
 independent corrections and manually installed runners.
 
-### Final packet certification after exact-head review comment `5676911476`
+### Pre-issue-79 packet certification after exact-head review comment `5676911476`
 
-Final certification reruns the immutable-parent RED and current GREEN/CURRENT
-boundary commands above, then checks Markdown fence/style parity, packet-local
-links and fragments, backlog JSON, the current six-row ledger and preserved
-historical ledgers, embedded wrapper/scanner/parity AST and compile, full
-static scanner zero violations, one-file scope, added-line secret/private-path
-hygiene and pager-safe Git diff checks. Local/tracking/remote/PR SHA parity is
-recorded in the worker handoff after the one stable candidate push so the
-packet remains non-self-referential. No live verification, workflow replay,
-credential use, source-code test, merge or Codex review is claimed; rollback is
-packet-only to `f44a4871f87c1a8165593549d58ece6ffee61bf2`.
+That pre-issue-79 certification reran the immutable-parent RED and current
+GREEN/CURRENT boundary commands above, then checked Markdown fence/style
+parity, packet-local links and fragments, backlog JSON, its then-current
+six-row ledger and preserved historical ledgers, embedded wrapper/scanner/
+parity AST and compile, full static scanner zero violations, one-file scope,
+added-line secret/private-path hygiene and pager-safe Git diff checks. Its
+link, scanner and ledger totals below describe the pre-issue-79 packet only.
+Local/tracking/remote/PR SHA parity was to be recorded in the worker handoff
+after the stable candidate push so the packet remained non-self-referential.
+No live verification, workflow replay, credential use, source-code test, merge
+or Codex review was claimed; rollback was packet-only to
+`f44a4871f87c1a8165593549d58ece6ffee61bf2`.
 
 ~~~text
-GREEN final packet certification: 474 Markdown fence markers in 237 matching pairs; 1,040 total Markdown links across 56 tracked Markdown files (157 local targets, 49 fragments, 883 external syntax URLs); backlog JSON valid; current six-row ledger valid with 6 rows x 4 columns and historical URL/source/disposition ledger valid with 31 rows; exact-parent RED plus current GREEN/CURRENT and failure-boundary probes passed with 2 scoped fresh shell probes and 0 script errors; wrapper/scanner AST and compile valid, 95 Python heredoc bodies AST/compile valid, full static scanner passed with 331 shell commands and zero violations; one-file scope, added-line secret/private-path hygiene, and git -P diff --check passed; no live verification, workflow replay, credential use, source-code test, merge or Codex review claimed; rollback parent f44a4871f87c1a8165593549d58ece6ffee61bf2
+Historical pre-issue-79 counts: 474 raw Markdown fence-like marker lines, of which 472 are semantic markers in 236 matching pairs; 1,040 Markdown links across 56 tracked Markdown files (157 local targets, 49 fragments, 883 external syntax URLs); prior six-row ledger valid with 6 rows x 4 columns and historical URL/source/disposition ledger valid with 31 rows; exact-parent RED plus current GREEN/CURRENT and failure-boundary probes passed with 2 scoped fresh shell probes and 0 script errors; wrapper/scanner AST and compile valid, 95 Python heredoc bodies AST/compile valid, full static scanner passed with 331 shell commands and zero violations; one-file scope, added-line secret/private-path hygiene, and git -P diff --check passed; no live verification, workflow replay, credential use, source-code test, merge or Codex review claimed; rollback parent f44a4871f87c1a8165593549d58ece6ffee61bf2
 ~~~
+
+### Issue #79 evidence hardening from exact-head review comment `5677854749`
+
+The [seven-finding review comment](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5677854749)
+was reported against immutable packet source
+`b6dbf021801ef5d920d1a9e7659f8bd97be11695`. The focused offline regression
+harness is [issue79_regression_test.py](../../scripts/evidence_packet/issue79_regression_test.py).
+The test inputs are synthetic strings and mappings. The harness statically
+loads only scanner definitions and safe literal configuration from this
+packet, parses shell/Python examples as data, and runs only literal Git setup
+commands against temporary local repositories created by the tests.
+
+The red run was recorded before the scanner corrections on branch baseline
+`3d108256883458d25446a6311c8f50176a8ee7cd`:
+
+~~~text
+RED: python3 scripts/evidence_packet/issue79_regression_test.py
+7 tests run; 18 assertion failures across all seven findings.
+GREEN: python3 scripts/evidence_packet/issue79_regression_test.py
+7 tests passed after the scoped fail-closed corrections.
+RED packet-blob boundary: python3 -B scripts/evidence_packet/issue79_regression_test.py
+8 tests ran; 7 passed and the packet-sized synthetic blob errored with "Git query output exceeded the reviewed budget" at the 64 KiB metadata cap.
+GREEN current: python3 -B scripts/evidence_packet/issue79_regression_test.py
+8 tests passed; packet blob capture uses its separate 8 MiB cap, while metadata queries remain capped at 64 KiB.
+~~~
+
+#### Seven-finding URL/source/disposition ledger
+
+| # | Finding in review `5677854749` | Red proof | Correction and retained safe case |
+|---|---|---|---|
+| 1 | Path filesystem readers beyond `read_text`/`read_bytes` bypass path review | Synthetic `Path.glob`, `iterdir`, and `stat` calls on unreviewed paths were accepted | Path receivers and aliases require reviewed provenance; unreviewed readers are rejected, annotated `Path` readers stay fail-closed, reviewed packet `Path.read_text`/`stat` remain accepted, and the existing package `glob` is accepted only after its `relative_to` root guard. |
+| 2 | Environment values read through loops/comprehensions are not tainted | Synthetic loop and list-comprehension targets could receive `os.environ` values without reaching the sink check | Loop and comprehension targets inherit iterable taint; literal loop data remains accepted. |
+| 3 | Process launchers hidden in iterable targets bypass command checks | Synthetic list/tuple launcher elements and loop aliases passed unresolved | Launcher aliases in iterable/loop targets fail closed; ordinary `str.upper` iterator callbacks remain accepted. |
+| 4 | Shell `export`/`set` forms dump inherited environment values | Bare `export`, `export -p`, and non-reviewed `set` forms passed | Bare/dump builtins and non-reviewed `set` forms are rejected; exact `set -euo pipefail` and enumerated packet export values remain accepted. |
+| 5 | Negative-filter Git child environment forwards credentials | A synthetic child environment containing `GH_TOKEN`, `GITHUB_TOKEN`, app-key, and generic-secret names retained them | Git children receive the positive `PATH`/locale allowlist plus reviewed Git config overrides; synthetic credentials are dropped. |
+| 6 | Exact-head parity misses Git intent bits and raw-byte divergence | A temporary local repository showed skip-worktree/assume-unchanged bits and worktree byte divergence that porcelain status alone missed | The verifier checks `git ls-files -v -z`, the pinned `HEAD` blob, and worktree bytes before status; a packet-sized synthetic `git show` also reproduced the old 64 KiB capture failure. The reviewed packet blob now has a separate 8 MiB maximum through the same bounded deadline/process-group cleanup path; all metadata queries retain 64 KiB. |
+| 7 | Git config include directives are not rejected | Synthetic `-c`, `--config-env`, and `git config` include/includeIf forms passed read-only classification | Include-path config is rejected before read-only classification; reviewed `git -c core.fsmonitor=false` remains accepted. |
+
+The historical URL bookkeeping is also restored: the prior ledger omitted the
+[packet-completion summary comment](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5651578138)
+and the [initial Codex findings comment](https://github.com/1XP-AI/gh-runnerd/pull/78#issuecomment-5652329850).
+Both are provenance links to earlier evidence; their dispositions remain in
+the preserved historical ledger above. The source pin for this seven-row
+ledger is `b6dbf021801ef5d920d1a9e7659f8bd97be11695`; the local rollback parent
+for this candidate is `3d108256883458d25446a6311c8f50176a8ee7cd`.
+
+The current harness also locks down two issue-candidate regressions found
+during review: an annotated `p: Path = Path("synthetic/unreviewed")` reader
+must remain rejected, while `ast.walk` and regex `match.group` are not Path
+readers; the exact-head blob fixture is sized to at least the packet's UTF-8
+byte length. Its corrected positive path accepts only the packet's fixed
+repository path and a literal `HEAD` or full hexadecimal revision.
+
+This is packet/scanner and focused synthetic-harness evidence only. It does
+not claim live GitHub/App/runner/Scale Set verification, workflow dispatch or
+replay, credential use, source-code tests, merge, or Codex review. Malicious
+review examples were inspected only as data.
+
+#### Current issue #79 candidate certification
+
+Current Markdown fence count: 476 raw marker-like lines, 474 semantic fence
+markers in 237 matching pairs. The seven-row finding ledger has 4 columns;
+the two previously missing historical comment URLs and local harness link are
+present. `python3 -B scripts/evidence_packet/issue79_regression_test.py` passed
+8 synthetic tests; the packet-wide static scanner passed 331 shell commands
+and 95 Python heredoc bodies with zero violations; `git -P diff --check`
+passed. No final-verification template, live GitHub/App/runner/Scale Set,
+workflow replay, credential use, Go test, Docker, Keychain or launchd action
+was run; rollback is packet/harness-only to
+`3d108256883458d25446a6311c8f50176a8ee7cd`.
