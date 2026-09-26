@@ -1,24 +1,10 @@
 # Inactive template. Render and independently review immutable private-repo
 # .github/workflows/canary.yml before dispatch. Never install in the public repo.
 name: G01 private protocol canary
-run-name: G01 __G01_OWNER_NONCE__ ${{ inputs.phase }}
+run-name: G01 __G01_OWNER_NONCE__
 
 on:
   workflow_dispatch:
-    inputs:
-      phase:
-        description: Reviewed serial canary phase
-        required: true
-        type: choice
-        options:
-          - baseline
-          - before-ack
-          - after-ack
-          - acquisition-ambiguity
-          - jit-ambiguity
-          - idle-drain
-          - busy-deregistration
-          - session-replacement
 
 permissions: {}
 
