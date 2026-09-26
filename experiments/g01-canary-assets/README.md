@@ -14,11 +14,11 @@ commit and the actual run ID in the controller manifest. The group must allow
 only that private repository. Do not change labels through dispatch inputs.
 
 The workflow is phase-agnostic: it keeps `workflow_dispatch` but defines no
-phase input, and its run name contains no phase. Do not infer a controller phase
-from the run name or workflow inputs. The offline contract has the controller
-approval identify one exact workflow run ID and an allowed phase set; a signed
-broker provenance receipt binds the approval digest, that run ID and the
-selected controller phase for an invocation. This fixture evidence does not
+dispatch inputs at all, and its run name contains no phase. Do not infer a
+controller phase from the run name or workflow inputs. The offline contract
+has the controller approval identify one exact workflow run ID and an allowed
+phase set; a signed broker provenance receipt binds the approval digest, that
+run ID and the selected controller phase for an invocation. This fixture evidence does not
 establish a production-authenticated provenance source or reviewed trust-root
 provisioning/rotation authority. The provider-side conditional-delete gate also
 remains unresolved. This change closes neither gate and authorizes no live

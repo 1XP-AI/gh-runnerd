@@ -14,8 +14,9 @@ remains loopback-only.
 ## Workflow and controller-phase provenance boundary
 
 The inactive canary template is phase-agnostic: it keeps manual
-`workflow_dispatch`, defines no phase input, and does not put a phase in
-`run-name`. Do not infer a controller phase from `run-name` or workflow inputs.
+`workflow_dispatch` but defines no dispatch inputs at all, and does not put a
+phase in `run-name`. Do not infer a controller phase from `run-name` or workflow
+inputs.
 In the offline contract, the controller approval identifies one exact workflow
 run ID and an allowed phase set; the signed broker provenance receipt binds the
 approval digest, that run ID, and the selected controller phase for an

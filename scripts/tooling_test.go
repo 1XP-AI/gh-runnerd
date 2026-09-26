@@ -1082,8 +1082,13 @@ func toolingG01CanaryWorkflowPhaseAgnostic(workflow string) bool {
 			childIndent = indent
 		}
 		if indent == childIndent {
+			keyLine := strings.TrimSpace(line)
+			// This line parser cannot resolve YAML explicit keys or merges, so reject them.
+			if keyLine == "?" || strings.HasPrefix(keyLine, "? ") || strings.HasPrefix(keyLine, "?\t") {
+				return false
+			}
 			key, _, found := toolingG01CanaryMappingEntry(line)
-			if found && key == "inputs" {
+			if found && (key == "inputs" || key == "<<") {
 				return false
 			}
 		}
@@ -1101,7 +1106,7 @@ func TestG01CanaryWorkflowIsPhaseAgnostic(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !toolingG01CanaryWorkflowPhaseAgnostic(string(workflowData)) {
-		t.Fatal("G01 canary template must keep workflow_dispatch without phase inputs or interpolation")
+		t.Fatal("G01 canary template must keep workflow_dispatch without inputs or phase interpolation")
 	}
 }
 
@@ -1134,6 +1139,29 @@ jobs:
         type: choice`
 	if toolingG01CanaryWorkflowPhaseAgnostic(escapedQuotedPhaseInput) {
 		t.Error("G01 canary contract accepted a YAML-escaped quoted inputs key")
+	}
+
+	explicitPhaseInputKey := `on:
+  workflow_dispatch:
+    ? inputs
+    :
+      phase:
+        required: true
+        type: choice`
+	if toolingG01CanaryWorkflowPhaseAgnostic(explicitPhaseInputKey) {
+		t.Error("G01 canary contract accepted a phase input with an explicit YAML mapping key")
+	}
+
+	mergedPhaseInputs := `on:
+  workflow_call: &shared_phase_inputs
+    inputs:
+      phase:
+        required: true
+        type: string
+  workflow_dispatch:
+    <<: *shared_phase_inputs`
+	if toolingG01CanaryWorkflowPhaseAgnostic(mergedPhaseInputs) {
+		t.Error("G01 canary contract accepted phase inputs merged through a YAML alias")
 	}
 
 	deeplyIndentedPhaseInput := `on:
