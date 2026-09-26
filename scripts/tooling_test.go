@@ -1068,7 +1068,6 @@ func toolingG01CanaryWorkflowPhaseAgnostic(workflow string) bool {
 	}
 
 	dispatch := workflow[dispatchStart:]
-	childIndent := -1
 	for _, rawLine := range strings.Split(dispatch, "\n")[1:] {
 		line := toolingG01CanaryActiveYAMLLine(rawLine)
 		if strings.TrimSpace(line) == "" {
@@ -1078,20 +1077,8 @@ func toolingG01CanaryWorkflowPhaseAgnostic(workflow string) bool {
 		if indent <= dispatchIndent {
 			break
 		}
-		if childIndent < 0 {
-			childIndent = indent
-		}
-		if indent == childIndent {
-			keyLine := strings.TrimSpace(line)
-			// This line parser cannot resolve YAML explicit keys or merges, so reject them.
-			if keyLine == "?" || strings.HasPrefix(keyLine, "? ") || strings.HasPrefix(keyLine, "?\t") {
-				return false
-			}
-			key, _, found := toolingG01CanaryMappingEntry(line)
-			if found && (key == "inputs" || key == "<<") {
-				return false
-			}
-		}
+		// This canary forbids all dispatch inputs; do not partially parse YAML child keys.
+		return false
 	}
 
 	if toolingG01CanaryHasPhaseInterpolation(workflow) {
@@ -1162,6 +1149,17 @@ jobs:
     <<: *shared_phase_inputs`
 	if toolingG01CanaryWorkflowPhaseAgnostic(mergedPhaseInputs) {
 		t.Error("G01 canary contract accepted phase inputs merged through a YAML alias")
+	}
+
+	aliasedPhaseInputKey := `name: &phase_input_key inputs
+on:
+  workflow_dispatch:
+    *phase_input_key:
+      phase:
+        required: true
+        type: choice`
+	if toolingG01CanaryWorkflowPhaseAgnostic(aliasedPhaseInputKey) {
+		t.Error("G01 canary contract accepted a phase input whose YAML mapping key is an alias")
 	}
 
 	deeplyIndentedPhaseInput := `on:
