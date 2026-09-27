@@ -639,6 +639,32 @@ class Issue79RegressionTests(unittest.TestCase):
         )
         self.assertIsNone(self.inspect(safe))
 
+    def test_sensitive_mapping_return_survives_unrelated_nested_name_collision(self) -> None:
+        unsafe = (
+            'import os\n'
+            'def relay(value):\n'
+            '    return value\n'
+            'def build_snapshot():\n'
+            '    return relay(dict(os.environ))\n'
+            'def unrelated_scope():\n'
+            '    def relay(other):\n'
+            '        return {"status": "reviewed"}\n'
+            'print(build_snapshot())\n'
+        )
+        self.assertIsNotNone(self.inspect(unsafe))
+
+    def test_safe_top_level_helper_ignores_unrelated_nested_name_collision(self) -> None:
+        safe_collision = (
+            'import os\n'
+            'def snapshot():\n'
+            '    return {"status": "reviewed"}\n'
+            'def unrelated_scope():\n'
+            '    def snapshot():\n'
+            '        return os.environ\n'
+            'print(snapshot())\n'
+        )
+        self.assertIsNone(self.inspect(safe_collision))
+
     def test_resolved_local_paths_from_helpers_and_globals_reach_output_sinks(self) -> None:
         unsafe = (
             'from pathlib import Path\n'
@@ -664,6 +690,46 @@ class Issue79RegressionTests(unittest.TestCase):
             '    raise SystemExit("invalid root")\n'
         )
         self.assertIsNone(self.inspect(safe))
+
+    def test_resolved_local_paths_cross_helper_boundaries_to_output_sinks(self) -> None:
+        unsafe = (
+            'from pathlib import Path\n'
+            'def worktree_root():\n'
+            '    return Path.cwd().resolve()\n'
+            'root_alias = worktree_root\n'
+            'print(root_alias())\n',
+            'from pathlib import Path\n'
+            'def report(root):\n'
+            '    print(root)\n'
+            'report(Path.cwd().resolve())\n',
+            'from pathlib import Path\n'
+            'def worktree_roots():\n'
+            '    yield Path.cwd().resolve()\n'
+            'print(next(worktree_roots()))\n',
+            'from pathlib import Path\n'
+            'def outer():\n'
+            '    root = Path.cwd().resolve()\n'
+            '    def report():\n'
+            '        print(root)\n'
+            '    report()\n'
+            'outer()\n',
+            'from pathlib import Path\n'
+            'def report(root=Path.cwd().resolve()):\n'
+            '    print(root)\n'
+            'report()\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+        safe_default_validation = (
+            'from pathlib import Path\n'
+            'def validate_root(root=Path.cwd().resolve()):\n'
+            '    if not root.is_absolute():\n'
+            '        raise SystemExit("invalid root")\n'
+            'validate_root()\n'
+        )
+        self.assertIsNone(self.inspect(safe_default_validation))
 
     def test_canonical_package_guard_remains_reviewed(self) -> None:
         bodies = [
@@ -1231,18 +1297,38 @@ class Issue79RegressionTests(unittest.TestCase):
             '    except ValueError:\n'
             '        raise SystemExit(f"{label}: package source escaped the reviewed module")'
         )
-        unreachable = (
-            '    if False:\n'
-            '        try:\n'
-            '            package_dir.relative_to(go_repo_root / module_dir)\n'
-            '        except ValueError:\n'
-            '            raise SystemExit(f"{label}: package source escaped the reviewed module")'
-        )
-        mutated = self.replace_source_fuzz_guard_fragment(
-            bodies[0], original, unreachable
-        )
         self.assertIsNone(self.inspect(bodies[0]))
-        self.assertIsNotNone(self.inspect(mutated))
+        unreachable_variants = (
+            (
+                '    if False:\n'
+                '        try:\n'
+                '            package_dir.relative_to(go_repo_root / module_dir)\n'
+                '        except ValueError:\n'
+                '            raise SystemExit(f"{label}: package source escaped the reviewed module")'
+            ),
+            (
+                '    if True:\n'
+                '        pass\n'
+                '    else:\n'
+                '        try:\n'
+                '            package_dir.relative_to(go_repo_root / module_dir)\n'
+                '        except ValueError:\n'
+                '            raise SystemExit(f"{label}: package source escaped the reviewed module")'
+            ),
+            (
+                '    if 0:\n'
+                '        try:\n'
+                '            package_dir.relative_to(go_repo_root / module_dir)\n'
+                '        except ValueError:\n'
+                '            raise SystemExit(f"{label}: package source escaped the reviewed module")'
+            ),
+        )
+        for unreachable in unreachable_variants:
+            with self.subTest(unreachable=unreachable):
+                mutated = self.replace_source_fuzz_guard_fragment(
+                    bodies[0], original, unreachable
+                )
+                self.assertIsNotNone(self.inspect(mutated))
 
     def test_packet_loader_rejects_packet_controlled_definition_time_code(self) -> None:
         specimens = (

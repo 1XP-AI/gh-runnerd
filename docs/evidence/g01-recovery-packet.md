@@ -9117,6 +9117,70 @@ def python_credential_reader_aliases(tree):
     return aliases
 
 
+def python_lexical_scope_chain(scope, parents):
+    """Return the current scope and its enclosing lexical scopes."""
+    chain = []
+    seen = set()
+    while scope is not None and id(scope) not in seen:
+        seen.add(id(scope))
+        chain.append(scope)
+        if isinstance(scope, ast.Module):
+            break
+        scope = python_enclosing_scope(parents.get(scope), parents)
+    return chain
+
+
+def python_local_function_candidates(name, call, tree, parents):
+    """Resolve same-name helpers visible from the call's lexical scope."""
+    index = getattr(tree, "_issue79_local_function_index", None)
+    if index is None:
+        functions_by_scope = {}
+        aliases_by_scope = {}
+        for candidate in ast.walk(tree):
+            if isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                binding_scope = python_enclosing_scope(
+                    parents.get(candidate), parents
+                )
+                functions_by_scope.setdefault(
+                    (id(binding_scope), candidate.name), []
+                ).append(candidate)
+            elif isinstance(candidate, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+                binding_scope = python_enclosing_scope(candidate, parents)
+                targets = candidate.targets if isinstance(candidate, ast.Assign) else [candidate.target]
+                value = candidate.value
+                if not isinstance(value, ast.Name):
+                    continue
+                for target in targets:
+                    if isinstance(target, ast.Name):
+                        aliases_by_scope.setdefault(
+                            (id(binding_scope), target.id), set()
+                        ).add(value.id)
+        index = (functions_by_scope, aliases_by_scope)
+        tree._issue79_local_function_index = index
+    functions_by_scope, aliases_by_scope = index
+    visible_scopes = set(
+        python_lexical_scope_chain(python_enclosing_scope(call, parents), parents)
+    )
+    names = {name}
+    for _ in range(len(aliases_by_scope) + 1):
+        changed = False
+        for scope in visible_scopes:
+            for (binding_scope_id, target_name), source_names in aliases_by_scope.items():
+                if binding_scope_id == id(scope) and target_name in names:
+                    for source_name in source_names:
+                        if source_name not in names:
+                            names.add(source_name)
+                            changed = True
+        if not changed:
+            break
+    return [
+        candidate
+        for scope in visible_scopes
+        for candidate_name in names
+        for candidate in functions_by_scope.get((id(scope), candidate_name), ())
+    ]
+
+
 def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen=None):
     """Track credential values through aliases without trusting variable names."""
     if node is None:
@@ -9157,12 +9221,9 @@ def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen
         ):
             return True
         if isinstance(node.func, ast.Name):
-            local_helpers = [
-                candidate
-                for candidate in ast.walk(tree)
-                if isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and candidate.name == node.func.id
-            ]
+            local_helpers = python_local_function_candidates(
+                node.func.id, node, tree, parents
+            )
             for function in local_helpers:
                 returned_values = [
                     candidate.value
@@ -9269,23 +9330,20 @@ def python_sensitive_value_names(tree, parents):
             return names
         return []
 
-    local_functions = {
-        node.name: node
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-
     def function_parameters(function):
         positional = list(function.args.posonlyargs) + list(function.args.args)
         return positional + list(function.args.kwonlyargs)
 
     def call_arguments(call, function):
         parameters = function_parameters(function)
+        positional_parameters = list(function.args.posonlyargs) + list(
+            function.args.args
+        )
         bound = []
         for index, argument in enumerate(call.args):
-            if index >= len(parameters):
+            if index >= len(positional_parameters):
                 break
-            bound.append((parameters[index].arg, argument))
+            bound.append((positional_parameters[index].arg, argument))
         parameter_by_name = {parameter.arg: parameter.arg for parameter in parameters}
         for keyword in call.keywords:
             if keyword.arg in parameter_by_name:
@@ -9295,7 +9353,11 @@ def python_sensitive_value_names(tree, parents):
     # Iterate assignments and direct local-helper calls to a fixed point. The
     # call-site pass closes the exact environment-map laundering gap where a
     # helper parameter is later indexed or sent to a sink.
-    for _ in range(len(assignments) + len(local_functions) + 1):
+    function_count = sum(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        for node in ast.walk(tree)
+    )
+    for _ in range(len(assignments) + function_count + 1):
         changed = False
         for target, value in assignments:
             if not python_sensitive_value_expression(
@@ -9309,15 +9371,15 @@ def python_sensitive_value_names(tree, parents):
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
                 continue
-            function = local_functions.get(node.func.id)
-            if function is None:
-                continue
-            for parameter, argument in call_arguments(node, function):
-                if python_sensitive_value_expression(
-                    argument, sensitive_names, tree, parents
-                ) and parameter not in sensitive_names:
-                    sensitive_names.add(parameter)
-                    changed = True
+            for function in python_local_function_candidates(
+                node.func.id, node, tree, parents
+            ):
+                for parameter, argument in call_arguments(node, function):
+                    if python_sensitive_value_expression(
+                        argument, sensitive_names, tree, parents
+                    ) and parameter not in sensitive_names:
+                        sensitive_names.add(parameter)
+                        changed = True
         if not changed:
             break
     return sensitive_names
@@ -12460,17 +12522,9 @@ def python_resolved_local_path_expression(
     seen.add(id(node))
     if isinstance(node, ast.Name):
         scope = python_enclosing_scope(node, parents)
+        lexical_scopes = set(python_lexical_scope_chain(scope, parents))
         for assigned_scope, value in assignments_by_name.get(node.id, ()):
-            if (
-                assigned_scope is scope
-                or (
-                    isinstance(
-                        scope,
-                        (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
-                    )
-                    and assigned_scope is tree
-                )
-            ) and python_resolved_local_path_expression(
+            if assigned_scope in lexical_scopes and python_resolved_local_path_expression(
                 value,
                 tree,
                 parents,
@@ -12484,17 +12538,14 @@ def python_resolved_local_path_expression(
         if dotted in {"Path.cwd", "pathlib.Path.cwd"}:
             return True
         if isinstance(node.func, ast.Name):
-            local_helpers = [
-                candidate
-                for candidate in ast.walk(tree)
-                if isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and candidate.name == node.func.id
-            ]
+            local_helpers = python_local_function_candidates(
+                node.func.id, node, tree, parents
+            )
             for function in local_helpers:
                 returned_values = [
                     candidate.value
                     for candidate in ast.walk(function)
-                    if isinstance(candidate, ast.Return)
+                    if isinstance(candidate, (ast.Return, ast.Yield, ast.YieldFrom))
                     and candidate.value is not None
                     and python_enclosing_scope(candidate, parents) is function
                 ]
@@ -12509,6 +12560,19 @@ def python_resolved_local_path_expression(
                     for value in returned_values
                 ):
                     return True
+        if isinstance(node.func, ast.Name) and node.func.id in {
+            "iter", "list", "next", "reversed", "set", "sorted", "tuple"
+        }:
+            return any(
+                python_resolved_local_path_expression(
+                    argument,
+                    tree,
+                    parents,
+                    assignments_by_name,
+                    seen.copy(),
+                )
+                for argument in node.args
+            )
         if (
             isinstance(node.func, ast.Attribute)
             and node.func.attr == "resolve"
@@ -12575,13 +12639,12 @@ def python_try_in_unreachable_if_body(node, parents):
     current = node
     while current in parents:
         parent = parents[current]
-        if (
-            isinstance(parent, ast.If)
-            and isinstance(parent.test, ast.Constant)
-            and parent.test.value is False
-            and current in parent.body
-        ):
-            return True
+        if isinstance(parent, ast.If) and isinstance(parent.test, ast.Constant):
+            condition = bool(parent.test.value)
+            if (not condition and current in parent.body) or (
+                condition and current in parent.orelse
+            ):
+                return True
         current = parent
     return False
 
@@ -13454,17 +13517,64 @@ def python_sensitive_read_violation(tree, parents):
     for candidate in ast.walk(tree):
         if isinstance(candidate, ast.Assign):
             targets = candidate.targets
+            value = candidate.value
         elif isinstance(candidate, (ast.AnnAssign, ast.NamedExpr)):
             targets = [candidate.target]
+            value = candidate.value
+        elif isinstance(candidate, (ast.For, ast.AsyncFor, ast.comprehension)):
+            targets = [candidate.target]
+            value = candidate.iter
         else:
-            targets = []
-        if targets and isinstance(candidate, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
-            for target in targets:
-                for name in ast.walk(target):
-                    if isinstance(name, ast.Name) and isinstance(name.ctx, ast.Store):
-                        assignments_by_name.setdefault(name.id, []).append(
-                            (python_enclosing_scope(candidate, parents), candidate.value)
-                        )
+            continue
+        for target in targets:
+            for name in ast.walk(target):
+                if isinstance(name, ast.Name) and isinstance(name.ctx, ast.Store):
+                    assignments_by_name.setdefault(name.id, []).append(
+                        (python_enclosing_scope(candidate, parents), value)
+                    )
+
+    def helper_parameters(function):
+        return list(function.args.posonlyargs) + list(function.args.args)
+
+    for function in ast.walk(tree):
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        positional = helper_parameters(function)
+        default_offset = len(positional) - len(function.args.defaults)
+        for parameter, default in zip(
+            positional[default_offset:], function.args.defaults
+        ):
+            assignments_by_name.setdefault(parameter.arg, []).append(
+                (function, default)
+            )
+        for parameter, default in zip(
+            function.args.kwonlyargs, function.args.kw_defaults
+        ):
+            if default is not None:
+                assignments_by_name.setdefault(parameter.arg, []).append(
+                    (function, default)
+                )
+
+    for call in ast.walk(tree):
+        if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name):
+            continue
+        for function in python_local_function_candidates(
+            call.func.id, call, tree, parents
+        ):
+            positional = helper_parameters(function)
+            for parameter, argument in zip(positional, call.args):
+                assignments_by_name.setdefault(parameter.arg, []).append(
+                    (function, argument)
+                )
+            named_parameters = {
+                parameter.arg
+                for parameter in positional + function.args.kwonlyargs
+            }
+            for keyword in call.keywords:
+                if keyword.arg in named_parameters:
+                    assignments_by_name.setdefault(keyword.arg, []).append(
+                        (function, keyword.value)
+                    )
     for alias, receiver in path_reader_aliases.items():
         if not python_reviewed_read_path(receiver, tree, parents):
             return f"Python unreviewed Path reader alias {alias!r} is not allowed"
@@ -26969,3 +27079,60 @@ The complete command and result, `git diff --check`, and final two-file scope ar
 #### Candidate verification
 
 The final `python3 -B scripts/evidence_packet/issue79_regression_test.py` rerun ran 30 tests in 72.350s and passed; the current packet static scan covered 331 shell commands and 95 Python heredoc bodies with zero violations. `git diff --check` exited 0 with no output. `git diff --name-only` listed only `docs/evidence/g01-recovery-packet.md` and `scripts/evidence_packet/issue79_regression_test.py`; the added-line credential/private-path scan found no matches. Rollback remains the two-file diff from immutable parent `8b5f35b3d6bfea965aad3d515a35b1a3485dae6a`.
+
+### Issue #79 exact-candidate evidence hardening from `184701d0ff26b4e8d15ce02adbaadfd6913bdb9e`
+
+The supplied independent review findings apply to immutable input candidate
+`184701d0ff26b4e8d15ce02adbaadfd6913bdb9e`. This batch closes two P1 findings
+and the resolved-path disclosure cases in scope for issue #79. The review
+dispatch did not include a review URL, so this record does not invent one.
+The Python specimens below are inert source strings parsed by the offline
+harness; none was compiled or executed.
+
+| Finding | RED against exact input candidate | Correction and retained safe case |
+|---|---|---|
+| P1: package containment could be counted when its `try` existed only in the unreachable `else` of `if True`, or in the unreachable body of `if 0`. | `test_unreachable_package_containment_try_is_not_reviewed` accepted both modified guards. | Reachability checks account for literal truth values in both `if` arms; the canonical reachable package guard remains accepted. |
+| P1: an unrelated nested helper with the same name could shadow the top-level helper binding used for environment-map taint propagation. | `test_sensitive_mapping_return_survives_unrelated_nested_name_collision` accepted a mapping from `dict(os.environ)` returned through a top-level relay. | Helper candidates are constrained to lexical scopes visible at the call, preserving the top-level relay parameter taint. A top-level reviewed mapping remains accepted when an unrelated nested same-name helper returns `os.environ`. |
+| P2: resolved local paths could reach output sinks through local helper aliases, arguments bound to helper parameters, generator yields, nested closure captures, or default arguments. | `test_resolved_local_paths_cross_helper_boundaries_to_output_sinks` accepted all five inert disclosure specimens. | Path provenance follows visible helper aliases and return/yield values, call arguments and defaults bound to helper parameters, and assignments captured from enclosing scopes. Internal root validation with no output sink remains accepted. |
+| P3: an unrelated nested same-name helper returning `os.environ` caused a safe top-level status mapping to be classified as sensitive. | `test_safe_top_level_helper_ignores_unrelated_nested_name_collision` falsely rejected the reviewed status mapping. | The same lexical helper resolution removes this false positive while the P1 environment-map relay remains rejected. |
+
+Test-first RED commands and recorded results:
+
+```text
+python3 -B scripts/evidence_packet/issue79_regression_test.py Issue79RegressionTests.test_sensitive_mapping_return_survives_unrelated_nested_name_collision Issue79RegressionTests.test_resolved_local_paths_cross_helper_boundaries_to_output_sinks Issue79RegressionTests.test_unreachable_package_containment_try_is_not_reviewed
+Ran 3 tests in 31.961s; failed with 8 assertion failures (1 environment-taint case, 5 path-disclosure cases, and 2 unreachable package-guard cases).
+python3 -B scripts/evidence_packet/issue79_regression_test.py Issue79RegressionTests.test_safe_top_level_helper_ignores_unrelated_nested_name_collision
+Ran 1 test in 0.074s; failed because the scanner reported a credential/environment output-sink violation for the safe top-level status mapping.
+```
+
+Focused GREEN commands and recorded results:
+
+```text
+python3 -B scripts/evidence_packet/issue79_regression_test.py Issue79RegressionTests.test_sensitive_mapping_return_survives_unrelated_nested_name_collision Issue79RegressionTests.test_safe_top_level_helper_ignores_unrelated_nested_name_collision Issue79RegressionTests.test_resolved_local_paths_cross_helper_boundaries_to_output_sinks Issue79RegressionTests.test_resolved_local_paths_from_helpers_and_globals_reach_output_sinks Issue79RegressionTests.test_resolved_local_paths_are_not_disclosed_to_output_sinks
+Ran 5 tests in 0.084s; passed.
+python3 -B scripts/evidence_packet/issue79_regression_test.py Issue79RegressionTests.test_unreachable_package_containment_try_is_not_reviewed Issue79RegressionTests.test_canonical_package_guard_remains_reviewed
+Ran 2 tests in 28.124s; passed.
+```
+
+GitHub exact-head Codex review and the hosted PR quick check remain pending;
+neither is claimed complete by this local evidence. The full offline regression
+harness, final packet scan, diff check, and added-line credential/private-path
+scan are recorded in the candidate certification below. The local commit SHA is
+reported in the worker completion record.
+
+#### Current-candidate offline certification
+
+After the scanner corrections and this review disposition were added,
+the final focused command ran 8 tests in 27.672s and passed. A subprocess wrapper
+captured stdout and stderr separately for `python3 -B
+scripts/evidence_packet/issue79_regression_test.py`; the command ran 33 tests
+in 53.046s and passed with exit code 0. Its current-packet scan covered 331
+shell commands and 95 Python heredoc bodies with zero violations. These checks
+are offline static-scanner evidence; they do not close G01's remaining evidence
+gates or replace the pending exact-head Codex review and hosted PR quick check.
+Rollback point is the immutable starting SHA
+`184701d0ff26b4e8d15ce02adbaadfd6913bdb9e`.
+`git -P diff --check` exited 0; `git diff --name-only` listed only
+`docs/evidence/g01-recovery-packet.md` and
+`scripts/evidence_packet/issue79_regression_test.py`; the added-line
+credential/private-path scan found zero matches.
