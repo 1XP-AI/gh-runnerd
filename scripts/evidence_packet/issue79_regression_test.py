@@ -732,6 +732,43 @@ class Issue79RegressionTests(unittest.TestCase):
             with self.subTest(body=body):
                 self.assertIsNotNone(self.inspect(body))
 
+    def test_launcher_aliases_survive_sorted_mapping_values(self) -> None:
+        body = (
+            'import subprocess\n'
+            'launchers = {"run": subprocess.run}\n'
+            'for launch in sorted(launchers.values()):\n'
+            '    launch(["gh", "workflow", "run", "ci.yml"])\n'
+        )
+        self.assertIsNotNone(self.inspect(body))
+
+    def test_launcher_aliases_survive_filter_mapping_values(self) -> None:
+        body = (
+            'import subprocess\n'
+            'launchers = {"run": subprocess.run}\n'
+            'for launch in filter(None, launchers.values()):\n'
+            '    launch(["gh", "workflow", "run", "ci.yml"])\n'
+        )
+        self.assertIsNotNone(self.inspect(body))
+
+    def test_launcher_aliases_survive_map_mapping_values(self) -> None:
+        body = (
+            'import subprocess\n'
+            'launchers = {"run": subprocess.run}\n'
+            'for launch in map(lambda value: value, launchers.values()):\n'
+            '    launch(["gh", "workflow", "run", "ci.yml"])\n'
+        )
+        self.assertIsNotNone(self.inspect(body))
+
+    def test_launcher_aliases_yielded_by_local_generator(self) -> None:
+        body = (
+            'import subprocess\n'
+            'def launcher_stream():\n'
+            '    yield subprocess.run\n'
+            'for launch in launcher_stream():\n'
+            '    launch(["gh", "workflow", "run", "ci.yml"])\n'
+        )
+        self.assertIsNotNone(self.inspect(body))
+
     def test_launcher_aliases_returned_by_local_helpers_are_rejected(self) -> None:
         body = (
             'import subprocess\n'
@@ -1035,8 +1072,8 @@ class Issue79RegressionTests(unittest.TestCase):
             "git config --inc --list",
             "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=include.path GIT_CONFIG_VALUE_0=synthetic/included.cfg git status",
             "env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=includeIf.gitdir:/synthetic/repo.path GIT_CONFIG_VALUE_0=synthetic/included.cfg git status",
-            "GIT_CONFIG_PARAMETERS='include.path=synthetic/included.cfg' git status",
-            "env GIT_CONFIG_PARAMETERS='includeIf.gitdir:/synthetic/repo.path=synthetic/included.cfg' git status",
+            "GIT_CONFIG_PARAMETERS=\"'include.path=synthetic/included.cfg'\" git status",
+            "env GIT_CONFIG_PARAMETERS=\"'includeIf.gitdir:/synthetic/repo.path=synthetic/included.cfg'\" git status",
         ):
             with self.subTest(command=command):
                 self.assertIsNotNone(self.shell_violation(command))

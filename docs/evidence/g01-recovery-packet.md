@@ -10281,7 +10281,9 @@ def python_import_bindings(tree):
                     returned_values = [
                         candidate.value
                         for candidate in ast.walk(function)
-                        if isinstance(candidate, ast.Return)
+                        if isinstance(
+                            candidate, (ast.Return, ast.Yield, ast.YieldFrom)
+                        )
                         and candidate.value is not None
                         and python_enclosing_scope(candidate, parents) is function
                     ]
@@ -10309,7 +10311,7 @@ def python_import_bindings(tree):
                 isinstance(value.func, ast.Name)
                 and value.func.id in {
                     "dict", "enumerate", "iter", "list", "reversed", "set",
-                    "tuple", "zip",
+                    "filter", "map", "sorted", "tuple", "zip",
                 }
             ):
                 return any(
@@ -26825,7 +26827,8 @@ environment mappings, or temporary local Git fixtures. Python specimens are
 parsed and inspected as data; none is compiled or executed. On the candidate
 scanner, the new red probes reproduced environment-taint loss through
 generator yields, `itertools.chain`, and starred operands; launcher aliases
-lost through `reversed`, dictionary conversion, and local helper returns;
+lost through `reversed`, dictionary conversion, `sorted`/`filter`/`map` over
+mapping values, local generator yields, and local helper returns;
 packet-derived function definitions reaching `compile`/`exec` without a
 definition-time review; include-option abbreviations and
 `GIT_CONFIG_PARAMETERS` escaping Git config checks; local `Path.resolve()`
@@ -26834,7 +26837,8 @@ as containment proof.
 
 The scanner now propagates taint through generator yields, chain operands, and
 starred values; tracks launcher aliases through the reviewed iterator and
-mapping conversions and helper-returned callables; validates packet-derived
+mapping conversions, `sorted`/`filter`/`map` wrappers, generator yields, and
+helper-returned callables; validates packet-derived
 `FunctionDef` definitions before both bounded Git-query and parity-helper
 compile/exec sites; rejects include-option prefixes and
 `GIT_CONFIG_PARAMETERS`; blocks resolved local paths at output/error sinks;
@@ -26849,9 +26853,38 @@ probes confirmed the corrected chain and reversed/dictionary specimens fail
 independently; after correction, both nested-root and unreachable-containment
 probes were replayed against the stated candidate scanner and failed because
 it accepted each unsafe proof. All focused corrections passed afterward.
-Full local verification after this findings subsection was added:
+The preceding 22-test harness revision completed this full local verification:
 `python3 -B scripts/evidence_packet/issue79_regression_test.py` ran 22 tests
 in 53.538s and passed; the embedded static scan covered 331 shell commands
 and 95 Python heredoc bodies with zero violations. `git diff --check` exited
 0 with no output. No live runner/workflow operations, network calls, or GitHub
 writes were performed; no live tests were run.
+
+#### Follow-up launcher-iteration regression ledger
+
+| Regression path | RED against candidate `9548096` | Correction and focused GREEN |
+|---|---|---|
+| `sorted(launchers.values())` | The scanner accepted a loop that invoked the `subprocess.run` value. | Treat `sorted` as an iterable-preserving wrapper and propagate launcher provenance from its arguments. |
+| `filter(None, launchers.values())` | The scanner accepted the filtered launcher loop. | Inspect `filter` arguments for contained command launchers. |
+| `map(lambda value: value, launchers.values())` | The scanner accepted the mapped launcher loop. | Inspect `map` arguments for contained command launchers. |
+| Local generator yielding `subprocess.run` | The scanner accepted a callable yielded and invoked by the caller. | Include direct `yield` and `yield from` expressions when tracing local helper-produced iterables. |
+
+Each row has a focused source-data fixture; the four fixtures failed against
+the candidate and passed after the scanner change. The existing reversed and
+dictionary-conversion positive findings and ordinary `str.upper` callback
+control remain covered.
+
+The `GIT_CONFIG_PARAMETERS` rejection fixtures now pass a Git-formatted,
+single-quoted `key=value` token through the shell, for example
+`GIT_CONFIG_PARAMETERS="'include.path=synthetic/included.cfg'"`. An isolated
+local Git config query accepted the embedded single-quoted token; the
+unquoted token and value-only quoting variants were rejected by Git. The
+scanner still rejects the valid environment assignment before read-only
+classification.
+
+Updated full local verification: `python3 -B
+scripts/evidence_packet/issue79_regression_test.py` ran 26 tests in 53.313s
+and passed. The embedded static scan covered 331 shell commands and 95 Python
+heredoc bodies with zero violations; `git diff --check` exited 0 with no
+output. No live tests, runner/workflow operations, network calls, or GitHub
+writes were performed.
