@@ -9157,25 +9157,25 @@ def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen
         ):
             return True
         if isinstance(node.func, ast.Name):
-            local_generators = [
+            local_helpers = [
                 candidate
                 for candidate in ast.walk(tree)
                 if isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef))
                 and candidate.name == node.func.id
             ]
-            for function in local_generators:
-                yielded_values = [
+            for function in local_helpers:
+                returned_values = [
                     candidate.value
                     for candidate in ast.walk(function)
-                    if isinstance(candidate, (ast.Yield, ast.YieldFrom))
+                    if isinstance(candidate, (ast.Return, ast.Yield, ast.YieldFrom))
                     and candidate.value is not None
                     and python_enclosing_scope(candidate, parents) is function
                 ]
-                if yielded_values and any(
+                if returned_values and any(
                     python_sensitive_value_expression(
                         value, sensitive_names, tree, parents, seen.copy()
                     )
-                    for value in yielded_values
+                    for value in returned_values
                 ):
                     return True
         if isinstance(node.func, ast.Name) and node.func.id in {
@@ -10192,11 +10192,10 @@ def python_import_bindings(tree):
     for target, value, _destructured in assignment_bindings:
         if isinstance(target, ast.Name) and value is not None:
             assigned_values.setdefault(target.id, []).append(value)
-    local_functions = {
-        node.name: node
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
+    local_functions = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            local_functions.setdefault(node.name, []).append(node)
     parents = {
         child: parent
         for parent in ast.walk(tree)
@@ -10277,26 +10276,26 @@ def python_import_bindings(tree):
             if isinstance(value.func, ast.Name) and value.func.id in local_functions:
                 function_name = value.func.id
                 if function_name not in seen_functions:
-                    function = local_functions[function_name]
-                    returned_values = [
-                        candidate.value
-                        for candidate in ast.walk(function)
-                        if isinstance(
-                            candidate, (ast.Return, ast.Yield, ast.YieldFrom)
-                        )
-                        and candidate.value is not None
-                        and python_enclosing_scope(candidate, parents) is function
-                    ]
-                    if any(
-                        iterable_may_contain_launcher(
-                            candidate,
-                            set(seen_names),
-                            set(seen_nodes),
-                            seen_functions | {function_name},
-                        )
-                        for candidate in returned_values
-                    ):
-                        return True
+                    for function in local_functions[function_name]:
+                        returned_values = [
+                            candidate.value
+                            for candidate in ast.walk(function)
+                            if isinstance(
+                                candidate, (ast.Return, ast.Yield, ast.YieldFrom)
+                            )
+                            and candidate.value is not None
+                            and python_enclosing_scope(candidate, parents) is function
+                        ]
+                        if any(
+                            iterable_may_contain_launcher(
+                                candidate,
+                                set(seen_names),
+                                set(seen_nodes),
+                                seen_functions | {function_name},
+                            )
+                            for candidate in returned_values
+                        ):
+                            return True
             if (
                 isinstance(value.func, ast.Attribute)
                 and value.func.attr in {"items", "keys", "values"}
@@ -12462,7 +12461,16 @@ def python_resolved_local_path_expression(
     if isinstance(node, ast.Name):
         scope = python_enclosing_scope(node, parents)
         for assigned_scope, value in assignments_by_name.get(node.id, ()):
-            if assigned_scope is scope and python_resolved_local_path_expression(
+            if (
+                assigned_scope is scope
+                or (
+                    isinstance(
+                        scope,
+                        (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
+                    )
+                    and assigned_scope is tree
+                )
+            ) and python_resolved_local_path_expression(
                 value,
                 tree,
                 parents,
@@ -12475,6 +12483,32 @@ def python_resolved_local_path_expression(
         dotted = python_dotted_name(node.func)
         if dotted in {"Path.cwd", "pathlib.Path.cwd"}:
             return True
+        if isinstance(node.func, ast.Name):
+            local_helpers = [
+                candidate
+                for candidate in ast.walk(tree)
+                if isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and candidate.name == node.func.id
+            ]
+            for function in local_helpers:
+                returned_values = [
+                    candidate.value
+                    for candidate in ast.walk(function)
+                    if isinstance(candidate, ast.Return)
+                    and candidate.value is not None
+                    and python_enclosing_scope(candidate, parents) is function
+                ]
+                if returned_values and any(
+                    python_resolved_local_path_expression(
+                        value,
+                        tree,
+                        parents,
+                        assignments_by_name,
+                        seen.copy(),
+                    )
+                    for value in returned_values
+                ):
+                    return True
         if (
             isinstance(node.func, ast.Attribute)
             and node.func.attr == "resolve"
@@ -12535,6 +12569,21 @@ def python_path_division_names(node):
             node.right
         )
     return [node.id] if isinstance(node, ast.Name) else []
+
+
+def python_try_in_unreachable_if_body(node, parents):
+    current = node
+    while current in parents:
+        parent = parents[current]
+        if (
+            isinstance(parent, ast.If)
+            and isinstance(parent.test, ast.Constant)
+            and parent.test.value is False
+            and current in parent.body
+        ):
+            return True
+        current = parent
+    return False
 
 
 def python_reviewed_go_package_directory(node, tree, parents):
@@ -12889,7 +12938,11 @@ def python_reviewed_go_package_directory(node, tree, parents):
         return False
     expected_root = ["go_repo_root", "module_dir"]
     for candidate in ast.walk(scope):
-        if not isinstance(candidate, ast.Try) or candidate.end_lineno >= node.lineno:
+        if (
+            not isinstance(candidate, ast.Try)
+            or candidate.end_lineno >= node.lineno
+            or python_try_in_unreachable_if_body(candidate, parents)
+        ):
             continue
         if python_enclosing_scope(candidate, parents) is not scope:
             continue
@@ -26888,3 +26941,31 @@ and passed. The embedded static scan covered 331 shell commands and 95 Python
 heredoc bodies with zero violations; `git diff --check` exited 0 with no
 output. No live tests, runner/workflow operations, network calls, or GitHub
 writes were performed.
+
+### Issue #79 four-gap scanner correction at baseline `8b5f35b`
+
+This batch addresses four independent evidence-packet scanner gaps reported
+for [issue #79](https://github.com/1XP-AI/gh-runnerd/issues/79). The reviewer
+provenance is the supplied independent finding set against immutable starting
+packet source `8b5f35b3d6bfea965aad3d515a35b1a3485dae6a`; the prior reviewer did
+not rerun this regression suite. The red reproduction below is this worker's
+run against that unchanged scanner. Four AST-only tests were added first; their
+Python specimens are inert source strings passed to the scanner and were not
+evaluated, compiled, or launched.
+
+| # | Finding at immutable source `8b5f35b3d6bfea965aad3d515a35b1a3485dae6a` | RED against unchanged scanner | Scoped correction and GREEN |
+|---|---|---|---|
+| 1 | Nested lexical helper definitions sharing a function name could cause a safe shadow helper to hide a `subprocess.run` launcher returned by the outer helper. | `test_nested_function_name_collision_does_not_hide_launcher_alias` failed because the scanner returned no violation for the inert launcher witness. | Launcher-return analysis now examines every same-name local helper definition and fails closed if any returned value is command-capable. The non-launcher helper control remains accepted. |
+| 2 | A package-containment `try` nested under `if False` could be accepted as a reachable `package_dir.relative_to(...)` check. | `test_unreachable_package_containment_try_is_not_reviewed` failed because the modified source-fuzz guard was accepted. | Package-root evidence ignores containment `try` nodes under a literal-false branch. The canonical reachable guard remains accepted. |
+| 3 | Sensitive values returned by local helpers, including `dict(os.environ)`, were not propagated to output sinks. | Three subcases in `test_sensitive_local_helper_returns_are_tainted_at_output_sinks` failed: direct environment mapping return, `dict(os.environ)`, and a forwarding helper. | Sensitive-value analysis now follows local `Return` values through helper calls. A helper returning a reviewed status mapping remains accepted. |
+| 4 | Resolved local paths returned by helpers or stored in module globals could reach output sinks without path disclosure rejection. | Two subcases in `test_resolved_local_paths_from_helpers_and_globals_reach_output_sinks` failed: helper-returned `Path.cwd().resolve()` and a function printing a module-global resolved path. | Path-output analysis follows local helper returns and module-level path bindings referenced by functions. Internal path validation remains accepted. |
+
+Exact focused red command: `python3 -B scripts/evidence_packet/issue79_regression_test.py Issue79RegressionTests.test_nested_function_name_collision_does_not_hide_launcher_alias Issue79RegressionTests.test_unreachable_package_containment_try_is_not_reviewed Issue79RegressionTests.test_sensitive_local_helper_returns_are_tainted_at_output_sinks Issue79RegressionTests.test_resolved_local_paths_from_helpers_and_globals_reach_output_sinks` ran 4 tests and failed with 7 assertion failures. The scanner in the working tree was still the baseline scanner; only the four test methods had been added.
+
+Exact focused green command: the same command above ran 4 tests in 15.099s and passed. Its safe controls covered ordinary helper outputs, the canonical reachable package guard, a status mapping, and local path validation without disclosure. An intermediate candidate attempt surfaced 9 implementation errors from changing a helper map's shape at the wrong call site; that mapping was corrected before the green result, and the complete suite below records the final candidate.
+
+The complete command and result, `git diff --check`, and final two-file scope are recorded in the candidate certification below. Rollback point is immutable starting SHA `8b5f35b3d6bfea965aad3d515a35b1a3485dae6a`; only this packet and its offline regression harness are in scope. The local commit can be reverted, or these two paths restored from that SHA. No GitHub writes, push, review request, project change, credential/host operation, synthetic source execution, live workflow, or runner action was performed. The checks establish static-scanner behavior for these specimens only; they do not prove runtime behavior or close G01's live/product evidence gaps.
+
+#### Candidate verification
+
+The final `python3 -B scripts/evidence_packet/issue79_regression_test.py` rerun ran 30 tests in 72.350s and passed; the current packet static scan covered 331 shell commands and 95 Python heredoc bodies with zero violations. `git diff --check` exited 0 with no output. `git diff --name-only` listed only `docs/evidence/g01-recovery-packet.md` and `scripts/evidence_packet/issue79_regression_test.py`; the added-line credential/private-path scan found no matches. Rollback remains the two-file diff from immutable parent `8b5f35b3d6bfea965aad3d515a35b1a3485dae6a`.

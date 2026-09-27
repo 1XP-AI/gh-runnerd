@@ -587,6 +587,84 @@ class Issue79RegressionTests(unittest.TestCase):
         )
         self.assertIsNone(self.inspect(internal_use))
 
+    def test_nested_function_name_collision_does_not_hide_launcher_alias(self) -> None:
+        body = (
+            'import subprocess\n'
+            'def launcher_factory():\n'
+            '    return subprocess.run\n'
+            'def unrelated_scope():\n'
+            '    def launcher_factory():\n'
+            '        return print\n'
+            'launch = launcher_factory()\n'
+            'launch(["gh", "workflow", "run", "ci.yml"])\n'
+        )
+        self.assertIsNotNone(self.inspect(body))
+
+        safe = (
+            'def value_factory():\n'
+            '    return print\n'
+            'def unrelated_scope():\n'
+            '    def value_factory():\n'
+            '        return str.upper\n'
+            'value = value_factory()\n'
+            'value("reviewed")\n'
+        )
+        self.assertIsNone(self.inspect(safe))
+
+    def test_sensitive_local_helper_returns_are_tainted_at_output_sinks(self) -> None:
+        unsafe = (
+            'import os\n'
+            'def environment_snapshot():\n'
+            '    return os.environ\n'
+            'print(environment_snapshot())\n',
+            'import os\n'
+            'def environment_snapshot():\n'
+            '    return dict(os.environ)\n'
+            'print(environment_snapshot())\n',
+            'import os\n'
+            'def environment_snapshot():\n'
+            '    return dict(os.environ)\n'
+            'def forwarded_snapshot():\n'
+            '    return environment_snapshot()\n'
+            'print(forwarded_snapshot())\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+        safe = (
+            'def reviewed_status():\n'
+            '    return {"status": "reviewed"}\n'
+            'print(reviewed_status())\n'
+        )
+        self.assertIsNone(self.inspect(safe))
+
+    def test_resolved_local_paths_from_helpers_and_globals_reach_output_sinks(self) -> None:
+        unsafe = (
+            'from pathlib import Path\n'
+            'def worktree_root():\n'
+            '    return Path.cwd().resolve()\n'
+            'print(worktree_root())\n',
+            'from pathlib import Path\n'
+            'resolved_root = Path.cwd().resolve()\n'
+            'def report_root():\n'
+            '    print(resolved_root)\n'
+            'report_root()\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+        safe = (
+            'from pathlib import Path\n'
+            'def worktree_root():\n'
+            '    return Path.cwd().resolve()\n'
+            'root = worktree_root()\n'
+            'if not root.is_absolute():\n'
+            '    raise SystemExit("invalid root")\n'
+        )
+        self.assertIsNone(self.inspect(safe))
+
     def test_canonical_package_guard_remains_reviewed(self) -> None:
         bodies = [
             body
@@ -1138,6 +1216,33 @@ class Issue79RegressionTests(unittest.TestCase):
             bodies[0], original, unreachable
         )
         self.assertFalse(self.package_directory_guard_is_reviewed(mutated))
+
+    def test_unreachable_package_containment_try_is_not_reviewed(self) -> None:
+        bodies = [
+            body
+            for _line, body, _safe_marker, _invocation
+            in self.scanner["python_heredoc_bodies"](PACKET_TEXT)  # type: ignore[operator]
+            if "def source_fuzz_guard():" in body
+        ]
+        self.assertEqual(len(bodies), 1)
+        original = (
+            '    try:\n'
+            '        package_dir.relative_to(go_repo_root / module_dir)\n'
+            '    except ValueError:\n'
+            '        raise SystemExit(f"{label}: package source escaped the reviewed module")'
+        )
+        unreachable = (
+            '    if False:\n'
+            '        try:\n'
+            '            package_dir.relative_to(go_repo_root / module_dir)\n'
+            '        except ValueError:\n'
+            '            raise SystemExit(f"{label}: package source escaped the reviewed module")'
+        )
+        mutated = self.replace_source_fuzz_guard_fragment(
+            bodies[0], original, unreachable
+        )
+        self.assertIsNone(self.inspect(bodies[0]))
+        self.assertIsNotNone(self.inspect(mutated))
 
     def test_packet_loader_rejects_packet_controlled_definition_time_code(self) -> None:
         specimens = (
