@@ -6013,6 +6013,7 @@ def run_bounded_git_query(
 def git_query(arguments):
     return [
         "git",
+        "--no-replace-objects",
         "-P",
         "-c",
         "core.fsmonitor=false",
@@ -8211,6 +8212,8 @@ def git_filter_attribute_violation(tokens):
         for token in tokens
     ):
         return "Git filter/external-attributes configuration is not allowed"
+    if subcommand == "config" and "--includes" in tokens:
+        return "Git configuration includes are not allowed before read-only commands"
     if subcommand == "config" and any(
         git_config_include_key(token.split("=", 1)[0])
         for token in tokens[1:]
@@ -8741,10 +8744,25 @@ def shell_environment_builtin_violation(tokens):
     return None
 
 
+def git_config_environment_include_violation(tokens):
+    """Reject include keys injected through Git's numbered config environment."""
+    for token in tokens:
+        if not assignment.fullmatch(token):
+            continue
+        name, value = token.split("=", 1)
+        if not re.fullmatch(r"GIT_CONFIG_KEY_[0-9]+", name, re.IGNORECASE):
+            continue
+        key = value.split("=", 1)[0]
+        if git_config_include_key(key):
+            return "Git configuration includes are not allowed before read-only commands"
+    return None
+
+
 def forbidden_command(tokens, depth=0):
     tokens = list(tokens)
     if not tokens:
         return None
+    original_tokens = list(tokens)
     sensitive_parameter_violation = shell_sensitive_parameter_violation(tokens)
     if sensitive_parameter_violation:
         return sensitive_parameter_violation
@@ -8773,6 +8791,8 @@ def forbidden_command(tokens, depth=0):
         )
     tokens = executable_tokens(tokens)
     if not tokens:
+        if any(executable_basename(token) == "env" for token in original_tokens):
+            return "env without a child command can print inherited environment values"
         return None
     environment_builtin_violation = shell_environment_builtin_violation(tokens)
     if environment_builtin_violation:
@@ -8789,6 +8809,12 @@ def forbidden_command(tokens, depth=0):
         return "RIPGREP_CONFIG_PATH configuration is not allowed"
     if unresolved_executable(tokens[0]):
         return "unresolved or parameter-expanded executable is not allowed"
+    if executable_basename(tokens[0]) == "git":
+        environment_include_violation = git_config_environment_include_violation(
+            original_tokens
+        )
+        if environment_include_violation:
+            return environment_include_violation
     trap_violation = shell_trap_violation(tokens, depth)
     if trap_violation:
         return trap_violation
@@ -9120,6 +9146,16 @@ def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen
             for argument in node.args
         ):
             return True
+        if isinstance(node.func, ast.Name) and node.func.id in {
+            "enumerate", "filter", "iter", "map", "next", "reversed",
+            "sorted", "zip",
+        }:
+            return any(
+                python_sensitive_value_expression(
+                    argument, sensitive_names, tree, parents, seen.copy()
+                )
+                for argument in node.args
+            )
         if isinstance(node.func, ast.Attribute):
             return python_sensitive_value_expression(
                 node.func.value, sensitive_names, tree, parents, seen.copy()
@@ -9178,6 +9214,8 @@ def python_sensitive_value_names(tree, parents):
     def target_names(target):
         if isinstance(target, ast.Name):
             return [target.id]
+        if isinstance(target, ast.Starred):
+            return target_names(target.value)
         if isinstance(target, (ast.Tuple, ast.List)):
             names = []
             for element in target.elts:
@@ -10110,6 +10148,7 @@ def python_import_bindings(tree):
             assigned_values.setdefault(target.id, []).append(value)
 
     iterable_bindings = []
+    starred_iterable_aliases = set()
     for node in ast.walk(tree):
         if isinstance(node, (ast.For, ast.AsyncFor)):
             target, value = node.target, node.iter
@@ -10117,6 +10156,10 @@ def python_import_bindings(tree):
             target, value = node.target, node.iter
         else:
             continue
+        if any(isinstance(candidate, ast.Starred) for candidate in ast.walk(target)):
+            starred_iterable_aliases.update(
+                bound_target.id for bound_target in target_names(target)
+            )
         iterable_bindings.extend(
             (bound_target, value)
             for bound_target in target_names(target)
@@ -10165,6 +10208,22 @@ def python_import_bindings(tree):
             return False
         if python_call_derived_command_alias(value, modules):
             return True
+        if isinstance(value, ast.Call):
+            if (
+                isinstance(value.func, ast.Attribute)
+                and value.func.attr in {"items", "values"}
+            ):
+                return iterable_may_contain_launcher(
+                    value.func.value, seen_names, seen_nodes
+                )
+            if (
+                isinstance(value.func, ast.Name)
+                and value.func.id in {"enumerate", "iter", "list", "set", "tuple", "zip"}
+            ):
+                return any(
+                    iterable_may_contain_launcher(argument, seen_names, seen_nodes)
+                    for argument in value.args
+                )
         if isinstance(
             value,
             (
@@ -10244,7 +10303,11 @@ def python_import_bindings(tree):
             break
     for alias in candidate_aliases:
         modules.pop(alias, None)
-        functions[alias] = None
+        functions[alias] = (
+            unresolved_starred_launcher_container
+            if alias in starred_iterable_aliases
+            else None
+        )
 
     def resolve_binding(node):
         dotted = python_dotted_name(node)
@@ -10386,8 +10449,15 @@ def python_class_command_attribute_violation(tree, modules, functions):
     return None
 
 
+unresolved_starred_launcher_container = "__g01_unresolved_starred_launcher_container__"
+
+
 def python_call_target(node, modules, functions):
     """Resolve callable dunder invocation back to its launcher receiver."""
+    if isinstance(node, ast.Subscript):
+        resolved_container = python_resolved_name(node.value, modules, functions)
+        if resolved_container == unresolved_starred_launcher_container:
+            return "unresolved", python_dotted_name(node.value) or "starred launcher container"
     if not (isinstance(node, ast.Attribute) and node.attr == "__call__"):
         return "normal", python_resolved_name(node, modules, functions)
     receiver = node.value
@@ -11498,17 +11568,34 @@ def python_path_receiver_expression(node, tree, parents, seen=None):
         return True
     if isinstance(node, ast.Call):
         dotted = python_dotted_name(node.func)
-        if dotted in {"Path", "pathlib.Path"}:
+        module_aliases, constructor_aliases = python_path_constructor_aliases(tree)
+        if isinstance(node.func, ast.Name) and node.func.id in constructor_aliases:
+            return True
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "Path"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in module_aliases
+        ):
             return True
         if (
             dotted in {"Path.cwd", "pathlib.Path.cwd"}
-            and not node.args
+            or (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr == "cwd"
+                and isinstance(node.func.value, ast.Attribute)
+                and node.func.value.attr == "Path"
+                and isinstance(node.func.value.value, ast.Name)
+                and node.func.value.value.id in module_aliases
+            )
+        ) and (
+            not node.args
             and not node.keywords
         ):
             return True
         if (
             isinstance(node.func, ast.Attribute)
-            and node.func.attr == "joinpath"
+            and node.func.attr in {"joinpath", "resolve"}
         ):
             return python_path_receiver_expression(node.func.value, tree, parents, seen)
         return False
@@ -11532,6 +11619,8 @@ def python_path_receiver_expression(node, tree, parents, seen=None):
                 continue
             if python_path_receiver_expression(value, tree, parents, seen):
                 return True
+        if python_path_typed_parameter(node, tree, parents):
+            return True
         return node.id.casefold().endswith(("path", "file", "directory", "dir", "root")) and not python_unassigned_path_parameter(node, parents)
     if isinstance(node, ast.Attribute):
         return python_path_receiver_expression(node.value, tree, parents, seen)
@@ -12255,15 +12344,330 @@ def python_path_division_names(node):
 
 
 def python_reviewed_go_package_directory(node, tree, parents):
-    """Accept source enumeration only after the packet's package-root guard."""
+    """Accept only the canonical zero-argument source-fuzz package guard."""
     scope = python_enclosing_scope(node, parents)
+    source_guards = [
+        candidate for candidate in tree.body
+        if isinstance(candidate, ast.FunctionDef)
+        and candidate.name == "source_fuzz_guard"
+    ]
     if not (
         isinstance(node, ast.Name)
         and node.id == "package_dir"
+        and len(source_guards) == 1
+        and source_guards[0] is scope
         and isinstance(scope, ast.FunctionDef)
         and scope.name == "source_fuzz_guard"
+        and not scope.decorator_list
+        and not scope.args.posonlyargs
+        and not scope.args.args
+        and not scope.args.kwonlyargs
+        and scope.args.vararg is None
+        and scope.args.kwarg is None
     ):
         return False
+
+    def target_has_name(target, name):
+        if isinstance(target, ast.Name):
+            return target.id == name
+        if isinstance(target, (ast.Tuple, ast.List)):
+            return any(target_has_name(element, name) for element in target.elts)
+        return False
+
+    def top_level_assignments(name):
+        found = []
+        for statement in tree.body:
+            if isinstance(statement, ast.Assign):
+                if any(target_has_name(target, name) for target in statement.targets):
+                    found.append((statement, statement.value))
+            elif isinstance(statement, ast.AnnAssign) and target_has_name(statement.target, name):
+                found.append((statement, statement.value))
+        return found
+
+    def has_raising_guard(name, expected, expected_name=False):
+        for statement in tree.body:
+            if not isinstance(statement, ast.If) or not isinstance(statement.test, ast.Compare):
+                continue
+            test = statement.test
+            if not (
+                isinstance(test.left, ast.Name)
+                and test.left.id == name
+                and len(test.ops) == 1
+                and isinstance(test.ops[0], ast.NotEq)
+                and len(test.comparators) == 1
+                and (
+                    (
+                        expected_name
+                        and isinstance(test.comparators[0], ast.Name)
+                        and test.comparators[0].id == expected
+                    )
+                    or (
+                        not expected_name
+                        and isinstance(test.comparators[0], ast.Constant)
+                        and test.comparators[0].value == expected
+                    )
+                )
+                and any(isinstance(candidate, ast.Raise) for candidate in ast.walk(statement))
+            ):
+                continue
+            return True
+        return False
+
+    module_values = top_level_assignments("module_values")
+    module_directory = top_level_assignments("module_dir")
+    if not (
+        len(module_values) == 1
+        and isinstance(module_values[0][1], ast.Call)
+        and python_dotted_name(module_values[0][1].func) == "flag_values"
+        and len(module_values[0][1].args) == 2
+        and isinstance(module_values[0][1].args[0], ast.Name)
+        and module_values[0][1].args[0].id == "test_args"
+        and isinstance(module_values[0][1].args[1], ast.Constant)
+        and module_values[0][1].args[1].value == "-C"
+        and len(module_directory) == 1
+        and isinstance(module_directory[0][1], ast.Subscript)
+        and isinstance(module_directory[0][1].value, ast.Name)
+        and module_directory[0][1].value.id == "module_values"
+        and isinstance(module_directory[0][1].slice, ast.Constant)
+        and module_directory[0][1].slice.value == 0
+        and has_raising_guard("module_dir", "experiments/g01-scaleset")
+    ):
+        return False
+
+    package_values = top_level_assignments("package_value")
+    actual_packages = top_level_assignments("actual_package")
+    if not (
+        len(package_values) == 1
+        and isinstance(package_values[0][1], ast.Subscript)
+        and isinstance(package_values[0][1].value, ast.Name)
+        and package_values[0][1].value.id == "list_base_args"
+        and isinstance(package_values[0][1].slice, ast.Subscript)
+        and isinstance(package_values[0][1].slice.value, ast.Name)
+        and package_values[0][1].slice.value.id == "package_indices"
+        and len(actual_packages) == 1
+        and isinstance(actual_packages[0][1], ast.JoinedStr)
+        and {field.value.id for field in ast.walk(actual_packages[0][1])
+             if isinstance(field, ast.FormattedValue) and isinstance(field.value, ast.Name)}
+        >= {"module_dir", "package_value"}
+    ):
+        return False
+    if not has_raising_guard("actual_package", "expected_package", expected_name=True):
+        return False
+
+    invocation_roots = top_level_assignments("invocation_root")
+    if len(invocation_roots) != 1:
+        return False
+    invocation_root_value = invocation_roots[0][1]
+    if not (
+        isinstance(invocation_root_value, ast.Call)
+        and isinstance(invocation_root_value.func, ast.Attribute)
+        and invocation_root_value.func.attr == "resolve"
+        and not invocation_root_value.args
+        and not invocation_root_value.keywords
+        and isinstance(invocation_root_value.func.value, ast.Call)
+        and python_dotted_name(invocation_root_value.func.value.func) == "Path.cwd"
+        and not invocation_root_value.func.value.args
+        and not invocation_root_value.func.value.keywords
+    ):
+        return False
+
+    repo_roots = top_level_assignments("repo_root")
+    if len(repo_roots) != 1:
+        return False
+    repo_root_value = repo_roots[0][1]
+    if not (
+        isinstance(repo_root_value, ast.Call)
+        and isinstance(repo_root_value.func, ast.Attribute)
+        and repo_root_value.func.attr == "resolve"
+        and not repo_root_value.args
+        and not repo_root_value.keywords
+        and isinstance(repo_root_value.func.value, ast.Call)
+        and python_dotted_name(repo_root_value.func.value.func) == "Path"
+        and len(repo_root_value.func.value.args) == 1
+        and not repo_root_value.func.value.keywords
+    ):
+        return False
+    root_path_argument = repo_root_value.func.value.args[0]
+    if not (
+        isinstance(root_path_argument, ast.Call)
+        and isinstance(root_path_argument.func, ast.Attribute)
+        and root_path_argument.func.attr == "strip"
+        and not root_path_argument.args
+        and isinstance(root_path_argument.func.value, ast.Call)
+        and python_dotted_name(root_path_argument.func.value.func) == "subprocess.check_output"
+        and root_path_argument.func.value.args
+    ):
+        return False
+    check_output_call = root_path_argument.func.value
+    check_output_keywords = {
+        keyword.arg: keyword.value for keyword in check_output_call.keywords
+    }
+    if not (
+        len(check_output_call.args) == 1
+        and set(check_output_keywords) == {"cwd", "env", "text"}
+        and isinstance(check_output_keywords["cwd"], ast.Name)
+        and check_output_keywords["cwd"].id == "invocation_root"
+        and isinstance(check_output_keywords["env"], ast.Name)
+        and check_output_keywords["env"].id == "env"
+        and isinstance(check_output_keywords["text"], ast.Constant)
+        and check_output_keywords["text"].value is True
+    ):
+        return False
+    git_root_call = check_output_call.args[0]
+    if not (
+        isinstance(git_root_call, ast.Call)
+        and python_dotted_name(git_root_call.func) == "git_command"
+        and len(git_root_call.args) == 1
+        and not git_root_call.keywords
+        and isinstance(git_root_call.args[0], (ast.List, ast.Tuple))
+        and [
+            item.value for item in git_root_call.args[0].elts
+            if isinstance(item, ast.Constant)
+        ] == ["rev-parse", "--show-toplevel"]
+        and has_raising_guard("invocation_root", "repo_root", expected_name=True)
+    ):
+        return False
+
+    initializers = [
+        candidate for candidate in tree.body
+        if isinstance(candidate, ast.FunctionDef)
+        and candidate.name == "package_initialization_guard"
+    ]
+    if not (
+        len(initializers) == 1
+        and not initializers[0].decorator_list
+        and not initializers[0].args.posonlyargs
+        and not initializers[0].args.args
+        and not initializers[0].args.kwonlyargs
+        and initializers[0].args.vararg is None
+        and initializers[0].args.kwarg is None
+    ):
+        return False
+    initializer = initializers[0]
+    snapshot_binding = None
+    root_binding = None
+    snapshot_bindings = []
+    root_bindings = []
+    for candidate in ast.walk(initializer):
+        if python_enclosing_scope(candidate, parents) is not initializer:
+            continue
+        if isinstance(candidate, ast.Assign):
+            if any(target_has_name(target, "source_snapshot_root") for target in candidate.targets):
+                snapshot_binding = candidate
+                snapshot_bindings.append(candidate)
+            if any(target_has_name(target, "go_repo_root") for target in candidate.targets):
+                root_binding = candidate
+                root_bindings.append(candidate)
+    if not (
+        len(snapshot_bindings) == 1
+        and len(root_bindings) == 1
+        and snapshot_binding is not None
+        and isinstance(snapshot_binding.value, ast.Call)
+        and python_dotted_name(snapshot_binding.value.func) == "create_immutable_source_snapshot"
+        and len(snapshot_binding.value.args) == 3
+        and [
+            argument.id for argument in snapshot_binding.value.args
+            if isinstance(argument, ast.Name)
+        ] == ["repo_root", "module_dir", "env"]
+        and root_binding is not None
+        and isinstance(root_binding.value, ast.Name)
+        and root_binding.value.id == "source_snapshot_root"
+        and snapshot_binding.end_lineno < root_binding.lineno
+    ):
+        return False
+    source_snapshot_roots = top_level_assignments("source_snapshot_root")
+    if not (
+        len(source_snapshot_roots) == 1
+        and isinstance(source_snapshot_roots[0][1], ast.Constant)
+        and source_snapshot_roots[0][1].value is None
+    ):
+        return False
+
+    root_names = {
+        "invocation_root", "repo_root", "module_dir", "package_value",
+        "actual_package", "source_snapshot_root", "go_repo_root",
+    }
+    approved_store_nodes = set()
+    for name in root_names:
+        assignments = top_level_assignments(name)
+        if name == "go_repo_root" and not (
+            len(assignments) == 1
+            and isinstance(assignments[0][1], ast.Name)
+            and assignments[0][1].id == "repo_root"
+        ):
+            return False
+        for statement, _value in assignments:
+            targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+            approved_store_nodes.update(
+                target_node
+                for target in targets
+                for target_node in ast.walk(target)
+                if isinstance(target_node, ast.Name) and target_node.id == name
+            )
+    approved_store_nodes.update(
+        target_node
+        for target in root_binding.targets
+        for target_node in ast.walk(target)
+        if isinstance(target_node, ast.Name) and target_node.id == "go_repo_root"
+    )
+    approved_store_nodes.update(
+        target_node
+        for target in snapshot_binding.targets
+        for target_node in ast.walk(target)
+        if isinstance(target_node, ast.Name) and target_node.id == "source_snapshot_root"
+    )
+    if any(
+        isinstance(candidate, ast.Name)
+        and candidate.id in root_names
+        and isinstance(candidate.ctx, ast.Store)
+        and candidate not in approved_store_nodes
+        for candidate in ast.walk(tree)
+    ):
+        return False
+
+    initialization_calls = [
+        candidate for candidate in ast.walk(tree)
+        if isinstance(candidate, ast.Call)
+        and python_dotted_name(candidate.func) == "package_initialization_guard"
+    ]
+    fuzz_guard_calls = [
+        candidate for candidate in ast.walk(tree)
+        if isinstance(candidate, ast.Call)
+        and python_dotted_name(candidate.func) == "source_fuzz_guard"
+    ]
+    fuzz_guard_call = next(
+        (
+            candidate for candidate in fuzz_guard_calls
+            if not candidate.args
+            and not candidate.keywords
+            and isinstance(parents.get(candidate), ast.Expr)
+            and parents.get(parents.get(candidate)) is tree
+        ),
+        None,
+    )
+    initialization_call = next(
+        (
+            candidate for candidate in initialization_calls
+            if not candidate.args
+            and not candidate.keywords
+            and isinstance(parents.get(candidate), ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "test_source_paths"
+                for target in parents[candidate].targets
+            )
+            and parents.get(parents.get(candidate)) is tree
+        ),
+        None,
+    )
+    if not (
+        len(fuzz_guard_calls) == 1
+        and fuzz_guard_call is not None
+        and len(initialization_calls) == 1
+        and initialization_call is not None
+        and initialization_call.lineno < fuzz_guard_call.lineno
+    ):
+        return False
+
     expected_package = ["go_repo_root", "module_dir", "package_value"]
     package_assignment = False
     for candidate in ast.walk(scope):
@@ -12503,6 +12907,292 @@ def python_reviewed_path_reader(node, method, tree, parents):
     )
 
 
+def python_path_constructor_aliases(tree):
+    """Resolve only imports and assignments that alias pathlib.Path itself."""
+    module_aliases = set()
+    constructor_aliases = set()
+    assignments = []
+    for candidate in ast.walk(tree):
+        if isinstance(candidate, ast.Import):
+            for alias in candidate.names:
+                if alias.name == "pathlib":
+                    module_aliases.add(alias.asname or "pathlib")
+        elif isinstance(candidate, ast.ImportFrom) and candidate.module == "pathlib":
+            for alias in candidate.names:
+                if alias.name == "Path":
+                    constructor_aliases.add(alias.asname or alias.name)
+        elif isinstance(candidate, ast.Assign):
+            assignments.extend((target, candidate.value) for target in candidate.targets)
+        elif isinstance(candidate, ast.AnnAssign) and candidate.value is not None:
+            assignments.append((candidate.target, candidate.value))
+        elif isinstance(candidate, ast.NamedExpr):
+            assignments.append((candidate.target, candidate.value))
+
+    def is_constructor(value):
+        if isinstance(value, ast.Name):
+            return value.id in constructor_aliases
+        if isinstance(value, ast.Attribute):
+            return (
+                isinstance(value.value, ast.Name)
+                and value.value.id in module_aliases
+                and value.attr == "Path"
+            )
+        return False
+
+    for _ in range(len(assignments) + 1):
+        changed = False
+        for target, value in assignments:
+            if not isinstance(target, ast.Name) or not is_constructor(value):
+                continue
+            if target.id not in constructor_aliases:
+                constructor_aliases.add(target.id)
+                changed = True
+        if not changed:
+            break
+    return module_aliases, constructor_aliases
+
+
+def python_path_typed_parameter(node, tree, parents):
+    """Recognize parameters annotated with an imported pathlib.Path."""
+    if not isinstance(node, ast.Name):
+        return False
+    module_aliases, constructor_aliases = python_path_constructor_aliases(tree)
+    current = node
+    while current is not None and not isinstance(
+        current, (ast.FunctionDef, ast.AsyncFunctionDef)
+    ):
+        current = parents.get(current)
+    if current is None:
+        return False
+    arguments = (
+        list(current.args.posonlyargs)
+        + list(current.args.args)
+        + list(current.args.kwonlyargs)
+    )
+    for argument in arguments:
+        if argument.arg != node.id or argument.annotation is None:
+            continue
+        for annotation in ast.walk(argument.annotation):
+            if isinstance(annotation, ast.Name) and annotation.id in constructor_aliases:
+                return True
+            if (
+                isinstance(annotation, ast.Attribute)
+                and annotation.attr == "Path"
+                and isinstance(annotation.value, ast.Name)
+                and annotation.value.id in module_aliases
+            ):
+                return True
+    return False
+
+
+def python_imported_module_alias_is_stable(name, module, tree):
+    """Require the imported module name to have no competing binding."""
+    imported = False
+    for candidate in ast.walk(tree):
+        if isinstance(candidate, ast.Name) and candidate.id == name and isinstance(candidate.ctx, ast.Store):
+            return False
+        if isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and candidate.name == name:
+            return False
+        if isinstance(candidate, ast.arg) and candidate.arg == name:
+            return False
+        if isinstance(candidate, ast.Import):
+            for alias in candidate.names:
+                local = alias.asname or alias.name.split(".", 1)[0]
+                if local == name:
+                    if alias.name != module:
+                        return False
+                    imported = True
+        elif isinstance(candidate, ast.ImportFrom):
+            for alias in candidate.names:
+                if (alias.asname or alias.name) == name:
+                    return False
+    return imported
+
+
+def python_imported_function_alias_is_stable(name, module, function, tree):
+    """Require an imported pure helper alias to have no competing binding."""
+    imported = False
+    for candidate in ast.walk(tree):
+        if isinstance(candidate, ast.Name) and candidate.id == name and isinstance(candidate.ctx, ast.Store):
+            return False
+        if isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and candidate.name == name:
+            return False
+        if isinstance(candidate, ast.arg) and candidate.arg == name:
+            return False
+        if isinstance(candidate, ast.Import):
+            for alias in candidate.names:
+                if (alias.asname or alias.name.split(".", 1)[0]) == name:
+                    return False
+        elif isinstance(candidate, ast.ImportFrom):
+            for alias in candidate.names:
+                if (alias.asname or alias.name) != name:
+                    continue
+                if candidate.level or candidate.module != module or alias.name != function:
+                    return False
+                imported = True
+    return imported
+
+
+def python_known_non_path_reader_call(node, tree):
+    """Exempt proven AST/regex APIs that overlap Path filesystem method names."""
+    attribute = node.func if isinstance(node, ast.Call) else node
+    if not isinstance(attribute, ast.Attribute):
+        return False
+    if attribute.attr == "group" and python_regex_match_receiver(
+        attribute.value, tree
+    ):
+        return True
+    if attribute.attr != "walk" or not isinstance(attribute.value, ast.Name):
+        return False
+    module = attribute.value.id
+    return python_imported_module_alias_is_stable(module, "ast", tree)
+
+
+def python_regex_match_receiver(node, tree, seen=None):
+    """Prove a .group receiver came from an imported regular-expression API."""
+    regex_modules = set()
+    regex_match_functions = {}
+    regex_compile_functions = {}
+    assignments = {}
+    iterable_bindings = {}
+    for candidate in ast.walk(tree):
+        if isinstance(candidate, ast.Import):
+            for alias in candidate.names:
+                local = alias.asname or alias.name.split(".", 1)[0]
+                if alias.name == "re" and python_imported_module_alias_is_stable(
+                    local, "re", tree
+                ):
+                    regex_modules.add(alias.asname or "re")
+        elif isinstance(candidate, ast.ImportFrom) and candidate.module == "re":
+            for alias in candidate.names:
+                if alias.name in {"match", "fullmatch", "search"}:
+                    regex_match_functions[alias.asname or alias.name] = alias.name
+                elif alias.name == "compile":
+                    regex_compile_functions[alias.asname or alias.name] = alias.name
+        elif isinstance(candidate, ast.Assign):
+            for target in candidate.targets:
+                if isinstance(target, ast.Name):
+                    assignments.setdefault(target.id, []).append(candidate.value)
+        elif isinstance(candidate, ast.AnnAssign) and isinstance(candidate.target, ast.Name):
+            if candidate.value is not None:
+                assignments.setdefault(candidate.target.id, []).append(candidate.value)
+        elif isinstance(candidate, ast.NamedExpr) and isinstance(candidate.target, ast.Name):
+            assignments.setdefault(candidate.target.id, []).append(candidate.value)
+        elif isinstance(candidate, (ast.For, ast.AsyncFor, ast.comprehension)):
+            target_names = []
+
+            def collect_target(target):
+                if isinstance(target, ast.Name):
+                    target_names.append(target.id)
+                elif isinstance(target, ast.Starred):
+                    collect_target(target.value)
+                elif isinstance(target, (ast.Tuple, ast.List)):
+                    for element in target.elts:
+                        collect_target(element)
+
+            collect_target(candidate.target)
+            for name in target_names:
+                iterable_bindings.setdefault(name, []).append(candidate.iter)
+
+    def compiled_pattern(value, visited=None):
+        if visited is None:
+            visited = set()
+        if value is None or id(value) in visited:
+            return False
+        visited.add(id(value))
+        if isinstance(value, ast.Call):
+            if isinstance(value.func, ast.Attribute) and value.func.attr == "compile":
+                module = value.func.value
+                if isinstance(module, ast.Name) and module.id in regex_modules:
+                    return True
+            if (
+                isinstance(value.func, ast.Name)
+                and value.func.id in regex_compile_functions
+                and python_imported_function_alias_is_stable(
+                    value.func.id, "re", regex_compile_functions[value.func.id], tree
+                )
+            ):
+                return True
+        if isinstance(value, ast.Name):
+            candidates = assignments.get(value.id, ())
+            return bool(candidates) and all(
+                compiled_pattern(candidate, visited.copy())
+                for candidate in candidates
+            )
+        return False
+
+    def regex_match_callable(value, visited=None):
+        if visited is None:
+            visited = set()
+        if value is None or id(value) in visited:
+            return False
+        visited.add(id(value))
+        if isinstance(value, ast.Name):
+            if value.id in regex_match_functions and python_imported_function_alias_is_stable(
+                value.id, "re", regex_match_functions[value.id], tree
+            ):
+                return True
+            candidates = assignments.get(value.id, ())
+            return bool(candidates) and all(
+                regex_match_callable(candidate, visited.copy())
+                for candidate in candidates
+            )
+        if isinstance(value, ast.Attribute) and value.attr in {
+            "finditer", "fullmatch", "match", "search",
+        }:
+            if isinstance(value.value, ast.Name) and value.value.id in regex_modules:
+                return True
+            return compiled_pattern(value.value)
+        return False
+
+    def yields_match(value, visited=None):
+        if visited is None:
+            visited = set()
+        if value is None or id(value) in visited:
+            return False
+        visited.add(id(value))
+        if isinstance(value, ast.Name):
+            candidates = tuple(assignments.get(value.id, ())) + tuple(
+                iterable_bindings.get(value.id, ())
+            )
+            return bool(candidates) and all(
+                yields_match(candidate, visited.copy())
+                for candidate in candidates
+            )
+        if isinstance(value, ast.Call):
+            if regex_match_callable(value.func):
+                return True
+            if isinstance(value.func, ast.Name) and value.func.id in {
+                "filter", "iter", "list", "next", "reversed", "set",
+                "sorted", "tuple",
+            }:
+                return bool(value.args) and all(
+                    yields_match(argument, visited.copy())
+                    for argument in value.args
+                )
+            if isinstance(value.func, ast.Name) and value.func.id == "map":
+                if value.args and regex_match_callable(value.args[0]):
+                    return True
+            if isinstance(value.func, ast.Name) and value.func.id == "zip":
+                return bool(value.args) and all(
+                    yields_match(argument, visited.copy()) for argument in value.args
+                )
+        if isinstance(value, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+            return yields_match(value.elt, visited.copy()) and all(
+                yields_match(generator.iter, visited.copy())
+                for generator in value.generators
+            )
+        if isinstance(value, (ast.List, ast.Tuple, ast.Set)):
+            return bool(value.elts) and all(
+                yields_match(element, visited.copy()) for element in value.elts
+            )
+        return False
+
+    if seen is not None:
+        return yields_match(node, set(seen))
+    return yields_match(node)
+
+
 def python_sensitive_read_violation(tree, parents):
     """Reject environment/credential reads and unreviewed file read sinks."""
     sensitive_names = python_sensitive_value_names(tree, parents)
@@ -12591,10 +13281,20 @@ def python_sensitive_read_violation(tree, parents):
             if (
                 isinstance(node.func, ast.Attribute)
                 and node.func.attr in python_path_filesystem_read_methods
-                and python_path_receiver_expression(
-                    node.func.value, tree, parents
-                )
             ):
+                if python_known_non_path_reader_call(node, tree):
+                    continue
+                if not python_path_receiver_expression(
+                    node.func.value, tree, parents
+                ):
+                    if python_reviewed_read_path(
+                        node.func.value, tree, parents
+                    ):
+                        continue
+                    return (
+                        "Python filesystem reader has unresolved Path receiver "
+                        f"for .{node.func.attr} on line {node.lineno}"
+                    )
                 if not python_reviewed_path_reader(
                     node.func.value, node.func.attr, tree, parents
                 ):
@@ -12899,7 +13599,7 @@ def python_path_reader_aliases(tree, parents):
             if (
                 isinstance(value, ast.Attribute)
                 and value.attr in python_path_filesystem_read_methods
-                and python_path_receiver_expression(value.value, tree, parents)
+                and not python_known_non_path_reader_call(value, tree)
             ):
                 receiver = value.value
             elif isinstance(value, ast.Name) and value.id in aliases:
@@ -24660,10 +25360,12 @@ boundary remain preserved.
 The RED command reads the immutable parent with `git show`, extracts only its
 offline scanner and evaluates synthetic AST/string witnesses. A RED line means
 the exact parent returned no violation for the unsafe witness. The Markdown
-link RED case evaluates the parent's old `is_file()`-only local-target rule
-against an existing absolute file; no fixture file, payload, credential,
-compiler, Go child, workflow, runner, Docker, Lima, Keychain, launchd or live
-remote operation is started.
+link RED case now exercises the parent's old `is_file()`-only local-target
+rule with a synthetic absolute path and a lexical `is_absolute()` check. The
+captured output below preserves the earlier run's host-path presence result as
+historical evidence; the current source does not repeat that check. No fixture
+file, payload, credential, compiler, Go child, workflow, runner, Docker, Lima,
+Keychain, launchd or live remote operation is started.
 
 ~~~sh
 # g01-safe-python-heredoc: reviewed exact-parent 518f23c seven-finding RED probe
@@ -24755,10 +25457,10 @@ link_end = parent_packet.index("jq empty docs/backlog.json", link_start)
 old_link_rule = parent_packet[link_start:link_end]
 if "repository_root" in old_link_rule or "relative_to(" in old_link_rule:
     raise SystemExit("RED setup changed: exact parent already had repository-root link containment")
-absolute_target = (Path("docs/evidence/g01-recovery-packet.md").parent / "/etc/passwd").resolve()
-if not absolute_target.is_file():
-    raise SystemExit("RED setup changed: absolute boundary file unavailable")
-print("RED 5675188494 absolute Markdown local target: immutable parent accepted existing /etc/passwd")
+absolute_target = Path("/") / "synthetic-private" / "file"
+if not absolute_target.is_absolute():
+    raise SystemExit("RED setup changed: synthetic absolute target formation changed")
+print("RED 5675188494 absolute Markdown local target: immutable parent accepted synthetic absolute target")
 print("exact-parent 518f23c seven-finding RED probes: all seven findings / 12 unsafe witnesses accepted")
 PY
 ~~~
@@ -25824,7 +26526,7 @@ not claim live GitHub/App/runner/Scale Set verification, workflow dispatch or
 replay, credential use, source-code tests, merge, or Codex review. Malicious
 review examples were inspected only as data.
 
-#### Current issue #79 candidate certification
+#### Prior issue #79 candidate certification (superseded by PR #103 review)
 
 Current Markdown fence count: 476 raw marker-like lines, 474 semantic fence
 markers in 237 matching pairs. The seven-row finding ledger has 4 columns;
@@ -25836,3 +26538,55 @@ passed. No final-verification template, live GitHub/App/runner/Scale Set,
 workflow replay, credential use, Go test, Docker, Keychain or launchd action
 was run; rollback is packet/harness-only to
 `3d108256883458d25446a6311c8f50176a8ee7cd`.
+
+#### PR #103 blocking review correction ledger
+
+This ledger records the nine P1 findings on immutable candidate source
+`387a647355e48d44333954fadf48d5b02335290c`. The specimens are synthetic
+source strings, shell tokens, mappings, and temporary local Git repositories.
+The harness parses scanner inputs as data; it never evaluates a malicious
+specimen or invokes its command. Trusted scanner function definitions are
+validated before compilation and are exercised by the harness. This is a
+trusted-code review boundary, not a Python sandbox.
+
+| # | Immutable review finding | Disposition and retained positive case |
+|---|---|---|
+| 1 | [4111249272](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4111249272) — unresolved/aliased Path receivers | RED reproduced imported/assigned Path aliases, `resolve().read_text()`, a factory result, a typed `Path` parameter, and an unresolved helper receiver. GREEN resolves reviewed aliases and fails closed on unknown filesystem readers; a fixed reviewed packet path, stable `ast.walk`, and stable regex `match.group` remain accepted. |
+| 2 | [4111249273](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4111249273) — iterator-wrapped environment taint | RED reproduced `enumerate`, `zip`, and starred loop-target leaks from `os.environ`; GREEN propagates taint through iterator wrappers and starred targets; literal iteration remains accepted. |
+| 3 | [4111249274](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4111249274) — mapping views and container-call launchers | RED reproduced `.values()`/`.items()` plus list/tuple/set/iterator wrappers and starred target/subscript launchers; GREEN tracks those aliases and rejects unresolved launcher subscripts; ordinary `str.upper` callbacks remain accepted. |
+| 4 | [4111249275](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4111249275) — scanner loader definition-time execution | RED supplied import, decorator, default, annotation, shadowing, and attribute-assignment specimens as AST data. GREEN validates an explicit import allowlist and definition-time AST before compiling trusted scanner functions, and rejects protected-name rebinding; no specimen code ran. |
+| 5 | [4111249279](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4111249279) — Git include prefixes and `--includes` | RED reproduced `git config --includes` and `GIT_CONFIG_KEY_n` include/includeIf injection through environment assignment prefixes; GREEN rejects before read-only classification; `git -P status` and reviewed non-include core configuration remain accepted. |
+| 6 | [4111249281](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4111249281) — Python harness language decision | This documentation finding has no command specimen. The narrow language rationale is recorded in coordinator-owned `docs/decisions/0004-offline-python-ast-regression-tooling.md`; that file is outside this worker commit and remains for coordinator integration/review. |
+| 7 | [4111249283](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4111249283) — `env` without a child exposes inherited variables | RED reproduced bare `env`, `env -0`, and no-child assignment forms; GREEN rejects environment-dump forms while preserving reviewed `env -i printf reviewed`. |
+| 8 | [4111273707](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4111273707) — Git replacement refs alter reviewed `HEAD:path` bytes | RED used a temporary Git repo where ordinary `git show` returned synthetic replacement bytes for the reviewed commit; GREEN adds `--no-replace-objects` to every bounded Git query and confirms the packet blob query returns the reviewed bytes. |
+| 9 | [4111273712](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4111273712) — package-root helper accepts caller-controlled roots | RED showed acceptance of a parameterized helper, a changed synthetic invocation root, and a local synthetic root shadow; GREEN requires the canonical zero-argument helper, `Path.cwd()` matched against Git's repository root, fixed reviewed `-C` module, package derived from parsed command arguments, and immutable source-snapshot root. The canonical packet helper remains accepted by a positive-control test. |
+
+Red/green commands and results for this batch: the first seven-case synthetic
+red command was `python3 -B scripts/evidence_packet/issue79_regression_test.py`
+with 18 assertion failures and 3 missing-validator errors. The loader/rebinding
+red command targeted `test_path_filesystem_readers_require_reviewed_paths`
+and `test_packet_loader_rejects_packet_controlled_definition_time_code` and
+reported 8 failures; the replacement-ref/root-helper red command targeted
+`test_packet_blob_query_ignores_replace_refs` and
+`test_path_filesystem_readers_require_reviewed_paths` and reported 2 failures.
+The subsequent `test_canonical_package_guard_remains_reviewed` red caught
+accepted synthetic invocation-root and local-root-shadow mutations; it passed
+after both root anchors were tied to the canonical packet flow.
+After their scoped corrections, the same targeted tests passed, and the
+canonical package-root and reviewed-path positive controls passed together.
+The final complete suite also passed; its exact command and current
+packet-wide static counts are recorded below.
+
+The prior certification's fence and ledger counts describe the candidate
+before these PR #103 corrections. This section adds one nine-row, three-column
+finding table and no Markdown code fences. No live GitHub/App, runner/Scale
+Set, workflow dispatch/replay, credential, Docker, Keychain, launchd, Go test,
+or host cleanup operation was performed or inferred.
+
+Post-correction bookkeeping: 476 raw fence-like marker lines, of which 474
+are semantic Markdown fence markers in 237 matching pairs. This ledger has 9
+rows and 3 columns; the historical seven-row/four-column ledger and earlier
+ledgers remain preserved. `python3 -B scripts/evidence_packet/issue79_regression_test.py`
+passed all 12 focused synthetic tests; the packet-wide scan covered 331 shell
+commands and 95 Python heredoc bodies with zero violations; `git diff --check`
+passed. These are local focused/static results only.

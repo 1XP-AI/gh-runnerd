@@ -1,4 +1,4 @@
-"""Offline, non-executing regression probes for the seven issue #79 findings.
+"""Offline, non-executing regression probes for issue #79 review findings.
 
 Python examples and shell commands supplied to the packet scanner remain data:
 the harness parses/inspects them but never evaluates or launches them. The only
@@ -9,6 +9,7 @@ repositories owned by these tests.
 from __future__ import annotations
 
 import ast
+import builtins
 import os
 import re
 import shlex
@@ -129,6 +130,86 @@ def _scanner_module_source(packet: str) -> str:
     return source
 
 
+def _literal_definition_time_expression(node: ast.AST) -> bool:
+    try:
+        ast.literal_eval(node)
+    except (ValueError, TypeError, SyntaxError, RecursionError):
+        return False
+    return True
+
+
+def _validated_scanner_statements(module: ast.Module) -> tuple[ast.stmt, ...]:
+    """Validate packet-controlled imports and definition-time expressions before exec."""
+    top_level = {id(statement) for statement in module.body}
+    allowed_imports = {"ast", "re", "shlex", "subprocess"}
+    protected_names = set(dir(builtins)) | {
+        "Path", "ast", "os", "re", "shlex", "source", "subprocess",
+        "tempfile", "types", "selectors", "signal", "time", "__builtins__",
+    }
+    for node in ast.walk(module):
+        if isinstance(node, ast.Import):
+            if id(node) not in top_level or any(
+                alias.name not in allowed_imports or alias.asname is not None
+                for alias in node.names
+            ):
+                raise AssertionError("packet scanner import is not explicitly reviewed")
+        elif isinstance(node, ast.ImportFrom):
+            if (
+                id(node) not in top_level
+                or node.level != 0
+                or node.module != "pathlib"
+                or len(node.names) != 1
+                or node.names[0].name != "Path"
+                or node.names[0].asname is not None
+            ):
+                raise AssertionError("packet scanner from-import is not explicitly reviewed")
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            argument_annotations = [
+                argument.annotation
+                for argument in (
+                    list(node.args.posonlyargs)
+                    + list(node.args.args)
+                    + list(node.args.kwonlyargs)
+                )
+            ]
+            if node.args.vararg is not None:
+                argument_annotations.append(node.args.vararg.annotation)
+            if node.args.kwarg is not None:
+                argument_annotations.append(node.args.kwarg.annotation)
+            if (
+                node.decorator_list
+                or node.returns is not None
+                or getattr(node, "type_params", ())
+                or any(annotation is not None for annotation in argument_annotations)
+                or not all(
+                    _literal_definition_time_expression(default)
+                    for default in node.args.defaults
+                )
+                or not all(
+                    default is None or _literal_definition_time_expression(default)
+                    for default in node.args.kw_defaults
+                )
+            ):
+                raise AssertionError(
+                    "packet scanner function has unreviewed definition-time expressions"
+                )
+            if id(node) in top_level and node.name in protected_names:
+                raise AssertionError("packet scanner function shadows a protected binding")
+        elif isinstance(node, ast.Lambda) and not all(
+            _literal_definition_time_expression(default)
+            for default in node.args.defaults
+        ):
+            raise AssertionError("packet scanner lambda has an unreviewed default expression")
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)) and id(node) in top_level:
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(not isinstance(target, ast.Name) for target in targets):
+                raise AssertionError("packet scanner assignment target is not a simple name")
+            bound_names = {target.id for target in targets}
+            if bound_names & (protected_names - {"source"}):
+                raise AssertionError("packet scanner assignment shadows a protected binding")
+    return tuple(module.body)
+
+
 def _scanner_namespace() -> dict[str, object]:
     source = _scanner_module_source(PACKET_TEXT)
     module = ast.parse(source, filename="<packet-scanner-data>")
@@ -144,9 +225,12 @@ def _scanner_namespace() -> dict[str, object]:
         "types": types,
         "source": PACKET_TEXT,
     }
-    for statement in module.body:
+    validated_statements = _validated_scanner_statements(module)
+    for statement in validated_statements:
         if isinstance(statement, (ast.Import, ast.ImportFrom)):
-            exec(compile(ast.Module(body=[statement], type_ignores=[]), "<packet-scanner-import>", "exec"), namespace)
+            # Names used by the scanner are preloaded above; packet text never
+            # gets to select or execute an import during harness setup.
+            continue
         elif isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
             exec(compile(ast.Module(body=[statement], type_ignores=[]), "<packet-scanner-function>", "exec"), namespace)
         elif isinstance(statement, (ast.Assign, ast.AnnAssign)):
@@ -159,7 +243,14 @@ def _scanner_namespace() -> dict[str, object]:
             if "source" in names or value is None:
                 continue
             if _safe_assignment_expression(value, namespace):
-                exec(compile(ast.Module(body=[statement], type_ignores=[]), "<packet-scanner-constant>", "exec"), namespace)
+                safe_statement = statement
+                if isinstance(statement, ast.AnnAssign):
+                    safe_statement = ast.Assign(
+                        targets=[statement.target],
+                        value=statement.value,
+                    )
+                    ast.copy_location(safe_statement, statement)
+                exec(compile(ast.Module(body=[safe_statement], type_ignores=[]), "<packet-scanner-constant>", "exec"), namespace)
     namespace["source"] = PACKET_TEXT
     return namespace
 
@@ -359,6 +450,21 @@ class Issue79RegressionTests(unittest.TestCase):
             'from pathlib import Path\nprint(list(Path("synthetic-private").walk()))\n',
             'from pathlib import Path\nreader = Path("synthetic-private").glob\nprint(list(reader("*")))\n',
             'from pathlib import Path\np: Path = Path("synthetic-private")\nprint(p.read_text())\n',
+            'from pathlib import Path\nfactory = Path\nprint(factory("synthetic-private").read_text())\n',
+            'from pathlib import Path\nprint(Path("synthetic-private").resolve().read_text())\n',
+            'from pathlib import Path\ndef path_factory():\n    return Path("synthetic-private")\nprint(path_factory().read_text())\n',
+            'from pathlib import Path\ndef read_private(path: Path):\n    return path.read_text()\n',
+            'import ast\nfrom pathlib import Path\nast = Path("synthetic-private")\nprint(list(ast.walk()))\n',
+            'import re\nfrom pathlib import Path\nmatch = re.match("a", "a")\nmatch = Path("synthetic-private")\nprint(match.group())\n',
+            'from pathlib import Path\n'
+            'def source_fuzz_guard(go_repo_root, module_dir, package_value):\n'
+            '    package_dir = (go_repo_root / module_dir / package_value).resolve()\n'
+            '    try:\n'
+            '        package_dir.relative_to(go_repo_root / module_dir)\n'
+            '    except ValueError:\n'
+            '        raise SystemExit("outside caller roots")\n'
+            '    print(list(package_dir.glob("*")))\n'
+            'source_fuzz_guard(Path("/"), Path("etc"), Path(""))\n',
         )
         for body in unsafe:
             with self.subTest(body=body):
@@ -368,24 +474,55 @@ class Issue79RegressionTests(unittest.TestCase):
             'from pathlib import Path\nprint(Path("docs/evidence/g01-recovery-packet.md").stat())\n',
             'import ast\nlist(ast.walk(ast.parse("value = 1")))\n',
             'import re\nmatch = re.match("x", "x")\nprint(match.group(0))\n',
-            'from pathlib import Path\n'
-            'def source_fuzz_guard(go_repo_root, module_dir, package_value):\n'
-            '    package_dir = (go_repo_root / module_dir / package_value).resolve()\n'
-            '    try:\n'
-            '        package_dir.relative_to(go_repo_root / module_dir)\n'
-            '    except ValueError:\n'
-            '        raise SystemExit("outside reviewed package root")\n'
-            '    return list(package_dir.glob("*.go"))\n',
         )
         for body in safe_bodies:
             with self.subTest(body=body):
                 self.assertIsNone(self.inspect(body))
 
+    def test_canonical_package_guard_remains_reviewed(self) -> None:
+        bodies = [
+            body
+            for _line, body, _safe_marker, _invocation
+            in self.scanner["python_heredoc_bodies"](PACKET_TEXT)  # type: ignore[operator]
+            if "def source_fuzz_guard():" in body
+        ]
+        self.assertEqual(len(bodies), 1)
+        self.assertIsNone(self.inspect(bodies[0]))
+        mutated_root = bodies[0].replace(
+            "invocation_root = Path.cwd().resolve()",
+            'invocation_root = Path("/synthetic/unreviewed-root").resolve()',
+            1,
+        )
+        self.assertNotEqual(mutated_root, bodies[0])
+        self.assertIsNotNone(self.inspect(mutated_root))
+        shadowed_root = bodies[0].replace(
+            "def source_fuzz_guard():\n    package_dir =",
+            'def source_fuzz_guard():\n'
+            '    go_repo_root = Path("/synthetic/unreviewed-root")\n'
+            '    package_dir =',
+            1,
+        )
+        self.assertNotEqual(shadowed_root, bodies[0])
+        self.assertIsNotNone(self.inspect(shadowed_root))
+
     def test_environment_taint_reaches_loop_and_comprehension_targets(self) -> None:
         loop = 'import os\nfor value in os.environ.values():\n    print(value)\n'
         comprehension = 'import os\n[print(value) for value in os.environ.values()]\n'
-        self.assertIsNotNone(self.inspect(loop))
-        self.assertIsNotNone(self.inspect(comprehension))
+        wrapped = (
+            'import os\nfor _, value in enumerate(os.environ.values()):\n'
+            '    print(value)\n'
+        )
+        zipped = (
+            'import os\nfor _, value in zip(range(1), os.environ.values()):\n'
+            '    print(value)\n'
+        )
+        starred = (
+            'import os\nfor *secret, in os.environ.values():\n'
+            '    print(secret)\n'
+        )
+        for body in (loop, comprehension, wrapped, zipped, starred):
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
         safe = 'for value in ["reviewed"]:\n    print(value)\n'
         self.assertIsNone(self.inspect(safe))
 
@@ -406,14 +543,42 @@ class Issue79RegressionTests(unittest.TestCase):
             '[launch(["gh", "workflow", "run", "ci.yml"]) '
             'for launch in [subprocess.run]]\n'
         )
-        for body in (direct, container, comprehension):
+        mapping_view = (
+            'import subprocess\n'
+            'launchers = {"run": subprocess.run}\n'
+            'for launch in launchers.values():\n'
+            '    launch(["gh", "workflow", "run", "ci.yml"])\n'
+        )
+        literal_mapping_view = (
+            'import subprocess\n'
+            'for launch in {"run": subprocess.run}.values():\n'
+            '    launch(["gh", "workflow", "run", "ci.yml"])\n'
+        )
+        converted_container = (
+            'import subprocess\n'
+            'launchers = {"run": subprocess.run}\n'
+            'for launch in list(launchers.values()):\n'
+            '    launch(["gh", "workflow", "run", "ci.yml"])\n'
+        )
+        starred_subscript = (
+            'import subprocess\n'
+            'for *launchers, in [subprocess.run]:\n'
+            '    launchers[0](["gh", "workflow", "run", "ci.yml"])\n'
+        )
+        for body in (
+            direct, container, comprehension, mapping_view,
+            literal_mapping_view, converted_container, starred_subscript,
+        ):
             with self.subTest(body=body):
                 self.assertIsNotNone(self.inspect(body))
         safe = 'for transform in [str.upper]:\n    transform("reviewed")\n'
         self.assertIsNone(self.inspect(safe))
 
     def test_environment_dump_builtins_are_narrowly_allowed(self) -> None:
-        for command in ("export", "export -p", "set", "set -o posix"):
+        for command in (
+            "export", "export -p", "set", "set -o posix", "env", "env -0",
+            "env -u NAME", "env NAME=synthetic",
+        ):
             with self.subTest(command=command):
                 self.assertIsNotNone(self.shell_violation(command))
         for command in (
@@ -421,6 +586,7 @@ class Issue79RegressionTests(unittest.TestCase):
             "export PATH=/opt/homebrew/bin:/usr/bin:/bin",
             "export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null",
             "export GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=false GIT_CONFIG_KEY_1=core.hooksPath GIT_CONFIG_VALUE_1=/dev/null",
+            "env -i printf reviewed",
         ):
             with self.subTest(command=command):
                 self.assertIsNone(self.shell_violation(command))
@@ -564,18 +730,144 @@ class Issue79RegressionTests(unittest.TestCase):
                     runtime["git_query"](["show", blob_spec]), cwd=root, env=env
                 )
 
+    def test_packet_blob_query_ignores_replace_refs(self) -> None:
+        runtime = _bounded_git_query_namespace(self.verification)
+        self.assertIn(
+            "--no-replace-objects",
+            runtime["git_query"](["rev-parse", "HEAD"]),  # type: ignore[operator]
+        )
+        with tempfile.TemporaryDirectory(prefix="gh-runnerd-issue79-replace-") as directory:
+            root = Path(directory)
+            relative = Path("docs/evidence/g01-recovery-packet.md")
+            packet = root / relative
+            packet.parent.mkdir(parents=True)
+            reviewed_bytes = b"synthetic reviewed HEAD packet\n"
+            replacement_bytes = b"synthetic replacement packet\n"
+            packet.write_bytes(reviewed_bytes)
+            env = {
+                "PATH": "/usr/bin:/bin",
+                "HOME": directory,
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_CONFIG_SYSTEM": os.devnull,
+                "GIT_ATTR_NOSYSTEM": "1",
+                "LC_ALL": "C",
+            }
+            _run_git_checked(["init", "-q"], root, env)
+            _run_git_checked(["add", relative.as_posix()], root, env)
+            _run_git_checked(
+                [
+                    "-c", "user.name=synthetic",
+                    "-c", "user.email=synthetic@example.invalid",
+                    "commit", "-q", "-m", "reviewed",
+                ],
+                root,
+                env,
+            )
+            reviewed_head = _run_git_checked(["rev-parse", "HEAD"], root, env).decode().strip()
+            packet.write_bytes(replacement_bytes)
+            _run_git_checked(["add", relative.as_posix()], root, env)
+            _run_git_checked(
+                [
+                    "-c", "user.name=synthetic",
+                    "-c", "user.email=synthetic@example.invalid",
+                    "commit", "--amend", "-q", "--no-edit",
+                ],
+                root,
+                env,
+            )
+            replacement_head = _run_git_checked(["rev-parse", "HEAD"], root, env).decode().strip()
+            _run_git_checked(["switch", "--detach", reviewed_head], root, env)
+            _run_git_checked(["replace", reviewed_head, replacement_head], root, env)
+
+            replaced_blob = _run_git_checked(
+                ["show", f"{reviewed_head}:{relative.as_posix()}"], root, env
+            )
+            self.assertEqual(replaced_blob, replacement_bytes)
+            result = runtime["run_bounded_git_packet_blob_query"](
+                f"{reviewed_head}:{relative.as_posix()}", cwd=root, env=env
+            )
+            self.assertEqual(result.stdout, reviewed_bytes)
+
     def test_git_config_include_options_are_rejected_before_read_only_classification(self) -> None:
         for command in (
             "git -c include.path=synthetic/included.cfg status",
             "git -c includeIf.gitdir:/synthetic/repo.path=synthetic/included.cfg status",
             "git -cinclude.path=synthetic/included.cfg status",
             "git --config-env=include.path=SYNTHETIC_INCLUDE status",
+            "git config --includes --list",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=include.path GIT_CONFIG_VALUE_0=synthetic/included.cfg git status",
+            "env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=includeIf.gitdir:/synthetic/repo.path GIT_CONFIG_VALUE_0=synthetic/included.cfg git status",
         ):
             with self.subTest(command=command):
                 self.assertIsNotNone(self.shell_violation(command))
         for command in ("git -P status", "git -c core.fsmonitor=false status"):
             with self.subTest(command=command):
                 self.assertIsNone(self.shell_violation(command))
+
+    def test_packet_loader_rejects_packet_controlled_definition_time_code(self) -> None:
+        specimens = (
+            "import synthetic_side_effect\n",
+            "@synthetic_side_effect()\ndef scanner():\n    return None\n",
+            "def scanner(value=synthetic_side_effect()):\n    return value\n",
+            "def set():\n    return None\n",
+            "def ast():\n    return None\n",
+            "set = lambda: None\n",
+            "import re\nre.compile = synthetic_side_effect\n",
+            "def scanner(*args: synthetic_side_effect()):\n    return None\n",
+            "def scanner(**kwargs: synthetic_side_effect()):\n    return None\n",
+        )
+        for source in specimens:
+            with self.subTest(source=source):
+                module = ast.parse(source, filename="<loader-specimen-data>")
+                with self.assertRaises(AssertionError):
+                    _validated_scanner_statements(module)
+
+    def test_current_packet_has_no_static_scanner_violations(self) -> None:
+        matches: list[str] = []
+        shell_command_count = 0
+        for command, number in self.scanner["shell_commands"](PACKET_TEXT):  # type: ignore[operator]
+            shell_command_count += 1
+            if self.scanner["shell_process_substitution"](command):  # type: ignore[operator]
+                matches.append(f"line {number}: shell process substitutions are not allowed")
+                continue
+            for segment in self.scanner["shell_token_segments"](command):  # type: ignore[operator]
+                if self.scanner["python_stdin_command"](segment):  # type: ignore[operator]
+                    if self.scanner["reviewed_python_heredoc_segment"](command, segment):  # type: ignore[operator]
+                        continue
+                    matches.append(
+                        f"line {number}: Python stdin/heredoc execution must be "
+                        "an isolated AST-inspected heredoc"
+                    )
+                    continue
+                violation = self.scanner["forbidden_command"](segment)  # type: ignore[operator]
+                if violation:
+                    matches.append(f"line {number}: {violation}")
+
+        python_body_count = 0
+        for number, body, safe_marker, invocation in self.scanner["python_heredoc_bodies"](PACKET_TEXT):  # type: ignore[operator]
+            python_body_count += 1
+            if not invocation["isolated"]:
+                matches.append(
+                    f"line {number}: executable Python heredoc must use -I before body inspection"
+                )
+                continue
+            if invocation["interpreter"] != "/opt/homebrew/bin/python3":
+                matches.append(
+                    f"line {number}: executable Python heredoc must use absolute /opt/homebrew/bin/python3"
+                )
+                continue
+            violation = self.scanner["inspect_python_heredoc"](body, safe_marker)  # type: ignore[operator]
+            if violation:
+                matches.append(f"line {number}: {violation}")
+
+        self.assertGreater(shell_command_count, 0)
+        self.assertGreater(python_body_count, 0)
+        self.assertEqual([], matches, "\n".join(matches))
+        print(
+            f"current packet static scan: {shell_command_count} shell commands, "
+            f"{python_body_count} Python heredoc bodies, zero violations"
+        )
 
 
 if __name__ == "__main__":
