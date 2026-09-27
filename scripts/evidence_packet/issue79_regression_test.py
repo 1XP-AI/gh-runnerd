@@ -366,6 +366,52 @@ def _safe_integer_expression(node: ast.AST) -> int:
     raise AssertionError("Git query budget/deadline is not a literal integer expression")
 
 
+def _validate_packet_function_definition(
+    node: ast.FunctionDef,
+    expected_name: str,
+    allowed_default_names: set[str] | None = None,
+) -> None:
+    """Reject packet-controlled definition-time expressions before compilation."""
+    allowed_default_names = allowed_default_names or set()
+
+    def reviewed_default(expression: ast.AST) -> bool:
+        return _literal_definition_time_expression(expression) or (
+            isinstance(expression, ast.Name)
+            and expression.id in allowed_default_names
+        )
+
+    argument_annotations = [
+        argument.annotation
+        for argument in (
+            list(node.args.posonlyargs)
+            + list(node.args.args)
+            + list(node.args.kwonlyargs)
+        )
+    ]
+    if node.args.vararg is not None:
+        argument_annotations.append(node.args.vararg.annotation)
+    if node.args.kwarg is not None:
+        argument_annotations.append(node.args.kwarg.annotation)
+    if (
+        node.name != expected_name
+        or node.decorator_list
+        or node.returns is not None
+        or getattr(node, "type_params", ())
+        or any(annotation is not None for annotation in argument_annotations)
+        or not all(
+            reviewed_default(default)
+            for default in node.args.defaults
+        )
+        or not all(
+            default is None or reviewed_default(default)
+            for default in node.args.kw_defaults
+        )
+    ):
+        raise AssertionError(
+            "packet scanner function has unreviewed definition-time expressions"
+        )
+
+
 def _bounded_git_query_namespace(module: ast.Module) -> dict[str, object]:
     """Load only the reviewed bounded local-Git query helpers from the template."""
     function_names = {
@@ -407,6 +453,14 @@ def _bounded_git_query_namespace(module: ast.Module) -> dict[str, object]:
                 for name in names:
                     namespace[name] = value
         elif isinstance(statement, ast.FunctionDef) and statement.name in function_names:
+            allowed_defaults = (
+                {"git_query_output_max_bytes"}
+                if statement.name == "run_bounded_git_query"
+                else set()
+            )
+            _validate_packet_function_definition(
+                statement, statement.name, allowed_defaults
+            )
             exec(
                 compile(ast.Module(body=[statement], type_ignores=[]), "<bounded-git-query>", "exec"),
                 namespace,
@@ -436,6 +490,45 @@ class Issue79RegressionTests(unittest.TestCase):
 
     def inspect(self, code: str) -> str | None:
         return self.scanner["inspect_python_heredoc"](code, False)  # type: ignore[operator]
+
+    def package_directory_guard_is_reviewed(self, code: str) -> bool:
+        tree = ast.parse(code, filename="<package-containment-specimen>")
+        parents = {
+            child: parent
+            for parent in ast.walk(tree)
+            for child in ast.iter_child_nodes(parent)
+        }
+        package_dir = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Name)
+            and node.id == "package_dir"
+            and isinstance(node.ctx, ast.Load)
+            and isinstance(parents.get(node), ast.Attribute)
+            and parents[node].attr == "glob"
+        )
+        return self.scanner["python_reviewed_go_package_directory"](
+            package_dir, tree, parents
+        )  # type: ignore[operator]
+
+    def replace_source_fuzz_guard_fragment(
+        self, code: str, original: str, replacement: str
+    ) -> str:
+        tree = ast.parse(code, filename="<package-containment-specimen>")
+        guards = [
+            statement
+            for statement in tree.body
+            if isinstance(statement, ast.FunctionDef)
+            and statement.name == "source_fuzz_guard"
+        ]
+        self.assertEqual(len(guards), 1)
+        source_lines = code.splitlines(keepends=True)
+        start = sum(len(line) for line in source_lines[: guards[0].lineno - 1])
+        end = sum(len(line) for line in source_lines[: guards[0].end_lineno])
+        guard_source = code[start:end]
+        changed_guard = guard_source.replace(original, replacement, 1)
+        self.assertNotEqual(changed_guard, guard_source)
+        return code[:start] + changed_guard + code[end:]
 
     def shell_violation(self, command: str) -> str | None:
         self.scanner["shell_owned_path_variables"].clear()  # type: ignore[union-attr]
@@ -478,6 +571,21 @@ class Issue79RegressionTests(unittest.TestCase):
         for body in safe_bodies:
             with self.subTest(body=body):
                 self.assertIsNone(self.inspect(body))
+
+    def test_resolved_local_paths_are_not_disclosed_to_output_sinks(self) -> None:
+        unsafe = (
+            'from pathlib import Path\nprint(Path.cwd().resolve())\n',
+            'from pathlib import Path\nresolved = Path("/synthetic/worktree").resolve()\n'
+            'print(f"root={resolved}")\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+        internal_use = (
+            'from pathlib import Path\nresolved = Path.cwd().resolve()\n'
+            'if not resolved.is_absolute():\n    raise SystemExit("invalid root")\n'
+        )
+        self.assertIsNone(self.inspect(internal_use))
 
     def test_canonical_package_guard_remains_reviewed(self) -> None:
         bodies = [
@@ -525,6 +633,39 @@ class Issue79RegressionTests(unittest.TestCase):
                 self.assertIsNotNone(self.inspect(body))
         safe = 'for value in ["reviewed"]:\n    print(value)\n'
         self.assertIsNone(self.inspect(safe))
+
+    def test_environment_taint_follows_generator_yields(self) -> None:
+        body = (
+            'import os\n'
+            'def inherited_values():\n'
+            '    yield from os.environ.values()\n'
+            'for secret in inherited_values():\n'
+            '    print(secret)\n'
+        )
+        self.assertIsNotNone(self.inspect(body))
+
+    def test_environment_taint_follows_itertools_chain(self) -> None:
+        body = (
+            'import itertools\nimport os\n'
+            'for secret in itertools.chain(("reviewed",), os.environ.values()):\n'
+            '    print(secret)\n'
+        )
+        tree = ast.parse(body, filename="<environment-taint-data>")
+        parents = {
+            child: parent
+            for parent in ast.walk(tree)
+            for child in ast.iter_child_nodes(parent)
+        }
+        tainted_names = self.scanner["python_sensitive_value_names"](tree, parents)  # type: ignore[operator]
+        self.assertIn("secret", tainted_names)
+
+    def test_environment_taint_follows_starred_operands(self) -> None:
+        body = (
+            'import os\n'
+            'for secret in zip(*[os.environ.values()]):\n'
+            '    print(secret)\n'
+        )
+        self.assertIsNotNone(self.inspect(body))
 
     def test_launcher_aliases_from_iterables_are_rejected(self) -> None:
         direct = (
@@ -574,6 +715,97 @@ class Issue79RegressionTests(unittest.TestCase):
         safe = 'for transform in [str.upper]:\n    transform("reviewed")\n'
         self.assertIsNone(self.inspect(safe))
 
+    def test_launcher_aliases_survive_reversed_and_dict_conversions(self) -> None:
+        reversed_values = (
+            'import subprocess\n'
+            'launchers = [subprocess.run]\n'
+            'for launch in reversed(launchers):\n'
+            '    launch(["gh", "workflow", "run", "ci.yml"])\n'
+        )
+        dictionary_values = (
+            'import subprocess\n'
+            'launchers = {"run": subprocess.run}\n'
+            'for launch in dict(launchers).values():\n'
+            '    launch(["gh", "workflow", "run", "ci.yml"])\n'
+        )
+        for body in (reversed_values, dictionary_values):
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+    def test_launcher_aliases_returned_by_local_helpers_are_rejected(self) -> None:
+        body = (
+            'import subprocess\n'
+            'def launcher_factory():\n'
+            '    return subprocess.run\n'
+            'launch = launcher_factory()\n'
+            'launch(["gh", "workflow", "run", "ci.yml"])\n'
+        )
+        self.assertIsNotNone(self.inspect(body))
+
+    def test_bounded_git_query_loader_rejects_unreviewed_function_definitions(self) -> None:
+        specimen = ast.parse(
+            'def run_bounded_git_query(value=packet_side_effect()):\n'
+            '    return value\n',
+            filename="<function-definition-data>",
+        ).body[0]
+        self.assertIsInstance(specimen, ast.FunctionDef)
+        compile_events: list[str] = []
+        exec_events: list[str] = []
+        original_compile = builtins.compile
+        original_exec = builtins.exec
+
+        def record_compile(*_args: object, **_kwargs: object) -> None:
+            compile_events.append("compile")
+
+        def record_exec(*_args: object, **_kwargs: object) -> None:
+            exec_events.append("exec")
+
+        builtins.compile = record_compile  # type: ignore[assignment]
+        builtins.exec = record_exec  # type: ignore[assignment]
+        try:
+            with self.assertRaises(AssertionError):
+                _bounded_git_query_namespace(
+                    ast.Module(body=[specimen], type_ignores=[])
+                )
+        finally:
+            builtins.compile = original_compile
+            builtins.exec = original_exec
+        self.assertEqual([], compile_events)
+        self.assertEqual([], exec_events)
+
+    def test_parity_helper_rejects_unreviewed_definition_before_compile(self) -> None:
+        original_verification = self.verification
+        specimen = ast.parse(
+            '@packet_side_effect()\n'
+            'def require_packet_head_parity(intent, blob, worktree):\n'
+            '    return None\n',
+            filename="<function-definition-data>",
+        ).body[0]
+        self.assertIsInstance(specimen, ast.FunctionDef)
+        self.verification = ast.Module(body=[specimen], type_ignores=[])
+        compile_events: list[str] = []
+        exec_events: list[str] = []
+        original_compile = builtins.compile
+        original_exec = builtins.exec
+
+        def record_compile(*_args: object, **_kwargs: object) -> None:
+            compile_events.append("compile")
+
+        def record_exec(*_args: object, **_kwargs: object) -> None:
+            exec_events.append("exec")
+
+        builtins.compile = record_compile  # type: ignore[assignment]
+        builtins.exec = record_exec  # type: ignore[assignment]
+        try:
+            with self.assertRaises(AssertionError):
+                self.test_final_parity_helper_rejects_intent_bits_and_raw_byte_divergence()
+        finally:
+            builtins.compile = original_compile
+            builtins.exec = original_exec
+            self.verification = original_verification
+        self.assertEqual([], compile_events)
+        self.assertEqual([], exec_events)
+
     def test_environment_dump_builtins_are_narrowly_allowed(self) -> None:
         for command in (
             "export", "export -p", "set", "set -o posix", "env", "env -0",
@@ -618,6 +850,9 @@ class Issue79RegressionTests(unittest.TestCase):
         namespace: dict[str, object] = {
             "__builtins__": __builtins__,
         }
+        _validate_packet_function_definition(
+            function, "require_packet_head_parity"
+        )
         exec(
             compile(ast.Module(body=[function], type_ignores=[]), "<parity-helper>", "exec"),
             namespace,
@@ -796,14 +1031,76 @@ class Issue79RegressionTests(unittest.TestCase):
             "git -cinclude.path=synthetic/included.cfg status",
             "git --config-env=include.path=SYNTHETIC_INCLUDE status",
             "git config --includes --list",
+            "git config --incl --list",
+            "git config --inc --list",
             "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=include.path GIT_CONFIG_VALUE_0=synthetic/included.cfg git status",
             "env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=includeIf.gitdir:/synthetic/repo.path GIT_CONFIG_VALUE_0=synthetic/included.cfg git status",
+            "GIT_CONFIG_PARAMETERS='include.path=synthetic/included.cfg' git status",
+            "env GIT_CONFIG_PARAMETERS='includeIf.gitdir:/synthetic/repo.path=synthetic/included.cfg' git status",
         ):
             with self.subTest(command=command):
                 self.assertIsNotNone(self.shell_violation(command))
         for command in ("git -P status", "git -c core.fsmonitor=false status"):
             with self.subTest(command=command):
                 self.assertIsNone(self.shell_violation(command))
+
+    def test_nested_raise_does_not_prove_module_root_guard(self) -> None:
+        bodies = [
+            body
+            for _line, body, _safe_marker, _invocation
+            in self.scanner["python_heredoc_bodies"](PACKET_TEXT)  # type: ignore[operator]
+            if "def source_fuzz_guard():" in body
+        ]
+        self.assertEqual(len(bodies), 1)
+        original = (
+            'if module_dir != "experiments/g01-scaleset":\n'
+            '    raise SystemExit(f"{label}: unexpected module directory {module_dir!r}")'
+        )
+        unreachable = (
+            'if module_dir != "experiments/g01-scaleset":\n'
+            '    if False:\n'
+            '        raise SystemExit(f"{label}: unexpected module directory {module_dir!r}")'
+        )
+        body_tree = ast.parse(bodies[0], filename="<module-root-guard-specimen>")
+        guards = [
+            statement
+            for statement in body_tree.body
+            if isinstance(statement, ast.If)
+            and isinstance(statement.test, ast.Compare)
+            and isinstance(statement.test.left, ast.Name)
+            and statement.test.left.id == "module_dir"
+        ]
+        self.assertEqual(len(guards), 1)
+        source_lines = bodies[0].splitlines(keepends=True)
+        start = sum(len(line) for line in source_lines[: guards[0].lineno - 1])
+        end = sum(len(line) for line in source_lines[: guards[0].end_lineno])
+        guard_source = bodies[0][start:end]
+        mutated_guard = guard_source.replace(original, unreachable, 1)
+        self.assertNotEqual(mutated_guard, guard_source)
+        mutated = bodies[0][:start] + mutated_guard + bodies[0][end:]
+        self.assertFalse(self.package_directory_guard_is_reviewed(mutated))
+
+    def test_unreachable_raise_does_not_prove_package_path_containment(self) -> None:
+        bodies = [
+            body
+            for _line, body, _safe_marker, _invocation
+            in self.scanner["python_heredoc_bodies"](PACKET_TEXT)  # type: ignore[operator]
+            if "def source_fuzz_guard():" in body
+        ]
+        self.assertEqual(len(bodies), 1)
+        original = (
+            '    except ValueError:\n'
+            '        raise SystemExit(f"{label}: package source escaped the reviewed module")'
+        )
+        unreachable = (
+            '    except ValueError:\n'
+            '        return\n'
+            '        raise SystemExit(f"{label}: package source escaped the reviewed module")'
+        )
+        mutated = self.replace_source_fuzz_guard_fragment(
+            bodies[0], original, unreachable
+        )
+        self.assertFalse(self.package_directory_guard_is_reviewed(mutated))
 
     def test_packet_loader_rejects_packet_controlled_definition_time_code(self) -> None:
         specimens = (

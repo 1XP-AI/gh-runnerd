@@ -8163,6 +8163,12 @@ def git_config_include_key(key):
     ) is not None
 
 
+def git_config_include_option(token):
+    """Recognize full and abbreviated positive --includes config options."""
+    option = token.split("=", 1)[0].lower()
+    return len(option) > 2 and "--includes".startswith(option)
+
+
 def git_filter_attribute_violation(tokens):
     """Reject Git filters and external attribute configuration before reads."""
     if not tokens or executable_basename(tokens[0]) != "git":
@@ -8212,7 +8218,9 @@ def git_filter_attribute_violation(tokens):
         for token in tokens
     ):
         return "Git filter/external-attributes configuration is not allowed"
-    if subcommand == "config" and "--includes" in tokens:
+    if subcommand == "config" and any(
+        git_config_include_option(token) for token in tokens[1:]
+    ):
         return "Git configuration includes are not allowed before read-only commands"
     if subcommand == "config" and any(
         git_config_include_key(token.split("=", 1)[0])
@@ -8750,6 +8758,8 @@ def git_config_environment_include_violation(tokens):
         if not assignment.fullmatch(token):
             continue
         name, value = token.split("=", 1)
+        if name.upper() == "GIT_CONFIG_PARAMETERS":
+            return "Git configuration parameters are not allowed before read-only commands"
         if not re.fullmatch(r"GIT_CONFIG_KEY_[0-9]+", name, re.IGNORECASE):
             continue
         key = value.split("=", 1)[0]
@@ -9146,9 +9156,41 @@ def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen
             for argument in node.args
         ):
             return True
+        if isinstance(node.func, ast.Name):
+            local_generators = [
+                candidate
+                for candidate in ast.walk(tree)
+                if isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and candidate.name == node.func.id
+            ]
+            for function in local_generators:
+                yielded_values = [
+                    candidate.value
+                    for candidate in ast.walk(function)
+                    if isinstance(candidate, (ast.Yield, ast.YieldFrom))
+                    and candidate.value is not None
+                    and python_enclosing_scope(candidate, parents) is function
+                ]
+                if yielded_values and any(
+                    python_sensitive_value_expression(
+                        value, sensitive_names, tree, parents, seen.copy()
+                    )
+                    for value in yielded_values
+                ):
+                    return True
         if isinstance(node.func, ast.Name) and node.func.id in {
             "enumerate", "filter", "iter", "map", "next", "reversed",
-            "sorted", "zip",
+            "sorted", "zip", "chain",
+        }:
+            return any(
+                python_sensitive_value_expression(
+                    argument, sensitive_names, tree, parents, seen.copy()
+                )
+                for argument in node.args
+            )
+        if dotted in {
+            "itertools.chain",
+            "itertools.chain.from_iterable",
         }:
             return any(
                 python_sensitive_value_expression(
@@ -9186,6 +9228,10 @@ def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen
         return any(
             python_sensitive_value_expression(child, sensitive_names, tree, parents, seen.copy())
             for child in ast.iter_child_nodes(node)
+        )
+    if isinstance(node, ast.Starred):
+        return python_sensitive_value_expression(
+            node.value, sensitive_names, tree, parents, seen.copy()
         )
     if isinstance(node, (ast.List, ast.Tuple, ast.Set, ast.Dict)):
         return any(
@@ -10146,6 +10192,16 @@ def python_import_bindings(tree):
     for target, value, _destructured in assignment_bindings:
         if isinstance(target, ast.Name) and value is not None:
             assigned_values.setdefault(target.id, []).append(value)
+    local_functions = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
 
     iterable_bindings = []
     starred_iterable_aliases = set()
@@ -10172,13 +10228,17 @@ def python_import_bindings(tree):
     # non-launching; such names remain mapped to None and fail closed.
     candidate_aliases = set()
 
-    def iterable_may_contain_launcher(value, seen_names=None, seen_nodes=None):
+    def iterable_may_contain_launcher(
+        value, seen_names=None, seen_nodes=None, seen_functions=None
+    ):
         if value is None:
             return False
         if seen_names is None:
             seen_names = set()
         if seen_nodes is None:
             seen_nodes = set()
+        if seen_functions is None:
+            seen_functions = set()
         if id(value) in seen_nodes:
             return False
         seen_nodes.add(id(value))
@@ -10194,7 +10254,12 @@ def python_import_bindings(tree):
                 return False
             seen_names.add(value.id)
             return any(
-                iterable_may_contain_launcher(candidate, seen_names, seen_nodes)
+                iterable_may_contain_launcher(
+                    candidate,
+                    set(seen_names),
+                    set(seen_nodes),
+                    set(seen_functions),
+                )
                 for candidate in assigned_values.get(value.id, ())
             )
         if isinstance(value, ast.Attribute):
@@ -10209,21 +10274,73 @@ def python_import_bindings(tree):
         if python_call_derived_command_alias(value, modules):
             return True
         if isinstance(value, ast.Call):
+            if isinstance(value.func, ast.Name) and value.func.id in local_functions:
+                function_name = value.func.id
+                if function_name not in seen_functions:
+                    function = local_functions[function_name]
+                    returned_values = [
+                        candidate.value
+                        for candidate in ast.walk(function)
+                        if isinstance(candidate, ast.Return)
+                        and candidate.value is not None
+                        and python_enclosing_scope(candidate, parents) is function
+                    ]
+                    if any(
+                        iterable_may_contain_launcher(
+                            candidate,
+                            set(seen_names),
+                            set(seen_nodes),
+                            seen_functions | {function_name},
+                        )
+                        for candidate in returned_values
+                    ):
+                        return True
             if (
                 isinstance(value.func, ast.Attribute)
-                and value.func.attr in {"items", "values"}
+                and value.func.attr in {"items", "keys", "values"}
             ):
                 return iterable_may_contain_launcher(
-                    value.func.value, seen_names, seen_nodes
+                    value.func.value,
+                    set(seen_names),
+                    set(seen_nodes),
+                    set(seen_functions),
                 )
             if (
                 isinstance(value.func, ast.Name)
-                and value.func.id in {"enumerate", "iter", "list", "set", "tuple", "zip"}
+                and value.func.id in {
+                    "dict", "enumerate", "iter", "list", "reversed", "set",
+                    "tuple", "zip",
+                }
             ):
                 return any(
-                    iterable_may_contain_launcher(argument, seen_names, seen_nodes)
+                    iterable_may_contain_launcher(
+                        argument,
+                        set(seen_names),
+                        set(seen_nodes),
+                        set(seen_functions),
+                    )
                     for argument in value.args
                 )
+            if (
+                isinstance(value.func, ast.Attribute)
+                and python_dotted_name(value.func) == "dict.fromkeys"
+            ):
+                return any(
+                    iterable_may_contain_launcher(
+                        argument,
+                        set(seen_names),
+                        set(seen_nodes),
+                        set(seen_functions),
+                    )
+                    for argument in value.args
+                )
+        if isinstance(value, ast.Starred):
+            return iterable_may_contain_launcher(
+                value.value,
+                set(seen_names),
+                set(seen_nodes),
+                set(seen_functions),
+            )
         if isinstance(
             value,
             (
@@ -10242,7 +10359,12 @@ def python_import_bindings(tree):
             ),
         ):
             return any(
-                iterable_may_contain_launcher(child, seen_names, seen_nodes)
+                iterable_may_contain_launcher(
+                    child,
+                    set(seen_names),
+                    set(seen_nodes),
+                    set(seen_functions),
+                )
                 for child in ast.iter_child_nodes(value)
                 if not isinstance(
                     child,
@@ -10270,6 +10392,10 @@ def python_import_bindings(tree):
             if (
                 destructured
                 or commandish
+                or (
+                    value is not None
+                    and iterable_may_contain_launcher(value)
+                )
                 or python_call_derived_command_alias(value, modules)
                 or target.id in modules
                 or target.id in functions
@@ -12316,6 +12442,72 @@ python_sensitive_sink_methods = {
 }
 
 
+def python_resolved_local_path_expression(
+    node,
+    tree,
+    parents,
+    assignments_by_name,
+    seen=None,
+):
+    """Track resolved local paths into output sinks without rejecting checks."""
+    if node is None:
+        return False
+    if seen is None:
+        seen = set()
+    if id(node) in seen:
+        return False
+    seen.add(id(node))
+    if isinstance(node, ast.Name):
+        scope = python_enclosing_scope(node, parents)
+        for assigned_scope, value in assignments_by_name.get(node.id, ()):
+            if assigned_scope is scope and python_resolved_local_path_expression(
+                value,
+                tree,
+                parents,
+                assignments_by_name,
+                seen.copy(),
+            ):
+                return True
+        return False
+    if isinstance(node, ast.Call):
+        dotted = python_dotted_name(node.func)
+        if dotted in {"Path.cwd", "pathlib.Path.cwd"}:
+            return True
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "resolve"
+        ):
+            return True
+        path_preserving_calls = {
+            "Path",
+            "pathlib.Path",
+            "str",
+            "repr",
+            "os.fspath",
+            "os.path.abspath",
+            "os.path.realpath",
+        }
+        if dotted not in path_preserving_calls and not (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr in {"as_posix", "as_uri"}
+        ):
+            return False
+    return any(
+        python_resolved_local_path_expression(
+            child,
+            tree,
+            parents,
+            assignments_by_name,
+            seen.copy(),
+        )
+        for child in ast.iter_child_nodes(node)
+        if not isinstance(
+            child,
+            (ast.expr_context, ast.operator, ast.unaryop, ast.boolop, ast.cmpop),
+        )
+    )
+
+
 def python_sensitive_output_sink(node):
     """Recognize output/error sinks without tainting ordinary containers/helpers."""
     if not isinstance(node, ast.Call):
@@ -12407,7 +12599,9 @@ def python_reviewed_go_package_directory(node, tree, parents):
                         and test.comparators[0].value == expected
                     )
                 )
-                and any(isinstance(candidate, ast.Raise) for candidate in ast.walk(statement))
+                and len(statement.body) == 1
+                and isinstance(statement.body[0], ast.Raise)
+                and not statement.orelse
             ):
                 continue
             return True
@@ -12697,18 +12891,21 @@ def python_reviewed_go_package_directory(node, tree, parents):
             continue
         if python_enclosing_scope(candidate, parents) is not scope:
             continue
-        guarded = any(
-            isinstance(call, ast.Call)
-            and python_dotted_name(call.func) == "package_dir.relative_to"
-            and len(call.args) == 1
-            and python_path_division_names(call.args[0]) == expected_root
-            for statement in candidate.body
-            for call in ast.walk(statement)
+        guarded = (
+            len(candidate.body) == 1
+            and isinstance(candidate.body[0], ast.Expr)
+            and isinstance(candidate.body[0].value, ast.Call)
+            and python_dotted_name(candidate.body[0].value.func)
+            == "package_dir.relative_to"
+            and len(candidate.body[0].value.args) == 1
+            and python_path_division_names(candidate.body[0].value.args[0])
+            == expected_root
         )
         fail_closed = any(
             isinstance(handler.type, ast.Name)
             and handler.type.id == "ValueError"
-            and any(isinstance(statement, ast.Raise) for statement in handler.body)
+            and len(handler.body) == 1
+            and isinstance(handler.body[0], ast.Raise)
             for handler in candidate.handlers
         )
         if guarded and fail_closed:
@@ -13198,6 +13395,21 @@ def python_sensitive_read_violation(tree, parents):
     sensitive_names = python_sensitive_value_names(tree, parents)
     credential_reader_aliases = python_credential_reader_aliases(tree)
     path_reader_aliases = python_path_reader_aliases(tree, parents)
+    assignments_by_name = {}
+    for candidate in ast.walk(tree):
+        if isinstance(candidate, ast.Assign):
+            targets = candidate.targets
+        elif isinstance(candidate, (ast.AnnAssign, ast.NamedExpr)):
+            targets = [candidate.target]
+        else:
+            targets = []
+        if targets and isinstance(candidate, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+            for target in targets:
+                for name in ast.walk(target):
+                    if isinstance(name, ast.Name) and isinstance(name.ctx, ast.Store):
+                        assignments_by_name.setdefault(name.id, []).append(
+                            (python_enclosing_scope(candidate, parents), candidate.value)
+                        )
     for alias, receiver in path_reader_aliases.items():
         if not python_reviewed_read_path(receiver, tree, parents):
             return f"Python unreviewed Path reader alias {alias!r} is not allowed"
@@ -13256,6 +13468,22 @@ def python_sensitive_read_violation(tree, parents):
                     "Python unreviewed Path reader alias call "
                     f"{node.func.id!r} is not allowed on line {node.lineno}"
                 )
+            output_arguments = list(node.args) + [
+                keyword.value for keyword in node.keywords
+            ]
+            if python_sensitive_output_sink(node) and any(
+                python_resolved_local_path_expression(
+                    argument,
+                    tree,
+                    parents,
+                    assignments_by_name,
+                )
+                for argument in output_arguments
+            ):
+                return (
+                    "Python resolved local path is sent to an output/error sink "
+                    f"{dotted or '<call>'!r} on line {node.lineno}"
+                )
             if python_sensitive_output_sink(node) and any(
                 python_sensitive_value_expression(
                     argument, sensitive_names, tree, parents
@@ -13265,8 +13493,7 @@ def python_sensitive_read_violation(tree, parents):
                     and python_dotted_name(candidate) == "os.environ"
                     for candidate in ast.walk(argument)
                 )
-                for argument in list(node.args)
-                + [keyword.value for keyword in node.keywords]
+                for argument in output_arguments
             ):
                 return (
                     "Python credential/environment value is sent to an output/error "
@@ -26556,7 +26783,7 @@ trusted-code review boundary, not a Python sandbox.
 | 3 | [4111249274](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4111249274) — mapping views and container-call launchers | RED reproduced `.values()`/`.items()` plus list/tuple/set/iterator wrappers and starred target/subscript launchers; GREEN tracks those aliases and rejects unresolved launcher subscripts; ordinary `str.upper` callbacks remain accepted. |
 | 4 | [4111249275](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4111249275) — scanner loader definition-time execution | RED supplied import, decorator, default, annotation, shadowing, and attribute-assignment specimens as AST data. GREEN validates an explicit import allowlist and definition-time AST before compiling trusted scanner functions, and rejects protected-name rebinding; no specimen code ran. |
 | 5 | [4111249279](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4111249279) — Git include prefixes and `--includes` | RED reproduced `git config --includes` and `GIT_CONFIG_KEY_n` include/includeIf injection through environment assignment prefixes; GREEN rejects before read-only classification; `git -P status` and reviewed non-include core configuration remain accepted. |
-| 6 | [4111249281](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4111249281) — Python harness language decision | This documentation finding has no command specimen. The narrow language rationale is recorded in coordinator-owned `docs/decisions/0004-offline-python-ast-regression-tooling.md`; that file is outside this worker commit and remains for coordinator integration/review. |
+| 6 | [4111249281](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4111249281) — Python harness language decision | This documentation finding has no command specimen. The narrow language rationale is recorded in ADR 0004, which is already present in this candidate; its accepted status remains subject to the stated PR merge and review gate. |
 | 7 | [4111249283](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4111249283) — `env` without a child exposes inherited variables | RED reproduced bare `env`, `env -0`, and no-child assignment forms; GREEN rejects environment-dump forms while preserving reviewed `env -i printf reviewed`. |
 | 8 | [4111273707](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4111273707) — Git replacement refs alter reviewed `HEAD:path` bytes | RED used a temporary Git repo where ordinary `git show` returned synthetic replacement bytes for the reviewed commit; GREEN adds `--no-replace-objects` to every bounded Git query and confirms the packet blob query returns the reviewed bytes. |
 | 9 | [4111273712](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4111273712) — package-root helper accepts caller-controlled roots | RED showed acceptance of a parameterized helper, a changed synthetic invocation root, and a local synthetic root shadow; GREEN requires the canonical zero-argument helper, `Path.cwd()` matched against Git's repository root, fixed reviewed `-C` module, package derived from parsed command arguments, and immutable source-snapshot root. The canonical packet helper remains accepted by a positive-control test. |
@@ -26590,3 +26817,41 @@ ledgers remain preserved. `python3 -B scripts/evidence_packet/issue79_regression
 passed all 12 focused synthetic tests; the packet-wide scan covered 331 shell
 commands and 95 Python heredoc bodies with zero violations; `git diff --check`
 passed. These are local focused/static results only.
+
+### Follow-up independent scanner findings on candidate `00fc5c4`
+
+The new regression specimens are synthetic Python source, shell tokens,
+environment mappings, or temporary local Git fixtures. Python specimens are
+parsed and inspected as data; none is compiled or executed. On the candidate
+scanner, the new red probes reproduced environment-taint loss through
+generator yields, `itertools.chain`, and starred operands; launcher aliases
+lost through `reversed`, dictionary conversion, and local helper returns;
+packet-derived function definitions reaching `compile`/`exec` without a
+definition-time review; include-option abbreviations and
+`GIT_CONFIG_PARAMETERS` escaping Git config checks; local `Path.resolve()`
+values reaching output sinks; and nested or unreachable raises being accepted
+as containment proof.
+
+The scanner now propagates taint through generator yields, chain operands, and
+starred values; tracks launcher aliases through the reviewed iterator and
+mapping conversions and helper-returned callables; validates packet-derived
+`FunctionDef` definitions before both bounded Git-query and parity-helper
+compile/exec sites; rejects include-option prefixes and
+`GIT_CONFIG_PARAMETERS`; blocks resolved local paths at output/error sinks;
+and requires a direct top-level guard raise plus a direct `ValueError` raise
+for package containment. The bounded Git-query loader permits only the
+previously validated output-limit constant as a nonliteral default. The path
+disclosure probe also checks a direct alias while the canonical package guard
+remains accepted.
+
+The original 22-test red run had 12 failures and 1 error. Follow-up pre-fix
+probes confirmed the corrected chain and reversed/dictionary specimens fail
+independently; after correction, both nested-root and unreachable-containment
+probes were replayed against the stated candidate scanner and failed because
+it accepted each unsafe proof. All focused corrections passed afterward.
+Full local verification after this findings subsection was added:
+`python3 -B scripts/evidence_packet/issue79_regression_test.py` ran 22 tests
+in 53.538s and passed; the embedded static scan covered 331 shell commands
+and 95 Python heredoc bodies with zero violations. `git diff --check` exited
+0 with no output. No live runner/workflow operations, network calls, or GitHub
+writes were performed; no live tests were run.
