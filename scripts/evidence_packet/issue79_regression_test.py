@@ -2977,6 +2977,60 @@ class Issue79RegressionTests(unittest.TestCase):
             'import subprocess\n'
             'fake_os = type("FakeOS", (), {"environ": {"fixture": "reviewed"}})\n'
         ))
+        self.assertIsNotNone(self.inspect(
+            'import subprocess\nnamespace = {"subprocess": subprocess, "safe": "reviewed"}\n'
+            'dict_type = type.__new__(type, "D", (dict,), {})\n'
+            'dict_type.update(namespace, {"safe": subprocess})\n'
+            'other = namespace["safe"]\nlookup = getattr\nmember = "os"\n'
+            'lookup(other, member).system("gh workflow run ci.yml")\n'
+        ))
+        self.assertIsNotNone(self.inspect(
+            'import subprocess\nnamespace = {"subprocess": subprocess, "safe": "reviewed"}\n'
+            'def type(*args):\n    return dict\n'
+            'type("FakeOS", (), {"environ": {"fixture": "reviewed"}}).update('
+            'namespace, {"safe": subprocess})\n'
+            'other = namespace["safe"]\nlookup = getattr\nmember = "os"\n'
+            'lookup(other, member).system("gh workflow run ci.yml")\n'
+        ))
+        self.assertIsNotNone(self.inspect(
+            'import subprocess\nnamespace = {"subprocess": subprocess, "safe": "reviewed"}\n'
+            'getattr(type, "__new__")(type, "D", (dict,), {}).update('
+            'namespace, {"safe": subprocess})\n'
+            'other = namespace["safe"]\nlookup = getattr\nmember = "os"\n'
+            'lookup(other, member).system("gh workflow run ci.yml")\n'
+        ))
+        self.assertIsNotNone(self.inspect(
+            'import subprocess\nnamespace = {"subprocess": subprocess, "safe": "reviewed"}\n'
+            'vars(type)["__new__"](type, "D", (dict,), {}).update('
+            'namespace, {"safe": subprocess})\n'
+            'other = namespace["safe"]\nlookup = getattr\nmember = "os"\n'
+            'lookup(other, member).system("gh workflow run ci.yml")\n'
+        ))
+        self.assertIsNotNone(self.inspect(
+            'import subprocess\nclass D(dict):\n    pass\n'
+            'namespace = {"subprocess": subprocess, "safe": "reviewed"}\n'
+            'D.update(namespace, {"safe": subprocess})\n'
+            'other = namespace["safe"]\nlookup = getattr\nmember = "os"\n'
+            'lookup(other, member).system("gh workflow run ci.yml")\n'
+        ))
+        self.assertIsNone(self.inspect(
+            'import subprocess\nclass StopAtChild(Exception):\n    pass\n'
+        ))
+        self.assertIsNotNone(self.inspect(
+            'import subprocess\nException = dict\nclass D(Exception):\n    pass\n'
+            'namespace = {"subprocess": subprocess, "safe": "reviewed"}\n'
+            'D.update(namespace, {"safe": subprocess})\n'
+            'other = namespace["safe"]\nlookup = getattr\nmember = "os"\n'
+            'lookup(other, member).system("gh workflow run ci.yml")\n'
+        ))
+        self.assertIsNotNone(self.inspect(
+            'import subprocess, sys\nsys._getframe().f_globals["Exception"] = dict\n'
+            'class D(Exception):\n    pass\n'
+            'namespace = {"subprocess": subprocess, "safe": "reviewed"}\n'
+            'D.update(namespace, {"safe": subprocess})\n'
+            'other = namespace["safe"]\nlookup = getattr\nmember = "os"\n'
+            'lookup(other, member).system("gh workflow run ci.yml")\n'
+        ))
         self.assertIsNone(self.inspect(
             'class Settings:\n    os = "darwin"\nprint(Settings.os)\n'
         ))
@@ -3394,6 +3448,38 @@ class Issue79RegressionTests(unittest.TestCase):
         ):
             with self.subTest(command=command):
                 self.assertIsNone(self.shell_violation(command))
+
+    def test_os_module_assignment_alias_cannot_hide_filesystem_mutation(self) -> None:
+        self.assertIsNotNone(self.inspect(
+            'import os\nalias = os\nalias.remove("/tmp/maintainer-owned")\n'
+        ))
+        self.assertIsNotNone(self.inspect('import os\nalias = os\nprint(alias.environ)\n'))
+        self.assertIsNotNone(self.inspect(
+            'import os\nalias = os\nprint(alias.getenv("GH_TOKEN"))\n'
+        ))
+        self.assertIsNone(self.inspect('import os\nalias = os\nprint("reviewed")\n'))
+
+    def test_from_import_environment_alias_remains_sensitive(self) -> None:
+        self.assertIsNotNone(self.inspect(
+            'from os import environ as inherited\nprint(inherited)\n'
+        ))
+        self.assertIsNone(self.inspect(
+            'from os import environ as inherited\nprint("reviewed")\n'
+        ))
+
+    def test_bash_prompt_expansion_cannot_evaluate_credential_name(self) -> None:
+        self.assertIsNotNone(self.shell_document_violation(
+            "printf -v payload '%s%s' '$' 'GH_TOKEN'; printf '%s\\n' \"${payload@P}\""
+        ))
+        self.assertIsNone(self.shell_violation("printf '%s\\n' 'reviewed'"))
+
+    def test_shell_reader_rejects_unreviewed_relative_credential_file(self) -> None:
+        self.assertIsNotNone(self.shell_violation("awk '{print}' maintainer.pem"))
+        self.assertIsNone(self.shell_violation("awk '{print}' docs/EXECUTION.md"))
+
+    def test_exception_arguments_keep_environment_taint(self) -> None:
+        self.assertIsNotNone(self.inspect('import os\nraise RuntimeError(os.environ)\n'))
+        self.assertIsNone(self.inspect('raise RuntimeError("reviewed")\n'))
 
     def test_jq_environment_object_references_are_rejected(self) -> None:
         for command in (

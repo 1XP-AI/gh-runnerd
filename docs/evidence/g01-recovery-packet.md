@@ -7384,6 +7384,8 @@ def shell_sensitive_parameter_violation(tokens):
     for token in tokens:
         if "${!" in token:
             return "indirect shell parameter expansion is not allowed"
+        if re.search(r"\$\{[^}]*@P\}", token):
+            return "Bash prompt-expansion transformation is not allowed"
         for match in shell_parameter.finditer(token):
             name = match.group(1) or match.group(2)
             if (
@@ -7906,9 +7908,7 @@ def shell_reviewed_reader_path(token):
         return False
     if token.startswith(reviewed_reader_path_prefixes):
         return True
-    if token.startswith(".") and token not in {".", "./"}:
-        return False
-    return True
+    return False
 
 
 def shell_mkdir_violation(tokens):
@@ -8872,9 +8872,19 @@ def shell_reader_path_violation(tokens):
         "jq": {"-f"},
     }.get(executable, set())
     position = 1
+    expression_consumed = executable not in {"awk", "grep", "jq", "rg"}
     while position < len(tokens):
         token = tokens[position]
         option = token.split("=", 1)[0]
+        if token in {"<<<", ">", ">>", "1>", "1>>", "2>", "2>>", "&>", "&>>", "<", "0<"}:
+            position += 2
+            continue
+        if token.startswith((">", "1>", "2>", "&>", "<", "0<")):
+            position += 1
+            continue
+        if executable == "rg" and token in {"--glob", "--iglob", "-g"}:
+            position += 2
+            continue
         if option in file_options:
             if "=" in token:
                 path = token.split("=", 1)[1]
@@ -8885,12 +8895,16 @@ def shell_reader_path_violation(tokens):
                 path = tokens[position]
             if not shell_reviewed_reader_path(path):
                 return "reader option path is not reviewed or packet-owned"
+            expression_consumed = True
         elif token.startswith("-f") and "-f" in file_options and len(token) > 2:
             if not shell_reviewed_reader_path(token[2:]):
                 return "reader option path is not reviewed or packet-owned"
+            expression_consumed = True
         elif token in {"--", "<<<"} or token.startswith("-"):
             position += 1
             continue
+        elif executable == "tr" or not expression_consumed:
+            expression_consumed = True
         elif not shell_reviewed_reader_path(token):
             return "reader path is not reviewed or packet-owned"
         position += 1
@@ -10396,7 +10410,13 @@ def python_sensitive_join_argument(node, sensitive_names, tree, parents, seen=No
 def python_sensitive_value_names(tree, parents):
     """Resolve credential aliases and local-helper parameter taint."""
     tree._issue79_member_taint_enabled = False
-    sensitive_names = set()
+    sensitive_names = {
+        alias.asname or alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "os"
+        for alias in node.names
+        if alias.name == "environ"
+    }
     assignments = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
@@ -12950,17 +12970,54 @@ python_reviewed_os_calls = {
 
 def python_unknown_os_call_violation(tree):
     """Fail closed for OS calls whose path/effect surface is not reviewed."""
+    os_names = {
+        alias.asname or alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+        if alias.name == "os"
+    }
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Name):
+                continue
+            if node.value.id not in os_names:
+                continue
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id not in os_names:
+                    os_names.add(target.id)
+                    changed = True
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in os_names
+            and node.value.id != "os"
+            and node.attr in {"environ", "getenv"}
+        ):
+            return "Python heredoc accesses environment values through an OS module alias"
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         dotted = python_dotted_name(node.func)
-        if not dotted or not dotted.startswith("os."):
+        if not dotted or "." not in dotted:
             continue
+        root, remainder = dotted.split(".", 1)
+        if root not in os_names:
+            continue
+        canonical = "os." + remainder
+        if root != "os" and canonical in python_filesystem_mutating_functions:
+            return (
+                "Python heredoc calls a filesystem mutator through an OS module alias "
+                f"{dotted!r} on line {node.lineno}"
+            )
         if (
-            dotted in python_filesystem_mutating_functions
-            or dotted in python_reviewed_os_calls
-            or dotted.startswith("os.path.")
-            or dotted.startswith("os.environ.")
+            canonical in python_filesystem_mutating_functions
+            or canonical in python_reviewed_os_calls
+            or canonical.startswith("os.path.")
+            or canonical.startswith("os.environ.")
         ):
             continue
         return (
@@ -13070,6 +13127,46 @@ def python_subprocess_os_reexport_violation(tree):
             elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
                 bind_subprocess_target(node.target, node.value)
     for node in ast.walk(tree):
+        reviewed_base_names = {"Exception", "ValueError"}
+        if (
+            (isinstance(node, ast.Name) and node.id in reviewed_base_names and isinstance(node.ctx, ast.Store))
+            or (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name in reviewed_base_names)
+            or (isinstance(node, ast.arg) and node.arg in reviewed_base_names)
+            or (isinstance(node, ast.ExceptHandler) and node.name in reviewed_base_names)
+            or (
+                isinstance(node, (ast.Import, ast.ImportFrom))
+                and any((alias.asname or alias.name) in reviewed_base_names for alias in node.names)
+            )
+        ):
+            return "Python heredoc shadows a reviewed built-in exception base"
+        if isinstance(node, ast.ClassDef) and (
+            node.keywords
+            or any(
+                not isinstance(base, ast.Name)
+                or base.id not in {"Exception", "ValueError"}
+                for base in node.bases
+            )
+        ):
+            return "Python heredoc declares an unreviewed class base or metaclass"
+        if (
+            (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == "type")
+            or (isinstance(node, ast.Name) and node.id == "type" and isinstance(node.ctx, ast.Store))
+            or (isinstance(node, ast.arg) and node.arg == "type")
+            or (
+                isinstance(node, (ast.Import, ast.ImportFrom))
+                and any(alias.asname == "type" for alias in node.names)
+            )
+        ):
+            return "Python heredoc shadows the reviewed built-in type constructor"
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and (
+                node.value.id == "type"
+                or python_assigned_callable_alias(node.value.id, "type", tree)
+            )
+        ):
+            return "Python heredoc accesses an unreviewed runtime metatype attribute"
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
@@ -15706,6 +15803,16 @@ def python_sensitive_read_violation(tree, parents):
                 if isinstance(node.exc, ast.Call) else [node.exc]
             )
             if any(
+                python_sensitive_value_expression(
+                    value, sensitive_names, tree, parents
+                )
+                for value in exception_values if value is not None
+            ):
+                return (
+                    "Python credential/environment value is sent through an exception argument "
+                    f"on line {node.lineno}"
+                )
+            if any(
                 python_resolved_local_path_expression(
                     value, tree, parents, assignments_by_name
                 )
@@ -16254,9 +16361,9 @@ def python_unreviewed_decorator_violation(tree, parents):
     }
     for candidate in ast.walk(tree):
         if isinstance(candidate, ast.ImportFrom) and candidate.module == "sys" and any(
-            alias.name in {"modules", "*"} for alias in candidate.names
+            alias.name in {"modules", "_getframe", "_current_frames", "*"} for alias in candidate.names
         ):
-            return "Python heredoc imports the mutable sys.modules registry"
+            return "Python heredoc imports a mutable process namespace handle"
         if (
             isinstance(candidate, ast.Call)
             and isinstance(candidate.func, ast.Name)
@@ -16274,11 +16381,11 @@ def python_unreviewed_decorator_violation(tree, parents):
             return "Python heredoc accesses the mutable global namespace"
         if (
             isinstance(candidate, ast.Attribute)
-            and candidate.attr == "modules"
+            and candidate.attr in {"modules", "_getframe", "_current_frames"}
             and isinstance(candidate.value, ast.Name)
             and candidate.value.id in sys_names
         ):
-            return "Python heredoc accesses the mutable sys.modules registry"
+            return "Python heredoc accesses a mutable process namespace handle"
         if isinstance(candidate, ast.Name) and candidate.id == "__builtins__":
             return "Python heredoc accesses the mutable builtins namespace"
         if isinstance(candidate, ast.Import) and any(
@@ -30749,3 +30856,79 @@ tests in 142.978s** (331 shell commands, 95 Python heredocs, zero violations)
 but preceded this final restriction. No dangerous witness ran. Full offline
 verification, independent sign-off, post-ledger packet scan, hosted quick
 check and exact-head GitHub Codex review remain pending.
+
+### Issue #79 post-push independent review of `31c2e60`
+
+The pushed head `31c2e6018b39b9ae8b6ae57fb7b54c17e41bf7b5` passed its
+[hosted Go quick check](https://github.com/1XP-AI/gh-runnerd/actions/runs/36469243663/job/109087027280).
+An exact-head GitHub Codex review was requested in
+[comment 5876553434](https://github.com/1XP-AI/gh-runnerd/pull/103#issuecomment-5876553434)
+and remains pending at this local correction checkpoint. A read-only
+GPT-6-Luna/max independent source pass found two more concrete P1 routes:
+
+| P1 | RED and local correction |
+|---|---|
+| `type.__new__(type, "D", (dict,), {})` builds a dict subclass outside the `type()` call guard. | The inert dynamic-key mutation witness failed before correction. Any metatype attribute access, including `__new__`, now fails closed. The focused negative case passed after correction. |
+| A local function named `type` returns `dict`, while the exact-shape `type("FakeOS", (), {"environ": ...})` exception trusts only spelling. | The inert shadowed-name witness failed before correction. Function, class, assignment, argument and import-alias bindings of `type` now fail closed before the exception. The focused negative and reviewed `FakeOS` positive controls passed afterward. |
+
+Adjacent `getattr(type, "__new__")` and `vars(type)["__new__"]` negative
+controls were already rejected by other scanner checks; no implementation
+change was attributed solely to those cases. All witnesses remained AST text;
+no metatype construction, filesystem mutator, workflow or live runner ran.
+The independent follow-up, full offline suite, post-ledger packet scan and a
+fresh exact-head hosted/Codex review after any push remain pending. Rollback
+is the two-file local correction against the pushed input SHA above.
+
+The next independent source pass found one more P1 constructor route:
+`class D(dict): pass` followed by `D.update(namespace, ...)` mutated the
+subprocess-bearing dictionary without a `type()` call. Its inert dynamic-key
+witness failed before correction. Executable heredocs now reject class bases
+and metaclasses except literal `Exception`/`ValueError` bases required by the
+reviewed synthetic stop-at-child cases. The focused unsafe and
+`StopAtChild(Exception)` safe controls passed after correction. The full
+offline harness had passed **101 tests in 145.802s** and the separate
+packet-only scan passed in **66.677s**, each finding 331 shell commands,
+95 Python heredocs and zero violations, but both predated this class-base
+guard. No witness ran. Fresh full/packet checks, independent sign-off and
+exact-next-head hosted/Codex review remain pending.
+
+Local adjacent self-review found `Exception = dict; class D(Exception)` could
+shadow the newly allowed exception base and recover `D.update`. Its inert
+dynamic-key assertion failed before the correction. Bindings of the reviewed
+`Exception`/`ValueError` names now fail closed before class-base acceptance;
+the focused unsafe case and ordinary `StopAtChild(Exception)` positive case
+passed. The earlier full-suite run was interrupted after this code changed
+and is not counted as a passing verification. A clean full and packet-only
+rerun, independent source conclusion, hosted quick check and exact-next-head
+Codex review remain pending.
+
+### Issue #79 PR #103 review 5343447750 correction
+
+The [exact-head Codex review](https://github.com/1XP-AI/gh-runnerd/pull/103#pullrequestreview-5343447750)
+covered pushed input `31c2e6018b39b9ae8b6ae57fb7b54c17e41bf7b5`.
+Its body had no substantive finding, but five inline P1 findings each failed
+an inert focused regression before correction. The issue-comment feed after
+the review request contained only that request; no bot issue-comment finding
+was present. The hosted quick check on this input passed, but neither it nor
+this review authorizes merging the now-unreviewed local correction.
+
+| Finding | RED and local correction |
+|---|---|
+| [OS-module assignment alias](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4126070534) | `alias = os; alias.remove(...)` was accepted. The OS-call classifier now propagates direct module aliases and rejects mutators through them. Adjacent `alias.environ` and `alias.getenv(...)` output witnesses also failed before a conservative alias-environment guard, then passed. Literal safe output after an OS alias remains accepted. |
+| [Imported environment mapping alias](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4126070549) | `from os import environ as inherited; print(inherited)` was accepted. Imported `environ` names now seed sensitive-value provenance; literal safe output remains accepted. |
+| [Bash prompt expansion](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4126070559) | A `printf -v`-assembled credential reference followed by `${payload@P}` was accepted. The Bash prompt-expansion transform is now rejected before ordinary parameter-name taint analysis; literal output remains accepted. |
+| [Unreviewed relative shell reader](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4126070568) | `awk '{print}' maintainer.pem` was accepted. Reader paths now require reviewed prefixes or packet-owned paths; the operand scanner distinguishes AWK/JQ/grep/rg expressions and shell redirections from file operands. The reviewed `docs/EXECUTION.md` reader remains accepted. |
+| [Sensitive exception arguments](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4126070575) | `raise RuntimeError(os.environ)` was accepted. Extracted constructor arguments now receive sensitive-value analysis before the exception is accepted; a literal reviewed exception remains accepted. |
+
+The independent read-only GPT-6-Luna/max class-base review also found
+`sys._getframe().f_globals["Exception"] = dict` could change an allowed
+exception base without an AST Store binding. That inert dynamic-key witness
+failed before the frame-namespace guard and passed after it. `sys._getframe`,
+`sys._current_frames` and their from-import forms now fail closed alongside
+the existing `sys.modules` rule. All six focused methods passed in 0.147s;
+unsafe strings were never executed. A packet-only scan after the reader
+operand adjustment passed in 67.422s: 331 shell commands, 95 Python
+heredocs, zero violations. Full post-ledger offline verification, final
+independent delta sign-off, a new hosted quick check and a fresh exact-head
+GitHub Codex review remain pending. Rollback is limited to the packet and
+offline harness against the pushed input SHA above; no live gate is claimed.
