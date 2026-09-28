@@ -6146,6 +6146,30 @@ git_environment.update(
     }
 )
 
+def require_git_invocation_root(invocation_root, env):
+    """Refuse status evidence if local Git config redirects the worktree."""
+    expected_root = Path(invocation_root).resolve()
+    result = run_bounded_git_query(
+        git_query(["rev-parse", "--show-toplevel"]),
+        cwd=expected_root,
+        env=env,
+    )
+    if result.returncode != 0 or result.stderr:
+        raise SystemExit("post-correction Git invocation-root query failed")
+    try:
+        root_output = result.stdout.decode("utf-8")
+        if not root_output.endswith("\n") or root_output.count("\n") != 1:
+            raise ValueError("Git top-level output was not one line")
+        actual_root = Path(root_output[:-1]).resolve()
+    except (OSError, RuntimeError, UnicodeDecodeError, ValueError):
+        raise SystemExit("post-correction Git invocation-root output was malformed")
+    if actual_root != expected_root:
+        raise SystemExit("post-correction Git top-level does not match invocation root")
+    return expected_root
+
+invocation_root = Path.cwd().resolve()
+require_git_invocation_root(invocation_root, git_environment)
+
 expected_origin_url = "https://github.com/1XP-AI/gh-runnerd.git"
 origin_result = run_bounded_git_query(
     git_query(["config", "--local", "--get-all", "remote.origin.url"]),
@@ -7292,6 +7316,7 @@ loader_assignment_names = {
 reviewed_shell_path = "/opt/homebrew/bin:/usr/bin:/bin"
 shell_owned_path_variables = set()
 shell_pending_owned_bindings = set()
+shell_sensitive_variable_names = set()
 
 
 def reviewed_loader_assignment(token):
@@ -7356,11 +7381,31 @@ def shell_sensitive_parameter_violation(tokens):
             return "indirect shell parameter expansion is not allowed"
         for match in shell_parameter.finditer(token):
             name = match.group(1) or match.group(2)
-            if credential_environment_name(name):
+            if (
+                credential_environment_name(name)
+                or name in shell_sensitive_variable_names
+            ):
                 return (
                     "credential-bearing shell parameter expansion is not allowed"
                 )
     return None
+
+def shell_record_sensitive_assignments(tokens):
+    """Track credential aliases across assignment-only shell commands."""
+    for token in tokens:
+        if not assignment.fullmatch(token):
+            continue
+        name, value = token.split("=", 1)
+        sensitive = any(
+            credential_environment_name(match.group(1) or match.group(2))
+            or (match.group(1) or match.group(2))
+            in shell_sensitive_variable_names
+            for match in shell_parameter.finditer(value)
+        )
+        if sensitive:
+            shell_sensitive_variable_names.add(name)
+        else:
+            shell_sensitive_variable_names.discard(name)
 
 def fence_details(line):
     """Normalize Markdown container prefixes before recognizing a fence."""
@@ -7494,6 +7539,7 @@ def reviewed_shell_preflight(stripped):
 def shell_commands(markdown):
     shell_owned_path_variables.clear()
     shell_pending_owned_bindings.clear()
+    shell_sensitive_variable_names.clear()
     in_shell = False
     shell_fence = None
     shell_fence_prefix = ""
@@ -7518,6 +7564,7 @@ def shell_commands(markdown):
                 in_shell = True
                 shell_fence = marker
                 shell_fence_prefix = fence_container_prefix(line)
+                shell_sensitive_variable_names.clear()
             continue
         if not in_shell:
             continue
@@ -7537,6 +7584,8 @@ def shell_commands(markdown):
         command = " ".join(pending)
         if shell_quote_pending(command):
             continue
+        for segment in shell_token_segments(command):
+            shell_record_sensitive_assignments(segment)
         unsafe_heredocs = non_python_heredoc_delimiters(command)
         if unsafe_heredocs:
             raise SystemExit(
@@ -8031,6 +8080,8 @@ def git_config_delegation(assignment, *, config_env=False):
     else:
         key, value = assignment.split("=", 1)
         key = key.lower()
+    if key == "core.worktree":
+        return "Git core.worktree redirection is not allowed"
     if key == "core.pager" or key == "pager" or key.startswith("pager."):
         return "Git pager command delegation is not allowed"
     if key in {"core.sshcommand", "credential.helper"}:
@@ -8132,10 +8183,9 @@ git_config_read_only_options = {
     "--get-all",
     "--get-regexp",
     "--get-urlmatch",
-    "--list",
-    "-l",
     "--name-only",
 }
+git_config_bounded_regexp_queries = {r"^filter\."}
 git_config_mutating_options = {
     "--add",
     "--blob",
@@ -8357,6 +8407,11 @@ def git_read_only_violation(tokens):
     if subcommand == "config":
         options = tokens[1:]
         if any(
+            option in {"--global", "-g", "--system", "-s", "--worktree", "--show-origin", "--show-scope"}
+            for option in options
+        ):
+            return "Git config query scope/origin is not allowed"
+        if any(
             option == mutating or option.startswith(mutating + "=")
             for option in options
             for mutating in git_config_mutating_options
@@ -8364,6 +8419,11 @@ def git_read_only_violation(tokens):
             return "Git config mutation is not allowed"
         if not any(option in git_config_read_only_options for option in options):
             return "Git config query must use an approved read-only option"
+        for index, option in enumerate(options):
+            if option == "--get-regexp":
+                pattern = options[index + 1] if index + 1 < len(options) else None
+                if "--local" not in options or pattern not in git_config_bounded_regexp_queries:
+                    return "Git config regex query is not a bounded local query"
     return None
 
 
@@ -8802,6 +8862,8 @@ def git_config_environment_include_violation(tokens):
         key = value.split("=", 1)[0]
         if git_config_include_key(key):
             return "Git configuration includes are not allowed before read-only commands"
+        if key.casefold() == "core.worktree":
+            return "Git core.worktree redirection is not allowed"
     return None
 
 
@@ -9720,6 +9782,33 @@ def python_assigned_callable_alias(name, target, tree):
     )
 
 
+def python_assigned_format_alias(name, tree):
+    """Resolve local aliases of format callables without evaluating them."""
+    assignments = getattr(tree, "_issue79_callable_alias_index", None)
+    if assignments is None:
+        python_assigned_callable_alias("", "format", tree)
+        assignments = getattr(tree, "_issue79_callable_alias_index", {})
+
+    def matches(value, seen):
+        if isinstance(value, ast.Attribute) and value.attr == "format":
+            return True
+        if python_dotted_name(value) in {"format", "builtins.format", "str.format"}:
+            return True
+        if not isinstance(value, ast.Name) or value.id in seen:
+            return False
+        return any(
+            matches(candidate, seen | {value.id})
+            for candidate in assignments.get(value.id, ())
+            if candidate is not None
+        )
+
+    return any(
+        matches(value, {name})
+        for value in assignments.get(name, ())
+        if value is not None
+    )
+
+
 def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen=None):
     """Track credential values through aliases without trusting variable names."""
     if node is None:
@@ -9742,6 +9831,17 @@ def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen
         )
     if isinstance(node, ast.Call):
         dotted = python_dotted_name(node.func)
+        if dotted in {"format", "builtins.format"} or (
+            isinstance(node.func, ast.Name)
+            and python_assigned_format_alias(node.func.id, tree)
+        ):
+            return any(
+                python_sensitive_value_expression(
+                    value, sensitive_names, tree, parents, seen.copy()
+                )
+                for value in list(node.args)
+                + [keyword.value for keyword in node.keywords]
+            )
         if dotted == "os.getenv":
             return True
         if dotted == "os.environ.get":
@@ -9838,9 +9938,20 @@ def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen
                 for argument in node.args
             )
         if isinstance(node.func, ast.Attribute):
-            return python_sensitive_value_expression(
+            sensitive_receiver = python_sensitive_value_expression(
                 node.func.value, sensitive_names, tree, parents, seen.copy()
             )
+            sensitive_join_values = node.func.attr == "join" and any(
+                isinstance(value, ast.Call)
+                and isinstance(value.func, ast.Attribute)
+                and value.func.attr in {"values", "items"}
+                and python_sensitive_value_expression(
+                    value, sensitive_names, tree, parents, seen.copy()
+                )
+                for value in list(node.args)
+                + [keyword.value for keyword in node.keywords]
+            )
+            return sensitive_receiver or sensitive_join_values
     if isinstance(node, (ast.DictComp, ast.ListComp, ast.SetComp, ast.GeneratorExp)):
         if any(
             isinstance(candidate, ast.Call)
@@ -9909,6 +10020,12 @@ def python_sensitive_value_names(tree, parents):
         )
         is_static_method = any(
             python_dotted_name(decorator) == "staticmethod"
+            or (
+                isinstance(decorator, ast.Name)
+                and python_assigned_callable_alias(
+                    decorator.id, "staticmethod", tree
+                )
+            )
             for decorator in getattr(function, "decorator_list", ())
         )
         if bound_method and positional_parameters and not is_static_method:
@@ -13278,8 +13395,8 @@ def python_path_method_alias_visible(name, method, node, tree, parents):
     if bindings is None:
         bindings = {}
 
-        def bind(scope, alias, value):
-            bindings.setdefault((id(scope), alias), []).append(value)
+        def bind(scope, alias, value, source):
+            bindings.setdefault((id(scope), alias), []).append((source, value))
 
         def target_names(target):
             if isinstance(target, ast.Name):
@@ -13301,48 +13418,47 @@ def python_path_method_alias_visible(name, method, node, tree, parents):
                 scope = python_enclosing_scope(candidate, parents)
                 for target in targets:
                     for alias in target_names(target):
-                        bind(scope, alias, value)
+                        bind(scope, alias, value, candidate)
             if isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 scope = python_enclosing_scope(parents.get(candidate), parents)
-                bind(scope, candidate.name, None)
+                bind(scope, candidate.name, None, candidate)
             if isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-                for argument in (
-                    list(candidate.args.posonlyargs)
-                    + list(candidate.args.args)
-                    + list(candidate.args.kwonlyargs)
+                positional = list(candidate.args.posonlyargs) + list(candidate.args.args)
+                default_offset = len(positional) - len(candidate.args.defaults)
+                for index, argument in enumerate(positional):
+                    default = (
+                        candidate.args.defaults[index - default_offset]
+                        if index >= default_offset
+                        else None
+                    )
+                    bind(candidate, argument.arg, default, candidate)
+                for argument, default in zip(
+                    candidate.args.kwonlyargs, candidate.args.kw_defaults
                 ):
-                    bind(candidate, argument.arg, None)
+                    bind(candidate, argument.arg, default, candidate)
                 for argument in (candidate.args.vararg, candidate.args.kwarg):
                     if argument is not None:
-                        bind(candidate, argument.arg, None)
+                        bind(candidate, argument.arg, None, candidate)
             if isinstance(candidate, ast.Import):
                 scope = python_enclosing_scope(candidate, parents)
                 for imported in candidate.names:
-                    bind(scope, imported.asname or imported.name.split(".")[0], None)
+                    bind(
+                        scope,
+                        imported.asname or imported.name.split(".")[0],
+                        None,
+                        candidate,
+                    )
             elif isinstance(candidate, ast.ImportFrom):
                 scope = python_enclosing_scope(candidate, parents)
                 for imported in candidate.names:
-                    bind(scope, imported.asname or imported.name, None)
+                    bind(scope, imported.asname or imported.name, None, candidate)
         tree._issue79_path_method_bindings = bindings
 
     path_aliases = getattr(tree, "_issue79_path_constructor_aliases", None)
     if path_aliases is None:
         path_aliases = python_path_constructor_aliases(tree)
         tree._issue79_path_constructor_aliases = path_aliases
-    module_aliases, constructor_aliases = path_aliases
-
     def resolves_expression(value, scope, seen):
-        if isinstance(value, ast.Attribute) and value.attr == method:
-            receiver = value.value
-            return (
-                isinstance(receiver, ast.Name)
-                and receiver.id in constructor_aliases
-            ) or (
-                isinstance(receiver, ast.Attribute)
-                and receiver.attr == "Path"
-                and isinstance(receiver.value, ast.Name)
-                and receiver.value.id in module_aliases
-            )
         if isinstance(value, ast.Name):
             for visible_scope in python_lexical_scope_chain(scope, parents):
                 visible_key = (id(visible_scope), value.id)
@@ -13351,24 +13467,80 @@ def python_path_method_alias_visible(name, method, node, tree, parents):
                 if visible_key in seen:
                     return False
                 next_seen = seen | {visible_key}
-                return any(
-                    assigned is not None
-                    and resolves_expression(assigned, visible_scope, next_seen)
-                    for assigned in bindings[visible_key]
+                assigned = max(
+                    bindings[visible_key],
+                    key=lambda entry: (
+                        getattr(entry[0], "lineno", -1),
+                        getattr(entry[0], "col_offset", -1),
+                    ),
+                )[1]
+                return assigned is not None and resolves_expression(
+                    assigned, visible_scope, next_seen
                 )
-        return False
+        return python_path_method_reference(value, method, tree)
 
     scope = python_enclosing_scope(node, parents)
     for visible_scope in python_lexical_scope_chain(scope, parents):
         key = (id(visible_scope), name)
         if key not in bindings:
             continue
-        return any(
-            assigned is not None
-            and resolves_expression(assigned, visible_scope, {key})
-            for assigned in bindings[key]
+        assigned = max(
+            bindings[key],
+            key=lambda entry: (
+                getattr(entry[0], "lineno", -1),
+                getattr(entry[0], "col_offset", -1),
+            ),
+        )[1]
+        return assigned is not None and resolves_expression(
+            assigned, visible_scope, {key}
         )
     return False
+
+
+def python_path_method_reference(value, method, tree):
+    """Recognize direct or static getattr references to Path.home/Path.cwd."""
+    path_aliases = getattr(tree, "_issue79_path_constructor_aliases", None)
+    if path_aliases is None:
+        path_aliases = python_path_constructor_aliases(tree)
+        tree._issue79_path_constructor_aliases = path_aliases
+    module_aliases, constructor_aliases = path_aliases
+
+    def is_path_constructor(expression):
+        return (
+            isinstance(expression, ast.Name)
+            and expression.id in constructor_aliases
+        ) or (
+            isinstance(expression, ast.Attribute)
+            and expression.attr == "Path"
+            and isinstance(expression.value, ast.Name)
+            and expression.value.id in module_aliases
+        )
+
+    if isinstance(value, ast.Attribute) and value.attr == method:
+        return is_path_constructor(value.value)
+    if isinstance(value, ast.NamedExpr):
+        return python_path_method_reference(value.value, method, tree)
+    if isinstance(value, ast.Call):
+        is_getattr = python_dotted_name(value.func) == "getattr" or (
+            isinstance(value.func, ast.Name)
+            and python_assigned_callable_alias(value.func.id, "getattr", tree)
+        )
+        return (
+            is_getattr
+            and len(value.args) in {2, 3}
+            and is_path_constructor(value.args[0])
+            and method in python_static_string_values(value.args[1], tree)
+        )
+    return False
+
+
+def python_path_method_expression_visible(value, method, node, tree, parents):
+    """Resolve direct and aliased Path methods at an output call site."""
+    if isinstance(value, ast.Name):
+        return python_path_method_alias_visible(
+            value.id, method, node, tree, parents
+        )
+    return python_path_method_reference(value, method, tree)
 
 
 def python_resolved_local_path_expression(
@@ -13401,44 +13573,12 @@ def python_resolved_local_path_expression(
         return False
     if isinstance(node, ast.Call):
         dotted = python_dotted_name(node.func)
-        path_aliases = getattr(tree, "_issue79_path_constructor_aliases", None)
-        if path_aliases is None:
-            path_aliases = python_path_constructor_aliases(tree)
-            tree._issue79_path_constructor_aliases = path_aliases
-        module_aliases, constructor_aliases = path_aliases
-        is_path_home = dotted in {"Path.home", "pathlib.Path.home"} or (
-            isinstance(node.func, ast.Attribute)
-            and node.func.attr == "home"
-            and isinstance(node.func.value, ast.Name)
-            and node.func.value.id in constructor_aliases
-        ) or (
-            isinstance(node.func, ast.Attribute)
-            and node.func.attr == "home"
-            and isinstance(node.func.value, ast.Attribute)
-            and node.func.value.attr == "Path"
-            and isinstance(node.func.value.value, ast.Name)
-            and node.func.value.value.id in module_aliases
+        is_path_home = python_path_method_expression_visible(
+            node.func, "home", node, tree, parents
         )
-        is_path_cwd = dotted in {"Path.cwd", "pathlib.Path.cwd"} or (
-            isinstance(node.func, ast.Attribute)
-            and node.func.attr == "cwd"
-            and isinstance(node.func.value, ast.Name)
-            and node.func.value.id in constructor_aliases
-        ) or (
-            isinstance(node.func, ast.Attribute)
-            and node.func.attr == "cwd"
-            and isinstance(node.func.value, ast.Attribute)
-            and node.func.value.attr == "Path"
-            and isinstance(node.func.value.value, ast.Name)
-            and node.func.value.value.id in module_aliases
+        is_path_cwd = python_path_method_expression_visible(
+            node.func, "cwd", node, tree, parents
         )
-        if isinstance(node.func, ast.Name):
-            is_path_home = is_path_home or python_path_method_alias_visible(
-                node.func.id, "home", node, tree, parents
-            )
-            is_path_cwd = is_path_cwd or python_path_method_alias_visible(
-                node.func.id, "cwd", node, tree, parents
-            )
         if is_path_home or is_path_cwd:
             return True
         if dotted == "os.path.expanduser" and node.args:
@@ -29150,3 +29290,75 @@ python3 -I -B scripts/evidence_packet/issue79_regression_test.py
 ran all 74 tests in 122.511s and passed. Its packet-wide static scan found 331
 shell commands and 95 Python heredoc bodies with zero violations. A separate
 final packet scan is run after this ledger edit.
+
+### Issue #79 PR #103 review 5337497074: evidence scanner P1 and alias corrections
+
+This ledger records four exact-head GitHub Codex P1 findings from review
+5337497074 at input HEAD `bda0eedb5ba43fba0243c77ef09f50714795490c`, two
+independently reproduced local P1 groups (formatter/static-method aliases and
+Path method aliases), and one local P2 false positive. The four supplied P1s
+were triaged as blocking and corrected; both local P1 groups were reproduced
+against the same input and corrected; the P2 rejection was corrected to retain
+the reviewed safe behavior. All Python and shell specimens remained inert
+scanner data. The only Git execution used a temporary synthetic repository
+with isolated HOME and system/global Git configuration disabled; no credential,
+real configuration, runner, workflow, App, or host operation was used.
+
+| # | Severity and immutable finding | RED reproduction at input HEAD | GREEN resolution and safe control |
+|---|---|---|---|
+| 1 | P1, [GitHub Codex finding 4121296898](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4121296898): newline-separated `secret=$GH_TOKEN` followed by `printf $secret` hid the credential behind a shell assignment alias. | `test_shell_credential_assignment_aliases_are_rejected` failed for both the direct alias and the second alias `copy=$secret`; shell source was scanned through the packet fence parser and never executed. | Shell-fence scanning now carries credential taint through assignment-only commands and alias chains, and clears it at each new shell fence. The literal `secret=reviewed` control remains accepted. |
+| 2 | P1, [GitHub Codex finding 4121296906](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4121296906): `secret=os.environ; print(''.join(secret.values()))` passed a sensitive mapping view through `join` without output taint. | `test_join_of_environment_views_keeps_sensitive_taint` accepted the assigned-environment witness; the direct `os.environ` variant was already rejected. | Join taint now follows sensitive `.values()`/`.items()` arguments while retaining reviewed environment-name list behavior. Literal status mappings joined through the same forms remain accepted. |
+| 3 | P1, [GitHub Codex finding 4121296915](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4121296915): a pre-existing local `.git/config` `core.worktree` redirect could make status appear clean while the invocation worktree was dirty. | The disposable repository had a modified invocation file while redirected `git status --short` returned empty. The active post-correction verifier had no same-environment top-level comparison, and the inert `git -c core.worktree=... status` scanner specimen was accepted. | The active verification template now runs `require_git_invocation_root(invocation_root, git_environment)` before repository queries and compares bounded `git rev-parse --show-toplevel` output with `Path.cwd().resolve()` under the same isolated environment. The regression extracts and validates that exact helper, accepts the ordinary repository root, then rejects the local-config alternate root before status evidence can be trusted; the `-c` and numbered config-environment overrides are also rejected. |
+| 4 | P1, [GitHub Codex finding 4121296923](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4121296923): `git config --global --list --show-origin` and `git config --get-regexp .` exposed unbounded configuration through read-only query classification. | `test_unbounded_git_config_dumps_are_rejected` accepted both inert scanner strings. A follow-up safe-control RED run also showed that removing `--get-regexp` outright rejected the packet's narrow repository-local filter check. | Global/system/worktree and origin/scope queries are rejected; `--list`/`-l` remain unapproved; regex queries require `--local` and the exact bounded `^filter\.` pattern. The unbounded `.` and global-list forms are rejected, while `git config --local --get-regexp '^filter\.'`, exact-key `--get`, and reviewed `git status --short` controls pass. |
+| 5 | P1, independent local review (no public URL): formatter callable aliases (`fmt = format` and `fmt = "{}".format`) lost sensitive argument taint; `sm = staticmethod` also made a static method look like a bound instance method, dropping its `payload` parameter. | `test_format_callable_aliases_preserve_sensitive_taint` and the aliased-decorator subcase of `test_sensitive_taint_crosses_inline_lambda_and_static_method_parameters` accepted their inert environment-output witnesses. | The sensitive-value resolver follows assigned format callables and their arguments. Static-method parameter binding also recognizes an assigned `staticmethod` alias; literal format/status and static-method controls remain accepted. |
+| 6 | P1, independent local review (no public URL): `Path.home`/`Path.cwd` output escaped through default-argument aliases, aliased `getattr`, and `NamedExpr` call targets. | `test_path_method_aliases_follow_defaults_getattr_and_namedexpr` failed for all four home/cwd shapes. | Path-method resolution now follows default values, literal `getattr` member aliases, and named expressions while respecting the lexical binding that supplies a method. A reviewed repository-relative `Path` output remains accepted. |
+| 7 | P2, independent local review (no public URL): a later safe `home = lambda: "reviewed"` did not cancel an earlier `home = Path.home` taint; helper and instance variants needed to remain safe too. | `test_path_home_alias_reassignment_and_helpers_remain_safe` rejected the direct reassignment and helper return; its instance-method positive control was already accepted. | Path alias resolution uses the latest binding in the applicable scope, so the reviewed unconditional overwrite and helper/instance controls pass while the P1 default/getattr/named-expression witnesses remain rejected. |
+
+The exact focused RED command for findings 1–4 was
+`python3 -I -B scripts/evidence_packet/issue79_regression_test.py Issue79RegressionTests.test_shell_credential_assignment_aliases_are_rejected Issue79RegressionTests.test_join_of_environment_views_keeps_sensitive_taint Issue79RegressionTests.test_core_worktree_override_cannot_mask_a_dirty_invocation_worktree Issue79RegressionTests.test_unbounded_git_config_dumps_are_rejected`.
+It ran 4 tests and failed with 6 unsafe-subcase assertion failures; the
+synthetic Git status deception also reproduced. The same command after the
+correction ran 4 tests and passed.
+
+The bounded-config positive control was added after the first green batch.
+`python3 -I -B scripts/evidence_packet/issue79_regression_test.py Issue79RegressionTests.test_unbounded_git_config_dumps_are_rejected`
+ran 1 test and failed because the removed `--get-regexp` option also blocked
+the packet's bounded local filter query. After restricting regex queries to
+the exact `--local --get-regexp '^filter\.'` form,
+the same focused command ran 1 test and passed.
+
+The focused local alias RED command was
+`python3 -I -B scripts/evidence_packet/issue79_regression_test.py Issue79RegressionTests.test_format_callable_aliases_preserve_sensitive_taint Issue79RegressionTests.test_sensitive_taint_crosses_inline_lambda_and_static_method_parameters Issue79RegressionTests.test_path_method_aliases_follow_defaults_getattr_and_namedexpr Issue79RegressionTests.test_path_home_alias_reassignment_and_helpers_remain_safe`.
+It ran 4 tests and failed with 9 unsafe-subcase assertion failures. The same
+command after correction ran 4 tests and passed, including the P2 positive
+controls. Each RED case was an AST/string fixture; none was evaluated or
+launched.
+
+The first full offline attempt with general method-call argument propagation
+ran 81 tests in 87.693s and failed 4 package-containment/static-scan checks
+because a safe list of environment variable names was treated like a list of
+environment values. Restricting the added join propagation to sensitive
+`.values()`/`.items()` inputs restored those reviewed controls. After the local
+`core.worktree` root guard and bounded Git-config query were in place, the final
+command
+`python3 -I -B scripts/evidence_packet/issue79_regression_test.py`
+ran all 81 tests in 134.483s and passed. Its packet-wide scan found 331 shell
+commands and 95 Python heredoc bodies with zero violations.
+
+After this ledger was written, the final packet scan command
+`python3 -I -B scripts/evidence_packet/issue79_regression_test.py Issue79RegressionTests.test_current_packet_has_no_static_scanner_violations`
+ran 1 test and passed; it again found 331 shell commands, 95 Python heredoc
+bodies, and zero violations. Final `git diff --check` exited 0. The added-line
+credential/private-key/personal-path pattern scan reported zero matches, and
+`git diff --name-only` listed exactly the two assigned files. HEAD remained
+`bda0eedb5ba43fba0243c77ef09f50714795490c`.
+
+Rollback for this correction is the exact clean input HEAD
+`bda0eedb5ba43fba0243c77ef09f50714795490c`: restore only
+`docs/evidence/g01-recovery-packet.md` and
+`scripts/evidence_packet/issue79_regression_test.py` to that tree and remove
+this section, including the added invocation-root check and callable/path
+alias scanner changes. The synthetic Git fixture uses a temporary directory
+and its isolated configuration only. No commit, push, merge, GitHub comment,
+Project write, exact-final-head review, hosted quick check, or live
+qualification is claimed; those remain with the coordinator.

@@ -710,6 +710,16 @@ class Issue79RegressionTests(unittest.TestCase):
         self.scanner["shell_pending_owned_bindings"].clear()  # type: ignore[union-attr]
         return self.scanner["forbidden_command"](shlex.split(command))  # type: ignore[operator]
 
+    def shell_document_violation(self, commands: str) -> str | None:
+        """Use the packet's shell-fence parser and scanner on inert source text."""
+        markdown = f"```sh\n{commands}\n```\n"
+        for command, _number in self.scanner["shell_commands"](markdown):  # type: ignore[operator]
+            for segment in self.scanner["shell_token_segments"](command):  # type: ignore[operator]
+                violation = self.scanner["forbidden_command"](segment)  # type: ignore[operator]
+                if violation:
+                    return violation
+        return None
+
     def test_path_filesystem_readers_require_reviewed_paths(self) -> None:
         unsafe = (
             'from pathlib import Path\nprint(list(Path("synthetic-private").glob("*")))\n',
@@ -1058,6 +1068,27 @@ class Issue79RegressionTests(unittest.TestCase):
             with self.subTest(body=body):
                 self.assertIsNone(self.inspect(body))
 
+    def test_join_of_environment_views_keeps_sensitive_taint(self) -> None:
+        unsafe = (
+            'import os\n'
+            'secret = os.environ\n'
+            "print(''.join(secret.values()))\n",
+            'import os\n'
+            "print(''.join(os.environ.values()))\n",
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+        safe = (
+            'snapshot = {"status": "reviewed"}\n'
+            "print(''.join(snapshot.values()))\n",
+            "print(''.join({'status': 'reviewed'}.values()))\n",
+        )
+        for body in safe:
+            with self.subTest(body=body):
+                self.assertIsNone(self.inspect(body))
+
     def test_sensitive_taint_crosses_inline_lambda_and_static_method_parameters(self) -> None:
         unsafe = (
             'import os\n'
@@ -1065,6 +1096,13 @@ class Issue79RegressionTests(unittest.TestCase):
             'import os\n'
             'class C:\n'
             '    @staticmethod\n'
+            '    def emit(payload):\n'
+            '        print(payload)\n'
+            'C().emit(os.environ)\n',
+            'import os\n'
+            'sm = staticmethod\n'
+            'class C:\n'
+            '    @sm\n'
             '    def emit(payload):\n'
             '        print(payload)\n'
             'C().emit(os.environ)\n',
@@ -1078,6 +1116,12 @@ class Issue79RegressionTests(unittest.TestCase):
             'emit({"status": "reviewed"})\n',
             'class C:\n'
             '    @staticmethod\n'
+            '    def emit(payload):\n'
+            '        print(payload)\n'
+            'C().emit({"status": "reviewed"})\n',
+            'sm = staticmethod\n'
+            'class C:\n'
+            '    @sm\n'
             '    def emit(payload):\n'
             '        print(payload)\n'
             'C().emit({"status": "reviewed"})\n',
@@ -1102,6 +1146,31 @@ class Issue79RegressionTests(unittest.TestCase):
             'secret = {"status": "reviewed"}\n'
             'print("{}".format(secret))\n',
             'print("{}".format({"status": "reviewed"}))\n',
+        )
+        for body in safe:
+            with self.subTest(body=body):
+                self.assertIsNone(self.inspect(body))
+
+    def test_format_callable_aliases_preserve_sensitive_taint(self) -> None:
+        unsafe = (
+            'import os\n'
+            'secret = os.environ\n'
+            'fmt = format\n'
+            'print(fmt(secret))\n',
+            'import os\n'
+            'secret = os.environ\n'
+            'fmt = "{}".format\n'
+            'print(fmt(secret))\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+        safe = (
+            'fmt = format\n'
+            'print(fmt("reviewed"))\n',
+            'fmt = "{}".format\n'
+            'print(fmt({"status": "reviewed"}))\n',
         )
         for body in safe:
             with self.subTest(body=body):
@@ -2143,6 +2212,94 @@ class Issue79RegressionTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertIsNone(self.shell_violation(command))
 
+    def test_core_worktree_override_cannot_mask_a_dirty_invocation_worktree(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="issue79-core-worktree-") as temporary:
+            root = Path(temporary)
+            repository = root / "invocation"
+            alternate = root / "alternate"
+            repository.mkdir()
+            alternate.mkdir()
+            (root / "home").mkdir()
+            environment = {
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "HOME": str(root / "home"),
+                "LC_ALL": "C",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_SYSTEM": "/dev/null",
+                "GIT_TERMINAL_PROMPT": "0",
+            }
+            _run_git_checked(["init", "-q"], repository, environment)
+            tracked = repository / "tracked.txt"
+            tracked.write_text("reviewed\n", encoding="utf-8")
+            _run_git_checked(["add", "tracked.txt"], repository, environment)
+            _run_git_checked(
+                [
+                    "-c", "user.name=synthetic",
+                    "-c", "user.email=synthetic@example.invalid",
+                    "commit", "-q", "-m", "fixture",
+                ],
+                repository,
+                environment,
+            )
+            root_guard = _verification_function(
+                self.verification, "require_git_invocation_root"
+            )
+            _validate_packet_function_definition(
+                root_guard, "require_git_invocation_root"
+            )
+            runtime = _bounded_git_query_namespace(self.verification)
+            exec(
+                compile(
+                    ast.Module(body=[root_guard], type_ignores=[]),
+                    "<synthetic-git-root-guard>",
+                    "exec",
+                ),
+                runtime,
+            )
+            runtime["require_git_invocation_root"](repository, environment)
+            (alternate / "tracked.txt").write_text("reviewed\n", encoding="utf-8")
+            tracked.write_text("dirty invocation worktree\n", encoding="utf-8")
+            _run_git_checked(
+                ["config", "--local", "core.worktree", str(alternate)],
+                repository,
+                environment,
+            )
+            redirected_status = _run_git_checked(
+                ["status", "--short"], repository, environment
+            )
+            self.assertEqual(b"", redirected_status)
+            self.assertEqual(b"dirty invocation worktree\n", tracked.read_bytes())
+            with self.assertRaisesRegex(
+                SystemExit,
+                "post-correction Git top-level does not match invocation root",
+            ):
+                runtime["require_git_invocation_root"](repository, environment)
+
+        # This command remains inert scanner data; only the disposable fixture
+        # above is used to demonstrate the worktree-selection failure mode.
+        self.assertIsNotNone(
+            self.shell_violation(
+                "git -c core.worktree=/synthetic/alternate status --short"
+            )
+        )
+        self.assertIsNone(self.shell_violation("git status --short"))
+
+    def test_unbounded_git_config_dumps_are_rejected(self) -> None:
+        for command in (
+            "git config --global --list --show-origin",
+            "git config --get-regexp .",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(self.shell_violation(command))
+        for command in (
+            "git config --get core.repositoryformatversion",
+            "git config --local --get-regexp '^filter\\.'",
+            "git status --short",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(self.shell_violation(command))
+
     def test_nested_raise_does_not_prove_module_root_guard(self) -> None:
         bodies = [
             body
@@ -2486,6 +2643,57 @@ class Issue79RegressionTests(unittest.TestCase):
             with self.subTest(body=body):
                 self.assertIsNone(self.inspect(body))
 
+    def test_path_method_aliases_follow_defaults_getattr_and_namedexpr(self) -> None:
+        unsafe = (
+            'from pathlib import Path as P\n'
+            'def report(home=P.home):\n'
+            '    print(home())\n'
+            'report()\n',
+            'from pathlib import Path as P\n'
+            'get = getattr\n'
+            'home = get(P, "home")\n'
+            'print(home())\n',
+            'from pathlib import Path as P\n'
+            'print((home := P.home)())\n',
+            'from pathlib import Path as P\n'
+            'print((cwd := getattr(P, "cwd"))())\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+        safe = (
+            'from pathlib import Path as P\n'
+            'print(P("docs/evidence/g01-recovery-packet.md"))\n',
+        )
+        for body in safe:
+            with self.subTest(body=body):
+                self.assertIsNone(self.inspect(body))
+
+    def test_path_home_alias_reassignment_and_helpers_remain_safe(self) -> None:
+        safe = (
+            'from pathlib import Path as P\n'
+            'home = P.home\n'
+            'home = lambda: "reviewed"\n'
+            'print(home())\n',
+            'from pathlib import Path as P\n'
+            'home = P.home\n'
+            'home = lambda: "reviewed"\n'
+            'def report():\n'
+            '    return home()\n'
+            'print(report())\n',
+            'from pathlib import Path as P\n'
+            'home = P.home\n'
+            'home = lambda: "reviewed"\n'
+            'class Report:\n'
+            '    def home(self):\n'
+            '        return "reviewed"\n'
+            'print(Report().home())\n',
+        )
+        for body in safe:
+            with self.subTest(body=body):
+                self.assertIsNone(self.inspect(body))
+
     def test_named_expression_callable_sink_preserves_environment_taint(self) -> None:
         self.assertIsNotNone(self.inspect('import os\n(emit := print)(os.environ)\n'))
         self.assertIsNone(self.inspect('emit = print\nemit("status: reviewed")\n'))
@@ -2513,6 +2721,21 @@ class Issue79RegressionTests(unittest.TestCase):
     def test_bash_indirect_environment_expansion_rejects_credential_names(self) -> None:
         self.assertIsNotNone(self.shell_violation('name=GH_TOKEN; printf "%s\\n" "${!name}"'))
         self.assertIsNone(self.shell_violation('printf "%s\\n" "status: reviewed"'))
+
+    def test_shell_credential_assignment_aliases_are_rejected(self) -> None:
+        unsafe = (
+            "secret=$GH_TOKEN\nprintf '%s\\n' $secret",
+            "secret=$GH_TOKEN\ncopy=$secret\nprintf '%s\\n' $copy",
+        )
+        for commands in unsafe:
+            with self.subTest(commands=commands):
+                self.assertIsNotNone(self.shell_document_violation(commands))
+
+        self.assertIsNone(
+            self.shell_document_violation(
+                "secret=reviewed\nprintf '%s\\n' $secret"
+            )
+        )
 
     def test_shell_environment_dump_readers_are_rejected(self) -> None:
         for command in (
