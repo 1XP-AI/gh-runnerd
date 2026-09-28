@@ -9341,13 +9341,33 @@ def python_sensitive_value_names(tree, parents):
         )
         bound = []
         for index, argument in enumerate(call.args):
-            if index >= len(positional_parameters):
-                break
-            bound.append((positional_parameters[index].arg, argument))
+            if isinstance(argument, ast.Starred):
+                for parameter in positional_parameters[index:]:
+                    bound.append((parameter.arg, argument.value))
+            elif index < len(positional_parameters):
+                bound.append((positional_parameters[index].arg, argument))
+            if function.args.vararg is not None:
+                bound.append((function.args.vararg.arg, argument))
         parameter_by_name = {parameter.arg: parameter.arg for parameter in parameters}
         for keyword in call.keywords:
             if keyword.arg in parameter_by_name:
                 bound.append((keyword.arg, keyword.value))
+            if keyword.arg is None:
+                # Expanded maps can bind any named parameter. Literal keys are
+                # handled precisely; unknown keys fail closed.
+                if isinstance(keyword.value, ast.Dict) and all(
+                    isinstance(key, ast.Constant) and isinstance(key.value, str)
+                    for key in keyword.value.keys
+                ):
+                    for key, value in zip(keyword.value.keys, keyword.value.values):
+                        if key.value in parameter_by_name:
+                            bound.append((key.value, value))
+                else:
+                    bound.extend((parameter.arg, keyword.value) for parameter in parameters)
+            elif function.args.kwarg is not None and keyword.arg not in parameter_by_name:
+                bound.append((function.args.kwarg.arg, keyword.value))
+            if keyword.arg is None and function.args.kwarg is not None:
+                bound.append((function.args.kwarg.arg, keyword.value))
         return bound
 
     # Iterate assignments and direct local-helper calls to a fixed point. The
@@ -9359,6 +9379,18 @@ def python_sensitive_value_names(tree, parents):
     )
     for _ in range(len(assignments) + function_count + 1):
         changed = False
+        for function in ast.walk(tree):
+            if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            positional = list(function.args.posonlyargs) + list(function.args.args)
+            defaults = list(zip(positional[-len(function.args.defaults):], function.args.defaults)) if function.args.defaults else []
+            defaults.extend(zip(function.args.kwonlyargs, function.args.kw_defaults))
+            for parameter, default in defaults:
+                if default is not None and python_sensitive_value_expression(
+                    default, sensitive_names, tree, parents
+                ) and parameter.arg not in sensitive_names:
+                    sensitive_names.add(parameter.arg)
+                    changed = True
         for target, value in assignments:
             if not python_sensitive_value_expression(
                 value, sensitive_names, tree, parents
@@ -12615,6 +12647,7 @@ def python_sensitive_output_sink(node):
     dotted = python_dotted_name(node.func)
     if dotted in {
         "print",
+        "sys.exit",
         "warnings.warn",
         "warnings.warn_explicit",
         "traceback.print_exc",
@@ -12636,13 +12669,34 @@ def python_path_division_names(node):
 
 
 def python_try_in_unreachable_if_body(node, parents):
+    def condition_value(test):
+        if isinstance(test, ast.Constant):
+            return bool(test.value)
+        if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+            value = condition_value(test.operand)
+            return None if value is None else not value
+        if (
+            isinstance(test, ast.Compare)
+            and isinstance(test.left, ast.Name)
+            and test.left.id == "module_dir"
+            and len(test.ops) == 1
+            and len(test.comparators) == 1
+            and isinstance(test.comparators[0], ast.Constant)
+            and test.comparators[0].value == "experiments/g01-scaleset"
+        ):
+            if isinstance(test.ops[0], ast.Eq):
+                return True
+            if isinstance(test.ops[0], ast.NotEq):
+                return False
+        return None
+
     current = node
     while current in parents:
         parent = parents[current]
-        if isinstance(parent, ast.If) and isinstance(parent.test, ast.Constant):
-            condition = bool(parent.test.value)
-            if (not condition and current in parent.body) or (
-                condition and current in parent.orelse
+        if isinstance(parent, ast.If):
+            condition = condition_value(parent.test)
+            if (condition is False and current in parent.body) or (
+                condition is True and current in parent.orelse
             ):
                 return True
         current = parent
@@ -13024,7 +13078,7 @@ def python_reviewed_go_package_directory(node, tree, parents):
             and handler.type.id == "ValueError"
             and len(handler.body) == 1
             and isinstance(handler.body[0], ast.Raise)
-            for handler in candidate.handlers
+            for handler in candidate.handlers[:1]
         )
         if guarded and fail_closed:
             return True
@@ -13562,10 +13616,20 @@ def python_sensitive_read_violation(tree, parents):
             call.func.id, call, tree, parents
         ):
             positional = helper_parameters(function)
-            for parameter, argument in zip(positional, call.args):
-                assignments_by_name.setdefault(parameter.arg, []).append(
-                    (function, argument)
-                )
+            for index, argument in enumerate(call.args):
+                if isinstance(argument, ast.Starred):
+                    for parameter in positional[index:]:
+                        assignments_by_name.setdefault(parameter.arg, []).append(
+                            (function, argument.value)
+                        )
+                elif index < len(positional):
+                    assignments_by_name.setdefault(positional[index].arg, []).append(
+                        (function, argument)
+                    )
+                if function.args.vararg is not None:
+                    assignments_by_name.setdefault(function.args.vararg.arg, []).append(
+                        (function, argument)
+                    )
             named_parameters = {
                 parameter.arg
                 for parameter in positional + function.args.kwonlyargs
@@ -13573,6 +13637,27 @@ def python_sensitive_read_violation(tree, parents):
             for keyword in call.keywords:
                 if keyword.arg in named_parameters:
                     assignments_by_name.setdefault(keyword.arg, []).append(
+                        (function, keyword.value)
+                    )
+                if keyword.arg is None:
+                    if isinstance(keyword.value, ast.Dict) and all(
+                        isinstance(key, ast.Constant) and isinstance(key.value, str)
+                        for key in keyword.value.keys
+                    ):
+                        for key, value in zip(keyword.value.keys, keyword.value.values):
+                            if key.value in named_parameters:
+                                assignments_by_name.setdefault(key.value, []).append(
+                                    (function, value)
+                                )
+                    else:
+                        for name in named_parameters:
+                            assignments_by_name.setdefault(name, []).append(
+                                (function, keyword.value)
+                            )
+                if function.args.kwarg is not None and (
+                    keyword.arg is None or keyword.arg not in named_parameters
+                ):
+                    assignments_by_name.setdefault(function.args.kwarg.arg, []).append(
                         (function, keyword.value)
                     )
     for alias, receiver in path_reader_aliases.items():
@@ -13592,6 +13677,20 @@ def python_sensitive_read_violation(tree, parents):
             ):
                 return (
                     "Python credential/environment value is sent to an exception "
+                    f"on line {node.lineno}"
+                )
+            exception_values = (
+                list(node.exc.args) + [keyword.value for keyword in node.exc.keywords]
+                if isinstance(node.exc, ast.Call) else [node.exc]
+            )
+            if any(
+                python_resolved_local_path_expression(
+                    value, tree, parents, assignments_by_name
+                )
+                for value in exception_values if value is not None
+            ):
+                return (
+                    "Python resolved local path is sent to an exception "
                     f"on line {node.lineno}"
                 )
         if isinstance(node, ast.Call):
@@ -27136,3 +27235,44 @@ Rollback point is the immutable starting SHA
 `docs/evidence/g01-recovery-packet.md` and
 `scripts/evidence_packet/issue79_regression_test.py`; the added-line
 credential/private-path scan found zero matches.
+
+### Issue #79 independent-review correction from `9e921283cf338c5b6d1b1c358d3735ae42f26cdd`
+
+The independent offline review of that candidate reported three P1 and two P2
+scanner gaps. Its report was delivered through the local review task, without a
+GitHub review URL. These five findings were reproduced with inert Python source
+strings; the source strings were parsed and inspected, never executed. The
+reviewer's nine focused tests passed for the earlier corrections, and its five
+new probes demonstrated distinct uncovered cases.
+
+| Finding | RED against `9e921283` | Correction and safe control |
+|---|---|---|
+| P1 containment proof was unreachable or swallowed | An `else` after the required module-directory guard, `if not False`, and a broad first exception handler each left an ineffective `relative_to` check accepted. | Recognize the proved module-directory branch and constant negation; require the first exception handler to fail closed for `ValueError`. The canonical reachable guard remains accepted. |
+| P1 environment map through variadic/default parameters | `*args`, `**kwargs`, and a default parameter each passed `dict(os.environ)` to `print`. | Propagate credential taint through expanded arguments and defaults. A helper printing ordinary values remains accepted. |
+| P1 environment map through `sys.exit` | Direct and helper-returned environment maps reached the exit message. | Classify `sys.exit` as an output/error sink; an ordinary status message remains accepted. |
+| P2 path through expanded helper arguments | Positional variadic, keyword variadic, and literal `**mapping` arguments sent a resolved path to `print`. | Bind expanded arguments to helper parameters for path provenance. Internal path validation remains accepted. |
+| P2 path in raised exception | `RuntimeError` and `SystemExit` carried a resolved path in their message. | Inspect raised exception arguments for resolved paths; ordinary status errors remain accepted. |
+
+Test-first RED command:
+
+```text
+python3 -B scripts/evidence_packet/issue79_regression_test.py Issue79RegressionTests.test_resolved_local_paths_cross_expanded_helper_arguments Issue79RegressionTests.test_resolved_local_paths_in_raised_errors_are_rejected Issue79RegressionTests.test_sensitive_variadic_and_default_helper_parameters_are_tainted Issue79RegressionTests.test_sys_exit_is_an_output_sink_for_sensitive_values Issue79RegressionTests.test_unreachable_package_containment_try_is_not_reviewed
+Ran 5 tests in 60.417s; failed with 14 assertion failures across the five findings.
+```
+
+Focused GREEN command:
+
+```text
+python3 -B scripts/evidence_packet/issue79_regression_test.py Issue79RegressionTests.test_resolved_local_paths_cross_expanded_helper_arguments Issue79RegressionTests.test_resolved_local_paths_in_raised_errors_are_rejected Issue79RegressionTests.test_sensitive_variadic_and_default_helper_parameters_are_tainted Issue79RegressionTests.test_sys_exit_is_an_output_sink_for_sensitive_values Issue79RegressionTests.test_unreachable_package_containment_try_is_not_reviewed Issue79RegressionTests.test_canonical_package_guard_remains_reviewed Issue79RegressionTests.test_safe_top_level_helper_ignores_unrelated_nested_name_collision
+Ran 7 tests in 78.528s; passed.
+```
+
+Rollback point is immutable `9e921283cf338c5b6d1b1c358d3735ae42f26cdd`;
+the correction touches only this packet and its offline issue #79 test harness.
+The final `python3 -B scripts/evidence_packet/issue79_regression_test.py`
+run passed all 37 tests in 129.787s, including a static scan of 331 shell
+commands and 95 Python heredoc bodies with zero violations. `git diff --check`
+exited 0 with no output. An added-line scan for private home paths and common
+credential/key prefixes returned zero matches. The independent delta review,
+hosted PR quick check, and GitHub Codex review remain pending for the final
+pushed SHA; this local verification is not their substitute.

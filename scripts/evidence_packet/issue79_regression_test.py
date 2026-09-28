@@ -731,6 +731,62 @@ class Issue79RegressionTests(unittest.TestCase):
         )
         self.assertIsNone(self.inspect(safe_default_validation))
 
+    def test_resolved_local_paths_cross_expanded_helper_arguments(self) -> None:
+        unsafe = (
+            'from pathlib import Path\n'
+            'def report(*roots):\n    print(roots)\n'
+            'report(Path.cwd().resolve())\n',
+            'from pathlib import Path\n'
+            'def report(**roots):\n    print(roots)\n'
+            'report(root=Path.cwd().resolve())\n',
+            'from pathlib import Path\n'
+            'def report(root):\n    print(root)\n'
+            'report(**{"root": Path.cwd().resolve()})\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+    def test_resolved_local_paths_in_raised_errors_are_rejected(self) -> None:
+        unsafe = (
+            'from pathlib import Path\nraise RuntimeError(str(Path.cwd().resolve()))\n',
+            'from pathlib import Path\nraise SystemExit(f"root={Path.cwd().resolve()}")\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+        self.assertIsNone(self.inspect('raise RuntimeError("reviewed status")\n'))
+
+    def test_sensitive_variadic_and_default_helper_parameters_are_tainted(self) -> None:
+        unsafe = (
+            'import os\ndef report(*values):\n    print(values)\n'
+            'report(dict(os.environ))\n',
+            'import os\ndef report(**values):\n    print(values)\n'
+            'report(**dict(os.environ))\n',
+            'import os\ndef report(value=dict(os.environ)):\n'
+            '    print(value)\nreport()\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+        self.assertIsNone(self.inspect(
+            'def report(*values, **options):\n    print(values, options)\n'
+            'report("reviewed", status="safe")\n'
+        ))
+
+    def test_sys_exit_is_an_output_sink_for_sensitive_values(self) -> None:
+        unsafe = (
+            'import os, sys\nsys.exit(str(dict(os.environ)))\n',
+            'import os, sys\ndef snapshot():\n    return dict(os.environ)\n'
+            'sys.exit(str(snapshot()))\n',
+            'from pathlib import Path\nimport sys\n'
+            'sys.exit(str(Path.cwd().resolve()))\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+        self.assertIsNone(self.inspect('import sys\nsys.exit("reviewed status")\n'))
+
     def test_canonical_package_guard_remains_reviewed(self) -> None:
         bodies = [
             body
@@ -1321,6 +1377,32 @@ class Issue79RegressionTests(unittest.TestCase):
                 '            package_dir.relative_to(go_repo_root / module_dir)\n'
                 '        except ValueError:\n'
                 '            raise SystemExit(f"{label}: package source escaped the reviewed module")'
+            ),
+            (
+                '    if module_dir == "experiments/g01-scaleset":\n'
+                '        pass\n'
+                '    else:\n'
+                '        try:\n'
+                '            package_dir.relative_to(go_repo_root / module_dir)\n'
+                '        except ValueError:\n'
+                '            raise SystemExit(f"{label}: package source escaped the reviewed module")'
+            ),
+            (
+                '    if not False:\n'
+                '        pass\n'
+                '    else:\n'
+                '        try:\n'
+                '            package_dir.relative_to(go_repo_root / module_dir)\n'
+                '        except ValueError:\n'
+                '            raise SystemExit(f"{label}: package source escaped the reviewed module")'
+            ),
+            (
+                '    try:\n'
+                '        package_dir.relative_to(go_repo_root / module_dir)\n'
+                '    except Exception:\n'
+                '        pass\n'
+                '    except ValueError:\n'
+                '        raise SystemExit(f"{label}: package source escaped the reviewed module")'
             ),
         )
         for unreachable in unreachable_variants:
