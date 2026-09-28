@@ -8871,11 +8871,17 @@ def shell_reader_path_violation(tokens):
     executable = executable_basename(tokens[0])
     recursive_grep = executable == "grep" and any(
         token in {"-r", "-R", "--recursive"}
+        or token in {"-drecurse", "--directories=recurse"}
+        or (
+            token in {"-d", "--directories"}
+            and index + 1 < len(tokens)
+            and tokens[index + 1] == "recurse"
+        )
         or (
             token.startswith("-") and not token.startswith("--")
             and any(flag in token[1:] for flag in "rR")
         )
-        for token in tokens[1:]
+        for index, token in enumerate(tokens[1:], 1)
     )
     file_options = {
         "diff": {"--from-file", "--to-file"},
@@ -8904,6 +8910,9 @@ def shell_reader_path_violation(tokens):
             position += 1
             continue
         if not operand_mode and executable == "rg" and token in {"--glob", "--iglob", "-g"}:
+            position += 2
+            continue
+        if not operand_mode and executable == "grep" and token in {"-d", "--directories"}:
             position += 2
             continue
         if not operand_mode and executable in {"grep", "rg"} and token in {"-e", "--regexp"}:
@@ -13073,7 +13082,7 @@ def python_assigned_module_names(tree, module):
                 if (
                     isinstance(iterable, ast.Call)
                     and isinstance(iterable.func, ast.Name)
-                    and iterable.func.id in {"tuple", "list", "set"}
+                    and iterable.func.id in {"tuple", "list", "set", "iter", "reversed", "sorted"}
                     and len(iterable.args) == 1
                     and not iterable.keywords
                 ):
@@ -15934,8 +15943,14 @@ def python_sensitive_read_violation(tree, parents):
                     isinstance(source, ast.Name)
                     or (
                         isinstance(source, ast.Call)
-                        and (python_dotted_name(source.func) or "").rsplit(".", 1)[-1].endswith(
-                            ("Error", "Exception", "Exit")
+                        and (
+                            (python_dotted_name(source.func) or "").rsplit(".", 1)[-1].endswith(
+                                ("Error", "Exception", "Exit")
+                            )
+                            or (python_dotted_name(source.func) or "").rsplit(".", 1)[-1] in {
+                                "StopIteration", "StopAsyncIteration", "KeyboardInterrupt",
+                                "ExceptionGroup", "BaseExceptionGroup",
+                            }
                         )
                     )
                 )
@@ -31253,3 +31268,29 @@ personal-path pattern scan found no matches. A separate post-ledger packet
 scan passed in 74.063s (331 shell commands, 95 Python heredocs, zero
 violations). Fresh exact-head hosted/Codex review remains pending. No live
 or trusted runner test ran.
+
+### Issue #79 independent follow-up on `cf4ae9e`
+
+The read-only GPT-6-Luna/max reviewer confirmed the three preceding direct
+witnesses closed, then found three adjacent P1 paths. The `grep` option route
+was also independently reproduced locally. All three inert regressions were
+RED before correction and GREEN afterward:
+
+| Finding | Local resolution |
+|---|---|
+| GNU grep `-d recurse`/`--directories=recurse` could recursively scan `.`. | Recursive option detection now includes both forms and consumes the `-d` option argument before reader operands. `grep -d recurse . docs/` remains accepted. |
+| `StopIteration(os.environ)` could hide a sensitive intermediate exception alias because its name lacks the old suffixes. | Exception-constructor provenance includes the reviewed built-in non-suffix exception names alongside `Error`/`Exception`/`Exit` forms; literal exception and canonical package controls remain accepted. |
+| `for alias in iter([os]): alias.remove(...)` bypassed static container unwrapping. | Module-alias propagation unwraps `iter` and other static one-argument container-preserving builtins around literal iterables; literal output remains accepted. |
+
+The three focused methods and canonical package control passed together in
+23.176s after correction. No witness was executed. Full offline verification,
+post-ledger packet scan, independent delta classification and a fresh exact-
+head hosted/Codex review remain pending.
+
+The clean isolated full rerun passed **116 tests in 160.080s**, including a
+current-packet scan of 331 shell commands and 95 Python heredocs with zero
+violations. `git diff --check` passed and the added-line credential/private-
+key/personal-path pattern scan found no matches. Separate post-ledger packet
+verification passed in 72.966s (331 shell commands, 95 Python heredocs,
+zero violations). Fresh exact-head hosted/Codex review remains pending; no
+live or trusted runner test ran.

@@ -3462,6 +3462,9 @@ class Issue79RegressionTests(unittest.TestCase):
         self.assertIsNotNone(self.inspect(
             'import os\nfor alias in tuple([os]):\n    alias.remove("synthetic-maintainer-owned")\n'
         ))
+        self.assertIsNotNone(self.inspect(
+            'import os\nfor alias in iter([os]):\n    alias.remove("synthetic-maintainer-owned")\n'
+        ))
         self.assertIsNotNone(self.inspect('import os\nalias = os\nprint(alias.environ)\n'))
         self.assertIsNotNone(self.inspect(
             'import os\nalias = os\nprint(alias.getenv("GH_TOKEN"))\n'
@@ -3501,6 +3504,10 @@ class Issue79RegressionTests(unittest.TestCase):
         ))
         self.assertIsNotNone(self.inspect(
             'import os\ninner = RuntimeError(os.environ)\n'
+            'cause = RuntimeError(inner)\nraise RuntimeError("reviewed") from cause\n'
+        ))
+        self.assertIsNotNone(self.inspect(
+            'import os\ninner = StopIteration(os.environ)\n'
             'cause = RuntimeError(inner)\nraise RuntimeError("reviewed") from cause\n'
         ))
         self.assertIsNone(self.inspect('raise RuntimeError("reviewed")\n'))
@@ -3579,8 +3586,11 @@ class Issue79RegressionTests(unittest.TestCase):
         self.assertIsNotNone(self.shell_violation('rg --hidden --no-ignore .'))
         self.assertIsNotNone(self.shell_violation('rg --hidden --no-ignore . .'))
         self.assertIsNotNone(self.shell_violation('grep -R . .'))
+        self.assertIsNotNone(self.shell_violation('grep -d recurse . .'))
+        self.assertIsNotNone(self.shell_violation('grep --directories=recurse . .'))
         self.assertIsNone(self.shell_violation('rg . docs/EXECUTION.md'))
         self.assertIsNone(self.shell_violation('grep -R . docs/'))
+        self.assertIsNone(self.shell_violation('grep -d recurse . docs/'))
         self.assertIsNone(self.shell_violation('rg -n . <<< reviewed'))
 
     def test_jq_environment_object_references_are_rejected(self) -> None:
