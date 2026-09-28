@@ -3479,7 +3479,31 @@ class Issue79RegressionTests(unittest.TestCase):
 
     def test_exception_arguments_keep_environment_taint(self) -> None:
         self.assertIsNotNone(self.inspect('import os\nraise RuntimeError(os.environ)\n'))
+        self.assertIsNotNone(self.inspect(
+            'import os\nraise RuntimeError("reviewed") from RuntimeError(os.environ)\n'
+        ))
         self.assertIsNone(self.inspect('raise RuntimeError("reviewed")\n'))
+
+    def test_module_dictionary_environment_access_is_rejected(self) -> None:
+        for body in (
+            'import os\nprint(vars(os)["environ"])\n',
+            'import os\nprint(os.__dict__["environ"])\n',
+        ):
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+        self.assertIsNone(self.inspect('import os\nprint("reviewed")\n'))
+
+    def test_shutil_module_assignment_alias_cannot_hide_mutation(self) -> None:
+        self.assertIsNotNone(self.inspect(
+            'import shutil\nalias = shutil\nalias.rmtree("/tmp/maintainer-owned")\n'
+        ))
+        self.assertIsNone(self.inspect('import shutil\nalias = shutil\nprint("reviewed")\n'))
+
+    def test_awk_program_cannot_rewrite_reader_argv(self) -> None:
+        self.assertIsNotNone(self.shell_violation(
+            'awk \'BEGIN { ARGV[1]="maintainer.pem" } {print}\' docs/EXECUTION.md'
+        ))
+        self.assertIsNone(self.shell_violation("awk '{print}' docs/EXECUTION.md"))
 
     def test_jq_environment_object_references_are_rejected(self) -> None:
         for command in (

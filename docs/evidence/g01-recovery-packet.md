@@ -8814,6 +8814,7 @@ def awk_command_violation(tokens):
             or (token.startswith("--exec") and token != "--exec")
             or re.search(r"\bsystem\s*\(", token)
             or re.search(r"\bENVIRON\b", token)
+            or re.search(r"\bARGV\b", token)
             or "getline" in token
             or output_pipe(token)
             or output_redirection(token)
@@ -12994,6 +12995,21 @@ def python_unknown_os_call_violation(tree):
             isinstance(node, ast.Attribute)
             and isinstance(node.value, ast.Name)
             and node.value.id in os_names
+            and node.attr == "__dict__"
+        ) or (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and (node.func.id == "vars" or python_assigned_callable_alias(node.func.id, "vars", tree))
+            and node.args
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id in os_names
+        ):
+            return "Python heredoc accesses an OS module dictionary"
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in os_names
             and node.value.id != "os"
             and node.attr in {"environ", "getenv"}
         ):
@@ -13295,6 +13311,34 @@ def python_subprocess_os_reexport_violation(tree):
 
 def python_filesystem_mutator_alias_violation(tree, parents):
     """Reject extracted mutator methods unless their receiver is temp-owned."""
+    shutil_names = {
+        alias.asname or alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+        if alias.name == "shutil"
+    }
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Name):
+                continue
+            if node.value.id not in shutil_names:
+                continue
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id not in shutil_names:
+                    shutil_names.add(target.id)
+                    changed = True
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in shutil_names
+            and node.value.id != "shutil"
+            and "shutil." + node.attr in python_filesystem_mutating_functions
+        ):
+            return "Python heredoc accesses a filesystem mutator through a shutil module alias"
     for node in ast.walk(tree):
         if isinstance(node, ast.Import) and any(
             alias.name in {"os", "shutil"} and alias.asname is not None
@@ -15798,10 +15842,15 @@ def python_sensitive_read_violation(tree, parents):
                     "Python credential/environment value is sent to an exception "
                     f"on line {node.lineno}"
                 )
-            exception_values = (
-                list(node.exc.args) + [keyword.value for keyword in node.exc.keywords]
-                if isinstance(node.exc, ast.Call) else [node.exc]
-            )
+            exception_values = []
+            for exception in (node.exc, node.cause):
+                if isinstance(exception, ast.Call):
+                    exception_values.extend(exception.args)
+                    exception_values.extend(
+                        keyword.value for keyword in exception.keywords
+                    )
+                elif exception is not None:
+                    exception_values.append(exception)
             if any(
                 python_sensitive_value_expression(
                     value, sensitive_names, tree, parents
@@ -30932,3 +30981,33 @@ heredocs, zero violations. Full post-ledger offline verification, final
 independent delta sign-off, a new hosted quick check and a fresh exact-head
 GitHub Codex review remain pending. Rollback is limited to the packet and
 offline harness against the pushed input SHA above; no live gate is claimed.
+
+### Issue #79 PR #103 review 5343672196 correction
+
+The [exact-head Codex review](https://github.com/1XP-AI/gh-runnerd/pull/103#pullrequestreview-5343672196)
+covered pushed input `b902f7df1d910a3fa836e60f983d65f15e7f613d`.
+Its body contained no substantive finding, but three inline P1 findings
+were reproduced as failing, inert source-only regressions. The issue-comment
+feed after the review request contained only that request.
+
+| Finding | RED and local correction |
+|---|---|
+| [OS module dictionary](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4126263858) | `vars(os)["environ"]` and `os.__dict__["environ"]` were accepted. The OS-module classifier now fails closed on module-dictionary access, including assigned OS aliases; a literal safe output remains accepted. |
+| [Assigned shutil alias](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4126263874) | `alias = shutil; alias.rmtree(...)` was accepted. The mutator classifier now follows assigned `shutil` module names and rejects aliased mutator access; a literal safe output remains accepted. |
+| [AWK ARGV rewrite](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4126263883) | An AWK program rewriting `ARGV[1]` to an unreviewed credential path was accepted despite a reviewed visible operand. AWK programs mentioning `ARGV` now fail closed; the literal reviewed print program remains accepted. |
+
+Local adjacent self-review also found `raise RuntimeError("reviewed") from
+RuntimeError(os.environ)` bypassed exception-argument taint. The inert
+regression failed before correction; both `Raise.exc` and `Raise.cause` are
+now examined, and a literal exception remains accepted. All four focused
+methods passed in 0.111s after correction. No witness was executed. Full
+offline verification, a post-ledger packet scan, independent review and a
+fresh exact-head hosted/Codex review remain pending; no live gate is claimed.
+
+After this ledger addition, the full isolated offline harness passed **109
+tests in 147.009s**, including the current packet static scan of 331 shell
+commands and 95 Python heredoc bodies with zero violations. `git diff
+--check` passed; an added-line scan for credential/private-key/personal-path
+patterns found no matches. Independent source review and a fresh exact-head
+hosted/Codex review remain pending. These offline checks do not authorize a
+live runner or workflow operation.
