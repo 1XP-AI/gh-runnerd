@@ -5830,6 +5830,7 @@ git_query_stream_chunk_bytes = 4096
 issue79_reviewed_evidence_paths = (
     "docs/evidence/g01-recovery-packet.md",
     "scripts/evidence_packet/issue79_regression_test.py",
+    "docs/decisions/0004-offline-python-ast-regression-tooling.md",
 )
 
 
@@ -6032,6 +6033,7 @@ def run_bounded_git_packet_blob_query(blob_spec, *, cwd, env):
     expected_paths = {
         "docs/evidence/g01-recovery-packet.md",
         "scripts/evidence_packet/issue79_regression_test.py",
+        "docs/decisions/0004-offline-python-ast-regression-tooling.md",
     }
     if not isinstance(blob_spec, str) or ":" not in blob_spec:
         raise SystemExit("Git evidence blob revision/path was malformed")
@@ -6058,6 +6060,7 @@ def require_packet_head_parity(intent_output, head_blob, worktree_bytes):
     expected_paths = {
         b"docs/evidence/g01-recovery-packet.md",
         b"scripts/evidence_packet/issue79_regression_test.py",
+        b"docs/decisions/0004-offline-python-ast-regression-tooling.md",
     }
     if not isinstance(intent_output, bytes):
         raise SystemExit("post-correction evidence intent output was not bytes")
@@ -6274,6 +6277,10 @@ for reviewed_path in issue79_reviewed_evidence_paths:
         elif reviewed_path == "scripts/evidence_packet/issue79_regression_test.py":
             reviewed_worktree_bytes = Path(
                 "scripts/evidence_packet/issue79_regression_test.py"
+            ).read_bytes()
+        elif reviewed_path == "docs/decisions/0004-offline-python-ast-regression-tooling.md":
+            reviewed_worktree_bytes = Path(
+                "docs/decisions/0004-offline-python-ast-regression-tooling.md"
             ).read_bytes()
         else:
             raise SystemExit("post-correction evidence path was not reviewed")
@@ -7405,6 +7412,16 @@ def shell_record_sensitive_assignments(tokens, preserve_existing=False):
         elif not preserve_existing:
             shell_sensitive_variable_names.discard(name)
 
+def shell_git_config_assignment_violation(tokens):
+    """Keep the reviewed Git child configuration intact across a shell fence."""
+    for token in tokens:
+        if not assignment.fullmatch(token):
+            continue
+        name = token.split("=", 1)[0]
+        if name.startswith("GIT_CONFIG_") and token not in reviewed_shell_export_assignments:
+            return "unreviewed Git configuration environment assignment"
+    return None
+
 def fence_details(line):
     """Normalize Markdown container prefixes before recognizing a fence."""
     candidate = line
@@ -7603,6 +7620,11 @@ def shell_commands(markdown):
         shell_owned_directory_proof(command)
         if shell_assignment_only(command):
             if (
+                not any(
+                    shell_git_config_assignment_violation(segment)
+                    for segment in shell_token_segments(command)
+                )
+                and
                 not any(
                     shell_command_substitution(segment)
                     for segment in shell_token_segments(command)
@@ -8397,6 +8419,11 @@ def git_read_only_violation(tokens):
     if not tokens or executable_basename(tokens[0]) != "git":
         return None
     subcommand = git_subcommand(tokens)
+    if subcommand == "show" and any(
+        token == "--output" or token.startswith("--output=")
+        for token in tokens[1:]
+    ):
+        return "Git show --output can overwrite files and is not allowed"
     diff_path_violation = git_diff_path_violation(tokens)
     if diff_path_violation:
         return diff_path_violation
@@ -8842,11 +8869,37 @@ def shell_reader_path_violation(tokens):
     """Reject reader operands outside reviewed repository or owned-temp paths."""
     if not tokens or executable_basename(tokens[0]) not in reviewed_reader_executables:
         return None
-    for token in tokens[1:]:
-        if token in {"--", "<<<"} or token.startswith("-"):
+    executable = executable_basename(tokens[0])
+    file_options = {
+        "diff": {"--from-file", "--to-file"},
+        "grep": {"-f", "--file"},
+        "rg": {"-f", "--file"},
+        "awk": {"-f", "--file"},
+        "jq": {"-f"},
+    }.get(executable, set())
+    position = 1
+    while position < len(tokens):
+        token = tokens[position]
+        option = token.split("=", 1)[0]
+        if option in file_options:
+            if "=" in token:
+                path = token.split("=", 1)[1]
+            else:
+                position += 1
+                if position >= len(tokens):
+                    return "reader file option requires a reviewed path"
+                path = tokens[position]
+            if not shell_reviewed_reader_path(path):
+                return "reader option path is not reviewed or packet-owned"
+        elif token.startswith("-f") and "-f" in file_options and len(token) > 2:
+            if not shell_reviewed_reader_path(token[2:]):
+                return "reader option path is not reviewed or packet-owned"
+        elif token in {"--", "<<<"} or token.startswith("-"):
+            position += 1
             continue
-        if not shell_reviewed_reader_path(token):
+        elif not shell_reviewed_reader_path(token):
             return "reader path is not reviewed or packet-owned"
+        position += 1
     return None
 
 
@@ -8926,11 +8979,22 @@ def git_config_environment_include_violation(tokens):
     return None
 
 
+reviewed_absolute_executable_paths = {
+    "/opt/homebrew/bin/python3",
+    "/bin/bash",
+    "/bin/sh",
+    "/usr/bin/git",
+    "/usr/bin/env",
+}
+
 def forbidden_command(tokens, depth=0):
     tokens = list(tokens)
     if not tokens:
         return None
     original_tokens = list(tokens)
+    git_config_assignment_violation = shell_git_config_assignment_violation(tokens)
+    if git_config_assignment_violation:
+        return git_config_assignment_violation
     sensitive_parameter_violation = shell_sensitive_parameter_violation(tokens)
     if sensitive_parameter_violation:
         return sensitive_parameter_violation
@@ -8962,6 +9026,8 @@ def forbidden_command(tokens, depth=0):
         if any(executable_basename(token) == "env" for token in original_tokens):
             return "env without a child command can print inherited environment values"
         return None
+    if "/" in tokens[0] and tokens[0] not in reviewed_absolute_executable_paths:
+        return "executable path is outside the reviewed absolute locations"
     environment_builtin_violation = shell_environment_builtin_violation(tokens)
     if environment_builtin_violation:
         return environment_builtin_violation
@@ -9924,7 +9990,7 @@ def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen
     if isinstance(node, ast.Subscript):
         if python_dotted_name(node.value) == "os.environ":
             key = node.slice.value if isinstance(node.slice, ast.Constant) else None
-            return key is None or not isinstance(key, str) or credential_environment_name(key)
+            return key is None or not isinstance(key, str) or key == "HOME" or credential_environment_name(key)
         if getattr(tree, "_issue79_member_taint_enabled", False) and python_sensitive_member_assignment_value(
             node, sensitive_names, tree, parents, seen.copy()
         ):
@@ -9994,13 +10060,13 @@ def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen
             return True
         if dotted == "os.environ.get":
             key = node.args[0].value if node.args and isinstance(node.args[0], ast.Constant) else None
-            return key is None or not isinstance(key, str) or credential_environment_name(key)
+            return key is None or not isinstance(key, str) or key == "HOME" or credential_environment_name(key)
         if (
             isinstance(node.func, ast.Name)
             and node.func.id in python_credential_reader_aliases(tree)
         ):
             key = node.args[0].value if node.args and isinstance(node.args[0], ast.Constant) else None
-            return key is None or not isinstance(key, str) or credential_environment_name(key)
+            return key is None or not isinstance(key, str) or key == "HOME" or credential_environment_name(key)
         sensitive_constructors = getattr(
             tree, "_issue79_sensitive_constructor_names", None
         )
@@ -29894,3 +29960,42 @@ matches. A packet-only scan after this final ledger update is still required.
 Rollback for this follow-up remains only the issue #79 packet and offline
 harness at input HEAD `7e277abf1c257edd5e07590add9b6b6c18c7928f`.
 GitHub Codex exact-head review and hosted PR quick check remain pending.
+
+### Issue #79 PR #103 exact-head review 5341432154 correction
+
+Input HEAD is `a55fb9d1c9402bc65c0f40daa6673d6f447700f4`. The
+[exact-head review](https://github.com/1XP-AI/gh-runnerd/pull/103#pullrequestreview-5341432154)
+reported seven P1 findings: four in the review body and three inline. The
+issue-comment feed had no additional finding. Each witness below was supplied
+as inert scanner or isolated temporary-Git test data; no unsafe executable,
+private file, real environment value, or runner was used by this correction.
+
+| P1 finding | RED reproduction | GREEN boundary and control |
+|---|---|---|
+| Review-body executable path | `/tmp/git` and `./git` with reviewed status arguments were accepted by basename. | Only bare executables resolved through the reviewed `PATH` and exact reviewed absolute executable paths are accepted; bare `git status` remains accepted. |
+| Review-body Git configuration state | Assignment-only `GIT_CONFIG_COUNT=1`, `GIT_CONFIG_KEY_0=diff.external`, and an unreviewed value were discarded before a later `git diff`. | Every unreviewed `GIT_CONFIG_*` assignment is retained for violation classification across the fence; exact required preflight settings remain accepted. |
+| Review-body `git show --output` | `git show --output=AGENTS.md --format=oneline -s HEAD` was classified read-only. | `git show --output` is rejected before read-only classification; ordinary `git show` remains allowed. |
+| Review-body reader option path | `diff --from-file=$HOME/.netrc docs/EXECUTION.md` hid a private path in an option. | Filename-bearing `diff`, `grep`, `rg`, `awk`, and `jq` options require reviewed paths, as ordinary file operands do. |
+| [Inline HOME path](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4124408099) | `home = os.environ["HOME"]; print(home)` was accepted. | `HOME` environment values retain path-sensitive taint; benign reviewed relative paths remain accepted. |
+| [Inline ADR parity](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4124408105) | The ADR changed in this PR was missing from the two-path intent/HEAD-byte parity list. | The ADR is now checked by the same bounded blob, intent-bit, and byte-parity loop; isolated temporary-Git fixtures exercise all three reviewed paths. |
+| [Inline loader assignment](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4124408110) | The offline loader silently skipped a top-level assignment whose value was an unreviewed command call. A subsequent self-review also reproduced the same gap under the special `source` assignment. | Unsupported top-level assignments now fail closed before any value is executed; the special `source` assignment must match its exact reviewed AST. Current safe scanner constants still load. |
+
+The six focused RED test methods failed with seven unsafe subcase assertions
+before correction. Their GREEN rerun passed six methods in 0.935s. The
+packet-only command then passed in 62.267s and reported 331 shell commands,
+95 Python heredoc bodies, and zero violations. The post-entry command
+`python3 -I -B scripts/evidence_packet/issue79_regression_test.py` passed all
+95 tests in 134.740s, again finding 331 shell commands, 95 Python heredoc
+bodies, and zero violations. `git diff --check` passed, only the packet and
+offline harness changed, and the added-line credential/private-key/personal-
+path pattern scan found zero matches. A packet-only scan after this final
+ledger update remains required before push.
+The post-GREEN self-review of the special `source` assignment produced one
+additional failing inert loader assertion, then passed after exact-AST
+validation. The complete harness was rerun after that change: 95 tests passed
+in 135.776s, with 331 shell commands, 95 Python heredoc bodies, and zero
+violations. The final post-ledger packet scan remains a separate gate.
+Rollback restores only this packet and its offline harness from input HEAD
+`a55fb9d1c9402bc65c0f40daa6673d6f447700f4`; ADR 0004 itself is unchanged
+in this correction. No live qualification, workflow dispatch, GitHub review of
+the next head, or hosted quick check is claimed.

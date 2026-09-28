@@ -242,7 +242,19 @@ def _scanner_namespace() -> dict[str, object]:
             else:
                 names = _target_names(statement.target)
                 value = statement.value
-            if "source" in names or value is None:
+            if "source" in names:
+                reviewed_source = ast.parse(
+                    'Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")',
+                    mode="eval",
+                ).body
+                if names != {"source"} or value is None or ast.dump(
+                    value, include_attributes=False
+                ) != ast.dump(reviewed_source, include_attributes=False):
+                    raise AssertionError(
+                        "packet scanner source assignment is not reviewed"
+                    )
+                continue
+            if value is None:
                 continue
             if _safe_assignment_expression(value, namespace):
                 safe_statement = statement
@@ -253,6 +265,10 @@ def _scanner_namespace() -> dict[str, object]:
                     )
                     ast.copy_location(safe_statement, statement)
                 exec(compile(ast.Module(body=[safe_statement], type_ignores=[]), "<packet-scanner-constant>", "exec"), namespace)
+            else:
+                raise AssertionError(
+                    "packet scanner has an unsupported top-level assignment"
+                )
     namespace["source"] = PACKET_TEXT
     return namespace
 
@@ -2136,6 +2152,7 @@ class Issue79RegressionTests(unittest.TestCase):
             (
                 "docs/evidence/g01-recovery-packet.md",
                 "scripts/evidence_packet/issue79_regression_test.py",
+                "docs/decisions/0004-offline-python-ast-regression-tooling.md",
             ),
         )
         required_order = (
@@ -2145,6 +2162,7 @@ class Issue79RegressionTests(unittest.TestCase):
             'run_bounded_git_packet_blob_query(\n        f"{local}:{reviewed_path}"',
             'Path(\n                "docs/evidence/g01-recovery-packet.md"\n            ).read_bytes()',
             'Path(\n                "scripts/evidence_packet/issue79_regression_test.py"\n            ).read_bytes()',
+            'Path(\n                "docs/decisions/0004-offline-python-ast-regression-tooling.md"\n            ).read_bytes()',
             "require_packet_head_parity(\n        intent_result.stdout",
             'git_query(["status", "--porcelain=v1", "--untracked-files=all"])',
         )
@@ -2523,6 +2541,36 @@ class Issue79RegressionTests(unittest.TestCase):
         )
         self.assertIsInstance(origin_check.test, ast.Compare)
 
+    def test_explicit_executable_paths_require_reviewed_locations(self) -> None:
+        for command in (
+            "/tmp/git status --porcelain=v1",
+            "./git status --porcelain=v1",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(self.shell_violation(command))
+        self.assertIsNone(self.shell_violation("git status --porcelain=v1"))
+
+    def test_git_config_assignments_cannot_replace_reviewed_fence_state(self) -> None:
+        commands = (
+            "GIT_CONFIG_COUNT=1\n"
+            "GIT_CONFIG_KEY_0=diff.external\n"
+            "GIT_CONFIG_VALUE_0=/tmp/reviewed-hook\n"
+            "git diff HEAD^ HEAD"
+        )
+        self.assertIsNotNone(self.shell_document_violation(commands))
+
+    def test_git_show_output_and_reader_option_paths_are_reviewed(self) -> None:
+        self.assertIsNotNone(
+            self.shell_violation(
+                "git show --output=AGENTS.md --format=oneline -s HEAD"
+            )
+        )
+        self.assertIsNotNone(
+            self.shell_violation(
+                "diff --from-file=$HOME/.netrc docs/EXECUTION.md"
+            )
+        )
+
     def test_nested_raise_does_not_prove_module_root_guard(self) -> None:
         bodies = [
             body
@@ -2712,6 +2760,37 @@ class Issue79RegressionTests(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     _validated_scanner_statements(module)
 
+    def test_packet_loader_rejects_unsupported_top_level_assignment(self) -> None:
+        original = globals()["PACKET_TEXT"]
+        try:
+            globals()["PACKET_TEXT"] = original.replace(
+                "def inspect_python_heredoc(body, safe_marker):",
+                'probe = os.system("gh workflow run ci.yml")\n'
+                'def inspect_python_heredoc(body, safe_marker):',
+                1,
+            )
+            self.assertNotEqual(globals()["PACKET_TEXT"], original)
+            with self.assertRaises(AssertionError):
+                _scanner_namespace()
+            source_assignment = (
+                'source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")'
+            )
+            source_position = original.rfind(
+                source_assignment,
+                0,
+                original.index("def inspect_python_heredoc(body, safe_marker):"),
+            )
+            self.assertGreaterEqual(source_position, 0)
+            globals()["PACKET_TEXT"] = (
+                original[:source_position]
+                + 'source = os.system("gh workflow run ci.yml")'
+                + original[source_position + len(source_assignment):]
+            )
+            with self.assertRaises(AssertionError):
+                _scanner_namespace()
+        finally:
+            globals()["PACKET_TEXT"] = original
+
     def test_constructor_and_output_sink_aliases_preserve_sensitive_taint(self) -> None:
         unsafe = (
             'import os\n'
@@ -2780,6 +2859,7 @@ class Issue79RegressionTests(unittest.TestCase):
             'import os\nprint(os.path.expanduser("~"))\n',
             'import os\nfrom pathlib import Path\n'
             'print(os.fsdecode(Path.cwd().resolve()))\n',
+            'import os\nhome = os.environ["HOME"]\nprint(home)\n',
         )
         for body in unsafe:
             with self.subTest(body=body):
