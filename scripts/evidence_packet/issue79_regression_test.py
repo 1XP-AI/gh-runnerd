@@ -2344,6 +2344,9 @@ class Issue79RegressionTests(unittest.TestCase):
     def test_home_and_decoded_local_paths_are_not_disclosed(self) -> None:
         unsafe = (
             'from pathlib import Path\nprint(Path.home())\n',
+            'from pathlib import Path as P\nprint(P.home())\n',
+            'import pathlib as pl\nprint(pl.Path.home())\n',
+            'from pathlib import Path\nhome = Path.home\nprint(home())\n',
             'from pathlib import Path\nprint(Path("~").expanduser())\n',
             'import os\nprint(os.path.expanduser("~"))\n',
             'import os\nfrom pathlib import Path\n'
@@ -2358,6 +2361,13 @@ class Issue79RegressionTests(unittest.TestCase):
             'root = Path.home()\n'
             'if not root.is_absolute():\n'
             '    raise SystemExit("invalid home root")\n',
+            'from pathlib import Path as P\n'
+            'print(P("docs/evidence/g01-recovery-packet.md"))\n',
+            'import pathlib as pl\n'
+            'print(pl.Path("docs/evidence/g01-recovery-packet.md"))\n',
+            'from pathlib import Path as P\n'
+            'is_absolute = P("docs/evidence/g01-recovery-packet.md").is_absolute\n'
+            'if is_absolute():\n    raise SystemExit("unexpected absolute path")\n',
             'from pathlib import Path\n'
             'print(Path("docs/evidence/g01-recovery-packet.md").expanduser())\n',
             'import os\nprint(os.path.expanduser("docs/evidence/g01-recovery-packet.md"))\n',
@@ -2367,6 +2377,38 @@ class Issue79RegressionTests(unittest.TestCase):
         for body in safe:
             with self.subTest(body=body):
                 self.assertIsNone(self.inspect(body))
+
+    def test_current_directory_path_aliases_are_not_disclosed(self) -> None:
+        unsafe = (
+            'from pathlib import Path as P\nprint(P.cwd())\n',
+            'import pathlib as pl\nprint(pl.Path.cwd())\n',
+            'from pathlib import Path\ncwd = Path.cwd\nprint(cwd())\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+        safe = (
+            'from pathlib import Path\n'
+            'cwd = Path.cwd\n'
+            'if not cwd().is_absolute():\n'
+            '    raise SystemExit("invalid working root")\n',
+            'from pathlib import Path as P\n'
+            'print(P("docs/evidence/g01-recovery-packet.md"))\n',
+            'import pathlib as pl\n'
+            'print(pl.Path("docs/evidence/g01-recovery-packet.md"))\n',
+        )
+        for body in safe:
+            with self.subTest(body=body):
+                self.assertIsNone(self.inspect(body))
+
+    def test_named_expression_callable_sink_preserves_environment_taint(self) -> None:
+        self.assertIsNotNone(self.inspect('import os\n(emit := print)(os.environ)\n'))
+        self.assertIsNone(self.inspect('emit = print\nemit("status: reviewed")\n'))
+
+    def test_bash_indirect_environment_expansion_rejects_credential_names(self) -> None:
+        self.assertIsNotNone(self.shell_violation('name=GH_TOKEN; printf "%s\\n" "${!name}"'))
+        self.assertIsNone(self.shell_violation('printf "%s\\n" "status: reviewed"'))
 
     def test_shell_environment_dump_readers_are_rejected(self) -> None:
         for command in (

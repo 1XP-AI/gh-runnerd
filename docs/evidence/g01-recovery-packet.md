@@ -7350,6 +7350,10 @@ shell_parameter = re.compile(
 def shell_sensitive_parameter_violation(tokens):
     """Reject credential-bearing shell parameter expansions in any argument."""
     for token in tokens:
+        for indirect in re.finditer(
+            r"\$\{!([A-Za-z_][A-Za-z0-9_]*)\}", token
+        ):
+            return "indirect shell parameter expansion is not allowed"
         for match in shell_parameter.finditer(token):
             name = match.group(1) or match.group(2)
             if credential_environment_name(name):
@@ -12483,7 +12487,11 @@ def python_path_receiver_expression(node, tree, parents, seen=None):
         return True
     if isinstance(node, ast.Call):
         dotted = python_dotted_name(node.func)
-        module_aliases, constructor_aliases = python_path_constructor_aliases(tree)
+        path_aliases = getattr(tree, "_issue79_path_constructor_aliases", None)
+        if path_aliases is None:
+            path_aliases = python_path_constructor_aliases(tree)
+            tree._issue79_path_constructor_aliases = path_aliases
+        module_aliases, constructor_aliases = path_aliases
         if isinstance(node.func, ast.Name) and node.func.id in constructor_aliases:
             return True
         if (
@@ -13278,12 +13286,78 @@ def python_resolved_local_path_expression(
         return False
     if isinstance(node, ast.Call):
         dotted = python_dotted_name(node.func)
-        if dotted in {
-            "Path.cwd",
-            "pathlib.Path.cwd",
-            "Path.home",
-            "pathlib.Path.home",
-        }:
+        path_aliases = getattr(tree, "_issue79_path_constructor_aliases", None)
+        if path_aliases is None:
+            path_aliases = python_path_constructor_aliases(tree)
+            tree._issue79_path_constructor_aliases = path_aliases
+        module_aliases, constructor_aliases = path_aliases
+        is_path_home = dotted in {"Path.home", "pathlib.Path.home"} or (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "home"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in constructor_aliases
+        ) or (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "home"
+            and isinstance(node.func.value, ast.Attribute)
+            and node.func.value.attr == "Path"
+            and isinstance(node.func.value.value, ast.Name)
+            and node.func.value.value.id in module_aliases
+        )
+        is_path_cwd = dotted in {"Path.cwd", "pathlib.Path.cwd"} or (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "cwd"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in constructor_aliases
+        ) or (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "cwd"
+            and isinstance(node.func.value, ast.Attribute)
+            and node.func.value.attr == "Path"
+            and isinstance(node.func.value.value, ast.Name)
+            and node.func.value.value.id in module_aliases
+        )
+        method_aliases = getattr(
+            tree, "_issue79_path_method_aliases", None
+        )
+        if method_aliases is None:
+            method_aliases = {"home": set(), "cwd": set()}
+            for candidate in ast.walk(tree):
+                if not isinstance(
+                    candidate, (ast.Assign, ast.AnnAssign, ast.NamedExpr)
+                ):
+                    continue
+                targets = (
+                    candidate.targets if isinstance(candidate, ast.Assign)
+                    else [candidate.target]
+                )
+                value = candidate.value
+                if not isinstance(value, ast.Attribute):
+                    continue
+                receiver = value.value
+                is_path_constructor_method = (
+                    isinstance(receiver, ast.Name)
+                    and receiver.id in constructor_aliases
+                ) or (
+                    isinstance(receiver, ast.Attribute)
+                    and receiver.attr == "Path"
+                    and isinstance(receiver.value, ast.Name)
+                    and receiver.value.id in module_aliases
+                )
+                if value.attr in method_aliases and is_path_constructor_method:
+                    method_aliases[value.attr].update(
+                        target.id for target in targets
+                        if isinstance(target, ast.Name)
+                    )
+            tree._issue79_path_method_aliases = method_aliases
+        if isinstance(node.func, ast.Name):
+            is_path_home = is_path_home or (
+                node.func.id in method_aliases["home"]
+            )
+            is_path_cwd = is_path_cwd or (
+                node.func.id in method_aliases["cwd"]
+            )
+        if is_path_home or is_path_cwd:
             return True
         if dotted == "os.path.expanduser" and node.args:
             return any(
@@ -13416,6 +13490,10 @@ def python_sensitive_output_sink(node, tree=None):
         "traceback.print_exc",
         "traceback.print_exception",
     }:
+        return True
+    if isinstance(node.func, ast.NamedExpr) and python_dotted_name(
+        node.func.value
+    ) in {"print", "builtins.print", "sys.exit", "warnings.warn"}:
         return True
     if isinstance(node.func, ast.Name) and tree is not None:
         sink_aliases = getattr(tree, "_issue79_sensitive_output_sink_aliases", None)
@@ -28663,6 +28741,7 @@ as an unsafe witness.
 | 7 | P1 (independent local review; no public URL supplied): `lookup = getattr(launchers, "get")` hid a launcher-bearing mapping lookup. | `test_getattr_mapping_lookup_alias_preserves_launcher_provenance` accepted the subsequent `lookup("x")` and workflow-launcher alias. | Mapping lookup analysis recognizes bounded `getattr` selections and keeps launcher provenance; a map containing `str.upper` remains accepted. |
 | 8 | P1 (independent local review; no public URL supplied): `print(os.fsdecode(Path.cwd().resolve()))` disclosed a resolved local path after filesystem decoding. | `test_home_and_decoded_local_paths_are_not_disclosed` accepted the converted current-directory path. | `os.fsdecode` now preserves resolved-path taint into output sinks; decoding a reviewed repository-relative path remains accepted. |
 | 9 | P2 (independent local review; no public URL supplied): a launcher lookup alias named `lookup` in one function caused a same-named local `str.upper` in another function to be rejected. | `test_mapping_lookup_alias_tracking_respects_function_scopes` returned a violation for the safe sibling function while the launcher alias was unused. | Lookup aliases are keyed by lexical binding and nearest shadowing binding. The sibling `str.upper` case is accepted while an invoked launcher lookup alias remains rejected. |
+| 10 | P1 (coordinator inert AST probe; no public URL supplied): `Path.cwd()` output bypassed resolved-local-path disclosure checks through `Path as P`, `pathlib as pl`, and `cwd = Path.cwd; cwd()`. | `test_current_directory_path_aliases_are_not_disclosed` accepted all three output forms before the correction. | The resolver recognizes imported constructor/module aliases and assigned `cwd` method aliases; internal absolute-path validation and output of a reviewed repository-relative path remain accepted. |
 
 The focused RED command added the seven regression methods before scanner
 changes: `python3 -I -B scripts/evidence_packet/issue79_regression_test.py
@@ -28819,3 +28898,106 @@ executed. No credentials, GitHub API or writes, browser, commit, push, merge,
 workflow, live test, or runner operation was used. This uncommitted correction
 has no final-head Codex review or hosted PR quick check. The offline results do
 not establish runtime behavior or complete the remaining G01 evidence gates.
+
+### Issue #79 PR #103 follow-up: home-path aliases and fresh P1 scanner findings
+
+The path-disclosure extension to `test_home_and_decoded_local_paths_are_not_disclosed`
+was run before the policy change. Its inert RED witnesses showed that `Path as P`,
+`pathlib as pl`, and an assigned `Path.home` callable were accepted; initial
+positive controls that attempted reviewed-file reads were rejected by the separate
+filesystem-read policy, so those controls were narrowed to reviewed relative path
+objects and internal validation before GREEN. The scanner now resolves imported
+Path constructor aliases and assigned `home` method aliases when classifying
+resolved local paths. No specimen was executed.
+
+The coordinator also supplied two exact-head P1 findings from Codex review
+[5336505067](https://github.com/1XP-AI/gh-runnerd/pull/103#pullrequestreview-5336505067):
+[inline Python NamedExpr sink alias](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4120522190)
+and [Bash indirect expansion](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4120522218).
+The new inert regressions failed before correction: both `(emit := print)(os.environ)`
+and `name=GH_TOKEN; printf "%s\\n" "${!name}"` were accepted. The scanner now
+recognizes a direct NamedExpr callable output sink and rejects indirect shell
+parameter expansion fail-closed; literal reviewed output remains accepted.
+
+Focused GREEN command: `python3 -I -B
+scripts/evidence_packet/issue79_regression_test.py
+Issue79RegressionTests.test_home_and_decoded_local_paths_are_not_disclosed
+Issue79RegressionTests.test_named_expression_callable_sink_preserves_environment_taint
+Issue79RegressionTests.test_bash_indirect_environment_expansion_rejects_credential_names`
+ran 3 tests and passed. The first owned full-suite process (PID 95107) ran for
+5m53s at approximately 96–100% CPU before the coordinator sent SIGINT while
+recursively evaluating existing path-alias analysis. It raised
+KeyboardInterrupt and is inconclusive, not passing evidence. Repeated
+computation of Path constructor aliases during path analysis was then cached
+per AST. The completed rerun after that cache fix passed all 69 tests in
+121.498s, with the same 331 shell commands, 95 Python heredoc bodies, and zero
+packet-scan violations.
+
+Rollback removes the three added alias witnesses and safe controls, restores the
+pre-follow-up resolved-path check for `Path.home`, removes the NamedExpr sink and
+indirect-expansion checks, removes the two new P1 regression methods, and removes
+this ledger section. The rollback target is input HEAD
+`1f5f89bc80f09393dbc44f45d20f0141e747005a` plus its existing two-file worktree
+state; do not restore either file wholesale from HEAD because that discards prior
+uncommitted evidence hardening.
+
+#### Completed local verification
+
+The completed `python3 -I -B scripts/evidence_packet/issue79_regression_test.py`
+run passed all 69 tests in 121.498s. Its packet-wide static scan covered 331 shell
+commands and 95 Python heredoc bodies with zero violations. `git diff --check`
+passed, the added-line sensitive-pattern scan found zero credential or personal
+path matches, and `git status --short` listed only the two assigned files. HEAD
+remains `1f5f89bc80f09393dbc44f45d20f0141e747005a`. These are offline scanner
+results only; they do not qualify runtime behavior, complete G01, or substitute
+for exact-final-head Codex review and hosted PR quick checks. No credentials,
+GitHub API or writes, browser, commit, push, merge, workflow, live test, or runner
+operation was used.
+
+The final packet text was then rescanned with
+`python3 -I -B scripts/evidence_packet/issue79_regression_test.py
+Issue79RegressionTests.test_current_packet_has_no_static_scanner_violations`;
+that test passed and again reported 331 shell commands, 95 Python heredoc
+bodies, and zero violations.
+
+### Current-directory path alias finding
+
+An adjacent P1 scanner bypass was reproduced from the coordinator's inert AST
+probes: output of `Path.cwd()` was accepted when the imported constructor was
+aliased (`Path as P`), the module was aliased (`pathlib as pl`), or the bound
+method was assigned (`cwd = Path.cwd; print(cwd())`). The RED command
+`python3 -I -B scripts/evidence_packet/issue79_regression_test.py
+Issue79RegressionTests.test_current_directory_path_aliases_are_not_disclosed`
+ran 1 test and failed with 3 subtest assertion failures in 0.096s. All three
+unsafe forms were accepted before the fix, while the safe absolute-path
+validation and reviewed-relative-path output controls in the same test passed.
+These were scanner inputs only; no specimen was executed and no real current
+directory was read.
+
+The resolver now recognizes `cwd` calls through imported `Path` constructors,
+aliased `pathlib` modules, and assigned method names. `home` and `cwd` method
+aliases share one cached per-AST pass. Focused GREEN command:
+`python3 -I -B scripts/evidence_packet/issue79_regression_test.py
+Issue79RegressionTests.test_current_directory_path_aliases_are_not_disclosed
+Issue79RegressionTests.test_home_and_decoded_local_paths_are_not_disclosed
+Issue79RegressionTests.test_named_expression_callable_sink_preserves_environment_taint
+Issue79RegressionTests.test_bash_indirect_environment_expansion_rejects_credential_names
+Issue79RegressionTests.test_current_packet_has_no_static_scanner_violations`
+ran 5 tests in 46.559s and passed. The packet scan found 331 shell commands and
+95 Python heredoc bodies with zero violations.
+
+The post-cwd complete offline run
+`python3 -I -B scripts/evidence_packet/issue79_regression_test.py` passed all 70
+tests in 123.489s. Its packet-wide static scan found 331 shell commands, 95
+Python heredoc bodies, and zero violations. This is the current completed run;
+the prior 5m53s interrupted attempt remains inconclusive.
+
+To roll back only this cwd-alias correction while preserving the incoming
+two-file worktree changes, remove
+`test_current_directory_path_aliases_are_not_disclosed`, remove cwd recognition
+and the shared `home`/`cwd` method-alias cache from
+`python_resolved_local_path_expression` (restoring the incoming home-alias
+handling), and remove finding 10 and this section. Do not restore either owned
+file wholesale from HEAD; the input worktree already contained unrelated
+uncommitted evidence hardening. The full task input HEAD remains
+`1f5f89bc80f09393dbc44f45d20f0141e747005a`.
