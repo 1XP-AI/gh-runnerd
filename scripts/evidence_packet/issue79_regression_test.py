@@ -267,15 +267,27 @@ def _verification_module(packet: str) -> ast.Module:
 
 
 def _top_level_assignment(module: ast.Module, name: str) -> ast.Assign | ast.AnnAssign:
-    for statement in module.body:
-        if isinstance(statement, ast.Assign) and any(
-            isinstance(target, ast.Name) and target.id == name
-            for target in statement.targets
-        ):
-            return statement
-        if isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name) and statement.target.id == name:
-            return statement
-    raise AssertionError(f"verification template assignment {name!r} is missing")
+    matches = [
+        statement
+        for statement in module.body
+        if (
+            isinstance(statement, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == name
+                for target in statement.targets
+            )
+        )
+        or (
+            isinstance(statement, ast.AnnAssign)
+            and isinstance(statement.target, ast.Name)
+            and statement.target.id == name
+        )
+    ]
+    if len(matches) != 1:
+        raise AssertionError(
+            f"verification template assignment {name!r} is missing or duplicated"
+        )
+    return matches[0]
 
 
 def _literal_assignment_value(statement: ast.Assign | ast.AnnAssign) -> object:
@@ -2270,6 +2282,199 @@ class Issue79RegressionTests(unittest.TestCase):
                 module = ast.parse(source, filename="<loader-specimen-data>")
                 with self.assertRaises(AssertionError):
                     _validated_scanner_statements(module)
+
+    def test_constructor_and_output_sink_aliases_preserve_sensitive_taint(self) -> None:
+        unsafe = (
+            'import os\n'
+            'maker = dict\n'
+            'value = maker(os.environ)\n'
+            'print(value)\n',
+            'import os\n'
+            'emit = print\n'
+            'emit(os.environ)\n',
+            'import os\n'
+            'import warnings\n'
+            'emit = warnings.warn\n'
+            'emit(os.environ)\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+        safe = (
+            'maker = dict\n'
+            'print(maker({"status": "ready"}))\n',
+            'emit = print\n'
+            'emit("reviewed")\n',
+            'import warnings\n'
+            'emit = warnings.warn\n'
+            'emit("reviewed")\n',
+        )
+        for body in safe:
+            with self.subTest(body=body):
+                self.assertIsNone(self.inspect(body))
+
+    def test_assigned_sensitive_constructor_aliases_preserve_taint(self) -> None:
+        unsafe = (
+            'import os\nmaker = list\nvalue = maker(os.environ)\nprint(value)\n',
+            'import os\nmaker = tuple\nvalue = maker(os.environ)\nprint(value)\n',
+            'import os\nmaker = set\nvalue = maker(os.environ)\nprint(value)\n',
+            'import os\nmaker = str\nvalue = maker(os.environ)\nprint(value)\n',
+            'import os\nmaker = repr\nvalue = maker(os.environ)\nprint(value)\n',
+            'import os\nmaker = bytes\n'
+            'value = maker(next(iter(os.environ.values()), "").encode())\n'
+            'print(value)\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+        safe = (
+            'maker = list\nvalue = maker(["status: reviewed"])\nprint(value)\n',
+            'maker = tuple\nvalue = maker(("status: reviewed",))\nprint(value)\n',
+            'maker = set\nvalue = maker({"status: reviewed"})\nprint(value)\n',
+            'maker = str\nvalue = maker("status: reviewed")\nprint(value)\n',
+            'maker = repr\nvalue = maker("status: reviewed")\nprint(value)\n',
+            'maker = bytes\nvalue = maker(b"status: reviewed")\nprint(value)\n',
+        )
+        for body in safe:
+            with self.subTest(body=body):
+                self.assertIsNone(self.inspect(body))
+
+    def test_home_and_decoded_local_paths_are_not_disclosed(self) -> None:
+        unsafe = (
+            'from pathlib import Path\nprint(Path.home())\n',
+            'from pathlib import Path\nprint(Path("~").expanduser())\n',
+            'import os\nprint(os.path.expanduser("~"))\n',
+            'import os\nfrom pathlib import Path\n'
+            'print(os.fsdecode(Path.cwd().resolve()))\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+        safe = (
+            'from pathlib import Path\n'
+            'root = Path.home()\n'
+            'if not root.is_absolute():\n'
+            '    raise SystemExit("invalid home root")\n',
+            'from pathlib import Path\n'
+            'print(Path("docs/evidence/g01-recovery-packet.md").expanduser())\n',
+            'import os\nprint(os.path.expanduser("docs/evidence/g01-recovery-packet.md"))\n',
+            'import os\nfrom pathlib import Path\n'
+            'print(os.fsdecode(Path("docs/evidence/g01-recovery-packet.md").as_posix().encode()))\n',
+        )
+        for body in safe:
+            with self.subTest(body=body):
+                self.assertIsNone(self.inspect(body))
+
+    def test_shell_environment_dump_readers_are_rejected(self) -> None:
+        for command in (
+            'awk \'BEGIN { print ENVIRON["GH_TOKEN"] }\'',
+            'awk \'BEGIN { for (name in ENVIRON) print ENVIRON[name] }\'',
+            'jq -n env',
+            'jq -n \'env.GH_TOKEN\'',
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(self.shell_violation(command))
+
+        for command in (
+            'awk \'BEGIN { print "reviewed" }\'',
+            'jq -n \'"reviewed"\'',
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(self.shell_violation(command))
+
+    def test_jq_environment_object_references_are_rejected(self) -> None:
+        for command in (
+            "jq -n '$ENV'",
+            "jq -n '$ENV.GH_TOKEN'",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(self.shell_violation(command))
+
+        self.assertIsNone(self.shell_violation('jq -n \'"reviewed"\''))
+
+    def test_path_getattr_readers_follow_local_path_and_member_returns(self) -> None:
+        unsafe = (
+            'from pathlib import Path\n'
+            'def private_path():\n'
+            '    return Path("synthetic-private/file")\n'
+            'def reader_name():\n'
+            '    return "read_text"\n'
+            'reader = getattr(private_path(), reader_name())\n'
+            'print(reader())\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+        safe = (
+            'from pathlib import Path\n'
+            'def reader_name():\n'
+            '    return "read_text"\n'
+            'reader = getattr(Path("docs/evidence/g01-recovery-packet.md"), reader_name())\n'
+            'print(reader())\n',
+        )
+        for body in safe:
+            with self.subTest(body=body):
+                self.assertIsNone(self.inspect(body))
+
+    def test_getattr_mapping_lookup_alias_preserves_launcher_provenance(self) -> None:
+        unsafe = (
+            'import subprocess\n'
+            'launchers = {"x": subprocess.run}\n'
+            'lookup = getattr(launchers, "get")\n'
+            'launch = lookup("x")\n'
+            'launch(["gh", "workflow", "run", "ci.yml"])\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+        safe = (
+            'callbacks = {"upper": str.upper}\n'
+            'lookup = getattr(callbacks, "get")\n'
+            'transform = lookup("upper")\n'
+            'transform("reviewed")\n',
+        )
+        for body in safe:
+            with self.subTest(body=body):
+                self.assertIsNone(self.inspect(body))
+
+    def test_mapping_lookup_alias_tracking_respects_function_scopes(self) -> None:
+        safe = (
+            'import subprocess\n'
+            'launchers = {"x": subprocess.run}\n'
+            'def unused_launcher_lookup():\n'
+            '    lookup = launchers.get\n'
+            'def safe_local_lookup():\n'
+            '    lookup = str.upper\n'
+            '    lookup("reviewed")\n',
+        )
+        for body in safe:
+            with self.subTest(body=body):
+                self.assertIsNone(self.inspect(body))
+
+        unsafe = (
+            'import subprocess\n'
+            'launchers = {"x": subprocess.run}\n'
+            'def launcher_lookup():\n'
+            '    lookup = getattr(launchers, "get")\n'
+            '    lookup("x")\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+    def test_reviewed_evidence_path_assignment_must_be_unique(self) -> None:
+        duplicate = ast.parse(
+            'issue79_reviewed_evidence_paths = ("canonical",)\n'
+            'issue79_reviewed_evidence_paths = ("later",)\n',
+            filename="<duplicate-evidence-path-data>",
+        )
+        with self.assertRaises(AssertionError):
+            _top_level_assignment(duplicate, "issue79_reviewed_evidence_paths")
 
     def test_current_packet_has_no_static_scanner_violations(self) -> None:
         matches: list[str] = []

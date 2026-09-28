@@ -8669,11 +8669,25 @@ def awk_command_violation(tokens):
             or token.startswith("--exec=")
             or (token.startswith("--exec") and token != "--exec")
             or re.search(r"\bsystem\s*\(", token)
+            or re.search(r"\bENVIRON\b", token)
             or "getline" in token
             or output_pipe(token)
             or output_redirection(token)
         ):
             return "awk command delegation is not allowed"
+    return None
+
+
+def jq_command_violation(tokens):
+    """Reject jq filters that read inherited environment values."""
+    if not tokens or executable_basename(tokens[0]).casefold() != "jq":
+        return None
+    for token in tokens[1:]:
+        if re.search(
+            r"(?<![A-Za-z0-9_])(?:env(?![A-Za-z0-9_])|\$ENV(?![A-Za-z0-9_]))",
+            token,
+        ):
+            return "jq environment access is not allowed"
     return None
 
 
@@ -8871,6 +8885,9 @@ def forbidden_command(tokens, depth=0):
     reader_path_violation = shell_reader_path_violation(tokens)
     if reader_path_violation:
         return reader_path_violation
+    jq_violation = jq_command_violation(tokens)
+    if jq_violation:
+        return jq_violation
     awk_violation = awk_command_violation(tokens)
     if awk_violation:
         return awk_violation
@@ -9278,6 +9295,35 @@ def python_static_string_values(node, tree):
         ))
 
     return resolve_literal_string_values(node, set())
+
+
+def python_static_string_values_from_local_calls(node, tree, parents, seen=None):
+    """Resolve literal strings returned by visible local helpers without execution."""
+    if node is None:
+        return set()
+    if seen is None:
+        seen = set()
+    if id(node) in seen:
+        return set()
+    seen.add(id(node))
+    values = set(python_static_string_values(node, tree))
+    if isinstance(node, ast.Name):
+        assignments = getattr(tree, "_issue79_string_assignment_index", {})
+        for value in assignments.get(node.id, ()):
+            if isinstance(value, ast.Call):
+                values.update(
+                    python_static_string_values_from_local_calls(
+                        value, tree, parents, seen.copy()
+                    )
+                )
+    elif isinstance(node, ast.Call):
+        for returned in python_local_call_return_values(node, tree, parents):
+            values.update(
+                python_static_string_values_from_local_calls(
+                    returned, tree, parents, seen.copy()
+                )
+            )
+    return values
 
 
 def python_local_call_return_values(call, tree, parents):
@@ -9703,7 +9749,35 @@ def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen
         ):
             key = node.args[0].value if node.args and isinstance(node.args[0], ast.Constant) else None
             return key is None or not isinstance(key, str) or credential_environment_name(key)
-        if dotted == "dict" and any(
+        sensitive_constructors = getattr(
+            tree, "_issue79_sensitive_constructor_names", None
+        )
+        if sensitive_constructors is None:
+            sensitive_constructors = {
+                "dict", "list", "tuple", "set", "str", "bytes", "repr",
+            }
+            tree._issue79_sensitive_constructor_names = sensitive_constructors
+        is_sensitive_constructor = dotted in sensitive_constructors
+        if not is_sensitive_constructor and isinstance(node.func, ast.Name):
+            constructor_aliases = getattr(
+                tree, "_issue79_sensitive_constructor_aliases", None
+            )
+            if constructor_aliases is None:
+                constructor_aliases = {}
+                tree._issue79_sensitive_constructor_aliases = constructor_aliases
+            is_sensitive_constructor = constructor_aliases.get(node.func.id)
+            if is_sensitive_constructor is None:
+                is_sensitive_constructor = any(
+                    python_assigned_callable_alias(
+                        node.func.id, constructor, tree
+                    )
+                    or python_imported_function_alias_is_stable(
+                        node.func.id, "builtins", constructor, tree
+                    )
+                    for constructor in sensitive_constructors
+                )
+                constructor_aliases[node.func.id] = is_sensitive_constructor
+        if is_sensitive_constructor and any(
             python_sensitive_value_expression(
                 value, sensitive_names, tree, parents, seen.copy()
             )
@@ -9752,14 +9826,6 @@ def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen
         if isinstance(node.func, ast.Attribute):
             return python_sensitive_value_expression(
                 node.func.value, sensitive_names, tree, parents, seen.copy()
-            )
-        if dotted in {"dict", "list", "tuple", "set", "str", "bytes", "repr"}:
-            return any(
-                python_sensitive_value_expression(
-                    argument, sensitive_names, tree, parents, seen.copy()
-                )
-                for argument in list(node.args)
-                + [keyword.value for keyword in node.keywords]
             )
     if isinstance(node, (ast.DictComp, ast.ListComp, ast.SetComp, ast.GeneratorExp)):
         if any(
@@ -10675,17 +10741,64 @@ def python_mapping_bindings(tree, modules, functions):
 
 def python_mapping_lookup_alias_violation(tree, mappings):
     """Reject aliases that invoke lookup methods on launcher-bearing maps."""
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
     assignments = []
+    bindings = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
-            assignments.extend((target, node.value) for target in node.targets)
+            for target in node.targets:
+                assignments.append(
+                    (target, node.value, python_enclosing_scope(node, parents))
+                )
         elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)) and node.value is not None:
-            assignments.append((node.target, node.value))
+            assignments.append(
+                (node.target, node.value, python_enclosing_scope(node, parents))
+            )
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            scope = python_enclosing_scope(node, parents)
+            bindings.add((id(scope), node.id))
+        elif isinstance(node, ast.arg):
+            scope = python_enclosing_scope(node, parents)
+            bindings.add((id(scope), node.arg))
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            scope = python_enclosing_scope(parents.get(node), parents)
+            bindings.add((id(scope), node.name))
+        elif isinstance(node, ast.Import):
+            scope = python_enclosing_scope(node, parents)
+            for imported in node.names:
+                bindings.add((id(scope), imported.asname or imported.name.split(".", 1)[0]))
+        elif isinstance(node, ast.ImportFrom):
+            scope = python_enclosing_scope(node, parents)
+            for imported in node.names:
+                bindings.add((id(scope), imported.asname or imported.name))
 
     aliases = {}
+
+    def nearest_binding(name, scope):
+        for visible_scope in python_lexical_scope_chain(scope, parents):
+            key = (id(visible_scope), name)
+            if key in bindings:
+                return key
+        return None
+
+    def launcher_bearing(mapping_name):
+        if mapping_name not in mappings:
+            return False
+        entries, _uncertain = mappings[mapping_name]
+        return any(
+            value in python_command_functions for value in entries.values()
+        ) or any(
+            key.rsplit(".", 1)[-1].lower() in python_command_leaf_names
+            for key in entries
+        )
+
     for _ in range(len(assignments) + 1):
         changed = False
-        for target, value in assignments:
+        for target, value, scope in assignments:
             if not isinstance(target, ast.Name):
                 continue
             mapping_name = None
@@ -10696,29 +10809,43 @@ def python_mapping_lookup_alias_violation(tree, mappings):
                 and value.value.id in mappings
             ):
                 mapping_name = value.value.id
+            elif (
+                isinstance(value, ast.Call)
+                and (
+                    python_dotted_name(value.func) == "getattr"
+                    or (
+                        isinstance(value.func, ast.Name)
+                        and python_assigned_callable_alias(
+                            value.func.id, "getattr", tree
+                        )
+                    )
+                )
+                and len(value.args) in {2, 3}
+                and isinstance(value.args[0], ast.Name)
+                and value.args[0].id in mappings
+                and python_static_string_values_from_local_calls(
+                    value.args[1], tree, parents
+                ) & {"get", "pop", "__getitem__"}
+            ):
+                mapping_name = value.args[0].id
             elif isinstance(value, ast.Name):
-                mapping_name = aliases.get(value.id)
-            if mapping_name is None:
+                source_binding = nearest_binding(value.id, scope)
+                mapping_name = aliases.get(source_binding)
+            target_binding = (id(scope), target.id)
+            if mapping_name is None or not launcher_bearing(mapping_name):
                 continue
-            entries, _uncertain = mappings[mapping_name]
-            launcher_bearing = any(
-                value in python_command_functions for value in entries.values()
-            ) or any(
-                key.rsplit(".", 1)[-1].lower() in python_command_leaf_names
-                for key in entries
-            )
-            if launcher_bearing and aliases.get(target.id) != mapping_name:
-                aliases[target.id] = mapping_name
+            if aliases.get(target_binding) != mapping_name:
+                aliases[target_binding] = mapping_name
                 changed = True
         if not changed:
             break
 
     for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id in aliases
-        ):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        call_scope = python_enclosing_scope(node, parents)
+        binding = nearest_binding(node.func.id, call_scope)
+        if binding in aliases:
             return (
                 "Python unresolved command-capable mapping lookup alias "
                 f"{node.func.id!r} is not allowed on line {node.lineno}"
@@ -12367,7 +12494,12 @@ def python_path_receiver_expression(node, tree, parents, seen=None):
         ):
             return True
         if (
-            dotted in {"Path.cwd", "pathlib.Path.cwd"}
+            dotted in {
+                "Path.cwd",
+                "pathlib.Path.cwd",
+                "Path.home",
+                "pathlib.Path.home",
+            }
             or (
                 isinstance(node.func, ast.Attribute)
                 and node.func.attr == "cwd"
@@ -12383,9 +12515,16 @@ def python_path_receiver_expression(node, tree, parents, seen=None):
             return True
         if (
             isinstance(node.func, ast.Attribute)
-            and node.func.attr in {"joinpath", "resolve"}
+            and node.func.attr in {"expanduser", "joinpath", "resolve"}
         ):
             return python_path_receiver_expression(node.func.value, tree, parents, seen)
+        if any(
+            python_path_receiver_expression(
+                returned, tree, parents, seen.copy()
+            )
+            for returned in python_local_call_return_values(node, tree, parents)
+        ):
+            return True
         return False
     if isinstance(node, ast.Name):
         for candidate in ast.walk(tree):
@@ -13139,8 +13278,18 @@ def python_resolved_local_path_expression(
         return False
     if isinstance(node, ast.Call):
         dotted = python_dotted_name(node.func)
-        if dotted in {"Path.cwd", "pathlib.Path.cwd"}:
+        if dotted in {
+            "Path.cwd",
+            "pathlib.Path.cwd",
+            "Path.home",
+            "pathlib.Path.home",
+        }:
             return True
+        if dotted == "os.path.expanduser" and node.args:
+            return any(
+                value.startswith("~")
+                for value in python_static_string_values(node.args[0], tree)
+            )
         if any(
             python_resolved_local_path_expression(
                 value,
@@ -13187,6 +13336,31 @@ def python_resolved_local_path_expression(
             )
         if (
             isinstance(node.func, ast.Attribute)
+            and node.func.attr == "expanduser"
+            and not node.args
+            and not node.keywords
+        ):
+            receiver = node.func.value
+            if isinstance(receiver, ast.Call) and receiver.args:
+                module_aliases, constructor_aliases = python_path_constructor_aliases(tree)
+                is_path_constructor = (
+                    isinstance(receiver.func, ast.Name)
+                    and receiver.func.id in constructor_aliases
+                ) or (
+                    isinstance(receiver.func, ast.Attribute)
+                    and receiver.func.attr == "Path"
+                    and isinstance(receiver.func.value, ast.Name)
+                    and receiver.func.value.id in module_aliases
+                )
+                if is_path_constructor and any(
+                    value.startswith("~")
+                    for value in python_static_string_values(
+                        receiver.args[0], tree
+                    )
+                ):
+                    return True
+        if (
+            isinstance(node.func, ast.Attribute)
             and node.func.attr == "resolve"
         ):
             return True
@@ -13198,6 +13372,7 @@ def python_resolved_local_path_expression(
             "str",
             "repr",
             "os.fspath",
+            "os.fsdecode",
             "os.path.abspath",
             "os.path.realpath",
         }
@@ -13242,17 +13417,50 @@ def python_sensitive_output_sink(node, tree=None):
         "traceback.print_exception",
     }:
         return True
-    if (
-        isinstance(node.func, ast.Name)
-        and tree is not None
-        and (
-            python_imported_function_alias_is_stable(
-                node.func.id, "sys", "exit", tree
+    if isinstance(node.func, ast.Name) and tree is not None:
+        sink_aliases = getattr(tree, "_issue79_sensitive_output_sink_aliases", None)
+        if sink_aliases is None:
+            targets = (
+                "print",
+                "builtins.print",
+                "sys.exit",
+                "warnings.warn",
+                "warnings.warn_explicit",
+                "traceback.print_exc",
+                "traceback.print_exception",
             )
-            or python_assigned_callable_alias(node.func.id, "sys.exit", tree)
-        )
-    ):
-        return True
+            python_assigned_callable_alias("", targets[0], tree)
+            assignment_index = getattr(tree, "_issue79_callable_alias_index", {})
+            sink_aliases = {
+                name
+                for name in assignment_index
+                if any(
+                    python_assigned_callable_alias(name, target, tree)
+                    for target in targets
+                )
+            }
+            imported_functions = {
+                "builtins": {"print"},
+                "sys": {"exit"},
+                "warnings": {"warn", "warn_explicit"},
+                "traceback": {"print_exc", "print_exception"},
+            }
+            for candidate in ast.walk(tree):
+                if not isinstance(candidate, ast.ImportFrom):
+                    continue
+                for imported in candidate.names:
+                    if imported.name not in imported_functions.get(
+                        candidate.module or "", set()
+                    ):
+                        continue
+                    local_name = imported.asname or imported.name
+                    if python_imported_function_alias_is_stable(
+                        local_name, candidate.module, imported.name, tree
+                    ):
+                        sink_aliases.add(local_name)
+            tree._issue79_sensitive_output_sink_aliases = sink_aliases
+        if node.func.id in sink_aliases:
+            return True
     return (
         isinstance(node.func, ast.Attribute)
         and node.func.attr.casefold() in python_sensitive_sink_methods
@@ -14827,7 +15035,9 @@ def python_path_reader_aliases(tree, parents):
             and len(value.args) in {2, 3}
         ):
             receivers = []
-            for method in python_static_string_values(value.args[1], tree):
+            for method in python_static_string_values_from_local_calls(
+                value.args[1], tree, parents
+            ):
                 attribute = ast.Attribute(
                     value=value.args[0], attr=method, ctx=ast.Load()
                 )
@@ -14888,7 +15098,9 @@ def python_unresolved_path_getattr_violation(tree, parents):
             and len(node.args) in {2, 3}
         ):
             continue
-        if python_static_string_values(node.args[1], tree):
+        if python_static_string_values_from_local_calls(
+            node.args[1], tree, parents
+        ):
             continue
         if python_path_receiver_expression(node.args[0], tree, parents):
             return (
@@ -28427,3 +28639,183 @@ were used. This self-review finding has no public URL; the local correction
 has no final-head GitHub Codex review or hosted PR quick check. These results
 cover the requested offline AST and packet-static behavior only; they do not
 establish runtime behavior or complete the remaining G01 evidence gates.
+
+### Issue #79 PR #103 correction from exact review `5335553432`
+
+This correction starts from clean HEAD
+`2c755af9dca8c44f902ad82879010743da2cc62c`. The supplied [Codex review
+5335553432](https://github.com/1XP-AI/gh-runnerd/pull/103#pullrequestreview-5335553432)
+reported five inline P1 findings and no new issue-comment findings. All five
+were triaged as blocking. The three additional local P1 findings below had no
+public URLs supplied; the local P2 scope false positive was fixed because the
+correction stayed bounded to lexical alias resolution. Every Python and shell
+specimen below was inert scanner input; none was evaluated, compiled, or run
+as an unsafe witness.
+
+| # | Finding and immutable URL | RED evidence against input HEAD | Correction and safe control |
+|---|---|---|---|
+| 1 | P1 [Codex comment 4119824482](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4119824482): `maker = dict; value = maker(os.environ); print(value)` lost environment taint through a constructor alias. | `test_constructor_and_output_sink_aliases_preserve_sensitive_taint` accepted the aliased `dict` result at `print`. | Taint follows assigned and imported aliases of `dict`; an aliased copy of a literal status mapping remains accepted. |
+| 2 | P1 [Codex comment 4119824487](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4119824487): aliases of output sinks such as `emit = print; emit(os.environ)` and `warnings.warn` were not classified as sinks. | The same focused test accepted both `print` and `warnings.warn` aliases carrying `os.environ`. | Known output-sink assignment/import aliases are resolved once per AST; literal status messages through the same aliases remain accepted. |
+| 3 | P1 [Codex comment 4119824492](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4119824492): output of `Path.home()`, `Path("~").expanduser()`, or `os.path.expanduser("~")` could disclose the home path. | `test_home_and_decoded_local_paths_are_not_disclosed` accepted all three home-path forms. | Home-path sources and literal tilde expansion are tainted for output checks. Internal validation of `Path.home()` and output of a relative repository path after `expanduser()` remain accepted. |
+| 4 | P1 [Codex comment 4119824497](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4119824497): `awk` could print `ENVIRON["GH_TOKEN"]` and `jq -n env` could dump the inherited environment. | `test_shell_environment_dump_readers_are_rejected` returned no violation for either supplied command; a second AWK environment iteration and `jq env.GH_TOKEN` were also RED. | The scanner rejects AWK `ENVIRON` access and jq filter tokens containing the `env` filter. Literal-only AWK and jq filters remain accepted. These commands were passed only to the tokenizer/scanner and never executed. |
+| 5 | P1 [Codex comment 4119824501](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4119824501): the harness's first-match assignment helper could verify a canonical evidence path list while Python runtime honored a later duplicate assignment. | `test_reviewed_evidence_path_assignment_must_be_unique` failed because `_top_level_assignment` returned the first of two inert top-level assignments. Direct inspection of the input packet found one actual `issue79_reviewed_evidence_paths` declaration; the harness's duplicate-source guard was still missing. | `_top_level_assignment` now requires exactly one top-level declaration. The existing parity test also checks the canonical two-path value and use order, so a future duplicate fails the harness before it can bless the first value. |
+| 6 | P1 (independent local review; no public URL supplied): a local helper returning a private `Path` plus a helper-returned `getattr` member name (`read_text`) bypassed filesystem-reader checks. | `test_path_getattr_readers_follow_local_path_and_member_returns` accepted the two inert helper returns followed by a `getattr` reader. | Static literal-string analysis follows visible local return expressions and Path receiver analysis follows local helper returns; the same computed member on the reviewed packet path remains accepted. |
+| 7 | P1 (independent local review; no public URL supplied): `lookup = getattr(launchers, "get")` hid a launcher-bearing mapping lookup. | `test_getattr_mapping_lookup_alias_preserves_launcher_provenance` accepted the subsequent `lookup("x")` and workflow-launcher alias. | Mapping lookup analysis recognizes bounded `getattr` selections and keeps launcher provenance; a map containing `str.upper` remains accepted. |
+| 8 | P1 (independent local review; no public URL supplied): `print(os.fsdecode(Path.cwd().resolve()))` disclosed a resolved local path after filesystem decoding. | `test_home_and_decoded_local_paths_are_not_disclosed` accepted the converted current-directory path. | `os.fsdecode` now preserves resolved-path taint into output sinks; decoding a reviewed repository-relative path remains accepted. |
+| 9 | P2 (independent local review; no public URL supplied): a launcher lookup alias named `lookup` in one function caused a same-named local `str.upper` in another function to be rejected. | `test_mapping_lookup_alias_tracking_respects_function_scopes` returned a violation for the safe sibling function while the launcher alias was unused. | Lookup aliases are keyed by lexical binding and nearest shadowing binding. The sibling `str.upper` case is accepted while an invoked launcher lookup alias remains rejected. |
+
+The focused RED command added the seven regression methods before scanner
+changes: `python3 -I -B scripts/evidence_packet/issue79_regression_test.py
+Issue79RegressionTests.test_constructor_and_output_sink_aliases_preserve_sensitive_taint
+Issue79RegressionTests.test_home_and_decoded_local_paths_are_not_disclosed
+Issue79RegressionTests.test_shell_environment_dump_readers_are_rejected
+Issue79RegressionTests.test_path_getattr_readers_follow_local_path_and_member_returns
+Issue79RegressionTests.test_getattr_mapping_lookup_alias_preserves_launcher_provenance
+Issue79RegressionTests.test_mapping_lookup_alias_tracking_respects_function_scopes
+Issue79RegressionTests.test_reviewed_evidence_path_assignment_must_be_unique`
+ran 7 tests and failed with 16 assertion failures. The unsafe cases were
+accepted; the P2 safe-scope control was rejected. After the minimal corrections,
+the same seven-test command passed. An additional home-path safe-control
+refinement was checked by rerunning `test_home_and_decoded_local_paths_are_not_disclosed`;
+it passed with ordinary relative `expanduser()` output still allowed.
+
+The final `python3 -I -B scripts/evidence_packet/issue79_regression_test.py`
+run passed all 65 tests in 158.666 seconds. Its packet-wide static scan covered
+331 shell commands and 95 Python heredoc bodies with zero violations. The first
+whole-suite attempt was interrupted after the static test remained active for
+over six minutes; its traceback showed imported-sink alias checks repeatedly
+walking the same AST. The resolver now caches the alias set per AST, and the
+completed full rerun above passed.
+
+Rollback target is the clean input HEAD
+`2c755af9dca8c44f902ad82879010743da2cc62c`; restoring only these two owned
+paths to that commit reverses this correction and leaves all committed work
+intact. No other path was edited. Final hygiene results are recorded below.
+No unsafe Python or shell witness was executed. The authorized harness did run
+its existing isolated standard-library shadowing check and synthetic local Git
+fixtures. No credentials, GitHub API or writes, browser, commit, push, merge,
+workflow, live test, or runner operation was used. The supplied review applies
+to the input SHA; this local correction has no final-head Codex review or
+hosted PR quick check. These offline AST and packet-static results do not prove
+runtime behavior or complete the remaining G01 evidence gates.
+
+#### Final correction hygiene
+
+After the final packet-wide static scan, `git diff --check` exited 0 and the
+added-line credential/private-machine-path scan returned zero matches. The
+only modified paths are this packet and
+`scripts/evidence_packet/issue79_regression_test.py`. No commit or push was
+made.
+
+### Issue #79 PR #103 local self-review: jq `$ENV`
+
+Independent local self-review reproduced a P1 scanner bypass: the new
+`jq_command_violation` rejected `jq -n env` but accepted `jq -n '$ENV'` and
+`jq -n '$ENV.GH_TOKEN'`. jq's `$ENV` is an environment object. No public
+finding URL was supplied. The coordinator triaged this as blocking and
+reproduced it by passing each command string only through `shlex.split` and
+`forbidden_command`; neither command was executed.
+
+The inert regression `test_jq_environment_object_references_are_rejected`
+was added first. Before the scanner change,
+`python3 -I -B scripts/evidence_packet/issue79_regression_test.py
+Issue79RegressionTests.test_jq_environment_object_references_are_rejected`
+ran 1 test and failed with 2 assertion failures: both `$ENV` forms returned
+no violation. The safe literal filter in the same test remained accepted.
+
+The bounded correction now recognizes a `$ENV` token with identifier
+boundaries alongside the existing `env` filter check. The focused GREEN
+command,
+`python3 -I -B scripts/evidence_packet/issue79_regression_test.py
+Issue79RegressionTests.test_jq_environment_object_references_are_rejected
+Issue79RegressionTests.test_shell_environment_dump_readers_are_rejected`,
+ran 2 tests in 0.093s and passed. This covered both `$ENV` forms, the safe
+literal jq filter, the existing jq `env` cases, AWK `ENVIRON` readers, and
+their safe literal controls. These results concern scanner input only.
+
+Rollback for this follow-up removes only the new jq regression method, restores
+the jq matcher to its pre-follow-up `env`-only expression, and removes this
+self-review entry. The rollback target is the input HEAD
+`2c755af9dca8c44f902ad82879010743da2cc62c` plus the full pre-existing
+uncommitted two-file batch. Restoring either file from HEAD would discard that
+batch and is not the rollback for this follow-up.
+
+The prior interrupted suite attempt recorded in the preserved batch ledger is
+inconclusive and is not counted as passing evidence. The full-suite result for
+this follow-up is recorded after its completed run below.
+
+#### Follow-up verification
+
+After recording this self-review, `python3 -I -B
+scripts/evidence_packet/issue79_regression_test.py` completed with 66 tests
+passing in 159.614s. The final packet static scan covered 331 shell commands
+and 95 Python heredoc bodies with zero violations. `git diff --check` exited 0.
+The added-line scan found zero credential-pattern and personal/private-path
+matches. `git status --short` lists only this packet and
+`scripts/evidence_packet/issue79_regression_test.py`; HEAD remains
+`2c755af9dca8c44f902ad82879010743da2cc62c`. The earlier interrupted run
+remains inconclusive; this completed run is separate evidence. No credentials,
+GitHub API access or writes, browser, commit, push, merge, workflow, live test,
+or runner operation was used. This local correction has no final-head Codex
+review or hosted PR quick check and does not establish runtime behavior or
+complete the remaining G01 evidence gates.
+
+### Issue #79 PR #103 local self-review: assigned constructor aliases
+
+This P1 self-review follows up on the immutable [Codex finding
+4119824482](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4119824482),
+which identified aliases of the environment-preserving constructors. The
+preceding correction recognized an assigned `dict` alias, while assigned
+`list`, `tuple`, `set`, `str`, and `repr` aliases still lost taint when their
+results were stored before reaching an output sink. No separate public URL was
+supplied for this local reproduction. The direct nested `print(maker(...))`
+shape was already rejected; these specimens used an intermediate `value`.
+
+The inert regression `test_assigned_sensitive_constructor_aliases_preserve_taint`
+was added before the scanner correction. Its RED command,
+`python3 -I -B scripts/evidence_packet/issue79_regression_test.py
+Issue79RegressionTests.test_assigned_sensitive_constructor_aliases_preserve_taint`,
+ran 1 test and failed with 6 assertion failures: all five reported aliases and
+an aliased `bytes` conversion were accepted at `print(value)`. The bytes case
+uses `maker(next(iter(os.environ.values()), "").encode())`, which is a valid
+conversion to bytes; all specimens were scanner input only. The six literal
+status controls in the same test passed.
+
+The bounded fix now propagates sensitive arguments through the existing
+constructor set (`dict`, `list`, `tuple`, `set`, `str`, `bytes`, and `repr`)
+when called directly or through an assigned/stable `builtins` alias. Alias
+resolution is cached on the AST. The focused GREEN command,
+`python3 -I -B scripts/evidence_packet/issue79_regression_test.py
+Issue79RegressionTests.test_assigned_sensitive_constructor_aliases_preserve_taint
+Issue79RegressionTests.test_constructor_and_output_sink_aliases_preserve_sensitive_taint
+Issue79RegressionTests.test_sensitive_local_helper_returns_are_tainted_at_output_sinks
+Issue79RegressionTests.test_sensitive_return_through_factory_created_instance_is_tainted
+Issue79RegressionTests.test_sensitive_method_and_lambda_returns_are_tainted`,
+ran 5 test methods in 0.110s and passed, including the safe controls and
+adjacent constructor, helper-return, and sink cases.
+
+The full `python3 -I -B scripts/evidence_packet/issue79_regression_test.py`
+offline suite then passed all 67 tests in 122.046s. Its packet-wide static scan
+covered 331 shell commands and 95 Python heredoc bodies with zero violations.
+No specimen was executed as code.
+
+Rollback for this self-review removes only the new regression method, restores
+the constructor check in `python_sensitive_value_expression` to the exact
+pre-follow-up behavior, and removes this ledger section. The rollback target is
+the state immediately before this follow-up: input HEAD
+`2c755af9dca8c44f902ad82879010743da2cc62c` plus the full existing uncommitted
+two-file batch, including its jq `$ENV` correction and earlier ledger entries.
+Do not restore either owned file from HEAD; that would discard the full batch.
+
+#### Final local verification and limits
+
+The final `git diff --check` exited 0, and the added-line credential/private-
+path scan found zero matches. The complete offline suite and packet-wide scan
+results above are the completed runs; the earlier interrupted attempt remains
+inconclusive and is not counted. Only this packet and
+`scripts/evidence_packet/issue79_regression_test.py` are modified, and HEAD
+remains `2c755af9dca8c44f902ad82879010743da2cc62c`. No unsafe specimen was
+executed. No credentials, GitHub API or writes, browser, commit, push, merge,
+workflow, live test, or runner operation was used. This uncommitted correction
+has no final-head Codex review or hosted PR quick check. The offline results do
+not establish runtime behavior or complete the remaining G01 evidence gates.
