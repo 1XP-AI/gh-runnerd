@@ -9261,6 +9261,15 @@ def python_static_string_values(node, tree):
     def resolve_literal_string_values(value, seen):
         if isinstance(value, ast.Constant) and isinstance(value.value, str):
             return {value.value}
+        if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add):
+            left = resolve_literal_string_values(value.left, seen.copy())
+            right = resolve_literal_string_values(value.right, seen.copy())
+            if not left or not right or len(left) * len(right) > 16:
+                return set()
+            combined = {first + second for first in left for second in right}
+            return {
+                candidate for candidate in combined if len(candidate) <= 256
+            }
         if not isinstance(value, ast.Name) or value.id in seen:
             return set()
         return set().union(*(
@@ -9360,7 +9369,10 @@ def python_local_call_return_values(call, tree, parents):
             elif isinstance(value, ast.Name) and value.id not in seen_names:
                 seen_names.add(value.id)
                 if value.id != "self":
-                    for scope in visible_scopes:
+                    binding_scopes = set(python_lexical_scope_chain(
+                        python_enclosing_scope(value, parents), parents
+                    )) or visible_scopes
+                    for scope in binding_scopes:
                         for assignment in assignments_by_scope.get(
                             (id(scope), value.id), ()
                         ):
@@ -9440,6 +9452,24 @@ def python_local_class_alias_names(name, method_name, scopes, methods_by_scope, 
     """Resolve scoped class-name aliases for known local method receivers."""
     found = set()
 
+    def visit_expression(expression, seen):
+        if isinstance(expression, ast.Name):
+            visit(expression.id, set(seen))
+        elif isinstance(expression, ast.IfExp):
+            visit_expression(expression.body, set(seen))
+            visit_expression(expression.orelse, set(seen))
+        elif (
+            isinstance(expression, ast.Subscript)
+            and isinstance(expression.value, (ast.List, ast.Tuple))
+        ):
+            index = expression.slice
+            if isinstance(index, ast.Index):
+                index = index.value
+            if isinstance(index, ast.Constant) and type(index.value) is int:
+                elements = expression.value.elts
+                if -len(elements) <= index.value < len(elements):
+                    visit_expression(elements[index.value], set(seen))
+
     def visit(candidate, seen):
         if candidate in seen:
             return
@@ -9452,8 +9482,7 @@ def python_local_class_alias_names(name, method_name, scopes, methods_by_scope, 
             return
         for scope in scopes:
             for assigned in assignments_by_scope.get((id(scope), candidate), ()):
-                if isinstance(assigned, ast.Name):
-                    visit(assigned.id, set(seen))
+                visit_expression(assigned, set(seen))
 
     visit(name, set())
     return found
@@ -9564,8 +9593,20 @@ def python_local_bound_method_candidates(name, call, tree, parents):
                         ))
                     if len(value.args) == 3 and isinstance(value.args[2], ast.Name):
                         found.extend(methods(value.args[2].id, set(seen)))
+                    elif len(value.args) == 3 and isinstance(value.args[2], ast.Attribute):
+                        found.extend(python_local_method_candidates(
+                            value.args[2], call, tree, parents
+                        ))
                 elif isinstance(value, ast.Name):
                     found.extend(methods(value.id, set(seen)))
+                elif isinstance(value, ast.Call):
+                    for returned in python_local_call_return_values(
+                        value, tree, parents
+                    ):
+                        if isinstance(returned, ast.Attribute):
+                            found.extend(python_local_method_candidates(
+                                returned, call, tree, parents
+                            ))
         return found
 
     return methods(name, set())
@@ -10630,6 +10671,59 @@ def python_mapping_bindings(tree, modules, functions):
         if not changed:
             break
     return mappings
+
+
+def python_mapping_lookup_alias_violation(tree, mappings):
+    """Reject aliases that invoke lookup methods on launcher-bearing maps."""
+    assignments = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            assignments.extend((target, node.value) for target in node.targets)
+        elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)) and node.value is not None:
+            assignments.append((node.target, node.value))
+
+    aliases = {}
+    for _ in range(len(assignments) + 1):
+        changed = False
+        for target, value in assignments:
+            if not isinstance(target, ast.Name):
+                continue
+            mapping_name = None
+            if (
+                isinstance(value, ast.Attribute)
+                and value.attr in {"get", "pop", "__getitem__"}
+                and isinstance(value.value, ast.Name)
+                and value.value.id in mappings
+            ):
+                mapping_name = value.value.id
+            elif isinstance(value, ast.Name):
+                mapping_name = aliases.get(value.id)
+            if mapping_name is None:
+                continue
+            entries, _uncertain = mappings[mapping_name]
+            launcher_bearing = any(
+                value in python_command_functions for value in entries.values()
+            ) or any(
+                key.rsplit(".", 1)[-1].lower() in python_command_leaf_names
+                for key in entries
+            )
+            if launcher_bearing and aliases.get(target.id) != mapping_name:
+                aliases[target.id] = mapping_name
+                changed = True
+        if not changed:
+            break
+
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in aliases
+        ):
+            return (
+                "Python unresolved command-capable mapping lookup alias "
+                f"{node.func.id!r} is not allowed on line {node.lineno}"
+            )
+    return None
 
 
 def python_mapping_command(node, mappings, modules, functions):
@@ -13107,9 +13201,15 @@ def python_resolved_local_path_expression(
             "os.path.abspath",
             "os.path.realpath",
         }
-        if dotted not in path_preserving_calls and not (
+        aliased_ascii = (
+            isinstance(node.func, ast.Name)
+            and python_assigned_callable_alias(node.func.id, "ascii", tree)
+        )
+        if dotted not in path_preserving_calls and not aliased_ascii and not (
             isinstance(node.func, ast.Attribute)
-            and node.func.attr in {"__str__", "as_posix", "as_uri"}
+            and node.func.attr in {
+                "__fspath__", "__str__", "as_posix", "as_uri", "decode", "encode"
+            }
         ):
             return False
     return any(
@@ -13707,8 +13807,10 @@ def python_reviewed_markdown_link_target_path(node, tree, parents):
         )
         for candidate in ast.walk(link_loop)
     )
-    target_path_assignment = any(
-        isinstance(candidate, ast.Assign)
+    target_path_assignments = [
+        candidate
+        for candidate in ast.walk(link_loop)
+        if isinstance(candidate, ast.Assign)
         and candidate.end_lineno < node.lineno
         and any(
             isinstance(target, ast.Name) and target.id == "path"
@@ -13727,28 +13829,94 @@ def python_reviewed_markdown_link_target_path(node, tree, parents):
         and candidate.value.func.value.left.value.id == "source"
         and isinstance(candidate.value.func.value.right, ast.Name)
         and candidate.value.func.value.right.id == "target"
-        for candidate in ast.walk(link_loop)
+    ]
+    target_path_assignment = bool(target_path_assignments)
+    reviewed_path_bindings = {
+        target: assignment
+        for assignment in target_path_assignments
+        for target in assignment.targets
+        if isinstance(target, ast.Name) and target.id == "path"
+    }
+    path_bindings = sorted(
+        (
+            candidate
+            for candidate in ast.walk(link_loop)
+            if isinstance(candidate, ast.Name)
+            and candidate.id == "path"
+            and isinstance(candidate.ctx, (ast.Store, ast.Del))
+            and python_enclosing_scope(candidate, parents)
+            is python_enclosing_scope(node, parents)
+        ),
+        key=lambda candidate: (candidate.lineno, candidate.col_offset),
     )
+
+    def source_position(candidate):
+        return candidate.lineno, candidate.col_offset
+
+    def containing_suite(statement):
+        parent = parents.get(statement)
+        if parent is None:
+            return None
+        for field in ("body", "orelse", "finalbody"):
+            suite = getattr(parent, field, None)
+            if isinstance(suite, list) and any(item is statement for item in suite):
+                return parent, field
+        return None
+
     guarded = False
     for candidate in ast.walk(link_loop):
         if not isinstance(candidate, ast.Try) or candidate.end_lineno >= node.lineno:
             continue
-        checks_repository_root = any(
-            isinstance(call, ast.Call)
-            and python_dotted_name(call.func) == "path.relative_to"
-            and len(call.args) == 1
-            and isinstance(call.args[0], ast.Name)
-            and call.args[0].id == "repository_root"
+        containment_checks = [
+            statement.value
             for statement in candidate.body
-            for call in ast.walk(statement)
-        )
+            if isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Call)
+            and isinstance(statement.value.func, ast.Attribute)
+            and statement.value.func.attr == "relative_to"
+            and isinstance(statement.value.func.value, ast.Name)
+            and statement.value.func.value.id == "path"
+            and len(statement.value.args) == 1
+            and isinstance(statement.value.args[0], ast.Name)
+            and statement.value.args[0].id == "repository_root"
+        ]
+        checks_repository_root = bool(containment_checks)
         skips_outside_paths = any(
             isinstance(handler.type, ast.Name)
             and handler.type.id == "ValueError"
-            and any(isinstance(statement, ast.Continue) for statement in handler.body)
+            and any(
+                isinstance(statement, ast.Continue) for statement in handler.body
+            )
             for handler in candidate.handlers
         )
-        if checks_repository_root and skips_outside_paths:
+        if containment_checks:
+            containment_position = source_position(containment_checks[0])
+            latest_bindings = [
+                binding
+                for binding in path_bindings
+                if source_position(binding) < containment_position
+            ]
+            latest_binding = latest_bindings[-1] if latest_bindings else None
+            reviewed_assignment = reviewed_path_bindings.get(latest_binding)
+            same_suite_as_target = (
+                reviewed_assignment is not None
+                and containing_suite(candidate)
+                == containing_suite(reviewed_assignment)
+            )
+            no_later_path_rebind = not any(
+                containment_position < source_position(binding) < source_position(node)
+                for binding in path_bindings
+            )
+        else:
+            same_suite_as_target = False
+            no_later_path_rebind = False
+        if (
+            checks_repository_root
+            and skips_outside_paths
+            and same_suite_as_target
+            and no_later_path_rebind
+            and not python_try_in_unreachable_if_body(candidate, parents)
+        ):
             guarded = True
             break
     return (
@@ -13924,6 +14092,42 @@ def python_regex_match_receiver(node, tree, seen=None):
     regex_compile_functions = {}
     assignments = {}
     iterable_bindings = {}
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+
+    def shadowed_by_parameter(value):
+        if not isinstance(value, ast.Name):
+            return False
+        current = value
+        while current in parents:
+            current = parents[current]
+            if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                parameters = (
+                    list(current.args.posonlyargs)
+                    + list(current.args.args)
+                    + list(current.args.kwonlyargs)
+                )
+                if current.args.vararg is not None:
+                    parameters.append(current.args.vararg)
+                if current.args.kwarg is not None:
+                    parameters.append(current.args.kwarg)
+                return any(parameter.arg == value.id for parameter in parameters)
+            if isinstance(current, ast.Lambda):
+                parameters = (
+                    list(current.args.posonlyargs)
+                    + list(current.args.args)
+                    + list(current.args.kwonlyargs)
+                )
+                if current.args.vararg is not None:
+                    parameters.append(current.args.vararg)
+                if current.args.kwarg is not None:
+                    parameters.append(current.args.kwarg)
+                return any(parameter.arg == value.id for parameter in parameters)
+        return False
+
     for candidate in ast.walk(tree):
         if isinstance(candidate, ast.Import):
             for alias in candidate.names:
@@ -14021,6 +14225,8 @@ def python_regex_match_receiver(node, tree, seen=None):
             return False
         visited.add(id(value))
         if isinstance(value, ast.Name):
+            if shadowed_by_parameter(value):
+                return False
             candidates = tuple(assignments.get(value.id, ())) + tuple(
                 iterable_bindings.get(value.id, ())
             )
@@ -14064,6 +14270,11 @@ def python_regex_match_receiver(node, tree, seen=None):
 
 def python_sensitive_read_violation(tree, parents):
     """Reject environment/credential reads and unreviewed file read sinks."""
+    unresolved_path_getattr = python_unresolved_path_getattr_violation(
+        tree, parents
+    )
+    if unresolved_path_getattr:
+        return unresolved_path_getattr
     sensitive_names = python_sensitive_value_names(tree, parents)
     credential_reader_aliases = python_credential_reader_aliases(tree)
     path_reader_aliases = python_path_reader_aliases(tree, parents)
@@ -14604,7 +14815,15 @@ def python_path_reader_aliases(tree, parents):
             return [value.value]
         if (
             isinstance(value, ast.Call)
-            and python_dotted_name(value.func) == "getattr"
+            and (
+                python_dotted_name(value.func) == "getattr"
+                or (
+                    isinstance(value.func, ast.Name)
+                    and python_assigned_callable_alias(
+                        value.func.id, "getattr", tree
+                    )
+                )
+            )
             and len(value.args) in {2, 3}
         ):
             receivers = []
@@ -14650,6 +14869,33 @@ def python_path_reader_aliases(tree, parents):
         if not changed:
             break
     return aliases
+
+
+def python_unresolved_path_getattr_violation(tree, parents):
+    """Fail closed when getattr selects an unknown member from a Path receiver."""
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and (
+                python_dotted_name(node.func) == "getattr"
+                or (
+                    isinstance(node.func, ast.Name)
+                    and python_assigned_callable_alias(
+                        node.func.id, "getattr", tree
+                    )
+                )
+            )
+            and len(node.args) in {2, 3}
+        ):
+            continue
+        if python_static_string_values(node.args[1], tree):
+            continue
+        if python_path_receiver_expression(node.args[0], tree, parents):
+            return (
+                "Python getattr has an unresolved member on a Path receiver "
+                f"on line {node.lineno}"
+            )
+    return None
 
 
 def python_open_read_violation(tree, parents):
@@ -14710,6 +14956,9 @@ def inspect_python_heredoc(body, safe_marker):
     if import_path_mutation_violation:
         return import_path_mutation_violation
     mappings = python_mapping_bindings(tree, modules, functions)
+    mapping_lookup_violation = python_mapping_lookup_alias_violation(tree, mappings)
+    if mapping_lookup_violation:
+        return mapping_lookup_violation
     literal_bindings = python_literal_bindings(tree)
     dynamic_bindings, unresolved_dynamic_bindings = python_dynamic_execution_bindings(tree)
     parents = {
@@ -28011,3 +28260,170 @@ this packet, the offline issue #79 harness, and ADR 0004. No commit, push,
 merge, workflow dispatch, runner access, credential operation, live test,
 browser use, or GitHub write was performed. This local evidence does not claim
 final-head GitHub Codex review or hosted PR quick-check completion.
+
+### Issue #79 PR #103 follow-up on starting head a61c35fb8ad7a1425e363a8fcfc6f5748eaa5029
+
+This bounded offline correction preserves the packet's AST scanner contract.
+It does not emulate Python execution: specimens are parsed inert strings, and
+the fixes follow only literal mapping aliases, local helper-returned bound
+methods, bounded literal class aliases, resolved-path conversions, and
+statically resolvable getattr names. The independent local review source was
+gpt-6-luna / max, read-only inspection of the workspace diff, with no public
+review URL supplied.
+
+| # | Severity and scanner contract | RED witness against the starting worktree | Fail-closed correction and safe control |
+|---|---|---|---|
+| 1 | P1: command-launcher provenance must survive a mapping lookup alias chain so a workflow launcher cannot be hidden from command policy. | launchers.get assigned to lookup, copied to lookup2, then called to produce subprocess.run; the final gh workflow run was accepted. | Calls through aliases of lookup methods on launcher-bearing maps are rejected as unresolved. A similarly aliased str.upper callback remains accepted. |
+| 2 | P1: environment and credential values must not reach output sinks through a local callback. | make_callback returned C.emit; calling the resulting alias with os.environ reached print(value) without taint. | Local helper-returned bound methods are resolved for parameter taint. Passing a literal status mapping through the same callback remains accepted. |
+| 3 | P1: resolved local paths must not be disclosed to output sinks after path/string conversion. | convert = ascii, Path.cwd().resolve().__fspath__(), and Path.cwd().resolve().as_posix().encode().decode() each returned no violation. | Path provenance now follows the tested ascii alias, __fspath__, as_posix, encode, and decode calls. The same conversions on a reviewed repository path remain accepted. |
+| 4 | P1: a method returning environment data must remain tainted through a class alias selected by literal container indexing or a conditional. | Alias = (Snapshot,)[0] and Alias = Snapshot if flag else Snapshot both hid dict(os.environ) from the output check. | Class alias tracing follows bounded tuple/list indexing and both IfExp branches. The regression also selects between sensitive Snapshot and safe Status classes; safe status aliases remain accepted. |
+| 5 | P1: filesystem reads from paths outside reviewed roots must remain rejected through getattr aliases. | read_text assembled from literal strings hid Path("synthetic-private/file").read_text; an unresolved member and an alias of getattr also returned no violation. | Literal concatenation resolves to the reviewed reader policy. getattr on a Path-like receiver with no bounded static member name fails closed, including a statically assigned getattr alias. The reviewed packet reader selected with literal concatenation remains accepted. |
+
+The first focused RED command added the five regression methods before scanner
+edits:
+
+~~~text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py Issue79RegressionTests.test_mapping_lookup_method_alias_chain_preserves_launcher_provenance Issue79RegressionTests.test_factory_returned_bound_method_receives_sensitive_argument Issue79RegressionTests.test_resolved_paths_keep_taint_through_protocol_and_byte_conversions Issue79RegressionTests.test_container_and_conditional_class_aliases_preserve_return_taint Issue79RegressionTests.test_concatenated_getattr_path_reader_is_rejected
+Ran 5 tests in 0.097s; failed with 8 assertion failures across the unsafe specimens. The safe controls passed.
+~~~
+
+After the independent reviewer flagged unresolved and aliased getattr member
+forms, each added inert specimen produced a separate RED with one assertion
+failure because the scanner returned None. The conditional-class control was
+strengthened to select between the sensitive Snapshot and safe Status classes.
+The final focused GREEN command was:
+
+~~~text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py Issue79RegressionTests.test_mapping_lookup_method_alias_chain_preserves_launcher_provenance Issue79RegressionTests.test_factory_returned_bound_method_receives_sensitive_argument Issue79RegressionTests.test_resolved_paths_keep_taint_through_protocol_and_byte_conversions Issue79RegressionTests.test_container_and_conditional_class_aliases_preserve_return_taint Issue79RegressionTests.test_concatenated_getattr_path_reader_is_rejected
+Ran 5 tests in 0.098s; passed, including safe callback, status, reviewed-path, and internal-validation controls.
+~~~
+
+An intermediate complete run before the unresolved-member and getattr-alias
+follow-ups ran 54 tests and passed. Its packet scan covered 331 shell commands
+and 95 Python heredoc bodies with zero violations. Final verification of the
+amended ledger and scanner is recorded below.
+
+The read-only independent review classified the five supplied shapes as P1
+under existing command, sensitive-output, and unreviewed-file rules. It
+identified the unresolved and aliased getattr forms; both were added with
+bounded fail-closed checks and inert regression coverage. This is independent
+local review evidence, not GitHub Codex review of a final pushed head.
+
+Rollback target is the exact starting worktree snapshot at
+a61c35fb8ad7a1425e363a8fcfc6f5748eaa5029. Reversing this uncommitted batch
+restores only the two owned paths. No ADR change was needed.
+
+#### Final local verification
+
+On this amended worktree, python3 -I -B
+scripts/evidence_packet/issue79_regression_test.py ran 54 tests in 233.883
+seconds and passed. Its packet-wide static scan covered 331 shell commands
+and 95 Python heredoc bodies with zero violations. The focused five-method
+rerun also passed in 0.098 seconds after the final getattr-alias correction.
+git -P diff --check exited 0. The added-line pattern scan found no
+credential-shaped values or personal home paths, and only the two owned paths
+are modified.
+
+The independent gpt-6-luna / max read-only local review confirmed the final
+getattr-alias correction is bounded, checked the final evidence entry, and
+found the supplied scanner bypasses closed by static inspection. It ran no
+tests or specimens and supplied no public review URL. No final-head GitHub
+Codex review or hosted PR quick check is claimed. No commit, push, merge,
+browser, workflow, live specimen, runner, or credential operation occurred.
+A separate static-only rerun after appending the follow-up evidence entry ran
+1 test in 121.094 seconds and passed with 331 shell commands and 95 Python
+heredoc bodies scanned, zero violations.
+
+### Issue #79 PR #103 correction from exact review `5334901335`
+
+The correction starts from HEAD `a61c35fb8ad7a1425e363a8fcfc6f5748eaa5029`
+with the pre-existing uncommitted five-P1 batch preserved in these same two
+owned files. The supplied exact-head Codex review reported two P1 inline
+findings and no new issue-comment findings. Both P1s were triaged as blocking;
+their public inline threads remain open pending review of a future pushed
+candidate. No GitHub read or write was performed during this local correction.
+Every Python witness below is an inert string parsed and inspected by the AST
+scanner, never compiled, evaluated, or launched.
+
+| # | Finding and immutable review URL | RED against the starting worktree | Correction and retained safe control |
+|---|---|---|---|
+| 1 | P1 [Codex comment 4119319614](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4119319614): the Markdown local-link exemption accepted `path.relative_to(repository_root)` hidden under `if False` inside `try`, allowing later file and anchor checks to inspect an out-of-root target. | `test_markdown_link_containment_guard_must_be_direct_and_reachable` failed because the scanner approved a `relative_to` call nested under `if False`; the same test also checks a try hidden beneath an unreachable branch. | Count only a direct `path.relative_to(repository_root)` expression in a try that shares the path-assignment suite, skips `ValueError` directly, and is not under a literal-unreachable branch. The canonical Markdown checker guard remains reviewed. |
+| 2 | P1 [Codex comment 4119319626](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4119319626): the regex `.group()` exemption resolved receiver names globally and treated a shadowing function parameter as a regex match. | `test_regex_group_exemption_respects_shadowing_parameters` failed because a function parameter named `match` inherited a module-level `re.match` exemption. | Regex receiver tracing refuses the exemption when the receiver name is a function or lambda parameter. A canonical imported `re.match(...).group(0)` receiver remains accepted. |
+| 3 | Local P1 (no public URL supplied): `print(build().read())` lost sensitive-value taint when `build` returned a `Snapshot` instance from a local assignment and `Snapshot.read` returned `dict(os.environ)`. | `test_sensitive_return_through_factory_created_instance_is_tainted` failed because the scanner returned no violation. | Method-return tracing resolves assignments in the lexical scope that produced the returned receiver, then follows its class method return. A factory-created status object remains accepted. |
+| 4 | Local P1 (no public URL supplied): `callback = getattr(sink, "missing", sink.emit); callback(os.environ)` lost method parameter taint through the `getattr` default bound method. | `test_getattr_default_bound_method_taints_sensitive_arguments` failed because the scanner returned no violation. | Bound-method tracing includes an attribute supplied as the `getattr` default. The same callback invoked with a literal status mapping remains accepted. |
+| 5 | P2 harness documentation: its module docstring said Git was the only child-process kind, while the existing import-isolation test also launches an isolated Python probe. | Direct source inspection of the docstring and `test_isolated_invocation_ignores_synthetic_local_module` confirmed the stale statement; no behavior test was needed for this documentation-only correction. | The docstring now records both temporary local Git commands and the isolated `sys.executable -I -B -c` standard-library shadowing probe. |
+
+The focused RED command added the four AST tests before scanner edits:
+`python3 -I -B scripts/evidence_packet/issue79_regression_test.py Issue79RegressionTests.test_markdown_link_containment_guard_must_be_direct_and_reachable Issue79RegressionTests.test_regex_group_exemption_respects_shadowing_parameters Issue79RegressionTests.test_sensitive_return_through_factory_created_instance_is_tainted Issue79RegressionTests.test_getattr_default_bound_method_taints_sensitive_arguments` ran 4 tests in 0.092s and failed with 4 assertions. The four unsafe witnesses were accepted; safe controls are in the same methods. The Markdown method stops at its first failing unsafe assertion in RED; after correction its rerun exercised both unreachable forms and the canonical positive.
+
+The same focused command after the minimal scanner changes ran 4 tests in
+0.092s and passed. A broader focused rerun including the existing filesystem
+reader, sensitive method/lambda, tainted parameter, and package-guard cases
+ran 8 tests in 12.623s and passed. No unsafe source snippet was executed.
+
+The rollback target is the pre-correction worktree snapshot: HEAD
+`a61c35fb8ad7a1425e363a8fcfc6f5748eaa5029` plus the preserved uncommitted
+five-P1 batch. Reversal removes only this follow-up's four tests, scanner
+changes, and docstring edit while retaining that batch; restoring the clean
+HEAD files would incorrectly discard the pre-existing work. No ADR change was
+needed. Final full-suite and hygiene results follow.
+
+#### Final local verification
+
+`python3 -I -B scripts/evidence_packet/issue79_regression_test.py` ran 58
+tests in 236.487s and passed. Its packet-wide static scan covered 331 shell
+commands and 95 Python heredoc bodies with zero violations. `git diff --check`
+exited 0. The added-line credential and personal-path scan found no matches,
+and `git status --short` lists only the packet and offline regression harness.
+
+No unsafe Python or shell specimen was evaluated, compiled, or launched. The
+pre-existing isolated `-I -B -c` standard-library probe and temporary local
+Git fixtures ran as part of the harness. No credential, GitHub API/write,
+browser, commit, push, merge, workflow, live specimen, or runner operation was
+performed. Codex review `5334901335` applies to input HEAD `a61c35f`; this
+uncommitted correction has no final-head Codex review or hosted PR quick check.
+The two P1 threads therefore still require a future exact-head review before
+merge. These results establish only the tested offline static-AST behavior;
+they do not establish runtime behavior or complete the remaining G01 evidence
+gates.
+
+### Issue #79 PR #103 local self-review follow-up
+
+This follow-up preserves the prior nine P1 corrections, the harness docstring
+correction, and their packet ledger. The additional local self-review finding
+has no public review URL. Every witness is an inert AST specimen; no unsafe
+source is evaluated, compiled, or launched.
+
+| # | Finding and URL | RED against the pre-follow-up worktree | Correction and safe control |
+|---|---|---|---|
+| 1 | P1 (self-review; no public URL supplied): the Markdown-link exemption certified `path.is_file()` after `path` was rebound to `Path("synthetic-private/file")`. A containment `try` placed before the approved resolved-path assignment also certified the later read. | `test_markdown_link_containment_guard_must_be_direct_and_reachable` retained the canonical safe control and added both mutations. `python3 -I -B scripts/evidence_packet/issue79_regression_test.py Issue79RegressionTests.test_markdown_link_containment_guard_must_be_direct_and_reachable` ran 1 test and failed with 2 subtest assertion failures: both unsafe variants were accepted. | Track `path` bindings in the read's lexical scope. The `relative_to(repository_root)` guard must follow the reviewed resolved-path binding, and no later `path` binding may occur before the file check. The canonical guard and existing unreachable-guard negatives remain covered. |
+
+The same focused command after the fix ran 1 test in 0.091s and passed. This
+exercised the canonical positive, both existing unreachable-guard negatives,
+the later-rebinding negative, and the guard-before-assignment negative.
+
+Rollback is to the exact pre-follow-up worktree snapshot: HEAD
+`a61c35fb8ad7a1425e363a8fcfc6f5748eaa5029` plus the preserved uncommitted
+nine-P1 batch, harness docstring correction, and packet ledger. Reversal must
+remove only this follow-up's scanner change, regression additions, and ledger
+entry; restoring either owned file from clean HEAD would discard prior work.
+No ADR change was needed. Final full-suite and hygiene results follow.
+
+#### Final local verification
+
+`python3 -I -B scripts/evidence_packet/issue79_regression_test.py`
+ran 58 tests in 236.197s and passed. Its packet-wide static scan covered 331
+shell commands and 95 Python heredoc bodies with zero violations. The focused
+Markdown guard test passed in 0.091s after the fix. `git diff --check` exited
+0. Added-line credential-token and personal-machine-path scans found no
+matches. `git status --short` lists only the packet and offline regression
+harness.
+
+No unsafe Python or shell specimen was evaluated, compiled, or launched. The
+existing isolated `-I -B -c` standard-library probe and temporary local Git
+fixtures ran as part of the harness. No credentials, GitHub API or writes,
+browser, commit, push, merge, workflow, live specimen, or runner operation
+were used. This self-review finding has no public URL; the local correction
+has no final-head GitHub Codex review or hosted PR quick check. These results
+cover the requested offline AST and packet-static behavior only; they do not
+establish runtime behavior or complete the remaining G01 evidence gates.

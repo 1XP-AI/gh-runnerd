@@ -1,9 +1,10 @@
 """Offline, non-executing regression probes for issue #79 review findings.
 
 Python examples and shell commands supplied to the packet scanner remain data:
-the harness parses/inspects them but never evaluates or launches them. The only
-child processes created below are literal Git commands against temporary local
-repositories owned by these tests.
+the harness parses/inspects them but never evaluates or launches them. Child
+processes are limited to literal Git commands against temporary local
+repositories and an isolated ``sys.executable -I -B -c`` probe that verifies a
+synthetic local module cannot shadow a standard-library import.
 """
 
 from __future__ import annotations
@@ -501,6 +502,158 @@ class Issue79RegressionTests(unittest.TestCase):
     def inspect(self, code: str) -> str | None:
         return self.scanner["inspect_python_heredoc"](code, False)  # type: ignore[operator]
 
+    def markdown_link_target_path_is_reviewed(self, code: str) -> bool:
+        tree = ast.parse(code, filename="<markdown-link-check-specimen>")
+        parents = {
+            child: parent
+            for parent in ast.walk(tree)
+            for child in ast.iter_child_nodes(parent)
+        }
+        path = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Name)
+            and node.id == "path"
+            and isinstance(parents.get(node), ast.Attribute)
+            and parents[node].attr == "is_file"
+        )
+        return self.scanner["python_reviewed_markdown_link_target_path"](
+            path, tree, parents
+        )  # type: ignore[operator]
+
+    def test_markdown_link_containment_guard_must_be_direct_and_reachable(self) -> None:
+        canonical = (
+            'import subprocess\n'
+            'from pathlib import Path\n'
+            'files = subprocess.check_output(["git", "ls-files", "*.md"], text=True).splitlines()\n'
+            'repository_root = Path.cwd().resolve()\n'
+            'for name in files:\n'
+            '    source = Path(name)\n'
+            '    markdown = source.read_text(encoding="utf-8")\n'
+            '    for match in link.finditer(markdown):\n'
+            '        target = match.group(1).strip().strip("<>")\n'
+            '        if target.startswith("#"):\n'
+            '            path, fragment = source, target[1:]\n'
+            '        else:\n'
+            '            target, separator, fragment = target.partition("#")\n'
+            '            path = (source.parent / target).resolve()\n'
+            '            try:\n'
+            '                path.relative_to(repository_root)\n'
+            '            except ValueError:\n'
+            '                continue\n'
+            '        if not path.is_file():\n'
+            '            errors.append(target)\n'
+        )
+        nested_relative_to = canonical.replace(
+            '                path.relative_to(repository_root)\n',
+            '                if False:\n'
+            '                    path.relative_to(repository_root)\n',
+            1,
+        )
+        unreachable_try = canonical.replace(
+            '            try:\n'
+            '                path.relative_to(repository_root)\n'
+            '            except ValueError:\n'
+            '                continue\n',
+            '            if False:\n'
+            '                try:\n'
+            '                    path.relative_to(repository_root)\n'
+            '                except ValueError:\n'
+            '                    continue\n',
+            1,
+        )
+        path_rebound_after_guard = canonical.replace(
+            '        if not path.is_file():\n',
+            '        path = Path("synthetic-private/file")\n'
+            '        if not path.is_file():\n',
+            1,
+        )
+        guard_before_approved_path_assignment = canonical.replace(
+            '            path = (source.parent / target).resolve()\n'
+            '            try:\n'
+            '                path.relative_to(repository_root)\n'
+            '            except ValueError:\n'
+            '                continue\n',
+            '            try:\n'
+            '                path.relative_to(repository_root)\n'
+            '            except ValueError:\n'
+            '                continue\n'
+            '            path = (source.parent / target).resolve()\n',
+            1,
+        )
+        self.assertNotEqual(canonical, nested_relative_to)
+        self.assertNotEqual(canonical, unreachable_try)
+        self.assertNotEqual(canonical, path_rebound_after_guard)
+        self.assertNotEqual(canonical, guard_before_approved_path_assignment)
+        self.assertTrue(self.markdown_link_target_path_is_reviewed(canonical))
+        self.assertFalse(self.markdown_link_target_path_is_reviewed(nested_relative_to))
+        self.assertFalse(self.markdown_link_target_path_is_reviewed(unreachable_try))
+        for specimen in (
+            path_rebound_after_guard,
+            guard_before_approved_path_assignment,
+        ):
+            with self.subTest(specimen=specimen):
+                self.assertFalse(self.markdown_link_target_path_is_reviewed(specimen))
+
+    def test_regex_group_exemption_respects_shadowing_parameters(self) -> None:
+        shadowed = (
+            'import re\n'
+            'match = re.match("x", "x")\n'
+            'def render(match):\n'
+            '    print(match.group())\n'
+        )
+        canonical = (
+            'import re\n'
+            'match = re.match("x", "x")\n'
+            'print(match.group(0))\n'
+        )
+        self.assertIsNotNone(self.inspect(shadowed))
+        self.assertIsNone(self.inspect(canonical))
+
+    def test_sensitive_return_through_factory_created_instance_is_tainted(self) -> None:
+        unsafe = (
+            'import os\n'
+            'class Snapshot:\n'
+            '    def read(self):\n'
+            '        return dict(os.environ)\n'
+            'def build():\n'
+            '    instance = Snapshot()\n'
+            '    return instance\n'
+            'print(build().read())\n'
+        )
+        safe = (
+            'class Snapshot:\n'
+            '    def read(self):\n'
+            '        return {"status": "ready"}\n'
+            'def build():\n'
+            '    instance = Snapshot()\n'
+            '    return instance\n'
+            'print(build().read())\n'
+        )
+        self.assertIsNotNone(self.inspect(unsafe))
+        self.assertIsNone(self.inspect(safe))
+
+    def test_getattr_default_bound_method_taints_sensitive_arguments(self) -> None:
+        unsafe = (
+            'import os\n'
+            'class Sink:\n'
+            '    def emit(self, value):\n'
+            '        print(value)\n'
+            'sink = Sink()\n'
+            'callback = getattr(sink, "missing", sink.emit)\n'
+            'callback(os.environ)\n'
+        )
+        safe = (
+            'class Sink:\n'
+            '    def emit(self, value):\n'
+            '        print(value)\n'
+            'sink = Sink()\n'
+            'callback = getattr(sink, "missing", sink.emit)\n'
+            'callback({"status": "ready"})\n'
+        )
+        self.assertIsNotNone(self.inspect(unsafe))
+        self.assertIsNone(self.inspect(safe))
+
     def package_directory_guard_is_reviewed(self, code: str) -> bool:
         tree = ast.parse(code, filename="<package-containment-specimen>")
         parents = {
@@ -643,6 +796,68 @@ class Issue79RegressionTests(unittest.TestCase):
             'print("reviewed".__str__())\n'
         )
         self.assertIsNone(self.inspect(safe_formatting))
+
+    def test_resolved_paths_keep_taint_through_protocol_and_byte_conversions(self) -> None:
+        unsafe = (
+            'from pathlib import Path\n'
+            'convert = ascii\n'
+            'print(convert(Path.cwd().resolve()))\n',
+            'from pathlib import Path\n'
+            'print(Path.cwd().resolve().__fspath__())\n',
+            'from pathlib import Path\n'
+            'print(Path.cwd().resolve().as_posix().encode().decode())\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+        safe = (
+            'from pathlib import Path\n'
+            'convert = ascii\n'
+            'print(convert(Path("docs/evidence/g01-recovery-packet.md")))\n',
+            'from pathlib import Path\n'
+            'print(Path("docs/evidence/g01-recovery-packet.md").__fspath__())\n',
+            'from pathlib import Path\n'
+            'print(Path("docs/evidence/g01-recovery-packet.md").as_posix().encode().decode())\n',
+        )
+        for body in safe:
+            with self.subTest(body=body):
+                self.assertIsNone(self.inspect(body))
+
+    def test_concatenated_getattr_path_reader_is_rejected(self) -> None:
+        unsafe = (
+            'from pathlib import Path\n'
+            'member = "read_" + "text"\n'
+            'reader = getattr(Path("synthetic-private/file"), member)\n'
+            'print(reader())\n',
+            'from pathlib import Path\n'
+            'member = "read_" + suffix\n'
+            'reader = getattr(Path("synthetic-private/file"), member)\n'
+            'print(reader())\n',
+            'from pathlib import Path\n'
+            'lookup = getattr\n'
+            'member = "read_" + suffix\n'
+            'reader = lookup(Path("synthetic-private/file"), member)\n'
+            'print(reader())\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+        safe = (
+            'from pathlib import Path\n'
+            'member = "read_" + "text"\n'
+            'reader = getattr(Path("docs/evidence/g01-recovery-packet.md"), member)\n'
+            'print(reader())\n',
+            'from pathlib import Path\n'
+            'lookup = getattr\n'
+            'member = "read_" + "text"\n'
+            'reader = lookup(Path("docs/evidence/g01-recovery-packet.md"), member)\n'
+            'print(reader())\n',
+        )
+        for body in safe:
+            with self.subTest(body=body):
+                self.assertIsNone(self.inspect(body))
 
     def test_nested_function_name_collision_does_not_hide_launcher_alias(self) -> None:
         body = (
@@ -826,6 +1041,72 @@ class Issue79RegressionTests(unittest.TestCase):
             '    return instance\n'
             'sink = build()\n'
             'sink.emit({"status": "reviewed"})\n',
+        )
+        for body in safe:
+            with self.subTest(body=body):
+                self.assertIsNone(self.inspect(body))
+
+    def test_factory_returned_bound_method_receives_sensitive_argument(self) -> None:
+        unsafe = (
+            'import os\n'
+            'class C:\n'
+            '    def emit(self, value):\n'
+            '        print(value)\n'
+            'def make_callback():\n'
+            '    return C().emit\n'
+            'callback = make_callback()\n'
+            'callback(os.environ)\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+        safe = (
+            'class C:\n'
+            '    def emit(self, value):\n'
+            '        print(value)\n'
+            'def make_callback():\n'
+            '    return C().emit\n'
+            'callback = make_callback()\n'
+            'callback({"status": "reviewed"})\n',
+        )
+        for body in safe:
+            with self.subTest(body=body):
+                self.assertIsNone(self.inspect(body))
+
+    def test_container_and_conditional_class_aliases_preserve_return_taint(self) -> None:
+        unsafe = (
+            'import os\n'
+            'class Snapshot:\n'
+            '    def read(self):\n'
+            '        return dict(os.environ)\n'
+            'Alias = (Snapshot,)[0]\n'
+            'print(Alias().read())\n',
+            'import os\n'
+            'class Snapshot:\n'
+            '    def read(self):\n'
+            '        return dict(os.environ)\n'
+            'class Status:\n'
+            '    def read(self):\n'
+            '        return {"status": "reviewed"}\n'
+            'Alias = Snapshot if flag else Status\n'
+            'print(Alias().read())\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+        safe = (
+            'class StatusSnapshot:\n'
+            '    def read(self):\n'
+            '        return {"status": "reviewed"}\n'
+            'Alias = (StatusSnapshot,)[0]\n'
+            'print(Alias().read())\n',
+            'class StatusSnapshot:\n'
+            '    def read(self):\n'
+            '        return {"status": "reviewed"}\n'
+            'Alias = StatusSnapshot if flag else StatusSnapshot\n'
+            'print(Alias().read())\n',
         )
         for body in safe:
             with self.subTest(body=body):
@@ -1386,6 +1667,30 @@ class Issue79RegressionTests(unittest.TestCase):
             'transform("reviewed")\n'
         )
         self.assertIsNone(self.inspect(safe))
+
+    def test_mapping_lookup_method_alias_chain_preserves_launcher_provenance(self) -> None:
+        unsafe = (
+            'import subprocess\n'
+            'launchers = {"x": subprocess.run}\n'
+            'lookup = launchers.get\n'
+            'lookup2 = lookup\n'
+            'launch = lookup2("x")\n'
+            'launch(["gh", "workflow", "run", "ci.yml"])\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+        safe = (
+            'callbacks = {"upper": str.upper}\n'
+            'lookup = callbacks.get\n'
+            'lookup2 = lookup\n'
+            'transform = lookup2("upper")\n'
+            'transform("reviewed")\n',
+        )
+        for body in safe:
+            with self.subTest(body=body):
+                self.assertIsNone(self.inspect(body))
 
     def test_isolated_invocation_ignores_synthetic_local_module(self) -> None:
         with tempfile.TemporaryDirectory(prefix="issue79-python-isolation-") as root:
