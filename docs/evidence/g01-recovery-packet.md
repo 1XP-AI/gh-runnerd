@@ -7375,9 +7375,7 @@ shell_parameter = re.compile(
 def shell_sensitive_parameter_violation(tokens):
     """Reject credential-bearing shell parameter expansions in any argument."""
     for token in tokens:
-        for indirect in re.finditer(
-            r"\$\{!([A-Za-z_][A-Za-z0-9_]*)\}", token
-        ):
+        if "${!" in token:
             return "indirect shell parameter expansion is not allowed"
         for match in shell_parameter.finditer(token):
             name = match.group(1) or match.group(2)
@@ -7390,7 +7388,7 @@ def shell_sensitive_parameter_violation(tokens):
                 )
     return None
 
-def shell_record_sensitive_assignments(tokens):
+def shell_record_sensitive_assignments(tokens, preserve_existing=False):
     """Track credential aliases across assignment-only shell commands."""
     for token in tokens:
         if not assignment.fullmatch(token):
@@ -7404,7 +7402,7 @@ def shell_record_sensitive_assignments(tokens):
         )
         if sensitive:
             shell_sensitive_variable_names.add(name)
-        else:
+        elif not preserve_existing:
             shell_sensitive_variable_names.discard(name)
 
 def fence_details(line):
@@ -7584,8 +7582,16 @@ def shell_commands(markdown):
         command = " ".join(pending)
         if shell_quote_pending(command):
             continue
-        for segment in shell_token_segments(command):
-            shell_record_sensitive_assignments(segment)
+        segments, operators = shell_segments_with_operators(command)
+        for index, segment in enumerate(segments):
+            previous_operator = operators[index - 1] if index else None
+            next_operator = operators[index] if index < len(operators) else None
+            preserve_existing = previous_operator in {"&&", "||", "|", "&"} or (
+                index == 0 and next_operator == "|"
+            )
+            shell_record_sensitive_assignments(
+                segment, preserve_existing=preserve_existing
+            )
         unsafe_heredocs = non_python_heredoc_delimiters(command)
         if unsafe_heredocs:
             raise SystemExit(
@@ -7599,6 +7605,11 @@ def shell_commands(markdown):
                 not any(
                     shell_command_substitution(segment)
                     for segment in shell_token_segments(command)
+                )
+                and not any(
+                    "${!" in token
+                    for segment in shell_token_segments(command)
+                    for token in segment
                 )
                 and not shell_process_substitution(command)
             ):
@@ -7696,19 +7707,25 @@ def python_heredoc_bodies(markdown):
             + ": unterminated heredoc body"
         )
 
-def shell_token_segments(command):
+def shell_segments_with_operators(command):
     try:
         lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
         lexer.whitespace_split = True
         tokens = list(lexer)
     except ValueError:
-        return []
+        return [], []
     segments = [[]]
+    operators = []
     for token in tokens:
         if token in {";", "&&", "||", "|", "&"}:
+            operators.append(token)
             segments.append([])
         else:
             segments[-1].append(token)
+    return segments, operators
+
+def shell_token_segments(command):
+    segments, _operators = shell_segments_with_operators(command)
     return [segment for segment in segments if segment]
 
 def shell_assignment_only(command):
@@ -8181,11 +8198,15 @@ git_read_only_subcommands = {
 git_config_read_only_options = {
     "--get",
     "--get-all",
-    "--get-regexp",
     "--get-urlmatch",
-    "--name-only",
+    "--get-regexp",
 }
 git_config_bounded_regexp_queries = {r"^filter\."}
+git_config_reviewed_query_keys = {
+    "--get": {"core.repositoryformatversion"},
+    "--get-all": {"remote.origin.url"},
+    "--get-urlmatch": {"http.sslverify"},
+}
 git_config_mutating_options = {
     "--add",
     "--blob",
@@ -8202,8 +8223,8 @@ git_config_mutating_options = {
 }
 
 
-def git_subcommand(tokens):
-    """Return the first Git subcommand after global/config options."""
+def git_subcommand_index(tokens):
+    """Return the first Git subcommand index after global/config options."""
     index = 1
     while index < len(tokens):
         token = tokens[index]
@@ -8224,8 +8245,13 @@ def git_subcommand(tokens):
         if token.startswith("-"):
             index += 1
             continue
-        return executable_basename(token)
+        return index
     return None
+
+def git_subcommand(tokens):
+    """Return the first Git subcommand after global/config options."""
+    index = git_subcommand_index(tokens)
+    return executable_basename(tokens[index]) if index is not None else None
 
 
 def git_config_include_key(key):
@@ -8405,7 +8431,8 @@ def git_read_only_violation(tokens):
         if tokens[index:] != ["ls-remote", "."]:
             return "Git ls-remote is restricted to the literal local repository form"
     if subcommand == "config":
-        options = tokens[1:]
+        config_index = git_subcommand_index(tokens)
+        options = tokens[config_index + 1:] if config_index is not None else []
         if any(
             option in {"--global", "-g", "--system", "-s", "--worktree", "--show-origin", "--show-scope"}
             for option in options
@@ -8417,13 +8444,31 @@ def git_read_only_violation(tokens):
             for mutating in git_config_mutating_options
         ):
             return "Git config mutation is not allowed"
-        if not any(option in git_config_read_only_options for option in options):
+        if options.count("--local") > 1:
+            return "Git config query scope is duplicated"
+        query = [option for option in options if option != "--local"]
+        if not query or query[0] not in git_config_read_only_options:
             return "Git config query must use an approved read-only option"
-        for index, option in enumerate(options):
-            if option == "--get-regexp":
-                pattern = options[index + 1] if index + 1 < len(options) else None
-                if "--local" not in options or pattern not in git_config_bounded_regexp_queries:
-                    return "Git config regex query is not a bounded local query"
+        query_option = query[0]
+        operands = query[1:]
+        if query_option == "--get-regexp":
+            if (
+                "--local" not in options
+                or len(operands) != 1
+                or operands[0] not in git_config_bounded_regexp_queries
+            ):
+                return "Git config regex query is not a bounded local query"
+        elif query_option in git_config_reviewed_query_keys:
+            expected_operands = 1 if query_option in {"--get", "--get-all"} else 2
+            if (
+                len(operands) != expected_operands
+                or operands[0] not in git_config_reviewed_query_keys[query_option]
+            ):
+                return "Git config query key is not in the reviewed allowlist"
+            if query_option == "--get-urlmatch" and not operands[1].startswith("https://"):
+                return "Git config URL-match query requires a literal HTTPS URL"
+        else:
+            return "Git config query must use an approved read-only option"
     return None
 
 
@@ -9831,6 +9876,39 @@ def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen
         )
     if isinstance(node, ast.Call):
         dotted = python_dotted_name(node.func)
+        if python_reviewed_string_join_callable(node.func, tree) and any(
+            python_sensitive_join_argument(
+                value, sensitive_names, tree, parents, seen.copy()
+            )
+            for value in list(node.args)
+            + [keyword.value for keyword in node.keywords]
+        ):
+            return True
+        if isinstance(node.func, ast.Name) and (
+            node.func.id == "format"
+            or python_assigned_format_alias(node.func.id, tree)
+        ):
+            local_format_callables = python_local_function_candidates(
+                node.func.id, node, tree, parents
+            ) + python_local_lambda_candidates(node.func.id, node, tree, parents)
+            if local_format_callables:
+                sensitive_return = any(
+                    python_sensitive_value_expression(
+                        value, sensitive_names, tree, parents, seen.copy()
+                    )
+                    for value in python_local_call_return_values(
+                        node, tree, parents
+                    )
+                )
+                if not sensitive_return:
+                    safe_local_format_calls = getattr(
+                        tree, "_issue79_safe_local_format_calls", None
+                    )
+                    if safe_local_format_calls is None:
+                        safe_local_format_calls = set()
+                        tree._issue79_safe_local_format_calls = safe_local_format_calls
+                    safe_local_format_calls.add(id(node))
+                return sensitive_return
         if dotted in {"format", "builtins.format"} or (
             isinstance(node.func, ast.Name)
             and python_assigned_format_alias(node.func.id, tree)
@@ -9941,17 +10019,7 @@ def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen
             sensitive_receiver = python_sensitive_value_expression(
                 node.func.value, sensitive_names, tree, parents, seen.copy()
             )
-            sensitive_join_values = node.func.attr == "join" and any(
-                isinstance(value, ast.Call)
-                and isinstance(value.func, ast.Attribute)
-                and value.func.attr in {"values", "items"}
-                and python_sensitive_value_expression(
-                    value, sensitive_names, tree, parents, seen.copy()
-                )
-                for value in list(node.args)
-                + [keyword.value for keyword in node.keywords]
-            )
-            return sensitive_receiver or sensitive_join_values
+            return sensitive_receiver
     if isinstance(node, (ast.DictComp, ast.ListComp, ast.SetComp, ast.GeneratorExp)):
         if any(
             isinstance(candidate, ast.Call)
@@ -9981,6 +10049,109 @@ def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen
         )
     return False
 
+def python_unshadowed_builtin_call(node, names, tree):
+    if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+        return False
+    if node.func.id not in names:
+        return False
+    for candidate in ast.walk(tree):
+        if isinstance(candidate, ast.Name) and candidate.id == node.func.id and isinstance(candidate.ctx, ast.Store):
+            return False
+        if isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and candidate.name == node.func.id:
+            return False
+        if isinstance(candidate, ast.arg) and candidate.arg == node.func.id:
+            return False
+    return True
+
+def python_join_assignment_index(tree):
+    """Cache local assignments used by literal joins and their value aliases."""
+    assignments = getattr(tree, "_issue79_join_alias_index", None)
+    if assignments is None:
+        assignments = {}
+        for candidate in ast.walk(tree):
+            if isinstance(candidate, ast.Assign):
+                targets = candidate.targets
+            elif isinstance(candidate, (ast.AnnAssign, ast.NamedExpr)):
+                targets = [candidate.target]
+            else:
+                continue
+            for target in targets:
+                if isinstance(target, ast.Name) and candidate.value is not None:
+                    assignments.setdefault(target.id, []).append(candidate.value)
+        tree._issue79_join_alias_index = assignments
+    return assignments
+
+def python_reviewed_string_join_callable(value, tree, seen=None):
+    """Resolve literal-string join receivers and their local callable aliases."""
+    if seen is None:
+        seen = set()
+    if isinstance(value, ast.Attribute) and value.attr == "join":
+        receiver = value.value
+        if python_static_string_values(receiver, tree):
+            return True
+        return (
+            python_unshadowed_builtin_call(receiver, {"str"}, tree)
+            and not receiver.args
+            and not receiver.keywords
+        )
+    if not isinstance(value, ast.Name) or value.id in seen:
+        return False
+    return any(
+        python_reviewed_string_join_callable(candidate, tree, seen | {value.id})
+        for candidate in python_join_assignment_index(tree).get(value.id, ())
+    )
+
+def python_sensitive_join_argument(node, sensitive_names, tree, parents, seen=None):
+    """Track environment value/item iterators through reviewed join wrappers."""
+    if seen is None:
+        seen = set()
+    if id(node) in seen:
+        return False
+    seen.add(id(node))
+    if isinstance(node, ast.Name):
+        return any(
+            python_sensitive_join_argument(
+                candidate, sensitive_names, tree, parents, seen.copy()
+            )
+            for candidate in python_join_assignment_index(tree).get(node.id, ())
+        )
+    if isinstance(node, ast.Call):
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr in {"values", "items"}
+        ):
+            return python_sensitive_value_expression(
+                node.func.value, sensitive_names, tree, parents, seen.copy()
+            )
+        if python_unshadowed_builtin_call(node, {"list", "tuple", "iter"}, tree):
+            return any(
+                python_sensitive_join_argument(
+                    argument, sensitive_names, tree, parents, seen.copy()
+                )
+                for argument in node.args
+            )
+        if python_unshadowed_builtin_call(node, {"map"}, tree):
+            return any(
+                python_sensitive_join_argument(
+                    argument, sensitive_names, tree, parents, seen.copy()
+                )
+                for argument in node.args[1:]
+            )
+    if isinstance(node, (ast.GeneratorExp, ast.ListComp, ast.SetComp)):
+        return any(
+            python_sensitive_join_argument(
+                generator.iter, sensitive_names, tree, parents, seen.copy()
+            )
+            for generator in node.generators
+        )
+    if isinstance(node, (ast.List, ast.Tuple)):
+        return any(
+            python_sensitive_join_argument(
+                element, sensitive_names, tree, parents, seen.copy()
+            )
+            for element in node.elts
+        )
+    return False
 
 def python_sensitive_value_names(tree, parents):
     """Resolve credential aliases and local-helper parameter taint."""
@@ -13458,42 +13629,79 @@ def python_path_method_alias_visible(name, method, node, tree, parents):
     if path_aliases is None:
         path_aliases = python_path_constructor_aliases(tree)
         tree._issue79_path_constructor_aliases = path_aliases
+    def binding_is_conditional(source, scope):
+        current = source
+        while current is not None and current is not scope:
+            current = parents.get(current)
+            if isinstance(
+                current,
+                (
+                    ast.If,
+                    ast.For,
+                    ast.AsyncFor,
+                    ast.While,
+                    ast.Try,
+                    ast.ExceptHandler,
+                    ast.IfExp,
+                    ast.BoolOp,
+                    ast.comprehension,
+                ),
+            ) or type(current).__name__ in {"Match", "match_case"}:
+                return True
+        return False
+
     def resolves_expression(value, scope, seen):
         if isinstance(value, ast.Name):
             for visible_scope in python_lexical_scope_chain(scope, parents):
-                visible_key = (id(visible_scope), value.id)
-                if visible_key not in bindings:
+                if (id(visible_scope), value.id) not in bindings:
                     continue
-                if visible_key in seen:
-                    return False
-                next_seen = seen | {visible_key}
-                assigned = max(
-                    bindings[visible_key],
-                    key=lambda entry: (
-                        getattr(entry[0], "lineno", -1),
-                        getattr(entry[0], "col_offset", -1),
-                    ),
-                )[1]
-                return assigned is not None and resolves_expression(
-                    assigned, visible_scope, next_seen
+                return resolves_name(
+                    visible_scope, value.id, seen
                 )
         return python_path_method_reference(value, method, tree)
+
+    def resolves_name(visible_scope, alias, seen):
+        key = (id(visible_scope), alias)
+        if key in seen:
+            return False
+        entries = bindings.get(key, ())
+        if not entries:
+            return False
+        ordered = sorted(
+            entries,
+            key=lambda entry: (
+                getattr(entry[0], "lineno", -1),
+                getattr(entry[0], "col_offset", -1),
+            ),
+        )
+        definite = [
+            entry
+            for entry in ordered
+            if not binding_is_conditional(entry[0], visible_scope)
+        ]
+        base = definite[-1] if definite else None
+        next_seen = seen | {key}
+        if (
+            base is not None
+            and base[1] is not None
+            and resolves_expression(base[1], visible_scope, next_seen)
+        ):
+            return True
+        base_position = ordered.index(base) if base is not None else -1
+        return any(
+            bound_expression is not None
+            and resolves_expression(bound_expression, visible_scope, next_seen)
+            for index, (source, bound_expression) in enumerate(ordered)
+            if index > base_position
+            and binding_is_conditional(source, visible_scope)
+        )
 
     scope = python_enclosing_scope(node, parents)
     for visible_scope in python_lexical_scope_chain(scope, parents):
         key = (id(visible_scope), name)
         if key not in bindings:
             continue
-        assigned = max(
-            bindings[key],
-            key=lambda entry: (
-                getattr(entry[0], "lineno", -1),
-                getattr(entry[0], "col_offset", -1),
-            ),
-        )[1]
-        return assigned is not None and resolves_expression(
-            assigned, visible_scope, {key}
-        )
+        return resolves_name(visible_scope, name, set())
     return False
 
 
@@ -15002,10 +15210,14 @@ def python_sensitive_read_violation(tree, parents):
                 python_sensitive_value_expression(
                     argument, sensitive_names, tree, parents
                 )
-                or any(
-                    isinstance(candidate, ast.Attribute)
-                    and python_dotted_name(candidate) == "os.environ"
-                    for candidate in ast.walk(argument)
+                or (
+                    any(
+                        isinstance(candidate, ast.Attribute)
+                        and python_dotted_name(candidate) == "os.environ"
+                        for candidate in ast.walk(argument)
+                    )
+                    and id(argument)
+                    not in getattr(tree, "_issue79_safe_local_format_calls", set())
                 )
                 for argument in output_arguments
             ):
@@ -29362,3 +29574,63 @@ alias scanner changes. The synthetic Git fixture uses a temporary directory
 and its isolated configuration only. No commit, push, merge, GitHub comment,
 Project write, exact-final-head review, hosted quick check, or live
 qualification is claimed; those remain with the coordinator.
+
+### Issue #79 PR #103 exact-head review 5338401659 follow-up
+
+This entry records the three P1 findings from exact-head GitHub Codex review
+5338401659 at input HEAD `db8faba6f3a1de384bbde729e3d19a8134f6f7a2`, the
+independent shell indirect-expansion P1, the safe-control P2 for a local
+user-defined `format` alias, and the coordinator's additional conditional
+`Path.home` P1. Python and shell witnesses are inert AST/scanner input strings;
+no unsafe source was executed and no real credential, home path, or runner was
+read or used.
+
+| # | Severity and immutable finding | RED reproduction at input HEAD | GREEN resolution and safe control |
+|---|---|---|---|
+| 1 | P1, [GitHub Codex finding 4121983412](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4121983412): after `secret=$GH_TOKEN`, a skipped `[ 1 = 2 ] && secret=reviewed` assignment could clear taint before a later `printf`. | `test_shell_credential_assignment_aliases_are_rejected` accepted the conditional overwrite witness while its earlier environment assignment tainted `secret`. | Shell tokenization retains the prior taint across conditional assignment segments. Literal and unconditional `secret=reviewed` overwrites remain accepted. |
+| 2 | P1, [GitHub Codex finding 4121983428](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4121983428): `join(list(secret.values()))` and tuple, generator, and `map` wrappers could lose environment-value taint. | `test_join_of_environment_views_keeps_sensitive_taint` accepted the wrapper witnesses before the fix. | Taint follows sensitive environment views through the reviewed wrappers. Literal status-value controls pass, and propagation is limited to sensitive `.values()`/`.items()` sources so reviewed environment-name joins remain safe. |
+| 3 | P1, [GitHub Codex finding 4121983438](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4121983438): generic Git config read classification accepted credential-bearing keys such as `credential.helper`, `http.*.extraheader`, and `user.email`. | `test_git_config_queries_allow_only_reviewed_keys` accepted disallowed exact-key and URL-match queries before the allowlist. | `--get`, `--get-all`, and `--get-urlmatch` now require their exact reviewed keys; the bounded local `^filter\.` regex remains the only regex query. The packet's `--local --get-all remote.origin.url` and `--get core.repositoryformatversion` queries remain allowed. |
+| 4 | P1, independent local review (no public URL): indirect shell expansion such as `secret=${!name}` could be hidden in an assignment and escape environment-taint checks. | `test_shell_indirect_environment_expansion_in_assignment_is_rejected` reproduced the assignment-only gap with inert shell text. | Indirect expansion is rejected, including in assignment-only commands; the same scanner still accepts reviewed literal status output. |
+| 5 | P2, independent local review (no public URL): a local user-defined `format` function returning the constant `"reviewed"` was falsely rejected when passed `os.environ`, including through `fmt = format`. | `test_user_defined_format_alias_returning_constant_is_safe` failed for both the direct function and its alias. | Local constant-return analysis exempts those resolved custom calls from environment-output rejection. The existing format taint tests continue to reject standard formatting that exposes sensitive arguments. |
+| 6 | P1, coordinator follow-up (no public URL): `home = P.home; if False: home = lambda: "reviewed"; print(home())` could let an unexecuted conditional assignment erase the `Path.home` alias. | `test_path_home_alias_conditional_reassignment_retains_taint` failed because the inert AST specimen was accepted. | Alias resolution retains possible conditional bindings after the latest definite assignment. The unconditional `home = lambda: "reviewed"` safe overwrite control in `test_path_home_alias_reassignment_and_helpers_remain_safe` remains accepted. |
+
+The initial focused RED batch ran five issue-specific test methods and failed
+with 15 unsafe-subcase assertions across the shell, join, Git-query, and
+indirect-expansion witnesses. The coordinator-supplied `Path.home` RED command
+ran one test and failed because the scanner returned no finding. After the
+fixes, the focused review-method tests passed, as did the four Path alias tests
+including the unconditional overwrite control. An early full run of all 85
+tests completed in 133.576s but failed only the packet's static audit because
+the local loop name `source_value` shadowed an audit helper name; renaming that
+loop variable removed the audit collision, and the targeted post-correction
+packet scan passed with 331 shell commands, 95 Python heredoc bodies, and zero
+violations. The post-ledger command
+`python3 -I -B scripts/evidence_packet/issue79_regression_test.py` then passed
+all 85 tests in 133.460s; its packet-wide audit again found 331 shell commands,
+95 Python heredoc bodies, and zero violations. An independent scan is run once
+more against this final ledger text.
+
+The coordinator's subsequent inert self-probe found a further join-alias gap
+before commit: a literal string separator stored in a local variable, an
+assigned `"".join` callable, a `str().join` receiver, an `iter` wrapper, and a
+stored `secret.values()` view were accepted when joined into an output sink.
+These were scanner-only strings; no environment values were read. Adding the
+unsafe witnesses and safe literal-snapshot controls to
+`test_join_of_environment_views_keeps_sensitive_taint` first made the focused
+test fail for three receiver/wrapper subcases and then two stored-view
+subcases. The correction recognizes reviewed literal-string join aliases and
+follows stored view/iterable aliases through the join argument while retaining
+the user-defined `format` and literal-snapshot safe controls. The focused
+join/format command then passed two tests. After this correction,
+`python3 -I -B scripts/evidence_packet/issue79_regression_test.py` passed all
+85 tests in 137.779s; its packet-wide audit found 331 shell commands and 95
+Python heredoc bodies with zero violations. A final packet-only scan after
+this ledger update remains required before commit.
+
+Rollback for this correction is input HEAD
+`db8faba6f3a1de384bbde729e3d19a8134f6f7a2`: restore only
+`docs/evidence/g01-recovery-packet.md` and
+`scripts/evidence_packet/issue79_regression_test.py` to that tree and remove
+this section. No commit, push, GitHub or Project write, workflow operation,
+live runner test, exact-final-head Codex review, or hosted PR quick check is
+claimed; final review and hosted checks remain with the coordinator.

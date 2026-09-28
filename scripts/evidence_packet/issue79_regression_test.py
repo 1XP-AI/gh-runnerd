@@ -1075,6 +1075,38 @@ class Issue79RegressionTests(unittest.TestCase):
             "print(''.join(secret.values()))\n",
             'import os\n'
             "print(''.join(os.environ.values()))\n",
+            'import os\n'
+            'secret = os.environ\n'
+            "print(''.join(list(secret.values())))\n",
+            'import os\n'
+            'secret = os.environ\n'
+            "print(''.join(tuple(secret.values())))\n",
+            'import os\n'
+            'secret = os.environ\n'
+            "print(''.join(value for value in secret.values()))\n",
+            'import os\n'
+            'secret = os.environ\n'
+            "print(''.join(map(str, secret.values())))\n",
+            'import os\n'
+            'secret = os.environ\n'
+            'separator = ""\n'
+            'print(separator.join(list(secret.values())))\n',
+            'import os\n'
+            'secret = os.environ\n'
+            'join = "".join\n'
+            'print(join(list(secret.values())))\n',
+            'import os\n'
+            'secret = os.environ\n'
+            'print(str().join(iter(secret.values())))\n',
+            'import os\n'
+            'secret = os.environ\n'
+            'values = secret.values()\n'
+            'print("".join(values))\n',
+            'import os\n'
+            'secret = os.environ\n'
+            'values = list(secret.values())\n'
+            'join = "".join\n'
+            'print(join(values))\n',
         )
         for body in unsafe:
             with self.subTest(body=body):
@@ -1084,6 +1116,20 @@ class Issue79RegressionTests(unittest.TestCase):
             'snapshot = {"status": "reviewed"}\n'
             "print(''.join(snapshot.values()))\n",
             "print(''.join({'status': 'reviewed'}.values()))\n",
+            'snapshot = {"status": "reviewed"}\n'
+            "print(''.join(list(snapshot.values())))\n",
+            "print(''.join(tuple({'status': 'reviewed'}.values())))\n",
+            "print(''.join(value for value in {'status': 'reviewed'}.values()))\n",
+            "print(''.join(map(str, {'status': 'reviewed'}.values())))\n",
+            'snapshot = {"status": "reviewed"}\n'
+            'separator = ""\n'
+            'print(separator.join(list(snapshot.values())))\n',
+            'snapshot = {"status": "reviewed"}\n'
+            'join = "".join\n'
+            'print(join(list(snapshot.values())))\n',
+            'snapshot = {"status": "reviewed"}\n'
+            'values = snapshot.values()\n'
+            'print("".join(values))\n',
         )
         for body in safe:
             with self.subTest(body=body):
@@ -1171,6 +1217,22 @@ class Issue79RegressionTests(unittest.TestCase):
             'print(fmt("reviewed"))\n',
             'fmt = "{}".format\n'
             'print(fmt({"status": "reviewed"}))\n',
+        )
+        for body in safe:
+            with self.subTest(body=body):
+                self.assertIsNone(self.inspect(body))
+
+    def test_user_defined_format_alias_returning_constant_is_safe(self) -> None:
+        safe = (
+            'import os\n'
+            'def format(value):\n'
+            '    return "reviewed"\n'
+            'print(format(os.environ))\n',
+            'import os\n'
+            'def format(value):\n'
+            '    return "reviewed"\n'
+            'fmt = format\n'
+            'print(fmt(os.environ))\n',
         )
         for body in safe:
             with self.subTest(body=body):
@@ -2300,6 +2362,27 @@ class Issue79RegressionTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertIsNone(self.shell_violation(command))
 
+    def test_git_config_queries_allow_only_reviewed_keys(self) -> None:
+        for command in (
+            "git config --get credential.helper",
+            "git config --get-all credential.helper",
+            "git config --get-urlmatch http.extraheader https://github.com/1XP-AI/gh-runnerd",
+            "git config --get-urlmatch http.https://github.com/.extraheader https://github.com/1XP-AI/gh-runnerd",
+            "git config --get user.email",
+            "git config --get-all user.email",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(self.shell_violation(command))
+
+        for command in (
+            "git config --local --get-all remote.origin.url",
+            "git config --get core.repositoryformatversion",
+            "git config --local --get-regexp '^filter\\.'",
+            "git config --get-urlmatch http.sslverify https://github.com/1XP-AI/gh-runnerd",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(self.shell_violation(command))
+
     def test_nested_raise_does_not_prove_module_root_guard(self) -> None:
         bodies = [
             body
@@ -2694,6 +2777,16 @@ class Issue79RegressionTests(unittest.TestCase):
             with self.subTest(body=body):
                 self.assertIsNone(self.inspect(body))
 
+    def test_path_home_alias_conditional_reassignment_retains_taint(self) -> None:
+        body = (
+            'from pathlib import Path as P\n'
+            'home = P.home\n'
+            'if False:\n'
+            '    home = lambda: "reviewed"\n'
+            'print(home())\n'
+        )
+        self.assertIsNotNone(self.inspect(body))
+
     def test_named_expression_callable_sink_preserves_environment_taint(self) -> None:
         self.assertIsNotNone(self.inspect('import os\n(emit := print)(os.environ)\n'))
         self.assertIsNone(self.inspect('emit = print\nemit("status: reviewed")\n'))
@@ -2726,14 +2819,23 @@ class Issue79RegressionTests(unittest.TestCase):
         unsafe = (
             "secret=$GH_TOKEN\nprintf '%s\\n' $secret",
             "secret=$GH_TOKEN\ncopy=$secret\nprintf '%s\\n' $copy",
+            "secret=$GH_TOKEN\n[ 1 = 2 ] && secret=reviewed\nprintf '%s\\n' \"$secret\"",
         )
         for commands in unsafe:
             with self.subTest(commands=commands):
                 self.assertIsNotNone(self.shell_document_violation(commands))
 
-        self.assertIsNone(
+        for commands in (
+            "secret=reviewed\nprintf '%s\\n' $secret",
+            "secret=$GH_TOKEN\nsecret=reviewed\nprintf '%s\\n' $secret",
+        ):
+            with self.subTest(commands=commands):
+                self.assertIsNone(self.shell_document_violation(commands))
+
+    def test_shell_indirect_environment_expansion_in_assignment_is_rejected(self) -> None:
+        self.assertIsNotNone(
             self.shell_document_violation(
-                "secret=reviewed\nprintf '%s\\n' $secret"
+                "name=GH_TOKEN\nsecret=${!name}\nprintf '%s\\n' \"$secret\""
             )
         )
 
