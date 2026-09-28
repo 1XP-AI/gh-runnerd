@@ -8353,7 +8353,7 @@ def git_filter_attribute_violation(tokens):
 
 
 def git_diff_path_violation(tokens):
-    """Require reviewed paths for Git diff --no-index and --output operands."""
+    """Require reviewed --no-index inputs and reject Git diff file output."""
     if not tokens or executable_basename(tokens[0]) != "git":
         return None
     index = 1
@@ -8379,7 +8379,6 @@ def git_diff_path_violation(tokens):
         return None
     arguments = tokens[index + 1:]
     no_index = False
-    output_paths = []
     path_operands = []
     after_separator = False
     position = 0
@@ -8391,13 +8390,8 @@ def git_diff_path_violation(tokens):
             break
         if token == "--no-index":
             no_index = True
-        elif token == "--output":
-            if position + 1 >= len(arguments):
-                return "Git diff --output requires a reviewed path"
-            output_paths.append(arguments[position + 1])
-            position += 1
-        elif token.startswith("--output="):
-            output_paths.append(token.split("=", 1)[1])
+        elif token == "--output" or token.startswith("--output="):
+            return "Git diff --output can overwrite files and is not allowed"
         elif token.startswith("-"):
             pass
         elif not after_separator:
@@ -8405,7 +8399,7 @@ def git_diff_path_violation(tokens):
         position += 1
     if no_index and len(path_operands) < 2:
         return "Git diff --no-index requires two reviewed paths"
-    paths = output_paths + (path_operands if no_index else [])
+    paths = path_operands if no_index else []
     for path in paths:
         if path == "__g01_reviewed_dynamic_path__":
             continue
@@ -12975,6 +12969,89 @@ def python_unknown_os_call_violation(tree):
     return None
 
 
+def python_subprocess_os_reexport_violation(tree):
+    """Do not let subprocess's imported os module bypass direct os guards."""
+    subprocess_names = {
+        alias.asname or alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+        if alias.name == "subprocess"
+    }
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "subprocess" and any(
+            alias.name == "os" for alias in node.names
+        ):
+            return "Python heredoc imports the unreviewed subprocess.os re-export"
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Name):
+                continue
+            if node.value.id not in subprocess_names:
+                continue
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id not in subprocess_names:
+                    subprocess_names.add(target.id)
+                    changed = True
+    for node in ast.walk(tree):
+        if subprocess_names and isinstance(node, ast.Attribute) and node.attr == "os":
+            return "Python heredoc accesses an unreviewed OS module re-export"
+        if (
+            subprocess_names
+            and
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and (
+                node.func.id == "getattr"
+                or python_assigned_callable_alias(node.func.id, "getattr", tree)
+            )
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value == "os"
+        ):
+            return "Python heredoc dynamically accesses an OS module re-export"
+        if (
+            subprocess_names
+            and
+            isinstance(node, ast.Subscript)
+            and isinstance(node.slice, ast.Constant)
+            and node.slice.value == "os"
+            and (
+                (isinstance(node.value, ast.Attribute) and node.value.attr == "__dict__")
+                or (
+                    isinstance(node.value, ast.Call)
+                    and isinstance(node.value.func, ast.Name)
+                    and (
+                        node.value.func.id == "vars"
+                        or python_assigned_callable_alias(node.value.func.id, "vars", tree)
+                    )
+                )
+            )
+        ):
+            return "Python heredoc looks up an OS module through a module dictionary"
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            if node.value.id in subprocess_names and node.attr in {
+                "os", "__dict__", "__getattribute__"
+            }:
+                return "Python heredoc accesses an unreviewed subprocess module re-export"
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and (
+                node.func.id in {"getattr", "vars"}
+                or python_assigned_callable_alias(node.func.id, "getattr", tree)
+                or python_assigned_callable_alias(node.func.id, "vars", tree)
+            )
+            and node.args
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id in subprocess_names
+        ):
+            return "Python heredoc dynamically accesses a subprocess module re-export"
+    return None
+
+
 def python_filesystem_mutator_alias_violation(tree, parents):
     """Reject extracted mutator methods unless their receiver is temp-owned."""
     for node in ast.walk(tree):
@@ -15930,6 +16007,117 @@ def python_open_read_violation(tree, parents):
     return None
 
 
+def python_unreviewed_decorator_violation(tree, parents):
+    """Keep decorators limited to inert reviewed builtin forms."""
+    for candidate in ast.walk(tree):
+        if isinstance(candidate, ast.Name) and candidate.id == "__builtins__":
+            return "Python heredoc accesses the mutable builtins namespace"
+        if isinstance(candidate, ast.Import) and any(
+            alias.name == "builtins" for alias in candidate.names
+        ):
+            return "Python heredoc imports the mutable builtins namespace"
+        if isinstance(candidate, ast.ImportFrom) and candidate.module == "builtins":
+            return "Python heredoc imports from the mutable builtins namespace"
+    reviewed_value = ast.parse("self._process.returncode", mode="eval").body
+    def shadows_builtin(name):
+        return any(
+            (
+                isinstance(candidate, ast.Name)
+                and candidate.id == name
+                and isinstance(candidate.ctx, ast.Store)
+            )
+            or (
+                isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                and candidate.name == name
+            )
+            or (isinstance(candidate, ast.arg) and candidate.arg == name)
+            or (
+                isinstance(candidate, (ast.Import, ast.ImportFrom))
+                and any((alias.asname or alias.name) == name for alias in candidate.names)
+            )
+            for candidate in ast.walk(tree)
+        )
+    property_is_shadowed = shadows_builtin("property")
+    staticmethod_is_shadowed = shadows_builtin("staticmethod")
+    staticmethod_aliases = {}
+    if not staticmethod_is_shadowed:
+        for candidate in ast.walk(tree):
+            if (
+                isinstance(candidate, ast.Assign)
+                and len(candidate.targets) == 1
+                and isinstance(candidate.targets[0], ast.Name)
+                and isinstance(candidate.value, ast.Name)
+                and candidate.value.id == "staticmethod"
+            ):
+                staticmethod_aliases[candidate.targets[0].id] = candidate.lineno
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        if not node.decorator_list:
+            continue
+        parent = parents.get(node)
+        decorator = node.decorator_list[0]
+        reviewed_staticmethod = (
+            not staticmethod_is_shadowed
+            and isinstance(node, ast.FunctionDef)
+            and isinstance(parent, ast.ClassDef)
+            and len(node.decorator_list) == 1
+            and isinstance(decorator, ast.Name)
+            and (
+                decorator.id == "staticmethod"
+                or (
+                    decorator.id in staticmethod_aliases
+                    and staticmethod_aliases[decorator.id] < node.lineno
+                    and sum(
+                        isinstance(candidate, ast.Name)
+                        and candidate.id == decorator.id
+                        and isinstance(candidate.ctx, ast.Store)
+                        for candidate in ast.walk(tree)
+                    ) == 1
+                    and not any(
+                        (
+                            isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                            and candidate.name == decorator.id
+                        )
+                        or (isinstance(candidate, ast.arg) and candidate.arg == decorator.id)
+                        or (
+                            isinstance(candidate, (ast.Import, ast.ImportFrom))
+                            and any(
+                                (alias.asname or alias.name) == decorator.id
+                                for alias in candidate.names
+                            )
+                        )
+                        for candidate in ast.walk(tree)
+                    )
+                )
+            )
+        )
+        reviewed_property = (
+            not property_is_shadowed
+            and isinstance(node, ast.FunctionDef)
+            and isinstance(parent, ast.ClassDef)
+            and parent.name == "GoAliasPopen"
+            and node.name == "returncode"
+            and len(node.decorator_list) == 1
+            and isinstance(node.decorator_list[0], ast.Name)
+            and node.decorator_list[0].id == "property"
+            and len(node.args.args) == 1
+            and node.args.args[0].arg == "self"
+            and not node.args.posonlyargs
+            and not node.args.kwonlyargs
+            and node.args.vararg is None
+            and node.args.kwarg is None
+            and not node.args.defaults
+            and len(node.body) == 1
+            and isinstance(node.body[0], ast.Return)
+            and ast.dump(node.body[0].value, include_attributes=False)
+            == ast.dump(reviewed_value, include_attributes=False)
+        )
+        if not reviewed_property and not reviewed_staticmethod:
+            return f"Python heredoc has an unreviewed decorator on line {node.lineno}"
+    return None
+
+
 def inspect_python_heredoc(body, safe_marker):
     try:
         tree = ast.parse(body, filename="<python-heredoc>")
@@ -15959,6 +16147,12 @@ def inspect_python_heredoc(body, safe_marker):
         for parent in ast.walk(tree)
         for child in ast.iter_child_nodes(parent)
     }
+    decorator_violation = python_unreviewed_decorator_violation(tree, parents)
+    if decorator_violation:
+        return decorator_violation
+    subprocess_os_violation = python_subprocess_os_reexport_violation(tree)
+    if subprocess_os_violation:
+        return subprocess_os_violation
     class_command_violation = python_class_command_attribute_violation(
         tree, modules, functions
     )
@@ -29999,3 +30193,80 @@ Rollback restores only this packet and its offline harness from input HEAD
 `a55fb9d1c9402bc65c0f40daa6673d6f447700f4`; ADR 0004 itself is unchanged
 in this correction. No live qualification, workflow dispatch, GitHub review of
 the next head, or hosted quick check is claimed.
+
+### Issue #79 follow-up self-review: Git diff output
+
+During the exact-head review wait for `b3c335bd40def3ff75ef926387d82ac68d955103`,
+local source review found that the existing `git_diff_path_violation` accepted
+`git diff --output=AGENTS.md HEAD^ HEAD` and the separated option form because
+`AGENTS.md` was a reviewed *input* path. Both inert scanner cases failed the
+new `test_git_diff_output_cannot_replace_reviewed_source` before correction;
+no Git diff output command was executed. The minimal correction rejects all
+`git diff --output` forms before any destination path check. Plain `git diff`
+remains accepted, `git show --output` remains rejected, and `git log` remains
+outside the approved read-only subcommands. The focused test passed after the
+correction. The full offline harness then passed 96 tests in 133.122s with
+331 shell commands, 95 Python heredoc bodies and zero violations. The later
+extra `git log` and separated `git show` negative controls passed in a focused
+rerun; full post-ledger packet verification and exact-next-head hosted/Codex
+checks remain to be recorded. Rollback is limited to the packet and offline
+harness at the reviewed input `b3c335bd40def3ff75ef926387d82ac68d955103`.
+
+### Issue #79 PR #103 exact-head review 5341817408 correction
+
+The [Codex review](https://github.com/1XP-AI/gh-runnerd/pull/103#pullrequestreview-5341817408)
+covered input `b3c335bd40def3ff75ef926387d82ac68d955103`. Its body had no
+finding; all three inline P1 findings were reproduced using inert AST/heredoc
+test data and are blocking until a new exact-head review completes. The
+issue-comment feed contained only prior `@codex review` requests.
+
+| P1 finding | RED and correction |
+|---|---|
+| [Bare top-level expression](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4124733424) | `_validated_scanner_statements` accepted an unsupported expression statement while `_scanner_namespace` silently skipped it. The loader now extracts only the scanner definitions, rejects every unsupported top-level statement and also fails closed at execution. `print(subprocess.os.environ)` is additionally rejected by the heredoc scanner's re-export rule below. |
+| [Re-exported OS module](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4124733434) | `subprocess.os.remove` passed despite being a filesystem mutation. Direct, import-alias, from-import and simple assigned-alias forms all failed the new negative test before correction. Access to `subprocess`'s OS re-export and dynamic module lookup now fails closed before ordinary call classification; normal reviewed `subprocess` use remains accepted. |
+| [Launcher-returning decorator](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4124733438) | A decorator returning `subprocess.run` could replace a benign function and launch an unreviewed command. The scanner now rejects unreviewed decorators, retaining only the packet's exact synthetic `GoAliasPopen.returncode` property body when `property` is not shadowed. Ordinary undecorated functions remain accepted. |
+
+The three focused RED methods had six failing unsafe assertions. Four focused
+methods, including the prior `git diff --output` regression, passed after the
+minimal correction in 0.103s. A packet-only static scan then passed in
+62.147s: 331 shell commands, 95 Python heredoc bodies, zero violations.
+No real mutator, launcher, private path access, runner or workflow was invoked.
+The first full harness run after that correction ran 99 tests in 136.213s but
+failed two safe positive controls: built-in `@staticmethod` and its single
+reviewed alias. The decorator rule was narrowed to preserve those exact
+builtin forms only when the builtin or alias is not shadowed; the focused
+unsafe and safe cases then passed. A further inert self-review found that
+tuple-destructured and list-indexed `subprocess` aliases still reached `.os`;
+both new negative cases failed before the broader fail-closed `.os` access
+check, then passed with the existing import, direct-alias, dynamic-access and
+safe `subprocess` controls. The final full harness after these corrections
+passed 99 tests in 138.127s with 331 shell commands, 95 Python heredoc
+bodies and zero violations. `git diff --check` passed and an added-line scan
+for credential tokens, private-key markers and personal paths found zero
+matches. The final post-ledger packet scan, independent delta review, next
+hosted quick check and exact-head Codex review remain separate gates. Rollback
+restores only this packet and its offline harness from the input SHA above.
+
+### Issue #79 independent security delta review after 5341817408
+
+A read-only Codex agent launched as `gpt-6-luna` with `max` reasoning reviewed
+the uncommitted two-file correction. Its first focused `git diff --output`
+pass reported no finding. Its second security pass identified two P1 bypasses
+and two P2 over-rejections. No independent agent edited, pushed, ran a live
+command or represented the packet tests as independently executed.
+
+| Finding | Triage and result |
+|---|---|
+| P1: `lookup = getattr; lookup(subprocess, "os").remove(...)` | RED reproduced with an inert path; an analogous `vars` alias also failed. The re-export guard now resolves reviewed `getattr`/`vars` aliases before accepting a heredoc. The same test retains direct, imported, assigned, destructured and indexed aliases. |
+| P1: mutate `__builtins__.property` or `__builtins__["property"]` before the reviewed property decorator | RED reproduced both assignment forms and `setattr`. Executable heredocs now reject direct `__builtins__` access and importing the mutable `builtins` module, so the property and staticmethod exceptions cannot be replaced through those namespace handles. |
+| P2: unrelated `Settings.os` access was rejected | Reproduced as a safe positive control, then corrected: the conservative `.os` member guard applies only when `subprocess` is imported into that heredoc. `Settings.os` without such an import remains accepted. |
+| P2: an unrelated function parameter named `property` over-shadows the reviewed property exception in whole-tree analysis | Classified as a conservative false positive, not a release/security/data-loss/live blocker and not a current packet or evidence-reuse path. No fix or follow-up issue is warranted solely for this routine hypothetical safe case; the guard deliberately remains fail-closed. |
+
+The two P1 regression methods failed with five unsafe subcase assertions before
+correction. Their GREEN rerun, plus the existing staticmethod safe control,
+passed three focused methods in 0.105s. The full offline harness then passed
+99 tests in 137.470s, scanning 331 shell commands and 95 Python heredoc bodies
+with zero violations. Final independent delta sign-off, the post-ledger
+packet-only scan, hosted quick check and exact-next-head Codex review remain
+pending; none is claimed here. Rollback remains the two changed files to
+`b3c335bd40def3ff75ef926387d82ac68d955103`.

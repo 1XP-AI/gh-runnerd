@@ -129,7 +129,12 @@ def _scanner_module_source(packet: str) -> str:
     source = packet[code_start:terminator]
     if "def forbidden_command(tokens, depth=0):" not in source:
         raise AssertionError("packet scanner functions were not extracted")
-    return source
+    verification_start = source.find("\nmatches = []\n", source.index(
+        "def inspect_python_heredoc(body, safe_marker):"
+    ))
+    if verification_start < 0:
+        raise AssertionError("packet scanner verification boundary is missing")
+    return source[:verification_start]
 
 
 def _literal_definition_time_expression(node: ast.AST) -> bool:
@@ -209,6 +214,11 @@ def _validated_scanner_statements(module: ast.Module) -> tuple[ast.stmt, ...]:
             bound_names = {target.id for target in targets}
             if bound_names & (protected_names - {"source"}):
                 raise AssertionError("packet scanner assignment shadows a protected binding")
+    if any(not isinstance(statement, (
+        ast.Import, ast.ImportFrom, ast.FunctionDef, ast.AsyncFunctionDef,
+        ast.Assign, ast.AnnAssign,
+    )) for statement in module.body):
+        raise AssertionError("packet scanner has an unsupported top-level statement")
     return tuple(module.body)
 
 
@@ -269,6 +279,8 @@ def _scanner_namespace() -> dict[str, object]:
                 raise AssertionError(
                     "packet scanner has an unsupported top-level assignment"
                 )
+        else:
+            raise AssertionError("packet scanner has an unsupported top-level statement")
     namespace["source"] = PACKET_TEXT
     return namespace
 
@@ -2571,6 +2583,17 @@ class Issue79RegressionTests(unittest.TestCase):
             )
         )
 
+    def test_git_diff_output_cannot_replace_reviewed_source(self) -> None:
+        for command in (
+            "git diff --output=AGENTS.md HEAD^ HEAD",
+            "git diff --output AGENTS.md HEAD^ HEAD",
+            "git log --output=AGENTS.md -1",
+            "git show --output AGENTS.md HEAD",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(self.shell_violation(command))
+        self.assertIsNone(self.shell_violation("git diff HEAD^ HEAD"))
+
     def test_nested_raise_does_not_prove_module_root_guard(self) -> None:
         bodies = [
             body
@@ -2790,6 +2813,76 @@ class Issue79RegressionTests(unittest.TestCase):
                 _scanner_namespace()
         finally:
             globals()["PACKET_TEXT"] = original
+
+    def test_packet_loader_rejects_bare_top_level_expression(self) -> None:
+        module = ast.parse('print(subprocess.os.environ)\n')
+        with self.assertRaises(AssertionError):
+            _validated_scanner_statements(module)
+        self.assertIsNotNone(self.inspect('import subprocess\nprint(subprocess.os.environ)\n'))
+
+    def test_reexported_os_module_does_not_bypass_heredoc_checks(self) -> None:
+        unsafe = (
+            'import subprocess\nsubprocess.os.remove("/tmp/maintainer-owned")\n',
+            'import subprocess as sp\nsp.os.remove("/tmp/maintainer-owned")\n',
+            'from subprocess import os as operating\noperating.remove("/tmp/maintainer-owned")\n',
+            'import subprocess\nsp = subprocess\nsp.os.remove("/tmp/maintainer-owned")\n',
+            'import subprocess\ngetattr(subprocess, "os").remove("/tmp/maintainer-owned")\n',
+            'import subprocess\nsubprocess.__dict__["os"].remove("/tmp/maintainer-owned")\n',
+            'import subprocess\nother, = (subprocess,)\nother.os.remove("/tmp/maintainer-owned")\n',
+            'import subprocess\nother = [subprocess][0]\nother.os.remove("/tmp/maintainer-owned")\n',
+            'import subprocess\nlookup = getattr\nlookup(subprocess, "os").remove("/tmp/maintainer-owned")\n',
+            'import subprocess\nlookup = vars\nlookup(subprocess)["os"].remove("/tmp/maintainer-owned")\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+        self.assertIsNone(self.inspect('import subprocess\nprint("reviewed")\n'))
+        self.assertIsNone(self.inspect(
+            'class Settings:\n    os = "darwin"\nprint(Settings.os)\n'
+        ))
+
+    def test_command_capable_decorator_cannot_replace_safe_function(self) -> None:
+        body = (
+            'import subprocess\n'
+            'def deco(function):\n'
+            '    return subprocess.run\n'
+            '@deco\n'
+            'def launch(command):\n'
+            '    return None\n'
+            'launch(["gh", "workflow", "run", "ci.yml"])\n'
+        )
+        self.assertIsNotNone(self.inspect(body))
+        self.assertIsNotNone(self.inspect(
+            'import subprocess\n'
+            'def sm(function):\n    return subprocess.run\n'
+            'class C:\n    @sm\n    def launch(command):\n        return None\n'
+            'C().launch(["gh", "workflow", "run", "ci.yml"])\n'
+        ))
+        self.assertIsNotNone(self.inspect(
+            'import subprocess\n'
+            'class GoAliasPopen:\n'
+            '    @property\n'
+            '    def returncode(self):\n'
+            '        return subprocess.run\n'
+        ))
+        for mutation in (
+            '__builtins__["property"] = replace\n',
+            '__builtins__.property = replace\n',
+            'setattr(__builtins__, "property", replace)\n',
+        ):
+            body = (
+                'import subprocess\n'
+                'def replace(function):\n    return subprocess.run\n'
+                + mutation
+                + 'class GoAliasPopen:\n'
+                '    @property\n'
+                '    def returncode(self):\n'
+                '        return self._process.returncode\n'
+                'GoAliasPopen.returncode(["gh", "workflow", "run", "ci.yml"])\n'
+            )
+            with self.subTest(mutation=mutation):
+                self.assertIsNotNone(self.inspect(body))
+        self.assertIsNone(self.inspect('def reviewed():\n    return "safe"\nprint(reviewed())\n'))
 
     def test_constructor_and_output_sink_aliases_preserve_sensitive_taint(self) -> None:
         unsafe = (
