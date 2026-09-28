@@ -9704,7 +9704,7 @@ def python_local_class_alias_names(name, method_name, scopes, methods_by_scope, 
             index = expression.slice
             if isinstance(index, ast.Index):
                 index = index.value
-            if isinstance(index, ast.Constant) and type(index.value) is int:
+            if isinstance(index, ast.Constant) and isinstance(index.value, int) and not isinstance(index.value, bool):
                 elements = expression.value.elts
                 if -len(elements) <= index.value < len(elements):
                     visit_expression(elements[index.value], set(seen))
@@ -9887,7 +9887,8 @@ def python_assigned_callable_alias(name, target, tree):
             isinstance(value, ast.Subscript)
             and isinstance(value.value, (ast.List, ast.Tuple))
             and isinstance(value.slice, ast.Constant)
-            and type(value.slice.value) is int
+            and isinstance(value.slice.value, int)
+            and not isinstance(value.slice.value, bool)
         ):
             elements = value.value.elts
             index = value.slice.value
@@ -12978,6 +12979,17 @@ def python_subprocess_os_reexport_violation(tree):
         for alias in node.names
         if alias.name == "subprocess"
     }
+    name_bind_counts = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            name_bind_counts[node.id] = name_bind_counts.get(node.id, 0) + 1
+    literal_dicts = {
+        target.id: node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Dict)
+        for target in node.targets
+        if isinstance(target, ast.Name) and name_bind_counts[target.id] == 1
+    }
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module == "subprocess" and any(
             alias.name == "os" for alias in node.names
@@ -12986,16 +12998,149 @@ def python_subprocess_os_reexport_violation(tree):
     changed = True
     while changed:
         changed = False
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Name):
-                continue
-            if node.value.id not in subprocess_names:
-                continue
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id not in subprocess_names:
+        def may_refer_to_subprocess(value):
+            if isinstance(value, ast.Name):
+                return value.id in subprocess_names
+            if isinstance(value, (ast.Tuple, ast.List, ast.Set)):
+                return any(may_refer_to_subprocess(item) for item in value.elts)
+            if isinstance(value, ast.Dict):
+                return any(may_refer_to_subprocess(item) for item in value.values)
+            if isinstance(value, ast.Call):
+                if (
+                    isinstance(value.func, ast.Attribute)
+                    and value.func.attr == "copy"
+                    and may_refer_to_subprocess(value.func.value)
+                ):
+                    return True
+                if (
+                    isinstance(value.func, ast.Name)
+                    and value.func.id in {"dict", "list", "tuple", "set"}
+                    and any(may_refer_to_subprocess(item) for item in value.args)
+                ):
+                    return True
+            if isinstance(value, (ast.BinOp, ast.BoolOp)):
+                operands = (
+                    [value.left, value.right]
+                    if isinstance(value, ast.BinOp)
+                    else value.values
+                )
+                return any(may_refer_to_subprocess(item) for item in operands)
+            if isinstance(value, ast.Subscript):
+                if (
+                    isinstance(value.value, ast.Name)
+                    and value.value.id in literal_dicts
+                    and isinstance(value.slice, ast.Constant)
+                ):
+                    source = literal_dicts[value.value.id]
+                    matching_values = [
+                        item
+                        for key, item in zip(source.keys, source.values)
+                        if isinstance(key, ast.Constant) and key.value == value.slice.value
+                    ]
+                    if matching_values:
+                        return any(may_refer_to_subprocess(item) for item in matching_values)
+                    return False
+                return may_refer_to_subprocess(value.value)
+            if isinstance(value, ast.IfExp):
+                return may_refer_to_subprocess(value.body) or may_refer_to_subprocess(value.orelse)
+            if isinstance(value, ast.NamedExpr):
+                return may_refer_to_subprocess(value.value)
+            return False
+
+        def bind_subprocess_target(target, value):
+            nonlocal changed
+            if isinstance(target, ast.Name):
+                if may_refer_to_subprocess(value) and target.id not in subprocess_names:
                     subprocess_names.add(target.id)
                     changed = True
+            elif isinstance(target, (ast.Tuple, ast.List)):
+                if isinstance(value, (ast.Tuple, ast.List)):
+                    for element, source in zip(target.elts, value.elts):
+                        bind_subprocess_target(element, source)
+                elif may_refer_to_subprocess(value):
+                    for element in target.elts:
+                        bind_subprocess_target(element, value)
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, (ast.Attribute, ast.Subscript)) and may_refer_to_subprocess(node.value):
+                        return "Python heredoc stores the subprocess module in an unreviewed object"
+                    bind_subprocess_target(target, node.value)
+            elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
+                bind_subprocess_target(node.target, node.value)
     for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and (
+                node.func.id == "type"
+                or python_assigned_callable_alias(node.func.id, "type", tree)
+            )
+        ):
+            reviewed_fake_os = (
+                node.func.id == "type"
+                and not node.keywords
+                and len(node.args) == 3
+                and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == "FakeOS"
+                and isinstance(node.args[1], ast.Tuple)
+                and not node.args[1].elts
+                and isinstance(node.args[2], ast.Dict)
+                and len(node.args[2].keys) == 1
+                and isinstance(node.args[2].keys[0], ast.Constant)
+                and node.args[2].keys[0].value == "environ"
+                and isinstance(node.args[2].values[0], ast.Dict)
+                and all(
+                    isinstance(item, ast.Constant) and isinstance(item.value, str)
+                    for item in node.args[2].values[0].values
+                )
+            )
+            if not reviewed_fake_os:
+                return "Python heredoc constructs or obtains an unreviewed runtime type"
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr == "__class__"
+        ):
+            return "Python heredoc obtains an unreviewed runtime class"
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and (
+                node.func.id in {"getattr", "vars"}
+                or python_assigned_callable_alias(node.func.id, "getattr", tree)
+                or python_assigned_callable_alias(node.func.id, "vars", tree)
+            )
+            and node.args
+            and isinstance(node.args[0], ast.Name)
+            and (
+                node.args[0].id == "dict"
+                or python_assigned_callable_alias(node.args[0].id, "dict", tree)
+            )
+        ):
+            return "Python heredoc dynamically accesses a dictionary mutator descriptor"
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and (
+                node.value.id == "dict"
+                or python_assigned_callable_alias(node.value.id, "dict", tree)
+            )
+        ):
+            return "Python heredoc accesses an unreviewed dictionary type attribute"
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in subprocess_names
+            and node.attr in {"update", "setdefault", "__setitem__", "__ior__", "clear", "pop", "popitem"}
+        ):
+            return "Python heredoc mutates a subprocess-bearing container indirectly"
+        if (
+            isinstance(node, ast.AugAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id in subprocess_names
+        ):
+            return "Python heredoc rebinds a subprocess-bearing container indirectly"
         if subprocess_names and isinstance(node, ast.Attribute) and node.attr == "os":
             return "Python heredoc accesses an unreviewed OS module re-export"
         if (
@@ -13045,8 +13190,7 @@ def python_subprocess_os_reexport_violation(tree):
                 or python_assigned_callable_alias(node.func.id, "vars", tree)
             )
             and node.args
-            and isinstance(node.args[0], ast.Name)
-            and node.args[0].id in subprocess_names
+            and may_refer_to_subprocess(node.args[0])
         ):
             return "Python heredoc dynamically accesses a subprocess module re-export"
     return None
@@ -13054,6 +13198,30 @@ def python_subprocess_os_reexport_violation(tree):
 
 def python_filesystem_mutator_alias_violation(tree, parents):
     """Reject extracted mutator methods unless their receiver is temp-owned."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import) and any(
+            alias.name in {"os", "shutil"} and alias.asname is not None
+            for alias in node.names
+        ):
+            return "Python heredoc aliases a filesystem-capable module"
+        if isinstance(node, ast.ImportFrom) and node.module in {"os", "shutil"} and any(
+            alias.name == "*" or f"{node.module}.{alias.name}" in python_filesystem_mutating_functions
+            for alias in node.names
+        ):
+            return "Python heredoc imports an unreviewed filesystem mutator"
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and python_dotted_name(node) in python_filesystem_mutating_functions
+            and not (
+                isinstance(parents.get(node), ast.Call)
+                and parents[node].func is node
+            )
+        ):
+            return (
+                "Python heredoc stores or passes an unowned filesystem mutator "
+                f"{python_dotted_name(node)!r} on line {node.lineno}"
+            )
     for node in ast.walk(tree):
         assignments = []
         if isinstance(node, ast.Assign):
@@ -13884,6 +14052,31 @@ python_sensitive_sink_methods = {
 }
 
 
+def python_sensitive_sink_storage_violation(tree, parents):
+    """Reject output methods hidden in containers or other indirect holders."""
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Attribute)
+            and node.attr.casefold() in python_sensitive_sink_methods
+        ):
+            continue
+        parent = parents.get(node)
+        if isinstance(parent, ast.Call) and parent.func is node:
+            continue
+        if isinstance(parent, ast.ExceptHandler) and parent.type is node:
+            continue
+        if isinstance(parent, ast.Assign) and parent.value is node and all(
+            isinstance(target, ast.Name) for target in parent.targets
+        ):
+            continue
+        if isinstance(parent, (ast.AnnAssign, ast.NamedExpr)) and parent.value is node and isinstance(
+            parent.target, ast.Name
+        ):
+            continue
+        return f"Python heredoc stores an output sink method in an unreviewed holder on line {node.lineno}"
+    return None
+
+
 def python_path_method_alias_visible(name, method, node, tree, parents):
     """Resolve Path.home/Path.cwd aliases in lexical scope, respecting shadows."""
     bindings = getattr(tree, "_issue79_path_method_bindings", None)
@@ -13970,7 +14163,7 @@ def python_path_method_alias_visible(name, method, node, tree, parents):
                     ast.BoolOp,
                     ast.comprehension,
                 ),
-            ) or type(current).__name__ in {"Match", "match_case"}:
+            ) or isinstance(current, (ast.Match, ast.match_case)):
                 return True
         return False
 
@@ -14235,6 +14428,45 @@ def python_resolved_local_path_expression(
     )
 
 
+def python_assigned_sink_method_alias(name, tree):
+    """Track method output sinks after assignment to callable names."""
+    python_assigned_callable_alias("", "print", tree)
+    assignments = getattr(tree, "_issue79_callable_alias_index", {})
+
+    def sink_method_matches(value, seen):
+        if isinstance(value, ast.Attribute):
+            return value.attr.casefold() in python_sensitive_sink_methods
+        if (
+            isinstance(value, ast.Call)
+            and (
+                python_dotted_name(value.func) == "getattr"
+                or (
+                    isinstance(value.func, ast.Name)
+                    and python_assigned_callable_alias(value.func.id, "getattr", tree)
+                )
+            )
+            and len(value.args) >= 2
+            and any(
+                method.casefold() in python_sensitive_sink_methods
+                for method in python_static_string_values(value.args[1], tree)
+            )
+        ):
+            return True
+        if isinstance(value, ast.Name) and value.id not in seen:
+            return any(
+                sink_method_matches(candidate, seen | {value.id})
+                for candidate in assignments.get(value.id, ())
+                if candidate is not None
+            )
+        return False
+
+    return any(
+        sink_method_matches(value, {name})
+        for value in assignments.get(name, ())
+        if value is not None
+    )
+
+
 def python_sensitive_output_sink(node, tree=None):
     """Recognize output/error sinks without tainting ordinary containers/helpers."""
     if not isinstance(node, ast.Call):
@@ -14265,9 +14497,12 @@ def python_sensitive_output_sink(node, tree=None):
         if (
             isinstance(named_value, ast.Name)
             and tree is not None
-            and any(
-                python_assigned_callable_alias(named_value.id, target, tree)
-                for target in named_targets
+            and (
+                any(
+                    python_assigned_callable_alias(named_value.id, target, tree)
+                    for target in named_targets
+                )
+                or python_assigned_sink_method_alias(named_value.id, tree)
             )
         ):
             return True
@@ -14292,6 +14527,7 @@ def python_sensitive_output_sink(node, tree=None):
                     python_assigned_callable_alias(name, target, tree)
                     for target in targets
                 )
+                or python_assigned_sink_method_alias(name, tree)
             }
             imported_functions = {
                 "builtins": {"print"},
@@ -16009,7 +16245,40 @@ def python_open_read_violation(tree, parents):
 
 def python_unreviewed_decorator_violation(tree, parents):
     """Keep decorators limited to inert reviewed builtin forms."""
+    sys_names = {
+        alias.asname or alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+        if alias.name == "sys"
+    }
     for candidate in ast.walk(tree):
+        if isinstance(candidate, ast.ImportFrom) and candidate.module == "sys" and any(
+            alias.name in {"modules", "*"} for alias in candidate.names
+        ):
+            return "Python heredoc imports the mutable sys.modules registry"
+        if (
+            isinstance(candidate, ast.Call)
+            and isinstance(candidate.func, ast.Name)
+            and (
+                candidate.func.id in {"globals", "locals"}
+                or (candidate.func.id == "vars" and not candidate.args)
+                or python_assigned_callable_alias(candidate.func.id, "globals", tree)
+                or python_assigned_callable_alias(candidate.func.id, "locals", tree)
+                or (
+                    not candidate.args
+                    and python_assigned_callable_alias(candidate.func.id, "vars", tree)
+                )
+            )
+        ):
+            return "Python heredoc accesses the mutable global namespace"
+        if (
+            isinstance(candidate, ast.Attribute)
+            and candidate.attr == "modules"
+            and isinstance(candidate.value, ast.Name)
+            and candidate.value.id in sys_names
+        ):
+            return "Python heredoc accesses the mutable sys.modules registry"
         if isinstance(candidate, ast.Name) and candidate.id == "__builtins__":
             return "Python heredoc accesses the mutable builtins namespace"
         if isinstance(candidate, ast.Import) and any(
@@ -16147,6 +16416,9 @@ def inspect_python_heredoc(body, safe_marker):
         for parent in ast.walk(tree)
         for child in ast.iter_child_nodes(parent)
     }
+    sink_storage_violation = python_sensitive_sink_storage_violation(tree, parents)
+    if sink_storage_violation:
+        return sink_storage_violation
     decorator_violation = python_unreviewed_decorator_violation(tree, parents)
     if decorator_violation:
         return decorator_violation
@@ -30270,3 +30542,210 @@ with zero violations. Final independent delta sign-off, the post-ledger
 packet-only scan, hosted quick check and exact-next-head Codex review remain
 pending; none is claimed here. Rollback remains the two changed files to
 `b3c335bd40def3ff75ef926387d82ac68d955103`.
+
+### Issue #79 independent re-review of `6f3f8c8` correction
+
+The pushed input head `6f3f8c8b5427222232104304d7c7ba0c41e2187f`
+passed its [hosted PR quick check](https://github.com/1XP-AI/gh-runnerd/actions/runs/36457680826/job/109048081622),
+but independent read-only GPT-6-Luna/max re-review identified two remaining
+P1 scanner bypasses. The GitHub Codex review requested for that head had not
+completed at this local correction checkpoint; the passing quick check is not
+merge authorization.
+
+| P1 | RED and correction |
+|---|---|
+| A destructured `subprocess` alias plus aliased `getattr` and a local dynamic member key could reach `subprocess.os.system`. | The inert `other, = (subprocess,)`, `lookup = getattr`, `member = "os"` witness was accepted before the fix. Subprocess-origin propagation now covers simple, unpacked, indexed and conditional bindings, so the existing fail-closed re-export check applies to the resolved first argument even with a dynamic key. |
+| `globals()["__builtins__"]` could mutate `property` and replace the only approved property decorator with a command launcher. | The inert global-mapping witness was accepted before the fix. Executable heredocs now reject mutable global namespace access through `globals()` and its reviewed aliases. Three adjacent acquisition routes—module-scope `locals()`, no-argument `vars()` and `sys.modules["builtins"]`—were also reproduced as failing negative cases and rejected. Ordinary reviewed staticmethod and property controls remain accepted. |
+
+The two original focused negative methods failed twice for the two P1
+witnesses. The three adjacent namespace acquisition subcases failed before
+their correction. The focused GREEN rerun passed three methods in 0.113s,
+including the staticmethod safe control. The full offline harness passed 99
+tests in 136.709s and reported 331 shell commands, 95 Python heredoc bodies
+and zero violations. All unsafe commands were AST/scanner text only; no GitHub
+workflow, filesystem mutator or mutable builtins code was executed. Post-ledger
+packet-only verification, final independent delta review, new hosted quick
+check and GitHub Codex exact-head review remain pending. Rollback restores
+only the packet and harness from this input head; no live gate is claimed.
+
+### Issue #79 PR #103 review 5342450001 and final-delta correction
+
+GitHub Codex [review 5342450001](https://github.com/1XP-AI/gh-runnerd/pull/103#pullrequestreview-5342450001)
+covered exact input `6f3f8c8b5427222232104304d7c7ba0c41e2187f`.
+Its body had no finding, but two inline P1 findings were reproduced as inert
+scanner inputs. The issue-comment feed contained only the review request.
+A read-only GPT-6-Luna/max focused delta review of the local correction also
+reported three P1 candidates and one P2 conservative rejection; each was
+triaged against the same local scanner before this next candidate push.
+
+| Finding | RED, correction or evidence-based disposition |
+|---|---|
+| [Output method alias](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4125208502), P1 | `emit = sys.stdout.write; emit(str(os.environ))` and a second alias were accepted before correction. The sensitive sink classifier now follows assignments of reviewed sink methods; literal safe output through the alias remains accepted. |
+| [Filesystem mutator in containers](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4125208513), P1 | `actions = {"delete": os.remove}; actions["delete"](...)` and list storage were accepted before correction. A mutator function reference that is stored or passed rather than directly called now fails closed; direct reviewed temporary-owned filesystem calls retain their existing checks. |
+| Independent P1: dict-indexed `subprocess` alias with dynamic OS key | The inert dict-index witness was accepted before correction. Subprocess-origin propagation now includes dict values as well as tuple/list/set and indexed forms; the re-export check rejects the resulting dynamic lookup. |
+| Independent P1: tuple-unpacked `globals` callable | Rebutted with a focused inert reproduction, not left unresolved: `lookup, = (globals,)` followed by `lookup()` already returns `Python heredoc contains an unresolved command-capable call 'lookup' on line 5`. The negative case was added; no extra implementation change was required. |
+| Independent P1: `from sys import modules` | The imported registry alias bypassed the direct `sys.modules` check before correction. Importing `modules` from `sys` now fails closed before decorator classification. |
+| Independent P2: a list containing `subprocess` is conservatively treated as a module alias | Triage once as a hypothetical safe false positive, not a current packet path or a release/security/data-loss/live blocker. The fail-closed provenance is retained; no fix or follow-up issue is warranted solely for this routine safe case. |
+
+The two GitHub P1 test methods failed with four unsafe subcase assertions
+before correction. The independent dict and imported-registry witnesses each
+failed before correction; the unpacked-global witness was rejected without a
+fix. The focused GREEN rerun passed four methods in 0.115s. The full offline
+harness then passed **101 tests in 140.534s**, including 331 shell commands,
+95 Python heredoc bodies and zero violations. No mutator, output sink, GitHub
+workflow or mutable-builtins witness was actually executed. `git diff --check`,
+added-line sensitive-pattern scan, post-ledger packet-only scan, final
+independent delta sign-off, new hosted quick check and exact-next-head GitHub
+Codex review remain separate gates. Rollback is the two-file correction to
+input `6f3f8c8b5427222232104304d7c7ba0c41e2187f`.
+
+### Issue #79 pre-push security delta and packet parity
+
+The read-only GPT-6-Luna/max follow-up to the GitHub P1 corrections identified
+four further concrete P1 scanner bypasses. Each witness was an inert heredoc
+string, failed a focused regression assertion before correction, and was never
+executed as a command or filesystem operation:
+
+| P1 witness | Correction and nearby control |
+|---|---|
+| `holder.module = subprocess; other = holder.module; lookup(other, member).system(...)` | Storing a subprocess-origin module in an attribute or subscript now fails closed. Direct reviewed subprocess calls remain accepted. |
+| `lookup = getattr; emit = lookup(sys.stdout, "write"); emit(str(os.environ))` | Output sink method aliases now resolve an assigned `getattr` alias. Storing an output method indirectly in a container also failed a separate inert self-review assertion and is rejected; literal output through a direct alias remains accepted. |
+| `from os import remove as erase; actions = {"delete": erase}` and `import os as operating` before mutator storage | Imported filesystem mutators, star imports from filesystem-capable modules, and aliases of `os`/`shutil` modules fail closed; ordinary reviewed `import os` remains accepted. |
+| `from sys import *; modules["builtins"]` | Star import from `sys` is rejected before access to its mutable module registry. |
+
+The independent reviewer confirmed those four corrections at source level and
+found no new P0/P1 in that delta; it did not claim to execute tests. A later
+packet-only run found two conservative false positives: a synthetic namespace
+dictionary containing `subprocess` tainted an unrelated key, and the new
+helper's `matches` local collided with an existing nested function name in
+the packet's self-inspection. A safe unrelated-key control failed before
+key-aware literal-dictionary lookup; the unsafe module-key and dictionary
+update controls remain rejected. Renaming the new local binding removed the
+helper collision. The packet-only scan then passed in 69.001s: 331 shell
+commands, 95 Python heredoc bodies, zero violations. The full offline
+harness passed **101 tests in 139.560s** with the same counts. These checks
+are offline only, not live runner qualification. Final independent review of
+the key-aware delta, post-ledger packet-only scan, hosted quick check and
+GitHub Codex review of the next exact head remain separate gates. Rollback
+restores only this packet and offline harness from the pushed input
+`6f3f8c8b5427222232104304d7c7ba0c41e2187f`.
+
+The final key-aware-dictionary review did not sign off its first candidate:
+the reviewer reproduced a P1 `namespace.update({"safe": subprocess})`
+mutation followed by an aliased `getattr` with a dynamic `member` key. The
+earlier literal-`"os"` negative assertion had been rejected by a different
+guard and did not establish origin tracking. The corrected dynamic-key
+assertion failed before indirect container mutators were rejected. A separate
+conditional reassignment witness failed before multiply-bound names stopped
+using the initial literal dictionary as their sole source. Subsequent inert
+tuple-unpack and loop-target reassignment witnesses exposed the same missing
+Store-binding count; counting all AST Store names closed both. Finally, the
+reviewer found that `update = namespace.update` could evade a direct-call-only
+mutator guard. Its exact dynamic-key witness failed before rejecting the
+method reference itself, then passed. The focused subprocess re-export test
+passed after each correction. All named commands and paths in these witnesses
+were inert scanner strings. The **101-test, 139.021s** full offline run and
+the **64.987s** packet-only scan (331/95/zero) preceded the last loop-target
+and stored-method corrections and are not claimed for that final candidate.
+Final independent source review, full suite, post-ledger packet scan, hosted
+quick check and exact-next-head GitHub Codex review remain pending.
+
+Another independent source pass verified the loop-target and stored-method
+guards but found a type-level P1 mutation route: `dict.update(namespace,
+{"safe": subprocess})` could change a subprocess-bearing namespace without
+touching the guarded `namespace.update` attribute. Its dynamic-key witness
+failed before correction. Access to unreviewed dictionary mutator descriptors
+is now rejected; inert `mapping_type = dict; mapping_type.update(...)` and
+`getattr(dict, "update")(...)` variants also failed before that closure and
+passed after it. The preceding full harness run passed **101 tests in
+141.730s**, scanning 331 shell commands and 95 Python heredocs with zero
+violations, but preceded this latest descriptor correction. The final full
+suite, post-ledger packet-only scan, independent source sign-off, hosted PR
+quick check and exact-head GitHub Codex review are still required before
+merge. No witness was executed; no live operation was authorized or run.
+
+The next read-only pass found one additional runtime-type P1 route:
+`type(namespace).update(namespace, ...)` obtained the same mutator despite
+the direct `dict` descriptor guard. Its inert dynamic-key assertion failed
+before correction. Rejecting runtime type acquisition from a
+subprocess-bearing name closed it; the adjacent `namespace.__class__` route
+also failed before correction and passed afterward. The immediately preceding
+**101-test, 140.270s** full run and **65.995s** packet-only scan each reported
+331 shell commands, 95 Python heredocs and zero violations but predated these
+two final runtime-type guards. Their focused negative test passed after the
+correction; a fresh full run, packet-only scan and independent sign-off are
+still required. No actual mutator or command witness was executed.
+
+The next independent source pass found that projecting the same container
+through `[namespace][0]` still escaped the direct-name `type`/`__class__`
+guards. The exact `type([namespace][0]).update(...)` witness failed before
+the existing subprocess-origin expression resolver was applied to these
+operands, then passed. The adjacent projected `.__class__` and
+`getattr([namespace][0], "__class__")` witnesses also failed before their
+corrections and passed afterward. A full suite run immediately before this
+projected-receiver correction passed **101 tests in 140.270s**, with 331
+shell commands, 95 Python heredocs and zero violations, but is not claimed
+for the corrected head. The final full suite, post-ledger packet scan,
+independent source review, hosted quick check and exact-head GitHub Codex
+review remain pending; all dangerous witnesses remained inert strings.
+
+The subsequent independent pass found a copied-container P1:
+`namespace.copy().__class__.update(namespace, ...)` could obtain the same
+dictionary mutator because the provenance helper did not follow call results.
+Its inert dynamic-key witness failed before correction. Subprocess-bearing
+container provenance now follows `copy()`, direct built-in container
+constructors and value-preserving binary/Boolean compositions before the
+existing type/class/access guards; the focused witness passed afterward.
+The preceding full harness run passed **101 tests in 141.708s** (331 shell
+commands, 95 Python heredocs, zero violations), but preceded this copy
+correction. No live or unsafe witness ran. A fresh full suite, post-ledger
+packet scan, independent delta sign-off, hosted quick check and exact-head
+GitHub Codex review remain pending.
+
+The next read-only reviewer pass reproduced a P1 descriptor-table route:
+`update = dict.__dict__["update"]` followed by a dynamic-key command witness
+was accepted. The inert assertion failed before dictionary-type `__dict__`
+access was rejected, then passed. `vars(dict)["update"]` failed an adjacent
+assertion before the same fail-closed descriptor acquisition check and passed
+afterward. The preceding full harness passed **101 tests in 145.723s** and
+reported 331 shell commands, 95 Python heredocs and zero violations, but
+predated these two corrections. No descriptor or command was actually
+executed. A fresh full harness, post-ledger packet scan, independent delta
+review, hosted quick check and exact-head GitHub Codex review remain pending.
+
+The next independent pass identified `dict.__mro__[0].update(...)` as a P1
+route around the enumerated dictionary mutator names. Its inert dynamic-key
+witness failed before correction. Dictionary-type attribute access through
+`dict` or a tracked alias now fails closed in a subprocess-bearing heredoc,
+rather than attempting to enumerate mutator/introspection member names; the
+focused negative and unrelated-key safe controls passed after correction.
+The immediately preceding full harness and packet scan were run before this
+change, so no final whole-packet claim is made yet. No witness or live runner
+operation executed. Full offline verification, independent source sign-off,
+hosted quick check and exact-head GitHub Codex review remain pending.
+
+The next independent pass found `type({}).update(namespace, ...)` could
+reacquire the same descriptor without mentioning a subprocess-bearing
+receiver. This dynamic-key P1 witness and the adjacent
+`{}.__class__.update(...)` witness each failed before correction and passed
+afterward. The packet scanner's three one-argument `type` checks were
+replaced with equivalent `isinstance`/Boolean-exclusion or AST-node checks;
+one-argument runtime type queries and `.__class__` access now fail closed in
+subprocess-bearing heredocs. The reviewed three-argument synthetic `FakeOS`
+class construction remains allowed. The prior full offline harness passed
+**101 tests in 139.576s**, with 331 shell commands, 95 Python heredocs and
+zero violations, but preceded these guards. Final full and post-ledger
+packet-only checks, independent source sign-off, hosted quick check and
+exact-head GitHub Codex review remain pending; no witness executed.
+
+The next independent review found the remaining three-argument `type()`
+surface could create a `dict` subclass and call its unbound mutator:
+`type("D", (dict,), {}).update(namespace, ...)`. Its inert dynamic-key witness
+failed before correction. Runtime type construction is now restricted to
+the packet's direct, exact-shape synthetic `FakeOS` class: empty bases and
+one `environ` dictionary containing string-only values. The focused unsafe
+and safe controls passed afterward. The preceding full harness passed **101
+tests in 142.978s** (331 shell commands, 95 Python heredocs, zero violations)
+but preceded this final restriction. No dangerous witness ran. Full offline
+verification, independent sign-off, post-ledger packet scan, hosted quick
+check and exact-head GitHub Codex review remain pending.

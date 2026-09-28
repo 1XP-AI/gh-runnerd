@@ -2832,11 +2832,151 @@ class Issue79RegressionTests(unittest.TestCase):
             'import subprocess\nother = [subprocess][0]\nother.os.remove("/tmp/maintainer-owned")\n',
             'import subprocess\nlookup = getattr\nlookup(subprocess, "os").remove("/tmp/maintainer-owned")\n',
             'import subprocess\nlookup = vars\nlookup(subprocess)["os"].remove("/tmp/maintainer-owned")\n',
+            'import subprocess\nother, = (subprocess,)\nlookup = getattr\nmember = "os"\nlookup(other, member).system("gh workflow run ci.yml")\n',
+            'import subprocess\nother = {"module": subprocess}["module"]\nlookup = getattr\nmember = "os"\nlookup(other, member).system("gh workflow run ci.yml")\n',
+            'import subprocess\nclass Holder:\n    pass\nholder = Holder()\nholder.module = subprocess\nother = holder.module\nlookup = getattr\nmember = "os"\nlookup(other, member).system("gh workflow run ci.yml")\n',
         )
         for body in unsafe:
             with self.subTest(body=body):
                 self.assertIsNotNone(self.inspect(body))
         self.assertIsNone(self.inspect('import subprocess\nprint("reviewed")\n'))
+        self.assertIsNone(self.inspect(
+            'import subprocess\nnamespace = {"subprocess": subprocess, "safe": "reviewed"}\n'
+            'value = namespace["safe"]\nnamespace["safe"] = value\n'
+        ))
+        self.assertIsNotNone(self.inspect(
+            'import subprocess\nnamespace = {"subprocess": subprocess}\n'
+            'other = namespace["subprocess"]\ngetattr(other, "os").system("gh workflow run ci.yml")\n'
+        ))
+        self.assertIsNotNone(self.inspect(
+            'import subprocess\nnamespace = {"subprocess": subprocess, "safe": "reviewed"}\n'
+            'namespace.update({"safe": subprocess})\n'
+            'other = namespace["safe"]\ngetattr(other, "os").system("gh workflow run ci.yml")\n'
+        ))
+        self.assertIsNotNone(self.inspect(
+            'import subprocess\nnamespace = {"subprocess": subprocess, "safe": "reviewed"}\n'
+            'namespace.update({"safe": subprocess})\nother = namespace["safe"]\n'
+            'lookup = getattr\nmember = "os"\n'
+            'lookup(other, member).system("gh workflow run ci.yml")\n'
+        ))
+        self.assertIsNotNone(self.inspect(
+            'import subprocess\nnamespace = {"safe": subprocess}\n'
+            'if False:\n    namespace = {"safe": "reviewed", "subprocess": subprocess}\n'
+            'other = namespace["safe"]\nlookup = getattr\nmember = "os"\n'
+            'lookup(other, member).system("gh workflow run ci.yml")\n'
+        ))
+        self.assertIsNotNone(self.inspect(
+            'import subprocess\nnamespace = {"safe": "reviewed", "subprocess": subprocess}\n'
+            'namespace, = ({"safe": subprocess},)\n'
+            'other = namespace["safe"]\nlookup = getattr\nmember = "os"\n'
+            'lookup(other, member).system("gh workflow run ci.yml")\n'
+        ))
+        self.assertIsNotNone(self.inspect(
+            'import subprocess\nnamespace = {"safe": "reviewed", "subprocess": subprocess}\n'
+            'for namespace in [{"safe": subprocess}]:\n    other = namespace["safe"]\n'
+            'lookup = getattr\nmember = "os"\n'
+            'lookup(other, member).system("gh workflow run ci.yml")\n'
+        ))
+        self.assertIsNotNone(self.inspect(
+            'import subprocess\nnamespace = {"subprocess": subprocess, "safe": "reviewed"}\n'
+            'update = namespace.update\nupdate({"safe": subprocess})\n'
+            'other = namespace["safe"]\nlookup = getattr\nmember = "os"\n'
+            'lookup(other, member).system("gh workflow run ci.yml")\n'
+        ))
+        self.assertIsNotNone(self.inspect(
+            'import subprocess\nnamespace = {"subprocess": subprocess, "safe": "reviewed"}\n'
+            'dict.update(namespace, {"safe": subprocess})\n'
+            'other = namespace["safe"]\nlookup = getattr\nmember = "os"\n'
+            'lookup(other, member).system("gh workflow run ci.yml")\n'
+        ))
+        self.assertIsNotNone(self.inspect(
+            'import subprocess\nnamespace = {"subprocess": subprocess, "safe": "reviewed"}\n'
+            'mapping_type = dict\nmapping_type.update(namespace, {"safe": subprocess})\n'
+            'other = namespace["safe"]\nlookup = getattr\nmember = "os"\n'
+            'lookup(other, member).system("gh workflow run ci.yml")\n'
+        ))
+        self.assertIsNotNone(self.inspect(
+            'import subprocess\nnamespace = {"subprocess": subprocess, "safe": "reviewed"}\n'
+            'getattr(dict, "update")(namespace, {"safe": subprocess})\n'
+            'other = namespace["safe"]\nlookup = getattr\nmember = "os"\n'
+            'lookup(other, member).system("gh workflow run ci.yml")\n'
+        ))
+        self.assertIsNotNone(self.inspect(
+            'import subprocess\nnamespace = {"subprocess": subprocess, "safe": "reviewed"}\n'
+            'type(namespace).update(namespace, {"safe": subprocess})\n'
+            'other = namespace["safe"]\nlookup = getattr\nmember = "os"\n'
+            'lookup(other, member).system("gh workflow run ci.yml")\n'
+        ))
+        self.assertIsNotNone(self.inspect(
+            'import subprocess\nnamespace = {"subprocess": subprocess, "safe": "reviewed"}\n'
+            'namespace.__class__.update(namespace, {"safe": subprocess})\n'
+            'other = namespace["safe"]\nlookup = getattr\nmember = "os"\n'
+            'lookup(other, member).system("gh workflow run ci.yml")\n'
+        ))
+        self.assertIsNotNone(self.inspect(
+            'import subprocess\nnamespace = {"subprocess": subprocess, "safe": "reviewed"}\n'
+            'type([namespace][0]).update(namespace, {"safe": subprocess})\n'
+            'other = namespace["safe"]\nlookup = getattr\nmember = "os"\n'
+            'lookup(other, member).system("gh workflow run ci.yml")\n'
+        ))
+        self.assertIsNotNone(self.inspect(
+            'import subprocess\nnamespace = {"subprocess": subprocess, "safe": "reviewed"}\n'
+            '[namespace][0].__class__.update(namespace, {"safe": subprocess})\n'
+            'other = namespace["safe"]\nlookup = getattr\nmember = "os"\n'
+            'lookup(other, member).system("gh workflow run ci.yml")\n'
+        ))
+        self.assertIsNotNone(self.inspect(
+            'import subprocess\nnamespace = {"subprocess": subprocess, "safe": "reviewed"}\n'
+            'getattr([namespace][0], "__class__").update(namespace, {"safe": subprocess})\n'
+            'other = namespace["safe"]\nlookup = getattr\nmember = "os"\n'
+            'lookup(other, member).system("gh workflow run ci.yml")\n'
+        ))
+        self.assertIsNotNone(self.inspect(
+            'import subprocess\nnamespace = {"subprocess": subprocess, "safe": "reviewed"}\n'
+            'namespace.copy().__class__.update(namespace, {"safe": subprocess})\n'
+            'other = namespace["safe"]\nlookup = getattr\nmember = "os"\n'
+            'lookup(other, member).system("gh workflow run ci.yml")\n'
+        ))
+        self.assertIsNotNone(self.inspect(
+            'import subprocess\nnamespace = {"subprocess": subprocess, "safe": "reviewed"}\n'
+            'update = dict.__dict__["update"]\nupdate(namespace, {"safe": subprocess})\n'
+            'other = namespace["safe"]\nlookup = getattr\nmember = "os"\n'
+            'lookup(other, member).system("gh workflow run ci.yml")\n'
+        ))
+        self.assertIsNotNone(self.inspect(
+            'import subprocess\nnamespace = {"subprocess": subprocess, "safe": "reviewed"}\n'
+            'update = vars(dict)["update"]\nupdate(namespace, {"safe": subprocess})\n'
+            'other = namespace["safe"]\nlookup = getattr\nmember = "os"\n'
+            'lookup(other, member).system("gh workflow run ci.yml")\n'
+        ))
+        self.assertIsNotNone(self.inspect(
+            'import subprocess\nnamespace = {"subprocess": subprocess, "safe": "reviewed"}\n'
+            'dict.__mro__[0].update(namespace, {"safe": subprocess})\n'
+            'other = namespace["safe"]\nlookup = getattr\nmember = "os"\n'
+            'lookup(other, member).system("gh workflow run ci.yml")\n'
+        ))
+        self.assertIsNotNone(self.inspect(
+            'import subprocess\nnamespace = {"subprocess": subprocess, "safe": "reviewed"}\n'
+            'type({}).update(namespace, {"safe": subprocess})\n'
+            'other = namespace["safe"]\nlookup = getattr\nmember = "os"\n'
+            'lookup(other, member).system("gh workflow run ci.yml")\n'
+        ))
+        self.assertIsNotNone(self.inspect(
+            'import subprocess\nnamespace = {"subprocess": subprocess, "safe": "reviewed"}\n'
+            '{}.__class__.update(namespace, {"safe": subprocess})\n'
+            'other = namespace["safe"]\nlookup = getattr\nmember = "os"\n'
+            'lookup(other, member).system("gh workflow run ci.yml")\n'
+        ))
+        self.assertIsNotNone(self.inspect(
+            'import subprocess\nnamespace = {"subprocess": subprocess, "safe": "reviewed"}\n'
+            'type("D", (dict,), {}).update(namespace, {"safe": subprocess})\n'
+            'other = namespace["safe"]\nlookup = getattr\nmember = "os"\n'
+            'lookup(other, member).system("gh workflow run ci.yml")\n'
+        ))
+        self.assertIsNone(self.inspect(
+            'import subprocess\n'
+            'fake_os = type("FakeOS", (), {"environ": {"fixture": "reviewed"}})\n'
+        ))
         self.assertIsNone(self.inspect(
             'class Settings:\n    os = "darwin"\nprint(Settings.os)\n'
         ))
@@ -2869,6 +3009,9 @@ class Issue79RegressionTests(unittest.TestCase):
             '__builtins__["property"] = replace\n',
             '__builtins__.property = replace\n',
             'setattr(__builtins__, "property", replace)\n',
+            'ns = globals()["__builtins__"]\n'
+            'if isinstance(ns, dict):\n    ns["property"] = replace\n'
+            'else:\n    ns.property = replace\n',
         ):
             body = (
                 'import subprocess\n'
@@ -2882,7 +3025,55 @@ class Issue79RegressionTests(unittest.TestCase):
             )
             with self.subTest(mutation=mutation):
                 self.assertIsNotNone(self.inspect(body))
+        for acquisition in (
+            'ns = locals()["__builtins__"]\n',
+            'ns = vars()["__builtins__"]\n',
+            'import sys\nns = sys.modules["builtins"]\n',
+            'from sys import modules\nns = modules["builtins"]\n',
+            'from sys import *\nns = modules["builtins"]\n',
+            'lookup, = (globals,)\nns = lookup()["__builtins__"]\n',
+        ):
+            body = (
+                'import subprocess\n'
+                'def replace(function):\n    return subprocess.run\n'
+                + acquisition
+                + 'if isinstance(ns, dict):\n    ns["property"] = replace\n'
+                'else:\n    ns.property = replace\n'
+                'class GoAliasPopen:\n'
+                '    @property\n'
+                '    def returncode(self):\n'
+                '        return self._process.returncode\n'
+                'GoAliasPopen.returncode(["gh", "workflow", "run", "ci.yml"])\n'
+            )
+            with self.subTest(acquisition=acquisition):
+                self.assertIsNotNone(self.inspect(body))
         self.assertIsNone(self.inspect('def reviewed():\n    return "safe"\nprint(reviewed())\n'))
+
+    def test_output_sink_method_alias_keeps_sensitive_taint(self) -> None:
+        unsafe = (
+            'import os, sys\nemit = sys.stdout.write\nemit(str(os.environ))\n',
+            'import os, sys\nemit = sys.stdout.write\nagain = emit\nagain(str(os.environ))\n',
+            'import os, sys\nsinks = {"emit": sys.stdout.write}\nsinks["emit"](str(os.environ))\n',
+            'import os, sys\nsinks = [sys.stdout.write]\nsinks[0](str(os.environ))\n',
+            'import os, sys\nlookup = getattr\nemit = lookup(sys.stdout, "write")\nemit(str(os.environ))\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+        self.assertIsNone(self.inspect(
+            'import sys\nemit = sys.stdout.write\nemit("reviewed")\n'
+        ))
+
+    def test_filesystem_mutator_cannot_hide_in_container_binding(self) -> None:
+        unsafe = (
+            'import os\nactions = {"delete": os.remove}\nactions["delete"]("/tmp/maintainer-owned")\n',
+            'import os\nactions = [os.remove]\nactions[0]("/tmp/maintainer-owned")\n',
+            'from os import remove as erase\nactions = {"delete": erase}\nactions["delete"]("/tmp/maintainer-owned")\n',
+            'import os as operating\nactions = {"delete": operating.remove}\nactions["delete"]("/tmp/maintainer-owned")\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
 
     def test_constructor_and_output_sink_aliases_preserve_sensitive_taint(self) -> None:
         unsafe = (
