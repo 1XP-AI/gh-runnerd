@@ -708,14 +708,14 @@ class Issue79RegressionTests(unittest.TestCase):
     def shell_violation(self, command: str) -> str | None:
         self.scanner["shell_owned_path_variables"].clear()  # type: ignore[union-attr]
         self.scanner["shell_pending_owned_bindings"].clear()  # type: ignore[union-attr]
-        return self.scanner["forbidden_command"](shlex.split(command))  # type: ignore[operator]
+        return self.scanner["forbidden_shell_command"](shlex.split(command))  # type: ignore[operator]
 
     def shell_document_violation(self, commands: str) -> str | None:
         """Use the packet's shell-fence parser and scanner on inert source text."""
         markdown = f"```sh\n{commands}\n```\n"
         for command, _number in self.scanner["shell_commands"](markdown):  # type: ignore[operator]
             for segment in self.scanner["shell_token_segments"](command):  # type: ignore[operator]
-                violation = self.scanner["forbidden_command"](segment)  # type: ignore[operator]
+                violation = self.scanner["forbidden_shell_command"](segment)  # type: ignore[operator]
                 if violation:
                     return violation
         return None
@@ -1130,6 +1130,113 @@ class Issue79RegressionTests(unittest.TestCase):
             'snapshot = {"status": "reviewed"}\n'
             'values = snapshot.values()\n'
             'print("".join(values))\n',
+        )
+        for body in safe:
+            with self.subTest(body=body):
+                self.assertIsNone(self.inspect(body))
+
+    def test_environment_urlencode_output_keeps_sensitive_taint(self) -> None:
+        unsafe = (
+            'import os\n'
+            'import urllib.parse\n'
+            'print(urllib.parse.urlencode(os.environ))\n',
+            'import os\n'
+            'from urllib.parse import urlencode\n'
+            'print(urlencode(os.environ))\n',
+            'import os\n'
+            'from urllib.parse import urlencode as encode\n'
+            'query = encode(os.environ)\n'
+            'print(query)\n',
+            'import os\n'
+            'import urllib.parse as parse\n'
+            'secret = os.environ\n'
+            'print(parse.urlencode(secret))\n',
+            'import os\n'
+            'from urllib.parse import urlencode as encode\n'
+            'def unrelated(encode):\n'
+            '    return "reviewed"\n'
+            'secret = os.environ\n'
+            'print(encode(secret))\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+        safe = (
+            'from urllib.parse import urlencode\n'
+            'print(urlencode({"status": "reviewed"}))\n',
+        )
+        for body in safe:
+            with self.subTest(body=body):
+                self.assertIsNone(self.inspect(body))
+
+    def test_sensitive_environment_assignment_to_members_keeps_taint(self) -> None:
+        unsafe = (
+            'import os\n'
+            'box = {}\n'
+            'box.payload = os.environ\n'
+            'print(box.payload)\n',
+            'import os\n'
+            'box = {}\n'
+            'box["payload"] = os.environ\n'
+            'print(box["payload"])\n',
+            'import os\n'
+            'box = {}\n'
+            'box.payload = os.environ\n'
+            'value = box.payload\n'
+            'print(value)\n',
+            'import os\n'
+            'box = {}\n'
+            'box.payload = os.environ\n'
+            'first = box.payload\n'
+            'second = first\n'
+            'print(second)\n',
+            'import os\n'
+            'def save(obj, value):\n'
+            '    obj.payload = value\n'
+            'box = {}\n'
+            'save(box, os.environ)\n'
+            'print(box.payload)\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+        safe = (
+            'box = {}\n'
+            'box["payload"] = {"status": "reviewed"}\n'
+            'print(box["payload"])\n',
+        )
+        for body in safe:
+            with self.subTest(body=body):
+                self.assertIsNone(self.inspect(body))
+
+    def test_environment_joins_cover_str_descriptor_and_nested_next(self) -> None:
+        unsafe = (
+            'import os\n'
+            'secret = os.environ\n'
+            'print(str.join("", secret.values()))\n',
+            'import os\n'
+            'secret = os.environ\n'
+            'print("".join(next(iter(secret.values()))))\n',
+            'import os\n'
+            'def unrelated(str):\n'
+            '    return "reviewed"\n'
+            'secret = os.environ\n'
+            'print(str.join("", secret.values()))\n',
+            'import os\n'
+            'def unrelated(next):\n'
+            '    return "reviewed"\n'
+            'secret = os.environ\n'
+            'print("".join(next(iter(secret.values()))))\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+        safe = (
+            'print(str.join("", {"status": "reviewed"}.values()))\n',
+            'print("".join(next(iter({"status": "reviewed"}.values()))))\n',
         )
         for body in safe:
             with self.subTest(body=body):
@@ -2375,13 +2482,46 @@ class Issue79RegressionTests(unittest.TestCase):
                 self.assertIsNotNone(self.shell_violation(command))
 
         for command in (
-            "git config --local --get-all remote.origin.url",
             "git config --get core.repositoryformatversion",
             "git config --local --get-regexp '^filter\\.'",
             "git config --get-urlmatch http.sslverify https://github.com/1XP-AI/gh-runnerd",
         ):
             with self.subTest(command=command):
                 self.assertIsNone(self.shell_violation(command))
+
+    def test_shell_origin_url_query_is_rejected_but_verifier_capture_remains(self) -> None:
+        query = "git config --local --get-all remote.origin.url"
+        self.assertIsNone(
+            self.scanner["git_read_only_violation"](shlex.split(query))  # type: ignore[operator]
+        )
+        self.assertIsNotNone(self.shell_violation(query))
+        self.assertIsNotNone(
+            self.shell_violation("trap 'git config --local --get-all remote.origin.url' EXIT")
+        )
+        self.assertIsNotNone(
+            self.inspect(
+                'import subprocess\n'
+                'subprocess.run(["git", "config", "--local", "--get-all", '
+                '"remote.origin.url"], check=True)\n'
+            )
+        )
+
+        origin_capture = _top_level_assignment(self.verification, "origin_result")
+        self.assertEqual(
+            self.scanner["python_dotted_name"](origin_capture.value.func),  # type: ignore[operator,union-attr]
+            "run_bounded_git_query",
+        )
+        self.assertIn("remote.origin.url", ast.unparse(origin_capture.value))
+        origin_check = next(
+            statement
+            for statement in self.verification.body
+            if isinstance(statement, ast.If)
+            and any(
+                isinstance(node, ast.Name) and node.id == "origin_urls"
+                for node in ast.walk(statement.test)
+            )
+        )
+        self.assertIsInstance(origin_check.test, ast.Compare)
 
     def test_nested_raise_does_not_prove_module_root_guard(self) -> None:
         bodies = [
@@ -2832,6 +2972,41 @@ class Issue79RegressionTests(unittest.TestCase):
             with self.subTest(commands=commands):
                 self.assertIsNone(self.shell_document_violation(commands))
 
+    def test_conditional_and_env_prefix_assignments_do_not_clear_shell_taint(self) -> None:
+        commands_by_case = {
+            "conditional-if": (
+                "secret=$GH_TOKEN\n"
+                "if [ 1 = 2 ]; then secret=reviewed; fi\n"
+                "printf '%s\\n' \"$secret\""
+            ),
+            "env-prefix": (
+                "secret=$GH_TOKEN\n"
+                "env secret=reviewed printf '%s\\n' \"$secret\""
+            ),
+        }
+        for label, commands in commands_by_case.items():
+            with self.subTest(label=label):
+                markdown = f"```sh\n{commands}\n```\n"
+                output_violation = None
+                for command, _line in self.scanner["shell_commands"](markdown):  # type: ignore[operator]
+                    for segment in self.scanner["shell_token_segments"](command):  # type: ignore[operator]
+                        if "printf" in segment:
+                            output_violation = self.scanner["forbidden_shell_command"](segment)  # type: ignore[operator]
+                self.assertIsNotNone(output_violation)
+
+    def test_shell_parameter_modifier_keeps_sensitive_assignment_taint(self) -> None:
+        commands = (
+            "secret=${GH_TOKEN#x}\n"
+            "printf '%s\\n' \"$secret\""
+        )
+        markdown = f"```sh\n{commands}\n```\n"
+        output_violation = None
+        for command, _line in self.scanner["shell_commands"](markdown):  # type: ignore[operator]
+            for segment in self.scanner["shell_token_segments"](command):  # type: ignore[operator]
+                if segment and segment[0] == "printf":
+                    output_violation = self.scanner["forbidden_shell_command"](segment)  # type: ignore[operator]
+        self.assertIsNotNone(output_violation)
+
     def test_shell_indirect_environment_expansion_in_assignment_is_rejected(self) -> None:
         self.assertIsNotNone(
             self.shell_document_violation(
@@ -2964,7 +3139,7 @@ class Issue79RegressionTests(unittest.TestCase):
                         "an isolated AST-inspected heredoc"
                     )
                     continue
-                violation = self.scanner["forbidden_command"](segment)  # type: ignore[operator]
+                violation = self.scanner["forbidden_shell_command"](segment)  # type: ignore[operator]
                 if violation:
                     matches.append(f"line {number}: {violation}")
 

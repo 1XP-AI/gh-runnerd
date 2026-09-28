@@ -7369,7 +7369,7 @@ def credential_environment_name(name):
     )
 
 shell_parameter = re.compile(
-    r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?:[^}]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)"
+    r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?:[^}]*(?:\}|$))|\$([A-Za-z_][A-Za-z0-9_]*)"
 )
 
 def shell_sensitive_parameter_violation(tokens):
@@ -7589,9 +7589,10 @@ def shell_commands(markdown):
             preserve_existing = previous_operator in {"&&", "||", "|", "&"} or (
                 index == 0 and next_operator == "|"
             )
-            shell_record_sensitive_assignments(
-                segment, preserve_existing=preserve_existing
-            )
+            if segment and all(assignment.fullmatch(token) for token in segment):
+                shell_record_sensitive_assignments(
+                    segment, preserve_existing=preserve_existing
+                )
         unsafe_heredocs = non_python_heredoc_delimiters(command)
         if unsafe_heredocs:
             raise SystemExit(
@@ -8026,7 +8027,7 @@ def shell_trap_violation(tokens, depth=0):
     for segment in segments:
         if reviewed_shell_cleanup(segment):
             continue
-        violation = forbidden_command(segment, depth + 1)
+        violation = forbidden_shell_command(segment, depth + 1)
         if violation:
             return f"trap handler -> {violation}"
     return None
@@ -8469,6 +8470,19 @@ def git_read_only_violation(tokens):
                 return "Git config URL-match query requires a literal HTTPS URL"
         else:
             return "Git config query must use an approved read-only option"
+    return None
+
+def git_sensitive_shell_output_violation(tokens):
+    """Do not print the raw local origin URL from an executable shell query."""
+    if not tokens or executable_basename(tokens[0]) != "git":
+        return None
+    config_index = git_subcommand_index(tokens)
+    if config_index is None or executable_basename(tokens[config_index]) != "config":
+        return None
+    options = tokens[config_index + 1:]
+    query = [option for option in options if option != "--local"]
+    if query == ["--get-all", "remote.origin.url"]:
+        return "Git remote.origin.url output is not allowed in an executable shell"
     return None
 
 
@@ -9013,7 +9027,7 @@ def forbidden_command(tokens, depth=0):
             return f"{executable} -c nested command-string depth exceeded"
         if payload is not None:
             for nested_segment in shell_token_segments(payload):
-                nested_violation = forbidden_command(nested_segment, depth + 1)
+                nested_violation = forbidden_shell_command(nested_segment, depth + 1)
                 if nested_violation:
                     return f"{executable} -c -> {nested_violation}"
         return f"{executable} -c command string"
@@ -9060,6 +9074,14 @@ def forbidden_command(tokens, depth=0):
     if executable not in reviewed_shell_executables:
         return f"{executable} shell executable is not in the reviewed safe allowlist"
     return None
+
+def forbidden_shell_command(tokens, depth=0):
+    normalized = executable_tokens(tokens)
+    if normalized:
+        sensitive_git_output = git_sensitive_shell_output_violation(normalized)
+        if sensitive_git_output:
+            return sensitive_git_output
+    return forbidden_command(tokens, depth)
 
 python_command_functions = {
     "os.execv",
@@ -9853,6 +9875,28 @@ def python_assigned_format_alias(name, tree):
         if value is not None
     )
 
+def python_imported_urlencode_aliases(tree):
+    """Cache urllib.parse.urlencode import spellings without evaluating the AST."""
+    aliases = getattr(tree, "_issue79_urlencode_import_aliases", None)
+    if aliases is None:
+        aliases = set()
+        for candidate in ast.walk(tree):
+            if isinstance(candidate, ast.ImportFrom):
+                if candidate.level == 0 and candidate.module == "urllib.parse":
+                    aliases.update(
+                        alias.asname or alias.name
+                        for alias in candidate.names
+                        if alias.name == "urlencode"
+                    )
+            elif isinstance(candidate, ast.Import):
+                for alias in candidate.names:
+                    if alias.name == "urllib.parse":
+                        aliases.add((alias.asname or "urllib.parse") + ".urlencode")
+                    elif alias.name == "urllib":
+                        aliases.add((alias.asname or "urllib") + ".parse.urlencode")
+        tree._issue79_urlencode_import_aliases = aliases
+    return aliases
+
 
 def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen=None):
     """Track credential values through aliases without trusting variable names."""
@@ -9864,19 +9908,45 @@ def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen
         return False
     seen.add(id(node))
     if isinstance(node, ast.Name):
-        return node.id in sensitive_names
+        if node.id in sensitive_names:
+            return True
+        if getattr(tree, "_issue79_member_taint_enabled", False):
+            return any(
+                isinstance(value, (ast.Name, ast.Attribute, ast.Subscript))
+                and python_sensitive_value_expression(
+                    value, sensitive_names, tree, parents, seen.copy()
+                )
+                for value in python_join_assignment_index(tree).get(node.id, ())
+            )
+        return False
     if isinstance(node, ast.Attribute) and python_dotted_name(node) == "os.environ":
         return True
     if isinstance(node, ast.Subscript):
         if python_dotted_name(node.value) == "os.environ":
             key = node.slice.value if isinstance(node.slice, ast.Constant) else None
             return key is None or not isinstance(key, str) or credential_environment_name(key)
+        if getattr(tree, "_issue79_member_taint_enabled", False) and python_sensitive_member_assignment_value(
+            node, sensitive_names, tree, parents, seen.copy()
+        ):
+            return True
         return python_sensitive_value_expression(
             node.value, sensitive_names, tree, parents, seen.copy()
         )
+    if isinstance(node, ast.Attribute) and getattr(tree, "_issue79_member_taint_enabled", False) and python_sensitive_member_assignment_value(
+        node, sensitive_names, tree, parents, seen.copy()
+    ):
+        return True
     if isinstance(node, ast.Call):
         dotted = python_dotted_name(node.func)
-        if python_reviewed_string_join_callable(node.func, tree) and any(
+        if dotted == "urllib.parse.urlencode" or dotted in python_imported_urlencode_aliases(tree):
+            return any(
+                python_sensitive_value_expression(
+                    value, sensitive_names, tree, parents, seen.copy()
+                )
+                for value in list(node.args)
+                + [keyword.value for keyword in node.keywords]
+            )
+        if python_reviewed_string_join_callable(node.func, tree, parents) and any(
             python_sensitive_join_argument(
                 value, sensitive_names, tree, parents, seen.copy()
             )
@@ -10049,19 +10119,126 @@ def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen
         )
     return False
 
-def python_unshadowed_builtin_call(node, names, tree):
+def python_sensitive_member_key(node):
+    """Key a simple attribute/item target so later reads retain assigned taint."""
+    parts = []
+    current = node
+    while isinstance(current, (ast.Attribute, ast.Subscript)):
+        if isinstance(current, ast.Attribute):
+            parts.append("attribute:" + current.attr)
+            current = current.value
+        else:
+            parts.append(
+                "item:" + ast.dump(current.slice, include_attributes=False)
+            )
+            current = current.value
+    if not isinstance(current, ast.Name):
+        return None
+    parts.append("name:" + current.id)
+    return "member:" + ":".join(reversed(parts))
+
+def python_sensitive_member_assignment_index(tree, parents):
+    """Index explicit member writes and direct local-helper object aliases."""
+    index = getattr(tree, "_issue79_sensitive_member_assignment_index", None)
+    if index is None:
+        index = {}
+        helper_writes = {}
+        for candidate in ast.walk(tree):
+            if isinstance(candidate, ast.Assign):
+                targets, value = candidate.targets, candidate.value
+            elif isinstance(candidate, (ast.AnnAssign, ast.NamedExpr)):
+                targets, value = [candidate.target], candidate.value
+            else:
+                continue
+            if value is None:
+                continue
+            for target in targets:
+                if not isinstance(target, (ast.Attribute, ast.Subscript)):
+                    continue
+                key = python_sensitive_member_key(target)
+                if key is not None:
+                    index.setdefault(key, []).append(value)
+                    scope = python_enclosing_scope(candidate, parents)
+                    if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        parameters = list(scope.args.posonlyargs) + list(scope.args.args)
+                        for position, parameter in enumerate(parameters):
+                            prefix = "member:name:" + parameter.arg + ":"
+                            if key.startswith(prefix):
+                                helper_writes.setdefault(scope.name, []).append(
+                                    (scope, position, prefix, key, value)
+                                )
+        for call in ast.walk(tree):
+            if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name):
+                continue
+            writes = helper_writes.get(call.func.id, ())
+            if not writes:
+                continue
+            visible = python_local_function_candidates(call.func.id, call, tree, parents)
+            for function, position, prefix, key, value in writes:
+                if function not in visible or position >= len(call.args):
+                    continue
+                argument = call.args[position]
+                if isinstance(argument, ast.Name):
+                    alias_key = "member:name:" + argument.id + ":" + key[len(prefix):]
+                    index.setdefault(alias_key, []).append(value)
+        tree._issue79_sensitive_member_assignment_index = index
+    return index
+
+def python_sensitive_member_assignment_value(
+    node, sensitive_names, tree, parents, seen=None
+):
+    """Propagate taint only from a matching explicit member write."""
+    if seen is None:
+        seen = set()
+    key = python_sensitive_member_key(node)
+    if key is None:
+        return False
+    marker = ("member", key)
+    if marker in seen:
+        return False
+    next_seen = seen | {marker}
+    return any(
+        python_sensitive_value_expression(
+            value, sensitive_names, tree, parents, next_seen.copy()
+        )
+        for value in python_sensitive_member_assignment_index(tree, parents).get(key, ())
+    )
+
+def python_shadowed_builtin_names(tree, node, parents):
+    """Return bindings visible to this call, not unrelated nested scopes."""
+    shadowed = getattr(tree, "_issue79_shadowed_builtin_names", None)
+    if shadowed is None:
+        shadowed = {}
+        for candidate in ast.walk(tree):
+            if isinstance(candidate, ast.Name) and isinstance(candidate.ctx, ast.Store):
+                scope = python_enclosing_scope(candidate, parents)
+                shadowed.setdefault(id(scope), set()).add(candidate.id)
+            elif isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                scope = python_enclosing_scope(parents.get(candidate), parents)
+                shadowed.setdefault(id(scope), set()).add(candidate.name)
+            elif isinstance(candidate, ast.arg):
+                scope = python_enclosing_scope(candidate, parents)
+                shadowed.setdefault(id(scope), set()).add(candidate.arg)
+        tree._issue79_shadowed_builtin_names = shadowed
+    scope = python_enclosing_scope(node, parents)
+    return set().union(
+        *(shadowed.get(id(visible), set()) for visible in python_lexical_scope_chain(scope, parents))
+    )
+
+def python_unshadowed_builtin_call(node, names, tree, parents):
     if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
         return False
-    if node.func.id not in names:
-        return False
-    for candidate in ast.walk(tree):
-        if isinstance(candidate, ast.Name) and candidate.id == node.func.id and isinstance(candidate.ctx, ast.Store):
-            return False
-        if isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and candidate.name == node.func.id:
-            return False
-        if isinstance(candidate, ast.arg) and candidate.arg == node.func.id:
-            return False
-    return True
+    return (
+        node.func.id in names
+        and node.func.id not in python_shadowed_builtin_names(tree, node, parents)
+    )
+
+def python_unshadowed_builtin_reference(node, names, tree, parents):
+    return (
+        isinstance(node, ast.Name)
+        and node.id in names
+        and node.id not in python_shadowed_builtin_names(tree, node, parents)
+    )
 
 def python_join_assignment_index(tree):
     """Cache local assignments used by literal joins and their value aliases."""
@@ -10081,7 +10258,7 @@ def python_join_assignment_index(tree):
         tree._issue79_join_alias_index = assignments
     return assignments
 
-def python_reviewed_string_join_callable(value, tree, seen=None):
+def python_reviewed_string_join_callable(value, tree, parents, seen=None):
     """Resolve literal-string join receivers and their local callable aliases."""
     if seen is None:
         seen = set()
@@ -10089,15 +10266,17 @@ def python_reviewed_string_join_callable(value, tree, seen=None):
         receiver = value.value
         if python_static_string_values(receiver, tree):
             return True
+        if python_unshadowed_builtin_reference(receiver, {"str"}, tree, parents):
+            return True
         return (
-            python_unshadowed_builtin_call(receiver, {"str"}, tree)
+            python_unshadowed_builtin_call(receiver, {"str"}, tree, parents)
             and not receiver.args
             and not receiver.keywords
         )
     if not isinstance(value, ast.Name) or value.id in seen:
         return False
     return any(
-        python_reviewed_string_join_callable(candidate, tree, seen | {value.id})
+        python_reviewed_string_join_callable(candidate, tree, parents, seen | {value.id})
         for candidate in python_join_assignment_index(tree).get(value.id, ())
     )
 
@@ -10123,14 +10302,14 @@ def python_sensitive_join_argument(node, sensitive_names, tree, parents, seen=No
             return python_sensitive_value_expression(
                 node.func.value, sensitive_names, tree, parents, seen.copy()
             )
-        if python_unshadowed_builtin_call(node, {"list", "tuple", "iter"}, tree):
+        if python_unshadowed_builtin_call(node, {"list", "tuple", "iter", "next"}, tree, parents):
             return any(
                 python_sensitive_join_argument(
                     argument, sensitive_names, tree, parents, seen.copy()
                 )
                 for argument in node.args
             )
-        if python_unshadowed_builtin_call(node, {"map"}, tree):
+        if python_unshadowed_builtin_call(node, {"map"}, tree, parents):
             return any(
                 python_sensitive_join_argument(
                     argument, sensitive_names, tree, parents, seen.copy()
@@ -10155,6 +10334,7 @@ def python_sensitive_join_argument(node, sensitive_names, tree, parents, seen=No
 
 def python_sensitive_value_names(tree, parents):
     """Resolve credential aliases and local-helper parameter taint."""
+    tree._issue79_member_taint_enabled = False
     sensitive_names = set()
     assignments = []
     for node in ast.walk(tree):
@@ -10321,6 +10501,7 @@ def python_sensitive_value_names(tree, parents):
                         changed = True
         if not changed:
             break
+    tree._issue79_member_taint_enabled = True
     return sensitive_names
 
 
@@ -13758,7 +13939,11 @@ def python_resolved_local_path_expression(
     assignments_by_name,
     seen=None,
 ):
-    """Track resolved local paths into output sinks without rejecting checks."""
+    """Track resolved local paths into output sinks without rejecting checks.
+
+    A node needs expansion only once per sink: sharing the visited set across
+    branches avoids exponential revisits through local-helper return cycles.
+    """
     if node is None:
         return False
     if seen is None:
@@ -13775,7 +13960,7 @@ def python_resolved_local_path_expression(
                 tree,
                 parents,
                 assignments_by_name,
-                seen.copy(),
+                seen,
             ):
                 return True
         return False
@@ -13800,14 +13985,14 @@ def python_resolved_local_path_expression(
                 tree,
                 parents,
                 assignments_by_name,
-                seen.copy(),
+                seen,
             )
             for value in python_local_call_return_values(node, tree, parents)
         ):
             return True
         if dotted == "dict" and any(
             python_resolved_local_path_expression(
-                value, tree, parents, assignments_by_name, seen.copy()
+                value, tree, parents, assignments_by_name, seen
             )
             for value in list(node.args)
             + [keyword.value for keyword in node.keywords]
@@ -13818,7 +14003,7 @@ def python_resolved_local_path_expression(
             and node.func.attr == "format"
             and any(
                 python_resolved_local_path_expression(
-                    value, tree, parents, assignments_by_name, seen.copy()
+                    value, tree, parents, assignments_by_name, seen
                 )
                 for value in list(node.args)
                 + [keyword.value for keyword in node.keywords]
@@ -13834,7 +14019,7 @@ def python_resolved_local_path_expression(
                     tree,
                     parents,
                     assignments_by_name,
-                    seen.copy(),
+                    seen,
                 )
                 for argument in node.args
             )
@@ -13897,7 +14082,7 @@ def python_resolved_local_path_expression(
             tree,
             parents,
             assignments_by_name,
-            seen.copy(),
+            seen,
         )
         for child in ast.iter_child_nodes(node)
         if not isinstance(
@@ -15858,7 +16043,7 @@ def inspect_python_heredoc(body, safe_marker):
             continue
         segments = shell_token_segments(value) if kind == "shell" else [value]
         for segment in segments:
-            violation = forbidden_command(segment)
+            violation = forbidden_shell_command(segment)
             if violation:
                 return f"Python heredoc command: {violation}"
     if dynamic_calls:
@@ -15883,7 +16068,7 @@ for command, number in shell_commands(source):
                 "an isolated AST-inspected heredoc"
             )
             continue
-        violation = forbidden_command(segment)
+        violation = forbidden_shell_command(segment)
         if violation:
             matches.append(f"line {number}: {violation}")
 for number, body, safe_marker, invocation in python_heredoc_bodies(source):
@@ -29634,3 +29819,78 @@ Rollback for this correction is input HEAD
 this section. No commit, push, GitHub or Project write, workflow operation,
 live runner test, exact-final-head Codex review, or hosted PR quick check is
 claimed; final review and hosted checks remain with the coordinator.
+
+### Issue #79 PR #103 exact-head review 5339367722 and final-delta hardening
+
+Input HEAD is `7e277abf1c257edd5e07590add9b6b6c18c7928f`. Four P1 findings
+from [GitHub Codex review 5339367722](https://github.com/1XP-AI/gh-runnerd/pull/103#pullrequestreview-5339367722)
+are addressed in this packet and its offline regression harness:
+
+| Finding | Inert RED witness | Correction and safe boundary |
+|---|---|---|
+| [URL-encoder argument taint](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4122733322) | `urlencode(os.environ)` and an imported alias were accepted before the fix. | The encoder retains sensitive argument taint; literal reviewed data remains accepted. |
+| [Raw origin URL shell output](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4122733336) | Executable `git config --local --get-all remote.origin.url` was allowed to print the raw URL. | The shell context rejects that output, while the captured, compared Python verifier query remains permitted. |
+| [Member-stored environment values](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4122733350) | Assigning `os.environ` to an attribute or item and printing it, including through a one-step local alias, was accepted. | Output inspection traces matching member writes without expanding the global taint fixed point; a literal member value remains accepted. |
+| [Shell parameter modifier](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4122733359) | `secret=${GH_TOKEN#x}` followed by `printf` lost its sensitive assignment. | Braced parameter modifiers retain taint before output. |
+
+Independent read-only final-delta review also reproduced conditional `if`
+and `env` prefix assignments clearing prior shell taint, and the Python
+`str.join` descriptor and nested `next(iter(...))` join forms losing
+environment-value taint. The corresponding inert negative tests and literal
+safe controls are included in the same harness. No specimen was executed or
+fed a real credential.
+
+RED was checked against the immutable input packet through the offline harness
+loader: six focused methods produced ten failing unsafe subcases and zero
+harness errors; a compatibility name mapped the new shell wrapper to the
+input scanner's original `forbidden_command`. A subsequent self-review added
+the one-step member alias witness, which failed once against the intermediate
+candidate before its output-only correction. The canonical GREEN command is
+`python3 -I -B scripts/evidence_packet/issue79_regression_test.py`.
+Repeated intermediate packet scans were interrupted after exceeding five
+minutes and are not claimed as passes. The measured input-HEAD packet scan
+passed in 57.011s. The final correction shares a visited AST set across the
+local-path resolver's branches, preventing repeated expansion of the same
+return graph; seven existing path-disclosure tests passed, and the candidate
+packet-only scan passed in 60.153s with 331 shell commands, 95 Python heredoc
+bodies, and zero violations after unrelated diagnostic caches were removed.
+
+Before the independent follow-up, the offline command
+`python3 -I -B scripts/evidence_packet/issue79_regression_test.py` passed all
+91 tests in 131.352s, including the packet scan of 331 shell commands and 95
+Python heredoc bodies with zero violations. A separate post-ledger packet scan
+and diff hygiene check are recorded after this entry. Exact-head hosted and
+GitHub Codex review gates remain pending and are not inferred from offline
+results. Rollback is limited to this packet and the offline
+issue #79 harness at input HEAD `7e277abf1c257edd5e07590add9b6b6c18c7928f`.
+No live runner, workflow dispatch, credential, or production behavior was
+exercised.
+
+### Issue #79 independent final-delta review follow-up
+
+A read-only GPT-6-Luna/max review of the uncommitted two-file candidate found
+five further P1 boundary paths. The reviewer made no file changes or live
+calls. The coordinator reproduced all specimens as inert scanner inputs; the
+four focused test methods first failed in four unsafe subcases, while a
+separate Python subprocess probe was also accepted before its correction.
+
+| Reproduced path | Correction and control |
+|---|---|
+| A literal `trap` handler could print the raw `remote.origin.url`; a Python `subprocess.run` literal argv could do the same. | Deferred shell handlers and literal Python command argv now use the same sensitive-output rule as executable shell commands. Direct shell, nested `bash -c`, and the packet's captured/compared verifier controls remain in scope. |
+| `import urllib.parse as parse; secret = os.environ; print(parse.urlencode(secret))` was accepted; an unrelated function parameter could also hide a directly imported encoder alias. | Encoder import spellings include module aliases, and an unrelated shadow no longer removes the import from the conservative taint set. Literal data remains accepted. |
+| An unrelated function parameter named `str` or `next` hid the built-in join/value wrapper at module scope. | Built-in shadowing is checked against the call's visible lexical scopes rather than the whole AST. Literal reviewed data remains accepted. |
+| Member-stored environment values passed through two local aliases were accepted. | Output-only member lookup follows bounded Name/attribute/item alias expressions without enlarging the global taint fixed point. |
+| A local helper wrote `obj.payload = value` after a call passed the caller's `box` and environment map; printing `box.payload` was accepted. | Direct local-helper positional object bindings are mapped to matching member writes; unreviewed dynamic helpers are not executed. |
+
+The focused GREEN command naming the four updated issue methods passed four
+tests in 0.105s. The packet-only command then passed in 60.205s with 331 shell
+commands, 95 Python heredoc bodies, and zero violations. The post-entry
+`python3 -I -B scripts/evidence_packet/issue79_regression_test.py` command
+passed all 91 tests in 134.300s and again found 331 shell commands, 95 Python
+heredoc bodies, and zero violations. `git diff --check` exited cleanly,
+`git diff --name-only` listed only the packet and offline harness, and the
+added-line credential/private-key/personal-path pattern scan found zero
+matches. A packet-only scan after this final ledger update is still required.
+Rollback for this follow-up remains only the issue #79 packet and offline
+harness at input HEAD `7e277abf1c257edd5e07590add9b6b6c18c7928f`.
+GitHub Codex exact-head review and hosted PR quick check remain pending.
