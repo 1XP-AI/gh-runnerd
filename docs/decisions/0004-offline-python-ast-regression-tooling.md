@@ -39,10 +39,11 @@ a separately reviewed decision. The CLI, daemon and production adapters remain
 Go; no Python interpreter or package is bundled into release artifacts.
 
 The harness must use only the standard library and explicitly selected local
-Git fixture operations. Invoke it with `python3 -B` to avoid bytecode artifacts
-and record the actual interpreter and test results. Adding dependencies,
-automatic hosted execution, or a broader supported interpreter matrix requires
-separate review; this ADR does not claim those checks have run.
+Git fixture operations. Invoke it with `python3 -I -B`: isolated mode ignores
+the current directory, `PYTHONPATH` and user-site imports, while `-B` avoids
+bytecode artifacts. Record the actual interpreter and test results. Adding
+dependencies, automatic hosted execution, or a broader supported interpreter
+matrix requires separate review; this ADR does not claim those checks have run.
 
 ## Trust and execution boundaries
 

@@ -9351,7 +9351,10 @@ def python_local_call_return_values(call, tree, parents):
                 return
             seen_nodes.add(id(value))
             if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
-                class_names.add(value.func.id)
+                class_names.update(python_local_class_alias_names(
+                    value.func.id, attribute.attr, visible_scopes,
+                    methods_by_scope, assignments_by_scope,
+                ))
                 for returned in python_local_call_return_values(value, tree, parents):
                     resolve_receiver(returned, seen_names.copy(), seen_nodes.copy())
             elif isinstance(value, ast.Name) and value.id not in seen_names:
@@ -9433,6 +9436,29 @@ def python_local_call_return_values(call, tree, parents):
     return []
 
 
+def python_local_class_alias_names(name, method_name, scopes, methods_by_scope, assignments_by_scope):
+    """Resolve scoped class-name aliases for known local method receivers."""
+    found = set()
+
+    def visit(candidate, seen):
+        if candidate in seen:
+            return
+        seen.add(candidate)
+        if any(
+            (id(scope), candidate, method_name) in methods_by_scope
+            for scope in scopes
+        ):
+            found.add(candidate)
+            return
+        for scope in scopes:
+            for assigned in assignments_by_scope.get((id(scope), candidate), ()):
+                if isinstance(assigned, ast.Name):
+                    visit(assigned.id, set(seen))
+
+    visit(name, set())
+    return found
+
+
 def python_local_method_candidates(attribute, call, tree, parents):
     """Resolve local methods for known instance and local-factory receivers."""
     if not isinstance(attribute, ast.Attribute):
@@ -9463,13 +9489,19 @@ def python_local_method_candidates(attribute, call, tree, parents):
             return
         seen_nodes.add(id(value))
         if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
-            class_names.add(value.func.id)
+            class_names.update(python_local_class_alias_names(
+                value.func.id, attribute.attr, visible_scopes,
+                methods_by_scope, assignments_by_scope,
+            ))
             for returned in python_local_call_return_values(value, tree, parents):
                 resolve_receiver(returned, seen_names.copy(), seen_nodes.copy())
         elif isinstance(value, ast.Name) and value.id not in seen_names:
             seen_names.add(value.id)
             if value.id != "self":
-                for scope in visible_scopes:
+                binding_scopes = set(python_lexical_scope_chain(
+                    python_enclosing_scope(value, parents), parents
+                )) or visible_scopes
+                for scope in binding_scopes:
                     for assignment in assignments_by_scope.get(
                         (id(scope), value.id), ()
                     ):
@@ -9494,6 +9526,49 @@ def python_local_method_candidates(attribute, call, tree, parents):
             (id(scope), class_name, attribute.attr), ()
         )
     ]
+
+
+def python_local_bound_method_candidates(name, call, tree, parents):
+    """Resolve assigned bound methods, including static getattr aliases."""
+    index = getattr(tree, "_issue79_local_return_index", None)
+    if index is None:
+        python_local_call_return_values(call, tree, parents)
+        index = getattr(tree, "_issue79_local_return_index", None)
+    assignments_by_scope, _methods_by_scope = index
+    visible_scopes = set(python_lexical_scope_chain(
+        python_enclosing_scope(call, parents), parents
+    ))
+
+    def methods(candidate_name, seen):
+        if candidate_name in seen:
+            return []
+        seen.add(candidate_name)
+        found = []
+        for scope in visible_scopes:
+            for value in assignments_by_scope.get((id(scope), candidate_name), ()):
+                if isinstance(value, ast.Attribute):
+                    found.extend(python_local_method_candidates(
+                        value, call, tree, parents
+                    ))
+                elif (
+                    isinstance(value, ast.Call)
+                    and python_dotted_name(value.func) == "getattr"
+                    and len(value.args) in {2, 3}
+                ):
+                    for attribute in python_static_string_values(value.args[1], tree):
+                        found.extend(python_local_method_candidates(
+                            ast.Attribute(
+                                value=value.args[0], attr=attribute,
+                                ctx=ast.Load(),
+                            ), call, tree, parents
+                        ))
+                    if len(value.args) == 3 and isinstance(value.args[2], ast.Name):
+                        found.extend(methods(value.args[2].id, set(seen)))
+                elif isinstance(value, ast.Name):
+                    found.extend(methods(value.id, set(seen)))
+        return found
+
+    return methods(name, set())
 
 
 def python_assigned_callable_alias(name, target, tree):
@@ -9798,20 +9873,29 @@ def python_sensitive_value_names(tree, parents):
             ):
                 continue
             if isinstance(node.func, ast.Name):
-                candidates = python_local_function_candidates(
-                    node.func.id, node, tree, parents
-                ) + python_local_lambda_candidates(
-                    node.func.id, node, tree, parents
-                )
-                bound_method = False
+                candidates = [
+                    (function, False)
+                    for function in python_local_function_candidates(
+                        node.func.id, node, tree, parents
+                    ) + python_local_lambda_candidates(
+                        node.func.id, node, tree, parents
+                    )
+                ] + [
+                    (method, True)
+                    for method in python_local_bound_method_candidates(
+                        node.func.id, node, tree, parents
+                    )
+                ]
             elif isinstance(node.func, ast.Attribute):
-                candidates = python_local_method_candidates(
-                    node.func, node, tree, parents
-                )
-                bound_method = True
+                candidates = [
+                    (method, True)
+                    for method in python_local_method_candidates(
+                        node.func, node, tree, parents
+                    )
+                ]
             else:
                 continue
-            for function in candidates:
+            for function, bound_method in candidates:
                 for parameter, argument in call_arguments(
                     node, function, bound_method=bound_method
                 ):
@@ -10781,7 +10865,7 @@ def python_import_bindings(tree):
                     return True
             if (
                 isinstance(value.func, ast.Attribute)
-                and value.func.attr in {"items", "keys", "values", "pop"}
+                and value.func.attr in {"get", "items", "keys", "values", "pop"}
             ):
                 return iterable_may_contain_launcher(
                     value.func.value,
@@ -13013,6 +13097,8 @@ def python_resolved_local_path_expression(
         ):
             return True
         path_preserving_calls = {
+            "ascii",
+            "format",
             "Path",
             "pathlib.Path",
             "str",
@@ -13023,7 +13109,7 @@ def python_resolved_local_path_expression(
         }
         if dotted not in path_preserving_calls and not (
             isinstance(node.func, ast.Attribute)
-            and node.func.attr in {"as_posix", "as_uri"}
+            and node.func.attr in {"__str__", "as_posix", "as_uri"}
         ):
             return False
     return any(
@@ -14508,35 +14594,51 @@ def python_path_reader_aliases(tree, parents):
             assignments.append((node.target, node.value))
         elif isinstance(node, ast.NamedExpr):
             assignments.append((node.target, node.value))
+
+    def reader_receivers(value):
+        if (
+            isinstance(value, ast.Attribute)
+            and value.attr in python_path_filesystem_read_methods
+            and not python_known_non_path_reader_call(value, tree)
+        ):
+            return [value.value]
+        if (
+            isinstance(value, ast.Call)
+            and python_dotted_name(value.func) == "getattr"
+            and len(value.args) in {2, 3}
+        ):
+            receivers = []
+            for method in python_static_string_values(value.args[1], tree):
+                attribute = ast.Attribute(
+                    value=value.args[0], attr=method, ctx=ast.Load()
+                )
+                if (
+                    method in python_path_filesystem_read_methods
+                    and not python_known_non_path_reader_call(attribute, tree)
+                ):
+                    receivers.append(value.args[0])
+            if len(value.args) == 3:
+                receivers.extend(reader_receivers(value.args[2]))
+            return receivers
+        return []
+
     for _ in range(len(assignments) + 1):
         changed = False
         for target, value in assignments:
             if not isinstance(target, ast.Name):
                 continue
             receiver = None
-            if (
-                isinstance(value, ast.Attribute)
-                and value.attr in python_path_filesystem_read_methods
-                and not python_known_non_path_reader_call(value, tree)
-            ):
-                receiver = value.value
-            elif isinstance(value, ast.Name) and value.id in aliases:
+            if isinstance(value, ast.Name) and value.id in aliases:
                 receiver = aliases[value.id]
-            elif isinstance(value, ast.Call):
-                for returned in python_local_call_return_values(
-                    value, tree, parents
+            candidates = reader_receivers(value)
+            if isinstance(value, ast.Call):
+                for returned in python_local_call_return_values(value, tree, parents):
+                    candidates.extend(reader_receivers(returned))
+            for candidate in candidates:
+                if receiver is None or not python_reviewed_read_path(
+                    candidate, tree, parents
                 ):
-                    if (
-                        isinstance(returned, ast.Attribute)
-                        and returned.attr in python_path_filesystem_read_methods
-                        and not python_known_non_path_reader_call(
-                            returned, tree
-                        )
-                    ):
-                        if receiver is None or not python_reviewed_read_path(
-                            returned.value, tree, parents
-                        ):
-                            receiver = returned.value
+                    receiver = candidate
             previous = aliases.get(target.id)
             if previous is not None and not python_reviewed_read_path(
                 previous, tree, parents
@@ -27851,3 +27953,61 @@ assertion failure, then passed GREEN after alias selection conservatively
 retained any unreviewed return or assignment. The same test retains the
 reviewed-reader positive control. No specimen was executed; this result still
 requires final-head independent and GitHub Codex review.
+
+### Issue #79 PR #103 P1 corrections from Codex review `5334590641`
+
+The supplied exact-head review was reported against source
+`9233241cbd55f35746dffac8f98ff06509cd3c38`. The four public P1 findings below
+were triaged as blocking and reproduced with inert Python AST specimens. None
+was evaluated, compiled, or launched. Safe controls use literal status values,
+non-launcher callbacks, and the isolated interpreter probe described below.
+
+| # | Finding and review URL | RED against the starting worktree | Correction and retained safe case |
+|---|---|---|---|
+| 1 | [Codex P1 4119067262](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4119067262): a constructor alias (`Alias = Snapshot`) hid a method returning `dict(os.environ)` from output taint. | `test_sensitive_method_and_lambda_returns_are_tainted` accepted `print(Alias().read())`. | Local method-return analysis now follows scoped class-name aliases. An aliased status class returning `{"status": "reviewed"}` remains accepted. |
+| 2 | [Codex P1 4119067272](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4119067272): `launchers.get("x")` lost the `subprocess.run` mapping provenance when assigned to `launch`. | `test_launcher_alias_returned_by_mapping_get_is_rejected` accepted the indirect workflow launcher call. | Mapping `.get` results now inherit launcher presence; a candidate alias is rejected unresolved. A `str.upper` callback selected with `.get` remains accepted. |
+| 3 | [Codex P1 4119067280](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4119067280): resolved local paths escaped output checks through `format`, `ascii`, and explicit `__str__`. | `test_resolved_local_paths_are_not_disclosed_to_output_sinks` accepted all three converted path values. | Path provenance now follows those string conversions to output sinks. The same converters over a reviewed literal remain accepted. |
+| 4 | [Codex P1 4119067288](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4119067288): the prescribed `python3 -B` command remained importable through `PYTHONPATH` or a local shadow module. | `test_isolated_invocation_ignores_synthetic_local_module` found the ADR still prescribed `python3 -B`; its synthetic local `json.py` isolation control passed with `-I`. | The ADR now prescribes `python3 -I -B`. The harness verifies an inert local module cannot shadow the standard library with `PYTHONPATH` and a temporary cwd set. Earlier `python3 -B` results in this packet remain historical records. |
+
+Three independent local P1 corrections already present in the pre-writer
+worktree were preserved. No public review URLs were supplied for these findings.
+The focused GREEN rerun below covers each corrected path and its safe control.
+
+| Local finding (no public URL supplied) | Preserved correction and positive control |
+|---|---|
+| A helper returning `getattr(Path("synthetic-private/file"), member)` could hand an unchecked filesystem reader to its caller. | Reader aliases now follow static `getattr` and helper returns; the reviewed packet reader remains accepted. |
+| `callback = getattr(sink, member); callback(os.environ)` could pass an environment mapping into a local output method. | Method aliases from static `getattr` are resolved for taint binding; a literal status mapping remains accepted. |
+| `sink = build(); sink.emit(os.environ)` could hide the output receiver behind a helper-created instance. | Scoped receiver aliases now follow helper returns; a helper-created sink receiving a literal status mapping remains accepted. |
+
+The new test-first RED command was:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py Issue79RegressionTests.test_sensitive_method_and_lambda_returns_are_tainted Issue79RegressionTests.test_launcher_alias_returned_by_mapping_get_is_rejected Issue79RegressionTests.test_resolved_local_paths_are_not_disclosed_to_output_sinks Issue79RegressionTests.test_isolated_invocation_ignores_synthetic_local_module
+Ran 4 tests in 0.130s; failed with 6 assertion failures: constructor alias taint, mapping-get launcher provenance, three path conversions, and the obsolete ADR invocation. The synthetic import-isolation control and safe controls passed.
+```
+
+After the scoped corrections and ADR update, focused GREEN was:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py Issue79RegressionTests.test_path_filesystem_readers_require_reviewed_paths Issue79RegressionTests.test_sensitive_values_are_tainted_into_method_and_lambda_parameters Issue79RegressionTests.test_sensitive_method_and_lambda_returns_are_tainted Issue79RegressionTests.test_launcher_alias_returned_by_mapping_pop_is_rejected Issue79RegressionTests.test_launcher_alias_returned_by_mapping_get_is_rejected Issue79RegressionTests.test_resolved_local_paths_are_not_disclosed_to_output_sinks Issue79RegressionTests.test_isolated_invocation_ignores_synthetic_local_module
+Ran 7 tests in 0.152s; passed.
+```
+
+The three pre-existing local corrections were also run before this batch: the
+path-reader, method/lambda taint-binding, and method/lambda-return tests passed
+3 tests in 0.109s. All specimens remained inert scanner input. The local module
+was a temporary harmless `json.py`; no repository module, credential, network,
+runner, or workflow was accessed.
+
+Rollback is a reviewed reversal of this batch's packet, harness, and ADR delta
+to the pre-writer worktree snapshot at `9233241cbd55f35746dffac8f98ff06509cd3c38`,
+retaining the three pre-existing local corrections. No commit or push was made.
+Final local verification used `python3 -I -B
+scripts/evidence_packet/issue79_regression_test.py`; it ran 49 tests and passed.
+The packet-wide static scan covered 331 shell commands and 95 Python heredoc
+bodies with zero violations. `git -P diff --check` exited 0, and the added-line
+credential/private-path scan returned zero matches. The only changed paths are
+this packet, the offline issue #79 harness, and ADR 0004. No commit, push,
+merge, workflow dispatch, runner access, credential operation, live test,
+browser use, or GitHub write was performed. This local evidence does not claim
+final-head GitHub Codex review or hosted PR quick-check completion.

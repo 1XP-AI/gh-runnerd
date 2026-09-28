@@ -16,6 +16,7 @@ import shlex
 import selectors
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import types
@@ -567,6 +568,12 @@ class Issue79RegressionTests(unittest.TestCase):
             '    return Path("docs/evidence/g01-recovery-packet.md").read_text\n'
             'reader = reader_factory(True)\n'
             'print(reader())\n',
+            'from pathlib import Path\n'
+            'member = "read_text"\n'
+            'def reader_factory():\n'
+            '    return getattr(Path("synthetic-private/file"), member)\n'
+            'reader = reader_factory()\n'
+            'print(reader())\n',
             'from pathlib import Path\ndef read_private(path: Path):\n    return path.read_text()\n',
             'import ast\nfrom pathlib import Path\nast = Path("synthetic-private")\nprint(list(ast.walk()))\n',
             'import re\nfrom pathlib import Path\nmatch = re.match("a", "a")\nmatch = Path("synthetic-private")\nprint(match.group())\n',
@@ -591,6 +598,12 @@ class Issue79RegressionTests(unittest.TestCase):
             'reader = reviewed_reader_factory()\n'
             'print(reader())\n',
             'from pathlib import Path\n'
+            'member = "read_text"\n'
+            'def reviewed_reader_factory():\n'
+            '    return getattr(Path("docs/evidence/g01-recovery-packet.md"), member)\n'
+            'reader = reviewed_reader_factory()\n'
+            'print(reader())\n',
+            'from pathlib import Path\n'
             'source = Path("scripts/evidence_packet/issue79_regression_test.py").read_bytes()\n'
             'if not source:\n    raise SystemExit("reviewed source is empty")\n',
             'from pathlib import Path\nprint(Path("docs/evidence/g01-recovery-packet.md").stat())\n',
@@ -606,6 +619,15 @@ class Issue79RegressionTests(unittest.TestCase):
             'from pathlib import Path\nprint(Path.cwd().resolve())\n',
             'from pathlib import Path\nresolved = Path("/synthetic/worktree").resolve()\n'
             'print(f"root={resolved}")\n',
+            'from pathlib import Path\n'
+            'value = format(Path.cwd().resolve())\n'
+            'print(value)\n',
+            'from pathlib import Path\n'
+            'value = ascii(Path.cwd().resolve())\n'
+            'print(value)\n',
+            'from pathlib import Path\n'
+            'value = Path.cwd().resolve().__str__()\n'
+            'print(value)\n',
         )
         for body in unsafe:
             with self.subTest(body=body):
@@ -615,6 +637,12 @@ class Issue79RegressionTests(unittest.TestCase):
             'if not resolved.is_absolute():\n    raise SystemExit("invalid root")\n'
         )
         self.assertIsNone(self.inspect(internal_use))
+        safe_formatting = (
+            'print(format("reviewed"))\n'
+            'print(ascii("reviewed"))\n'
+            'print("reviewed".__str__())\n'
+        )
+        self.assertIsNone(self.inspect(safe_formatting))
 
     def test_nested_function_name_collision_does_not_hide_launcher_alias(self) -> None:
         body = (
@@ -717,6 +745,12 @@ class Issue79RegressionTests(unittest.TestCase):
             'import os\n'
             'reader = getattr(object(), "missing", lambda: dict(os.environ))\n'
             'print(reader())\n',
+            'import os\n'
+            'class Snapshot:\n'
+            '    def read(self):\n'
+            '        return dict(os.environ)\n'
+            'Alias = Snapshot\n'
+            'print(Alias().read())\n',
         )
         for body in unsafe:
             with self.subTest(body=body):
@@ -729,6 +763,14 @@ class Issue79RegressionTests(unittest.TestCase):
             'print(StatusSnapshot().read())\n'
         )
         self.assertIsNone(self.inspect(safe))
+        safe_alias = (
+            'class StatusSnapshot:\n'
+            '    def read(self):\n'
+            '        return {"status": "reviewed"}\n'
+            'Alias = StatusSnapshot\n'
+            'print(Alias().read())\n'
+        )
+        self.assertIsNone(self.inspect(safe_alias))
 
     def test_sensitive_values_are_tainted_into_method_and_lambda_parameters(self) -> None:
         unsafe = (
@@ -740,6 +782,23 @@ class Issue79RegressionTests(unittest.TestCase):
             'import os\n'
             'emit = lambda payload: print(payload)\n'
             'emit(os.environ)\n',
+            'import os\n'
+            'class C:\n'
+            '    def emit(self, payload):\n'
+            '        print(payload)\n'
+            'sink = C()\n'
+            'member = "emit"\n'
+            'callback = getattr(sink, member)\n'
+            'callback(os.environ)\n',
+            'import os\n'
+            'class C:\n'
+            '    def emit(self, payload):\n'
+            '        print(payload)\n'
+            'def build():\n'
+            '    instance = C()\n'
+            '    return instance\n'
+            'sink = build()\n'
+            'sink.emit(os.environ)\n',
         )
         for body in unsafe:
             with self.subTest(body=body):
@@ -752,6 +811,21 @@ class Issue79RegressionTests(unittest.TestCase):
             'C().emit({"status": "reviewed"})\n',
             'emit = lambda payload: print(payload)\n'
             'emit({"status": "reviewed"})\n',
+            'class C:\n'
+            '    def emit(self, payload):\n'
+            '        print(payload)\n'
+            'sink = C()\n'
+            'member = "emit"\n'
+            'callback = getattr(sink, member)\n'
+            'callback({"status": "reviewed"})\n',
+            'class C:\n'
+            '    def emit(self, payload):\n'
+            '        print(payload)\n'
+            'def build():\n'
+            '    instance = C()\n'
+            '    return instance\n'
+            'sink = build()\n'
+            'sink.emit({"status": "reviewed"})\n',
         )
         for body in safe:
             with self.subTest(body=body):
@@ -1296,6 +1370,51 @@ class Issue79RegressionTests(unittest.TestCase):
             'transform("reviewed")\n'
         )
         self.assertIsNone(self.inspect(safe))
+
+    def test_launcher_alias_returned_by_mapping_get_is_rejected(self) -> None:
+        unsafe = (
+            'import subprocess\n'
+            'launchers = {"x": subprocess.run}\n'
+            'launch = launchers.get("x")\n'
+            'launch(["gh", "workflow", "run", "ci.yml"])\n'
+        )
+        self.assertIsNotNone(self.inspect(unsafe))
+
+        safe = (
+            'callbacks = {"upper": str.upper}\n'
+            'transform = callbacks.get("upper")\n'
+            'transform("reviewed")\n'
+        )
+        self.assertIsNone(self.inspect(safe))
+
+    def test_isolated_invocation_ignores_synthetic_local_module(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="issue79-python-isolation-") as root:
+            synthetic_module = Path(root) / "json.py"
+            synthetic_module.write_text('VALUE = "synthetic"\n', encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    "-B",
+                    "-c",
+                    'import json; print(getattr(json, "VALUE", "stdlib"))',
+                ],
+                cwd=root,
+                env={"PYTHONPATH": root},
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(0, result.returncode, "isolated interpreter probe failed")
+            self.assertEqual("stdlib", result.stdout.strip())
+
+        adr = (ROOT / "docs" / "decisions" / "0004-offline-python-ast-regression-tooling.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("python3 -I -B", adr)
+        self.assertNotIn("Invoke it with `python3 -B`", adr)
 
     def test_bounded_git_query_loader_rejects_unreviewed_function_definitions(self) -> None:
         specimen = ast.parse(
