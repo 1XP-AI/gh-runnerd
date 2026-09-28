@@ -3465,6 +3465,10 @@ class Issue79RegressionTests(unittest.TestCase):
         self.assertIsNotNone(self.inspect(
             'import os\nfor alias in iter([os]):\n    alias.remove("synthetic-maintainer-owned")\n'
         ))
+        self.assertIsNotNone(self.inspect(
+            'import os\nfor alias in filter(None, [os]):\n'
+            '    alias.remove("synthetic-maintainer-owned")\n'
+        ))
         self.assertIsNotNone(self.inspect('import os\nalias = os\nprint(alias.environ)\n'))
         self.assertIsNotNone(self.inspect(
             'import os\nalias = os\nprint(alias.getenv("GH_TOKEN"))\n'
@@ -3509,6 +3513,15 @@ class Issue79RegressionTests(unittest.TestCase):
         self.assertIsNotNone(self.inspect(
             'import os\ninner = StopIteration(os.environ)\n'
             'cause = RuntimeError(inner)\nraise RuntimeError("reviewed") from cause\n'
+        ))
+        self.assertIsNotNone(self.inspect(
+            'import os\ninner = UserWarning(os.environ)\n'
+            'cause = RuntimeError(inner)\nraise RuntimeError("reviewed") from cause\n'
+        ))
+        self.assertIsNotNone(self.inspect(
+            'import os\nclass Halt(Exception):\n    pass\n'
+            'inner = Halt(os.environ)\ncause = RuntimeError(inner)\n'
+            'raise RuntimeError("reviewed") from cause\n'
         ))
         self.assertIsNone(self.inspect('raise RuntimeError("reviewed")\n'))
 
@@ -3588,6 +3601,8 @@ class Issue79RegressionTests(unittest.TestCase):
         self.assertIsNotNone(self.shell_violation('grep -R . .'))
         self.assertIsNotNone(self.shell_violation('grep -d recurse . .'))
         self.assertIsNotNone(self.shell_violation('grep --directories=recurse . .'))
+        self.assertIsNotNone(self.shell_violation('grep --direct=recurse . .'))
+        self.assertIsNotNone(self.shell_violation('grep --direct recurse . .'))
         self.assertIsNone(self.shell_violation('rg . docs/EXECUTION.md'))
         self.assertIsNone(self.shell_violation('grep -R . docs/'))
         self.assertIsNone(self.shell_violation('grep -d recurse . docs/'))

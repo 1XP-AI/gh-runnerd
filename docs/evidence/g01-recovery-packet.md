@@ -8872,8 +8872,9 @@ def shell_reader_path_violation(tokens):
     recursive_grep = executable == "grep" and any(
         token in {"-r", "-R", "--recursive"}
         or token in {"-drecurse", "--directories=recurse"}
+        or (token.startswith("--dir") and token.endswith("=recurse"))
         or (
-            token in {"-d", "--directories"}
+            (token == "-d" or token.startswith("--dir"))
             and index + 1 < len(tokens)
             and tokens[index + 1] == "recurse"
         )
@@ -8912,7 +8913,9 @@ def shell_reader_path_violation(tokens):
         if not operand_mode and executable == "rg" and token in {"--glob", "--iglob", "-g"}:
             position += 2
             continue
-        if not operand_mode and executable == "grep" and token in {"-d", "--directories"}:
+        if not operand_mode and executable == "grep" and (
+            token == "-d" or (token.startswith("--dir") and "=" not in token)
+        ):
             position += 2
             continue
         if not operand_mode and executable in {"grep", "rg"} and token in {"-e", "--regexp"}:
@@ -13082,6 +13085,16 @@ def python_assigned_module_names(tree, module):
                 if (
                     isinstance(iterable, ast.Call)
                     and isinstance(iterable.func, ast.Name)
+                    and iterable.func.id == "filter"
+                    and len(iterable.args) == 2
+                    and isinstance(iterable.args[0], ast.Constant)
+                    and iterable.args[0].value is None
+                    and not iterable.keywords
+                ):
+                    iterable = iterable.args[1]
+                if (
+                    isinstance(iterable, ast.Call)
+                    and isinstance(iterable.func, ast.Name)
                     and iterable.func.id in {"tuple", "list", "set", "iter", "reversed", "sorted"}
                     and len(iterable.args) == 1
                     and not iterable.keywords
@@ -15924,6 +15937,16 @@ def python_sensitive_read_violation(tree, parents):
                     assignments_by_name.setdefault(function.args.kwarg.arg, []).append(
                         (function, keyword.value)
                     )
+    local_exception_names = {
+        candidate.name
+        for candidate in ast.walk(tree)
+        if isinstance(candidate, ast.ClassDef)
+        and any(
+            isinstance(base, ast.Name) and base.id in {"Exception", "ValueError"}
+            for base in candidate.bases
+        )
+    }
+
     def exception_arguments(value, seen_names=None, follow_names=True):
         if value is None:
             return []
@@ -15945,12 +15968,14 @@ def python_sensitive_read_violation(tree, parents):
                         isinstance(source, ast.Call)
                         and (
                             (python_dotted_name(source.func) or "").rsplit(".", 1)[-1].endswith(
-                                ("Error", "Exception", "Exit")
+                                ("Error", "Exception", "Exit", "Warning")
                             )
                             or (python_dotted_name(source.func) or "").rsplit(".", 1)[-1] in {
                                 "StopIteration", "StopAsyncIteration", "KeyboardInterrupt",
-                                "ExceptionGroup", "BaseExceptionGroup",
+                                "ExceptionGroup", "BaseExceptionGroup", "TimeoutExpired",
                             }
+                            or (python_dotted_name(source.func) or "").rsplit(".", 1)[-1]
+                            in local_exception_names
                         )
                     )
                 )
@@ -31294,3 +31319,30 @@ key/personal-path pattern scan found no matches. Separate post-ledger packet
 verification passed in 72.966s (331 shell commands, 95 Python heredocs,
 zero violations). Fresh exact-head hosted/Codex review remains pending; no
 live or trusted runner test ran.
+
+### Issue #79 independent follow-up on `415e551`
+
+The read-only GPT-6-Luna/max reviewer confirmed the three direct prior
+witnesses closed, then found three adjacent P1s. The `UserWarning` route was
+also reproduced and corrected during local self-review before the report
+arrived. All three inert source witnesses were RED before correction and
+GREEN afterward:
+
+| Finding | Local resolution |
+|---|---|
+| GNU grep's unique long-option abbreviation `--direct=recurse` could recursively read `.`. | Recursive option detection recognizes the `--dir...=recurse` family and separate `--direct recurse` argument; the reader parser consumes the option value before path inspection. Approved `grep -d recurse . docs/` remains accepted. |
+| `UserWarning(os.environ)` and a local `class Halt(Exception)` could hide sensitive data in an intermediate cause alias. | Exception-object provenance includes warning names and local classes with reviewed exception bases, in addition to built-in non-suffix names. Literal exceptions and the canonical package guard remain accepted. |
+| `for alias in filter(None, [os]): alias.remove(...)` escaped literal iterable unwrapping. | Module-alias propagation unwraps this statically visible filter form; literal output after an OS alias remains accepted. |
+
+The three focused methods and canonical package guard passed together in
+24.411s. No specimen was executed. Full offline suite, post-ledger packet
+scan, independent delta classification and a fresh exact-head hosted/Codex
+review remain pending.
+
+The clean isolated full rerun passed **116 tests in 160.740s**, including a
+current-packet scan of 331 shell commands and 95 Python heredocs with zero
+violations. `git diff --check` passed; the added-line credential/private-key/
+personal-path pattern scan found no matches. Separate post-ledger packet
+verification passed in 72.672s (331 shell commands, 95 Python heredocs,
+zero violations). Fresh exact-head hosted/Codex review remains pending; no
+trusted or live runner test ran.
