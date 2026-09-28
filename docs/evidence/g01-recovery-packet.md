@@ -8869,6 +8869,14 @@ def shell_reader_path_violation(tokens):
     if not tokens or executable_basename(tokens[0]) not in reviewed_reader_executables:
         return None
     executable = executable_basename(tokens[0])
+    recursive_grep = executable == "grep" and any(
+        token in {"-r", "-R", "--recursive"}
+        or (
+            token.startswith("-") and not token.startswith("--")
+            and any(flag in token[1:] for flag in "rR")
+        )
+        for token in tokens[1:]
+    )
     file_options = {
         "diff": {"--from-file", "--to-file"},
         "grep": {"-f", "--file"},
@@ -8923,8 +8931,8 @@ def shell_reader_path_violation(tokens):
             continue
         elif executable == "tr" or not expression_consumed:
             expression_consumed = True
-        elif executable == "rg" and token in {".", "./"}:
-            return "rg may not use the repository root as a reader operand"
+        elif (executable == "rg" or recursive_grep) and token in {".", "./"}:
+            return "recursive readers may not use the repository root as an operand"
         elif not shell_reviewed_reader_path(token):
             return "reader path is not reviewed or packet-owned"
         else:
@@ -13061,8 +13069,17 @@ def python_assigned_module_names(tree, module):
             elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
                 changed = bind(node.target, node.value) or changed
             elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
-                if isinstance(node.iter, (ast.Tuple, ast.List)):
-                    changed = any([bind(node.target, item) for item in node.iter.elts]) or changed
+                iterable = node.iter
+                if (
+                    isinstance(iterable, ast.Call)
+                    and isinstance(iterable.func, ast.Name)
+                    and iterable.func.id in {"tuple", "list", "set"}
+                    and len(iterable.args) == 1
+                    and not iterable.keywords
+                ):
+                    iterable = iterable.args[0]
+                if isinstance(iterable, (ast.Tuple, ast.List, ast.Set)):
+                    changed = any([bind(node.target, item) for item in iterable.elts]) or changed
     return names
 
 
@@ -15908,7 +15925,21 @@ def python_sensitive_read_violation(tree, parents):
                 return [value]
             if value.id in seen_names:
                 return [value]
-            sources = assignments_by_name.get(value.id, ())
+            scope = python_enclosing_scope(value, parents)
+            sources = (
+                (source_scope, source)
+                for source_scope, source in assignments_by_name.get(value.id, ())
+                if source_scope is scope
+                and (
+                    isinstance(source, ast.Name)
+                    or (
+                        isinstance(source, ast.Call)
+                        and (python_dotted_name(source.func) or "").rsplit(".", 1)[-1].endswith(
+                            ("Error", "Exception", "Exit")
+                        )
+                    )
+                )
+            )
             return [value] + [
                 argument
                 for _scope, source in sources
@@ -15919,7 +15950,7 @@ def python_sensitive_read_violation(tree, parents):
             return [value] + [
                 nested
                 for argument in arguments
-                for nested in exception_arguments(argument, seen_names, False)
+                for nested in exception_arguments(argument, seen_names)
             ]
         return [value]
 
@@ -31196,3 +31227,29 @@ credential/private-key/personal-path pattern scan found no matches. A
 separate post-ledger packet scan passed in 73.718s (331 shell commands, 95
 Python heredocs, zero violations). Fresh exact-head hosted/Codex review
 remains pending. No live or trusted runner test was performed.
+
+### Issue #79 independent follow-up on `f24c73a`
+
+The read-only GPT-6-Luna/max follow-up confirmed the four preceding forms
+closed and identified three adjacent P1s. Each new inert witness failed before
+correction and passed afterward:
+
+| Finding | Local resolution |
+|---|---|
+| `grep -R . .` recursively read the repository root. | Recursive grep now rejects `.`/`./` reader operands, as `rg` does. The reviewed `grep -R . docs/` control remains accepted. The suggested `docs` spelling was not an accepted path under the existing prefix rule, so the safe control uses the approved `docs/` spelling. |
+| `inner = RuntimeError(os.environ); cause = RuntimeError(inner); raise ... from cause` hid a credential mapping in an intermediate alias. | Exception-object provenance now follows same-scope exception constructor/name assignments through nested arguments. The first broad attempt falsely classified the packet's reviewed `TimeoutExpired` path; limiting source expansion to exception constructors/names restored the canonical positive control while retaining the unsafe witness. |
+| `for alias in tuple([os]): alias.remove(...)` hid an OS module alias in a literal container constructor. | Module-alias propagation unwraps static tuple/list/set constructors around literal iterables before binding loop/comprehension targets; literal safe output remains accepted. |
+
+The focused three methods and canonical package guard passed together in
+22.648s after correction. The intermediate focused run failed the canonical
+control and a `docs` reader spelling; neither is counted as passing evidence.
+No specimen was executed. Full-suite and post-ledger packet verification,
+hosted quick check and exact-head GitHub Codex review remain pending.
+
+The clean isolated full rerun passed **116 tests in 160.633s**, including
+331 shell commands and 95 Python heredocs with zero current-packet
+violations. `git diff --check` passed; the added-line credential/private-key/
+personal-path pattern scan found no matches. A separate post-ledger packet
+scan passed in 74.063s (331 shell commands, 95 Python heredocs, zero
+violations). Fresh exact-head hosted/Codex review remains pending. No live
+or trusted runner test ran.
