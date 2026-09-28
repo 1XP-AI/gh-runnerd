@@ -8828,6 +8828,10 @@ def jq_command_violation(tokens):
     if not tokens or executable_basename(tokens[0]).casefold() != "jq":
         return None
     for token in tokens[1:]:
+        if token == "-L" or token.startswith("-L") and len(token) > 2:
+            return "jq external module search paths are not allowed"
+        if re.search(r"\b(?:include|import)\b", token):
+            return "jq external module loading is not allowed"
         if re.search(
             r"(?<![A-Za-z0-9_])(?:env(?![A-Za-z0-9_])|\$ENV(?![A-Za-z0-9_]))",
             token,
@@ -8874,19 +8878,32 @@ def shell_reader_path_violation(tokens):
     }.get(executable, set())
     position = 1
     expression_consumed = executable not in {"awk", "grep", "jq", "rg"}
+    operand_mode = False
+    reviewed_operand = False
     while position < len(tokens):
         token = tokens[position]
         option = token.split("=", 1)[0]
+        if token == "--" and not operand_mode:
+            operand_mode = True
+            position += 1
+            continue
         if token in {"<<<", ">", ">>", "1>", "1>>", "2>", "2>>", "&>", "&>>", "<", "0<"}:
+            if token in {"<<<", "<", "0<"}:
+                reviewed_operand = True
             position += 2
             continue
         if token.startswith((">", "1>", "2>", "&>", "<", "0<")):
             position += 1
             continue
-        if executable == "rg" and token in {"--glob", "--iglob", "-g"}:
+        if not operand_mode and executable == "rg" and token in {"--glob", "--iglob", "-g"}:
             position += 2
             continue
-        if option in file_options:
+        if not operand_mode and executable in {"grep", "rg"} and token in {"-e", "--regexp"}:
+            position += 1
+            if position >= len(tokens):
+                return "reader pattern option requires an expression"
+            expression_consumed = True
+        elif not operand_mode and option in file_options:
             if "=" in token:
                 path = token.split("=", 1)[1]
             else:
@@ -8897,18 +8914,22 @@ def shell_reader_path_violation(tokens):
             if not shell_reviewed_reader_path(path):
                 return "reader option path is not reviewed or packet-owned"
             expression_consumed = True
-        elif token.startswith("-f") and "-f" in file_options and len(token) > 2:
+        elif not operand_mode and token.startswith("-f") and "-f" in file_options and len(token) > 2:
             if not shell_reviewed_reader_path(token[2:]):
                 return "reader option path is not reviewed or packet-owned"
             expression_consumed = True
-        elif token in {"--", "<<<"} or token.startswith("-"):
+        elif not operand_mode and (token == "<<<" or token.startswith("-")):
             position += 1
             continue
         elif executable == "tr" or not expression_consumed:
             expression_consumed = True
         elif not shell_reviewed_reader_path(token):
             return "reader path is not reviewed or packet-owned"
+        else:
+            reviewed_operand = True
         position += 1
+    if executable == "rg" and not reviewed_operand:
+        return "rg requires an explicit reviewed reader path"
     return None
 
 
@@ -12417,13 +12438,53 @@ def reviewed_python_signal_target(node, tree, parents, dotted):
 
 def python_process_signal_violation(tree, parents):
     """Reject unowned process signals and broad targets before execution."""
+    module_names = {
+        "os": python_assigned_module_names(tree, "os"),
+        "signal": python_assigned_module_names(tree, "signal"),
+    }
+    aliases = {
+        alias.asname or alias.name: f"{node.module}.{alias.name}"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module in module_names
+        for alias in node.names
+        if f"{node.module}.{alias.name}" in python_process_signal_functions
+    }
+
+    def signal_name(value):
+        if isinstance(value, ast.Name):
+            return aliases.get(value.id)
+        if isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name):
+            for module, names in module_names.items():
+                if value.value.id in names:
+                    canonical = module + "." + value.attr
+                    if canonical in python_process_signal_functions:
+                        return canonical
+        return None
+
+    changed = True
+    while changed:
+        changed = False
+        for candidate in ast.walk(tree):
+            if isinstance(candidate, ast.Assign):
+                targets, value = candidate.targets, candidate.value
+            elif isinstance(candidate, (ast.AnnAssign, ast.NamedExpr)):
+                targets, value = [candidate.target], candidate.value
+            else:
+                continue
+            canonical = signal_name(value)
+            if canonical is None:
+                continue
+            for target in targets:
+                if isinstance(target, ast.Name) and aliases.get(target.id) != canonical:
+                    aliases[target.id] = canonical
+                    changed = True
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         import_launcher_violation = python_import_launcher_violation(node)
         if import_launcher_violation:
             return f"{import_launcher_violation} on line {node.lineno}"
-        dotted = python_dotted_name(node.func)
+        dotted = signal_name(node.func) or python_dotted_name(node.func)
         if dotted not in python_process_signal_functions:
             continue
         if reviewed_python_signal_target(node, tree, parents, dotted):
@@ -12969,27 +13030,40 @@ python_reviewed_os_calls = {
 }
 
 
-def python_unknown_os_call_violation(tree):
-    """Fail closed for OS calls whose path/effect surface is not reviewed."""
-    os_names = {
+def python_assigned_module_names(tree, module):
+    """Follow direct and positional-destructured module assignment aliases."""
+    names = {
         alias.asname or alias.name
         for node in ast.walk(tree)
         if isinstance(node, ast.Import)
         for alias in node.names
-        if alias.name == "os"
+        if alias.name == module
     }
+
+    def bind(target, value):
+        if isinstance(target, ast.Name) and isinstance(value, ast.Name):
+            if value.id in names and target.id not in names:
+                names.add(target.id)
+                return True
+        if isinstance(target, (ast.Tuple, ast.List)) and isinstance(value, (ast.Tuple, ast.List)):
+            if len(target.elts) == len(value.elts):
+                return any([bind(part, source) for part, source in zip(target.elts, value.elts)])
+        return False
+
     changed = True
     while changed:
         changed = False
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Name):
-                continue
-            if node.value.id not in os_names:
-                continue
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id not in os_names:
-                    os_names.add(target.id)
-                    changed = True
+            if isinstance(node, ast.Assign):
+                changed = any([bind(target, node.value) for target in node.targets]) or changed
+            elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
+                changed = bind(node.target, node.value) or changed
+    return names
+
+
+def python_unknown_os_call_violation(tree):
+    """Fail closed for OS calls whose path/effect surface is not reviewed."""
+    os_names = python_assigned_module_names(tree, "os")
     for node in ast.walk(tree):
         if (
             isinstance(node, ast.Attribute)
@@ -12999,7 +13073,11 @@ def python_unknown_os_call_violation(tree):
         ) or (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
-            and (node.func.id == "vars" or python_assigned_callable_alias(node.func.id, "vars", tree))
+            and (
+                node.func.id in {"vars", "getattr"}
+                or python_assigned_callable_alias(node.func.id, "vars", tree)
+                or python_assigned_callable_alias(node.func.id, "getattr", tree)
+            )
             and node.args
             and isinstance(node.args[0], ast.Name)
             and node.args[0].id in os_names
@@ -13311,26 +13389,16 @@ def python_subprocess_os_reexport_violation(tree):
 
 def python_filesystem_mutator_alias_violation(tree, parents):
     """Reject extracted mutator methods unless their receiver is temp-owned."""
-    shutil_names = {
-        alias.asname or alias.name
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Import)
-        for alias in node.names
-        if alias.name == "shutil"
-    }
-    changed = True
-    while changed:
-        changed = False
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Name):
-                continue
-            if node.value.id not in shutil_names:
-                continue
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id not in shutil_names:
-                    shutil_names.add(target.id)
-                    changed = True
+    shutil_names = python_assigned_module_names(tree, "shutil")
     for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in shutil_names
+            and node.attr != "which"
+            and "shutil." + node.attr not in python_filesystem_mutating_functions
+        ):
+            return "Python heredoc accesses an unreviewed shutil entry point"
         if (
             isinstance(node, ast.Attribute)
             and isinstance(node.value, ast.Name)
@@ -15823,6 +15891,24 @@ def python_sensitive_read_violation(tree, parents):
                     assignments_by_name.setdefault(function.args.kwarg.arg, []).append(
                         (function, keyword.value)
                     )
+    def exception_arguments(value, seen_names=None):
+        if value is None:
+            return []
+        if seen_names is None:
+            seen_names = set()
+        if isinstance(value, ast.Name):
+            if value.id in seen_names:
+                return [value]
+            sources = assignments_by_name.get(value.id, ())
+            return [value] + [
+                argument
+                for _scope, source in sources
+                for argument in exception_arguments(source, seen_names | {value.id})
+            ]
+        if isinstance(value, ast.Call):
+            return list(value.args) + [keyword.value for keyword in value.keywords]
+        return [value]
+
     for alias, receiver in path_reader_aliases.items():
         if not python_reviewed_read_path(receiver, tree, parents):
             return f"Python unreviewed Path reader alias {alias!r} is not allowed"
@@ -15834,6 +15920,9 @@ def python_sensitive_read_violation(tree, parents):
                     "Python credential/environment subscript is not allowed "
                     f"on line {node.lineno}"
                 )
+        if isinstance(node, ast.Assert) and node.msg is not None:
+            if python_sensitive_value_expression(node.msg, sensitive_names, tree, parents):
+                return f"Python assertion message contains an environment value on line {node.lineno}"
         if isinstance(node, ast.Raise):
             if node.exc is not None and python_sensitive_value_expression(
                 node.exc, sensitive_names, tree, parents
@@ -15842,15 +15931,7 @@ def python_sensitive_read_violation(tree, parents):
                     "Python credential/environment value is sent to an exception "
                     f"on line {node.lineno}"
                 )
-            exception_values = []
-            for exception in (node.exc, node.cause):
-                if isinstance(exception, ast.Call):
-                    exception_values.extend(exception.args)
-                    exception_values.extend(
-                        keyword.value for keyword in exception.keywords
-                    )
-                elif exception is not None:
-                    exception_values.append(exception)
+            exception_values = exception_arguments(node.exc) + exception_arguments(node.cause)
             if any(
                 python_sensitive_value_expression(
                     value, sensitive_names, tree, parents
@@ -16401,13 +16482,7 @@ def python_open_read_violation(tree, parents):
 
 def python_unreviewed_decorator_violation(tree, parents):
     """Keep decorators limited to inert reviewed builtin forms."""
-    sys_names = {
-        alias.asname or alias.name
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Import)
-        for alias in node.names
-        if alias.name == "sys"
-    }
+    sys_names = python_assigned_module_names(tree, "sys")
     for candidate in ast.walk(tree):
         if isinstance(candidate, ast.ImportFrom) and candidate.module == "sys" and any(
             alias.name in {"modules", "_getframe", "_current_frames", "*"} for alias in candidate.names
@@ -31011,3 +31086,62 @@ commands and 95 Python heredoc bodies with zero violations. `git diff
 patterns found no matches. Independent source review and a fresh exact-head
 hosted/Codex review remain pending. These offline checks do not authorize a
 live runner or workflow operation.
+
+### Issue #79 adjacent assigned-module alias correction
+
+Local source review after `9a31f9942dcfa29b3072c29599b31fb1618b2549`
+found that `alias = sys; alias._getframe()` bypassed the frame-namespace
+guard. An inert focused regression failed before correction, then passed.
+Adjacent positional unpacking witnesses `alias, = (sys,)` and `alias, =
+(shutil,)` also failed before correction and passed afterward. The shared
+module-name fixed point now follows direct and positionally matched tuple/list
+assignments for `os`, `shutil`, and `sys`; literal output controls remain
+accepted. No specimen was executed. Full offline verification, independent
+classification, hosted quick check and exact-head Codex review are required
+after the next push; this local delta is not merge-reviewed.
+
+The GPT-6-Luna/max read-only follow-up on `9a31f99` classified five adjacent
+P1s. The `sys` assignment alias and annotated `os`/`shutil` assignments are
+covered by the shared fixed point above. Three further inert regressions were
+RED before correction and GREEN afterward:
+
+| Independent finding | Local resolution |
+|---|---|
+| `grep -e . -- -maintainer.pem` skipped a dash-prefixed file after `--`; `rg --hidden --no-ignore .` searched the current directory implicitly. | Reader parsing now switches to operand mode after `--`, consumes `-e`/`--regexp` pattern arguments, and requires an explicit reviewed path for `rg`. A reviewed `rg . docs/EXECUTION.md` control remains accepted. |
+| `lookup = getattr; print(lookup(os, "environ"))` exposed the inherited environment. | The OS-module guard fails closed on direct or assigned `getattr`/`vars` calls whose first argument is an imported/assigned OS module. Literal safe output remains accepted. |
+| `cause = RuntimeError(os.environ); raise RuntimeError("reviewed") from cause` hid exception data in a local assignment. | Exception-argument inspection now follows local assignment sources for raised exception and cause names; literal exceptions remain accepted. |
+
+The focused three-method run passed in 0.106s. None of the witnesses was
+executed. Packet/full verification, the next hosted quick check and exact-head
+GitHub Codex review remain required before merge.
+
+### Issue #79 PR #103 review 5343868697 correction
+
+The [exact-head Codex review](https://github.com/1XP-AI/gh-runnerd/pull/103#pullrequestreview-5343868697)
+covered pushed input `9a31f9942dcfa29b3072c29599b31fb1618b2549`.
+Its body had no substantive finding; four inline P1s were each reproduced as
+failing inert scanner regressions before correction and passed after. No bot
+issue-comment finding accompanied the review.
+
+| Finding | RED and local correction |
+|---|---|
+| [Assertion message disclosure](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4126424411) | `assert False, os.environ` was accepted. Assertion messages now receive sensitive-value analysis; a literal assertion remains accepted. |
+| [Unreviewed shutil entry point](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4126424421) | `shutil._rmtree_unsafe(...)` was accepted. Attributes of imported/assigned `shutil` now fail closed unless they are reviewed mutators handled by the owned-path policy or the packet's reviewed `which` call; literal safe output remains accepted. |
+| [Aliased process signals](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4126424430) | `from os import getppid, kill; kill(getppid(), 9)` and `send = os.kill; send(1, 9)` were accepted. The signal classifier now resolves imported, module-assigned and callable-assigned names before applying owned-target review; literal safe output remains accepted. |
+| [jq module search](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4126424441) | `jq -n -L/tmp 'include "evil"; leak'` and direct `include` were accepted. jq module search options and external module-loading filter tokens now fail closed; a literal-only filter remains accepted. |
+
+All four focused methods passed in 0.105s after correction. No witness was
+executed. Full offline suite, post-ledger packet scan, independent delta
+classification, hosted quick check and exact-next-head Codex review remain
+pending; no live operation is authorized by these checks.
+
+After this ledger entry, the full isolated offline harness passed **116 tests
+in 144.328s**. Its packet static scan examined 331 shell commands and 95
+Python heredocs with zero violations. The earlier packet-only scan found one
+overbroad `rg` rule against a reviewed here-string input; the rule was
+corrected to distinguish explicit stdin from implicit current-directory
+search, and the full scan above passed. `git diff --check` passed and the
+added-line credential/private-key/personal-path pattern scan found no
+matches. A separate post-ledger packet scan passed in 71.363s, again finding
+331 shell commands, 95 Python heredocs and zero violations. Final independent
+review and fresh exact-head hosted/Codex review remain pending.

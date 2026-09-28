@@ -3453,6 +3453,9 @@ class Issue79RegressionTests(unittest.TestCase):
         self.assertIsNotNone(self.inspect(
             'import os\nalias = os\nalias.remove("/tmp/maintainer-owned")\n'
         ))
+        self.assertIsNotNone(self.inspect(
+            'import os\nalias, = (os,)\nalias.remove("/tmp/maintainer-owned")\n'
+        ))
         self.assertIsNotNone(self.inspect('import os\nalias = os\nprint(alias.environ)\n'))
         self.assertIsNotNone(self.inspect(
             'import os\nalias = os\nprint(alias.getenv("GH_TOKEN"))\n'
@@ -3482,7 +3485,15 @@ class Issue79RegressionTests(unittest.TestCase):
         self.assertIsNotNone(self.inspect(
             'import os\nraise RuntimeError("reviewed") from RuntimeError(os.environ)\n'
         ))
+        self.assertIsNotNone(self.inspect(
+            'import os\ncause = RuntimeError(os.environ)\n'
+            'raise RuntimeError("reviewed") from cause\n'
+        ))
         self.assertIsNone(self.inspect('raise RuntimeError("reviewed")\n'))
+
+    def test_assertion_message_cannot_disclose_environment(self) -> None:
+        self.assertIsNotNone(self.inspect('import os\nassert False, os.environ\n'))
+        self.assertIsNone(self.inspect('assert True, "reviewed"\n'))
 
     def test_module_dictionary_environment_access_is_rejected(self) -> None:
         for body in (
@@ -3493,17 +3504,64 @@ class Issue79RegressionTests(unittest.TestCase):
                 self.assertIsNotNone(self.inspect(body))
         self.assertIsNone(self.inspect('import os\nprint("reviewed")\n'))
 
+    def test_getattr_alias_cannot_expose_os_environment(self) -> None:
+        self.assertIsNotNone(self.inspect(
+            'import os\nlookup = getattr\nprint(lookup(os, "environ"))\n'
+        ))
+        self.assertIsNone(self.inspect(
+            'import os\nlookup = getattr\nprint("reviewed")\n'
+        ))
+
+    def test_assigned_sys_alias_cannot_reach_frame_namespace(self) -> None:
+        self.assertIsNotNone(self.inspect(
+            'import sys\nalias = sys\nalias._getframe()\n'
+        ))
+        self.assertIsNotNone(self.inspect(
+            'import sys\nalias, = (sys,)\nalias._getframe()\n'
+        ))
+        self.assertIsNone(self.inspect('import sys\nalias = sys\nprint("reviewed")\n'))
+
     def test_shutil_module_assignment_alias_cannot_hide_mutation(self) -> None:
         self.assertIsNotNone(self.inspect(
             'import shutil\nalias = shutil\nalias.rmtree("/tmp/maintainer-owned")\n'
         ))
+        self.assertIsNotNone(self.inspect(
+            'import shutil\nalias, = (shutil,)\nalias.rmtree("/tmp/maintainer-owned")\n'
+        ))
         self.assertIsNone(self.inspect('import shutil\nalias = shutil\nprint("reviewed")\n'))
+
+    def test_unreviewed_shutil_entry_point_is_rejected(self) -> None:
+        self.assertIsNotNone(self.inspect(
+            'import shutil\nshutil._rmtree_unsafe("/tmp/maintainer-owned", None, lambda *args: None)\n'
+        ))
+        self.assertIsNotNone(self.inspect(
+            'import shutil\ngetattr(shutil, "_rmtree_unsafe")("/tmp/maintainer-owned", None, lambda *args: None)\n'
+        ))
+        self.assertIsNotNone(self.inspect(
+            'import shutil\nvars(shutil)["_rmtree_unsafe"]("/tmp/maintainer-owned", None, lambda *args: None)\n'
+        ))
+        self.assertIsNone(self.inspect('import shutil\nprint("reviewed")\n'))
+
+    def test_signal_aliases_require_owned_targets(self) -> None:
+        self.assertIsNotNone(self.inspect(
+            'from os import getppid, kill\nkill(getppid(), 9)\n'
+        ))
+        self.assertIsNotNone(self.inspect(
+            'import os\nsend = os.kill\nsend(1, 9)\n'
+        ))
+        self.assertIsNone(self.inspect('import os\nprint("reviewed")\n'))
 
     def test_awk_program_cannot_rewrite_reader_argv(self) -> None:
         self.assertIsNotNone(self.shell_violation(
             'awk \'BEGIN { ARGV[1]="maintainer.pem" } {print}\' docs/EXECUTION.md'
         ))
         self.assertIsNone(self.shell_violation("awk '{print}' docs/EXECUTION.md"))
+
+    def test_shell_reader_requires_explicit_reviewed_operand(self) -> None:
+        self.assertIsNotNone(self.shell_violation('grep -e . -- -maintainer.pem'))
+        self.assertIsNotNone(self.shell_violation('rg --hidden --no-ignore .'))
+        self.assertIsNone(self.shell_violation('rg . docs/EXECUTION.md'))
+        self.assertIsNone(self.shell_violation('rg -n . <<< reviewed'))
 
     def test_jq_environment_object_references_are_rejected(self) -> None:
         for command in (
@@ -3513,6 +3571,11 @@ class Issue79RegressionTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertIsNotNone(self.shell_violation(command))
 
+        self.assertIsNone(self.shell_violation('jq -n \'"reviewed"\''))
+
+    def test_jq_external_module_loading_is_rejected(self) -> None:
+        self.assertIsNotNone(self.shell_violation('jq -n -L/tmp \'include "evil"; leak\''))
+        self.assertIsNotNone(self.shell_violation('jq -n \'include "evil"; leak\''))
         self.assertIsNone(self.shell_violation('jq -n \'"reviewed"\''))
 
     def test_path_getattr_readers_follow_local_path_and_member_returns(self) -> None:
