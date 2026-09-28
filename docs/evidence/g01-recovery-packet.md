@@ -9781,6 +9781,16 @@ def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen
                     for constructor in sensitive_constructors
                 )
                 constructor_aliases[node.func.id] = is_sensitive_constructor
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "format":
+            return python_sensitive_value_expression(
+                node.func.value, sensitive_names, tree, parents, seen.copy()
+            ) or any(
+                python_sensitive_value_expression(
+                    value, sensitive_names, tree, parents, seen.copy()
+                )
+                for value in list(node.args)
+                + [keyword.value for keyword in node.keywords]
+            )
         if is_sensitive_constructor and any(
             python_sensitive_value_expression(
                 value, sensitive_names, tree, parents, seen.copy()
@@ -9897,7 +9907,11 @@ def python_sensitive_value_names(tree, parents):
         positional_parameters = list(function.args.posonlyargs) + list(
             function.args.args
         )
-        if bound_method and positional_parameters:
+        is_static_method = any(
+            python_dotted_name(decorator) == "staticmethod"
+            for decorator in getattr(function, "decorator_list", ())
+        )
+        if bound_method and positional_parameters and not is_static_method:
             positional_parameters = positional_parameters[1:]
         parameters = positional_parameters + list(function.args.kwonlyargs)
         bound = []
@@ -9983,7 +9997,9 @@ def python_sensitive_value_names(tree, parents):
                 for value in call_values
             ):
                 continue
-            if isinstance(node.func, ast.Name):
+            if isinstance(node.func, ast.Lambda):
+                candidates = [(node.func, False)]
+            elif isinstance(node.func, ast.Name):
                 candidates = [
                     (function, False)
                     for function in python_local_function_candidates(
@@ -13256,6 +13272,105 @@ python_sensitive_sink_methods = {
 }
 
 
+def python_path_method_alias_visible(name, method, node, tree, parents):
+    """Resolve Path.home/Path.cwd aliases in lexical scope, respecting shadows."""
+    bindings = getattr(tree, "_issue79_path_method_bindings", None)
+    if bindings is None:
+        bindings = {}
+
+        def bind(scope, alias, value):
+            bindings.setdefault((id(scope), alias), []).append(value)
+
+        def target_names(target):
+            if isinstance(target, ast.Name):
+                return [target.id]
+            if isinstance(target, (ast.Tuple, ast.List)):
+                return [name for item in target.elts for name in target_names(item)]
+            return []
+
+        for candidate in ast.walk(tree):
+            if isinstance(candidate, ast.Assign):
+                targets, value = candidate.targets, candidate.value
+            elif isinstance(candidate, (ast.AnnAssign, ast.NamedExpr)):
+                targets, value = [candidate.target], candidate.value
+            elif isinstance(candidate, (ast.For, ast.AsyncFor, ast.comprehension)):
+                targets, value = [candidate.target], candidate.iter
+            else:
+                targets, value = [], None
+            if targets:
+                scope = python_enclosing_scope(candidate, parents)
+                for target in targets:
+                    for alias in target_names(target):
+                        bind(scope, alias, value)
+            if isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                scope = python_enclosing_scope(parents.get(candidate), parents)
+                bind(scope, candidate.name, None)
+            if isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                for argument in (
+                    list(candidate.args.posonlyargs)
+                    + list(candidate.args.args)
+                    + list(candidate.args.kwonlyargs)
+                ):
+                    bind(candidate, argument.arg, None)
+                for argument in (candidate.args.vararg, candidate.args.kwarg):
+                    if argument is not None:
+                        bind(candidate, argument.arg, None)
+            if isinstance(candidate, ast.Import):
+                scope = python_enclosing_scope(candidate, parents)
+                for imported in candidate.names:
+                    bind(scope, imported.asname or imported.name.split(".")[0], None)
+            elif isinstance(candidate, ast.ImportFrom):
+                scope = python_enclosing_scope(candidate, parents)
+                for imported in candidate.names:
+                    bind(scope, imported.asname or imported.name, None)
+        tree._issue79_path_method_bindings = bindings
+
+    path_aliases = getattr(tree, "_issue79_path_constructor_aliases", None)
+    if path_aliases is None:
+        path_aliases = python_path_constructor_aliases(tree)
+        tree._issue79_path_constructor_aliases = path_aliases
+    module_aliases, constructor_aliases = path_aliases
+
+    def resolves_expression(value, scope, seen):
+        if isinstance(value, ast.Attribute) and value.attr == method:
+            receiver = value.value
+            return (
+                isinstance(receiver, ast.Name)
+                and receiver.id in constructor_aliases
+            ) or (
+                isinstance(receiver, ast.Attribute)
+                and receiver.attr == "Path"
+                and isinstance(receiver.value, ast.Name)
+                and receiver.value.id in module_aliases
+            )
+        if isinstance(value, ast.Name):
+            for visible_scope in python_lexical_scope_chain(scope, parents):
+                visible_key = (id(visible_scope), value.id)
+                if visible_key not in bindings:
+                    continue
+                if visible_key in seen:
+                    return False
+                next_seen = seen | {visible_key}
+                return any(
+                    assigned is not None
+                    and resolves_expression(assigned, visible_scope, next_seen)
+                    for assigned in bindings[visible_key]
+                )
+        return False
+
+    scope = python_enclosing_scope(node, parents)
+    for visible_scope in python_lexical_scope_chain(scope, parents):
+        key = (id(visible_scope), name)
+        if key not in bindings:
+            continue
+        return any(
+            assigned is not None
+            and resolves_expression(assigned, visible_scope, {key})
+            for assigned in bindings[key]
+        )
+    return False
+
+
 def python_resolved_local_path_expression(
     node,
     tree,
@@ -13317,45 +13432,12 @@ def python_resolved_local_path_expression(
             and isinstance(node.func.value.value, ast.Name)
             and node.func.value.value.id in module_aliases
         )
-        method_aliases = getattr(
-            tree, "_issue79_path_method_aliases", None
-        )
-        if method_aliases is None:
-            method_aliases = {"home": set(), "cwd": set()}
-            for candidate in ast.walk(tree):
-                if not isinstance(
-                    candidate, (ast.Assign, ast.AnnAssign, ast.NamedExpr)
-                ):
-                    continue
-                targets = (
-                    candidate.targets if isinstance(candidate, ast.Assign)
-                    else [candidate.target]
-                )
-                value = candidate.value
-                if not isinstance(value, ast.Attribute):
-                    continue
-                receiver = value.value
-                is_path_constructor_method = (
-                    isinstance(receiver, ast.Name)
-                    and receiver.id in constructor_aliases
-                ) or (
-                    isinstance(receiver, ast.Attribute)
-                    and receiver.attr == "Path"
-                    and isinstance(receiver.value, ast.Name)
-                    and receiver.value.id in module_aliases
-                )
-                if value.attr in method_aliases and is_path_constructor_method:
-                    method_aliases[value.attr].update(
-                        target.id for target in targets
-                        if isinstance(target, ast.Name)
-                    )
-            tree._issue79_path_method_aliases = method_aliases
         if isinstance(node.func, ast.Name):
-            is_path_home = is_path_home or (
-                node.func.id in method_aliases["home"]
+            is_path_home = is_path_home or python_path_method_alias_visible(
+                node.func.id, "home", node, tree, parents
             )
-            is_path_cwd = is_path_cwd or (
-                node.func.id in method_aliases["cwd"]
+            is_path_cwd = is_path_cwd or python_path_method_alias_visible(
+                node.func.id, "cwd", node, tree, parents
             )
         if is_path_home or is_path_cwd:
             return True
@@ -13491,10 +13573,28 @@ def python_sensitive_output_sink(node, tree=None):
         "traceback.print_exception",
     }:
         return True
-    if isinstance(node.func, ast.NamedExpr) and python_dotted_name(
-        node.func.value
-    ) in {"print", "builtins.print", "sys.exit", "warnings.warn"}:
-        return True
+    if isinstance(node.func, ast.NamedExpr):
+        named_value = node.func.value
+        named_targets = (
+            "print",
+            "builtins.print",
+            "sys.exit",
+            "warnings.warn",
+            "warnings.warn_explicit",
+            "traceback.print_exc",
+            "traceback.print_exception",
+        )
+        if python_dotted_name(named_value) in named_targets:
+            return True
+        if (
+            isinstance(named_value, ast.Name)
+            and tree is not None
+            and any(
+                python_assigned_callable_alias(named_value.id, target, tree)
+                for target in named_targets
+            )
+        ):
+            return True
     if isinstance(node.func, ast.Name) and tree is not None:
         sink_aliases = getattr(tree, "_issue79_sensitive_output_sink_aliases", None)
         if sink_aliases is None:
@@ -29001,3 +29101,52 @@ handling), and remove finding 10 and this section. Do not restore either owned
 file wholesale from HEAD; the input worktree already contained unrelated
 uncommitted evidence hardening. The full task input HEAD remains
 `1f5f89bc80f09393dbc44f45d20f0141e747005a`.
+
+### Issue #79 PR #103 exact-head callable and path-alias findings
+
+This correction records two P1 findings and one P2 finding from an independent,
+read-only gpt-6-luna/max review of immutable input HEAD
+1784c1530e64bb6c45b512f293a8caeaaa0ff44a; no public URL was supplied for
+that review. It also records three fresh exact-head GitHub Codex P1 findings
+from review 5337088216 at the same input SHA. The Python specimens below are
+inert strings passed to the AST scanner; none was executed, and no real
+environment mapping, home path, or current directory was read.
+
+| # | Severity and immutable finding | RED reproduction at input HEAD | GREEN resolution and positive control |
+|---|---|---|---|
+| 1 | P1, independent read-only review (no public URL): an assigned output-sink alias in (alias := emit)(os.environ) lost environment taint although direct (alias := print)(os.environ) was rejected. | test_named_expression_sink_alias_chain_preserves_environment_taint accepted the assigned-alias witness; the direct sink control was rejected. | Named-expression callable values now resolve assigned aliases of reviewed output sinks. A literal reviewed status mapping through the same named-expression form remains accepted. |
+| 2 | P1, independent read-only review (no public URL): home = Path.home; other = home; print(other()) bypassed path-disclosure detection; the same alias chain through Path.cwd was unchecked. | test_path_method_alias_chains_respect_lexical_shadowing accepted both the home and current-directory alias chains. | The path checker follows scoped Path.home and Path.cwd method aliases across assignments; existing direct, imported-alias, and safe relative-path controls remain covered. |
+| 3 | P2, independent read-only review (no public URL): a module-level method alias named home or cwd wrongly tainted a shadowing function parameter in def report(home): print(home()). | The same test rejected both the home and cwd parameter-shadow controls. | Method aliases now resolve against lexical bindings and stop at a nearer parameter or other binding. Both shadowing controls and a reviewed relative Path output pass. |
+| 4 | P1, [GitHub Codex finding 4120959212](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4120959212), source 1784c1530e64bb6c45b512f293a8caeaaa0ff44a: immediate lambda invocation did not bind os.environ to the lambda's payload parameter before checking print(payload). | test_sensitive_taint_crosses_inline_lambda_and_static_method_parameters accepted (lambda payload: print(payload))(os.environ). | Immediate lambda call arguments now bind to lambda parameters during taint analysis. The assigned-lambda status control remains accepted. |
+| 5 | P1, [GitHub Codex finding 4120959225](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4120959225), source 1784c1530e64bb6c45b512f293a8caeaaa0ff44a: taint was not propagated through "{}".format(secret) after secret = os.environ. | test_sensitive_taint_reaches_string_format_arguments accepted the assigned environment alias passed to str.format; the direct os.environ argument control was already rejected. | Sensitive-value analysis now follows str.format arguments as well as the format receiver. Formatting a literal reviewed status mapping remains accepted. |
+| 6 | P1, [GitHub Codex finding 4120959236](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4120959236), source 1784c1530e64bb6c45b512f293a8caeaaa0ff44a: static-method binding incorrectly discarded payload as if it were an instance self parameter. | The same lambda/static-method test accepted C().emit(os.environ) for an @staticmethod that prints payload. | Taint binding now drops the first positional parameter only for bound instance methods. A static method called with a literal reviewed status mapping remains accepted. |
+
+The RED command
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py Issue79RegressionTests.test_named_expression_sink_alias_chain_preserves_environment_taint Issue79RegressionTests.test_path_method_alias_chains_respect_lexical_shadowing Issue79RegressionTests.test_sensitive_taint_crosses_inline_lambda_and_static_method_parameters Issue79RegressionTests.test_sensitive_taint_reaches_string_format_arguments
+ran 4 tests in 0.102s and failed with 8 unsafe-subcase assertions. The direct
+sink and direct environment-format controls, safe status outputs, and reviewed
+relative-path positive control passed during that RED run.
+
+The focused GREEN command
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py Issue79RegressionTests.test_named_expression_callable_sink_preserves_environment_taint Issue79RegressionTests.test_named_expression_sink_alias_chain_preserves_environment_taint Issue79RegressionTests.test_sensitive_values_are_tainted_into_method_and_lambda_parameters Issue79RegressionTests.test_sensitive_taint_crosses_inline_lambda_and_static_method_parameters Issue79RegressionTests.test_sensitive_taint_reaches_string_format_arguments Issue79RegressionTests.test_home_and_decoded_local_paths_are_not_disclosed Issue79RegressionTests.test_current_directory_path_aliases_are_not_disclosed Issue79RegressionTests.test_path_method_alias_chains_respect_lexical_shadowing Issue79RegressionTests.test_resolved_local_paths_are_not_disclosed_to_output_sinks Issue79RegressionTests.test_resolved_paths_keep_taint_through_protocol_and_byte_conversions
+ran 10 tests in 0.123s and passed.
+
+Rollback is limited to the correction represented here: remove the four added
+regression methods; restore the incoming python_resolved_local_path_expression
+method-alias block and remove python_path_method_alias_visible; revert the
+named-expression sink-alias, inline-lambda/static-method binder, and
+str.format taint changes; and remove this section. Do not restore either file
+wholesale or change the input HEAD. The final exact-head GitHub Codex review and
+hosted PR quick check remain pending; this offline record does not claim either
+has completed.
+
+The first full-suite attempt was interrupted before completion after the scoped
+alias resolver repeatedly rebuilt the Path import-alias set; that attempt is
+inconclusive and is not counted as a pass. The resolver now reuses the
+per-AST Path-constructor cache and carries an explicit visited-binding set for
+alias cycles; the path-alias regression includes a cyclic-alias control. The
+completed command
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py
+ran all 74 tests in 122.511s and passed. Its packet-wide static scan found 331
+shell commands and 95 Python heredoc bodies with zero violations. A separate
+final packet scan is run after this ledger edit.

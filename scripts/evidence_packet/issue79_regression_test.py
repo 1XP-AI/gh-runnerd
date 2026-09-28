@@ -1058,6 +1058,55 @@ class Issue79RegressionTests(unittest.TestCase):
             with self.subTest(body=body):
                 self.assertIsNone(self.inspect(body))
 
+    def test_sensitive_taint_crosses_inline_lambda_and_static_method_parameters(self) -> None:
+        unsafe = (
+            'import os\n'
+            '(lambda payload: print(payload))(os.environ)\n',
+            'import os\n'
+            'class C:\n'
+            '    @staticmethod\n'
+            '    def emit(payload):\n'
+            '        print(payload)\n'
+            'C().emit(os.environ)\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+        safe = (
+            'emit = lambda payload: print(payload)\n'
+            'emit({"status": "reviewed"})\n',
+            'class C:\n'
+            '    @staticmethod\n'
+            '    def emit(payload):\n'
+            '        print(payload)\n'
+            'C().emit({"status": "reviewed"})\n',
+        )
+        for body in safe:
+            with self.subTest(body=body):
+                self.assertIsNone(self.inspect(body))
+
+    def test_sensitive_taint_reaches_string_format_arguments(self) -> None:
+        unsafe = (
+            'import os\n'
+            'secret = os.environ\n'
+            'print("{}".format(secret))\n',
+            'import os\n'
+            'print("{}".format(os.environ))\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+        safe = (
+            'secret = {"status": "reviewed"}\n'
+            'print("{}".format(secret))\n',
+            'print("{}".format({"status": "reviewed"}))\n',
+        )
+        for body in safe:
+            with self.subTest(body=body):
+                self.assertIsNone(self.inspect(body))
+
     def test_factory_returned_bound_method_receives_sensitive_argument(self) -> None:
         unsafe = (
             'import os\n'
@@ -2402,9 +2451,64 @@ class Issue79RegressionTests(unittest.TestCase):
             with self.subTest(body=body):
                 self.assertIsNone(self.inspect(body))
 
+    def test_path_method_alias_chains_respect_lexical_shadowing(self) -> None:
+        unsafe = (
+            'from pathlib import Path\n'
+            'home = Path.home\n'
+            'other = home\n'
+            'print(other())\n',
+            'from pathlib import Path\n'
+            'cwd = Path.cwd\n'
+            'other = cwd\n'
+            'print(other())\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+        safe = (
+            'from pathlib import Path\n'
+            'home = Path.home\n'
+            'def report(home):\n'
+            '    print(home())\n',
+            'from pathlib import Path\n'
+            'cwd = Path.cwd\n'
+            'def report(cwd):\n'
+            '    print(cwd())\n',
+            'from pathlib import Path\n'
+            'home = other\n'
+            'other = home\n'
+            'print(other())\n',
+            'from pathlib import Path\n'
+            'print(Path("docs/evidence/g01-recovery-packet.md"))\n',
+        )
+        for body in safe:
+            with self.subTest(body=body):
+                self.assertIsNone(self.inspect(body))
+
     def test_named_expression_callable_sink_preserves_environment_taint(self) -> None:
         self.assertIsNotNone(self.inspect('import os\n(emit := print)(os.environ)\n'))
         self.assertIsNone(self.inspect('emit = print\nemit("status: reviewed")\n'))
+
+    def test_named_expression_sink_alias_chain_preserves_environment_taint(self) -> None:
+        unsafe = (
+            'import os\n'
+            'emit = print\n'
+            '(alias := emit)(os.environ)\n',
+            'import os\n'
+            '(alias := print)(os.environ)\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+        safe = (
+            'emit = print\n'
+            '(alias := emit)({"status": "reviewed"})\n',
+        )
+        for body in safe:
+            with self.subTest(body=body):
+                self.assertIsNone(self.inspect(body))
 
     def test_bash_indirect_environment_expansion_rejects_credential_names(self) -> None:
         self.assertIsNotNone(self.shell_violation('name=GH_TOKEN; printf "%s\\n" "${!name}"'))
