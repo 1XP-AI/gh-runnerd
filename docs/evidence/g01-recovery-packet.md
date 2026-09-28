@@ -8923,6 +8923,8 @@ def shell_reader_path_violation(tokens):
             continue
         elif executable == "tr" or not expression_consumed:
             expression_consumed = True
+        elif executable == "rg" and token in {".", "./"}:
+            return "rg may not use the repository root as a reader operand"
         elif not shell_reviewed_reader_path(token):
             return "reader path is not reviewed or packet-owned"
         else:
@@ -13058,6 +13060,9 @@ def python_assigned_module_names(tree, module):
                 changed = any([bind(target, node.value) for target in node.targets]) or changed
             elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
                 changed = bind(node.target, node.value) or changed
+            elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+                if isinstance(node.iter, (ast.Tuple, ast.List)):
+                    changed = any([bind(node.target, item) for item in node.iter.elts]) or changed
     return names
 
 
@@ -13079,8 +13084,10 @@ def python_unknown_os_call_violation(tree):
                 or python_assigned_callable_alias(node.func.id, "getattr", tree)
             )
             and node.args
-            and isinstance(node.args[0], ast.Name)
-            and node.args[0].id in os_names
+            and any(
+                isinstance(candidate, ast.Name) and candidate.id in os_names
+                for candidate in ast.walk(node.args[0])
+            )
         ):
             return "Python heredoc accesses an OS module dictionary"
     for node in ast.walk(tree):
@@ -15891,12 +15898,14 @@ def python_sensitive_read_violation(tree, parents):
                     assignments_by_name.setdefault(function.args.kwarg.arg, []).append(
                         (function, keyword.value)
                     )
-    def exception_arguments(value, seen_names=None):
+    def exception_arguments(value, seen_names=None, follow_names=True):
         if value is None:
             return []
         if seen_names is None:
             seen_names = set()
         if isinstance(value, ast.Name):
+            if not follow_names:
+                return [value]
             if value.id in seen_names:
                 return [value]
             sources = assignments_by_name.get(value.id, ())
@@ -15906,7 +15915,12 @@ def python_sensitive_read_violation(tree, parents):
                 for argument in exception_arguments(source, seen_names | {value.id})
             ]
         if isinstance(value, ast.Call):
-            return list(value.args) + [keyword.value for keyword in value.keywords]
+            arguments = list(value.args) + [keyword.value for keyword in value.keywords]
+            return [value] + [
+                nested
+                for argument in arguments
+                for nested in exception_arguments(argument, seen_names, False)
+            ]
         return [value]
 
     for alias, receiver in path_reader_aliases.items():
@@ -31145,3 +31159,40 @@ added-line credential/private-key/personal-path pattern scan found no
 matches. A separate post-ledger packet scan passed in 71.363s, again finding
 331 shell commands, 95 Python heredocs and zero violations. Final independent
 review and fresh exact-head hosted/Codex review remain pending.
+
+### Issue #79 independent follow-up on `86d90df`
+
+A read-only GPT-6-Luna/max pass over the preceding local delta found four
+further P1 source routes. Each inert witness failed a focused regression
+before correction and passed afterward; no witness was executed:
+
+| Finding | Local resolution |
+|---|---|
+| `rg --hidden --no-ignore . .` could scan the repository root despite the explicit-path rule. | `rg` reader operands `.` and `./` now fail closed; the reviewed `docs/EXECUTION.md` input remains accepted. |
+| `lookup = getattr; lookup([os][0], "environ")` bypassed the direct-name OS module guard. | Dynamic `getattr`/`vars` access fails closed when the receiver expression contains an imported/assigned OS module name; literal safe output remains accepted. |
+| `cause = RuntimeError(RuntimeError(os.environ))` hid a credential mapping one constructor level deeper. | Raised exception and cause argument inspection now recursively expands nested calls and local assignment sources; literal exception remains accepted. |
+| `for alias in (os,): alias.remove(...)` bypassed assignment-only module alias propagation. | The shared module-name fixed point now follows literal tuple/list loop and comprehension elements; literal output controls remain accepted. |
+
+The focused four-method run passed in 0.115s. Full offline verification,
+packet-only recheck, hosted quick check and exact-head GitHub Codex review
+remain required after the next push; the current local correction is not
+merge-reviewed.
+
+The first full-suite run after this correction **failed** four existing
+canonical-package positive controls: recursively resolving every name inside
+exception constructor arguments conflated unrelated same-spelled variables
+across scopes and falsely marked a reviewed `TimeoutExpired` as credential
+output. It is not counted as passing verification. Name-source expansion is
+now limited to the raised exception or cause alias; nested constructor calls
+are still recursively inspected, while ordinary constructor argument names
+use the existing sensitive-name analysis. The canonical package control and
+the nested credential-cause regression both passed together in 23.040s.
+Full-suite and post-ledger packet verification remain pending.
+
+The clean full isolated rerun subsequently passed **116 tests in 163.401s**,
+including a current-packet static scan of 331 shell commands and 95 Python
+heredocs with zero violations. `git diff --check` passed; the added-line
+credential/private-key/personal-path pattern scan found no matches. A
+separate post-ledger packet scan passed in 73.718s (331 shell commands, 95
+Python heredocs, zero violations). Fresh exact-head hosted/Codex review
+remains pending. No live or trusted runner test was performed.

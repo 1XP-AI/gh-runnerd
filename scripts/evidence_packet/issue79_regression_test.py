@@ -3456,6 +3456,9 @@ class Issue79RegressionTests(unittest.TestCase):
         self.assertIsNotNone(self.inspect(
             'import os\nalias, = (os,)\nalias.remove("/tmp/maintainer-owned")\n'
         ))
+        self.assertIsNotNone(self.inspect(
+            'import os\nfor alias in (os,):\n    alias.remove("synthetic-maintainer-owned")\n'
+        ))
         self.assertIsNotNone(self.inspect('import os\nalias = os\nprint(alias.environ)\n'))
         self.assertIsNotNone(self.inspect(
             'import os\nalias = os\nprint(alias.getenv("GH_TOKEN"))\n'
@@ -3489,6 +3492,10 @@ class Issue79RegressionTests(unittest.TestCase):
             'import os\ncause = RuntimeError(os.environ)\n'
             'raise RuntimeError("reviewed") from cause\n'
         ))
+        self.assertIsNotNone(self.inspect(
+            'import os\ncause = RuntimeError(RuntimeError(os.environ))\n'
+            'raise RuntimeError("reviewed") from cause\n'
+        ))
         self.assertIsNone(self.inspect('raise RuntimeError("reviewed")\n'))
 
     def test_assertion_message_cannot_disclose_environment(self) -> None:
@@ -3507,6 +3514,9 @@ class Issue79RegressionTests(unittest.TestCase):
     def test_getattr_alias_cannot_expose_os_environment(self) -> None:
         self.assertIsNotNone(self.inspect(
             'import os\nlookup = getattr\nprint(lookup(os, "environ"))\n'
+        ))
+        self.assertIsNotNone(self.inspect(
+            'import os\nlookup = getattr\nprint(lookup([os][0], "environ"))\n'
         ))
         self.assertIsNone(self.inspect(
             'import os\nlookup = getattr\nprint("reviewed")\n'
@@ -3560,6 +3570,7 @@ class Issue79RegressionTests(unittest.TestCase):
     def test_shell_reader_requires_explicit_reviewed_operand(self) -> None:
         self.assertIsNotNone(self.shell_violation('grep -e . -- -maintainer.pem'))
         self.assertIsNotNone(self.shell_violation('rg --hidden --no-ignore .'))
+        self.assertIsNotNone(self.shell_violation('rg --hidden --no-ignore . .'))
         self.assertIsNone(self.shell_violation('rg . docs/EXECUTION.md'))
         self.assertIsNone(self.shell_violation('rg -n . <<< reviewed'))
 
