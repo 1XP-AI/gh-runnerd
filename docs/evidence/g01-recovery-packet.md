@@ -5827,6 +5827,10 @@ git_query_termination_grace_seconds = 5
 git_query_output_max_bytes = 64 * 1024
 git_query_packet_blob_output_max_bytes = 8 * 1024 * 1024
 git_query_stream_chunk_bytes = 4096
+issue79_reviewed_evidence_paths = (
+    "docs/evidence/g01-recovery-packet.md",
+    "scripts/evidence_packet/issue79_regression_test.py",
+)
 
 
 def close_git_query_streams(process):
@@ -6024,19 +6028,22 @@ def git_query(arguments):
 
 
 def run_bounded_git_packet_blob_query(blob_spec, *, cwd, env):
-    """Capture only the reviewed packet's HEAD blob under its separate cap."""
-    expected_path = "docs/evidence/g01-recovery-packet.md"
+    """Capture only a reviewed issue #79 evidence source under its separate cap."""
+    expected_paths = {
+        "docs/evidence/g01-recovery-packet.md",
+        "scripts/evidence_packet/issue79_regression_test.py",
+    }
     if not isinstance(blob_spec, str) or ":" not in blob_spec:
-        raise SystemExit("Git packet blob revision/path was malformed")
+        raise SystemExit("Git evidence blob revision/path was malformed")
     revision, path = blob_spec.split(":", 1)
-    if path != expected_path or not (
+    if path not in expected_paths or not (
         revision == "HEAD"
         or (
             len(revision) in {40, 64}
             and all(character in "0123456789abcdefABCDEF" for character in revision)
         )
     ):
-        raise SystemExit("Git packet blob query was outside the reviewed revision/path")
+        raise SystemExit("Git evidence blob query was outside the reviewed revision/path")
     command = git_query(["show", blob_spec])
     return run_bounded_git_query(
         command,
@@ -6047,22 +6054,25 @@ def run_bounded_git_packet_blob_query(blob_spec, *, cwd, env):
 
 
 def require_packet_head_parity(intent_output, head_blob, worktree_bytes):
-    """Bind the reviewed packet path and bytes to the current HEAD blob."""
-    expected_path = b"docs/evidence/g01-recovery-packet.md"
+    """Bind a reviewed issue #79 evidence path and bytes to its HEAD blob."""
+    expected_paths = {
+        b"docs/evidence/g01-recovery-packet.md",
+        b"scripts/evidence_packet/issue79_regression_test.py",
+    }
     if not isinstance(intent_output, bytes):
-        raise SystemExit("post-correction packet intent output was not bytes")
+        raise SystemExit("post-correction evidence intent output was not bytes")
     records = intent_output.split(b"\0")
     if records[-1] != b"" or len(records) != 2:
-        raise SystemExit("post-correction packet intent output was malformed")
+        raise SystemExit("post-correction evidence intent output was malformed")
     record = records[0]
-    if len(record) < 3 or record[1:2] != b" " or record[2:] != expected_path:
-        raise SystemExit("post-correction packet index entry was missing or malformed")
+    if len(record) < 3 or record[1:2] != b" " or record[2:] not in expected_paths:
+        raise SystemExit("post-correction evidence index entry was missing or malformed")
     if record[:1] in {b"S", b"s", b"h"}:
-        raise SystemExit("post-correction packet has skip-worktree or assume-unchanged intent")
+        raise SystemExit("post-correction evidence has skip-worktree or assume-unchanged intent")
     if not isinstance(head_blob, bytes) or not isinstance(worktree_bytes, bytes):
-        raise SystemExit("post-correction packet byte comparison was not binary")
+        raise SystemExit("post-correction evidence byte comparison was not binary")
     if head_blob != worktree_bytes:
-        raise SystemExit("post-correction packet bytes differ from the current HEAD blob")
+        raise SystemExit("post-correction evidence bytes differ from the current HEAD blob")
 
 
 git_transport_override_names = {
@@ -6217,30 +6227,39 @@ local_result = run_bounded_git_query(
 if local_result.returncode != 0 or local_result.stderr:
     raise SystemExit("post-correction local head query failed")
 local = local_result.stdout.decode("utf-8").strip()
-packet_path = Path("docs/evidence/g01-recovery-packet.md")
-intent_result = run_bounded_git_query(
-    git_query(["ls-files", "-v", "-z", "--", packet_path.as_posix()]),
-    cwd=Path.cwd(),
-    env=git_environment,
-)
-if intent_result.returncode != 0 or intent_result.stderr:
-    raise SystemExit("post-correction packet intent-bit query failed")
-packet_blob_result = run_bounded_git_packet_blob_query(
-    f"{local}:{packet_path.as_posix()}",
-    cwd=Path.cwd(),
-    env=git_environment,
-)
-if packet_blob_result.returncode != 0 or packet_blob_result.stderr:
-    raise SystemExit("post-correction packet HEAD blob query failed")
-try:
-    packet_worktree_bytes = packet_path.read_bytes()
-except OSError:
-    raise SystemExit("post-correction packet worktree bytes could not be read")
-require_packet_head_parity(
-    intent_result.stdout,
-    packet_blob_result.stdout,
-    packet_worktree_bytes,
-)
+for reviewed_path in issue79_reviewed_evidence_paths:
+    intent_result = run_bounded_git_query(
+        git_query(["ls-files", "-v", "-z", "--", reviewed_path]),
+        cwd=Path.cwd(),
+        env=git_environment,
+    )
+    if intent_result.returncode != 0 or intent_result.stderr:
+        raise SystemExit("post-correction evidence intent-bit query failed")
+    reviewed_blob_result = run_bounded_git_packet_blob_query(
+        f"{local}:{reviewed_path}",
+        cwd=Path.cwd(),
+        env=git_environment,
+    )
+    if reviewed_blob_result.returncode != 0 or reviewed_blob_result.stderr:
+        raise SystemExit("post-correction evidence HEAD blob query failed")
+    try:
+        if reviewed_path == "docs/evidence/g01-recovery-packet.md":
+            reviewed_worktree_bytes = Path(
+                "docs/evidence/g01-recovery-packet.md"
+            ).read_bytes()
+        elif reviewed_path == "scripts/evidence_packet/issue79_regression_test.py":
+            reviewed_worktree_bytes = Path(
+                "scripts/evidence_packet/issue79_regression_test.py"
+            ).read_bytes()
+        else:
+            raise SystemExit("post-correction evidence path was not reviewed")
+    except OSError:
+        raise SystemExit("post-correction evidence worktree bytes could not be read")
+    require_packet_head_parity(
+        intent_result.stdout,
+        reviewed_blob_result.stdout,
+        reviewed_worktree_bytes,
+    )
 status = run_bounded_git_query(
     git_query(["status", "--porcelain=v1", "--untracked-files=all"]),
     cwd=Path.cwd(),
@@ -9181,6 +9200,77 @@ def python_local_function_candidates(name, call, tree, parents):
     ]
 
 
+def python_local_lambda_candidates(name, call, tree, parents):
+    """Resolve assigned lambdas visible from a local call site."""
+    visible_scopes = set(
+        python_lexical_scope_chain(python_enclosing_scope(call, parents), parents)
+    )
+    assignments_by_scope = {}
+    for candidate in ast.walk(tree):
+        if isinstance(candidate, ast.Assign):
+            targets, value = candidate.targets, candidate.value
+        elif (
+            isinstance(candidate, (ast.AnnAssign, ast.NamedExpr))
+            and candidate.value is not None
+        ):
+            targets, value = [candidate.target], candidate.value
+        else:
+            continue
+        binding_scope = python_enclosing_scope(candidate, parents)
+        for target in targets:
+            if isinstance(target, ast.Name):
+                assignments_by_scope.setdefault(
+                    (id(binding_scope), target.id), []
+                ).append(value)
+
+    def resolve(candidate_name, seen):
+        if candidate_name in seen:
+            return []
+        seen.add(candidate_name)
+        candidates = []
+        for scope in visible_scopes:
+            for value in assignments_by_scope.get(
+                (id(scope), candidate_name), ()
+            ):
+                if isinstance(value, ast.Lambda):
+                    candidates.append(value)
+                elif isinstance(value, ast.Name):
+                    candidates.extend(resolve(value.id, set(seen)))
+        return candidates
+
+    return resolve(name, set())
+
+
+def python_static_string_values(node, tree):
+    """Resolve literal strings through simple local assignment aliases."""
+    assignments = getattr(tree, "_issue79_string_assignment_index", None)
+    if assignments is None:
+        assignments = {}
+        for candidate in ast.walk(tree):
+            if isinstance(candidate, ast.Assign):
+                targets = candidate.targets
+            elif isinstance(candidate, (ast.AnnAssign, ast.NamedExpr)):
+                targets = [candidate.target]
+            else:
+                continue
+            for target in targets:
+                if isinstance(target, ast.Name) and candidate.value is not None:
+                    assignments.setdefault(target.id, []).append(candidate.value)
+        tree._issue79_string_assignment_index = assignments
+
+    def resolve_literal_string_values(value, seen):
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            return {value.value}
+        if not isinstance(value, ast.Name) or value.id in seen:
+            return set()
+        return set().union(*(
+            resolve_literal_string_values(candidate, seen | {value.id})
+            for candidate in assignments.get(value.id, ())
+        ))
+
+    return resolve_literal_string_values(node, set())
+
+
 def python_local_call_return_values(call, tree, parents):
     """Resolve returned expressions from visible local functions, methods, and lambdas."""
     if not isinstance(call, ast.Call):
@@ -9252,11 +9342,18 @@ def python_local_call_return_values(call, tree, parents):
     def method_return_values(attribute):
         class_names = set()
 
-        def resolve_receiver(value, seen_names=None):
+        def resolve_receiver(value, seen_names=None, seen_nodes=None):
             if seen_names is None:
                 seen_names = set()
+            if seen_nodes is None:
+                seen_nodes = set()
+            if id(value) in seen_nodes:
+                return
+            seen_nodes.add(id(value))
             if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
                 class_names.add(value.func.id)
+                for returned in python_local_call_return_values(value, tree, parents):
+                    resolve_receiver(returned, seen_names.copy(), seen_nodes.copy())
             elif isinstance(value, ast.Name) and value.id not in seen_names:
                 seen_names.add(value.id)
                 if value.id != "self":
@@ -9264,7 +9361,7 @@ def python_local_call_return_values(call, tree, parents):
                         for assignment in assignments_by_scope.get(
                             (id(scope), value.id), ()
                         ):
-                            resolve_receiver(assignment, seen_names.copy())
+                            resolve_receiver(assignment, seen_names.copy(), seen_nodes.copy())
                 else:
                     enclosing = call_scope
                     while enclosing is not None and not isinstance(enclosing, ast.ClassDef):
@@ -9298,13 +9395,23 @@ def python_local_call_return_values(call, tree, parents):
                     isinstance(value, ast.Call)
                     and python_dotted_name(value.func) == "getattr"
                     and len(value.args) in {2, 3}
-                    and isinstance(value.args[1], ast.Constant)
-                    and isinstance(value.args[1].value, str)
                 ):
-                    values.extend(method_return_values(ast.Attribute(
-                        value=value.args[0], attr=value.args[1].value,
-                        ctx=ast.Load(),
-                    )))
+                    for attribute in python_static_string_values(value.args[1], tree):
+                        values.extend(method_return_values(ast.Attribute(
+                            value=value.args[0], attr=attribute, ctx=ast.Load(),
+                        )))
+                    if len(value.args) == 3:
+                        fallback = value.args[2]
+                        if isinstance(fallback, ast.Lambda):
+                            values.extend(returned_values(fallback))
+                        elif isinstance(fallback, ast.Name):
+                            values.extend(
+                                result
+                                for candidate in python_local_function_candidates(
+                                    fallback.id, call, tree, parents
+                                )
+                                for result in returned_values(candidate)
+                            )
                 elif isinstance(value, ast.Name):
                     values.extend(bound_method_bindings(value.id, set(seen)))
         return values
@@ -9324,6 +9431,69 @@ def python_local_call_return_values(call, tree, parents):
     if isinstance(function, ast.Attribute):
         return method_return_values(function)
     return []
+
+
+def python_local_method_candidates(attribute, call, tree, parents):
+    """Resolve local methods for known instance and local-factory receivers."""
+    if not isinstance(attribute, ast.Attribute):
+        return []
+    index = getattr(tree, "_issue79_local_return_index", None)
+    if index is None:
+        python_local_call_return_values(call, tree, parents)
+        index = getattr(tree, "_issue79_local_return_index", None)
+    if index is None:
+        return []
+    assignments_by_scope, methods_by_scope = index
+    call_scope = python_enclosing_scope(call, parents)
+    visible_scopes = set(python_lexical_scope_chain(call_scope, parents))
+    if not any(
+        binding_scope_id == id(scope) and method_name == attribute.attr
+        for binding_scope_id, _class_name, method_name in methods_by_scope
+        for scope in visible_scopes
+    ):
+        return []
+    class_names = set()
+
+    def resolve_receiver(value, seen_names=None, seen_nodes=None):
+        if seen_names is None:
+            seen_names = set()
+        if seen_nodes is None:
+            seen_nodes = set()
+        if id(value) in seen_nodes:
+            return
+        seen_nodes.add(id(value))
+        if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
+            class_names.add(value.func.id)
+            for returned in python_local_call_return_values(value, tree, parents):
+                resolve_receiver(returned, seen_names.copy(), seen_nodes.copy())
+        elif isinstance(value, ast.Name) and value.id not in seen_names:
+            seen_names.add(value.id)
+            if value.id != "self":
+                for scope in visible_scopes:
+                    for assignment in assignments_by_scope.get(
+                        (id(scope), value.id), ()
+                    ):
+                        resolve_receiver(
+                            assignment, seen_names.copy(), seen_nodes.copy()
+                        )
+            else:
+                enclosing = call_scope
+                while enclosing is not None and not isinstance(
+                    enclosing, ast.ClassDef
+                ):
+                    enclosing = parents.get(enclosing)
+                if isinstance(enclosing, ast.ClassDef):
+                    class_names.add(enclosing.name)
+
+    resolve_receiver(attribute.value)
+    return [
+        method
+        for scope in visible_scopes
+        for class_name in class_names
+        for method in methods_by_scope.get(
+            (id(scope), class_name, attribute.attr), ()
+        )
+    ]
 
 
 def python_assigned_callable_alias(name, target, tree):
@@ -9350,11 +9520,14 @@ def python_assigned_callable_alias(name, target, tree):
             isinstance(value, ast.Call)
             and python_dotted_name(value.func) == "getattr"
             and len(value.args) in {2, 3}
-            and isinstance(value.args[1], ast.Constant)
-            and isinstance(value.args[1].value, str)
-            and f"{python_dotted_name(value.args[0])}.{value.args[1].value}" == target
         ):
-            return True
+            if any(
+                f"{python_dotted_name(value.args[0])}.{attribute}" == target
+                for attribute in python_static_string_values(value.args[1], tree)
+            ):
+                return True
+            if len(value.args) == 3 and matches(value.args[2], seen):
+                return True
         if (
             isinstance(value, ast.Subscript)
             and isinstance(value.value, (ast.List, ast.Tuple))
@@ -9534,11 +9707,13 @@ def python_sensitive_value_names(tree, parents):
         positional = list(function.args.posonlyargs) + list(function.args.args)
         return positional + list(function.args.kwonlyargs)
 
-    def call_arguments(call, function):
-        parameters = function_parameters(function)
+    def call_arguments(call, function, bound_method=False):
         positional_parameters = list(function.args.posonlyargs) + list(
             function.args.args
         )
+        if bound_method and positional_parameters:
+            positional_parameters = positional_parameters[1:]
+        parameters = positional_parameters + list(function.args.kwonlyargs)
         bound = []
         for index, argument in enumerate(call.args):
             if isinstance(argument, ast.Starred):
@@ -9610,12 +9785,36 @@ def python_sensitive_value_names(tree, parents):
                     sensitive_names.add(name)
                     changed = True
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            if not isinstance(node, ast.Call):
                 continue
-            for function in python_local_function_candidates(
-                node.func.id, node, tree, parents
+            call_values = list(node.args) + [
+                keyword.value for keyword in node.keywords
+            ]
+            if not any(
+                python_sensitive_value_expression(
+                    value, sensitive_names, tree, parents
+                )
+                for value in call_values
             ):
-                for parameter, argument in call_arguments(node, function):
+                continue
+            if isinstance(node.func, ast.Name):
+                candidates = python_local_function_candidates(
+                    node.func.id, node, tree, parents
+                ) + python_local_lambda_candidates(
+                    node.func.id, node, tree, parents
+                )
+                bound_method = False
+            elif isinstance(node.func, ast.Attribute):
+                candidates = python_local_method_candidates(
+                    node.func, node, tree, parents
+                )
+                bound_method = True
+            else:
+                continue
+            for function in candidates:
+                for parameter, argument in call_arguments(
+                    node, function, bound_method=bound_method
+                ):
                     if python_sensitive_value_expression(
                         argument, sensitive_names, tree, parents
                     ) and parameter not in sensitive_names:
@@ -10582,7 +10781,7 @@ def python_import_bindings(tree):
                     return True
             if (
                 isinstance(value.func, ast.Attribute)
-                and value.func.attr in {"items", "keys", "values"}
+                and value.func.attr in {"items", "keys", "values", "pop"}
             ):
                 return iterable_may_contain_launcher(
                     value.func.value,
@@ -12507,6 +12706,9 @@ python_reviewed_read_path_prefixes = (
     "go.mod",
     "go.sum",
 )
+python_reviewed_read_path_exact_paths = {
+    "scripts/evidence_packet/issue79_regression_test.py",
+}
 python_reviewed_read_path_names = {
     "path",
     "source",
@@ -12635,6 +12837,8 @@ def python_reviewed_read_path(node, tree, parents, seen=None):
         return True
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         value = node.value.replace("\\", "/")
+        if value in python_reviewed_read_path_exact_paths:
+            return True
         return (
             not value.startswith("/")
             and ".." not in value.split("/")
@@ -14318,6 +14522,26 @@ def python_path_reader_aliases(tree, parents):
                 receiver = value.value
             elif isinstance(value, ast.Name) and value.id in aliases:
                 receiver = aliases[value.id]
+            elif isinstance(value, ast.Call):
+                for returned in python_local_call_return_values(
+                    value, tree, parents
+                ):
+                    if (
+                        isinstance(returned, ast.Attribute)
+                        and returned.attr in python_path_filesystem_read_methods
+                        and not python_known_non_path_reader_call(
+                            returned, tree
+                        )
+                    ):
+                        if receiver is None or not python_reviewed_read_path(
+                            returned.value, tree, parents
+                        ):
+                            receiver = returned.value
+            previous = aliases.get(target.id)
+            if previous is not None and not python_reviewed_read_path(
+                previous, tree, parents
+            ):
+                continue
             if receiver is not None and aliases.get(target.id) is not receiver:
                 aliases[target.id] = receiver
                 changed = True
@@ -27559,3 +27783,71 @@ argument-bearing constructors, bound-method returns, literal container
 selection, and static `getattr` attributes, retaining the safe status controls.
 No specimen was executed. This is independent local review evidence, not the
 GitHub exact-head Codex review or hosted PR quick check.
+
+### Four P1 findings from PR #103 Codex review `5334233252`
+
+The supplied review is [Codex review 5334233252](https://github.com/1XP-AI/gh-runnerd/pull/103#pullrequestreview-5334233252)
+against exact base `b79709bf4c8d9d2762c9fbaa8128ba6e6a06f969`. The four Python
+specimens are inert AST input strings. The index-bit and byte-parity checks use
+only temporary local Git repositories. This record does not claim a review of
+the final worktree head.
+
+| # | Finding | RED against exact base | Correction and safe control |
+|---|---|---|---|
+| 1 | A local factory could return `Path("synthetic-private/file").read_text`, then its result could be called as an unchecked reader. | `test_path_filesystem_readers_require_reviewed_paths` accepted the factory-returned reader. | Path-reader alias analysis now inspects local helper return expressions. A factory returning the reviewed packet reader remains accepted. |
+| 2 | `launchers = {"x": subprocess.run}; launch = launchers.pop("x")` left a callable launcher alias unresolved. | `test_launcher_alias_returned_by_mapping_pop_is_rejected` accepted the launcher invocation. | Launcher provenance now follows mapping `pop` values. A `str.upper` callback popped from a local map remains accepted. |
+| 3 | Credential taint did not bind arguments to local method or assigned-lambda parameters, so `C().emit(os.environ)` and its lambda equivalent reached `print(payload)`. | `test_sensitive_values_are_tainted_into_method_and_lambda_parameters` accepted both inert specimens. | Taint binding now covers known local method receivers and assigned local lambdas. Safe status values passed through each callable remain accepted. |
+| 4 | Final parity checked intent bits and raw HEAD bytes only for the packet, leaving `scripts/evidence_packet/issue79_regression_test.py` maskable by Git intent bits. | The parity regression failed because the template had no reviewed-source path list or parity check for the harness. A temporary repository reproduced clean porcelain status while either protected path had `skip-worktree` or `assume-unchanged` set and modified bytes. | The template checks both #79 evidence paths before status, and the bounded blob reader permits exactly those paths under the existing packet-blob output cap. The temporary Git fixture verifies clean parity, both hidden intent bits on each path, and unmasked byte divergence. |
+
+Exact pre-fix RED command:
+
+```text
+python3 -B scripts/evidence_packet/issue79_regression_test.py Issue79RegressionTests.test_path_filesystem_readers_require_reviewed_paths Issue79RegressionTests.test_launcher_alias_returned_by_mapping_pop_is_rejected Issue79RegressionTests.test_sensitive_values_are_tainted_into_method_and_lambda_parameters Issue79RegressionTests.test_final_parity_helper_rejects_intent_bits_and_raw_byte_divergence
+Ran 4 tests in 0.096s; failed with 5 assertion failures (the helper-returned reader, mapping-pop launcher, method taint, lambda taint, and missing final-template evidence-path coverage).
+```
+
+After the initial correction, the first full run executed 47 tests in
+365.465s and found one static-scan failure: `Path(reviewed_path).read_bytes()`
+did not prove a reviewed literal path. The template now reads each allowlisted
+path through its own literal `Path(...)` expression. The focused GREEN command
+at that stage was:
+
+```text
+python3 -B scripts/evidence_packet/issue79_regression_test.py Issue79RegressionTests.test_path_filesystem_readers_require_reviewed_paths Issue79RegressionTests.test_launcher_alias_returned_by_mapping_pop_is_rejected Issue79RegressionTests.test_sensitive_values_are_tainted_into_method_and_lambda_parameters Issue79RegressionTests.test_final_parity_helper_rejects_intent_bits_and_raw_byte_divergence Issue79RegressionTests.test_sensitive_method_and_lambda_returns_are_tainted Issue79RegressionTests.test_launcher_aliases_returned_by_methods_and_lambdas_are_rejected Issue79RegressionTests.test_large_packet_blob_uses_a_separate_bounded_capture Issue79RegressionTests.test_packet_blob_query_ignores_replace_refs
+Ran 8 tests in 1.080s; passed.
+```
+
+The next complete run (47 tests in 221.119s) found one remaining static-scan
+failure because the scanner's reviewed-read allowlist did not include the
+exact harness path. The scanner now accepts that one exact path; it does not
+broaden the `scripts/` prefix. Final focused GREEN command:
+
+```text
+python3 -B scripts/evidence_packet/issue79_regression_test.py Issue79RegressionTests.test_path_filesystem_readers_require_reviewed_paths Issue79RegressionTests.test_launcher_alias_returned_by_mapping_pop_is_rejected Issue79RegressionTests.test_sensitive_values_are_tainted_into_method_and_lambda_parameters Issue79RegressionTests.test_final_parity_helper_rejects_intent_bits_and_raw_byte_divergence Issue79RegressionTests.test_sensitive_method_and_lambda_returns_are_tainted Issue79RegressionTests.test_launcher_aliases_returned_by_methods_and_lambdas_are_rejected Issue79RegressionTests.test_large_packet_blob_uses_a_separate_bounded_capture Issue79RegressionTests.test_packet_blob_query_ignores_replace_refs
+Ran 8 tests in 1.177s; passed.
+```
+
+#### Final verification and scope
+
+The final full offline harness, `python3 -B
+scripts/evidence_packet/issue79_regression_test.py`, ran 47 tests in 235.064s
+and passed. Its packet static scan covered 331 shell commands and 95 Python
+heredoc bodies with zero violations. `git diff --check` exited 0. The final
+added-line scan covered 507 lines with zero credential-pattern matches and
+zero personal-path matches; the only changed paths are this packet and
+`scripts/evidence_packet/issue79_regression_test.py`. HEAD remains exactly
+`b79709bf4c8d9d2762c9fbaa8128ba6e6a06f969`, with both files uncommitted. No
+GitHub access or writes, browser use, commit, push, merge, workflow dispatch,
+credential operation, or live runner access was performed. This local evidence
+does not claim final-head Codex review or hosted PR quick-check completion.
+
+Independent integration check before the correction push found one further
+fail-open path-reader case: a local factory returned a reviewed reader at one
+return site and an unreviewed reader at another. When AST traversal encountered
+the reviewed return first, the previous alias pass selected it and accepted a
+call that could read `synthetic-private/file`. The added inert specimen in
+`test_path_filesystem_readers_require_reviewed_paths` failed RED with one
+assertion failure, then passed GREEN after alias selection conservatively
+retained any unreviewed return or assignment. The same test retains the
+reviewed-reader positive control. No specimen was executed; this result still
+requires final-head independent and GitHub Codex review.

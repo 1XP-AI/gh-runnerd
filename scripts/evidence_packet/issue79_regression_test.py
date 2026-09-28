@@ -555,6 +555,18 @@ class Issue79RegressionTests(unittest.TestCase):
             'from pathlib import Path\nfactory = Path\nprint(factory("synthetic-private").read_text())\n',
             'from pathlib import Path\nprint(Path("synthetic-private").resolve().read_text())\n',
             'from pathlib import Path\ndef path_factory():\n    return Path("synthetic-private")\nprint(path_factory().read_text())\n',
+            'from pathlib import Path\n'
+            'def reader_factory():\n'
+            '    return Path("synthetic-private/file").read_text\n'
+            'reader = reader_factory()\n'
+            'print(reader())\n',
+            'from pathlib import Path\n'
+            'def reader_factory(flag):\n'
+            '    if flag:\n'
+            '        return Path("synthetic-private/file").read_text\n'
+            '    return Path("docs/evidence/g01-recovery-packet.md").read_text\n'
+            'reader = reader_factory(True)\n'
+            'print(reader())\n',
             'from pathlib import Path\ndef read_private(path: Path):\n    return path.read_text()\n',
             'import ast\nfrom pathlib import Path\nast = Path("synthetic-private")\nprint(list(ast.walk()))\n',
             'import re\nfrom pathlib import Path\nmatch = re.match("a", "a")\nmatch = Path("synthetic-private")\nprint(match.group())\n',
@@ -573,6 +585,14 @@ class Issue79RegressionTests(unittest.TestCase):
                 self.assertIsNotNone(self.inspect(body))
         safe_bodies = (
             'from pathlib import Path\nprint(Path("docs/evidence/g01-recovery-packet.md").read_text())\n',
+            'from pathlib import Path\n'
+            'def reviewed_reader_factory():\n'
+            '    return Path("docs/evidence/g01-recovery-packet.md").read_text\n'
+            'reader = reviewed_reader_factory()\n'
+            'print(reader())\n',
+            'from pathlib import Path\n'
+            'source = Path("scripts/evidence_packet/issue79_regression_test.py").read_bytes()\n'
+            'if not source:\n    raise SystemExit("reviewed source is empty")\n',
             'from pathlib import Path\nprint(Path("docs/evidence/g01-recovery-packet.md").stat())\n',
             'import ast\nlist(ast.walk(ast.parse("value = 1")))\n',
             'import re\nmatch = re.match("x", "x")\nprint(match.group(0))\n',
@@ -686,6 +706,17 @@ class Issue79RegressionTests(unittest.TestCase):
             'snapshot = EnvironmentSnapshot()\n'
             'reader = snapshot.read\n'
             'print(reader())\n',
+            'import os\n'
+            'class EnvironmentSnapshot:\n'
+            '    def read(self):\n'
+            '        return dict(os.environ)\n'
+            'def build():\n'
+            '    return EnvironmentSnapshot()\n'
+            'snapshot = build()\n'
+            'print(snapshot.read())\n',
+            'import os\n'
+            'reader = getattr(object(), "missing", lambda: dict(os.environ))\n'
+            'print(reader())\n',
         )
         for body in unsafe:
             with self.subTest(body=body):
@@ -698,6 +729,33 @@ class Issue79RegressionTests(unittest.TestCase):
             'print(StatusSnapshot().read())\n'
         )
         self.assertIsNone(self.inspect(safe))
+
+    def test_sensitive_values_are_tainted_into_method_and_lambda_parameters(self) -> None:
+        unsafe = (
+            'import os\n'
+            'class C:\n'
+            '    def emit(self, payload):\n'
+            '        print(payload)\n'
+            'C().emit(os.environ)\n',
+            'import os\n'
+            'emit = lambda payload: print(payload)\n'
+            'emit(os.environ)\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+        safe = (
+            'class C:\n'
+            '    def emit(self, payload):\n'
+            '        print(payload)\n'
+            'C().emit({"status": "reviewed"})\n',
+            'emit = lambda payload: print(payload)\n'
+            'emit({"status": "reviewed"})\n',
+        )
+        for body in safe:
+            with self.subTest(body=body):
+                self.assertIsNone(self.inspect(body))
 
     def test_sensitive_mapping_return_survives_unrelated_nested_name_collision(self) -> None:
         unsafe = (
@@ -915,6 +973,13 @@ class Issue79RegressionTests(unittest.TestCase):
             'leave(str(dict(os.environ)))\n',
             'import os, sys\n'
             'leave = getattr(sys, "exit", None)\n'
+            'leave(str(dict(os.environ)))\n',
+            'import os, sys\n'
+            'member = "exit"\n'
+            'leave = getattr(sys, member, None)\n'
+            'leave(str(dict(os.environ)))\n',
+            'import os, sys\n'
+            'leave = getattr(object(), "missing", sys.exit)\n'
             'leave(str(dict(os.environ)))\n',
         )
         for body in unsafe:
@@ -1169,6 +1234,15 @@ class Issue79RegressionTests(unittest.TestCase):
             'launcher = get_launcher()\n'
             'launcher(["gh", "workflow", "run", "ci.yml"])\n',
             'import subprocess\n'
+            'def make_launcher():\n'
+            '    return subprocess.run\n'
+            'class LauncherFactory:\n'
+            '    pass\n'
+            'factory = LauncherFactory()\n'
+            'get_launcher = getattr(factory, "get", make_launcher)\n'
+            'launcher = get_launcher()\n'
+            'launcher(["gh", "workflow", "run", "ci.yml"])\n',
+            'import subprocess\n'
             'class LauncherFactory:\n'
             '    def get(self):\n'
             '        return subprocess.run\n'
@@ -1184,6 +1258,15 @@ class Issue79RegressionTests(unittest.TestCase):
             'get_launcher = getattr(factory, "get", None)\n'
             'launcher = get_launcher()\n'
             'launcher(["gh", "workflow", "run", "ci.yml"])\n',
+            'import subprocess\n'
+            'class LauncherFactory:\n'
+            '    def get(self):\n'
+            '        return subprocess.run\n'
+            'factory = LauncherFactory()\n'
+            'member = "get"\n'
+            'get_launcher = getattr(factory, member, None)\n'
+            'launcher = get_launcher()\n'
+            'launcher(["gh", "workflow", "run", "ci.yml"])\n',
         )
         for body in unsafe:
             with self.subTest(body=body):
@@ -1194,6 +1277,22 @@ class Issue79RegressionTests(unittest.TestCase):
             '    def get(self):\n'
             '        return str.upper\n'
             'transform = StatusFactory().get()\n'
+            'transform("reviewed")\n'
+        )
+        self.assertIsNone(self.inspect(safe))
+
+    def test_launcher_alias_returned_by_mapping_pop_is_rejected(self) -> None:
+        unsafe = (
+            'import subprocess\n'
+            'launchers = {"x": subprocess.run}\n'
+            'launch = launchers.pop("x")\n'
+            'launch(["gh", "workflow", "run", "ci.yml"])\n'
+        )
+        self.assertIsNotNone(self.inspect(unsafe))
+
+        safe = (
+            'callbacks = {"upper": str.upper}\n'
+            'transform = callbacks.pop("upper")\n'
             'transform("reviewed")\n'
         )
         self.assertIsNone(self.inspect(safe))
@@ -1304,12 +1403,26 @@ class Issue79RegressionTests(unittest.TestCase):
         verifier_text = PACKET_TEXT[
             PACKET_TEXT.index("The following dynamic command is the live final-verification template."):
         ]
+        reviewed_paths = ast.literal_eval(
+            _top_level_assignment(
+                self.verification, "issue79_reviewed_evidence_paths"
+            ).value
+        )
+        self.assertEqual(
+            reviewed_paths,
+            (
+                "docs/evidence/g01-recovery-packet.md",
+                "scripts/evidence_packet/issue79_regression_test.py",
+            ),
+        )
         required_order = (
             'git_query(["rev-parse", "HEAD"])',
-            'git_query(["ls-files", "-v", "-z", "--", packet_path.as_posix()])',
-            'run_bounded_git_packet_blob_query(\n    f"{local}:{packet_path.as_posix()}"',
-            "packet_path.read_bytes()",
-            "require_packet_head_parity(\n    intent_result.stdout",
+            'for reviewed_path in issue79_reviewed_evidence_paths:',
+            'git_query(["ls-files", "-v", "-z", "--", reviewed_path])',
+            'run_bounded_git_packet_blob_query(\n        f"{local}:{reviewed_path}"',
+            'Path(\n                "docs/evidence/g01-recovery-packet.md"\n            ).read_bytes()',
+            'Path(\n                "scripts/evidence_packet/issue79_regression_test.py"\n            ).read_bytes()',
+            "require_packet_head_parity(\n        intent_result.stdout",
             'git_query(["status", "--porcelain=v1", "--untracked-files=all"])',
         )
         order = [verifier_text.index(item) for item in required_order]
@@ -1327,12 +1440,19 @@ class Issue79RegressionTests(unittest.TestCase):
         helper = namespace["require_packet_head_parity"]
         with tempfile.TemporaryDirectory(prefix="gh-runnerd-issue79-") as directory:
             root = Path(directory)
-            relative = Path("docs/evidence/g01-recovery-packet.md")
-            packet = root / relative
-            packet.parent.mkdir(parents=True)
-            reviewed_bytes = b"synthetic reviewed packet bytes\x00\n"
-            changed_bytes = b"synthetic modified packet bytes\x00\n"
-            packet.write_bytes(reviewed_bytes)
+            relative_paths = tuple(Path(path) for path in reviewed_paths)
+            reviewed_bytes = {
+                relative: f"synthetic reviewed bytes for {relative.as_posix()}\x00\n".encode()
+                for relative in relative_paths
+            }
+            changed_bytes = {
+                relative: f"synthetic modified bytes for {relative.as_posix()}\x00\n".encode()
+                for relative in relative_paths
+            }
+            for relative in relative_paths:
+                tracked_path = root / relative
+                tracked_path.parent.mkdir(parents=True, exist_ok=True)
+                tracked_path.write_bytes(reviewed_bytes[relative])
             env = {
                 "PATH": "/usr/bin:/bin",
                 "HOME": directory,
@@ -1342,47 +1462,74 @@ class Issue79RegressionTests(unittest.TestCase):
                 "LC_ALL": "C",
             }
             _run_git_checked(["init", "-q"], root, env)
-            _run_git_checked(["add", relative.as_posix()], root, env)
+            _run_git_checked(
+                ["add", *(relative.as_posix() for relative in relative_paths)],
+                root,
+                env,
+            )
             _run_git_checked(
                 ["-c", "user.name=synthetic", "-c", "user.email=synthetic@example.invalid", "commit", "-q", "-m", "baseline"],
                 root,
                 env,
             )
-            head = _run_git_checked(["rev-parse", "HEAD"], root, env).decode().strip()
-            intent = _run_git_checked(["ls-files", "-v", "-z", "--", relative.as_posix()], root, env)
-            blob = _run_git_checked(["show", f"{head}:{relative.as_posix()}"], root, env)
-            helper(intent, blob, packet.read_bytes())
+            head = _run_git_checked(
+                ["rev-parse", "HEAD"], root, env
+            ).decode().strip()
+            for relative in relative_paths:
+                intent = _run_git_checked(
+                    ["ls-files", "-v", "-z", "--", relative.as_posix()], root, env
+                )
+                blob = _run_git_checked(
+                    ["show", f"{head}:{relative.as_posix()}"], root, env
+                )
+                helper(intent, blob, (root / relative).read_bytes())
 
             for flag, clear_flag in (
                 ("--skip-worktree", "--no-skip-worktree"),
                 ("--assume-unchanged", "--no-assume-unchanged"),
             ):
-                _run_git_checked(["update-index", flag, relative.as_posix()], root, env)
-                packet.write_bytes(changed_bytes)
-                legacy_status = _run_git_checked(
-                    ["status", "--porcelain=v1", "--untracked-files=all"], root, env
-                )
-                self.assertEqual(legacy_status, b"")
+                for relative in relative_paths:
+                    tracked_path = root / relative
+                    _run_git_checked(
+                        ["update-index", flag, relative.as_posix()], root, env
+                    )
+                    tracked_path.write_bytes(changed_bytes[relative])
+                    legacy_status = _run_git_checked(
+                        ["status", "--porcelain=v1", "--untracked-files=all"], root, env
+                    )
+                    self.assertEqual(legacy_status, b"")
+                    with self.assertRaises(SystemExit):
+                        helper(
+                            _run_git_checked(
+                                ["ls-files", "-v", "-z", "--", relative.as_posix()],
+                                root,
+                                env,
+                            ),
+                            _run_git_checked(
+                                ["show", f"{head}:{relative.as_posix()}"], root, env
+                            ),
+                            tracked_path.read_bytes(),
+                        )
+                    _run_git_checked(
+                        ["update-index", clear_flag, relative.as_posix()], root, env
+                    )
+                    tracked_path.write_bytes(reviewed_bytes[relative])
+
+            for relative in relative_paths:
+                tracked_path = root / relative
+                tracked_path.write_bytes(changed_bytes[relative])
                 with self.assertRaises(SystemExit):
                     helper(
                         _run_git_checked(
-                            ["ls-files", "-v", "-z", "--", relative.as_posix()], root, env
+                            ["ls-files", "-v", "-z", "--", relative.as_posix()],
+                            root,
+                            env,
                         ),
-                        _run_git_checked(["show", f"{head}:{relative.as_posix()}"], root, env),
-                        packet.read_bytes(),
+                        _run_git_checked(
+                            ["show", f"{head}:{relative.as_posix()}"], root, env
+                        ),
+                        tracked_path.read_bytes(),
                     )
-                _run_git_checked(["update-index", clear_flag, relative.as_posix()], root, env)
-                packet.write_bytes(reviewed_bytes)
-
-            packet.write_bytes(changed_bytes)
-            with self.assertRaises(SystemExit):
-                helper(
-                    _run_git_checked(
-                        ["ls-files", "-v", "-z", "--", relative.as_posix()], root, env
-                    ),
-                    _run_git_checked(["show", f"{head}:{relative.as_posix()}"], root, env),
-                    packet.read_bytes(),
-                )
 
     def test_large_packet_blob_uses_a_separate_bounded_capture(self) -> None:
         runtime = _bounded_git_query_namespace(self.verification)
