@@ -350,10 +350,19 @@ def _safe_environment_mapping(module: ast.Module) -> dict[str, str]:
 
 
 def _verification_function(module: ast.Module, name: str) -> ast.FunctionDef:
-    for statement in module.body:
-        if isinstance(statement, ast.FunctionDef) and statement.name == name:
-            return statement
-    raise AssertionError(f"verification helper {name!r} is missing")
+    matches = [
+        statement
+        for statement in ast.walk(module)
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and statement.name == name
+    ]
+    if (
+        len(matches) == 1
+        and isinstance(matches[0], ast.FunctionDef)
+        and matches[0] in module.body
+    ):
+        return matches[0]
+    raise AssertionError(f"verification helper {name!r} is missing or duplicated")
 
 
 def _safe_integer_expression(node: ast.AST) -> int:
@@ -639,6 +648,57 @@ class Issue79RegressionTests(unittest.TestCase):
         )
         self.assertIsNone(self.inspect(safe))
 
+    def test_sensitive_method_and_lambda_returns_are_tainted(self) -> None:
+        unsafe = (
+            'import os\n'
+            'snapshot = lambda: dict(os.environ)\n'
+            'print(snapshot())\n',
+            'import os\n'
+            'class EnvironmentSnapshot:\n'
+            '    def read(self):\n'
+            '        return dict(os.environ)\n'
+            'print(EnvironmentSnapshot().read())\n',
+            'import os\n'
+            'class EnvironmentSnapshot:\n'
+            '    def read(self):\n'
+            '        return dict(os.environ)\n'
+            'snapshot = EnvironmentSnapshot()\n'
+            'print(snapshot.read())\n',
+            'import os\n'
+            'class EnvironmentSnapshot:\n'
+            '    def read(self):\n'
+            '        return dict(os.environ)\n'
+            'snapshot = EnvironmentSnapshot()\n'
+            'alias = snapshot\n'
+            'print(alias.read())\n',
+            'import os\n'
+            'class EnvironmentSnapshot:\n'
+            '    def __init__(self, label):\n'
+            '        self.label = label\n'
+            '    def read(self):\n'
+            '        return dict(os.environ)\n'
+            'snapshot = EnvironmentSnapshot("reviewed")\n'
+            'print(snapshot.read())\n',
+            'import os\n'
+            'class EnvironmentSnapshot:\n'
+            '    def read(self):\n'
+            '        return dict(os.environ)\n'
+            'snapshot = EnvironmentSnapshot()\n'
+            'reader = snapshot.read\n'
+            'print(reader())\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+        safe = (
+            'class StatusSnapshot:\n'
+            '    def read(self):\n'
+            '        return {"status": "reviewed"}\n'
+            'print(StatusSnapshot().read())\n'
+        )
+        self.assertIsNone(self.inspect(safe))
+
     def test_sensitive_mapping_return_survives_unrelated_nested_name_collision(self) -> None:
         unsafe = (
             'import os\n'
@@ -747,6 +807,28 @@ class Issue79RegressionTests(unittest.TestCase):
             with self.subTest(body=body):
                 self.assertIsNotNone(self.inspect(body))
 
+    def test_resolved_paths_cross_expanded_keyword_helpers_and_formatting(self) -> None:
+        unsafe = (
+            'from pathlib import Path\n'
+            'def report(root):\n'
+            '    print(root)\n'
+            'report(**dict(root=Path.cwd().resolve()))\n',
+            'from pathlib import Path\n'
+            'raise RuntimeError("root={}".format(Path.cwd().resolve()))\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+        safe = (
+            'from pathlib import Path\n'
+            'def validate(root):\n'
+            '    if not root.is_absolute():\n'
+            '        raise SystemExit("invalid root")\n'
+            'validate(**dict(root=Path.cwd().resolve()))\n'
+        )
+        self.assertIsNone(self.inspect(safe))
+
     def test_resolved_local_paths_in_raised_errors_are_rejected(self) -> None:
         unsafe = (
             'from pathlib import Path\nraise RuntimeError(str(Path.cwd().resolve()))\n',
@@ -774,6 +856,28 @@ class Issue79RegressionTests(unittest.TestCase):
             'report("reviewed", status="safe")\n'
         ))
 
+    def test_sensitive_mapping_expanded_into_kwargs_is_tainted(self) -> None:
+        unsafe = (
+            'import os\n'
+            'def report(**values):\n'
+            '    print(values["snapshot"])\n'
+            'report(**dict(snapshot=os.environ))\n',
+            'import os\n'
+            'def report(**values):\n'
+            '    print(values)\n'
+            'report(**dict(snapshot=dict(os.environ)))\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+        safe = (
+            'def report(**values):\n'
+            '    print(values)\n'
+            'report(**dict(status="reviewed"))\n'
+        )
+        self.assertIsNone(self.inspect(safe))
+
     def test_sys_exit_is_an_output_sink_for_sensitive_values(self) -> None:
         unsafe = (
             'import os, sys\nsys.exit(str(dict(os.environ)))\n',
@@ -786,6 +890,43 @@ class Issue79RegressionTests(unittest.TestCase):
             with self.subTest(body=body):
                 self.assertIsNotNone(self.inspect(body))
         self.assertIsNone(self.inspect('import sys\nsys.exit("reviewed status")\n'))
+
+    def test_imported_exit_alias_and_system_exit_preserve_sensitive_taint(self) -> None:
+        unsafe = (
+            'from sys import exit as leave\n'
+            'import os\n'
+            'leave(str(dict(os.environ)))\n',
+            'import os\n'
+            'raise SystemExit(str(dict(os.environ)))\n',
+            'import os, sys\n'
+            'leave = sys.exit\n'
+            'leave(str(dict(os.environ)))\n',
+            'import os\n'
+            'abort = SystemExit\n'
+            'raise abort(dict(os.environ))\n',
+            'import os, sys\n'
+            'leave = [sys.exit][0]\n'
+            'leave(str(dict(os.environ)))\n',
+            'import os\n'
+            'abort = [SystemExit][0]\n'
+            'raise abort(dict(os.environ))\n',
+            'import os, sys\n'
+            'leave = getattr(sys, "exit")\n'
+            'leave(str(dict(os.environ)))\n',
+            'import os, sys\n'
+            'leave = getattr(sys, "exit", None)\n'
+            'leave(str(dict(os.environ)))\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+        safe = (
+            'from sys import exit as leave\n'
+            'leave("reviewed status")\n'
+            'raise SystemExit("reviewed status")\n'
+        )
+        self.assertIsNone(self.inspect(safe))
 
     def test_canonical_package_guard_remains_reviewed(self) -> None:
         bodies = [
@@ -832,6 +973,21 @@ class Issue79RegressionTests(unittest.TestCase):
             with self.subTest(body=body):
                 self.assertIsNotNone(self.inspect(body))
         safe = 'for value in ["reviewed"]:\n    print(value)\n'
+        self.assertIsNone(self.inspect(safe))
+
+    def test_environment_taint_reaches_comprehension_iterator_outputs(self) -> None:
+        unsafe = (
+            'import os\n'
+            'print([value for value in iter(dict(os.environ).items())])\n',
+            'import os\n'
+            'values = [value for _, value in enumerate(dict(os.environ).items())]\n'
+            'print(values)\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+        safe = 'print([value for value in ["reviewed"]])\n'
         self.assertIsNone(self.inspect(safe))
 
     def test_environment_taint_follows_generator_yields(self) -> None:
@@ -979,6 +1135,69 @@ class Issue79RegressionTests(unittest.TestCase):
         )
         self.assertIsNotNone(self.inspect(body))
 
+    def test_launcher_aliases_returned_by_methods_and_lambdas_are_rejected(self) -> None:
+        unsafe = (
+            'import subprocess\n'
+            'launcher_factory = lambda: subprocess.run\n'
+            'launcher = launcher_factory()\n'
+            'launcher(["gh", "workflow", "run", "ci.yml"])\n',
+            'import subprocess\n'
+            'launcher = (lambda: subprocess.run)()\n'
+            'launcher(["gh", "workflow", "run", "ci.yml"])\n',
+            'import subprocess\n'
+            'class LauncherFactory:\n'
+            '    def get(self):\n'
+            '        return subprocess.run\n'
+            'launcher = LauncherFactory().get()\n'
+            'launcher(["gh", "workflow", "run", "ci.yml"])\n',
+            'import subprocess\n'
+            'class LauncherFactory:\n'
+            '    def __init__(self, label):\n'
+            '        self.label = label\n'
+            '    def get(self):\n'
+            '        return subprocess.run\n'
+            'factory = LauncherFactory("reviewed")\n'
+            'alias = factory\n'
+            'launcher = alias.get()\n'
+            'launcher(["gh", "workflow", "run", "ci.yml"])\n',
+            'import subprocess\n'
+            'class LauncherFactory:\n'
+            '    def get(self):\n'
+            '        return subprocess.run\n'
+            'factory = LauncherFactory()\n'
+            'get_launcher = factory.get\n'
+            'launcher = get_launcher()\n'
+            'launcher(["gh", "workflow", "run", "ci.yml"])\n',
+            'import subprocess\n'
+            'class LauncherFactory:\n'
+            '    def get(self):\n'
+            '        return subprocess.run\n'
+            'factory = LauncherFactory()\n'
+            'get_launcher = getattr(factory, "get")\n'
+            'launcher = get_launcher()\n'
+            'launcher(["gh", "workflow", "run", "ci.yml"])\n',
+            'import subprocess\n'
+            'class LauncherFactory:\n'
+            '    def get(self):\n'
+            '        return subprocess.run\n'
+            'factory = LauncherFactory()\n'
+            'get_launcher = getattr(factory, "get", None)\n'
+            'launcher = get_launcher()\n'
+            'launcher(["gh", "workflow", "run", "ci.yml"])\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+        safe = (
+            'class StatusFactory:\n'
+            '    def get(self):\n'
+            '        return str.upper\n'
+            'transform = StatusFactory().get()\n'
+            'transform("reviewed")\n'
+        )
+        self.assertIsNone(self.inspect(safe))
+
     def test_bounded_git_query_loader_rejects_unreviewed_function_definitions(self) -> None:
         specimen = ast.parse(
             'def run_bounded_git_query(value=packet_side_effect()):\n'
@@ -1042,6 +1261,17 @@ class Issue79RegressionTests(unittest.TestCase):
             self.verification = original_verification
         self.assertEqual([], compile_events)
         self.assertEqual([], exec_events)
+
+    def test_verification_parity_helper_definition_must_be_unique(self) -> None:
+        duplicate = ast.parse(
+            'def require_packet_head_parity(intent, blob, worktree):\n'
+            '    return None\n'
+            'def require_packet_head_parity(intent, blob, worktree):\n'
+            '    return None\n',
+            filename="<duplicate-parity-helper-data>",
+        )
+        with self.assertRaises(AssertionError):
+            _verification_function(duplicate, "require_packet_head_parity")
 
     def test_environment_dump_builtins_are_narrowly_allowed(self) -> None:
         for command in (
@@ -1411,6 +1641,46 @@ class Issue79RegressionTests(unittest.TestCase):
                     bodies[0], original, unreachable
                 )
                 self.assertIsNotNone(self.inspect(mutated))
+
+    def test_package_containment_try_requires_direct_reachable_body(self) -> None:
+        bodies = [
+            body
+            for _line, body, _safe_marker, _invocation
+            in self.scanner["python_heredoc_bodies"](PACKET_TEXT)  # type: ignore[operator]
+            if "def source_fuzz_guard():" in body
+        ]
+        self.assertEqual(len(bodies), 1)
+        original = (
+            '    try:\n'
+            '        package_dir.relative_to(go_repo_root / module_dir)\n'
+            '    except ValueError:\n'
+            '        raise SystemExit(f"{label}: package source escaped the reviewed module")'
+        )
+        self.assertIsNone(self.inspect(bodies[0]))
+        conditional_variants = (
+            (
+                '    if 0 == 1:\n'
+                '        try:\n'
+                '            package_dir.relative_to(go_repo_root / module_dir)\n'
+                '        except ValueError:\n'
+                '            raise SystemExit(f"{label}: package source escaped the reviewed module")'
+            ),
+            (
+                '    if 1 == 1:\n'
+                '        pass\n'
+                '    else:\n'
+                '        try:\n'
+                '            package_dir.relative_to(go_repo_root / module_dir)\n'
+                '        except ValueError:\n'
+                '            raise SystemExit(f"{label}: package source escaped the reviewed module")'
+            ),
+        )
+        for replacement in conditional_variants:
+            with self.subTest(replacement=replacement):
+                mutated = self.replace_source_fuzz_guard_fragment(
+                    bodies[0], original, replacement
+                )
+                self.assertFalse(self.package_directory_guard_is_reviewed(mutated))
 
     def test_packet_loader_rejects_packet_controlled_definition_time_code(self) -> None:
         specimens = (

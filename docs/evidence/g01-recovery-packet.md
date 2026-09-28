@@ -9181,6 +9181,206 @@ def python_local_function_candidates(name, call, tree, parents):
     ]
 
 
+def python_local_call_return_values(call, tree, parents):
+    """Resolve returned expressions from visible local functions, methods, and lambdas."""
+    if not isinstance(call, ast.Call):
+        return []
+    call_scope = python_enclosing_scope(call, parents)
+    visible_scopes = set(python_lexical_scope_chain(call_scope, parents))
+    index = getattr(tree, "_issue79_local_return_index", None)
+    if index is None:
+        assignments_by_scope = {}
+        methods_by_scope = {}
+        for candidate in ast.walk(tree):
+            if isinstance(candidate, ast.Assign):
+                targets, value = candidate.targets, candidate.value
+            elif (
+                isinstance(candidate, (ast.AnnAssign, ast.NamedExpr))
+                and candidate.value is not None
+            ):
+                targets, value = [candidate.target], candidate.value
+            else:
+                targets = []
+                value = None
+            binding_scope = python_enclosing_scope(candidate, parents)
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    assignments_by_scope.setdefault(
+                        (id(binding_scope), target.id), []
+                    ).append(value)
+            if isinstance(candidate, ast.ClassDef):
+                for method in candidate.body:
+                    if isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        methods_by_scope.setdefault(
+                            (
+                                id(binding_scope),
+                                candidate.name,
+                                method.name,
+                            ),
+                            [],
+                        ).append(method)
+        index = (assignments_by_scope, methods_by_scope)
+        tree._issue79_local_return_index = index
+    assignments_by_scope, methods_by_scope = index
+
+    def returned_values(function):
+        if isinstance(function, ast.Lambda):
+            return [function.body]
+        return [
+            candidate.value
+            for candidate in ast.walk(function)
+            if isinstance(candidate, (ast.Return, ast.Yield, ast.YieldFrom))
+            and candidate.value is not None
+            and python_enclosing_scope(candidate, parents) is function
+        ]
+
+    def lambda_bindings(name, seen=None):
+        if seen is None:
+            seen = set()
+        if name in seen:
+            return []
+        seen.add(name)
+        values = []
+        for scope in visible_scopes:
+            for value in assignments_by_scope.get((id(scope), name), ()):
+                if isinstance(value, ast.Lambda):
+                    values.extend(returned_values(value))
+                elif isinstance(value, ast.Name):
+                    values.extend(lambda_bindings(value.id, set(seen)))
+        return values
+
+    def method_return_values(attribute):
+        class_names = set()
+
+        def resolve_receiver(value, seen_names=None):
+            if seen_names is None:
+                seen_names = set()
+            if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
+                class_names.add(value.func.id)
+            elif isinstance(value, ast.Name) and value.id not in seen_names:
+                seen_names.add(value.id)
+                if value.id != "self":
+                    for scope in visible_scopes:
+                        for assignment in assignments_by_scope.get(
+                            (id(scope), value.id), ()
+                        ):
+                            resolve_receiver(assignment, seen_names.copy())
+                else:
+                    enclosing = call_scope
+                    while enclosing is not None and not isinstance(enclosing, ast.ClassDef):
+                        enclosing = parents.get(enclosing)
+                    if isinstance(enclosing, ast.ClassDef):
+                        class_names.add(enclosing.name)
+
+        resolve_receiver(attribute.value)
+        return [
+            value
+            for scope in visible_scopes
+            for class_name in class_names
+            for method in methods_by_scope.get(
+                (id(scope), class_name, attribute.attr), ()
+            )
+            for value in returned_values(method)
+        ]
+
+    def bound_method_bindings(name, seen=None):
+        if seen is None:
+            seen = set()
+        if name in seen:
+            return []
+        seen.add(name)
+        values = []
+        for scope in visible_scopes:
+            for value in assignments_by_scope.get((id(scope), name), ()):
+                if isinstance(value, ast.Attribute):
+                    values.extend(method_return_values(value))
+                elif (
+                    isinstance(value, ast.Call)
+                    and python_dotted_name(value.func) == "getattr"
+                    and len(value.args) in {2, 3}
+                    and isinstance(value.args[1], ast.Constant)
+                    and isinstance(value.args[1].value, str)
+                ):
+                    values.extend(method_return_values(ast.Attribute(
+                        value=value.args[0], attr=value.args[1].value,
+                        ctx=ast.Load(),
+                    )))
+                elif isinstance(value, ast.Name):
+                    values.extend(bound_method_bindings(value.id, set(seen)))
+        return values
+
+    function = call.func
+    if isinstance(function, ast.Lambda):
+        return returned_values(function)
+    if isinstance(function, ast.Name):
+        values = [
+            value
+            for candidate in python_local_function_candidates(
+                function.id, call, tree, parents
+            )
+            for value in returned_values(candidate)
+        ]
+        return values + lambda_bindings(function.id) + bound_method_bindings(function.id)
+    if isinstance(function, ast.Attribute):
+        return method_return_values(function)
+    return []
+
+
+def python_assigned_callable_alias(name, target, tree):
+    """Conservatively follow local assignment aliases of a known sink/exception."""
+    assignments = getattr(tree, "_issue79_callable_alias_index", None)
+    if assignments is None:
+        assignments = {}
+        for candidate in ast.walk(tree):
+            if isinstance(candidate, ast.Assign):
+                bindings = candidate.targets
+            elif isinstance(candidate, (ast.AnnAssign, ast.NamedExpr)):
+                bindings = [candidate.target]
+            else:
+                continue
+            for binding in bindings:
+                if isinstance(binding, ast.Name):
+                    assignments.setdefault(binding.id, []).append(candidate.value)
+        tree._issue79_callable_alias_index = assignments
+
+    def matches(value, seen):
+        if python_dotted_name(value) == target:
+            return True
+        if (
+            isinstance(value, ast.Call)
+            and python_dotted_name(value.func) == "getattr"
+            and len(value.args) in {2, 3}
+            and isinstance(value.args[1], ast.Constant)
+            and isinstance(value.args[1].value, str)
+            and f"{python_dotted_name(value.args[0])}.{value.args[1].value}" == target
+        ):
+            return True
+        if (
+            isinstance(value, ast.Subscript)
+            and isinstance(value.value, (ast.List, ast.Tuple))
+            and isinstance(value.slice, ast.Constant)
+            and type(value.slice.value) is int
+        ):
+            elements = value.value.elts
+            index = value.slice.value
+            return -len(elements) <= index < len(elements) and matches(
+                elements[index], seen
+            )
+        if not isinstance(value, ast.Name) or value.id in seen:
+            return False
+        return any(
+            matches(candidate, seen | {value.id})
+            for candidate in assignments.get(value.id, ())
+            if candidate is not None
+        )
+
+    return any(
+        matches(value, {name})
+        for value in assignments.get(name, ())
+        if value is not None
+    )
+
+
 def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen=None):
     """Track credential values through aliases without trusting variable names."""
     if node is None:
@@ -9215,30 +9415,31 @@ def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen
             key = node.args[0].value if node.args and isinstance(node.args[0], ast.Constant) else None
             return key is None or not isinstance(key, str) or credential_environment_name(key)
         if dotted == "dict" and any(
-            isinstance(argument, ast.Attribute)
-            and python_dotted_name(argument) == "os.environ"
-            for argument in node.args
+            python_sensitive_value_expression(
+                value, sensitive_names, tree, parents, seen.copy()
+            )
+            for value in list(node.args)
+            + [keyword.value for keyword in node.keywords]
         ):
             return True
-        if isinstance(node.func, ast.Name):
-            local_helpers = python_local_function_candidates(
-                node.func.id, node, tree, parents
+        if any(
+            python_sensitive_value_expression(
+                value, sensitive_names, tree, parents, seen.copy()
             )
-            for function in local_helpers:
-                returned_values = [
-                    candidate.value
-                    for candidate in ast.walk(function)
-                    if isinstance(candidate, (ast.Return, ast.Yield, ast.YieldFrom))
-                    and candidate.value is not None
-                    and python_enclosing_scope(candidate, parents) is function
-                ]
-                if returned_values and any(
-                    python_sensitive_value_expression(
-                        value, sensitive_names, tree, parents, seen.copy()
-                    )
-                    for value in returned_values
-                ):
-                    return True
+            for value in python_local_call_return_values(node, tree, parents)
+        ):
+            return True
+        if dotted == "SystemExit" or (
+            isinstance(node.func, ast.Name)
+            and python_assigned_callable_alias(node.func.id, "SystemExit", tree)
+        ):
+            return any(
+                python_sensitive_value_expression(
+                    value, sensitive_names, tree, parents, seen.copy()
+                )
+                for value in list(node.args)
+                + [keyword.value for keyword in node.keywords]
+            )
         if isinstance(node.func, ast.Name) and node.func.id in {
             "enumerate", "filter", "iter", "map", "next", "reversed",
             "sorted", "zip", "chain",
@@ -9268,7 +9469,8 @@ def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen
                 python_sensitive_value_expression(
                     argument, sensitive_names, tree, parents, seen.copy()
                 )
-                for argument in node.args
+                for argument in list(node.args)
+                + [keyword.value for keyword in node.keywords]
             )
     if isinstance(node, (ast.DictComp, ast.ListComp, ast.SetComp, ast.GeneratorExp)):
         if any(
@@ -9277,14 +9479,12 @@ def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen
             for candidate in ast.walk(node)
         ):
             return False
-        if any(
-            isinstance(generator.iter, ast.Attribute)
-            and (
-                python_dotted_name(generator.iter) or ""
-            ).startswith("os.environ")
+        return any(
+            python_sensitive_value_expression(
+                generator.iter, sensitive_names, tree, parents, seen.copy()
+            )
             for generator in node.generators
-        ):
-            return True
+        )
     if isinstance(node, (ast.BinOp, ast.BoolOp, ast.UnaryOp, ast.IfExp, ast.JoinedStr)):
         return any(
             python_sensitive_value_expression(child, sensitive_names, tree, parents, seen.copy())
@@ -9362,6 +9562,15 @@ def python_sensitive_value_names(tree, parents):
                     for key, value in zip(keyword.value.keys, keyword.value.values):
                         if key.value in parameter_by_name:
                             bound.append((key.value, value))
+                elif (
+                    isinstance(keyword.value, ast.Call)
+                    and python_dotted_name(keyword.value.func) == "dict"
+                    and not keyword.value.args
+                    and all(item.arg is not None for item in keyword.value.keywords)
+                ):
+                    for item in keyword.value.keywords:
+                        if item.arg in parameter_by_name:
+                            bound.append((item.arg, item.value))
                 else:
                     bound.extend((parameter.arg, keyword.value) for parameter in parameters)
             elif function.args.kwarg is not None and keyword.arg not in parameter_by_name:
@@ -10286,10 +10495,6 @@ def python_import_bindings(tree):
     for target, value, _destructured in assignment_bindings:
         if isinstance(target, ast.Name) and value is not None:
             assigned_values.setdefault(target.id, []).append(value)
-    local_functions = {}
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            local_functions.setdefault(node.name, []).append(node)
     parents = {
         child: parent
         for parent in ast.walk(tree)
@@ -10367,29 +10572,14 @@ def python_import_bindings(tree):
         if python_call_derived_command_alias(value, modules):
             return True
         if isinstance(value, ast.Call):
-            if isinstance(value.func, ast.Name) and value.func.id in local_functions:
-                function_name = value.func.id
-                if function_name not in seen_functions:
-                    for function in local_functions[function_name]:
-                        returned_values = [
-                            candidate.value
-                            for candidate in ast.walk(function)
-                            if isinstance(
-                                candidate, (ast.Return, ast.Yield, ast.YieldFrom)
-                            )
-                            and candidate.value is not None
-                            and python_enclosing_scope(candidate, parents) is function
-                        ]
-                        if any(
-                            iterable_may_contain_launcher(
-                                candidate,
-                                set(seen_names),
-                                set(seen_nodes),
-                                seen_functions | {function_name},
-                            )
-                            for candidate in returned_values
-                        ):
-                            return True
+            for candidate in python_local_call_return_values(value, tree, parents):
+                if iterable_may_contain_launcher(
+                    candidate,
+                    set(seen_names),
+                    set(seen_nodes),
+                    seen_functions | {python_dotted_name(value.func) or "call"},
+                ):
+                    return True
             if (
                 isinstance(value.func, ast.Attribute)
                 and value.func.attr in {"items", "keys", "values"}
@@ -12569,29 +12759,37 @@ def python_resolved_local_path_expression(
         dotted = python_dotted_name(node.func)
         if dotted in {"Path.cwd", "pathlib.Path.cwd"}:
             return True
-        if isinstance(node.func, ast.Name):
-            local_helpers = python_local_function_candidates(
-                node.func.id, node, tree, parents
+        if any(
+            python_resolved_local_path_expression(
+                value,
+                tree,
+                parents,
+                assignments_by_name,
+                seen.copy(),
             )
-            for function in local_helpers:
-                returned_values = [
-                    candidate.value
-                    for candidate in ast.walk(function)
-                    if isinstance(candidate, (ast.Return, ast.Yield, ast.YieldFrom))
-                    and candidate.value is not None
-                    and python_enclosing_scope(candidate, parents) is function
-                ]
-                if returned_values and any(
-                    python_resolved_local_path_expression(
-                        value,
-                        tree,
-                        parents,
-                        assignments_by_name,
-                        seen.copy(),
-                    )
-                    for value in returned_values
-                ):
-                    return True
+            for value in python_local_call_return_values(node, tree, parents)
+        ):
+            return True
+        if dotted == "dict" and any(
+            python_resolved_local_path_expression(
+                value, tree, parents, assignments_by_name, seen.copy()
+            )
+            for value in list(node.args)
+            + [keyword.value for keyword in node.keywords]
+        ):
+            return True
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "format"
+            and any(
+                python_resolved_local_path_expression(
+                    value, tree, parents, assignments_by_name, seen.copy()
+                )
+                for value in list(node.args)
+                + [keyword.value for keyword in node.keywords]
+            )
+        ):
+            return True
         if isinstance(node.func, ast.Name) and node.func.id in {
             "iter", "list", "next", "reversed", "set", "sorted", "tuple"
         }:
@@ -12640,7 +12838,7 @@ def python_resolved_local_path_expression(
     )
 
 
-def python_sensitive_output_sink(node):
+def python_sensitive_output_sink(node, tree=None):
     """Recognize output/error sinks without tainting ordinary containers/helpers."""
     if not isinstance(node, ast.Call):
         return False
@@ -12653,6 +12851,17 @@ def python_sensitive_output_sink(node):
         "traceback.print_exc",
         "traceback.print_exception",
     }:
+        return True
+    if (
+        isinstance(node.func, ast.Name)
+        and tree is not None
+        and (
+            python_imported_function_alias_is_stable(
+                node.func.id, "sys", "exit", tree
+            )
+            or python_assigned_callable_alias(node.func.id, "sys.exit", tree)
+        )
+    ):
         return True
     return (
         isinstance(node.func, ast.Attribute)
@@ -13058,6 +13267,7 @@ def python_reviewed_go_package_directory(node, tree, parents):
         if (
             not isinstance(candidate, ast.Try)
             or candidate.end_lineno >= node.lineno
+            or parents.get(candidate) is not scope
             or python_try_in_unreachable_if_body(candidate, parents)
         ):
             continue
@@ -13590,6 +13800,21 @@ def python_sensitive_read_violation(tree, parents):
     def helper_parameters(function):
         return list(function.args.posonlyargs) + list(function.args.args)
 
+    def expanded_keyword_values(value):
+        if isinstance(value, ast.Dict) and all(
+            isinstance(key, ast.Constant) and isinstance(key.value, str)
+            for key in value.keys
+        ):
+            return dict(zip((key.value for key in value.keys), value.values))
+        if (
+            isinstance(value, ast.Call)
+            and python_dotted_name(value.func) == "dict"
+            and not value.args
+            and all(keyword.arg is not None for keyword in value.keywords)
+        ):
+            return {keyword.arg: keyword.value for keyword in value.keywords}
+        return None
+
     for function in ast.walk(tree):
         if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
@@ -13640,13 +13865,11 @@ def python_sensitive_read_violation(tree, parents):
                         (function, keyword.value)
                     )
                 if keyword.arg is None:
-                    if isinstance(keyword.value, ast.Dict) and all(
-                        isinstance(key, ast.Constant) and isinstance(key.value, str)
-                        for key in keyword.value.keys
-                    ):
-                        for key, value in zip(keyword.value.keys, keyword.value.values):
-                            if key.value in named_parameters:
-                                assignments_by_name.setdefault(key.value, []).append(
+                    expanded_values = expanded_keyword_values(keyword.value)
+                    if expanded_values is not None:
+                        for key, value in expanded_values.items():
+                            if key in named_parameters:
+                                assignments_by_name.setdefault(key, []).append(
                                     (function, value)
                                 )
                     else:
@@ -13735,7 +13958,7 @@ def python_sensitive_read_violation(tree, parents):
             output_arguments = list(node.args) + [
                 keyword.value for keyword in node.keywords
             ]
-            if python_sensitive_output_sink(node) and any(
+            if python_sensitive_output_sink(node, tree) and any(
                 python_resolved_local_path_expression(
                     argument,
                     tree,
@@ -13748,7 +13971,7 @@ def python_sensitive_read_violation(tree, parents):
                     "Python resolved local path is sent to an output/error sink "
                     f"{dotted or '<call>'!r} on line {node.lineno}"
                 )
-            if python_sensitive_output_sink(node) and any(
+            if python_sensitive_output_sink(node, tree) and any(
                 python_sensitive_value_expression(
                     argument, sensitive_names, tree, parents
                 )
@@ -27276,3 +27499,63 @@ exited 0 with no output. An added-line scan for private home paths and common
 credential/key prefixes returned zero matches. The independent delta review,
 hosted PR quick check, and GitHub Codex review remain pending for the final
 pushed SHA; this local verification is not their substitute.
+
+### Issue #79 PR #103 exact-head correction from `dac58b4adde5b3f552254700e85a229cd6d0ad1b`
+
+The correction reproduces the supplied exact-head Codex findings and the
+independent offline review cases against immutable starting source
+`dac58b4adde5b3f552254700e85a229cd6d0ad1b`. Every Python specimen is an inert
+source string parsed by the scanner; no specimen was compiled, evaluated, or
+launched. The offline harness inspects only its reviewed scanner functions and
+temporary local Git fixtures.
+
+| # | Finding | RED against `dac58b4` | Minimal correction and retained safe case |
+|---|---|---|---|
+| 1 | P1 [Codex comment 4118425759](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4118425759): sensitive environment values returned from local methods or lambdas could reach output sinks. | `test_sensitive_method_and_lambda_returns_are_tainted` accepted direct lambda, direct method, and assigned-instance method returns containing `dict(os.environ)`. | Resolve visible local function, method, and lambda return expressions for sensitive-value checks. Ordinary status mappings returned from methods remain accepted. |
+| 2 | P1 [Codex comment 4118425766](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4118425766): sensitive values could be laundered through wrapped comprehension iterators. | `test_environment_taint_reaches_comprehension_iterator_outputs` accepted `iter(dict(os.environ).items())` and `enumerate(dict(os.environ).items())` comprehension sources. | Recursively inspect each comprehension iterator for environment taint; literal comprehension sources remain accepted. |
+| 3 | P1 [Codex comment 4118425771](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4118425771): command launchers returned through methods or lambdas could be assigned and called as aliases. | `test_launcher_aliases_returned_by_methods_and_lambdas_are_rejected` accepted factory lambdas, immediately called lambdas, and a local method returning `subprocess.run`. | Reuse scoped local-return analysis in launcher alias tracking. A local method returning `str.upper` remains accepted. |
+| 4 | P1 [Codex comment 4118425775](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4118425775): package containment could be credited to a `try` nested below an unknown condition. | `test_package_containment_try_requires_direct_reachable_body` credited both the conditional `try` body and conditional `else` as the guard. | Count containment only when the fail-closed `try` is a direct statement in the canonical guard body. The unchanged direct guard remains accepted. |
+| 5 | P1 [Codex comment 4118425779](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4118425779): duplicate parity-helper definitions could cause the test loader to silently select one definition. | `test_verification_parity_helper_definition_must_be_unique` showed the loader accepted duplicate `require_packet_head_parity` definitions. | Require a single top-level parity helper and reject nested or duplicate definitions before the parity checks run. The packet's single reviewed helper remains accepted by the parity fixture. |
+| 6 | P1: independent exact-head review (finding summary supplied with this correction; no public URL was supplied): `dict(snapshot=os.environ)` passed through an expanded `**kwargs` helper could reach a sink without taint. | `test_sensitive_mapping_expanded_into_kwargs_is_tainted` accepted both direct and nested environment mappings through `**dict(...)`. | Inspect `dict` keyword values and bind literal `dict(...)` expansions to helper parameters, including `**kwargs`. An ordinary `status="reviewed"` mapping remains accepted. |
+| 7 | P1: independent exact-head review (finding summary supplied with this correction; no public URL was supplied): `from sys import exit as leave` and `raise SystemExit(...)` bypassed sensitive output/error checks. | `test_imported_exit_alias_and_system_exit_preserve_sensitive_taint` accepted the imported exit alias with `str(dict(os.environ))` and the same value in a `SystemExit` message. | Recognize stable imported `sys.exit` aliases as output sinks and propagate sensitive taint through `SystemExit`; ordinary status messages remain accepted. |
+| 8 | P2: independent exact-head review (finding summary supplied with this correction; no public URL was supplied): `**dict(root=Path.cwd().resolve())` could pass a resolved path to a helper sink. | `test_resolved_paths_cross_expanded_keyword_helpers_and_formatting` accepted the expanded path argument. | Bind literal keyword-map entries to local helper parameters for path provenance. A helper that only validates the root remains accepted. |
+| 9 | P2: independent exact-head review (finding summary supplied with this correction; no public URL was supplied): a resolved path in `RuntimeError("root={}".format(...))` was missed. | The same `test_resolved_paths_cross_expanded_keyword_helpers_and_formatting` accepted a formatted path in a raised exception. | Follow path provenance through `str.format` arguments. Ordinary status exceptions remain accepted. |
+
+Test-first RED command: `python3 -B scripts/evidence_packet/issue79_regression_test.py Issue79RegressionTests.test_sensitive_method_and_lambda_returns_are_tainted Issue79RegressionTests.test_environment_taint_reaches_comprehension_iterator_outputs Issue79RegressionTests.test_launcher_aliases_returned_by_methods_and_lambdas_are_rejected Issue79RegressionTests.test_package_containment_try_requires_direct_reachable_body Issue79RegressionTests.test_verification_parity_helper_definition_must_be_unique Issue79RegressionTests.test_sensitive_mapping_expanded_into_kwargs_is_tainted Issue79RegressionTests.test_imported_exit_alias_and_system_exit_preserve_sensitive_taint Issue79RegressionTests.test_resolved_paths_cross_expanded_keyword_helpers_and_formatting` ran 8 tests and failed with 16 assertion failures. The negative specimens failed closed only after the corrections; the safe controls were included in each test method.
+
+Final focused GREEN command: the same selected command ran 8 tests in 10.734s and passed after the refactor. A second focused pass combined the new probes with existing helper-return, comprehension, launcher, path, package-containment, and parity-fixture regressions; it ran 24 tests in 93.566s and passed. The corrections share one cached scoped return-expression index for local functions, methods, and lambdas; environment taint remains limited to known sensitive values and iterator provenance.
+
+Final offline harness, packet scan, `git diff --check`, added-line credential/private-path scan, and two-file scope are recorded below after the stable candidate run. No GitHub writes or browser access, push, workflow dispatch, runner operation, credential use, or specimen execution was performed. These offline scanner checks do not close G01's live/product evidence gaps, replace exact-head GitHub Codex review, or replace the hosted PR quick check. Rollback point is the immutable starting SHA `dac58b4adde5b3f552254700e85a229cd6d0ad1b`.
+
+#### Intermediate offline certification before independent-review corrections
+
+After tightening the conditional-containment specimens to literal false/true
+branches, `python3 -B scripts/evidence_packet/issue79_regression_test.py` ran
+45 tests in 198.583s and passed. The packet-wide static scan covered 331 shell commands
+and 95 Python heredoc bodies with zero violations. `git diff --check` exited 0
+with no output. `git diff --name-only` listed only
+`docs/evidence/g01-recovery-packet.md` and
+`scripts/evidence_packet/issue79_regression_test.py`. The added-line scan
+covered 465 lines and found zero credential-pattern matches and zero
+personal/private-path matches. HEAD remains
+`dac58b4adde5b3f552254700e85a229cd6d0ad1b`; both files remain uncommitted.
+The local `gh` PR read could not connect to GitHub, so no review state or hosted
+quick-check status is inferred from this offline certification.
+
+#### Independent read-only delta review corrections
+
+An independent `gpt-6-luna`/`max` read-only review of the local candidate
+identified additional executable bypasses in the new method/alias tracing.
+Against the then-current source, focused inert AST specimens reproduced missed
+environment-return methods behind instance aliases or constructors with arguments,
+bound-method aliases, assigned/list-indexed/`getattr`-derived `sys.exit` or
+`SystemExit` aliases, and launcher factories behind bound-method or `getattr`
+aliases (including the optional third `getattr` argument). Focused RED runs
+used the three corresponding `Issue79RegressionTests` methods and failed with
+3, 2, 4, 2, and 2 assertion failures respectively as specimens were added.
+Each correction was followed by GREEN of its focused methods; the latest
+two-method focused run passed. The scanner now follows scoped receiver aliases,
+argument-bearing constructors, bound-method returns, literal container
+selection, and static `getattr` attributes, retaining the safe status controls.
+No specimen was executed. This is independent local review evidence, not the
+GitHub exact-head Codex review or hosted PR quick check.
