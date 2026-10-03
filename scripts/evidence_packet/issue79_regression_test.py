@@ -3591,6 +3591,22 @@ class Issue79RegressionTests(unittest.TestCase):
                     prefix + 'match fake:\n    ' + pattern + '\n        ' + call
                 ))
 
+    def test_os_path_member_recovery_and_expansion_are_not_certified(self) -> None:
+        for body in (
+            'from os import path as p\nalias = p\nprint(alias.abspath("."))\n',
+            'from os import path as p\nalias = p\nprint(alias.realpath("."))\n',
+            'import os\nresolve = os.path.__dict__["abspath"]\nprint(resolve("."))\n',
+            'import os\nprint(os.path.expandvars("$GH_TOKEN"))\n',
+            'import os\nexpand = os.path.expanduser\nprint(expand("~"))\n',
+            'import os\nprint(os.path.os.environ)\n',
+        ):
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+        self.assertIsNone(self.inspect(
+            'import os\nvalue = os.path.normpath("docs/example")\n'
+            'assert value == "docs/example"\nprint("reviewed")\n'
+        ))
+
     def test_bash_prompt_expansion_cannot_evaluate_credential_name(self) -> None:
         self.assertIsNotNone(self.shell_document_violation(
             "printf -v payload '%s%s' '$' 'GH_TOKEN'; printf '%s\\n' \"${payload@P}\""

@@ -13209,6 +13209,12 @@ def python_module_value_escape_violation(tree, parents, safe_marker):
                     if isinstance(target, ast.Name) and target.id not in names:
                         names.add(target.id)
                         changed = True
+                    if (
+                        isinstance(target, ast.Name) and value.id in path_modules
+                        and target.id not in path_modules
+                    ):
+                        path_modules.add(target.id)
+                        changed = True
 
     non_store_bound_names = {
         node.arg for node in ast.walk(tree) if isinstance(node, ast.arg)
@@ -13303,13 +13309,6 @@ def python_module_value_escape_violation(tree, parents, safe_marker):
         if isinstance(value, ast.Name) and value.id in names
     }
     for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.Attribute)
-            and python_dotted_name(node) in {"os.path.abspath", "os.path.realpath"}
-        ):
-            parent = parents.get(node)
-            if not isinstance(parent, ast.Call) or parent.func is not node:
-                return f"Python OS path callable escapes its reviewed direct call on line {node.lineno}"
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in names:
             if node.attr.startswith("__"):
                 return f"Python security module reflection is not reviewed on line {node.lineno}"
@@ -13321,6 +13320,11 @@ def python_module_value_escape_violation(tree, parents, safe_marker):
                 parent = parents.get(node)
                 if not isinstance(parent, ast.Attribute) or parent.value is not node:
                     return f"Python OS path module value escapes its reviewed attribute path on line {node.lineno}"
+                if parent.attr.startswith("__") or parent.attr == "expandvars":
+                    return f"Python OS path reflection/environment expansion is not reviewed on line {node.lineno}"
+                call = parents.get(parent)
+                if not isinstance(call, ast.Call) or call.func is not parent:
+                    return f"Python OS path member escapes its reviewed direct call on line {node.lineno}"
     for node in ast.walk(tree):
         if not isinstance(node, ast.Name) or not isinstance(node.ctx, ast.Load) or node.id not in names:
             continue
@@ -31675,3 +31679,29 @@ and path selectors, the namespace/reflection selectors and the pre-existing
 mixed-subprocess dictionary selector passed together in 0.150s. No specimen
 was executed. The completed immutable security report, final delta verdicts
 and candidate checks must be recorded in the PR before merge.
+
+#### Path-member delta HOLD at `ddfdcfd`
+
+The completed GPT-6-Luna/max contract delta review of immutable
+`ddfdcfd2fa71e30ced62cef93244649bf84a8e7a` passed four exact-blob focused
+methods in 0.148s, but retained HOLD. It reproduced two assigned aliases of
+a `from os import path` module reaching `abspath`/`realpath` output. The
+coordinator also reproduced nested path-module dictionary recovery and
+environment expansion as inert inputs. No candidate was pushed or merged.
+
+`test_os_path_member_recovery_and_expansion_are_not_certified` was RED with
+six failed assertions in 0.112s: the two module aliases, dictionary callable
+recovery, environment expansion, an `expanduser` callable alias and an OS
+module re-export. Path-module provenance now follows direct name aliases.
+Canonical `os.path` members must stay on direct calls; first-class member
+capture, reflection and `expandvars` are unsupported. This closes the
+member-recovery family rather than admitting new indirect callables.
+Canonical normalization/comparison positive controls remain accepted. Eight
+neighboring isolated methods passed in 0.156s after the correction. All
+specimens remained AST input, not executable tests against inherited data.
+
+The previous `ddfdcfd` exact-head packet selector passed in 122.930s
+(331 shell commands, 95 Python bodies, zero violations); it does not certify
+this subsequent delta. Final combined candidate packet verification,
+independent contract/security delta verdicts and fresh exact-head hosted/
+GitHub Codex review are still required.
