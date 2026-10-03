@@ -10897,6 +10897,29 @@ reviewed_python_compile_packet_revisions = {
 def python_compile_primitive_is_shadowed(name, tree, provider_call=None):
     """A matching call spelling does not establish a builtin/stdlib binding."""
     module_aliases = ({name} | python_assigned_module_names(tree, name)) if name in {"ast", "subprocess", "pathlib", "Path"} else {name}
+    if name == "Path":
+        module_aliases.update(
+            imported.asname or imported.name
+            for statement in ast.walk(tree)
+            if isinstance(statement, ast.ImportFrom) and statement.module == "pathlib"
+            for imported in statement.names if imported.name == "Path"
+        )
+    for _ in range(sum(isinstance(statement, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) for statement in ast.walk(tree)) + 1 if name in {"ast", "subprocess", "pathlib", "Path"} else 0):
+        before = set(module_aliases)
+        for statement in ast.walk(tree):
+            if isinstance(statement, ast.Assign):
+                bindings, provider_value = statement.targets, statement.value
+            elif isinstance(statement, (ast.AnnAssign, ast.NamedExpr)):
+                bindings, provider_value = [statement.target], statement.value
+            else:
+                continue
+            if (
+                isinstance(provider_value, ast.Name) and provider_value.id in module_aliases
+                or name == "Path" and python_dotted_name(provider_value) == "pathlib.Path"
+            ):
+                module_aliases.update(binding.id for binding in bindings if isinstance(binding, ast.Name))
+        if module_aliases == before:
+            break
     for candidate in ast.walk(tree):
         if (
             isinstance(candidate, ast.Name) and isinstance(candidate.ctx, ast.Store) and candidate.id == name
@@ -10933,8 +10956,15 @@ def python_compile_primitive_is_shadowed(name, tree, provider_call=None):
                     return True
         if (
             isinstance(candidate, ast.Call) and candidate.args
-            and python_dotted_name(candidate.func) in {"setattr", "delattr", "builtins.setattr", "builtins.delattr"}
             and any(isinstance(part, ast.Name) and part.id in module_aliases for part in ast.walk(candidate.args[0]))
+            and (
+                python_dotted_name(candidate.func) in {"setattr", "delattr", "builtins.setattr", "builtins.delattr"}
+                or isinstance(candidate.func, ast.Name) and any(
+                    python_assigned_callable_alias(candidate.func.id, setter, tree)
+                    or python_imported_function_alias_is_stable(candidate.func.id, "builtins", setter, tree)
+                    for setter in ("setattr", "delattr")
+                )
+            )
             and (provider_call is None or candidate.lineno <= provider_call.lineno)
         ):
             return True
@@ -11277,6 +11307,27 @@ def python_compile_provenance(tree):
         ):
             return set()
         return set().union(*(ast_receiver_names(child, seen) for child in ast.iter_child_nodes(value)))
+
+    # Origin aliases are broader than certified compiler values: a reader may
+    # expose mutable children without itself being a supported compiler input.
+    # Keep those borrowed objects linked to the certified roots until taint
+    # propagates, rather than granting the reader new compile authority.
+    for _ in range(len(ast_bindings) + 1):
+        origin_links_changed = False
+        for target, value in ast_bindings:
+            origins = ast_receiver_names(value)
+            for alias in target_names(target):
+                if not origins:
+                    continue
+                ast_aliases.setdefault(alias, set())
+                for origin in origins:
+                    if origin == alias or origin in ast_aliases[alias]:
+                        continue
+                    ast_aliases[alias].add(origin)
+                    ast_aliases[origin].add(alias)
+                    origin_links_changed = True
+        if not origin_links_changed:
+            break
 
     shadowed_ast_names = {
         candidate.arg for candidate in ast.walk(tree) if isinstance(candidate, ast.arg)
@@ -32357,3 +32408,30 @@ AST child/reader-result mutation escape without relaxing the existing
 128-helper and ten-loader controls. No fresh GitHub Codex review was
 requested mid-edit, and no new push, merge or live operation occurred.
 Issue #79 and parent G01 #1 remain In progress with required work outstanding.
+
+#### Origin-alias correction: focused GREEN, independent approval pending
+
+The five open cases at `45f8dfdc5c8e95e2eb9d64b4e78e1e45dc1ca0da`
+were revalidated together before implementation: five failed assertions in
+0.147s. Mutable results borrowed through dictionary readers, AST iterators
+or AST child attributes now stay connected to their compiled roots in the
+mutation-origin graph. This deliberately does not certify those readers as
+new compiler inputs. Provider mutation checks follow direct class aliases,
+annotated/named bindings and local/imported setter aliases rather than
+trusting only the canonical spelling.
+
+The two blocker methods plus actual-helper and historical-loader controls
+passed in 39.825s (four methods, all 128 compiler calls and ten loaders).
+Alias discovery was then limited to module/class providers, and receiver
+matching precedes setter resolution to avoid needless callable-index work.
+The combined focused group passed 21 methods in 4.277s: all five new denials,
+previous AST/provider/parameter/comprehension/mutation controls, all 128
+actual helper calls, ten loader exports and adjacent module/credential
+boundaries. The unsafe specimens remained AST data throughout.
+
+Canonical invocation remains `python3 -I -B
+scripts/evidence_packet/issue79_regression_test.py` with the recorded focused
+method selectors. These results replace neither a full harness result nor
+the required packet selector and exact-candidate independent delta reviews.
+The preceding HOLD verdicts remain historical; no final approval, new push,
+GitHub Codex result, merge or live authorization is inferred from GREEN.
