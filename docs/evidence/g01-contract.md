@@ -6,6 +6,53 @@ review approved the offline artifact at `4e58c55`; the reviewer reproduced race
 tests, vet and both pinned SDK comparisons. This is not approval of a live
 canary or the unresolved production integration gate.
 
+## Independent protocol review (2026-10-03)
+
+**Verdict:** APPROVE, scoped to the offline protocol evidence and provisional
+selection of the released `github.com/actions/scaleset v0.4.0` high-level
+listener with independent reconciliation. HOLD G01 closure and any production or
+live approval. The reviewer found no actionable defect in the reviewed current
+protocol evidence. This additive record preserves the historical 2026-09-07
+Astra authorship above.
+
+The independent reviewer was actual Codex GPT-6-Luna/max, verified before
+dispatch, and reviewed immutable parent-main source
+`9636e33781c72c32319db419334f49f1bc1866bc`. The complete
+[review comment](https://github.com/1XP-AI/gh-runnerd/issues/1#issuecomment-5967217026)
+contains the source anchors and scoped findings; the
+[supplement](https://github.com/1XP-AI/gh-runnerd/issues/1#issuecomment-5967258854)
+records the one corrected test-name gap. The review confirms the recorded
+statistics → ACK → acquisition → callbacks order, ACK-to-acquisition loss
+window, observational callbacks, 202/stale-statistics and session-fencing limits,
+and quarantine and JIT-secret-exposure conclusions. It does not establish
+exactly-once behavior or live GitHub semantics.
+
+The initial focused selection was run with Go 1.26.8:
+
+```text
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=60s -run '^(TestSDKACKBoundaries|TestSDKAcquisitionResponseLossAfterACK|TestSDKRepeatedStatisticsAnd202ReuseLastObservation|TestSDKHTTPFailuresAndSessionRefresh|TestSDKCapacityWithdrawalDoesNotFenceInFlightAcquisition|TestSDKJITResponseLossBeforeCreationDoesNotDiscoverIdentity|TestSDKJITResponseLossWithoutCommitDoesNotDiscoverIdentity|TestSDKJITResponseLossDiscoversIdentityWithoutReissuing)$' .
+PASS: github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset (0.359s)
+```
+
+Seven of the eight regex alternatives matched tests. The alternative
+`TestSDKJITResponseLossBeforeCreationDoesNotDiscoverIdentity` matched no test;
+the checked-in case is
+`TestSDKJITLookupBeforeCreationDoesNotDiscoverIdentity`, which this first
+command did not execute. The coordinator closed that execution-evidence gap on the
+same unchanged source SHA with:
+
+```text
+GOTOOLCHAIN=go1.26.8 go test -count=1 -timeout=45s -run '^TestSDKJITLookupBeforeCreationDoesNotDiscoverIdentity$' .
+PASS: github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset (0.361s)
+```
+
+That fixture used `httptest` and a transport that rejects non-fixture
+addresses; no JIT was created on GitHub and no runner binary was downloaded or
+executed. No full suite, race run, SDK comparison matrix, live canary or
+production approval is claimed by this review. The authorized canary, sanitized
+live evidence, safe-drain decision, and full G01/G02 production gates remain
+unresolved.
+
 ## Exact inputs and primary sources
 
 | Input | Exact selection / finding |
