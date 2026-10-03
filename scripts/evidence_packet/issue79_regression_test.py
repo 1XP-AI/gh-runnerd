@@ -3759,6 +3759,36 @@ class Issue79RegressionTests(unittest.TestCase):
                 self.assertIsNotNone(self.inspect(setup + mutation +
                     'exec(compile(module, "<probe>", "exec"), {"os": os})\n'))
 
+    def test_ast_child_reader_results_cannot_hide_mutation_from_the_compiled_origin(self) -> None:
+        setup = self.packet_ast_source_prefix() + (
+            'functions = {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}\n'
+        )
+        specimens = (
+            'helper = functions.get("run_go_child")\nhelper.body = ast.parse("print(os.environ)").body\n'
+            'exec(compile(ast.Module(body=[functions["run_go_child"]], type_ignores=[]), "<probe>", "exec"), {"os": os})\n',
+            'selected = next(ast.walk(module))\nselected.body = ast.parse("print(os.environ)").body\n'
+            'exec(compile(module, "<probe>", "exec"), {"os": os})\n',
+            'arguments = functions["run_go_child"].args\n'
+            'arguments.defaults = [ast.parse("print(os.environ)").body[0].value]\n'
+            'exec(compile(ast.Module(body=[functions["run_go_child"]], type_ignores=[]), "<probe>", "exec"), {"os": os})\n',
+        )
+        for specimen in specimens:
+            with self.subTest(specimen=specimen):
+                self.assertIsNotNone(self.inspect(setup + specimen))
+
+    def test_path_provider_patch_aliases_do_not_retain_source_authority(self) -> None:
+        setup = 'import os\nfrom pathlib import Path\ndef fake(self):\n    return "print(os.environ)"\n'
+        suffix = (
+            'wrapper = Path("docs/evidence/g01-recovery-packet.md").read_text()\n'
+            'exec(compile(wrapper, "<probe>", "exec"), {"os": os})\n'
+        )
+        for mutation in (
+            'patch_reader = setattr\npatch_reader(Path, "read_text", fake)\n',
+            'PathAlias = Path\nPathAlias.read_text = fake\n',
+        ):
+            with self.subTest(mutation=mutation):
+                self.assertIsNotNone(self.inspect(setup + mutation + suffix))
+
     def test_actual_packet_compile_helpers_retain_provenance(self) -> None:
         checked = 0
         for number, body, safe_marker, _ in self.scanner["python_heredoc_bodies"](PACKET_TEXT):

@@ -32314,3 +32314,46 @@ to `compile_source_call_node` (and the corresponding call list) without
 changing the source-binding rule. This is not a passing combined scan;
 the renamed source still needs its own selector and exact-head delta
 review. The 38-SHA fixture allowlist and mutable-AST guards are unchanged.
+
+#### Current checkpoint: passing packet scan, open origin-alias P1s
+
+Immutable `3d76310ffb913791e3c18415a986f6ce6b56484e` passed its packet
+selector in 49.663s: 331 shell commands, 95 Python bodies, zero static
+violations. Four focused exact-head methods passed in 1.670s, including all
+128 real compiler-helper calls and source/parameter/provider controls. These
+passing results do not establish absence of unsupported source effects.
+
+Both completed GPT-6-Luna/max independent delta reviews explicitly covered
+the `85dcf4b..3d76310` rename and reported HOLD at immutable `3d76310`.
+Their isolated pinned-blob AST-only probes reproduced a setter alias
+(`patch_reader = setattr`) forging the Path reader; the security review also
+reproduced a class alias (`PathAlias = Path`) replacing `read_text` without
+invalidating the canonical provider. Direct setter spelling was refused;
+the alias forms were accepted. Neither reviewer edited files or reran the
+whole packet scan/harness. Both reports settled successfully as completed
+reviews, were processed before acknowledgment, and their existing terminals
+were released back to external ownership without a process action. The
+review verdicts remain HOLD, not APPROVE.
+
+Coordinator boundary checks additionally accepted three mutable-reader
+escapes: `functions.get(...)` returning a helper node, `next(ast.walk(...))`
+returning the module, and a function's `.args` child carrying a replaced
+default expression. Their mutations did not reach the compiled origin's
+alias graph. The canonical regression failed three assertions in 0.140s;
+the two independently reported Path-provider aliases failed two assertions
+in 0.121s:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py Issue79RegressionTests.test_ast_child_reader_results_cannot_hide_mutation_from_the_compiled_origin
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py Issue79RegressionTests.test_path_provider_patch_aliases_do_not_retain_source_authority
+```
+
+These five specimens remained AST data, never compiled/executed and never
+read inherited values. Their RED tests are deliberately preserved before
+the next correction; no GREEN or final independent approval is claimed.
+They block pushing this branch as a stable candidate or merging PR #103.
+The next bounded correction must close class/setter provider aliases and
+AST child/reader-result mutation escape without relaxing the existing
+128-helper and ten-loader controls. No fresh GitHub Codex review was
+requested mid-edit, and no new push, merge or live operation occurred.
+Issue #79 and parent G01 #1 remain In progress with required work outstanding.
