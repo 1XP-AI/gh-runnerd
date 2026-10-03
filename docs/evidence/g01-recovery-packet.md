@@ -14760,7 +14760,11 @@ def python_subprocess_os_reexport_violation(tree):
             and node.target.id in subprocess_names
         ):
             return "Python heredoc rebinds a subprocess-bearing container indirectly"
-        if isinstance(node, ast.Attribute) and node.attr in {"os", "_os"}:
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr in {"os", "_os"}
+            and may_refer_to_subprocess(node.value)
+        ):
             return "Python heredoc accesses an unreviewed OS module re-export"
         if (
             isinstance(node, ast.Call)
@@ -16006,6 +16010,48 @@ def python_reviewed_markdown_source_path(node, tree, parents):
             for target in candidate.targets
         )
     ]
+    root_binding_nodes = []
+    for candidate in ast.walk(tree):
+        if (
+            isinstance(candidate, ast.Name)
+            and candidate.id == "repository_root"
+            and isinstance(candidate.ctx, (ast.Store, ast.Del))
+        ) or (
+            isinstance(candidate, ast.arg)
+            and candidate.arg == "repository_root"
+        ) or (
+            isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and candidate.name == "repository_root"
+        ) or (
+            isinstance(candidate, ast.ExceptHandler)
+            and candidate.name == "repository_root"
+        ) or (
+            isinstance(candidate, (ast.MatchAs, ast.MatchStar))
+            and candidate.name == "repository_root"
+        ) or (
+            isinstance(candidate, ast.MatchMapping)
+            and candidate.rest == "repository_root"
+        ) or (
+            isinstance(candidate, (ast.Global, ast.Nonlocal))
+            and "repository_root" in candidate.names
+        ):
+            root_binding_nodes.append(candidate)
+        elif isinstance(candidate, ast.Import) and any(
+            (alias.asname or alias.name.split(".", 1)[0]) == "repository_root"
+            for alias in candidate.names
+        ):
+            root_binding_nodes.append(candidate)
+        elif isinstance(candidate, ast.ImportFrom) and any(
+            (alias.asname or alias.name) == "repository_root"
+            for alias in candidate.names
+        ):
+            root_binding_nodes.append(candidate)
+    root_assignment_target = (
+        root_assignments[0].targets[0]
+        if len(root_assignments) == 1
+        and len(root_assignments[0].targets) == 1
+        else None
+    )
     if not (
         len(source_assignments) == 1
         and isinstance(source_assignments[0].value, ast.Call)
@@ -16024,7 +16070,9 @@ def python_reviewed_markdown_source_path(node, tree, parents):
         and path_assignments[0].value.func.value.left.id == "repository_root"
         and isinstance(path_assignments[0].value.func.value.right, ast.Name)
         and path_assignments[0].value.func.value.right.id == "source"
-        and len(root_assignments) == 1
+        and isinstance(root_assignment_target, ast.Name)
+        and root_assignment_target.id == "repository_root"
+        and root_binding_nodes == [root_assignment_target]
         and isinstance(root_assignments[0].value, ast.Call)
         and ast.dump(root_assignments[0].value, include_attributes=False)
         == ast.dump(ast.parse("Path.cwd().resolve()", mode="eval").body, include_attributes=False)
@@ -16043,8 +16091,11 @@ def python_reviewed_markdown_source_path(node, tree, parents):
         return False
     read_position = (node.lineno, node.col_offset)
 
-    def before_read(candidate):
-        return (candidate.lineno, candidate.col_offset) < read_position
+    def finishes_before_read(candidate):
+        return (
+            candidate.end_lineno,
+            candidate.end_col_offset,
+        ) < read_position
 
     def has_continue(node):
         return any(isinstance(child, ast.Continue) for child in node.body)
@@ -16053,7 +16104,7 @@ def python_reviewed_markdown_source_path(node, tree, parents):
         candidate for candidate in ast.walk(source_loop)
         if isinstance(candidate, ast.If)
         and parents.get(candidate) is source_loop
-        and before_read(candidate)
+        and finishes_before_read(candidate)
         and any(isinstance(statement, ast.Continue) for statement in candidate.body)
     ]
     lexical_guard = False
@@ -16088,7 +16139,7 @@ def python_reviewed_markdown_source_path(node, tree, parents):
             symlink_guard = True
     containment_guard = any(
         isinstance(candidate, ast.Try)
-        and candidate.end_lineno < node.lineno
+        and finishes_before_read(candidate)
         and any(
             isinstance(statement, ast.Expr)
             and isinstance(statement.value, ast.Call)
@@ -34483,3 +34534,69 @@ added. No full packet scan, full suite, live command or specimen execution is
 claimed. The final worktree SHA, focused-only scope, hygiene and local commit
 state are reported at handoff; coordinator-owned exact-head packet and
 independent review gates remain outstanding.
+
+#### Writer scoped failure corrections from `e0c8156c`
+
+At entry the worktree was clean at `e0c8156ca81d680448918c4ff1ca9c4e353d575a`.
+The coordinator reported a 163-test offline harness run with four failing
+assertions across three methods; its packet selector within that run passed
+with 261 shell commands, 86 Python bodies and no violations, including the
+119 current compiler-helper checks and ten loader controls. This worker did
+not rerun the full harness or packet selector.
+
+The three reported methods were `test_historical_compile_sources_require_replacement_suppression`,
+`test_packet_loader_rejects_unsupported_top_level_assignment` and
+`test_reexported_os_module_does_not_bypass_heredoc_checks`. The historical
+compile positive fixtures now use the current explicit Git isolation boundary;
+missing replacement suppression, system config, fsmonitor and hooks fences
+remain negative controls. The loader assertion now mutates the unique extracted
+current scanner source assignment and checks that extraction reflects the
+mutation before requiring the reviewed-source loader error; no packet-loader
+runtime rule was weakened. An OS attribute now requires a statically tracked
+subprocess-bearing receiver before it is classified as an OS-module re-export,
+preserving the benign `Settings.os = "darwin"` data-owner case and existing
+subprocess module/reflection rejection checks.
+
+The path regression first exposed three accepted inert AST mutations in one
+focused method (one test in 0.691s): an annotated root rebind, an augmented
+root rebind, and a `source_path.read_text` call inside the `source.is_symlink`
+branch before its direct `continue`. The scanner now requires one canonical
+simple `repository_root = Path.cwd().resolve()` binding and rejects other
+binding forms across the heredoc, including store/delete names, arguments,
+definitions, imports, exception/match bindings and global/nonlocal declarations.
+Both lexical and symlink guards, as well as the containment `try`, must end
+before the read; guards must remain direct children of the tracked-path loop
+with a direct `continue`. Additional inert cases cover a function-definition
+and import-alias root rebind. The canonical tracked-Markdown reader remains
+accepted.
+
+The focused regression passed after these changes:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_current_scanner_self_audit_ast_parameters_are_not_callbacks \
+  Issue79RegressionTests.test_current_vet_mutation_recipe_git_fixture_is_isolated \
+  Issue79RegressionTests.test_historical_compile_sources_require_replacement_suppression \
+  Issue79RegressionTests.test_packet_loader_rejects_unsupported_top_level_assignment \
+  Issue79RegressionTests.test_reexported_os_module_does_not_bypass_heredoc_checks \
+  Issue79RegressionTests.test_markdown_source_paths_cannot_escape_git_list_origin \
+  Issue79RegressionTests.test_current_executable_recipes_keep_git_and_path_provenance \
+  Issue79RegressionTests.test_unbound_anchor_reader_cannot_read_or_disclose_paths \
+  Issue79RegressionTests.test_markdown_link_containment_guard_must_be_direct_and_reachable \
+  Issue79RegressionTests.test_python_git_queries_require_isolated_environment_and_known_builder \
+  Issue79RegressionTests.test_python_git_builder_rebinding_is_not_certified \
+  Issue79RegressionTests.test_python_git_argv_mutation_is_not_certified \
+  Issue79RegressionTests.test_historical_unsafe_git_transcripts_are_inert_source_text \
+  Issue79RegressionTests.test_actual_packet_compile_helpers_retain_provenance \
+  Issue79RegressionTests.test_historic_scanner_loaders_export_only_their_required_helpers
+Ran 15 tests in 13.564s — OK
+packet compile-source boundary: 119 actual helper calls checked
+```
+
+The source-path method also passed alone in 0.773s after adding the function-
+definition and import-alias mutations. All adversarial recipes and mutations
+remained AST/source data; only the trusted standard-library harness and reviewed
+scanner ran with `python3 -I -B`. No source revision, compiler-input name or
+helper allowlist was added. This is focused evidence only: the updated packet
+selector, full harness, Go/hosted CI and live operations remain coordinator-owned
+and are not claimed as passed here.

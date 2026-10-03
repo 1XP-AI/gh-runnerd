@@ -2857,30 +2857,51 @@ class Issue79RegressionTests(unittest.TestCase):
     def test_packet_loader_rejects_unsupported_top_level_assignment(self) -> None:
         original = globals()["PACKET_TEXT"]
         try:
-            globals()["PACKET_TEXT"] = original.replace(
+            unsupported = original.replace(
                 "def inspect_python_heredoc(body, safe_marker):",
                 'probe = os.system("gh workflow run ci.yml")\n'
                 'def inspect_python_heredoc(body, safe_marker):',
                 1,
             )
+            self.assertNotEqual(unsupported, original)
+            scanner_source = _scanner_module_source(unsupported)
+            self.assertIn('probe = os.system("gh workflow run ci.yml")', scanner_source)
+            globals()["PACKET_TEXT"] = unsupported
             self.assertNotEqual(globals()["PACKET_TEXT"], original)
-            with self.assertRaises(AssertionError):
+            with self.assertRaisesRegex(AssertionError, "unsupported top-level assignment"):
                 _scanner_namespace()
-            source_assignment = (
-                'source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")'
+
+            scanner_source = _scanner_module_source(original)
+            module = ast.parse(scanner_source, filename="<current-packet-scanner-data>")
+            source_statement = _top_level_assignment(module, "source")
+            source_expression = ast.get_source_segment(scanner_source, source_statement)
+            self.assertEqual(
+                source_expression,
+                'source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")',
             )
-            source_position = original.rfind(
-                source_assignment,
-                0,
-                original.index("def inspect_python_heredoc(body, safe_marker):"),
-            )
+            self.assertIsInstance(source_statement, ast.Assign)
+            self.assertTrue(_validated_scanner_statements(module))
+            source_position = original.find(scanner_source)
             self.assertGreaterEqual(source_position, 0)
-            globals()["PACKET_TEXT"] = (
-                original[:source_position]
+            self.assertEqual(original.find(scanner_source, source_position + 1), -1)
+            line_offsets = [0]
+            for line in scanner_source.splitlines(keepends=True):
+                line_offsets.append(line_offsets[-1] + len(line))
+            start = line_offsets[source_statement.lineno - 1] + source_statement.col_offset
+            end = line_offsets[source_statement.end_lineno - 1] + source_statement.end_col_offset
+            mutated_scanner_source = (
+                scanner_source[:start]
                 + 'source = os.system("gh workflow run ci.yml")'
-                + original[source_position + len(source_assignment):]
+                + scanner_source[end:]
             )
-            with self.assertRaises(AssertionError):
+            mutated_packet = (
+                original[:source_position]
+                + mutated_scanner_source
+                + original[source_position + len(scanner_source):]
+            )
+            self.assertEqual(_scanner_module_source(mutated_packet), mutated_scanner_source)
+            globals()["PACKET_TEXT"] = mutated_packet
+            with self.assertRaisesRegex(AssertionError, "source assignment is not reviewed"):
                 _scanner_namespace()
         finally:
             globals()["PACKET_TEXT"] = original
@@ -3103,7 +3124,9 @@ class Issue79RegressionTests(unittest.TestCase):
             'lookup(other, member).system("gh workflow run ci.yml")\n'
         ))
         self.assertIsNone(self.inspect(
-            'class Settings:\n    os = "darwin"\nprint(Settings.os)\n'
+            'import subprocess\n'
+            'class Settings:\n    os = "darwin"\n'
+            'print(Settings.os)\n'
         ))
 
     def test_command_capable_decorator_cannot_replace_safe_function(self) -> None:
@@ -3755,6 +3778,46 @@ class Issue79RegressionTests(unittest.TestCase):
                 '    repository_root = Path("synthetic-private").resolve()\n'
                 'retarget_repository_root()\n'
                 'for name in files:\n',
+                1,
+            ),
+            "annotated repository-root retarget": body.replace(
+                'for name in files:\n',
+                'repository_root: Path = Path("synthetic-private").resolve()\n'
+                'for name in files:\n',
+                1,
+            ),
+            "augmented repository-root retarget": body.replace(
+                'for name in files:\n',
+                'repository_root /= Path("/tmp/synthetic-private")\n'
+                'for name in files:\n',
+                1,
+            ),
+            "function-definition repository-root retarget": body.replace(
+                'for name in files:\n',
+                'def repository_root():\n'
+                '    return Path("synthetic-private")\n'
+                'for name in files:\n',
+                1,
+            ),
+            "import-alias repository-root retarget": body.replace(
+                'for name in files:\n',
+                'import pathlib as repository_root\n'
+                'for name in files:\n',
+                1,
+            ),
+            "source read inside symlink rejection branch": body.replace(
+                '    if source.is_symlink():\n'
+                '        errors.append(f"{name}: tracked Markdown path was a symlink")\n'
+                '        continue\n',
+                '',
+                1,
+            ).replace(
+                '    markdown = "\\n".join(markdown_outside_fences(source_path.read_text(encoding="utf-8")))\n',
+                '    if source.is_symlink():\n'
+                '        markdown = "\\n".join(markdown_outside_fences(source_path.read_text(encoding="utf-8")))\n'
+                '        errors.append(f"{name}: tracked Markdown path was a symlink: {markdown}")\n'
+                '        continue\n'
+                '    markdown = "\\n".join(markdown_outside_fences(source_path.read_text(encoding="utf-8")))\n',
                 1,
             ),
             "loop variable rebound": body.replace(
@@ -4431,16 +4494,64 @@ class Issue79RegressionTests(unittest.TestCase):
 
     def test_historical_compile_sources_require_replacement_suppression(self) -> None:
         reference = '01764bbed0a387129d2a2abbc9e27a87e073f87e:docs/evidence/g01-recovery-packet.md'
-        for prefix in ('["git", "show", ', '["git", "-P", "show", '):
-            with self.subTest(prefix=prefix):
-                body = 'import os, subprocess\nwrapper = subprocess.check_output(' + prefix + repr(reference) + '], text=True)\n'
-                self.assertIsNotNone(self.inspect(body +
-                    'exec(compile(wrapper, "<probe>", "exec"), {"os": os})\n'))
-        for prefix in ('["git", "--no-replace-objects", "show", ', '["git", "--no-replace-objects", "-P", "show", '):
-            with self.subTest(safe_prefix=prefix):
-                body = 'import os, subprocess\nwrapper = subprocess.check_output(' + prefix + repr(reference) + '], text=True)\n'
-                self.assertIsNone(self.inspect(body +
-                    'exec(compile(wrapper, "<probe>", "exec"), {"os": os})\n'))
+        common = (
+            'import os, subprocess\n'
+            'git_environment = {"PATH": "/usr/bin:/bin", '
+            '"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", '
+            '"GIT_CONFIG_SYSTEM": "/dev/null", "GIT_ATTR_NOSYSTEM": "1"}\n'
+        )
+        prefix = (
+            '["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", '
+            '"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", '
+            '"GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", '
+        )
+        suffix = (
+            '"-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", '
+            '"show", ' + repr(reference) + '], env=git_environment, text=True)\n'
+            'exec(compile(wrapper, "<probe>", "exec"), {"os": os})\n'
+        )
+        safe_argv_prefix = prefix + '"--no-replace-objects", "-P", '
+        unsafe_argvs = (
+            (
+                "missing replacement suppression",
+                prefix + '"-P", ' + suffix,
+            ),
+            (
+                "missing system config",
+                (safe_argv_prefix + suffix).replace(
+                    '"GIT_CONFIG_SYSTEM=/dev/null", ', "", 1
+                ),
+            ),
+            (
+                "missing fsmonitor fence",
+                (safe_argv_prefix + suffix).replace(
+                    '"-c", "core.fsmonitor=false", ', "", 1
+                ),
+            ),
+            (
+                "missing hooks fence",
+                (safe_argv_prefix + suffix).replace(
+                    '"-c", "core.hooksPath=/dev/null", ', "", 1
+                ),
+            ),
+        )
+        for label, argv in unsafe_argvs:
+            body = common + 'wrapper = subprocess.check_output(' + argv
+            with self.subTest(unsafe_control=label):
+                self.assertIsNotNone(self.inspect(body))
+        safe_options = '"--no-replace-objects", "-P", '
+        direct = common + 'wrapper = subprocess.check_output(' + prefix + safe_options + suffix
+        with self.subTest(safe_prefix="canonical isolated direct argv"):
+            self.assertIsNone(self.inspect(direct))
+        tuple_argv = direct.replace(
+            'subprocess.check_output([', 'subprocess.check_output((', 1
+        ).replace(
+            '"show", ' + repr(reference) + '], env=git_environment',
+            '"show", ' + repr(reference) + ') , env=git_environment',
+            1,
+        )
+        with self.subTest(safe_prefix="canonical isolated tuple argv"):
+            self.assertIsNone(self.inspect(tuple_argv))
 
     def test_arbitrary_packet_slices_do_not_acquire_compile_authority(self) -> None:
         setup = 'import os\nfrom pathlib import Path\npacket = Path("docs/evidence/g01-recovery-packet.md").read_text()\n'
