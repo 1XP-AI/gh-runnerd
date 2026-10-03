@@ -22374,7 +22374,7 @@ with tempfile.TemporaryDirectory() as directory:
     reviewed_tree = subprocess.check_output(
         ["git", "rev-parse", "HEAD:experiments/g01-scaleset"], cwd=root, env=git_env, text=True,
     ).strip()
-    namespace = {
+    post_test_namespace = {
         "os": os,
         "re": __import__("re"),
         "stat": __import__("stat"),
@@ -22391,11 +22391,11 @@ with tempfile.TemporaryDirectory() as directory:
         functions["git_source_control_entries"],
         functions["git_worktree_matches_pinned_blobs"],
         functions["recheck_reviewed_source_checkout"],
-    ], type_ignores=[]), "<post-test-git>", "exec"), namespace)
-    namespace["recheck_reviewed_source_checkout"]("before synthetic child")
+    ], type_ignores=[]), "<post-test-git>", "exec"), post_test_namespace)
+    post_test_namespace["recheck_reviewed_source_checkout"]("before synthetic child")
     source_file.write_bytes(b"package p\n// mutation after child\n")
     try:
-        namespace["recheck_reviewed_source_checkout"]("after synthetic child")
+        post_test_namespace["recheck_reviewed_source_checkout"]("after synthetic child")
     except SystemExit as error:
         if "raw worktree bytes differ" not in str(error):
             raise SystemExit("post-test assertion: wrong mutation refusal")
@@ -22503,7 +22503,7 @@ signals = []
 saved_killpg = os.killpg
 os.killpg = lambda pid, signal_number: signals.append((pid, signal_number))
 try:
-    namespace = {
+    parent_group_namespace = {
         "os": os,
         "signal": __import__("signal"),
         "subprocess": subprocess,
@@ -22513,9 +22513,9 @@ try:
     exec(compile(ast.Module(
         body=[functions["close_go_child_streams"], functions["terminate_go_child_group"]],
         type_ignores=[],
-    ), "<parent-group-red>", "exec"), namespace)
+    ), "<parent-group-red>", "exec"), parent_group_namespace)
     process = DirectExitWithDescendant()
-    namespace["terminate_go_child_group"](process)
+    parent_group_namespace["terminate_go_child_group"](process)
 finally:
     os.killpg = saved_killpg
 if signals != [(51503, __import__("signal").SIGTERM)]:
@@ -31606,3 +31606,17 @@ alongside function aliases. That selector and the direct output selector
 passed GREEN in 0.116s. All unsafe specimens remained inert AST inputs.
 Combined isolated verification and independent review of this refinement
 must still be recorded against its candidate before merge.
+
+The canonical isolated full invocation on
+`55c5f6f5be97508abdb2264fa7afc5dd7ee20393` ran 122 tests in 271.948s and
+failed only `test_current_packet_has_no_static_scanner_violations`; the
+other 121 methods passed. The remaining two diagnostics were historical
+compile/exec helpers that reused the same namespace variable in one Python
+body. Their dictionaries now have distinct names (`post_test_namespace`
+and `parent_group_namespace`), preserving the one-declaration proof rather
+than weakening it. No scanner or harness source changed in that correction.
+The canonical isolated packet selector then passed one test in 119.911s:
+331 shell commands, 95 Python heredoc bodies, zero violations. This is
+incremental correction evidence, not a claim that the earlier full invocation
+passed. The final combined candidate still requires independent delta
+sign-off, hosted PR quick checks and completed exact-head GitHub Codex review.
