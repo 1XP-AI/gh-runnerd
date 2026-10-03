@@ -14558,6 +14558,13 @@ def python_subprocess_os_reexport_violation(tree):
         for alias in node.names
         if alias.name == "subprocess"
     }
+    reviewed_module_names = {
+        alias.asname or alias.name.split(".", 1)[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+        if alias.name in reviewed_python_import_modules
+    }
     name_bind_counts = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
@@ -14577,24 +14584,24 @@ def python_subprocess_os_reexport_violation(tree):
     changed = True
     while changed:
         changed = False
-        def may_refer_to_subprocess(value):
+        def may_refer_to_module(value, module_names):
             if isinstance(value, ast.Name):
-                return value.id in subprocess_names
+                return value.id in module_names
             if isinstance(value, (ast.Tuple, ast.List, ast.Set)):
-                return any(may_refer_to_subprocess(item) for item in value.elts)
+                return any(may_refer_to_module(item, module_names) for item in value.elts)
             if isinstance(value, ast.Dict):
-                return any(may_refer_to_subprocess(item) for item in value.values)
+                return any(may_refer_to_module(item, module_names) for item in value.values)
             if isinstance(value, ast.Call):
                 if (
                     isinstance(value.func, ast.Attribute)
                     and value.func.attr == "copy"
-                    and may_refer_to_subprocess(value.func.value)
+                    and may_refer_to_module(value.func.value, module_names)
                 ):
                     return True
                 if (
                     isinstance(value.func, ast.Name)
                     and value.func.id in {"dict", "list", "tuple", "set"}
-                    and any(may_refer_to_subprocess(item) for item in value.args)
+                    and any(may_refer_to_module(item, module_names) for item in value.args)
                 ):
                     return True
             if isinstance(value, (ast.BinOp, ast.BoolOp)):
@@ -14603,7 +14610,7 @@ def python_subprocess_os_reexport_violation(tree):
                     if isinstance(value, ast.BinOp)
                     else value.values
                 )
-                return any(may_refer_to_subprocess(item) for item in operands)
+                return any(may_refer_to_module(item, module_names) for item in operands)
             if isinstance(value, ast.Subscript):
                 if (
                     isinstance(value.value, ast.Name)
@@ -14617,37 +14624,48 @@ def python_subprocess_os_reexport_violation(tree):
                         if isinstance(key, ast.Constant) and key.value == value.slice.value
                     ]
                     if matching_values:
-                        return any(may_refer_to_subprocess(item) for item in matching_values)
+                        return any(may_refer_to_module(item, module_names) for item in matching_values)
                     return False
-                return may_refer_to_subprocess(value.value)
+                return may_refer_to_module(value.value, module_names)
             if isinstance(value, ast.IfExp):
-                return may_refer_to_subprocess(value.body) or may_refer_to_subprocess(value.orelse)
+                return (
+                    may_refer_to_module(value.body, module_names)
+                    or may_refer_to_module(value.orelse, module_names)
+                )
             if isinstance(value, ast.NamedExpr):
-                return may_refer_to_subprocess(value.value)
+                return may_refer_to_module(value.value, module_names)
             return False
 
-        def bind_subprocess_target(target, value):
+        def may_refer_to_subprocess(value):
+            return may_refer_to_module(value, subprocess_names)
+
+        def may_refer_to_reviewed_module(value):
+            return may_refer_to_module(value, reviewed_module_names)
+
+        def bind_module_target(target, value, module_names):
             nonlocal changed
             if isinstance(target, ast.Name):
-                if may_refer_to_subprocess(value) and target.id not in subprocess_names:
-                    subprocess_names.add(target.id)
+                if may_refer_to_module(value, module_names) and target.id not in module_names:
+                    module_names.add(target.id)
                     changed = True
             elif isinstance(target, (ast.Tuple, ast.List)):
                 if isinstance(value, (ast.Tuple, ast.List)):
                     for element, source in zip(target.elts, value.elts):
-                        bind_subprocess_target(element, source)
-                elif may_refer_to_subprocess(value):
+                        bind_module_target(element, source, module_names)
+                elif may_refer_to_module(value, module_names):
                     for element in target.elts:
-                        bind_subprocess_target(element, value)
+                        bind_module_target(element, value, module_names)
 
         for node in ast.walk(tree):
             if isinstance(node, ast.Assign):
                 for target in node.targets:
                     if isinstance(target, (ast.Attribute, ast.Subscript)) and may_refer_to_subprocess(node.value):
                         return "Python heredoc stores the subprocess module in an unreviewed object"
-                    bind_subprocess_target(target, node.value)
+                    bind_module_target(target, node.value, subprocess_names)
+                    bind_module_target(target, node.value, reviewed_module_names)
             elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
-                bind_subprocess_target(node.target, node.value)
+                bind_module_target(node.target, node.value, subprocess_names)
+                bind_module_target(node.target, node.value, reviewed_module_names)
     for node in ast.walk(tree):
         reviewed_base_names = {"Exception", "ValueError"}
         if (
@@ -14763,7 +14781,7 @@ def python_subprocess_os_reexport_violation(tree):
         if (
             isinstance(node, ast.Attribute)
             and node.attr in {"os", "_os"}
-            and may_refer_to_subprocess(node.value)
+            and may_refer_to_reviewed_module(node.value)
         ):
             return "Python heredoc accesses an unreviewed OS module re-export"
         if (
@@ -34600,3 +34618,43 @@ scanner ran with `python3 -I -B`. No source revision, compiler-input name or
 helper allowlist was added. This is focused evidence only: the updated packet
 selector, full harness, Go/hosted CI and live operations remain coordinator-owned
 and are not claimed as passed here.
+
+#### Writer correction for reviewed-module OS re-exports from `e720603`
+
+The coordinator reported that its 163-test run at `e7206034600adcae9afae2738dd7be690209ea48`
+had one failing assertion: `test_os_reexports_from_allowed_modules_are_not_certified` accepted
+the inert source `import pathlib; pathlib.os.remove("synthetic-owned")`. The
+focused selector reproduced that acceptance as one failure in 0.142s. After
+adding import-alias, dictionary-carried-module and reflective `pathlib.os`
+controls, the same selector failed two expected-refusal subcases in 0.137s:
+the direct and `import pathlib as files` forms. The dictionary-carried and
+reflection cases were already rejected by existing checks.
+
+The OS-re-export check now follows module origins from every directly imported
+module in `reviewed_python_import_modules`, not only `subprocess`, through the
+existing alias/container propagation. It uses that origin set only for the
+`os`/`_os` receiver check; subprocess-specific container mutation and dynamic
+re-export checks retain their narrower subprocess origin set. The benign
+`Settings.os = "darwin"` case, including a separate `subprocess` import, remains
+accepted; direct, aliased and container-carried `pathlib.os` cases and static
+reflection remain refused.
+
+The focused validation passed after the correction:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_reexported_os_module_does_not_bypass_heredoc_checks \
+  Issue79RegressionTests.test_os_reexports_from_allowed_modules_are_not_certified \
+  Issue79RegressionTests.test_displayhook_aliases_are_sensitive_output_sinks \
+  Issue79RegressionTests.test_actual_packet_compile_helpers_retain_provenance \
+  Issue79RegressionTests.test_historic_scanner_loaders_export_only_their_required_helpers
+Ran 5 tests in 5.292s — OK
+packet compile-source boundary: 119 actual helper calls checked
+```
+
+The helper selector preserved the 119 current actual compiler-helper checks and
+the loader selector preserved all ten historical-loader controls. No unsafe
+specimen, private path, hook or live resource was executed or read. No new
+compiler input, helper allowlist or source revision was added. The full harness
+and exact packet selector remain coordinator-owned and are not claimed as
+passed for this correction.

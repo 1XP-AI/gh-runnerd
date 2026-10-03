@@ -3610,6 +3610,10 @@ class Issue79RegressionTests(unittest.TestCase):
             'import tempfile as fixtures\nfixtures._os.remove("synthetic-owned")\n',
             'from tempfile import _os as inherited\ninherited.remove("synthetic-owned")\n',
             'import pathlib\npathlib.os.remove("synthetic-owned")\n',
+            'import pathlib as files\nfiles.os.remove("synthetic-owned")\n',
+            'import pathlib\nmodules = {"pathlib": pathlib}\n'
+            'module = modules["pathlib"]\nmodule.os.remove("synthetic-owned")\n',
+            'import pathlib\ngetattr(pathlib, "os").remove("synthetic-owned")\n',
             'import tempfile\ngetattr(tempfile, "_os").remove("synthetic-owned")\n',
             'import tempfile\ngetattr(tempfile, "_" + "os").remove("synthetic-owned")\n',
         ):
