@@ -3716,6 +3716,11 @@ class Issue79RegressionTests(unittest.TestCase):
         )
 
     def test_python_git_builder_rebinding_is_not_certified(self) -> None:
+        safe_environment = (
+            '{"PATH": "/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM": "1", '
+            '"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null", '
+            '"GIT_ATTR_NOSYSTEM": "1"}'
+        )
         for builder in ("git_command", "git_query"):
             prelude = (
                 'import subprocess\n'
@@ -3735,6 +3740,28 @@ class Issue79RegressionTests(unittest.TestCase):
             with self.subTest(builder=builder, kind="rebound builder"):
                 self.assertIsNotNone(self.inspect(
                     prelude + f'{builder} = lambda arguments: ["/usr/bin/git", "status"]\n' + call
+                ))
+            with self.subTest(builder=builder, kind="parameter shadow"):
+                self.assertIsNotNone(self.inspect(
+                    prelude
+                    + f'def invoke({builder}):\n'
+                    + f'    subprocess.run({builder}(["status", "--short"]), env={safe_environment})\n'
+                    + 'invoke(lambda arguments: ["/usr/bin/git", "status"])\n'
+                ))
+            with self.subTest(builder=builder, kind="inner definition shadow"):
+                self.assertIsNotNone(self.inspect(
+                    prelude
+                    + 'def invoke():\n'
+                    + f'    def {builder}(arguments):\n'
+                    + '        return ["/usr/bin/git", "status"]\n'
+                    + f'    subprocess.run({builder}(["status", "--short"]), env={safe_environment})\n'
+                    + 'invoke()\n'
+                ))
+            with self.subTest(builder=builder, kind="saved callable alias"):
+                self.assertIsNotNone(self.inspect(
+                    prelude
+                    + f'{builder}_alias = {builder}\n'
+                    + f'subprocess.run({builder}_alias(["status", "--short"]), env=git_environment)\n'
                 ))
 
     def test_python_git_argv_mutation_is_not_certified(self) -> None:
@@ -3756,9 +3783,30 @@ class Issue79RegressionTests(unittest.TestCase):
         for mutation in (
             'argv[:] = ["/usr/bin/git", "status"]\n',
             'saved_argv = argv\nsaved_argv[:] = ["/usr/bin/git", "status"]\n',
+            'argv.append("--config-env=core.fsmonitor=GIT_CONFIG_PARAMETERS")\n',
+            'def rewrite(command):\n'
+            '    command[:] = ["/usr/bin/git", "status"]\n'
+            'rewrite(argv)\n',
+            'locals()["argv"][:] = ["/usr/bin/git", "status"]\n',
+            'globals()["argv"][:] = ["/usr/bin/git", "status"]\n',
+            'def rewrite():\n'
+            '    global argv\n'
+            '    argv[:] = ["/usr/bin/git", "status"]\n'
+            'rewrite()\n',
         ):
             with self.subTest(mutation=mutation):
                 self.assertIsNotNone(self.inspect(prelude + mutation + call))
+        nonlocal_mutation = (
+            'def wrapper():\n'
+            '    argv = git_command(["status", "--short"])\n'
+            '    def rewrite():\n'
+            '        nonlocal argv\n'
+            '        argv[:] = ["/usr/bin/git", "status"]\n'
+            '    rewrite()\n'
+            '    subprocess.run(argv, env=git_environment)\n'
+            'wrapper()\n'
+        )
+        self.assertIsNotNone(self.inspect(prelude + nonlocal_mutation))
 
     def test_warning_sink_and_absolute_path_do_not_disclose_local_data(self) -> None:
         self.assertIsNotNone(self.inspect(

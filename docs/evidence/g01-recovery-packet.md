@@ -13394,14 +13394,86 @@ def reviewed_python_git_builder_definition(tree, name):
     )
 
 
-def reviewed_python_git_builder(node, tree):
+def reviewed_python_git_name_bound_in_scope(tree, parents, scope, name, allowed_definition=None):
+    """Find Python binders that could shadow a reviewed Git callable name."""
+    for candidate in ast.walk(tree):
+        if (
+            isinstance(candidate, ast.Name)
+            and candidate.id == name
+            and isinstance(candidate.ctx, (ast.Store, ast.Del))
+            and python_enclosing_scope(candidate, parents) is scope
+        ):
+            return True
+        if (
+            isinstance(candidate, ast.arg)
+            and candidate.arg == name
+            and python_enclosing_scope(candidate, parents) is scope
+        ):
+            return True
+        if isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if (
+                candidate is not allowed_definition
+                and candidate.name == name
+                and python_enclosing_scope(parents.get(candidate), parents) is scope
+            ):
+                return True
+        if isinstance(candidate, ast.Import) and python_enclosing_scope(candidate, parents) is scope:
+            if any((alias.asname or alias.name.split(".")[0]) == name for alias in candidate.names):
+                return True
+        if isinstance(candidate, ast.ImportFrom) and python_enclosing_scope(candidate, parents) is scope:
+            if any(alias.name == "*" or (alias.asname or alias.name) == name for alias in candidate.names):
+                return True
+        if isinstance(candidate, ast.ExceptHandler) and candidate.name == name:
+            if python_enclosing_scope(candidate, parents) is scope:
+                return True
+        if isinstance(candidate, (ast.MatchAs, ast.MatchStar)) and candidate.name == name:
+            if python_enclosing_scope(candidate, parents) is scope:
+                return True
+        if isinstance(candidate, ast.MatchMapping) and candidate.rest == name:
+            if python_enclosing_scope(candidate, parents) is scope:
+                return True
+        if isinstance(candidate, (ast.Global, ast.Nonlocal)) and name in candidate.names:
+            declared_scope = python_enclosing_scope(candidate, parents)
+            if declared_scope is scope:
+                return True
+            if isinstance(candidate, ast.Global) and isinstance(scope, ast.Module):
+                return True
+            if isinstance(candidate, ast.Nonlocal) and scope in python_lexical_scope_chain(
+                declared_scope, parents
+            ):
+                return True
+    return False
+
+
+def reviewed_python_git_builder_binding(node, tree, parents, name):
+    """Prove a builder reference reaches its sole unshadowed module definition."""
+    if not isinstance(node.func, ast.Name) or node.func.id != name:
+        return False
+    definitions = [
+        statement for statement in tree.body
+        if isinstance(statement, ast.FunctionDef) and statement.name == name
+    ]
+    if len(definitions) != 1:
+        return False
+    definition = definitions[0]
+    for scope in python_lexical_scope_chain(python_enclosing_scope(node, parents), parents):
+        allowed = definition if scope is tree else None
+        if reviewed_python_git_name_bound_in_scope(tree, parents, scope, name, allowed):
+            return False
+    return True
+
+
+def reviewed_python_git_builder(node, tree, parents):
     """Allow only calls to the packet's exact config-isolated Git builders."""
     if not isinstance(node, ast.Call):
         return False
     builder_name = python_dotted_name(node.func)
     if builder_name not in {"git_command", "git_query"}:
         return False
-    if not reviewed_python_git_builder_definition(tree, builder_name):
+    if (
+        not reviewed_python_git_builder_definition(tree, builder_name)
+        or not reviewed_python_git_builder_binding(node, tree, parents, builder_name)
+    ):
         return False
     if len(node.args) != 1 or node.keywords:
         return False
@@ -13435,6 +13507,63 @@ def reviewed_python_git_builder(node, tree):
     )
 
 
+def reviewed_python_git_argv_name_has_no_escape(node, tree, parents, scope):
+    """Allow the list only at a process argv slot; reject mutation and aliasing."""
+    if not isinstance(node, ast.Name):
+        return False
+    stores = []
+    has_parameter = False
+    for candidate in ast.walk(tree):
+        if isinstance(candidate, ast.arg) and candidate.arg == node.id:
+            candidate_scope = python_enclosing_scope(candidate, parents)
+            if candidate_scope is scope:
+                has_parameter = True
+            continue
+        if not isinstance(candidate, ast.Name) or candidate.id != node.id:
+            continue
+        candidate_scope = python_enclosing_scope(candidate, parents)
+        if candidate_scope is not scope:
+            if scope in python_lexical_scope_chain(candidate_scope, parents):
+                if any(
+                    isinstance(declaration, (ast.Global, ast.Nonlocal))
+                    and node.id in declaration.names
+                    and python_enclosing_scope(declaration, parents) is candidate_scope
+                    for declaration in ast.walk(candidate_scope)
+                ):
+                    return False
+                if not reviewed_python_git_name_bound_in_scope(
+                    tree, parents, candidate_scope, node.id
+                ):
+                    return False
+            continue
+        if isinstance(candidate.ctx, ast.Store):
+            parent = parents.get(candidate)
+            direct_assignment = (
+                isinstance(parent, ast.Assign)
+                and candidate in parent.targets
+                or isinstance(parent, ast.AnnAssign)
+                and parent.target is candidate
+                or isinstance(parent, ast.NamedExpr)
+                and parent.target is candidate
+            )
+            if not direct_assignment:
+                return False
+            stores.append(candidate)
+            continue
+        if isinstance(candidate.ctx, ast.Load):
+            parent = parents.get(candidate)
+            if not (
+                isinstance(parent, ast.Call)
+                and parent.args
+                and parent.args[0] is candidate
+                and python_dotted_name(parent.func) in python_command_functions
+            ):
+                return False
+            continue
+        return False
+    return len(stores) <= 1 and not (has_parameter and stores)
+
+
 def reviewed_python_git_command_origin(node, tree, parents, seen=None):
     """Trace a child argv only through unique bindings to the canonical builder."""
     if seen is None:
@@ -13443,10 +13572,12 @@ def reviewed_python_git_command_origin(node, tree, parents, seen=None):
         return False
     seen = seen | {id(node)}
     if isinstance(node, ast.Call):
-        return reviewed_python_git_builder(node, tree)
+        return reviewed_python_git_builder(node, tree, parents)
     if not isinstance(node, ast.Name):
         return False
     scope = python_enclosing_scope(node, parents)
+    if not reviewed_python_git_argv_name_has_no_escape(node, tree, parents, scope):
+        return False
     assignments = []
     for candidate in ast.walk(tree):
         if isinstance(candidate, ast.Assign):
@@ -33671,3 +33802,51 @@ accepted. The earlier 20-method GREEN result does not cover these new gaps.
 The local checkpoint is held pending a fail-closed binding/mutation correction;
 no packet selector, final independent approval, correction push or live result
 is claimed for it.
+
+#### Writer correction checkpoint: reviewed builder binding and argv immutability
+
+At the 2026-10-03 local checkpoint, repository `HEAD` was
+`7abfdf25bc3af4cd4eca964ace1410df6c7dddcb` and the working tree was clean before
+this correction. The builder checker now verifies that a call resolves to the
+sole reviewed top-level `git_command`/`git_query` definition, rejecting direct
+rebinding and visible local parameter, inner-definition, import, alias or
+global/nonlocal shadows. An argv name traced to a canonical builder is accepted
+only when every same-binding read occupies a direct process argv slot; it is
+refused when stored elsewhere, passed to helpers, mutated by subscription or
+list methods, rebound, or reached by a nested global/nonlocal writer. This
+preserves the canonical direct-builder, bound-list and isolated-environment
+controls without changing source SHA/compiler allowlists or adding call names.
+All adversarial inputs remained inert strings for AST inspection.
+
+The original supplied RED was four expected-refusal assertions across the two
+methods in 0.157s. Expanded shadow probes were RED at six assertions in 0.161s;
+the extended direct/saved-list, append and helper-escape group was RED at six
+assertions in 0.175s. A separate nested `global argv` mutation was RED at one
+assertion in 0.160s. The parameter and inner-definition tests use a safe literal
+child environment so they exercise callable resolution rather than failing the
+environment gate; after correction, both are refused. Saved callable aliases,
+local/global reflection, direct and saved-list mutation, method mutation,
+helper escape, and nested `global`/`nonlocal` mutation are refused. The existing
+canonical builder and argv positive controls remain accepted.
+
+The final bounded command passed six methods in 5.615s:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_python_git_builder_rebinding_is_not_certified \
+  Issue79RegressionTests.test_python_git_argv_mutation_is_not_certified \
+  Issue79RegressionTests.test_python_git_queries_require_isolated_environment_and_known_builder \
+  Issue79RegressionTests.test_git_child_environment_uses_a_positive_allowlist \
+  Issue79RegressionTests.test_actual_packet_compile_helpers_retain_provenance \
+  Issue79RegressionTests.test_historic_scanner_loaders_export_only_their_required_helpers
+```
+
+The run retained all 128 actual compiler-helper checks and ten historical
+loader controls. No full harness or packet selector was run; the coordinator
+owns both. The edited working tree has no new immutable commit SHA and is dirty
+only in `docs/evidence/g01-recovery-packet.md` and
+`scripts/evidence_packet/issue79_regression_test.py`; `git diff --check` passed,
+and the added-line path/credential scan examined 230 lines with zero matches.
+Independent final-source review and the coordinator packet selector remain
+required before a candidate can be considered complete. These focused checks
+do not claim a universal Python sandbox or resolve broader live-operation gates.
