@@ -14236,6 +14236,11 @@ def reviewed_python_git_query_collector(tree, parents):
         for node in ast.walk(function)
         if python_enclosing_scope(node, parents) is function
     ]
+    if any(
+        isinstance(node, (ast.Break, ast.Yield, ast.YieldFrom))
+        for node in local_nodes
+    ):
+        return False
     local_calls = [node for node in local_nodes if isinstance(node, ast.Call)]
     if any(
         isinstance(node, (ast.Import, ast.ImportFrom, ast.Global, ast.Nonlocal, ast.Match))
@@ -14729,9 +14734,85 @@ def reviewed_python_git_query_collector(tree, parents):
         or not any(parents.get(node) is extension for node in chunk_loads)
     ):
         return False
+    continue_nodes = [node for node in local_nodes if isinstance(node, ast.Continue)]
+    blocking_handlers = [
+        node for node in local_nodes
+        if isinstance(node, ast.ExceptHandler)
+        and isinstance(node.type, ast.Name)
+        and node.type.id == "BlockingIOError"
+    ]
+    empty_chunk_ifs = [
+        node for node in local_nodes
+        if isinstance(node, ast.If)
+        and isinstance(node.test, ast.UnaryOp)
+        and isinstance(node.test.op, ast.Not)
+        and is_name(node.test.operand, "chunk")
+        and parents.get(node) is ready_loop
+    ]
+    stdin_branches = [
+        node for node in local_nodes
+        if isinstance(node, ast.If)
+        and isinstance(node.test, ast.Compare)
+        and python_dotted_name(node.test.left) == "key.data"
+        and len(node.test.ops) == 1
+        and isinstance(node.test.ops[0], ast.Eq)
+        and len(node.test.comparators) == 1
+        and isinstance(node.test.comparators[0], ast.Constant)
+        and node.test.comparators[0].value == "stdin"
+        and parents.get(node) is ready_loop
+    ]
+    if (
+        len(continue_nodes) != 4
+        or len(blocking_handlers) != 2
+        or any(
+            len(handler.body) != 1
+            or not isinstance(handler.body[0], ast.Continue)
+            or ready_loop not in _python_parent_chain(handler, parents)
+            for handler in blocking_handlers
+        )
+        or len(empty_chunk_ifs) != 1
+        or empty_chunk_ifs[0].orelse
+        or not empty_chunk_ifs[0].body
+        or not isinstance(empty_chunk_ifs[0].body[-1], ast.Continue)
+        or len(stdin_branches) != 1
+        or stdin_branches[0].orelse
+        or not stdin_branches[0].body
+        or not isinstance(stdin_branches[0].body[-1], ast.Continue)
+        or set(continue_nodes)
+        != {handler.body[0] for handler in blocking_handlers}
+        | {empty_chunk_ifs[0].body[-1]}
+        | {stdin_branches[0].body[-1]}
+    ):
+        return False
+    write_handlers = [
+        handler for handler in blocking_handlers
+        if handler not in read_try.handlers
+    ]
+    write_tries = [parents.get(handler) for handler in write_handlers]
+    write_calls = [
+        node for node in local_calls
+        if python_dotted_name(node.func) == "os.write"
+    ]
+    if (
+        len(write_handlers) != 1
+        or len(write_tries) != 1
+        or not isinstance(write_tries[0], ast.Try)
+        or len(stdin_branches) != 1
+        or parents.get(write_tries[0]) is not stdin_branches[0]
+        or write_tries[0] not in stdin_branches[0].body
+        or len(write_calls) != 1
+        or write_tries[0] not in _python_parent_chain(write_calls[0], parents)
+    ):
+        return False
 
     bytes_calls = [node for node in local_calls if is_name(node.func, "bytes")]
     if len(bytes_calls) != 2 or bytearrays != [value for value in captures.values if isinstance(value, ast.Call)]:
+        return False
+    loop_nodes = [
+        node for node in local_nodes
+        if isinstance(node, (ast.For, ast.AsyncFor, ast.While, ast.comprehension))
+    ]
+    if len(loop_nodes) != 3 or set(loop_nodes) != {while_node, ready_loop, output_loop}:
         return False
     return True
 
@@ -36413,3 +36494,56 @@ P1 witnesses and the malformed/alias mutations. Only the five listed focused
 methods ran at this checkpoint; the full harness, packet-wide selector, Go
 checks, hosted CI, and live operations were not run and are not claimed.
 The coordinator owns final exact-head integration validation and review.
+
+#### Collector control-flow closure after the `062fade5` review
+
+The pinned `062fade5d0b3f5067a9620b9cd91c6ff9de4abb0` checkpoint had a
+coordinator-reported 169-test full-suite pass in 166.716s, 119 actual
+compiler-helper checks, and a packet scan of 261 shell commands and 86 Python
+bodies with zero violations. The independent contract and security reviews
+still held that checkpoint on collector control-flow mutations; the historical
+pass does not resolve those findings or certify this correction.
+
+The first focused run with new inert AST cases failed in 3.079s because the
+scanner accepted a conditional `break` for `status`, an early `continue`, and
+an additional nested loop. Its yield subcase also failed, but that fixture
+extended a temporary slice and did not mutate the AST, so it is not counted
+as a valid reproduction. A corrected fixture inserting two
+`ast.Yield` nodes was checked against the scanner loaded from the immutable
+`062fade5` packet blob; the old scanner accepted the fabricated origin bytes.
+The current regression now inserts those actual nodes and requires refusal.
+
+The collector proof rejects any `break`, `yield` or `yield from`, and requires
+exactly the existing three loops: output stream registration, selector drain,
+and ready-event handling. It allows only the four canonical continues: the two
+`BlockingIOError` handlers, the empty-read EOF branch, and the stdin-write
+branch. The stdin handler is tied to its `os.write` try block. This closes an
+early status break before pipe draining and the fabricated two-yield result
+without a status-string exception or new source, compiler-input, or helper
+allowlist.
+
+An intermediate focused attempt failed in 0.440s because its first proof
+version counted only three continues and refused the canonical stdin-write
+continue. After correcting the shape to allow exactly four, the fixture repair
+then exposed the unmodified yield case; the corrected collector selector
+passed in 3.107s. The first four-selector bounded verification passed in
+8.330s:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_git_query_collector_must_return_bounded_pipe_bytes \
+  Issue79RegressionTests.test_git_query_capture_must_be_on_the_active_result_path \
+  Issue79RegressionTests.test_bounded_git_origin_capture_requires_reviewed_comparison_and_no_output_escape \
+  Issue79RegressionTests.test_actual_packet_compile_helpers_retain_provenance
+Ran 4 tests in 8.330s — OK
+packet compile-source boundary: 119 actual helper calls checked
+```
+
+After the final check also required no alternate stdin branch and counted
+comprehensions among loops, the same four selectors passed again in 8.301s,
+with 119 actual compiler-helper calls checked.
+
+The probes inspected source and AST only; no verifier recipe, Git query, or
+adversarial specimen was run. This correction did not rerun the full harness,
+packet-wide selector, Go checks, hosted CI, or live operations. The coordinator
+owns the next exact-head integration scan and independent reviews.

@@ -2904,6 +2904,84 @@ class Issue79RegressionTests(unittest.TestCase):
                     inspect(ast.unparse(tree), marker),  # type: ignore[operator]
                     label,
                 )
+
+        def add_fabricated_yields(
+            collector: ast.FunctionDef, _drain: ast.While
+        ) -> None:
+            collector.body[0:0] = [
+                ast.Expr(
+                    value=ast.Yield(
+                        value=ast.Constant(
+                            value=b"https://github.com/1XP-AI/gh-runnerd.git\n"
+                        )
+                    )
+                ),
+                ast.Expr(value=ast.Yield(value=ast.Constant(value=b""))),
+            ]
+
+        control_flow_mutations = (
+            (
+                "conditional status break before draining output",
+                lambda collector, drain: drain.body.insert(
+                    0,
+                    ast.If(
+                        test=ast.Compare(
+                            left=ast.Constant(value="status"),
+                            ops=[ast.In()],
+                            comparators=[ast.Name(id="git_command", ctx=ast.Load())],
+                        ),
+                        body=[ast.Break()],
+                        orelse=[],
+                    ),
+                ),
+            ),
+            (
+                "early continue before deadline and output drain",
+                lambda collector, drain: drain.body.insert(
+                    0,
+                    ast.If(
+                        test=ast.Compare(
+                            left=ast.Name(id="output_limit", ctx=ast.Load()),
+                            ops=[ast.Gt()],
+                            comparators=[ast.Constant(value=0)],
+                        ),
+                        body=[ast.Continue()],
+                        orelse=[],
+                    ),
+                ),
+            ),
+            (
+                "additional nested loop",
+                lambda collector, drain: drain.body.insert(
+                    0,
+                    ast.While(
+                        test=ast.Constant(value=True),
+                        body=[ast.Pass()],
+                        orelse=[],
+                    ),
+                ),
+            ),
+            (
+                "fabricated origin bytes yielded before collection",
+                add_fabricated_yields,
+            ),
+        )
+        for label, mutate in control_flow_mutations:
+            with self.subTest(mutant=label):
+                tree = ast.parse(collector_body, filename="<git-query-control-flow-data>")
+                collector = _verification_function(tree, "capture_git_query_output")
+                drain = next(
+                    node
+                    for node in ast.walk(collector)
+                    if isinstance(node, ast.While)
+                    and ast.unparse(node.test) == "selector.get_map()"
+                )
+                mutate(collector, drain)
+                ast.fix_missing_locations(tree)
+                self.assertIsNotNone(
+                    inspect(ast.unparse(tree), marker),  # type: ignore[operator]
+                    label,
+                )
         tree = ast.parse(collector_body, filename="<git-query-collector-data>")
         collector = _verification_function(tree, "capture_git_query_output")
         collector.body.insert(
