@@ -10512,17 +10512,19 @@ def python_sensitive_member_assignment_index(tree, parents):
                                 helper_writes.setdefault(scope.name, []).append(
                                     (scope, position, prefix, key, value)
                                 )
-        for call in ast.walk(tree):
-            if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name):
+        for call_node in ast.walk(tree):
+            if not isinstance(call_node, ast.Call) or not isinstance(call_node.func, ast.Name):
                 continue
-            writes = helper_writes.get(call.func.id, ())
+            writes = helper_writes.get(call_node.func.id, ())
             if not writes:
                 continue
-            visible = python_local_function_candidates(call.func.id, call, tree, parents)
+            visible = python_local_function_candidates(
+                call_node.func.id, call_node, tree, parents
+            )
             for function, position, prefix, key, value in writes:
-                if function not in visible or position >= len(call.args):
+                if function not in visible or position >= len(call_node.args):
                     continue
-                argument = call.args[position]
+                argument = call_node.args[position]
                 if isinstance(argument, ast.Name):
                     alias_key = "member:name:" + argument.id + ":" + key[len(prefix):]
                     index.setdefault(alias_key, []).append(value)
@@ -13139,13 +13141,13 @@ def reviewed_python_helper_definition(node, parents):
     )
     if function_node is None:
         return False
-    for call in ast.walk(function_node):
-        if not isinstance(call, ast.Call):
+    for call_node in ast.walk(function_node):
+        if not isinstance(call_node, ast.Call):
             continue
-        if isinstance(call.func, ast.Name):
-            calls.add(call.func.id)
-        elif isinstance(call.func, ast.Attribute):
-            calls.add(call.func.attr)
+        if isinstance(call_node.func, ast.Name):
+            calls.add(call_node.func.id)
+        elif isinstance(call_node.func, ast.Attribute):
+            calls.add(call_node.func.attr)
     return required.issubset(calls)
 
 
@@ -15405,17 +15407,17 @@ def reviewed_python_git_environment_argument(node, tree, parents):
     """Recognize only a direct value passed to one statically bound env parameter."""
     parent = parents.get(node)
     if isinstance(parent, ast.keyword):
-        call = parents.get(parent)
+        call_node = parents.get(parent)
         argument_name = parent.arg
     elif isinstance(parent, ast.Call) and node in parent.args:
-        call = parent
+        call_node = parent
         argument_name = None
     else:
         return False
-    if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name):
+    if not isinstance(call_node, ast.Call) or not isinstance(call_node.func, ast.Name):
         return False
-    function_name = call.func.id
-    call_scope = python_enclosing_scope(call, parents)
+    function_name = call_node.func.id
+    call_scope = python_enclosing_scope(call_node, parents)
     definitions = [
         candidate for candidate in ast.walk(tree)
         if isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -15437,14 +15439,14 @@ def reviewed_python_git_environment_argument(node, tree, parents):
         return argument_name == "env" and (
             any(parameter.arg == "env" for parameter in parameters)
             or "env" in keyword_only
-        ) and sum(keyword.arg == "env" for keyword in call.keywords) == 1
-    if any(isinstance(argument, ast.Starred) for argument in call.args):
+        ) and sum(keyword.arg == "env" for keyword in call_node.keywords) == 1
+    if any(isinstance(argument, ast.Starred) for argument in call_node.args):
         return False
-    if any(keyword.arg == "env" for keyword in call.keywords):
+    if any(keyword.arg == "env" for keyword in call_node.keywords):
         return False
     return any(
         index < len(parameters) and parameters[index].arg == "env"
-        for index, argument in enumerate(call.args)
+        for index, argument in enumerate(call_node.args)
         if argument is node
     )
 
@@ -15999,7 +16001,6 @@ def python_reviewed_markdown_source_path(node, tree, parents):
     root_assignments = [
         candidate for candidate in ast.walk(tree)
         if isinstance(candidate, ast.Assign)
-        and python_enclosing_scope(candidate, parents) is scope
         and any(
             isinstance(target, ast.Name) and target.id == "repository_root"
             for target in candidate.targets
@@ -16051,8 +16052,9 @@ def python_reviewed_markdown_source_path(node, tree, parents):
     safe_path_guards = [
         candidate for candidate in ast.walk(source_loop)
         if isinstance(candidate, ast.If)
+        and parents.get(candidate) is source_loop
         and before_read(candidate)
-        and has_continue(candidate)
+        and any(isinstance(statement, ast.Continue) for statement in candidate.body)
     ]
     lexical_guard = False
     symlink_guard = False
@@ -17298,12 +17300,12 @@ def python_reviewed_markdown_link_target_path(node, tree, parents):
             for target in candidate.targets
         )
         and any(
-            isinstance(call, ast.Call)
-            and python_dotted_name(call.func) == "match.group"
-            and call.args
-            and isinstance(call.args[0], ast.Constant)
-            and call.args[0].value == 1
-            for call in ast.walk(candidate.value)
+            isinstance(call_node, ast.Call)
+            and python_dotted_name(call_node.func) == "match.group"
+            and call_node.args
+            and isinstance(call_node.args[0], ast.Constant)
+            and call_node.args[0].value == 1
+            for call_node in ast.walk(candidate.value)
         )
         for candidate in ast.walk(link_loop)
     )
@@ -17839,14 +17841,14 @@ def python_sensitive_read_violation(tree, parents):
                     (function, default)
                 )
 
-    for call in ast.walk(tree):
-        if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name):
+    for call_node in ast.walk(tree):
+        if not isinstance(call_node, ast.Call) or not isinstance(call_node.func, ast.Name):
             continue
         for function in python_local_function_candidates(
-            call.func.id, call, tree, parents
+            call_node.func.id, call_node, tree, parents
         ):
             positional = helper_parameters(function)
-            for index, argument in enumerate(call.args):
+            for index, argument in enumerate(call_node.args):
                 if isinstance(argument, ast.Starred):
                     for parameter in positional[index:]:
                         assignments_by_name.setdefault(parameter.arg, []).append(
@@ -17864,7 +17866,7 @@ def python_sensitive_read_violation(tree, parents):
                 parameter.arg
                 for parameter in positional + function.args.kwonlyargs
             }
-            for keyword in call.keywords:
+            for keyword in call_node.keywords:
                 if keyword.arg in named_parameters:
                     assignments_by_name.setdefault(keyword.arg, []).append(
                         (function, keyword.value)
@@ -24538,8 +24540,27 @@ with tempfile.TemporaryDirectory() as directory:
         ["git", "-c", "user.name=probe", "-c", "user.email=probe@example.invalid", "commit", "-q", "-m", "source"],
         cwd=root, env=git_env, check=True,
     )
+    git_query_environment = {
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_ATTR_NOSYSTEM": "1",
+        "GIT_CONFIG_COUNT": "2",
+        "GIT_CONFIG_KEY_0": "core.fsmonitor",
+        "GIT_CONFIG_VALUE_0": "false",
+        "GIT_CONFIG_KEY_1": "core.hooksPath",
+        "GIT_CONFIG_VALUE_1": "/dev/null",
+    }
     reviewed_tree = subprocess.check_output(
-        ["git", "rev-parse", "HEAD:experiments/g01-scaleset"], cwd=root, env=git_env, text=True,
+        [
+            "/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1",
+            "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+            "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects",
+            "-P", "-c", "core.fsmonitor=false", "-c",
+            "core.hooksPath=/dev/null", "rev-parse",
+            "HEAD:experiments/g01-scaleset",
+        ],
+        cwd=root, env=git_query_environment, text=True,
     ).strip()
     namespace = {
         "os": os,
@@ -24584,11 +24605,17 @@ for command in (
     violation = scanner_ns["forbidden_command"](segments[0]) if segments else None
     if violation is None:
         raise SystemExit(f"alias assertion: shell-form alias accepted: {command!r}")
-for command in ("git status", "git -c user.name=probe status"):
+for command in (
+    "/usr/bin/env -i GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_ATTR_NOSYSTEM=1 /usr/bin/git --no-replace-objects -P -c core.fsmonitor=false -c core.hooksPath=/dev/null status",
+    "/usr/bin/env -i GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_ATTR_NOSYSTEM=1 /usr/bin/git --no-replace-objects -P -c core.fsmonitor=false -c core.hooksPath=/dev/null diff --stat",
+):
     segments = scanner_ns["shell_token_segments"](command)
     if not segments or scanner_ns["forbidden_command"](segments[0]) is not None:
-        raise SystemExit(f"alias assertion: safe Git form rejected: {command!r}")
-print("GREEN 4005139673: pure static scanner rejected split/attached/wrapped shell-form Git aliases before generic Git classification; safe git status/config remained accepted and no command executed")
+        raise SystemExit(f"alias assertion: isolated safe Git form rejected: {command!r}")
+unisolated = scanner_ns["shell_token_segments"]("git status")
+if not unisolated or scanner_ns["forbidden_command"](unisolated[0]) is None:
+    raise SystemExit("alias assertion: unisolated Git query was accepted")
+print("GREEN 4005139673: pure static scanner rejected split/attached/wrapped shell-form Git aliases and unisolated Git queries before generic Git classification; explicit isolated status/diff controls remained accepted and no command executed")
 PY
 ```
 
@@ -34385,3 +34412,74 @@ whitespace and added-line private-path/credential hygiene, the exact local
 commit state and coordinator-owned packet/review gates are reported at handoff.
 Final `git diff --check` passed; the added-line personal-path, credential-token
 and private-key pattern scan covered 798 lines with zero matches.
+
+#### Writer bounded executable-recipe and source-path correction from 05044cfc
+
+At entry on 2026-10-03, `HEAD` was the clean local checkpoint
+`05044cfc34a76528d1c8d4baa6a8a195ee59c323`. The coordinator's exact packet
+selector had failed one test in 42.123s with two violations: the current
+scanner self-audit reported an unresolved command-capable `call` at body line
+2263, and the current synthetic vet-mutation recipe contained a Git query
+without an isolated environment. This worker did not rerun the packet selector,
+full harness or full suite, and did not execute any recipe or adversarial body.
+
+The scanner self-audit issue came from generic AST binding collection treating
+local AST variables named `call` as command-capable callback aliases. The
+current scanner's AST-node variables were renamed to `call_node`; no callback,
+function or compiler-input allowlist was expanded. A focused regression parses
+the active self-audit helper and confirms that its `call` parameter is not
+certified as a process callback.
+
+The current synthetic Git fixture now supplies a distinct literal child
+environment with system/global config disabled, system attributes disabled,
+`core.fsmonitor=false` and `core.hooksPath=/dev/null`; its current source-root
+query uses explicit `env -i`, `--no-replace-objects`, `-P` and the protective
+config options. Static controls keep the isolated status/diff forms accepted
+and check that an unisolated `git status` is rejected. The temporary fixture
+setup remains scoped to its temporary repository. The active recipe remains
+executable and is still inspected by the scanner; historical recorded outputs
+were not changed.
+
+The bounded source-list proof was also tightened after independent review.
+Assignments to `repository_root` in nested scopes now invalidate its single
+canonical binding, and lexical/symlink guards must be direct children of the
+tracked-path loop with a direct `continue`, so an unreachable or nested guard
+cannot establish source-read safety. The tracked-Markdown positive recipe
+remains accepted. Added inert AST mutations cover nested global root retarget,
+unreachable lexical and symlink guards, and a symlink `continue` nested under
+an unreachable branch; no mutated body was executed.
+
+The meaningful AST-only RED evidence was: the current synthetic Git recipe
+selector failed one test in 0.271s on the missing `env -i` proof; the nested
+`repository_root` mutation failed its regression in 0.437s; and the combined
+source-path/self-audit/Git selection ran three tests in 3.348s, with the
+source-path method exposing two unreachable-guard acceptances after the
+root-retarget case had been closed. The final focused command passed 12
+methods in 13.200s:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_current_scanner_self_audit_ast_parameters_are_not_callbacks \
+  Issue79RegressionTests.test_current_vet_mutation_recipe_git_fixture_is_isolated \
+  Issue79RegressionTests.test_markdown_source_paths_cannot_escape_git_list_origin \
+  Issue79RegressionTests.test_current_executable_recipes_keep_git_and_path_provenance \
+  Issue79RegressionTests.test_unbound_anchor_reader_cannot_read_or_disclose_paths \
+  Issue79RegressionTests.test_markdown_link_containment_guard_must_be_direct_and_reachable \
+  Issue79RegressionTests.test_python_git_queries_require_isolated_environment_and_known_builder \
+  Issue79RegressionTests.test_python_git_builder_rebinding_is_not_certified \
+  Issue79RegressionTests.test_python_git_argv_mutation_is_not_certified \
+  Issue79RegressionTests.test_historical_unsafe_git_transcripts_are_inert_source_text \
+  Issue79RegressionTests.test_actual_packet_compile_helpers_retain_provenance \
+  Issue79RegressionTests.test_historic_scanner_loaders_export_only_their_required_helpers
+Ran 12 tests in 13.200s — OK
+packet compile-source boundary: 119 actual helper calls checked
+```
+
+The run preserves the ten historical-loader controls; this candidate's helper
+selector reported 119 actual helper calls, while the previously shared 128-call
+result remains evidence for its earlier exact candidate only. No source
+revision, compiler-input name, callback exemption or helper whitelist was
+added. No full packet scan, full suite, live command or specimen execution is
+claimed. The final worktree SHA, focused-only scope, hygiene and local commit
+state are reported at handoff; coordinator-owned exact-head packet and
+independent review gates remain outstanding.

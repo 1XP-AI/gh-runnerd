@@ -3683,6 +3683,41 @@ class Issue79RegressionTests(unittest.TestCase):
                     label,
                 )
 
+    def test_current_scanner_self_audit_ast_parameters_are_not_callbacks(self) -> None:
+        body, _marker = self.packet_heredoc_containing(
+            "def python_local_function_candidates(",
+            "def inspect_python_heredoc(body, safe_marker):",
+            "matches = []",
+        )
+        tree = ast.parse(body, filename="<current-packet-scanner-data>")
+        helper = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "python_local_function_candidates"
+        )
+        source = ast.get_source_segment(body, helper)
+        self.assertIsNotNone(source)
+        modules, functions, unresolved = self.scanner["python_import_bindings"](tree)  # type: ignore[operator]
+        self.assertFalse(unresolved)
+        helper_tree = ast.Module(body=[helper], type_ignores=[])
+        self.assertIsNone(
+            self.scanner["python_callback_command_violation"](
+                helper_tree, modules, functions
+            )  # type: ignore[operator]
+        )
+
+    def test_current_vet_mutation_recipe_git_fixture_is_isolated(self) -> None:
+        body, marker = self.packet_heredoc_containing(
+            "reviewed_tree = subprocess.check_output(",
+            "git_env = {",
+            "GREEN 4005139662:",
+        )
+        self.assertIsNone(
+            self.scanner["inspect_python_heredoc"](body, marker),  # type: ignore[operator]
+            "current isolated synthetic Git/vet recipe must remain executable",
+        )
+
     def test_markdown_source_paths_cannot_escape_git_list_origin(self) -> None:
         body, marker = self.packet_heredoc_containing(
             'files = subprocess.check_output(',
@@ -3713,15 +3748,55 @@ class Issue79RegressionTests(unittest.TestCase):
                 'repository_root = Path.cwd().resolve()\n',
                 1,
             ),
+            "nested repository-root retarget": body.replace(
+                'for name in files:\n',
+                'def retarget_repository_root():\n'
+                '    global repository_root\n'
+                '    repository_root = Path("synthetic-private").resolve()\n'
+                'retarget_repository_root()\n'
+                'for name in files:\n',
+                1,
+            ),
             "loop variable rebound": body.replace(
                 '    source = Path(name)\n',
                 '    name = "experiments/g01-scaleset/.env"\n'
                 '    source = Path(name)\n',
                 1,
             ),
+            "lexical guard unreachable": body.replace(
+                '    if source.is_absolute() or ".." in source.parts:\n'
+                '        errors.append(f"{name}: tracked Markdown path was not relative")\n'
+                '        continue\n',
+                '    if False:\n'
+                '        if source.is_absolute() or ".." in source.parts:\n'
+                '            errors.append(f"{name}: tracked Markdown path was not relative")\n'
+                '            continue\n',
+                1,
+            ),
+            "symlink guard unreachable": body.replace(
+                '    if source.is_symlink():\n'
+                '        errors.append(f"{name}: tracked Markdown path was a symlink")\n'
+                '        continue\n',
+                '    if False:\n'
+                '        if source.is_symlink():\n'
+                '            errors.append(f"{name}: tracked Markdown path was a symlink")\n'
+                '            continue\n',
+                1,
+            ),
+            "symlink continue does not dominate": body.replace(
+                '    if source.is_symlink():\n'
+                '        errors.append(f"{name}: tracked Markdown path was a symlink")\n'
+                '        continue\n',
+                '    if source.is_symlink():\n'
+                '        if False:\n'
+                '            errors.append(f"{name}: tracked Markdown path was a symlink")\n'
+                '            continue\n',
+                1,
+            ),
         }
         for label, source in mutations.items():
             with self.subTest(mutation=label):
+                self.assertNotEqual(body, source, f"failed to construct {label} witness")
                 self.assertIsNotNone(
                     inspect(source, marker),  # type: ignore[operator]
                     f"Markdown read lost Git-list provenance after {label}",
