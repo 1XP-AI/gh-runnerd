@@ -13322,8 +13322,8 @@ def python_module_value_escape_violation(tree, parents, safe_marker):
                     return f"Python OS path module value escapes its reviewed attribute path on line {node.lineno}"
                 if parent.attr.startswith("__") or parent.attr == "expandvars":
                     return f"Python OS path reflection/environment expansion is not reviewed on line {node.lineno}"
-                call = parents.get(parent)
-                if not isinstance(call, ast.Call) or call.func is not parent:
+                path_member_call_node = parents.get(parent)
+                if not isinstance(path_member_call_node, ast.Call) or path_member_call_node.func is not parent:
                     return f"Python OS path member escapes its reviewed direct call on line {node.lineno}"
     for node in ast.walk(tree):
         if not isinstance(node, ast.Name) or not isinstance(node.ctx, ast.Load) or node.id not in names:
@@ -31705,3 +31705,17 @@ The previous `ddfdcfd` exact-head packet selector passed in 122.930s
 this subsequent delta. Final combined candidate packet verification,
 independent contract/security delta verdicts and fresh exact-head hosted/
 GitHub Codex review are still required.
+
+The completed GPT-6-Luna/max security delta report also retained HOLD on
+`ddfdcfd` for the same assigned path-module aliases, saved dictionary callable
+and environment expansion witnesses. Those are included in the six-witness
+correction above. Its complete prior namespace-pattern witness was refused;
+the broad coordinator checks were not duplicated by the reviewer.
+
+On `55412a05eba67366c074638509385427d2662dac`, the eight focused methods
+passed in 0.157s. The exact-head packet selector failed one assertion in
+107.128s: the scanner's new local AST variable named `call` collided with
+existing callback-name analysis of the scanner body itself. It is renamed
+`path_member_call_node` without changing the guard's semantics. This failed
+packet scan is not reported as GREEN; the subsequent exact-candidate scan
+and final delta verdicts are recorded in the PR when complete.
