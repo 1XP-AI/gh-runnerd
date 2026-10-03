@@ -9371,6 +9371,9 @@ def python_import_path_mutation_violation(tree):
 
 def python_credential_reader_aliases(tree):
     """Resolve only aliases of credential-bearing environment readers."""
+    cached = getattr(tree, "_issue79_credential_reader_aliases", None)
+    if cached is not None:
+        return cached
     reader_names = {
         "os.getenv",
         "os.getenvb",
@@ -9409,7 +9412,8 @@ def python_credential_reader_aliases(tree):
                 changed = True
         if not changed:
             break
-    return aliases
+    tree._issue79_credential_reader_aliases = frozenset(aliases)
+    return tree._issue79_credential_reader_aliases
 
 
 def python_lexical_scope_chain(scope, parents):
@@ -10846,10 +10850,53 @@ reviewed_python_compile_ast_names = {
 }
 reviewed_python_compile_slice_bases = reviewed_python_compile_source_names
 
+# Closed historical fixture inputs already named by the packet's reproductions.
+# Adding a revision changes this reviewed boundary; arbitrary Git objects do not.
+reviewed_python_compile_packet_revisions = {
+    "01764bbed0a387129d2a2abbc9e27a87e073f87e",
+    "055a05bd9d5a9bb101e4400dd7a9236e3afd9f48",
+    "13b463086a0e7aa710067cafb44dcd9aed118654",
+    "14f998f32710f122f5861edfac8fdbc89ef95bfb",
+    "1fc2cede68f2692de0fad7a18d6faf7810544845",
+    "21f258a4215c667c245abb44ea419eb7901de2ad",
+    "22a2923033c875ddd4f755774f79f60b94649449",
+    "2abe394ee32f09888892c4adea5fc08121845d6b",
+    "2d6a1f700e2fb3aa918f2166e4dd4611601b10be",
+    "390c89b5e431a165dfbf8fa986cbf2594e3444ce",
+    "393d029975139b9d28900d477f62e8de392ace96",
+    "3bc8445567fe68cc355cf3f88f0c962a41e9cad5",
+    "3c4eb91ba0dabce5ab29785e5da273d1734ae612",
+    "3f6de0b227e4b44aa3d5e259e937e7dc1f0856bb",
+    "423d4fc501120a014e63f77d3ef6652606d0326a",
+    "4bd66186ea8d980a06ed8a4adf7f51e76b5028ef",
+    "4ee7c855b1e79f9478e5cf73c270731dfbf58cf7",
+    "518f23c3c875bfda8c8c65239e5171d23c444fc6",
+    "5297b3c3b05afedf97723b7b58806cdd5519a2b6",
+    "5f42598b94ce5339c35f55be42eb108973850d24",
+    "6af854fb660bc7d9c31c9920a6cec5c2fbb1966d",
+    "6c55f5b67035fb1c7ac334984499cfe80d6bb86b",
+    "71a7a599de567914158b05e3c480f7e0d48c709f",
+    "755968f9b4343c860cd8ddeca12a97b277c6e1b5",
+    "7d91bed688dbea21bea7dff62f41d48d1d57ce4b",
+    "81787b2e90df496a9c5a51fddc7607d3019834b7",
+    "8958ec9a5c1e8de6c43d29e389a706f1c9ba75dd",
+    "8dfa9a031bc321f2ccc208104268f7c5ead9281b",
+    "943ebece04882a0faf055d73e5988bd8954088f8",
+    "b16a349509535d6dcb179c9c0bd7a6a313c48bcd",
+    "b85839cc801395f4ec9560b056a2a6706c7aa306",
+    "c9f986d0256e47aba7fd273c1ae03993193a39c8",
+    "ce417347aa100562722477ea1126a5cf6372ec3a",
+    "d85f99fa70a6f563079b1ed4f29a1bc97740a3c5",
+    "da1af0d041e37e5df9f3ed8028b51a69ec58ed8c",
+    "ec5eb8087420bbbbb2a8ccf5c5df190b3c644895",
+    "f44a4871f87c1a8165593549d58ece6ffee61bf2",
+    "f84113bf38dd77dacb5dd3ea9b6018c2f2d06471",
+}
+
 
 def python_compile_primitive_is_shadowed(name, tree, provider_call=None):
     """A matching call spelling does not establish a builtin/stdlib binding."""
-    module_aliases = python_assigned_module_names(tree, name) if name in {"ast", "subprocess", "pathlib"} else {name}
+    module_aliases = ({name} | python_assigned_module_names(tree, name)) if name in {"ast", "subprocess", "pathlib", "Path"} else {name}
     for candidate in ast.walk(tree):
         if (
             isinstance(candidate, ast.Name) and isinstance(candidate.ctx, ast.Store) and candidate.id == name
@@ -10884,6 +10931,13 @@ def python_compile_primitive_is_shadowed(name, tree, provider_call=None):
                     for part in ast.walk(target.value)
                 ):
                     return True
+        if (
+            isinstance(candidate, ast.Call) and candidate.args
+            and python_dotted_name(candidate.func) in {"setattr", "delattr", "builtins.setattr", "builtins.delattr"}
+            and any(isinstance(part, ast.Name) and part.id in module_aliases for part in ast.walk(candidate.args[0]))
+            and (provider_call is None or candidate.lineno <= provider_call.lineno)
+        ):
+            return True
     return False
 
 
@@ -10895,6 +10949,7 @@ def python_compile_provenance(tree):
     source_names = set()
     ast_names = set()
     packet_path_names = set()
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
 
     def target_names(target):
         if isinstance(target, ast.Name):
@@ -11015,6 +11070,7 @@ def python_compile_provenance(tree):
                 references = {reference} if reference is not None else set()
                 return bool(references) and all(
                     re.fullmatch(r"[0-9a-f]{40}:docs/evidence/g01-recovery-packet\.md", reference)
+                    and reference.split(":", 1)[0] in reviewed_python_compile_packet_revisions
                     for reference in references
                 )
         return False
@@ -11076,6 +11132,16 @@ def python_compile_provenance(tree):
             assignments.append((node.target, node.value))
         elif isinstance(node, ast.NamedExpr):
             assignments.append((node.target, node.value))
+        elif isinstance(node, ast.AugAssign):
+            assignments.append((node.target, None))
+    unsupported_source_binders = {
+        node.id for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+        and not (
+            isinstance(parents.get(node), ast.Assign) and node in parents[node].targets
+            or isinstance(parents.get(node), (ast.AnnAssign, ast.NamedExpr)) and parents[node].target is node
+        )
+    }
     tainted_packet_path_names = {
         name
         for target, value in assignments
@@ -11083,7 +11149,7 @@ def python_compile_provenance(tree):
         if name in packet_path_names and not packet_path_value(value)
     }
     packet_path_names.difference_update(tainted_packet_path_names)
-    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    packet_path_names.difference_update(unsupported_source_binders)
     source_parameter_rules = []
     for function in ast.walk(tree):
         if not isinstance(function, ast.FunctionDef):
@@ -11139,6 +11205,7 @@ def python_compile_provenance(tree):
             parameter for parameter, index, calls in source_parameter_rules
             if parameter in source_names and not source_parameter_is_proven(index, calls)
         )
+        invalidated_source_names.update(unsupported_source_binders.intersection(source_names))
         if not invalidated_source_names:
             break
         source_names.difference_update(invalidated_source_names)
@@ -11161,6 +11228,8 @@ def python_compile_provenance(tree):
             break
     ast_aliases = {name: set() for name in ast_names}
     for target, value in ast_bindings:
+        if value is None:
+            continue
         comprehension_bound_names = {
             bound for part in ast.walk(value) if isinstance(part, ast.comprehension)
             for bound in target_names(part.target)
@@ -11177,19 +11246,36 @@ def python_compile_provenance(tree):
                 ast_aliases[alias].add(dependency)
                 ast_aliases[dependency].add(alias)
 
-    def ast_receiver_names(value):
+    def ast_receiver_names(value, seen=None):
+        seen = seen or set()
+        if value is None or id(value) in seen:
+            return set()
+        seen = seen | {id(value)}
         if isinstance(value, ast.Name):
             current = parents.get(value)
             while current is not None:
                 if isinstance(current, (ast.ListComp, ast.DictComp, ast.SetComp, ast.GeneratorExp)):
-                    for generator in current.generators:
-                        if value.id in target_names(generator.target):
-                            return ast_receiver_names(generator.iter)
+                    matching = [
+                        generator for generator in current.generators
+                        if value.id in target_names(generator.target) and value not in ast.walk(generator.iter)
+                    ]
+                    if matching:
+                        return set().union(*(ast_receiver_names(generator.iter, seen) for generator in matching))
                 current = parents.get(current)
             return {value.id}.intersection(ast_aliases)
         if isinstance(value, (ast.Attribute, ast.Subscript)):
-            return ast_receiver_names(value.value)
-        return set()
+            if isinstance(value, ast.Attribute) and value.attr in {"name", "id", "arg", "attr", "lineno", "end_lineno", "col_offset", "end_col_offset"}:
+                return set()
+            return ast_receiver_names(value.value, seen)
+        if isinstance(value, ast.Call) and (
+            python_dotted_name(value.func) in {"ast.unparse", "ast.dump", "ast.literal_eval"}
+            or isinstance(value.func, ast.Name) and value.func.id in {"len", "isinstance", "any", "all"}
+            and not python_compile_primitive_is_shadowed(value.func.id, tree)
+            or isinstance(value.func, ast.Attribute) and value.func.attr == "keys"
+            and ast_value(value.func.value) and not value.args and not value.keywords
+        ):
+            return set()
+        return set().union(*(ast_receiver_names(child, seen) for child in ast.iter_child_nodes(value)))
 
     shadowed_ast_names = {
         candidate.arg for candidate in ast.walk(tree) if isinstance(candidate, ast.arg)
@@ -11206,7 +11292,7 @@ def python_compile_provenance(tree):
         for alias in candidate.names
     }
     readonly_primitive_names = {
-        name for name in {"isinstance", "len", "compile", "exec"}
+        name for name in {"isinstance", "len", "any", "all", "next", "compile", "exec"}
         if not python_compile_primitive_is_shadowed(name, tree)
     }
     while True:
@@ -32169,3 +32255,51 @@ changes a blocking boundary and needs fresh exact-candidate independent
 delta review; the prior HOLD is not approval of this correction. The
 already-running `6a7a17e` packet scan describes its captured older bytes,
 not this subsequent source change. No push or merge has occurred.
+
+The completed GPT-6-Luna/max security review of immutable `e378ba4`
+retained HOLD after isolated pinned-blob AST-only probes accepted six
+source/provider mutations: source, AST-body and parameter `+=`, a
+for-target packet-path rebind, an unrelated full-SHA Git provider and
+`setattr(Path, "read_text", fake)`. A multi-component Path read was
+already refused. The coordinator reproduced the six accepted forms in
+one canonical selector (six failed assertions, 0.136s).
+
+The completed contract follow-up on immutable `ef81a3e` passed six pinned
+methods in 2.358s, but retained HOLD for a duplicate-target comprehension
+whose inner target referred to the AST while receiver analysis stopped at
+the harmless outer target. The coordinator reproduced that case plus a
+wrapped AST argument (two failed assertions, 0.131s). Receiver analysis
+now unions the relevant comprehension origins and follows wrapped AST
+arguments with cycle protection. Proven scalar fields and unshadowed
+readonly builtin consumers do not falsely invalidate the real helpers.
+
+Augmented assignments invalidate source/AST proof; unsupported source/path
+binders cannot reuse an old literal read origin. Git compile providers now
+use a closed set of 38 immutable historical fixture inputs already named
+by the packet, not arbitrary full hashes. Adding one changes a reviewed
+boundary; membership is not approval to run all code in that snapshot.
+Primitive `setattr`/`delattr` changes are included in provider binding checks.
+An intermediate implementation failed with 134 errors from a parent-index
+initialization ordering mistake, then one assertion and ten errors from a
+missing-value mutation sentinel; those runs are not GREEN. Subsequent
+overly broad AST-consumer invalidation rejected ten helpers, then one,
+before the readonly controls were corrected. The final focused eight
+methods passed in 2.491s, including all 128 compiler calls, all ten local
+loader exports, mutation/provider denials and neighboring credential checks.
+
+The `6a7a17e` packet selector was explicitly interrupted after more than
+eight minutes of CPU work because its captured source was superseded and
+the scan substantially exceeded earlier 110–123s runs; exit was 130, not
+PASS. Only the coordinator-owned offline test process was interrupted.
+Its stack showed repeated credential-reader alias indexing in recursive
+taint analysis. A deterministic AST-walk-count regression failed in
+0.118s before caching and confirmed that an unchanged tree repeated two
+full walks. The alias result is now an immutable per-tree cache; seven
+focused methods passed in 1.352s with alias/import/credential-helper and
+AST controls unchanged. No wall-clock speedup or completed combined scan
+is claimed yet. The current source requires its own combined selector,
+fresh independent contract/security delta sign-off and exact pushed-head
+GitHub Codex/hosted gates. All preceding HOLD reports were delivered and
+processed; neither later implementation nor earlier focused GREEN is an
+independent approval. G01 and #79 remain incomplete; no live operation,
+new push or merge has occurred.

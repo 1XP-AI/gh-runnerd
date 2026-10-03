@@ -3492,6 +3492,24 @@ class Issue79RegressionTests(unittest.TestCase):
             with self.subTest(body=body):
                 self.assertIsNotNone(self.inspect(body))
 
+    def test_environment_reader_alias_index_is_reused_for_an_immutable_tree(self) -> None:
+        tree = ast.parse('import os\nreader = os.getenvb\nsecond = reader\n')
+        original_walk = ast.walk
+        walks = []
+        def counted_walk(node):
+            walks.append(id(node))
+            return original_walk(node)
+        try:
+            ast.walk = counted_walk
+            first = self.scanner["python_credential_reader_aliases"](tree)
+            self.assertEqual({"reader", "second"}, set(first))
+            count = len(walks)
+            second = self.scanner["python_credential_reader_aliases"](tree)
+            self.assertEqual(first, second)
+            self.assertEqual(count, len(walks), "unchanged AST must not rebuild the reader alias index")
+        finally:
+            ast.walk = original_walk
+
     def test_warning_sink_and_absolute_path_do_not_disclose_local_data(self) -> None:
         self.assertIsNotNone(self.inspect(
             'import os, warnings\nwarnings.showwarning(os.environ, UserWarning, "x", 1)\n'
@@ -3707,6 +3725,39 @@ class Issue79RegressionTests(unittest.TestCase):
         for specimen in specimens:
             with self.subTest(specimen=specimen):
                 self.assertIsNotNone(self.inspect(self.packet_ast_source_prefix() + specimen))
+
+    def test_augmented_assignment_and_forged_source_providers_invalidate_compile_proof(self) -> None:
+        prefix = self.packet_ast_source_prefix()
+        specimens = (
+            prefix + 'wrapper += "\\nprint(os.environ)"\nexec(compile(wrapper, "<probe>", "exec"), {"os": os})\n',
+            prefix + 'module.body += ast.parse("print(os.environ)").body\nexec(compile(module, "<probe>", "exec"), {"os": os})\n',
+            prefix + 'def execute(helper_source):\n    helper_source += "\\nprint(os.environ)"\n    exec(compile(helper_source, "<probe>", "exec"), {"os": os})\nexecute(wrapper)\n',
+            'import os\nfrom pathlib import Path\npacket_path = "docs/evidence/g01-recovery-packet.md"\n'
+            'for packet_path in ("outside",):\n    pass\nwrapper = Path(packet_path).read_text()\n'
+            'exec(compile(wrapper, "<probe>", "exec"), {"os": os})\n',
+            'import os, subprocess\nwrapper = subprocess.check_output(["git", "show", "'
+            + 'f' * 40 + ':docs/evidence/g01-recovery-packet.md"], text=True)\n'
+            'exec(compile(wrapper, "<probe>", "exec"), {"os": os})\n',
+            'import os\nfrom pathlib import Path\ndef fake(self):\n    return "print(os.environ)"\n'
+            'setattr(Path, "read_text", fake)\nwrapper = Path("docs/evidence/g01-recovery-packet.md").read_text()\n'
+            'exec(compile(wrapper, "<probe>", "exec"), {"os": os})\n',
+        )
+        for specimen in specimens:
+            with self.subTest(specimen=specimen):
+                self.assertIsNotNone(self.inspect(specimen))
+
+    def test_reused_comprehension_targets_and_wrapped_ast_arguments_keep_mutation_taint(self) -> None:
+        setup = self.packet_ast_source_prefix() + (
+            'def alter(value):\n    value.body = ast.parse("print(os.environ)").body\n'
+            'def alter_wrapped(values):\n    alter(values[0])\n'
+        )
+        for mutation in (
+            '[alter(node) for node in ["unused"] for node in [module]]\n',
+            'alter_wrapped([module])\n',
+        ):
+            with self.subTest(mutation=mutation):
+                self.assertIsNotNone(self.inspect(setup + mutation +
+                    'exec(compile(module, "<probe>", "exec"), {"os": os})\n'))
 
     def test_actual_packet_compile_helpers_retain_provenance(self) -> None:
         checked = 0
