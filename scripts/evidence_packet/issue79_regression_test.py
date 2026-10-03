@@ -3500,6 +3500,33 @@ class Issue79RegressionTests(unittest.TestCase):
             'from pathlib import Path\nprint(Path(".").absolute())\n'
         ))
 
+    def test_module_values_cannot_escape_through_containers_or_helpers(self) -> None:
+        unsafe = (
+            'import os\nmods = [os]\nprint(mods[0].environ)\n',
+            'import os\nmods = {"module": os}\nmods["module"].system("synthetic-command")\n',
+            'import shutil\nmods = [shutil]\nmods[0].rmtree("synthetic-owned")\n',
+            'import os\ndef module():\n    return os\nprint(module().environ)\n',
+            'import os\ndef identity(value):\n    return value\nprint(identity(os).environ)\n',
+            'import os\nmods = iter([os])\nprint(next(mods).environ)\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+        self.assertIsNone(self.inspect('import os\nprint("reviewed")\n'))
+        self.assertIsNone(self.inspect('import os\nalias = os\nprint("reviewed")\n'))
+
+    def test_warning_and_absolute_path_aliases_preserve_sensitive_values(self) -> None:
+        unsafe = (
+            'import os, warnings\nemit = warnings.showwarning\nemit(os.environ, UserWarning, "x", 1)\n',
+            'import os\nfrom warnings import showwarning as emit\nemit(os.environ, UserWarning, "x", 1)\n',
+            'from pathlib import Path\nabsolute = Path(".").absolute\nprint(absolute())\n',
+            'from pathlib import Path\nabsolute = getattr(Path("."), "absolute")\nprint(absolute())\n',
+            'import os\nalias = os\nprint(alias.environb)\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
     def test_bash_prompt_expansion_cannot_evaluate_credential_name(self) -> None:
         self.assertIsNotNone(self.shell_document_violation(
             "printf -v payload '%s%s' '$' 'GH_TOKEN'; printf '%s\\n' \"${payload@P}\""

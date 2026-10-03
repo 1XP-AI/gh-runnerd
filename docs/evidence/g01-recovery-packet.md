@@ -13143,7 +13143,7 @@ def python_unknown_os_call_violation(tree):
             and isinstance(node.value, ast.Name)
             and node.value.id in os_names
             and node.value.id != "os"
-            and node.attr in {"environ", "getenv"}
+            and node.attr in {"environ", "environb", "getenv", "getenvb"}
         ):
             return "Python heredoc accesses environment values through an OS module alias"
     for node in ast.walk(tree):
@@ -13172,6 +13172,47 @@ def python_unknown_os_call_violation(tree):
             "Python heredoc contains an unreviewed OS call with possible path/effect "
             f"surface {dotted!r} on line {node.lineno}"
         )
+    return None
+
+
+def python_module_value_escape_violation(tree, parents):
+    """Keep security-sensitive modules on direct, inspectable attribute paths."""
+    protected = {"os", "subprocess", "shutil", "signal", "sys", "pathlib", "warnings", "builtins", "importlib"}
+    names = {
+        alias.asname or alias.name.split(".")[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+        if alias.name.split(".")[0] in protected
+    }
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                targets, value = node.targets, node.value
+            elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
+                targets, value = [node.target], node.value
+            else:
+                continue
+            if isinstance(value, ast.Name) and value.id in names:
+                for target in targets:
+                    if isinstance(target, ast.Name) and target.id not in names:
+                        names.add(target.id)
+                        changed = True
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Name) or not isinstance(node.ctx, ast.Load) or node.id not in names:
+            continue
+        parent = parents.get(node)
+        if isinstance(parent, ast.Attribute) and parent.value is node:
+            continue
+        if isinstance(parent, ast.Assign) and parent.value is node and all(
+            isinstance(target, ast.Name) for target in parent.targets
+        ):
+            continue
+        if isinstance(parent, (ast.AnnAssign, ast.NamedExpr)) and parent.value is node and isinstance(parent.target, ast.Name):
+            continue
+        return f"Python security module value escapes its reviewed attribute path on line {node.lineno}"
     return None
 
 
@@ -14505,7 +14546,7 @@ def python_path_method_reference(value, method, tree):
         )
 
     if isinstance(value, ast.Attribute) and value.attr == method:
-        return is_path_constructor(value.value)
+        return method in {"resolve", "absolute"} or is_path_constructor(value.value)
     if isinstance(value, ast.NamedExpr):
         return python_path_method_reference(value.value, method, tree)
     if isinstance(value, ast.Call):
@@ -14516,7 +14557,7 @@ def python_path_method_reference(value, method, tree):
         return (
             is_getattr
             and len(value.args) in {2, 3}
-            and is_path_constructor(value.args[0])
+            and (method in {"resolve", "absolute"} or is_path_constructor(value.args[0]))
             and method in python_static_string_values(value.args[1], tree)
         )
     return False
@@ -14571,7 +14612,10 @@ def python_resolved_local_path_expression(
         is_path_cwd = python_path_method_expression_visible(
             node.func, "cwd", node, tree, parents
         )
-        if is_path_home or is_path_cwd:
+        if is_path_home or is_path_cwd or any(
+            python_path_method_expression_visible(node.func, method, node, tree, parents)
+            for method in ("resolve", "absolute")
+        ):
             return True
         if dotted == "os.path.expanduser" and node.args:
             return any(
@@ -14780,6 +14824,7 @@ def python_sensitive_output_sink(node, tree=None):
                 "sys.exit",
                 "warnings.warn",
                 "warnings.warn_explicit",
+                "warnings.showwarning",
                 "traceback.print_exc",
                 "traceback.print_exception",
             )
@@ -14797,7 +14842,7 @@ def python_sensitive_output_sink(node, tree=None):
             imported_functions = {
                 "builtins": {"print"},
                 "sys": {"exit"},
-                "warnings": {"warn", "warn_explicit"},
+                "warnings": {"warn", "warn_explicit", "showwarning"},
                 "traceback": {"print_exc", "print_exception"},
             }
             for candidate in ast.walk(tree):
@@ -16742,6 +16787,9 @@ def inspect_python_heredoc(body, safe_marker):
         for parent in ast.walk(tree)
         for child in ast.iter_child_nodes(parent)
     }
+    module_escape_violation = python_module_value_escape_violation(tree, parents)
+    if module_escape_violation:
+        return module_escape_violation
     sink_storage_violation = python_sensitive_sink_storage_violation(tree, parents)
     if sink_storage_violation:
         return sink_storage_violation
@@ -31356,3 +31404,34 @@ personal-path pattern scan found no matches. Separate post-ledger packet
 verification passed in 72.672s (331 shell commands, 95 Python heredocs,
 zero violations). Fresh exact-head hosted/Codex review remains pending; no
 trusted or live runner test ran.
+
+### Issue #79 correction of the completed `2390a54` Codex review
+
+Codex completed review of `2390a54e25065fb9856dc464fef902b3832f2b34`
+on 2026-09-28. Its four P1 findings are blocking until the corrected
+candidate receives independent review, a passing hosted quick check and a
+completed GitHub Codex review. The following specimens are inert AST inputs;
+none was executed with inherited environment values or real resources.
+
+| Finding at the reviewed input | Reproduction and correction |
+|---|---|
+| [Module values recovered from containers](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4127016661) | `test_module_values_cannot_escape_through_containers_or_helpers` reproduced six accepted bypasses: list/dict storage, a destructive-module container, helper returns, helper arguments and iterator recovery. Security-sensitive module values now remain on direct attribute paths or direct name aliases; storing/passing/returning them through unsupported dynamic paths is rejected before downstream certification. Direct unused imports and direct unused aliases remain accepted. |
+| [Warning output sink](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4127016664) | Direct `warnings.showwarning` was accepted before local correction `a6343f3`. Further RED cases reproduced assigned and from-import sink aliases. The direct, named-expression, assigned and imported sink tables now include `showwarning`. |
+| [Absolute local path output](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4127016674) | The direct `Path(".").absolute()` output was corrected in `a6343f3`; subsequent RED reproduced assigned and `getattr` method aliases. The existing lexical method resolver now recognizes `absolute` and `resolve` when tracking local-path output. Relative reviewed paths retain their existing positive controls. |
+| [Byte environment access](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4127016685) | Direct/from-import `environb` and imported `getenvb` each failed the new negative test before `a6343f3`. A subsequent RED reproduced `alias = os; print(alias.environb)`. Byte environment mappings/accessors now enter the same sensitivity boundary, including OS module aliases. |
+
+The initial local command `python3 -m unittest` with the two new test names
+failed with four assertions before `a6343f3`; its GREEN rerun passed both
+methods. The full local module invocation then passed 118 tests in 258.150s,
+including 331 shell commands and 95 Python heredocs with zero static scanner
+violations. That invocation was not the isolated ADR 0004 entry point.
+
+The later command `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest` with
+`test_module_values_cannot_escape_through_containers_or_helpers` and
+`test_warning_and_absolute_path_aliases_preserve_sensitive_values` failed
+with 11 assertions before their corrections. Its GREEN rerun, including the
+two earlier direct tests and the lexical-shadowing control, passed five
+methods in 0.123s. Results for the canonical isolated full invocation and
+independent review are recorded in the PR against the combined candidate
+when those gates settle. No live qualification result is claimed. Rollback is a reviewed reversal of this correction's
+packet/harness delta; the parent G01 and G02 live gates remain open.
