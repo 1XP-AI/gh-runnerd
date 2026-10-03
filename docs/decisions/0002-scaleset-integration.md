@@ -1,11 +1,17 @@
 # ADR 0002: Released Scale Set listener with independent reconciliation
 
-Status: **provisional integration selection; G01 remains unresolved** pending
-independent Luna max protocol review and authorized live contract evidence.
+Status: **provisional integration selection; independent offline protocol review
+approved on 2026-10-03; G01 closure and production G01/G02 remain unresolved.**
 
 Issue: [G01](https://github.com/1XP-AI/gh-runnerd/issues/1).
 Checked: 2026-09-07. See [measured offline evidence](../evidence/g01-contract.md)
 and [required live experiment](../evidence/g01-live-canary.md).
+
+The review is limited to the offline evidence and this provisional selection; it
+does not satisfy the authorized live canary, sanitized live evidence or safe-drain
+gate. See the [independent protocol review](../evidence/g01-contract.md#independent-protocol-review-2026-10-03),
+[full review comment](https://github.com/1XP-AI/gh-runnerd/issues/1#issuecomment-5967217026)
+and [focused-test supplement](https://github.com/1XP-AI/gh-runnerd/issues/1#issuecomment-5967258854).
 
 ## Decision
 
