@@ -11159,10 +11159,10 @@ def python_compile_provenance(tree):
             if isinstance(candidate, ast.Name) and isinstance(candidate.ctx, ast.Load)
             and candidate.id == function.name
         ]
-        calls = [parents.get(use) for use in uses]
-        direct_only = bool(calls) and not function.decorator_list and all(
-            isinstance(call, ast.Call) and call.func is use
-            for use, call in zip(uses, calls)
+        compile_source_call_nodes = [parents.get(use) for use in uses]
+        direct_only = bool(compile_source_call_nodes) and not function.decorator_list and all(
+            isinstance(compile_source_call_node, ast.Call) and compile_source_call_node.func is use
+            for use, compile_source_call_node in zip(uses, compile_source_call_nodes)
         ) and sum(
             isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
             and candidate.name == function.name for candidate in ast.walk(tree)
@@ -11173,12 +11173,13 @@ def python_compile_provenance(tree):
             for candidate in ast.walk(tree)
         )
         for index, parameter in enumerate(list(function.args.posonlyargs) + list(function.args.args)):
-            source_parameter_rules.append((parameter.arg, index, calls if direct_only else []))
+            source_parameter_rules.append((parameter.arg, index, compile_source_call_nodes if direct_only else []))
 
-    def source_parameter_is_proven(index, calls):
-        return bool(calls) and all(
-            not call.keywords and index < len(call.args) and source_value(call.args[index])
-            for call in calls
+    def source_parameter_is_proven(index, compile_source_call_nodes):
+        return bool(compile_source_call_nodes) and all(
+            not compile_source_call_node.keywords and index < len(compile_source_call_node.args)
+            and source_value(compile_source_call_node.args[index])
+            for compile_source_call_node in compile_source_call_nodes
         )
 
     for _ in range(len(assignments) + 1):
@@ -11190,8 +11191,8 @@ def python_compile_provenance(tree):
                     if name not in source_names:
                         source_names.add(name)
                         changed = True
-        for parameter, index, calls in source_parameter_rules:
-            if parameter not in source_names and source_parameter_is_proven(index, calls):
+        for parameter, index, compile_source_call_nodes in source_parameter_rules:
+            if parameter not in source_names and source_parameter_is_proven(index, compile_source_call_nodes):
                 source_names.add(parameter)
                 changed = True
         if not changed:
@@ -11202,8 +11203,8 @@ def python_compile_provenance(tree):
             if name in source_names and not source_value(value)
         }
         invalidated_source_names.update(
-            parameter for parameter, index, calls in source_parameter_rules
-            if parameter in source_names and not source_parameter_is_proven(index, calls)
+            parameter for parameter, index, compile_source_call_nodes in source_parameter_rules
+            if parameter in source_names and not source_parameter_is_proven(index, compile_source_call_nodes)
         )
         invalidated_source_names.update(unsupported_source_binders.intersection(source_names))
         if not invalidated_source_names:
@@ -32303,3 +32304,13 @@ GitHub Codex/hosted gates. All preceding HOLD reports were delivered and
 processed; neither later implementation nor earlier focused GREEN is an
 independent approval. G01 and #79 remain incomplete; no live operation,
 new push or merge has occurred.
+
+At immutable `85dcf4bd38a0233bfc7f64e6f2ace6f30975fe1b`, the combined
+24-method focused group passed in 2.604s (including 128 helper calls and
+ten loaders). The packet selector completed in 46.499s but failed one
+assertion: the new comprehension variable named `call` collided with
+existing callback-target analysis of the scanner body itself. It is renamed
+to `compile_source_call_node` (and the corresponding call list) without
+changing the source-binding rule. This is not a passing combined scan;
+the renamed source still needs its own selector and exact-head delta
+review. The 38-SHA fixture allowlist and mutable-AST guards are unchanged.
