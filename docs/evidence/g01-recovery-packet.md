@@ -10940,14 +10940,25 @@ def python_compile_primitive_is_shadowed(name, tree, provider_call=None):
             return any(provider_value_borrows_class(element, seen) for element in value.values)
         if isinstance(value, ast.IfExp):
             return any(provider_value_borrows_class(element, seen) for element in (value.body, value.orelse))
+        if isinstance(value, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            return any(provider_value_borrows_class(generator.iter, seen) for generator in value.generators)
         if isinstance(value, ast.Call):
             return (
                 isinstance(value.func, ast.Attribute)
-                and value.func.attr in {"get", "pop", "popitem", "copy", "items", "values", "__getitem__"}
+                and value.func.attr in {"get", "pop", "popitem", "copy", "items", "values", "__getitem__", "__iter__", "__next__"}
                 and provider_value_borrows_class(value.func.value, seen)
             ) or (
                 isinstance(value.func, ast.Name) and value.func.id in {"next", "iter"}
                 and any(provider_value_borrows_class(argument, seen) for argument in value.args)
+            ) or (
+                isinstance(value.func, ast.Name) and id(value.func) not in seen
+                and any(
+                    provider_value_borrows_class(
+                        ast.copy_location(ast.Call(func=provider_bound_callable, args=value.args, keywords=value.keywords), value),
+                        seen | {id(value.func)},
+                    )
+                    for provider_bound_callable in provider_bindings.get(value.func.id, ()) if provider_bound_callable is not None
+                )
             ) or any(
                 provider_value_borrows_class(returned, seen)
                 for returned in python_local_call_return_values(value, tree, class_borrow_parents)
@@ -32645,3 +32656,36 @@ The old contract approval and packet PASS apply to `70b29ce`, not this changed
 source. A new exact-candidate packet result and focused independent delta
 dispositions remain required before pushing. Unsafe examples stayed AST
 data; no full current harness, hosted Python, merge or live evidence is claimed.
+
+Immutable `6e41c63251022fae86f09dd696018576c75a44e2` passed the packet
+selector in 53.179s (331 shell commands, 95 Python bodies, zero violations),
+but both completed GPT-6-Luna/max focused reviews retained HOLD for saved
+container-method aliases. Direct `get`/`pop`, helper return and prior forms
+were refused; storing a bound reader as a callable lost its receiver origin.
+The security review also accepted a generator/`next` class borrow. The
+contract reviewer passed the pinned provider selector in 0.143s and checked
+that the `Path.cwd()` instance control did not acquire class mutation taint.
+Both reports were processed, released without a process action and acked;
+their statements that packet evidence was still pending describe their last
+inbox read, not the coordinator's subsequently completed result above.
+
+The canonical provider method reproduced saved `get`/`pop` in 0.165s
+(two failed assertions), then generator-next, comprehension-pop and saved
+iterator forms in 0.181s (five failed assertions total). A cyclic saved-reader
+alias produced a six-assertion RED group in 0.192s. All specimens remained
+AST data. Class borrowing now includes comprehension/iterator origins and
+statically expands assigned callable bindings into synthetic call AST nodes,
+with the original callable-node identity in the cycle guard. Those synthetic
+nodes are inspected, never evaluated or used as certified compiler input.
+Ordinary Path construction remains an instance, not a class borrow.
+
+The eight-method boundary group passed in 5.259s after correction; a final
+provider-local callable name disambiguation then passed five focused methods
+in 5.210s. Both groups include all 128 actual compiler-helper calls and ten
+historical loader controls. The five final selectors are the provider-alias,
+deferred-Git, opaque-AST-receiver, actual-helper and historical-loader methods
+already named above. The changed candidate requires its own packet selector
+and fresh exact-head contract/security delta dispositions. Previous HOLDs
+and older packet passes are not approval of this correction. No new push,
+GitHub Codex request, merge or live operation occurred; #79 and parent #1
+remain In progress, with G01/G02 production and live gates unchanged.
