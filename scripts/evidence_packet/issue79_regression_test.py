@@ -3621,6 +3621,149 @@ class Issue79RegressionTests(unittest.TestCase):
             with self.subTest(body=body):
                 self.assertIsNotNone(self.inspect(body))
 
+    def packet_ast_source_prefix(self) -> str:
+        return (
+            'import ast, os\nfrom pathlib import Path\n'
+            'packet = Path("docs/evidence/g01-recovery-packet.md").read_text()\n'
+            'wrapper_start = packet.index("\\nimport hashlib\\n") + 1\n'
+            'wrapper_end = packet.index("\\nPY\\n}", wrapper_start)\n'
+            'wrapper = packet[wrapper_start:wrapper_end]\n'
+            'module = ast.parse(wrapper)\n'
+        )
+
+    def test_packet_derived_ast_helper_selection_remains_supported(self) -> None:
+        suffixes = (
+            'functions = {node.name: node for node in module.body '
+            'if isinstance(node, ast.FunctionDef)}\n'
+            'namespace = {"os": os}\n'
+            'exec(compile(ast.Module(body=[functions["run_go_child"]], type_ignores=[]), '
+            '"<probe>", "exec"), namespace)\n',
+            'selected = []\nfor node in module.body:\n'
+            '    if isinstance(node, ast.FunctionDef) and node.name == "run_go_child":\n'
+            '        selected.append(node)\n'
+            'namespace = {"os": os}\n'
+            'exec(compile(ast.Module(body=selected, type_ignores=[]), '
+            '"<probe>", "exec"), namespace)\n',
+        )
+        for suffix in suffixes:
+            with self.subTest(suffix=suffix):
+                self.assertIsNone(self.inspect(self.packet_ast_source_prefix() + suffix))
+
+    def test_ast_compile_provenance_is_invalidated_by_unreviewed_mutation(self) -> None:
+        suffixes = (
+            'functions = {node.name: node for node in module.body '
+            'if isinstance(node, ast.FunctionDef)}\n'
+            'functions["run_go_child"] = ast.parse("print(os.environ)").body[0]\n'
+            'namespace = {"os": os}\n'
+            'exec(compile(ast.Module(body=[functions["run_go_child"]], type_ignores=[]), '
+            '"<probe>", "exec"), namespace)\n',
+            'selected = []\nfor node in module.body:\n    selected.append(node)\n'
+            'selected.append(ast.parse("print(os.environ)").body[0])\n'
+            'namespace = {"os": os}\n'
+            'exec(compile(ast.Module(body=selected, type_ignores=[]), '
+            '"<probe>", "exec"), namespace)\n',
+            'changed = wrapper\nchanged = "print(os.environ)"\n'
+            'module = ast.parse(changed)\nnamespace = {"os": os}\n'
+            'exec(compile(module, "<probe>", "exec"), namespace)\n',
+        )
+        for suffix in suffixes:
+            with self.subTest(suffix=suffix):
+                self.assertIsNotNone(self.inspect(self.packet_ast_source_prefix() + suffix))
+
+    def test_compile_provenance_does_not_leak_across_parameters_or_opaque_calls(self) -> None:
+        specimens = (
+            self.packet_ast_source_prefix() +
+            'def execute(wrapper):\n    exec(compile(wrapper, "<probe>", "exec"), {"os": os})\n'
+            'execute("print(os.environ)")\n',
+            self.packet_ast_source_prefix() +
+            'def execute(helper_source):\n    exec(compile(helper_source, "<probe>", "exec"), {"os": os})\n'
+            'callback = execute\nexecute(wrapper)\ncallback("print(os.environ)")\n',
+            self.packet_ast_source_prefix() +
+            'def alter(value):\n    value.body = ast.parse("print(os.environ)").body\n'
+            'alter(module)\nexec(compile(module, "<probe>", "exec"), {"os": os})\n',
+        )
+        for specimen in specimens:
+            with self.subTest(specimen=specimen):
+                self.assertIsNotNone(self.inspect(specimen))
+
+    def test_source_replacement_cannot_inject_an_unreviewed_program(self) -> None:
+        specimen = self.packet_ast_source_prefix() + (
+            'wrapper = wrapper.replace("", "print(os.environ)\\n", 1)\n'
+            'exec(compile(wrapper, "<probe>", "exec"), {"os": os})\n'
+        )
+        self.assertIsNotNone(self.inspect(specimen))
+
+    def test_actual_packet_compile_helpers_retain_provenance(self) -> None:
+        checked = 0
+        for number, body, safe_marker, _ in self.scanner["python_heredoc_bodies"](PACKET_TEXT):
+            tree = ast.parse(body, filename="<packet-helper-data>")
+            for node in ast.walk(tree):
+                if not (
+                    isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == "exec" and node.args
+                    and isinstance(node.args[0], ast.Call)
+                    and isinstance(node.args[0].func, ast.Name)
+                    and node.args[0].func.id == "compile"
+                ):
+                    continue
+                checked += 1
+                with self.subTest(packet_line=number, body_line=node.lineno):
+                    self.assertTrue(self.scanner["reviewed_python_exec_call"](node, safe_marker, tree))
+        self.assertGreater(checked, 0)
+        print(f"packet compile-source boundary: {checked} actual helper calls checked")
+
+    def test_ast_alias_and_nested_mutations_invalidate_helper_origins(self) -> None:
+        mutations = (
+            'alias = functions\nalias["run_go_child"] = ast.parse("print(os.environ)").body[0]\n',
+            'helper = functions["run_go_child"]\nhelper.body = ast.parse("print(os.environ)").body\n',
+            'functions["run_go_child"].body = ast.parse("print(os.environ)").body\n',
+            'put = functions.update\nput({"run_go_child": ast.parse("print(os.environ)").body[0]})\n',
+            'helper = functions["run_go_child"]\nsetattr(helper, "body", ast.parse("print(os.environ)").body)\n',
+        )
+        setup = self.packet_ast_source_prefix() + (
+            'functions = {node.name: node for node in module.body '
+            'if isinstance(node, ast.FunctionDef)}\n'
+        )
+        suffix = (
+            'namespace = {"os": os}\n'
+            'exec(compile(ast.Module(body=[functions["run_go_child"]], type_ignores=[]), '
+            '"<probe>", "exec"), namespace)\n'
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                self.assertIsNotNone(self.inspect(setup + mutation + suffix))
+
+    def test_ast_providers_cannot_be_forged_by_markers_or_monkeypatch(self) -> None:
+        bodies = (
+            'import ast, os, subprocess\n'
+            'packet = subprocess.check_output(["printf", '
+            '"print(os.environ) # docs/evidence/g01-recovery-packet.md"], text=True)\n'
+            'module = ast.parse(packet)\nnamespace = {"os": os}\n'
+            'exec(compile(module, "<probe>", "exec"), namespace)\n',
+            self.packet_ast_source_prefix() +
+            'def fake(value):\n    return None\nast.parse = fake\n'
+            'module = ast.parse(wrapper)\nnamespace = {"os": os}\n'
+            'exec(compile(module, "<probe>", "exec"), namespace)\n',
+        )
+        for body in bodies:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+    def test_compile_primitives_and_source_parameters_need_proven_bindings(self) -> None:
+        bodies = (
+            self.packet_ast_source_prefix() +
+            'exec = eval\nnamespace = {}\n'
+            'exec(compile(module, "<probe>", "exec"), namespace)\n',
+            'def check(helper_source):\n'
+            '    marker = \'source = Path("docs/evidence/g01-recovery-packet.md")\'\n'
+            '    tail = "matches = []"\n'
+            '    exec(compile(helper_source, "<probe>", "exec"), {})\n'
+            'check("print(__import__(\\\"os\\\").environ)")\n',
+        )
+        for body in bodies:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
     def test_bash_prompt_expansion_cannot_evaluate_credential_name(self) -> None:
         self.assertIsNotNone(self.shell_document_violation(
             "printf -v payload '%s%s' '$' 'GH_TOKEN'; printf '%s\\n' \"${payload@P}\""

@@ -10847,8 +10847,51 @@ reviewed_python_compile_ast_names = {
 reviewed_python_compile_slice_bases = reviewed_python_compile_source_names
 
 
+def python_compile_primitive_is_shadowed(name, tree, provider_call=None):
+    """A matching call spelling does not establish a builtin/stdlib binding."""
+    module_aliases = python_assigned_module_names(tree, name) if name in {"ast", "subprocess", "pathlib"} else {name}
+    for candidate in ast.walk(tree):
+        if (
+            isinstance(candidate, ast.Name) and isinstance(candidate.ctx, ast.Store) and candidate.id == name
+            or isinstance(candidate, ast.arg) and candidate.arg == name
+            or isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and candidate.name == name
+            or isinstance(candidate, ast.MatchMapping) and candidate.rest == name
+        ):
+            return True
+        if isinstance(candidate, (ast.Import, ast.ImportFrom)):
+            for imported in candidate.names:
+                binding = imported.asname or imported.name.split(".")[0]
+                if binding != name:
+                    continue
+                genuine = (
+                    isinstance(candidate, ast.Import) and imported.name == name
+                    and name in {"ast", "subprocess", "pathlib"}
+                ) or (
+                    isinstance(candidate, ast.ImportFrom) and candidate.module == "pathlib"
+                    and imported.name == name == "Path"
+                )
+                if not genuine:
+                    return True
+        if isinstance(candidate, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+            if provider_call is not None and candidate.lineno > provider_call.lineno:
+                continue
+            targets = candidate.targets if isinstance(candidate, ast.Assign) else [candidate.target]
+            for target in targets:
+                if name == "subprocess" and isinstance(target, ast.Attribute) and target.attr != "check_output":
+                    continue
+                if isinstance(target, (ast.Attribute, ast.Subscript)) and any(
+                    isinstance(part, ast.Name) and part.id in module_aliases
+                    for part in ast.walk(target.value)
+                ):
+                    return True
+    return False
+
+
 def python_compile_provenance(tree):
     """Resolve source/AST provenance before permitting static compile/exec."""
+    cached = getattr(tree, "_issue79_compile_provenance", None)
+    if cached is not None:
+        return cached
     source_names = set()
     ast_names = set()
     packet_path_names = set()
@@ -10867,7 +10910,7 @@ def python_compile_provenance(tree):
         return any(
             isinstance(candidate, ast.Constant)
             and isinstance(candidate.value, str)
-            and "docs/evidence/g01-recovery-packet.md" in candidate.value
+            and candidate.value == "docs/evidence/g01-recovery-packet.md"
             for candidate in ast.walk(node)
         ) or any(
             isinstance(candidate, ast.Name) and candidate.id in packet_path_names
@@ -10878,7 +10921,7 @@ def python_compile_provenance(tree):
         literal_path = (
             isinstance(value, ast.Constant)
             and isinstance(value.value, str)
-            and "docs/evidence/g01-recovery-packet.md" in value.value
+            and value.value == "docs/evidence/g01-recovery-packet.md"
         )
         path_constructor = (
             isinstance(value, ast.Call)
@@ -10895,21 +10938,6 @@ def python_compile_provenance(tree):
             continue
         packet_path_names.update(target_names(node.targets[0]))
 
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        literals = {
-            candidate.value
-            for candidate in ast.walk(node)
-            if isinstance(candidate, ast.Constant)
-            and isinstance(candidate.value, str)
-        }
-        if (
-            any('source = Path("docs/evidence/g01-recovery-packet.md")' in value for value in literals)
-            and any("matches = []" in value for value in literals)
-        ):
-            source_names.update(argument.arg for argument in node.args.args)
-
     def source_value(node):
         if isinstance(node, ast.Name):
             return node.id in source_names
@@ -10923,9 +10951,17 @@ def python_compile_provenance(tree):
                 isinstance(node.func, ast.Attribute)
                 and node.func.attr == "replace"
             ):
-                return source_value(node.func.value)
+                return (
+                    source_value(node.func.value) and not node.keywords and len(node.args) == 3
+                    and all(isinstance(argument, ast.Constant) for argument in node.args)
+                    and node.args[0].value == 'source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")'
+                    and node.args[1].value in {'source = ""', 'source = packet'}
+                    and type(node.args[2].value) is int and node.args[2].value == 1
+                )
             if isinstance(node.func, ast.Attribute) and node.func.attr == "read_text":
                 receiver = node.func.value
+                if python_compile_primitive_is_shadowed("Path", tree) or python_compile_primitive_is_shadowed("pathlib", tree):
+                    return False
                 return (
                     isinstance(receiver, ast.Call)
                     and python_dotted_name(receiver.func) in {"Path", "pathlib.Path"}
@@ -10936,16 +10972,99 @@ def python_compile_provenance(tree):
                     and receiver.id in packet_path_names
                 )
             if dotted == "subprocess.check_output":
-                return contains_packet_path(node)
+                if python_compile_primitive_is_shadowed("subprocess", tree, node) or not node.args:
+                    return False
+                command = node.args[0]
+                if not isinstance(command, (ast.List, ast.Tuple)) or len(command.elts) not in {3, 4}:
+                    return False
+                prefix = [part.value if isinstance(part, ast.Constant) else None for part in command.elts[:-1]]
+                if prefix not in (["git", "show"], ["git", "-P", "show"]):
+                    return False
+                def literal_reference(value, seen=None):
+                    seen = seen or set()
+                    if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                        return value.value
+                    if isinstance(value, ast.Name) and value.id not in seen:
+                        bindings = [
+                            candidate for candidate in ast.walk(tree)
+                            if isinstance(candidate, ast.Name) and isinstance(candidate.ctx, ast.Store)
+                            and candidate.id == value.id
+                        ]
+                        definitions = [
+                            candidate.value for candidate in ast.walk(tree)
+                            if isinstance(candidate, ast.Assign) and len(candidate.targets) == 1
+                            and isinstance(candidate.targets[0], ast.Name) and candidate.targets[0].id == value.id
+                        ]
+                        if len(bindings) == len(definitions) == 1:
+                            return literal_reference(definitions[0], seen | {value.id})
+                    if isinstance(value, ast.JoinedStr):
+                        parts = []
+                        for part in value.values:
+                            if isinstance(part, ast.FormattedValue):
+                                if part.conversion != -1 or part.format_spec is not None:
+                                    return None
+                                part = part.value
+                            resolved = literal_reference(part, seen.copy())
+                            if resolved is None:
+                                return None
+                            parts.append(resolved)
+                        return "".join(parts)
+                    return None
+                reference = literal_reference(command.elts[-1])
+                references = {reference} if reference is not None else set()
+                return bool(references) and all(
+                    re.fullmatch(r"[0-9a-f]{40}:docs/evidence/g01-recovery-packet\.md", reference)
+                    for reference in references
+                )
         return False
 
-    def ast_value(node):
+    ast_is_shadowed = python_compile_primitive_is_shadowed("ast", tree)
+
+    def ast_value(node, local_names=None):
+        local_names = local_names or set()
         if isinstance(node, ast.Name):
-            return node.id in ast_names
+            return node.id in ast_names or node.id in local_names
+        if isinstance(node, ast.Attribute):
+            return node.attr == "body" and ast_value(node.value, local_names)
+        if isinstance(node, ast.Subscript):
+            return ast_value(node.value, local_names)
         if isinstance(node, ast.Call):
-            return python_dotted_name(node.func) in {"ast.parse", "ast.Module"}
+            dotted = python_dotted_name(node.func)
+            if ast_is_shadowed:
+                return False
+            if dotted == "ast.parse":
+                return bool(node.args) and source_value(node.args[0])
+            if dotted == "ast.walk":
+                return len(node.args) == 1 and ast_value(node.args[0], local_names)
+            if dotted == "ast.Module" and not node.args:
+                keywords = {keyword.arg: keyword.value for keyword in node.keywords}
+                return (
+                    set(keywords) == {"body", "type_ignores"}
+                    and isinstance(keywords["type_ignores"], ast.List)
+                    and not keywords["type_ignores"].elts
+                    and ast_value(keywords["body"], local_names)
+                )
+            return False
         if isinstance(node, (ast.List, ast.Tuple)):
-            return bool(node.elts) and all(ast_value(element) for element in node.elts)
+            return all(ast_value(element, local_names) for element in node.elts)
+        if isinstance(node, ast.Dict):
+            return all(key is not None for key in node.keys) and all(
+                ast_value(element, local_names) for element in node.values
+            )
+        if isinstance(node, (ast.ListComp, ast.DictComp)):
+            bound_names = set(local_names)
+            for generator in node.generators:
+                ast_iterable = ast_value(generator.iter, bound_names)
+                literal_keys = isinstance(generator.iter, (ast.List, ast.Tuple, ast.Set)) and all(
+                    isinstance(element, ast.Constant) and isinstance(element.value, str)
+                    for element in generator.iter.elts
+                )
+                if generator.is_async or not (ast_iterable or literal_keys):
+                    return False
+                if ast_iterable:
+                    bound_names.update(target_names(generator.target))
+            element = node.value if isinstance(node, ast.DictComp) else node.elt
+            return ast_value(element, bound_names)
         return False
 
     assignments = []
@@ -10963,6 +11082,38 @@ def python_compile_provenance(tree):
         if name in packet_path_names and not packet_path_value(value)
     }
     packet_path_names.difference_update(tainted_packet_path_names)
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    source_parameter_rules = []
+    for function in ast.walk(tree):
+        if not isinstance(function, ast.FunctionDef):
+            continue
+        uses = [
+            candidate for candidate in ast.walk(tree)
+            if isinstance(candidate, ast.Name) and isinstance(candidate.ctx, ast.Load)
+            and candidate.id == function.name
+        ]
+        calls = [parents.get(use) for use in uses]
+        direct_only = bool(calls) and not function.decorator_list and all(
+            isinstance(call, ast.Call) and call.func is use
+            for use, call in zip(uses, calls)
+        ) and sum(
+            isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and candidate.name == function.name for candidate in ast.walk(tree)
+        ) == 1 and not any(
+            isinstance(candidate, (ast.Name, ast.arg))
+            and (candidate.id if isinstance(candidate, ast.Name) else candidate.arg) == function.name
+            and (not isinstance(candidate, ast.Name) or isinstance(candidate.ctx, ast.Store))
+            for candidate in ast.walk(tree)
+        )
+        for index, parameter in enumerate(list(function.args.posonlyargs) + list(function.args.args)):
+            source_parameter_rules.append((parameter.arg, index, calls if direct_only else []))
+
+    def source_parameter_is_proven(index, calls):
+        return bool(calls) and all(
+            not call.keywords and index < len(call.args) and source_value(call.args[index])
+            for call in calls
+        )
+
     for _ in range(len(assignments) + 1):
         changed = False
         for target, value in assignments:
@@ -10972,28 +11123,134 @@ def python_compile_provenance(tree):
                     if name not in source_names:
                         source_names.add(name)
                         changed = True
+        for parameter, index, calls in source_parameter_rules:
+            if parameter not in source_names and source_parameter_is_proven(index, calls):
+                source_names.add(parameter)
+                changed = True
+        if not changed:
+            break
+    while True:
+        invalidated_source_names = {
+            name for target, value in assignments for name in target_names(target)
+            if name in source_names and not source_value(value)
+        }
+        invalidated_source_names.update(
+            parameter for parameter, index, calls in source_parameter_rules
+            if parameter in source_names and not source_parameter_is_proven(index, calls)
+        )
+        if not invalidated_source_names:
+            break
+        source_names.difference_update(invalidated_source_names)
+
+    ast_bindings = list(assignments)
+    ast_bindings.extend(
+        (candidate.target, candidate.iter)
+        for candidate in ast.walk(tree)
+        if isinstance(candidate, ast.For)
+    )
+    for _ in range(len(ast_bindings) + 1):
+        changed = False
+        for target, value in ast_bindings:
             if ast_value(value):
-                for name in names:
+                for name in target_names(target):
                     if name not in ast_names:
                         ast_names.add(name)
                         changed = True
         if not changed:
             break
-    invalidated_source_names = {
-        name
-        for target, value in assignments
-        for name in target_names(target)
-        if name in source_names and not source_value(value)
-    }
-    invalidated_ast_names = {
-        name
-        for target, value in assignments
-        for name in target_names(target)
-        if name in ast_names and not ast_value(value)
-    }
-    source_names.difference_update(invalidated_source_names)
-    ast_names.difference_update(invalidated_ast_names)
-    return source_names, ast_names
+    ast_aliases = {name: set() for name in ast_names}
+    for target, value in ast_bindings:
+        comprehension_bound_names = {
+            bound for part in ast.walk(value) if isinstance(part, ast.comprehension)
+            for bound in target_names(part.target)
+        }
+        dependencies = {
+            part.id for part in ast.walk(value)
+            if isinstance(part, ast.Name) and isinstance(part.ctx, ast.Load) and part.id in ast_names
+            and part.id not in comprehension_bound_names
+        }
+        for alias in target_names(target):
+            if alias not in ast_aliases:
+                continue
+            for dependency in dependencies:
+                ast_aliases[alias].add(dependency)
+                ast_aliases[dependency].add(alias)
+
+    def ast_receiver_names(value):
+        if isinstance(value, ast.Name):
+            return {value.id}.intersection(ast_aliases)
+        if isinstance(value, (ast.Attribute, ast.Subscript)):
+            return ast_receiver_names(value.value)
+        return set()
+
+    while True:
+        invalidated_ast_names = {
+            name for target, value in ast_bindings for name in target_names(target)
+            if name in ast_names and not ast_value(value)
+        }
+        mutated_ast_names = set()
+        for target, value in assignments:
+            if isinstance(target, (ast.Subscript, ast.Attribute)):
+                if not isinstance(target, ast.Subscript) or not ast_value(value):
+                    mutated_ast_names.update(ast_receiver_names(target.value))
+        for candidate in ast.walk(tree):
+            if isinstance(candidate, ast.Call) and python_dotted_name(candidate.func) not in {
+                "ast.parse", "ast.walk", "ast.Module", "ast.dump", "ast.literal_eval", "ast.unparse",
+                "isinstance", "len", "compile", "exec",
+            } and not (
+                isinstance(candidate.func, ast.Attribute)
+                and candidate.func.attr in {"append", "extend", "insert", "update", "setdefault", "__setitem__", "__setattr__"}
+                and ast_receiver_names(candidate.func.value)
+                and not candidate.keywords
+                and all(ast_value(argument) for argument in candidate.args)
+            ) and not (
+                isinstance(candidate.func, ast.Attribute) and candidate.func.attr == "issubset"
+                and isinstance(candidate.func.value, ast.Name)
+                and sum(
+                    isinstance(part, ast.Name) and isinstance(part.ctx, ast.Store)
+                    and part.id == candidate.func.value.id for part in ast.walk(tree)
+                ) == 1
+                and any(
+                    isinstance(target, ast.Name) and target.id == candidate.func.value.id
+                    and isinstance(value, ast.Set)
+                    and all(isinstance(element, ast.Constant) and isinstance(element.value, str) for element in value.elts)
+                    for target, value in assignments
+                )
+            ):
+                for argument in candidate.args:
+                    mutated_ast_names.update(ast_receiver_names(argument))
+                for keyword in candidate.keywords:
+                    mutated_ast_names.update(ast_receiver_names(keyword.value))
+            if isinstance(candidate, ast.Attribute) and candidate.attr in {"append", "extend", "insert", "update", "setdefault", "__setitem__", "__setattr__"}:
+                parent = parents.get(candidate)
+                if not isinstance(parent, ast.Call) or parent.func is not candidate:
+                    mutated_ast_names.update(ast_receiver_names(candidate.value))
+            if (
+                isinstance(candidate, ast.Call) and isinstance(candidate.func, ast.Name)
+                and candidate.func.id in {"setattr", "delattr"} and candidate.args
+            ):
+                mutated_ast_names.update(ast_receiver_names(candidate.args[0]))
+            if not (
+                isinstance(candidate, ast.Call) and isinstance(candidate.func, ast.Attribute)
+                and candidate.func.attr in {"append", "extend", "insert", "update", "setdefault", "__setitem__", "__setattr__"}
+            ):
+                continue
+            values = candidate.args[1:] if candidate.func.attr in {"insert", "setdefault", "__setitem__"} else candidate.args
+            if not values or candidate.keywords or not all(ast_value(value) for value in values):
+                mutated_ast_names.update(ast_receiver_names(candidate.func.value))
+        pending = list(mutated_ast_names)
+        while pending:
+            current = pending.pop()
+            for alias in ast_aliases.get(current, ()):
+                if alias not in mutated_ast_names:
+                    mutated_ast_names.add(alias)
+                    pending.append(alias)
+        invalidated_ast_names.update(mutated_ast_names.intersection(ast_names))
+        if not invalidated_ast_names:
+            break
+        ast_names.difference_update(invalidated_ast_names)
+    tree._issue79_compile_provenance = (source_names, ast_names)
+    return tree._issue79_compile_provenance
 
 
 def reviewed_python_compile_source(node, provenance=None):
@@ -11037,17 +11294,18 @@ def reviewed_python_compile_source(node, provenance=None):
         return False
     body = keywords["body"]
     if isinstance(body, ast.Name):
-        return body.id in reviewed_python_compile_ast_names
+        return body.id in reviewed_python_compile_ast_names and body.id in ast_provenance
     if not isinstance(body, ast.List) or not body.elts:
         return False
     for element in body.elts:
         if isinstance(element, ast.Name):
-            if element.id not in reviewed_python_compile_ast_names:
+            if element.id not in reviewed_python_compile_ast_names or element.id not in ast_provenance:
                 return False
         elif not (
             isinstance(element, ast.Subscript)
             and isinstance(element.value, ast.Name)
             and element.value.id == "functions"
+            and element.value.id in ast_provenance
             and isinstance(element.slice, ast.Constant)
             and isinstance(element.slice.value, str)
         ):
@@ -11058,6 +11316,10 @@ def reviewed_python_compile_source(node, provenance=None):
 def reviewed_python_exec_call(call, safe_marker, tree=None):
     """Allow only the packet's static compile/exec metaprogramming path."""
     if not isinstance(call.func, ast.Name) or call.func.id != "exec":
+        return False
+    if tree is not None and any(
+        python_compile_primitive_is_shadowed(name, tree) for name in ("exec", "compile")
+    ):
         return False
     if not call.args or not isinstance(call.args[0], ast.Call):
         return False
@@ -13177,7 +13439,7 @@ def python_unknown_os_call_violation(tree):
 
 def python_module_value_escape_violation(tree, parents, safe_marker):
     """Keep security-sensitive modules on direct, inspectable attribute paths."""
-    protected = {"os", "subprocess", "shutil", "signal", "sys", "pathlib", "warnings", "builtins", "importlib"}
+    protected = {"os", "subprocess", "shutil", "signal", "sys", "pathlib", "warnings", "builtins", "importlib", "ast"}
     names = {
         alias.asname or alias.name.split(".")[0]
         for node in ast.walk(tree)
@@ -31745,3 +32007,50 @@ Compiler source-proof changes require their focused RED/GREEN evidence and
 an independent security delta review. No GREEN, final combined approval,
 fresh GitHub Codex review or merge is claimed for this open finding. The
 parent live gates and issue #79 remain incomplete.
+
+#### AST compile-source correction candidate (offline; review pending)
+
+The preceding open-P1 entry records the immutable RED at `de28dea`; it is
+not a claim about the correction below. A GPT-6-Luna/max read-only design
+audit of that commit retained HOLD and confirmed dictionary/list selection,
+forged providers, primitive rebinding and marker-only parameter gaps. Its
+first two-assertion reproduction used the non-isolated module invocation
+(0.113s); subsequent pinned-blob probes used isolated in-memory loading.
+That audit is design evidence, not approval of this implementation.
+
+The correction follows packet-derived text into genuine `ast.parse`, AST
+selection comprehensions and bounded lists, rather than granting authority
+to reserved names. Source providers require a literal packet path or a
+literal 40-hex commit plus that exact path through `git show` (optionally
+`-P`). Source/AST rebinding and mutable-object aliases invalidate proof.
+Nested AST changes, saved mutators and opaque AST consumers are refused;
+ordinary packet AST selection and read-only inspection remain supported.
+Function parameters require every use to be a direct call with proven
+source arguments. Marker text, an unrelated global binding and an escaped
+function value do not establish that proof. Source replacement is limited
+to the existing scanner self-read substitution, not arbitrary code editing.
+AST-module values also stay within reviewed direct uses or bounded helper
+namespaces. This is a deliberately conservative static subset, not a
+hostile-code execution sandbox or a complete Python effect system.
+
+Canonical isolated RED evidence before each relevant correction:
+the original two AST-name cases failed again in 0.116s; three direct
+source/container mutations failed in 0.143s; five alias/nested-mutation
+and two forged-provider assertions failed in 0.163s; two primitive/parameter
+assertions failed in 0.115s; three parameter/opaque-call assertions failed
+in 0.138s; arbitrary source replacement failed in 0.119s. These specimens
+were inspected as AST input only, never compiled or run against inherited
+environment data. The helper-preservation probe checks all 128 actual
+packet `exec(compile(...))` calls without executing those packet bodies.
+
+Intermediate provider/scope corrections rejected 56, then 11 actual helper
+calls; the parameter/opaque-call correction initially rejected nine controls,
+then six. These were failed runs, not GREEN. After resolving those overly
+broad checks, the focused 16-method boundary group passed in 1.232s,
+including all 128 real compile helpers and neighboring namespace/path guards,
+using `python3 -I -B scripts/evidence_packet/issue79_regression_test.py`
+with explicit method selectors. This is not a full harness pass. The
+combined packet scan and independent exact-commit contract/security delta
+reviews remain pending, as do the fresh pushed-head hosted PR quick check
+and GitHub Codex review. No push, merge, live dispatch or runner operation
+is claimed by this entry; G01 and #79 remain incomplete.
