@@ -3510,6 +3510,47 @@ class Issue79RegressionTests(unittest.TestCase):
         finally:
             ast.walk = original_walk
 
+    def test_os_reexports_from_allowed_modules_are_not_certified(self) -> None:
+        for body in (
+            'import tempfile\ntempfile._os.remove("synthetic-owned")\n',
+            'import tempfile as fixtures\nfixtures._os.remove("synthetic-owned")\n',
+            'from tempfile import _os as inherited\ninherited.remove("synthetic-owned")\n',
+            'import pathlib\npathlib.os.remove("synthetic-owned")\n',
+            'import tempfile\ngetattr(tempfile, "_os").remove("synthetic-owned")\n',
+            'import tempfile\ngetattr(tempfile, "_" + "os").remove("synthetic-owned")\n',
+        ):
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+        self.assertIsNone(self.inspect('import tempfile\nprint("offline fixture")\n'))
+
+    def test_displayhook_aliases_are_sensitive_output_sinks(self) -> None:
+        for body in (
+            'import os, sys\nsys.displayhook(os.environ)\n',
+            'import os, sys\nemit = sys.displayhook\nemit(os.environ)\n',
+            'import os\nfrom sys import displayhook as emit\nemit(os.environ)\n',
+            'import os\nimport sys as runtime\nruntime.displayhook(os.environ)\n',
+            'import os, sys\nruntime = sys\nemit = runtime.displayhook\nemit(os.environ)\n',
+            'import os, sys\n(emit := sys.displayhook)(os.environ)\n',
+        ):
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+        self.assertIsNone(self.inspect('import sys\nsys.displayhook("offline fixture")\n'))
+        self.assertIsNone(self.inspect('from sys import displayhook as emit\nemit("offline fixture")\n'))
+
+    def test_standalone_git_queries_require_explicit_hook_isolation(self) -> None:
+        for command in (
+            "git status --short", "git -P status --short",
+            "git -c core.fsmonitor=false status --short",
+            "git diff --stat", "git ls-files --cached",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(self.shell_violation(command))
+        self.assertIsNone(self.shell_violation(
+            "env -i GIT_CONFIG_NOSYSTEM=1 "
+            "GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null "
+            "git -P -c core.fsmonitor=false -c core.hooksPath=/dev/null status --short"
+        ))
+
     def test_warning_sink_and_absolute_path_do_not_disclose_local_data(self) -> None:
         self.assertIsNotNone(self.inspect(
             'import os, warnings\nwarnings.showwarning(os.environ, UserWarning, "x", 1)\n'

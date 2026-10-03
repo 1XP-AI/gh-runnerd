@@ -14028,7 +14028,7 @@ def python_module_value_escape_violation(tree, parents, safe_marker):
 
 
 def python_subprocess_os_reexport_violation(tree):
-    """Do not let subprocess's imported os module bypass direct os guards."""
+    """Reject OS re-exports, including private names, from reviewed modules."""
     subprocess_names = {
         alias.asname or alias.name
         for node in ast.walk(tree)
@@ -14048,10 +14048,10 @@ def python_subprocess_os_reexport_violation(tree):
         if isinstance(target, ast.Name) and name_bind_counts[target.id] == 1
     }
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "subprocess" and any(
-            alias.name == "os" for alias in node.names
+        if isinstance(node, ast.ImportFrom) and node.module in reviewed_python_import_modules and any(
+            alias.name in {"os", "_os"} for alias in node.names
         ):
-            return "Python heredoc imports the unreviewed subprocess.os re-export"
+            return "Python heredoc imports an unreviewed OS module re-export"
     changed = True
     while changed:
         changed = False
@@ -14238,11 +14238,9 @@ def python_subprocess_os_reexport_violation(tree):
             and node.target.id in subprocess_names
         ):
             return "Python heredoc rebinds a subprocess-bearing container indirectly"
-        if subprocess_names and isinstance(node, ast.Attribute) and node.attr == "os":
+        if isinstance(node, ast.Attribute) and node.attr in {"os", "_os"}:
             return "Python heredoc accesses an unreviewed OS module re-export"
         if (
-            subprocess_names
-            and
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
             and (
@@ -14250,16 +14248,13 @@ def python_subprocess_os_reexport_violation(tree):
                 or python_assigned_callable_alias(node.func.id, "getattr", tree)
             )
             and len(node.args) >= 2
-            and isinstance(node.args[1], ast.Constant)
-            and node.args[1].value == "os"
+            and python_static_string_values(node.args[1], tree) & {"os", "_os"}
         ):
             return "Python heredoc dynamically accesses an OS module re-export"
         if (
-            subprocess_names
-            and
             isinstance(node, ast.Subscript)
             and isinstance(node.slice, ast.Constant)
-            and node.slice.value == "os"
+            and node.slice.value in {"os", "_os"}
             and (
                 (isinstance(node.value, ast.Attribute) and node.value.attr == "__dict__")
                 or (
@@ -15595,6 +15590,10 @@ def python_warning_sink_targets(tree):
             for name in python_assigned_module_names(tree, "warnings")
             for method in ("warn", "warn_explicit", "showwarning")
         }
+        targets.update(
+            name + ".displayhook"
+            for name in python_assigned_module_names(tree, "sys")
+        )
         tree._issue79_warning_sink_targets = targets
     return targets
 
@@ -15610,6 +15609,7 @@ def python_sensitive_output_sink(node, tree=None):
     if dotted in {
         "print",
         "sys.exit",
+        "sys.displayhook",
         "warnings.warn",
         "warnings.warn_explicit",
         "warnings.showwarning",
@@ -15623,6 +15623,7 @@ def python_sensitive_output_sink(node, tree=None):
             "print",
             "builtins.print",
             "sys.exit",
+            "sys.displayhook",
             "warnings.warn",
             "warnings.warn_explicit",
             "warnings.showwarning",
@@ -15651,6 +15652,7 @@ def python_sensitive_output_sink(node, tree=None):
                 "print",
                 "builtins.print",
                 "sys.exit",
+                "sys.displayhook",
                 "warnings.warn",
                 "warnings.warn_explicit",
                 "warnings.showwarning",
@@ -15670,7 +15672,7 @@ def python_sensitive_output_sink(node, tree=None):
             }
             imported_functions = {
                 "builtins": {"print"},
-                "sys": {"exit"},
+                "sys": {"exit", "displayhook"},
                 "warnings": {"warn", "warn_explicit", "showwarning"},
                 "traceback": {"print_exc", "print_exception"},
             }
@@ -32984,3 +32986,48 @@ Before this ledger entry was appended, the corrected writer-source packet
 selector passed in 40.680s: 331 shell commands, 95 Python bodies and zero
 reported violations. This is an intermediate writer checkpoint, not approval
 of an immutable final head or a substitute for either independent disposition.
+
+#### GitHub exact-head review at fe38cc19: hooks, OS re-exports and displayhook
+
+Both independent GPT-6-Luna/max delta reviews APPROVED immutable
+`fe38cc195617ee1d71e3704e7ff6b3e7e2880ed7`. Contract checks passed four
+methods in 4.277s with 128 helper calls; security passed the three new methods,
+refused annotated/augmented same-line rebinding and checked base provenance
+before cached recipes (True then False). Both reports were processed, released
+without a process action and acknowledged. Exact-head packet selection passed
+in 40.704s (331 shell commands, 95 Python bodies, zero violations). One stable
+correction push followed. Hosted quick run `37108433678` passed in 26s at that
+SHA; changed-tooling/workflow regressions were skipped by scope and no Python
+suite result is implied.
+
+GitHub Codex review
+[5399684772](https://github.com/1XP-AI/gh-runnerd/pull/103#pullrequestreview-5399684772)
+then completed with three P1 findings, including its review-body finding as
+well as both inline findings. Internal approval and hosted success did not
+authorize a merge.
+
+| Exact-head finding | Inert reproduction and current disposition |
+|---|---|
+| [Review-body Git hook isolation finding](https://github.com/1XP-AI/gh-runnerd/pull/103#pullrequestreview-5399684772) | Bare `git status --short`, pager-only and fsmonitor-only variants, `diff` and `ls-files` were certified without a complete isolated Git query boundary. Five canonical negative assertions remain RED; this P1 is unresolved pending its separate local correction. No hook was executed by these specimens. |
+| [4172285626](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4172285626), other standard-library OS re-exports | Six witnesses used `tempfile._os`, import/assigned aliases, `pathlib.os` and literal/concatenated `getattr` keys. Re-export rejection now applies to `os`/`_os` attribute names, imports and static reflective keys without requiring a `subprocess` import. |
+| [4172285630](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4172285630), `sys.displayhook` output | Six direct, assigned, imported, module-alias and named-expression output witnesses were accepted. Direct/alias sink targets now include `displayhook`; existing protected-module reflection checks also refuse dynamic retrieval. Safe literal output remains accepted. |
+
+The three new methods were RED in 0.131s with 18 failed assertions: 17
+unsafe-query/output witnesses plus one invalid positive control that supplied
+a non-reviewed PATH assignment. Removing that assignment from the inert
+isolated-query control, without changing source or widening the loader policy,
+left the Git method meaningfully RED (five assertions, 0.120s) and its full
+explicit isolated prefix accepted by the previous scanner.
+
+After the two Python corrections, five focused methods passed in 5.483s:
+`test_os_reexports_from_allowed_modules_are_not_certified`,
+`test_displayhook_aliases_are_sensitive_output_sinks`,
+`test_warning_and_absolute_path_aliases_preserve_sensitive_values`,
+`test_actual_packet_compile_helpers_retain_provenance` and
+`test_historic_scanner_loaders_export_only_their_required_helpers`, under
+`Issue79RegressionTests` in the isolated harness. All 128 helper checks and ten
+historical loaders remained supported. Additional inert sys-reflection and
+named OS-re-export probes were refused; no adversarial program was executed.
+The Git isolation correction, new exact-source review and fresh pushed-head
+Codex/hosted gates remain required. No new correction push, merge, full current
+harness or live operation is claimed; #79 and parent #1 remain In progress.
