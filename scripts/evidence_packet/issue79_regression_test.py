@@ -3776,6 +3776,28 @@ class Issue79RegressionTests(unittest.TestCase):
             with self.subTest(specimen=specimen):
                 self.assertIsNotNone(self.inspect(setup + specimen))
 
+    def test_deferred_git_provider_does_not_ignore_later_monkeypatch(self) -> None:
+        specimen = (
+            'import os, subprocess\n'
+            'def run_probe():\n'
+            '    wrapper = subprocess.check_output(["git", "show", '
+            '"01764bbed0a387129d2a2abbc9e27a87e073f87e:docs/evidence/g01-recovery-packet.md"], text=True)\n'
+            '    exec(compile(wrapper, "<probe>", "exec"), {"os": os})\n'
+            'def fake(*args, **kwargs):\n    return "print(os.environ)"\n'
+            'subprocess.check_output = fake\nrun_probe()\n'
+        )
+        self.assertIsNotNone(self.inspect(specimen))
+
+    def test_opaque_ast_receiver_methods_cannot_replace_compiled_children(self) -> None:
+        suffix = 'exec(compile(module, "<probe>", "exec"), {"os": os})\n'
+        for mutation in (
+            'module.body.__iadd__(ast.parse("print(os.environ)").body)\n',
+            'module.body.__init__(ast.parse("print(os.environ)").body)\n',
+            'reset = module.body.__init__\nreset(ast.parse("print(os.environ)").body)\n',
+        ):
+            with self.subTest(mutation=mutation):
+                self.assertIsNotNone(self.inspect(self.packet_ast_source_prefix() + mutation + suffix))
+
     def test_path_provider_patch_aliases_do_not_retain_source_authority(self) -> None:
         setup = 'import os\nfrom pathlib import Path\ndef fake(self):\n    return "print(os.environ)"\n'
         suffix = (
@@ -3785,6 +3807,10 @@ class Issue79RegressionTests(unittest.TestCase):
         for mutation in (
             'patch_reader = setattr\npatch_reader(Path, "read_text", fake)\n',
             'PathAlias = Path\nPathAlias.read_text = fake\n',
+            'patches = {"set": setattr}\npatches["set"](Path, "read_text", fake)\n',
+            'def alter(cls):\n    cls.read_text = fake\nalter(Path)\n',
+            'classes = {"reader": Path}\nclasses["reader"].read_text = fake\n',
+            'PathAlias, = [Path]\nPathAlias.read_text = fake\n',
         ):
             with self.subTest(mutation=mutation):
                 self.assertIsNotNone(self.inspect(setup + mutation + suffix))

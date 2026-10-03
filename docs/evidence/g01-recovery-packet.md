@@ -10896,6 +10896,15 @@ reviewed_python_compile_packet_revisions = {
 
 def python_compile_primitive_is_shadowed(name, tree, provider_call=None):
     """A matching call spelling does not establish a builtin/stdlib binding."""
+    if provider_call is not None:
+        provider_parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+        enclosing_provider = provider_parents.get(provider_call)
+        while enclosing_provider is not None:
+            if isinstance(enclosing_provider, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                # Definition line order cannot prove when a deferred read runs.
+                provider_call = None
+                break
+            enclosing_provider = provider_parents.get(enclosing_provider)
     module_aliases = ({name} | python_assigned_module_names(tree, name)) if name in {"ast", "subprocess", "pathlib", "Path"} else {name}
     if name == "Path":
         module_aliases.update(
@@ -10904,6 +10913,47 @@ def python_compile_primitive_is_shadowed(name, tree, provider_call=None):
             if isinstance(statement, ast.ImportFrom) and statement.module == "pathlib"
             for imported in statement.names if imported.name == "Path"
         )
+    provider_bindings = {}
+    for statement in ast.walk(tree):
+        if isinstance(statement, ast.Assign):
+            bindings, provider_value = statement.targets, statement.value
+        elif isinstance(statement, (ast.AnnAssign, ast.NamedExpr)):
+            bindings, provider_value = [statement.target], statement.value
+        else:
+            continue
+        for binding in bindings:
+            if isinstance(binding, ast.Name):
+                provider_bindings.setdefault(binding.id, []).append(provider_value)
+
+    def provider_value_borrows_class(value, seen=None):
+        seen = seen or set()
+        if value is None or id(value) in seen:
+            return False
+        seen = seen | {id(value)}
+        if isinstance(value, ast.Name):
+            return value.id in module_aliases
+        if isinstance(value, (ast.List, ast.Tuple)):
+            return any(provider_value_borrows_class(element, seen) for element in value.elts)
+        if isinstance(value, ast.Dict):
+            return any(provider_value_borrows_class(element, seen) for element in value.values)
+        if isinstance(value, ast.IfExp):
+            return any(provider_value_borrows_class(element, seen) for element in (value.body, value.orelse))
+        if isinstance(value, ast.Subscript) and isinstance(value.slice, ast.Constant):
+            containers = provider_bindings.get(value.value.id, ()) if isinstance(value.value, ast.Name) else [value.value]
+            for container in containers:
+                if isinstance(container, ast.Dict):
+                    selected = [element for key, element in zip(container.keys, container.values)
+                                if key is None or isinstance(key, ast.Constant) and key.value == value.slice.value]
+                elif isinstance(container, (ast.List, ast.Tuple)) and isinstance(value.slice.value, int) and not isinstance(value.slice.value, bool):
+                    index = value.slice.value
+                    selected = [container.elts[index]] if -len(container.elts) <= index < len(container.elts) else []
+                else:
+                    selected = [container]
+                if any(provider_value_borrows_class(element, seen) for element in selected):
+                    return True
+            return False
+        return python_dotted_name(value) == "pathlib.Path"
+
     for _ in range(sum(isinstance(statement, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) for statement in ast.walk(tree)) + 1 if name in {"ast", "subprocess", "pathlib", "Path"} else 0):
         before = set(module_aliases)
         for statement in ast.walk(tree):
@@ -10914,10 +10964,13 @@ def python_compile_primitive_is_shadowed(name, tree, provider_call=None):
             else:
                 continue
             if (
-                isinstance(provider_value, ast.Name) and provider_value.id in module_aliases
-                or name == "Path" and python_dotted_name(provider_value) == "pathlib.Path"
+                provider_value_borrows_class(provider_value) if name == "Path"
+                else isinstance(provider_value, ast.Name) and provider_value.id in module_aliases
             ):
-                module_aliases.update(binding.id for binding in bindings if isinstance(binding, ast.Name))
+                module_aliases.update(
+                    part.id for binding in bindings for part in ast.walk(binding)
+                    if isinstance(part, ast.Name) and isinstance(part.ctx, ast.Store)
+                )
         if module_aliases == before:
             break
     for candidate in ast.walk(tree):
@@ -10949,11 +11002,31 @@ def python_compile_primitive_is_shadowed(name, tree, provider_call=None):
             for target in targets:
                 if name == "subprocess" and isinstance(target, ast.Attribute) and target.attr != "check_output":
                     continue
-                if isinstance(target, (ast.Attribute, ast.Subscript)) and any(
+                if (
+                    isinstance(target, ast.Attribute)
+                    or isinstance(target, ast.Subscript) and not isinstance(target.value, ast.Name)
+                ) and any(
                     isinstance(part, ast.Name) and part.id in module_aliases
                     for part in ast.walk(target.value)
                 ):
                     return True
+        if (
+            name == "Path"
+            and isinstance(candidate, ast.Call)
+            and (provider_call is None or candidate.lineno <= provider_call.lineno)
+            and any(
+                provider_value_borrows_class(argument)
+                for argument in [*candidate.args, *(keyword.value for keyword in candidate.keywords)]
+            )
+            and not (
+                isinstance(candidate.func, ast.Name)
+                and candidate.func.id in {"getattr", "hasattr", "isinstance", "issubclass", "type", "compile", "exec", "len", "any", "all"}
+                and not python_compile_primitive_is_shadowed(candidate.func.id, tree)
+            )
+        ):
+            # A provider passed to an opaque callable may be patched indirectly;
+            # do not need to prove which container holds the setter to refuse it.
+            return True
         if (
             isinstance(candidate, ast.Call) and candidate.args
             and any(isinstance(part, ast.Name) and part.id in module_aliases for part in ast.walk(candidate.args[0]))
@@ -11381,6 +11454,14 @@ def python_compile_provenance(tree):
                     for target, value in assignments
                 )
             ):
+                # A bound method's receiver is an input too. Unknown methods
+                # (including saved method aliases) can mutate borrowed children
+                # even when their explicit arguments have no reviewed origin.
+                if not (
+                    isinstance(candidate.func, ast.Attribute)
+                    and candidate.func.attr in {"get", "keys", "items", "values", "copy", "count", "index"}
+                ):
+                    mutated_ast_names.update(ast_receiver_names(candidate.func))
                 for argument in candidate.args:
                     mutated_ast_names.update(ast_receiver_names(argument))
                 for keyword in candidate.keywords:
@@ -32435,3 +32516,63 @@ method selectors. These results replace neither a full harness result nor
 the required packet selector and exact-candidate independent delta reviews.
 The preceding HOLD verdicts remain historical; no final approval, new push,
 GitHub Codex result, merge or live authorization is inferred from GREEN.
+
+#### Follow-up receiver, container and deferred-provider correction
+
+Immutable `ee513f82720d09f2ddc69a872837ab8b1fce86a6` passed the packet
+selector in 53.115s (331 shell commands, 95 Python bodies, zero violations),
+but both completed GPT-6-Luna/max delta reviews retained HOLD. The contract
+review passed seven pinned-blob selectors in 4.058s while accepting a later
+`subprocess.check_output` patch before a deferred helper ran, plus opaque
+AST receiver mutations. The security review accepted a dictionary-held
+setter replacing `Path.read_text`; direct/local/imported setters and the
+previous child-reader cases were refused. Both reviews were processed,
+released to external terminal ownership with no process action, then acked.
+
+Coordinator AST-only probes reproduced three receiver variants: direct
+`__iadd__`, direct list `__init__` and a saved bound initializer. The
+canonical method was RED with three failed assertions in 0.138s before
+receiver invalidation. The dictionary-held setter was RED (one assertion,
+0.119s); adding opaque-helper, dictionary-held-class and tuple-unpack class
+aliases produced four failed assertions in 0.134s. The deferred Git witness
+initially used an unlisted revision and was refused, which was not meaningful
+RED for this finding. Using an existing allowed fixture revision reproduced
+the actual bypass: one failed assertion in 0.118s. No specimen was executed.
+
+Unknown AST methods now include their receiver/callable origin as mutable
+input, including saved bound methods; a narrow readonly container-reader
+subset preserves helper selection. Path provider aliases include literal
+containers and destructuring. Constant-key/index resolution distinguishes
+borrowed classes from other values in the same helper namespace. Passing
+the class to an opaque callable invalidates its provider authority without
+needing to identify the hidden setter. Unshadowed builtin compile/exec are
+not themselves treated as class mutation; their existing source and namespace
+checks remain required. Deferred function/async/lambda reads cannot use
+definition-line order to ignore later provider changes. The 38 fixture
+revisions and compiler-input allowlists are unchanged.
+
+Overly broad intermediate provider checks rejected safe controls: focused
+runs failed 78, 73, 42, 23 and 19 assertions respectively. They are not GREEN.
+The final eight-method boundary group passed in 4.912s, including all 128
+actual compiler calls and ten loaders. The combined focused group passed
+23 methods in 5.103s; it includes the previous 21-method group plus the two
+new receiver/deferred methods. CPython remains 3.14.3; no full current harness,
+hosted Python or live coverage is claimed. Reproducible boundary invocation:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_deferred_git_provider_does_not_ignore_later_monkeypatch \
+  Issue79RegressionTests.test_path_provider_patch_aliases_do_not_retain_source_authority \
+  Issue79RegressionTests.test_opaque_ast_receiver_methods_cannot_replace_compiled_children \
+  Issue79RegressionTests.test_actual_packet_compile_helpers_retain_provenance \
+  Issue79RegressionTests.test_historic_scanner_loaders_export_only_their_required_helpers \
+  Issue79RegressionTests.test_packet_derived_ast_helper_selection_remains_supported \
+  Issue79RegressionTests.test_augmented_assignment_and_forged_source_providers_invalidate_compile_proof \
+  Issue79RegressionTests.test_ast_providers_cannot_be_forged_by_markers_or_monkeypatch
+```
+
+This correction requires its own packet selector and fresh exact-candidate
+contract/security delta sign-off before a stable batch push. The passing
+`ee513f8` scan does not certify the changed source. Previous HOLDs remain
+historical; no current approval, push, GitHub Codex request, merge or live
+operation occurred. #79 and parent G01 #1 remain In progress.
