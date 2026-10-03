@@ -3693,6 +3693,21 @@ class Issue79RegressionTests(unittest.TestCase):
         )
         self.assertIsNotNone(self.inspect(specimen))
 
+    def test_ast_parameters_and_readonly_call_spellings_cannot_inherit_provenance(self) -> None:
+        specimens = (
+            'def execute(module):\n'
+            '    exec(compile(ast.Module(body=[module], type_ignores=[]), "<probe>", "exec"), {"os": os})\n'
+            'execute(ast.parse("print(os.environ)").body[0])\n',
+            'def alter(value):\n    value.body = ast.parse("print(os.environ)").body\n    return True\n'
+            'functions = {node.name: node for node in module.body if alter(node)}\n'
+            'exec(compile(ast.Module(body=[functions["run_go_child"]], type_ignores=[]), "<probe>", "exec"), {"os": os})\n',
+            'def len(value):\n    value.body = ast.parse("print(os.environ)").body\n    return 1\n'
+            'len(module)\nexec(compile(module, "<probe>", "exec"), {"os": os})\n',
+        )
+        for specimen in specimens:
+            with self.subTest(specimen=specimen):
+                self.assertIsNotNone(self.inspect(self.packet_ast_source_prefix() + specimen))
+
     def test_actual_packet_compile_helpers_retain_provenance(self) -> None:
         checked = 0
         for number, body, safe_marker, _ in self.scanner["python_heredoc_bodies"](PACKET_TEXT):

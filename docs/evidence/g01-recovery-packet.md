@@ -11179,26 +11179,51 @@ def python_compile_provenance(tree):
 
     def ast_receiver_names(value):
         if isinstance(value, ast.Name):
+            current = parents.get(value)
+            while current is not None:
+                if isinstance(current, (ast.ListComp, ast.DictComp, ast.SetComp, ast.GeneratorExp)):
+                    for generator in current.generators:
+                        if value.id in target_names(generator.target):
+                            return ast_receiver_names(generator.iter)
+                current = parents.get(current)
             return {value.id}.intersection(ast_aliases)
         if isinstance(value, (ast.Attribute, ast.Subscript)):
             return ast_receiver_names(value.value)
         return set()
 
+    shadowed_ast_names = {
+        candidate.arg for candidate in ast.walk(tree) if isinstance(candidate, ast.arg)
+    } | {
+        candidate.name for candidate in ast.walk(tree)
+        if isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.ExceptHandler, ast.MatchAs, ast.MatchStar))
+        and candidate.name is not None
+    } | {
+        candidate.rest for candidate in ast.walk(tree)
+        if isinstance(candidate, ast.MatchMapping) and candidate.rest is not None
+    } | {
+        alias.asname or alias.name.split(".")[0]
+        for candidate in ast.walk(tree) if isinstance(candidate, (ast.Import, ast.ImportFrom))
+        for alias in candidate.names
+    }
+    readonly_primitive_names = {
+        name for name in {"isinstance", "len", "compile", "exec"}
+        if not python_compile_primitive_is_shadowed(name, tree)
+    }
     while True:
         invalidated_ast_names = {
             name for target, value in ast_bindings for name in target_names(target)
             if name in ast_names and not ast_value(value)
         }
+        invalidated_ast_names.update(shadowed_ast_names.intersection(ast_names))
         mutated_ast_names = set()
         for target, value in assignments:
             if isinstance(target, (ast.Subscript, ast.Attribute)):
                 if not isinstance(target, ast.Subscript) or not ast_value(value):
                     mutated_ast_names.update(ast_receiver_names(target.value))
         for candidate in ast.walk(tree):
-            if isinstance(candidate, ast.Call) and python_dotted_name(candidate.func) not in {
+            if isinstance(candidate, ast.Call) and python_dotted_name(candidate.func) not in ({
                 "ast.parse", "ast.walk", "ast.Module", "ast.dump", "ast.literal_eval", "ast.unparse",
-                "isinstance", "len", "compile", "exec",
-            } and not (
+            } | readonly_primitive_names) and not (
                 isinstance(candidate.func, ast.Attribute)
                 and candidate.func.attr in {"append", "extend", "insert", "update", "setdefault", "__setitem__", "__setattr__"}
                 and ast_receiver_names(candidate.func.value)
@@ -32125,3 +32150,22 @@ compile calls, opaque/parameter provenance and source-replacement denial.
 Independent reviews target `e378ba4`; they do not automatically approve
 this later compatibility delta. The subsequent combined selector and
 exact-candidate delta approval remain required before pushing.
+
+The completed GPT-6-Luna/max contract delta review of immutable `e378ba4`
+retained HOLD for an AST-parameter shadow: a parameter named `module`
+inherited proof from the unrelated packet-derived global. Four pinned-blob
+focused methods passed in 0.139s, but the inert shadow witness was accepted.
+The coordinator reproduced that witness plus comprehension-local mutation
+and a forged `len` consumer in one selector (three failed assertions,
+0.135s), without compiling or executing any specimen.
+
+The follow-up conservatively removes AST proof for parameter/definition/
+import/pattern collisions, resolves comprehension-local receiver origins
+through their generator instead of unrelated global names, and requires
+unshadowed bindings for the readonly builtin allowlist. Six focused methods
+passed in 2.412s, including all 128 actual compiler-helper calls, all ten
+literal loader exports and neighboring safe AST-selection controls. This
+changes a blocking boundary and needs fresh exact-candidate independent
+delta review; the prior HOLD is not approval of this correction. The
+already-running `6a7a17e` packet scan describes its captured older bytes,
+not this subsequent source change. No push or merge has occurred.
