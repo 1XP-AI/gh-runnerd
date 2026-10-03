@@ -4740,7 +4740,7 @@ from pathlib import Path
 
 prior_head = "22a2923033c875ddd4f755774f79f60b94649449"
 previous = subprocess.check_output(
-    ["git", "show", f"{prior_head}:docs/evidence/g01-recovery-packet.md"],
+    ["git", "--no-replace-objects", "show", f"{prior_head}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 wrapper_start = previous.index("\nimport hashlib\n", previous.index("go_test_checked()")) + 1
@@ -4896,7 +4896,7 @@ from pathlib import Path
 
 prior_head = "22a2923033c875ddd4f755774f79f60b94649449"
 previous = subprocess.check_output(
-    ["git", "show", f"{prior_head}:docs/evidence/g01-recovery-packet.md"],
+    ["git", "--no-replace-objects", "show", f"{prior_head}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 wrapper_start = previous.index("\nimport hashlib\n", previous.index("go_test_checked()")) + 1
@@ -5197,6 +5197,7 @@ starting_head = "3bc8445567fe68cc355cf3f88f0c962a41e9cad5"
 previous = subprocess.check_output(
     [
         "git",
+        "--no-replace-objects",
         "show",
         f"{starting_head}:docs/evidence/g01-recovery-packet.md",
     ],
@@ -5327,6 +5328,7 @@ starting_head = "3bc8445567fe68cc355cf3f88f0c962a41e9cad5"
 previous = subprocess.check_output(
     [
         "git",
+        "--no-replace-objects",
         "show",
         f"{starting_head}:docs/evidence/g01-recovery-packet.md",
     ],
@@ -5449,6 +5451,7 @@ starting_head = "3bc8445567fe68cc355cf3f88f0c962a41e9cad5"
 previous = subprocess.check_output(
     [
         "git",
+        "--no-replace-objects",
         "show",
         f"{starting_head}:docs/evidence/g01-recovery-packet.md",
     ],
@@ -7013,7 +7016,7 @@ from tempfile import TemporaryDirectory
 
 prior_head = "22a2923033c875ddd4f755774f79f60b94649449"
 previous = subprocess.check_output(
-    ["git", "show", f"{prior_head}:docs/evidence/g01-recovery-packet.md"],
+    ["git", "--no-replace-objects", "show", f"{prior_head}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 wrapper_start = previous.index("\nimport hashlib\n", previous.index("go_test_checked()")) + 1
@@ -7077,7 +7080,7 @@ namespace = {"label": "synthetic-init-boundary"}
 exec(compile(wrapper[helper_start:helper_end], "<source-derivation>", "exec"), namespace)
 prior_head = "22a2923033c875ddd4f755774f79f60b94649449"
 previous = subprocess.check_output(
-    ["git", "show", f"{prior_head}:docs/evidence/g01-recovery-packet.md"],
+    ["git", "--no-replace-objects", "show", f"{prior_head}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 prior_start = previous.index("\nimport hashlib\n", previous.index("go_test_checked()")) + 1
@@ -10940,6 +10943,8 @@ def python_compile_primitive_is_shadowed(name, tree, provider_call=None):
             return any(provider_value_borrows_class(element, seen) for element in value.values)
         if isinstance(value, ast.IfExp):
             return any(provider_value_borrows_class(element, seen) for element in (value.body, value.orelse))
+        if isinstance(value, ast.BoolOp):
+            return any(provider_value_borrows_class(element, seen) for element in value.values)
         if isinstance(value, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
             provider_result_values = (value.key, value.value) if isinstance(value, ast.DictComp) else (value.elt,)
             return any(
@@ -11076,6 +11081,132 @@ def python_compile_primitive_is_shadowed(name, tree, provider_call=None):
     return False
 
 
+def reviewed_python_source_slice(node, source_names, tree):
+    """Certify only the packet's closed extraction recipes, never arbitrary text."""
+    if not (
+        tree is not None and isinstance(node, ast.Subscript)
+        and isinstance(node.value, ast.Name) and node.value.id in source_names
+        and isinstance(node.slice, ast.Slice) and node.slice.step is None
+    ):
+        return False
+    slice_context = getattr(tree, "_issue79_source_slice_context", None)
+    if slice_context is None:
+        slice_parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+        slice_definitions = {}
+        for slice_statement in ast.walk(tree):
+            if isinstance(slice_statement, ast.Assign) and len(slice_statement.targets) == 1 and isinstance(slice_statement.targets[0], ast.Name):
+                slice_definitions.setdefault(slice_statement.targets[0].id, []).append(slice_statement)
+        slice_context = (slice_parents, slice_definitions, {})
+        tree._issue79_source_slice_context = slice_context
+    slice_parents, slice_definitions, slice_recipe_results = slice_context
+    # Only the structural recipe is cached. Base provenance is checked above
+    # on every call, including after source-name invalidation.
+    if node in slice_recipe_results:
+        return slice_recipe_results[node]
+
+    def slice_point(value, seen=None):
+        if value is None:
+            return (None, 0)
+        seen = seen or set()
+        if id(value) in seen:
+            return None
+        seen = seen | {id(value)}
+        if isinstance(value, ast.Name):
+            slice_scopes = python_lexical_scope_chain(python_enclosing_scope(value, slice_parents), slice_parents)
+            for slice_scope in slice_scopes:
+                candidates = [
+                    statement for statement in slice_definitions.get(value.id, ())
+                    if python_enclosing_scope(statement, slice_parents) is slice_scope
+                    and statement.lineno < value.lineno
+                ]
+                if not candidates:
+                    continue
+                latest = max(candidates, key=lambda statement: statement.lineno)
+                if not isinstance(slice_parents.get(latest), (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef)):
+                    return None
+                if any(
+                    isinstance(part, (ast.Name, ast.arg))
+                    and (part.id if isinstance(part, ast.Name) else part.arg) == value.id
+                    and (not isinstance(part, ast.Name) or isinstance(part.ctx, ast.Store))
+                    and python_enclosing_scope(part, slice_parents) is slice_scope
+                    and latest.lineno < getattr(part, "lineno", 0) <= value.lineno
+                    for part in ast.walk(tree)
+                ):
+                    return None
+                return slice_point(latest.value, seen)
+            return None
+        if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add):
+            left = slice_point(value.left, seen)
+            if left is None or left[1] != 0:
+                return None
+            if isinstance(value.right, ast.Constant) and value.right.value == 1 and not isinstance(value.right.value, bool):
+                return (left[0], 1)
+            if (
+                isinstance(value.right, ast.Call) and isinstance(value.right.func, ast.Name)
+                and value.right.func.id == "len" and not value.right.keywords and len(value.right.args) == 1
+                and isinstance(value.right.args[0], ast.Constant) and value.right.args[0].value == left[0]
+                and not python_compile_primitive_is_shadowed("len", tree)
+            ):
+                return (left[0], "length")
+            return None
+        if not (
+            isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute)
+            and value.func.attr in {"index", "find", "rfind"} and not value.keywords
+            and ast.dump(value.func.value) == ast.dump(node.value) and 1 <= len(value.args) <= 3
+            and isinstance(value.args[0], ast.Constant) and isinstance(value.args[0].value, str)
+        ):
+            return None
+        for anchor_value in value.args[1:]:
+            if isinstance(anchor_value, ast.Constant) and anchor_value.value == 0 and not isinstance(anchor_value.value, bool):
+                continue
+            anchor_point = slice_point(anchor_value, seen)
+            if anchor_point is None or anchor_point[0] not in {
+                "go_test_checked()", "def forbidden_command(tokens, depth=0):", "def python_heredoc_invocation(stripped):",
+                "def executable_shell_commands", "def executable_shell_commands(markdown):", "def git_query",
+                "The packet also runs a command-line scan over fenced", '\nfence_languages = {"sh", "bash", "shell", "zsh"}',
+                'fence_languages = {"sh", "bash", "shell", "zsh"}', "\nimport hashlib\n",
+                "def skip_source_ignored", "def source_fuzz_declarations", "def go_compatible_regexp",
+                "def reject_python_semantic_regexp_constructs", "def validate_test_stream(stdout, stderr):",
+                "def git_source_control_entries(repo_root, module_dir, env):",
+                "def git_worktree_matches_pinned_blobs(repo_root, module_dir, env):",
+                "git_transport_override_names = ", 'source = Path(',
+                'source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")',
+                "/opt/homebrew/bin/python3 -I - <<'PY'\n",
+            }:
+                return None
+        return (value.args[0].value, 0)
+
+    lower, upper = slice_point(node.slice.lower), slice_point(node.slice.upper)
+    if lower is None or upper is None:
+        return False
+    recipes = {
+        (("def validate_test_stream(stdout, stderr):", 0), ('\nrun_command = command + ["-json"]', 0)),
+        (("\nimport hashlib\n", 1), ("\nPY\n}", 0)),
+        (("def skip_source_ignored", 0), ("\nall_test_names = []", 0)),
+        (("def source_fuzz_declarations", 0), ("\nsource_fuzz_guard()", 0)),
+        (("def go_compatible_regexp", 0), ("\nall_test_names = []", 0)),
+        (("def reject_python_semantic_regexp_constructs", 0), ("\nsource_fuzz_guard()", 0)),
+        (("def executable_shell_commands", 0), ("\nguarded, fixtures =", 0)),
+        (("def git_source_control_entries(repo_root, module_dir, env):", 0), ("\ndef package_initialization_guard", 0)),
+        (("def git_worktree_matches_pinned_blobs(repo_root, module_dir, env):", 0), ("\ndef package_initialization_guard", 0)),
+        (("git_transport_override_names = ", 0), ("git_environment = {", 0)),
+        (("/opt/homebrew/bin/python3 -I - <<'PY'\n", "length"), ("\nPY\n```", 0)),
+    }
+    recipes.update(((marker, 0), ("\nmatches = []", 0)) for marker in {
+        'source = Path(', 'source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")',
+        'fence_languages = {"sh", "bash", "shell", "zsh"}',
+    })
+    recipes.update(((marker, 0), ("\nguarded, fixtures =", 0)) for marker in {
+        'source = Path(', 'source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")',
+    })
+    recipes.update(((None, 0), (marker, 0)) for marker in {
+        "run_result = run_go_child", "compiler_tool_environment_names =", "repo_root = Path(",
+    })
+    recipes.add(((None, 0), ("\ngo_env = dict(env)", "length")))
+    slice_recipe_results[node] = (lower, upper) in recipes
+    return slice_recipe_results[node]
+
+
 def python_compile_provenance(tree):
     """Resolve source/AST provenance before permitting static compile/exec."""
     cached = getattr(tree, "_issue79_compile_provenance", None)
@@ -11132,7 +11263,7 @@ def python_compile_provenance(tree):
         if isinstance(node, ast.Name):
             return node.id in source_names
         if isinstance(node, ast.Subscript):
-            return source_value(node.value)
+            return reviewed_python_source_slice(node, source_names, tree)
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
             return source_value(node.left) and source_value(node.right)
         if isinstance(node, ast.Call):
@@ -11166,10 +11297,10 @@ def python_compile_provenance(tree):
                 if python_compile_primitive_is_shadowed("subprocess", tree, node) or not node.args:
                     return False
                 command = node.args[0]
-                if not isinstance(command, (ast.List, ast.Tuple)) or len(command.elts) not in {3, 4}:
+                if not isinstance(command, (ast.List, ast.Tuple)) or len(command.elts) not in {4, 5}:
                     return False
                 prefix = [part.value if isinstance(part, ast.Constant) else None for part in command.elts[:-1]]
-                if prefix not in (["git", "show"], ["git", "-P", "show"]):
+                if prefix not in (["git", "--no-replace-objects", "show"], ["git", "--no-replace-objects", "-P", "show"]):
                     return False
                 def literal_reference(value, seen=None):
                     seen = seen or set()
@@ -11530,7 +11661,7 @@ def python_compile_provenance(tree):
     return tree._issue79_compile_provenance
 
 
-def reviewed_python_compile_source(node, provenance=None):
+def reviewed_python_compile_source(node, provenance=None, tree=None):
     """Permit only packet-derived source slices or provenance-checked AST nodes."""
     source_provenance, ast_provenance = provenance or (set(), set())
     if isinstance(node, ast.Name):
@@ -11542,20 +11673,10 @@ def reviewed_python_compile_source(node, provenance=None):
             and node.id in ast_provenance
         )
     if isinstance(node, ast.Subscript):
-        if not (
-            isinstance(node.value, ast.Name)
-            and node.value.id in reviewed_python_compile_slice_bases
-            and node.value.id in source_provenance
-            and isinstance(node.slice, ast.Slice)
-        ):
-            return False
-        return all(
-            part is None or isinstance(part, ast.Name)
-            for part in (node.slice.lower, node.slice.upper, node.slice.step)
-        )
+        return reviewed_python_source_slice(node, source_provenance, tree)
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-        return reviewed_python_compile_source(node.left, provenance) and reviewed_python_compile_source(
-            node.right, provenance
+        return reviewed_python_compile_source(node.left, provenance, tree) and reviewed_python_compile_source(
+            node.right, provenance, tree
         )
     if not (
         isinstance(node, ast.Call)
@@ -11606,7 +11727,7 @@ def reviewed_python_exec_call(call, safe_marker, tree=None):
     if len(compiler.args) != 3 or compiler.keywords:
         return False
     provenance = python_compile_provenance(tree) if tree is not None else (set(), set())
-    if not reviewed_python_compile_source(compiler.args[0], provenance):
+    if not reviewed_python_compile_source(compiler.args[0], provenance, tree):
         return False
     filename, mode = compiler.args[1:3]
     return (
@@ -13246,7 +13367,7 @@ def reviewed_python_dynamic_git_call(argument, tree=None, parents=None):
     while (
         subcommand_index < len(argument.elts)
         and isinstance(argument.elts[subcommand_index], ast.Constant)
-        and argument.elts[subcommand_index].value in {"-P", "--no-pager"}
+        and argument.elts[subcommand_index].value in {"-P", "--no-pager", "--no-replace-objects"}
     ):
         subcommand_index += 1
     if subcommand_index >= len(argument.elts):
@@ -18037,6 +18158,7 @@ starting_head = "423d4fc501120a014e63f77d3ef6652606d0326a"
 previous = subprocess.check_output(
     [
         "git",
+        "--no-replace-objects",
         "show",
         f"{starting_head}:docs/evidence/g01-recovery-packet.md",
     ],
@@ -18159,6 +18281,7 @@ starting_head = "423d4fc501120a014e63f77d3ef6652606d0326a"
 previous = subprocess.check_output(
     [
         "git",
+        "--no-replace-objects",
         "show",
         f"{starting_head}:docs/evidence/g01-recovery-packet.md",
     ],
@@ -18460,6 +18583,7 @@ starting_head = "01764bbed0a387129d2a2abbc9e27a87e073f87e"
 previous = subprocess.check_output(
     [
         "git",
+        "--no-replace-objects",
         "show",
         f"{starting_head}:docs/evidence/g01-recovery-packet.md",
     ],
@@ -18696,7 +18820,7 @@ from contextlib import redirect_stdout
 
 starting_head = "4bd66186ea8d980a06ed8a4adf7f51e76b5028ef"
 previous = subprocess.check_output(
-    ["git", "show", f"{starting_head}:docs/evidence/g01-recovery-packet.md"],
+    ["git", "--no-replace-objects", "show", f"{starting_head}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 start = previous.index("\nimport hashlib\n", previous.index("go_test_checked()")) + 1
@@ -18802,7 +18926,7 @@ import subprocess
 
 starting_head = "4bd66186ea8d980a06ed8a4adf7f51e76b5028ef"
 previous = subprocess.check_output(
-    ["git", "show", f"{starting_head}:docs/evidence/g01-recovery-packet.md"],
+    ["git", "--no-replace-objects", "show", f"{starting_head}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 scanner_start = previous.index('fence_languages = {"sh", "bash", "shell", "zsh"}')
@@ -18871,7 +18995,7 @@ import subprocess
 
 starting_head = "4bd66186ea8d980a06ed8a4adf7f51e76b5028ef"
 previous = subprocess.check_output(
-    ["git", "show", f"{starting_head}:docs/evidence/g01-recovery-packet.md"],
+    ["git", "--no-replace-objects", "show", f"{starting_head}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 old_selector = re.compile(
@@ -18947,7 +19071,7 @@ from pathlib import Path
 
 starting_head = "943ebece04882a0faf055d73e5988bd8954088f8"
 previous = subprocess.check_output(
-    ["git", "show", f"{starting_head}:docs/evidence/g01-recovery-packet.md"],
+    ["git", "--no-replace-objects", "show", f"{starting_head}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 start = previous.index("\nimport hashlib\n", previous.index("go_test_checked()")) + 1
@@ -19357,7 +19481,7 @@ from pathlib import Path
 starting_head = "d85f99fa70a6f563079b1ed4f29a1bc97740a3c5"
 packet_path = "docs/evidence/g01-recovery-packet.md"
 previous = subprocess.check_output(
-    ["git", "show", f"{starting_head}:{packet_path}"], text=True
+    ["git", "--no-replace-objects", "show", f"{starting_head}:{packet_path}"], text=True
 )
 wrapper_start = previous.index("\nimport hashlib\n", previous.index("go_test_checked()")) + 1
 wrapper_end = previous.index("\nPY\n}", wrapper_start)
@@ -19708,7 +19832,7 @@ from pathlib import Path
 
 parent = "da1af0d041e37e5df9f3ed8028b51a69ec58ed8c"
 packet = subprocess.check_output(
-    ["git", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    ["git", "--no-replace-objects", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
@@ -20099,7 +20223,7 @@ from pathlib import Path
 
 parent = "5297b3c3b05afedf97723b7b58806cdd5519a2b6"
 packet = subprocess.check_output(
-    ["git", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    ["git", "--no-replace-objects", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 
@@ -20869,7 +20993,7 @@ import sys
 
 parent = "81787b2e90df496a9c5a51fddc7607d3019834b7"
 packet = subprocess.check_output(
-    ["git", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    ["git", "--no-replace-objects", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 lines = packet.splitlines()
@@ -21281,7 +21405,7 @@ import tempfile
 from pathlib import Path
 
 parent = "6c55f5b67035fb1c7ac334984499cfe80d6bb86b"
-packet = subprocess.check_output(["git", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"], text=True)
+packet = subprocess.check_output(["git", "--no-replace-objects", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"], text=True)
 status_start = packet.index('        [\n            "git",\n            "status",')
 status_end = packet.index('        ],', status_start) + len('        ],')
 status_argv = packet[status_start:status_end]
@@ -21319,7 +21443,7 @@ import subprocess
 from pathlib import Path
 
 parent = "6c55f5b67035fb1c7ac334984499cfe80d6bb86b"
-packet = subprocess.check_output(["git", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"], text=True)
+packet = subprocess.check_output(["git", "--no-replace-objects", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"], text=True)
 scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
 scanner_start = packet.rfind("source = Path(", 0, scanner_anchor)
 scanner_end = packet.index("\nmatches = []", scanner_anchor)
@@ -21346,7 +21470,7 @@ import subprocess
 import sys
 
 parent = "6c55f5b67035fb1c7ac334984499cfe80d6bb86b"
-packet = subprocess.check_output(["git", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"], text=True)
+packet = subprocess.check_output(["git", "--no-replace-objects", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"], text=True)
 wrapper_start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
 wrapper_end = packet.index("\nPY\n}", wrapper_start)
 wrapper = packet[wrapper_start:wrapper_end]
@@ -21584,7 +21708,7 @@ from pathlib import Path
 
 parent = "13b463086a0e7aa710067cafb44dcd9aed118654"
 packet = subprocess.check_output(
-    ["git", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    ["git", "--no-replace-objects", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
@@ -21787,7 +21911,7 @@ from pathlib import Path
 
 parent = "5f42598b94ce5339c35f55be42eb108973850d24"
 packet = subprocess.check_output(
-    ["git", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"], text=True
+    ["git", "--no-replace-objects", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"], text=True
 )
 heredoc_pattern = re.compile(
     r"\\bpython3\\s+-I\\b[^\\n]*<<-?\\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\\1"
@@ -22042,7 +22166,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 parent = "055a05bd9d5a9bb101e4400dd7a9236e3afd9f48"
-packet = subprocess.check_output(["git", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"], text=True)
+packet = subprocess.check_output(["git", "--no-replace-objects", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"], text=True)
 scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
 scanner_start = packet.rfind("source = Path(", 0, scanner_anchor)
 scanner_end = packet.index("\nmatches = []", scanner_anchor)
@@ -22545,7 +22669,7 @@ import sys
 
 parent = "4ee7c855b1e79f9478e5cf73c270731dfbf58cf7"
 packet = subprocess.check_output(
-    ["git", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    ["git", "--no-replace-objects", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
@@ -23038,7 +23162,7 @@ from pathlib import Path
 
 parent = "6af854fb660bc7d9c31c9920a6cec5c2fbb1966d"
 packet = subprocess.check_output(
-    ["git", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    ["git", "--no-replace-objects", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
@@ -23414,7 +23538,7 @@ from pathlib import Path
 
 parent = "3f6de0b227e4b44aa3d5e259e937e7dc1f0856bb"
 packet = subprocess.check_output(
-    ["git", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    ["git", "--no-replace-objects", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 
@@ -23807,7 +23931,7 @@ from pathlib import Path
 
 parent = "7d91bed688dbea21bea7dff62f41d48d1d57ce4b"
 packet = subprocess.check_output(
-    ["git", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    ["git", "--no-replace-objects", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 
@@ -24130,7 +24254,7 @@ from pathlib import Path
 
 parent = "71a7a599de567914158b05e3c480f7e0d48c709f"
 packet = subprocess.check_output(
-    ["git", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    ["git", "--no-replace-objects", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
@@ -24398,7 +24522,7 @@ from pathlib import Path
 
 parent = "8dfa9a031bc321f2ccc208104268f7c5ead9281b"
 packet = subprocess.check_output(
-    ["git", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    ["git", "--no-replace-objects", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
@@ -24784,7 +24908,7 @@ from pathlib import Path
 
 parent = "2abe394ee32f09888892c4adea5fc08121845d6b"
 packet = subprocess.check_output(
-    ["git", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    ["git", "--no-replace-objects", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 
@@ -25225,7 +25349,7 @@ from pathlib import Path
 
 parent = "14f998f32710f122f5861edfac8fdbc89ef95bfb"
 packet = subprocess.check_output(
-    ["git", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    ["git", "--no-replace-objects", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 
@@ -25606,7 +25730,7 @@ from pathlib import Path
 
 parent = "ce417347aa100562722477ea1126a5cf6372ec3a"
 packet = subprocess.check_output(
-    ["git", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    ["git", "--no-replace-objects", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 wrapper_start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
@@ -25702,7 +25826,7 @@ from pathlib import Path
 
 parent_sha = "21f258a4215c667c245abb44ea419eb7901de2ad"
 parent_packet = subprocess.check_output(
-    ["git", "show", f"{parent_sha}:docs/evidence/g01-recovery-packet.md"],
+    ["git", "--no-replace-objects", "show", f"{parent_sha}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 anchor = parent_packet.index("def forbidden_command(tokens, depth=0):")
@@ -26144,7 +26268,7 @@ parent_sha = "755968f9b4343c860cd8ddeca12a97b277c6e1b5"
 packet_path = "docs/evidence/g01-recovery-packet.md"
 packet = Path(packet_path).read_text(encoding="utf-8")
 parent_packet = subprocess.check_output(
-    ["git", "show", f"{parent_sha}:{packet_path}"], text=True
+    ["git", "--no-replace-objects", "show", f"{parent_sha}:{packet_path}"], text=True
 )
 
 def load_scanner(text):
@@ -26717,7 +26841,7 @@ from pathlib import Path
 
 parent = "1fc2cede68f2692de0fad7a18d6faf7810544845"
 packet = subprocess.check_output(
-    ["git", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    ["git", "--no-replace-objects", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
@@ -27144,7 +27268,7 @@ def inspected(body, safe_marker=True):
 # Reproduce every RED against the immutable parent scanner loaded only by git show.
 parent_sha = "b85839cc801395f4ec9560b056a2a6706c7aa306"
 parent_packet = subprocess.check_output(
-    ["git", "show", f"{parent_sha}:docs/evidence/g01-recovery-packet.md"],
+    ["git", "--no-replace-objects", "show", f"{parent_sha}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 parent_anchor = parent_packet.index("def forbidden_command(tokens, depth=0):")
@@ -27375,7 +27499,7 @@ def load_scanner(text, label):
 
 current = load_scanner(packet, "current-scanner-401034")
 parent_packet = subprocess.check_output(
-    ["git", "show", f"{parent_sha}:docs/evidence/g01-recovery-packet.md"],
+    ["git", "--no-replace-objects", "show", f"{parent_sha}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 parent = load_scanner(parent_packet, "exact-parent-3c4eb91-scanner")
@@ -27660,7 +27784,7 @@ from pathlib import Path
 parent_sha = "390c89b5e431a165dfbf8fa986cbf2594e3444ce"
 current_packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
 parent_packet = subprocess.check_output(
-    ["git", "show", f"{parent_sha}:docs/evidence/g01-recovery-packet.md"],
+    ["git", "--no-replace-objects", "show", f"{parent_sha}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 
@@ -27895,7 +28019,7 @@ from pathlib import Path
 parent_sha = "c9f986d0256e47aba7fd273c1ae03993193a39c8"
 packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
 parent_packet = subprocess.check_output(
-    ["git", "show", f"{parent_sha}:docs/evidence/g01-recovery-packet.md"],
+    ["git", "--no-replace-objects", "show", f"{parent_sha}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 
@@ -28144,7 +28268,7 @@ from pathlib import Path
 parent_sha = "f84113bf38dd77dacb5dd3ea9b6018c2f2d06471"
 packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
 parent_packet = subprocess.check_output(
-    ["git", "show", f"{parent_sha}:docs/evidence/g01-recovery-packet.md"],
+    ["git", "--no-replace-objects", "show", f"{parent_sha}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 
@@ -28455,7 +28579,7 @@ from pathlib import Path
 parent_sha = "393d029975139b9d28900d477f62e8de392ace96"
 packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
 parent_packet = subprocess.check_output(
-    ["git", "show", f"{parent_sha}:docs/evidence/g01-recovery-packet.md"],
+    ["git", "--no-replace-objects", "show", f"{parent_sha}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 
@@ -28678,7 +28802,7 @@ parent_sha = "b16a349509535d6dcb179c9c0bd7a6a313c48bcd"
 packet_path = "docs/evidence/g01-recovery-packet.md"
 packet = Path(packet_path).read_text(encoding="utf-8")
 parent_packet = subprocess.check_output(
-    ["git", "show", f"{parent_sha}:{packet_path}"], text=True
+    ["git", "--no-replace-objects", "show", f"{parent_sha}:{packet_path}"], text=True
 )
 
 def load_scanner(text):
@@ -28893,7 +29017,7 @@ from pathlib import Path
 parent_sha = "8958ec9a5c1e8de6c43d29e389a706f1c9ba75dd"
 packet_path = "docs/evidence/g01-recovery-packet.md"
 parent_packet = subprocess.check_output(
-    ["git", "show", f"{parent_sha}:{packet_path}"], text=True
+    ["git", "--no-replace-objects", "show", f"{parent_sha}:{packet_path}"], text=True
 )
 anchor = parent_packet.index("def forbidden_command(tokens, depth=0):")
 start = parent_packet.rfind("source = Path(", 0, anchor)
@@ -29219,7 +29343,7 @@ from pathlib import Path
 parent_sha = "518f23c3c875bfda8c8c65239e5171d23c444fc6"
 packet_path = "docs/evidence/g01-recovery-packet.md"
 parent_packet = subprocess.check_output(
-    ["git", "show", f"{parent_sha}:{packet_path}"], text=True
+    ["git", "--no-replace-objects", "show", f"{parent_sha}:{packet_path}"], text=True
 )
 anchor = parent_packet.index("def forbidden_command(tokens, depth=0):")
 start = parent_packet.rfind("source = Path(", 0, anchor)
@@ -29575,7 +29699,7 @@ from pathlib import Path
 parent_sha = "2d6a1f700e2fb3aa918f2166e4dd4611601b10be"
 packet_path = "docs/evidence/g01-recovery-packet.md"
 parent_packet = subprocess.check_output(
-    ["git", "show", f"{parent_sha}:{packet_path}"], text=True
+    ["git", "--no-replace-objects", "show", f"{parent_sha}:{packet_path}"], text=True
 )
 
 def load_scanner(packet, label):
@@ -29942,7 +30066,7 @@ from pathlib import Path
 parent_sha = "f44a4871f87c1a8165593549d58ece6ffee61bf2"
 packet_path = "docs/evidence/g01-recovery-packet.md"
 parent_packet = subprocess.check_output(
-    ["git", "-P", "show", f"{parent_sha}:{packet_path}"], text=True
+    ["git", "--no-replace-objects", "-P", "show", f"{parent_sha}:{packet_path}"], text=True
 )
 
 def load_scanner(packet, label):
@@ -32741,3 +32865,44 @@ batch. An exact-candidate packet selector and new independent dispositions
 covering both this result-origin fix and the pin metadata remain required before
 a stable push. Old packet passes and the prior scoped approval are not approval
 of this changed candidate. No live experiment or production Go change occurred.
+
+#### GitHub exact-head review at d618c229: three P1 corrections
+
+Both independent GPT-6-Luna/max delta reviews APPROVED immutable
+`d618c229197797f7896d6e72c2e5630b0fd30d62`, including the pin metadata;
+the contract reviewer passed four pinned methods in 5.434s and the security
+review refused six mutation witnesses plus a nested-generator borrow with
+three untainted instance/scalar controls. Both reports were processed,
+released without a process action and acknowledged. The stable candidate was
+pushed once. Hosted PR quick run `37105263575` passed in 36s at that SHA;
+its scope skipped changed-tooling/workflow regressions and ran no Python
+harness. These checks did not approve a merge: fresh GitHub Codex review
+`5399495944` completed at that head and reported three P1 findings.
+
+| Exact-head finding | Inert reproduction and local correction |
+|---|---|
+| [4172117980](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4172117980), Boolean provider origin | Generator `Path or None` and direct `True and Path` results lost class origins. Borrowing now follows Boolean operands, without evaluating them. |
+| [4172117984](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4172117984), replacement refs in compiler sources | Both unfenced `git show` prefixes acquired trusted source provenance from an allowlisted textual SHA. Compiler-source reads now require literal `--no-replace-objects`, optionally followed by `-P`. Current executable historical-reader prescriptions use that flag; historical recorded output/results are unchanged. The existing dynamic Git decoder recognizes only this additional no-effect global safety flag. |
+| [4172117986](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4172117986), arbitrary packet slicing | Assigned arithmetic slices, named-bound slices and direct compile slices could extract a `print(os.environ)` specimen. Source assignment and direct compiler checks now share closed extraction recipes with lexical bound resolution, same-source literal markers, bounded offsets and no slice step. Unknown extraction cannot acquire compiler authority merely from packet origin or an approved destination name. |
+
+The three new methods were meaningfully RED in 0.157s with seven failed
+assertions; all examples remained AST data. Boolean plus comprehension controls
+passed two methods in 0.139s. Git-prefix, deferred-provider and unlisted-source
+controls passed three methods in 0.150s; both suppressed-prefix positive controls
+were accepted. Initial slice/prescription integration failed 58 assertions
+(five methods, 5.091s), then 15 (two methods, 5.811s), then five (two methods,
+5.761s): missing command rewrites, the new dynamic global-option shape and one
+existing validator recipe were corrected, not relabeled as prior passes.
+
+The eight-method focused group then passed in 5.841s, preserving all 128 actual
+compiler-helper calls and ten historical loaders. Its selectors are the three
+new Boolean-provider, replacement-suppression and arbitrary-slice methods;
+the existing comprehension-result, provider-alias, deferred-Git, actual-helper
+and historical-loader methods. A subsequent refactor shares immutable-AST
+slice indexes and caches only structural recipes; every use still rechecks
+current base-source provenance. Post-refactor the same eight methods passed
+in 5.468s, again preserving 128 actual helpers and ten loaders. Exact-candidate
+packet scan and independent review remain required. Old d618c229 internal
+approvals/hosted success do not approve these corrections. No new correction
+push, merge, full-current harness or product live test is claimed. #79 and
+parent #1 remain In progress with G01/G02/live gates unchanged.

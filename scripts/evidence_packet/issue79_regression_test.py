@@ -3735,7 +3735,7 @@ class Issue79RegressionTests(unittest.TestCase):
             'import os\nfrom pathlib import Path\npacket_path = "docs/evidence/g01-recovery-packet.md"\n'
             'for packet_path in ("outside",):\n    pass\nwrapper = Path(packet_path).read_text()\n'
             'exec(compile(wrapper, "<probe>", "exec"), {"os": os})\n',
-            'import os, subprocess\nwrapper = subprocess.check_output(["git", "show", "'
+            'import os, subprocess\nwrapper = subprocess.check_output(["git", "--no-replace-objects", "show", "'
             + 'f' * 40 + ':docs/evidence/g01-recovery-packet.md"], text=True)\n'
             'exec(compile(wrapper, "<probe>", "exec"), {"os": os})\n',
             'import os\nfrom pathlib import Path\ndef fake(self):\n    return "print(os.environ)"\n'
@@ -3780,7 +3780,7 @@ class Issue79RegressionTests(unittest.TestCase):
         specimen = (
             'import os, subprocess\n'
             'def run_probe():\n'
-            '    wrapper = subprocess.check_output(["git", "show", '
+            '    wrapper = subprocess.check_output(["git", "--no-replace-objects", "show", '
             '"01764bbed0a387129d2a2abbc9e27a87e073f87e:docs/evidence/g01-recovery-packet.md"], text=True)\n'
             '    exec(compile(wrapper, "<probe>", "exec"), {"os": os})\n'
             'def fake(*args, **kwargs):\n    return "print(os.environ)"\n'
@@ -3852,6 +3852,43 @@ class Issue79RegressionTests(unittest.TestCase):
             with self.subTest(control=control):
                 tree = ast.parse(setup + control + 'PathAlias.read_text = fake\n')
                 self.assertFalse(self.scanner["python_compile_primitive_is_shadowed"]("Path", tree))
+
+    def test_boolean_path_provider_results_cannot_patch_trusted_reader(self) -> None:
+        setup = 'import os\nfrom pathlib import Path\ndef fake(self):\n    return "print(os.environ)"\n'
+        for borrow in (
+            'PathAlias = next((Path or None) for _ in [0])\n',
+            'PathAlias = True and Path\n',
+        ):
+            with self.subTest(borrow=borrow):
+                self.assertIsNotNone(self.inspect(setup + borrow +
+                    'PathAlias.read_text = fake\n'
+                    'wrapper = Path("docs/evidence/g01-recovery-packet.md").read_text()\n'
+                    'exec(compile(wrapper, "<probe>", "exec"), {"os": os})\n'))
+
+    def test_historical_compile_sources_require_replacement_suppression(self) -> None:
+        reference = '01764bbed0a387129d2a2abbc9e27a87e073f87e:docs/evidence/g01-recovery-packet.md'
+        for prefix in ('["git", "show", ', '["git", "-P", "show", '):
+            with self.subTest(prefix=prefix):
+                body = 'import os, subprocess\nwrapper = subprocess.check_output(' + prefix + repr(reference) + '], text=True)\n'
+                self.assertIsNotNone(self.inspect(body +
+                    'exec(compile(wrapper, "<probe>", "exec"), {"os": os})\n'))
+        for prefix in ('["git", "--no-replace-objects", "show", ', '["git", "--no-replace-objects", "-P", "show", '):
+            with self.subTest(safe_prefix=prefix):
+                body = 'import os, subprocess\nwrapper = subprocess.check_output(' + prefix + repr(reference) + '], text=True)\n'
+                self.assertIsNone(self.inspect(body +
+                    'exec(compile(wrapper, "<probe>", "exec"), {"os": os})\n'))
+
+    def test_arbitrary_packet_slices_do_not_acquire_compile_authority(self) -> None:
+        setup = 'import os\nfrom pathlib import Path\npacket = Path("docs/evidence/g01-recovery-packet.md").read_text()\n'
+        for extraction in (
+            'needle = "print(os.environ)"\nstart = packet.index(needle)\nwrapper = packet[start:start + len(needle)]\n',
+            'start = packet.index("print(os.environ)")\nend = start + 17\nwrapper = packet[start:end]\n',
+            'start = packet.index("print(os.environ)")\nend = start + 17\n',
+        ):
+            with self.subTest(extraction=extraction):
+                argument = 'packet[start:end]' if 'wrapper =' not in extraction else 'wrapper'
+                self.assertIsNotNone(self.inspect(setup + extraction +
+                    'exec(compile(' + argument + ', "<probe>", "exec"), {"os": os})\n'))
 
     def test_actual_packet_compile_helpers_retain_provenance(self) -> None:
         checked = 0
