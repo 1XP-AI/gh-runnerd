@@ -38,7 +38,7 @@ Seven of the eight regex alternatives matched tests. The alternative
 `TestSDKJITResponseLossBeforeCreationDoesNotDiscoverIdentity` matched no test;
 the checked-in case is
 `TestSDKJITLookupBeforeCreationDoesNotDiscoverIdentity`, which this first
-command did not execute. The reviewer closed that execution-evidence gap on the
+command did not execute. The coordinator closed that execution-evidence gap on the
 same unchanged source SHA with:
 
 ```text
