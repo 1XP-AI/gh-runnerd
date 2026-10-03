@@ -35491,7 +35491,8 @@ helper and explicit stdout/stderr pipes, and the existing origin comparison
 remains intact. No compiler input, source revision, module-wide exemption or
 helper allowlist was added.
 
-The bounded post-fix selection passed all three new finding methods and the
+At resulting exact source `3e597eb2`, the bounded post-fix selection passed all
+three new finding methods and the
 existing displayhook, pathlib-reader/mutator, OS-re-export, isolated-Git,
 builder-rebinding and argv-mutation controls, plus the current compiler-helper
 and historical-loader controls:
@@ -35575,7 +35576,10 @@ result are outside the certified shape; the bounded child capture, explicit
 pipes and exact expected URL stay required. The tests directly exercise raw,
 aliased and decoded output plus a removed comparison.
 
-The post-correction focused verification passed 15 methods in 10.789s:
+At the later exact `a9d602e5` checkpoint, the 15-method focused verification
+passed in 10.789s and recorded 119 actual compiler-helper checks plus ten
+historical loader controls. This 15-method result belongs to `a9d602e5`, not
+`3e597eb2`:
 
 ```text
 python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
@@ -35630,9 +35634,11 @@ accounting assertions again; those assertions had been placed after the
 unreachable return in the AST mutation helper.
 
 The Path mutation regression produced two failures in 0.138s for loop-target
-and nested-global rebinding of an ordinary set name to an unowned `Path`; the
-third destructuring form was already rejected by the scanner at this source.
-The receiver proof now refuses reassignment through those binding forms. A
+and nested-global rebinding of an ordinary set name to an unowned `Path`. Its
+third destructuring fixture omitted the initial ordinary-set seed and did not
+reproduce the coordinator's seeded witness, which was accepted at immutable
+`a9d602e5`. The current receiver proof now refuses the seeded form along with
+reassignment through the other binding forms. A
 scanner self-audit run then found its own safe `seen.copy()` set clones as
 filesystem `Path.copy()` calls (the combined intermediate run failed after
 37.078s, and the focused retry failed after 47.426s). Internal visited-set
@@ -35662,9 +35668,38 @@ python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
 Ran 1 test in 0.741s — OK
 ```
 
-The earlier 15-method focused result at `3e597eb2` remains the recorded
-119-compiler-helper/10-loader evidence; this correction ran the focused
+The separate 13-method focused selector at `3e597eb2` passed in 5.567s and
+recorded 119 actual compiler-helper checks plus ten historical loader
+controls. The `a9d602e5` result is the 15-method, 10.789s run recorded above;
+these results are from distinct checkpoints. This correction ran the focused
 self-audit selector but did not rerun those broader selectors. The adversarial
 programs remained source strings and AST mutations. The coordinator owns the
 next exact-head packet scan and any full-suite validation; neither is claimed
 here.
+
+#### Coordinator validation and seeded destructuring control at `dba804f`
+
+The coordinator reported that the full 168-test harness passed in 160.796s at
+exact source `dba804f69cafcf2a1f171ad72a3db98288b70ed8`. At that same exact
+source, its current-packet selector reported 261 shell commands and 86 Python
+bodies, zero violations, 119 actual compiler-helper calls and ten historical
+loader controls. This result is pinned to `dba804f`; it does not certify the
+later test and ledger-only delta in this entry. No Go/hosted-CI or live
+operation result is claimed.
+
+The destructuring witness in the Path-mutator regression previously omitted
+the ordinary-set seed and therefore did not reproduce the coordinator's
+accepted witness at `a9d602e5`: `seen = {"node"}` followed by destructuring
+`seen, other = (Path("synthetic-unowned-source"), None)`. The focused fixture
+now includes that initial set assignment, so the requested selector exercises
+the reported entry state and refuses it at the `dba804f` source:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_new_path_mutators_require_owned_sources_and_destinations
+Ran 1 test in 0.176s — OK
+```
+
+This follow-up changes only the regression source and this ledger; scanner
+source and executable compiler recipes are unchanged. The witness remains an
+inert Python source string parsed by the harness.

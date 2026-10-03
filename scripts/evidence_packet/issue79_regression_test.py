@@ -3961,6 +3961,7 @@ class Issue79RegressionTests(unittest.TestCase):
             'for seen in [Path("synthetic-unowned-source")]:\n'
             '    seen.copy(Path("synthetic-unowned-destination"))\n',
             'from pathlib import Path\n'
+            'seen = {"node"}\n'
             'seen, other = (Path("synthetic-unowned-source"), None)\n'
             'seen.copy(Path("synthetic-unowned-destination"))\n',
             'from pathlib import Path\n'
