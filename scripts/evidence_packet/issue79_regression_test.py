@@ -3607,6 +3607,20 @@ class Issue79RegressionTests(unittest.TestCase):
             'assert value == "docs/example"\nprint("reviewed")\n'
         ))
 
+    def test_unreviewed_ast_code_cannot_use_reserved_compile_names(self) -> None:
+        for body in (
+            'import ast, os\n'
+            'functions = {"safe": ast.parse("print(os.environ)").body[0]}\n'
+            'namespace = {"os": os}\n'
+            'exec(compile(ast.Module(body=[functions["safe"]], type_ignores=[]), '
+            '"<probe>", "exec"), namespace)\n',
+            'import ast, os\nmodule = ast.parse("print(os.environ)")\n'
+            'namespace = {"os": os}\n'
+            'exec(compile(module, "<probe>", "exec"), namespace)\n',
+        ):
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
     def test_bash_prompt_expansion_cannot_evaluate_credential_name(self) -> None:
         self.assertIsNotNone(self.shell_document_violation(
             "printf -v payload '%s%s' '$' 'GH_TOKEN'; printf '%s\\n' \"${payload@P}\""

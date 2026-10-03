@@ -31719,3 +31719,29 @@ existing callback-name analysis of the scanner body itself. It is renamed
 `path_member_call_node` without changing the guard's semantics. This failed
 packet scan is not reported as GREEN; the subsequent exact-candidate scan
 and final delta verdicts are recorded in the PR when complete.
+
+#### Open P1: AST compile-source proof (not corrected)
+
+The path-member contract reviewer approved immutable `55412a0` after four
+exact-blob focused methods passed in 0.142s. That sign-off does not cover the
+subsequent AST-variable rename. The renamed `a628322c48e8c2895bdeb3c5e9161618189f782a`
+packet selector then passed in 110.796s (331 shell commands, 95 Python bodies,
+zero violations). These are scoped passing results, not approval of the
+entire combined candidate.
+
+Coordinator self-review reproduced a separate P1 compile-source gap:
+an arbitrary parsed AST stored in a dictionary named `functions` or a
+variable named `module` was accepted at a compiled execution call with an
+OS-module namespace. `test_unreviewed_ast_code_cannot_use_reserved_compile_names`
+failed two assertions in 0.115s under the canonical isolated harness command.
+The specimens are inert AST input; neither the compiled specimen nor its
+environment output was executed. This RED remains intentionally unresolved
+in the local work-in-progress branch, not in a pushed merge candidate.
+
+The next correction must tie AST nodes, containers and selected helper
+members to reviewed source provenance rather than their reserved names or
+node kinds, while preserving the actual packet-derived helper controls.
+Compiler source-proof changes require their focused RED/GREEN evidence and
+an independent security delta review. No GREEN, final combined approval,
+fresh GitHub Codex review or merge is claimed for this open finding. The
+parent live gates and issue #79 remain incomplete.
