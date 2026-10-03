@@ -2807,6 +2807,139 @@ class Issue79RegressionTests(unittest.TestCase):
             "a collector placed after the returned result must not certify its output",
         )
 
+    def test_git_query_collector_must_return_bounded_pipe_bytes(self) -> None:
+        collector_body, marker = self.packet_heredoc_containing(
+            "def capture_git_query_output(process, git_command, output_limit, input_bytes=None):",
+            'return bytes(captures["stdout"]), bytes(captures["stderr"])',
+            "def run_bounded_git_query(",
+        )
+        inspect = self.scanner["inspect_python_heredoc"]
+        self.assertIsNone(
+            inspect(collector_body, marker),  # type: ignore[operator]
+            "the canonical bounded pipe collector remains accepted",
+        )
+        mutations = (
+            (
+                "process.communicate() output",
+                [
+                    ast.Return(
+                        value=ast.Call(
+                            func=ast.Attribute(
+                                value=ast.Name(id="process", ctx=ast.Load()),
+                                attr="communicate",
+                                ctx=ast.Load(),
+                            ),
+                            args=[],
+                            keywords=[],
+                        )
+                    )
+                ],
+            ),
+            (
+                "fabricated origin bytes after wait",
+                [
+                    ast.Expr(
+                        value=ast.Call(
+                            func=ast.Attribute(
+                                value=ast.Name(id="process", ctx=ast.Load()),
+                                attr="wait",
+                                ctx=ast.Load(),
+                            ),
+                            args=[],
+                            keywords=[],
+                        )
+                    ),
+                    ast.Return(
+                        value=ast.Tuple(
+                            elts=[
+                                ast.Constant(
+                                    value=b"https://github.com/1XP-AI/gh-runnerd.git\n"
+                                ),
+                                ast.Constant(value=b""),
+                            ],
+                            ctx=ast.Load(),
+                        )
+                    ),
+                ],
+            ),
+        )
+        for label, replacement in mutations:
+            with self.subTest(mutant=label):
+                tree = ast.parse(collector_body, filename="<git-query-collector-data>")
+                collector = _verification_function(tree, "capture_git_query_output")
+                collector.body = replacement
+                ast.fix_missing_locations(tree)
+                self.assertIsNotNone(
+                    inspect(ast.unparse(tree), marker),  # type: ignore[operator]
+                    label,
+                )
+        for label, change in (
+            (
+                "empty budget len operand",
+                lambda guard: guard.test.left.left.left.args.clear(),
+            ),
+            (
+                "non-call budget operand",
+                lambda guard: setattr(
+                    guard.test.left.left,
+                    "left",
+                    ast.Constant(value=0),
+                ),
+            ),
+        ):
+            with self.subTest(mutant=label):
+                tree = ast.parse(collector_body, filename="<git-query-collector-data>")
+                collector = _verification_function(tree, "capture_git_query_output")
+                guard = next(
+                    node
+                    for node in ast.walk(collector)
+                    if isinstance(node, ast.If)
+                    and isinstance(node.test, ast.Compare)
+                    and isinstance(node.test.comparators[0], ast.Name)
+                    and node.test.comparators[0].id == "output_limit"
+                )
+                change(guard)
+                ast.fix_missing_locations(tree)
+                self.assertIsNotNone(
+                    inspect(ast.unparse(tree), marker),  # type: ignore[operator]
+                    label,
+                )
+        tree = ast.parse(collector_body, filename="<git-query-collector-data>")
+        collector = _verification_function(tree, "capture_git_query_output")
+        collector.body.insert(
+            0,
+            ast.Delete(
+                targets=[ast.Name(id="captures", ctx=ast.Del())],
+            ),
+        )
+        ast.fix_missing_locations(tree)
+        self.assertIsNotNone(
+            inspect(ast.unparse(tree), marker),  # type: ignore[operator]
+            "an unexpected local deletion shape must be rejected without crashing",
+        )
+        tree = ast.parse(collector_body, filename="<git-query-collector-data>")
+        collector = _verification_function(tree, "capture_git_query_output")
+        parents = {
+            child: parent
+            for parent in ast.walk(tree)
+            for child in ast.iter_child_nodes(parent)
+        }
+        returned = next(node for node in ast.walk(collector) if isinstance(node, ast.Return))
+        returned.value.elts[0].args[0].value.id = "capture_alias"
+        return_parent = parents[returned]
+        return_parent.body.insert(
+            return_parent.body.index(returned),
+            ast.Assign(
+                targets=[ast.Name(id="capture_alias", ctx=ast.Store())],
+                value=ast.Name(id="captures", ctx=ast.Load()),
+            ),
+        )
+        ast.fix_missing_locations(tree)
+        self.assertIsNotNone(
+            inspect(ast.unparse(tree), marker),  # type: ignore[operator]
+            "an output-buffer alias must not inherit the reviewed capture proof",
+        )
+
 
     def test_bounded_git_origin_capture_requires_reviewed_comparison_and_no_output_escape(self) -> None:
         verification_body, verification_marker = self.packet_heredoc_containing(
@@ -3964,6 +4097,12 @@ class Issue79RegressionTests(unittest.TestCase):
             'seen = {"node"}\n'
             'seen, other = (Path("synthetic-unowned-source"), None)\n'
             'seen.copy(Path("synthetic-unowned-destination"))\n',
+            'from pathlib import Path\n'
+            'def copier(seen=None):\n'
+            '    if seen is None:\n'
+            '        seen = set()\n'
+            '    seen.copy(Path("synthetic-unowned-destination"))\n'
+            'copier(**{"seen": Path("synthetic-unowned-source")})\n',
             'from pathlib import Path\n'
             'seen = set()\n'
             'def retarget():\n'

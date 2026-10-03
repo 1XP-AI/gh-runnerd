@@ -14024,6 +14024,718 @@ def python_git_origin_capture_violation(tree, parents):
     return "Python bounded Git origin output is not compared or escapes its verifier"
 
 
+def reviewed_python_git_query_output_budget(tree, parents, runner):
+    """Prove the collector limit comes from one of the packet's finite caps."""
+    limit_names = {
+        "git_query_output_max_bytes",
+        "git_query_packet_blob_output_max_bytes",
+    }
+    chunk_name = "git_query_stream_chunk_bytes"
+    constant_names = limit_names | {chunk_name}
+
+    def positive_integer(node):
+        if isinstance(node, ast.Constant):
+            return node.value if isinstance(node.value, int) and not isinstance(node.value, bool) and node.value > 0 else None
+        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Mult)):
+            left = positive_integer(node.left)
+            right = positive_integer(node.right)
+            if left is not None and right is not None:
+                return left + right if isinstance(node.op, ast.Add) else left * right
+        return None
+
+    definitions = {}
+    for statement in tree.body:
+        if not isinstance(statement, ast.Assign) or len(statement.targets) != 1:
+            continue
+        target = statement.targets[0]
+        if isinstance(target, ast.Name) and target.id in constant_names:
+            if target.id in definitions:
+                return False
+            definitions[target.id] = statement.value
+    if set(definitions) != constant_names or any(
+        positive_integer(value) is None for value in definitions.values()
+    ):
+        return False
+    if positive_integer(definitions[chunk_name]) > min(
+        positive_integer(definitions[name]) for name in limit_names
+    ):
+        return False
+    if any(
+        isinstance(node, ast.Name)
+        and node.id in constant_names
+        and isinstance(node.ctx, ast.Store)
+        and not (
+            isinstance(parents.get(node), ast.Assign)
+            and parents[node] in tree.body
+            and parents[node].value is definitions[node.id]
+        )
+        for node in ast.walk(tree)
+    ):
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name in constant_names:
+                return False
+        elif isinstance(node, ast.arg) and node.arg in constant_names:
+            return False
+        elif isinstance(node, ast.ExceptHandler) and node.name in constant_names:
+            return False
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name in constant_names:
+            return False
+        elif isinstance(node, ast.MatchMapping) and node.rest in constant_names:
+            return False
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            aliases = node.names
+            if any(
+                (alias.asname or alias.name.split(".")[0]) in constant_names
+                for alias in aliases
+            ):
+                return False
+            if isinstance(node, ast.ImportFrom) and any(
+                (alias.asname or alias.name) in constant_names for alias in aliases
+            ):
+                return False
+        elif isinstance(node, (ast.Global, ast.Nonlocal)) and any(
+            name in constant_names for name in node.names
+        ):
+            return False
+
+    parameters = runner.args.kwonlyargs
+    output_parameter = next(
+        (index for index, parameter in enumerate(parameters) if parameter.arg == "output_limit"),
+        None,
+    )
+    if output_parameter is None:
+        return False
+    if any(
+        isinstance(node, ast.Name)
+        and node.id == "output_limit"
+        and isinstance(node.ctx, ast.Store)
+        and python_enclosing_scope(node, parents) is runner
+        for node in ast.walk(runner)
+    ):
+        return False
+    if any(
+        node is not runner
+        and python_enclosing_scope(node, parents) is runner
+        and (
+            isinstance(node, (ast.Import, ast.ImportFrom, ast.Match, ast.Global, ast.Nonlocal))
+            or isinstance(node, ast.ExceptHandler) and node.name is not None
+            or isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda))
+        )
+        for node in ast.walk(runner)
+    ):
+        return False
+    default = runner.args.kw_defaults[output_parameter]
+    if not (
+        isinstance(default, ast.Name)
+        and default.id == "git_query_output_max_bytes"
+    ):
+        return False
+    guards = [
+        node
+        for node in ast.walk(runner)
+        if isinstance(node, ast.If)
+        and python_enclosing_scope(node, parents) is runner
+        and isinstance(node.test, ast.Compare)
+        and isinstance(node.test.left, ast.Name)
+        and node.test.left.id == "output_limit"
+        and len(node.test.ops) == 1
+        and isinstance(node.test.ops[0], ast.NotIn)
+        and len(node.test.comparators) == 1
+        and isinstance(node.test.comparators[0], ast.Set)
+        and {
+            element.id for element in node.test.comparators[0].elts
+            if isinstance(element, ast.Name)
+        } == limit_names
+        and len(node.test.comparators[0].elts) == 2
+        and len(node.body) == 1
+        and isinstance(node.body[0], ast.Raise)
+        and isinstance(node.body[0].exc, ast.Call)
+        and python_dotted_name(node.body[0].exc.func) == "SystemExit"
+    ]
+    if len(guards) != 1:
+        return False
+
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "run_bounded_git_query"
+    ]
+    if not calls:
+        return False
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Name)
+            and node.id == "run_bounded_git_query"
+            and isinstance(node.ctx, ast.Load)
+        ):
+            continue
+        parent = parents.get(node)
+        if not isinstance(parent, ast.Call) or parent.func is not node or parent not in calls:
+            return False
+    for call in calls:
+        if len(call.args) != 1 or any(keyword.arg is None for keyword in call.keywords):
+            return False
+        supplied_limits = [keyword.value for keyword in call.keywords if keyword.arg == "output_limit"]
+        if len(supplied_limits) > 1 or (
+            supplied_limits
+            and not (
+                isinstance(supplied_limits[0], ast.Name)
+                and supplied_limits[0].id in limit_names
+            )
+        ):
+            return False
+    return True
+
+
+def reviewed_python_git_query_collector(tree, parents):
+    """Prove bounded output bytes come only from the registered process pipes."""
+    collectors = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "capture_git_query_output"
+    ]
+    runners = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "run_bounded_git_query"
+    ]
+    if len(collectors) != 1 or len(runners) != 1:
+        return False
+    function = collectors[0]
+    runner = runners[0]
+    if not reviewed_python_git_query_output_budget(tree, parents, runner):
+        return False
+    if any(
+        node is not function
+        and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda))
+        and python_enclosing_scope(node, parents) is function
+        for node in ast.walk(function)
+    ):
+        return False
+    if (
+        function.args.posonlyargs
+        or [argument.arg for argument in function.args.args]
+        != ["process", "git_command", "output_limit", "input_bytes"]
+        or function.args.kwonlyargs
+        or function.args.vararg is not None
+        or function.args.kwarg is not None
+        or len(function.args.defaults) != 1
+        or not isinstance(function.args.defaults[0], ast.Constant)
+        or function.args.defaults[0].value is not None
+    ):
+        return False
+
+    local_nodes = [
+        node
+        for node in ast.walk(function)
+        if python_enclosing_scope(node, parents) is function
+    ]
+    local_calls = [node for node in local_nodes if isinstance(node, ast.Call)]
+    if any(
+        isinstance(node, (ast.Import, ast.ImportFrom, ast.Global, ast.Nonlocal, ast.Match))
+        or isinstance(node, ast.ExceptHandler) and node.name is not None
+        or isinstance(node, ast.Delete)
+        or isinstance(node, (ast.Attribute, ast.Subscript))
+        and isinstance(node.ctx, (ast.Store, ast.Del))
+        for node in local_nodes
+    ):
+        return False
+    store_names = sorted(
+        node.id
+        for node in local_nodes
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+    )
+    if store_names != sorted(
+        [
+            "captures", "pending_input", "pending_input", "selector", "name",
+            "deadline", "remaining", "remaining", "stream", "stream", "stream",
+            "ready", "key", "_", "chunk", "written",
+        ]
+    ):
+        return False
+    call_names = sorted(ast.unparse(node.func) for node in local_calls)
+    if call_names != sorted(
+        [
+            "selectors.DefaultSelector", "SystemExit", "SystemExit", "SystemExit",
+            "SystemExit", "bytearray", "bytearray", "memoryview", "selector.get_map",
+            "process.wait", "selector.close", "getattr", "getattr", "os.set_blocking",
+            "os.set_blocking", "len", "len", "len", "len", "time.monotonic",
+            "time.monotonic", "time.monotonic", "selector.select",
+            "subprocess.TimeoutExpired", "subprocess.TimeoutExpired",
+            "subprocess.TimeoutExpired", "bytes", "bytes", "selector.register",
+            "selector.register", "stream.fileno", "stream.fileno", "stream.fileno",
+            "stream.fileno", "stream.close", "stream.close", "stream.close",
+            "captures[key.data].extend", "os.read", "selector.unregister",
+            "selector.unregister", "os.write",
+        ]
+    ):
+        return False
+
+    def is_name(node, name):
+        return isinstance(node, ast.Name) and node.id == name
+
+    def is_buffer(node, key):
+        return (
+            isinstance(node, ast.Subscript)
+            and is_name(node.value, "captures")
+            and isinstance(node.slice, ast.Constant)
+            and node.slice.value == key
+            and isinstance(node.ctx, ast.Load)
+        )
+
+    def is_len(node, argument):
+        return (
+            isinstance(node, ast.Call)
+            and is_name(node.func, "len")
+            and len(node.args) == 1
+            and not node.keywords
+            and node.args[0] is argument
+            and python_unshadowed_builtin_call(node, {"len"}, tree, parents)
+        )
+
+    def budget_test(node):
+        if not (
+            isinstance(node, ast.Compare)
+            and len(node.ops) == 1
+            and isinstance(node.ops[0], ast.Gt)
+            and len(node.comparators) == 1
+            and is_name(node.comparators[0], "output_limit")
+            and isinstance(node.left, ast.BinOp)
+            and isinstance(node.left.op, ast.Add)
+            and isinstance(node.left.left, ast.BinOp)
+            and isinstance(node.left.left.op, ast.Add)
+        ):
+            return False
+        first, second, third = (
+            node.left.left.left,
+            node.left.left.right,
+            node.left.right,
+        )
+        return (
+            isinstance(first, ast.Call)
+            and len(first.args) == 1
+            and is_buffer(first.args[0], "stdout")
+            and is_len(first, first.args[0])
+            and isinstance(second, ast.Call)
+            and len(second.args) == 1
+            and is_buffer(second.args[0], "stderr")
+            and is_len(second, second.args[0])
+            and isinstance(third, ast.Call)
+            and len(third.args) == 1
+            and is_name(third.args[0], "chunk")
+            and is_len(third, third.args[0])
+        )
+
+    guards = [
+        node for node in local_nodes
+        if isinstance(node, ast.If) and budget_test(node.test)
+    ]
+    if (
+        len(guards) != 1
+        or len(guards[0].body) != 1
+        or not isinstance(guards[0].body[0], ast.Raise)
+        or not isinstance(guards[0].body[0].exc, ast.Call)
+        or python_dotted_name(guards[0].body[0].exc.func) != "SystemExit"
+        or guards[0].orelse
+    ):
+        return False
+    budget_guard = guards[0]
+    initial_limits = [
+        node for node in function.body
+        if isinstance(node, ast.If)
+        and isinstance(node.test, ast.Compare)
+        and is_name(node.test.left, "output_limit")
+        and len(node.test.ops) == 1
+        and isinstance(node.test.ops[0], ast.LtE)
+        and len(node.test.comparators) == 1
+        and isinstance(node.test.comparators[0], ast.Constant)
+        and node.test.comparators[0].value == 0
+        and len(node.body) == 1
+        and isinstance(node.body[0], ast.Raise)
+    ]
+    if len(initial_limits) != 1:
+        return False
+
+    captures_assignments = [
+        node for node in local_nodes
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and is_name(node.targets[0], "captures")
+    ]
+    if len(captures_assignments) != 1 or parents.get(captures_assignments[0]) is not function:
+        return False
+    captures_assignment = captures_assignments[0]
+    captures = captures_assignment.value
+    if not isinstance(captures, ast.Dict) or [
+        key.value if isinstance(key, ast.Constant) else None for key in captures.keys
+    ] != ["stdout", "stderr"]:
+        return False
+
+    selector_assignments = [
+        node for node in local_nodes
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and is_name(node.targets[0], "selector")
+        and isinstance(node.value, ast.Call)
+        and python_dotted_name(node.value.func) == "selectors.DefaultSelector"
+        and not node.value.args
+        and not node.value.keywords
+    ]
+    if (
+        len(selector_assignments) != 1
+        or parents.get(selector_assignments[0]) is not function
+    ):
+        return False
+    bytearrays = [
+        node for node in local_calls
+        if is_name(node.func, "bytearray")
+    ]
+    if len(bytearrays) != 2 or any(
+        node.args or node.keywords
+        or not python_unshadowed_builtin_call(node, {"bytearray"}, tree, parents)
+        for node in bytearrays
+    ) or [
+        value for value in captures.values if isinstance(value, ast.Call)
+    ] != bytearrays:
+        return False
+
+    returns = [node for node in local_nodes if isinstance(node, ast.Return)]
+    if len(returns) != 1 or not isinstance(returns[0].value, ast.Tuple) or len(returns[0].value.elts) != 2:
+        return False
+    return_value = returns[0].value
+    returned_buffers = []
+    byte_calls = []
+    for expected, item in zip(("stdout", "stderr"), return_value.elts):
+        if not (
+            isinstance(item, ast.Call)
+            and is_name(item.func, "bytes")
+            and len(item.args) == 1
+            and not item.keywords
+            and is_buffer(item.args[0], expected)
+            and python_unshadowed_builtin_call(item, {"bytes"}, tree, parents)
+        ):
+            return False
+        returned_buffers.append(item.args[0])
+        byte_calls.append(item)
+    if [node for node in local_calls if is_name(node.func, "bytes")] != byte_calls:
+        return False
+
+    extensions = [
+        node for node in local_calls
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "extend"
+    ]
+    if (
+        len(extensions) != 1
+        or len(extensions[0].args) != 1
+        or extensions[0].keywords
+        or not is_name(extensions[0].args[0], "chunk")
+        or not isinstance(extensions[0].func.value, ast.Subscript)
+        or not is_name(extensions[0].func.value.value, "captures")
+        or not isinstance(extensions[0].func.value.slice, ast.Attribute)
+        or not is_name(extensions[0].func.value.slice.value, "key")
+        or extensions[0].func.value.slice.attr != "data"
+    ):
+        return False
+    extension = extensions[0]
+    extension_statement = parents.get(extension)
+    if not isinstance(extension_statement, ast.Expr):
+        return False
+
+    read_calls = [
+        node for node in local_calls
+        if python_dotted_name(node.func) == "os.read"
+    ]
+    if (
+        len(read_calls) != 1
+        or len(read_calls[0].args) != 2
+        or read_calls[0].keywords
+        or not isinstance(read_calls[0].args[0], ast.Call)
+        or python_dotted_name(read_calls[0].args[0].func) != "stream.fileno"
+        or read_calls[0].args[0].args
+        or read_calls[0].args[0].keywords
+        or not is_name(read_calls[0].args[1], "git_query_stream_chunk_bytes")
+    ):
+        return False
+    read_assignment = parents.get(read_calls[0])
+    if not (
+        isinstance(read_assignment, ast.Assign)
+        and len(read_assignment.targets) == 1
+        and is_name(read_assignment.targets[0], "chunk")
+        and read_assignment.value is read_calls[0]
+    ):
+        return False
+    read_try = parents.get(read_assignment)
+    if not (
+        isinstance(read_try, ast.Try)
+        and read_assignment in read_try.body
+        and len(read_try.handlers) == 1
+        and isinstance(read_try.handlers[0].type, ast.Name)
+        and read_try.handlers[0].type.id == "BlockingIOError"
+        and len(read_try.handlers[0].body) == 1
+        and isinstance(read_try.handlers[0].body[0], ast.Continue)
+    ):
+        return False
+
+    ready_assignments = [
+        node for node in local_nodes
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and is_name(node.targets[0], "ready")
+        and isinstance(node.value, ast.Call)
+        and python_dotted_name(node.value.func) == "selector.select"
+        and [python_dotted_name(argument) for argument in node.value.args] == ["remaining"]
+        and not node.value.keywords
+    ]
+    if len(ready_assignments) != 1:
+        return False
+    ready_assignment = ready_assignments[0]
+    ready_loops = [
+        node for node in local_nodes
+        if isinstance(node, ast.For)
+        and isinstance(node.target, ast.Tuple)
+        and len(node.target.elts) == 2
+        and is_name(node.target.elts[0], "key")
+        and is_name(node.target.elts[1], "_")
+        and is_name(node.iter, "ready")
+    ]
+    if len(ready_loops) != 1:
+        return False
+    ready_loop = ready_loops[0]
+    while_node = parents.get(ready_loop)
+    if not (
+        isinstance(while_node, ast.While)
+        and isinstance(while_node.test, ast.Call)
+        and python_dotted_name(while_node.test.func) == "selector.get_map"
+        and not while_node.test.args
+        and not while_node.test.keywords
+        and not while_node.orelse
+        and ready_loop in while_node.body
+        and ready_assignment in while_node.body
+        and while_node.body.index(ready_assignment) < while_node.body.index(ready_loop)
+    ):
+        return False
+    wait_calls = [
+        node for node in local_calls
+        if python_dotted_name(node.func) == "process.wait"
+    ]
+    if (
+        len(wait_calls) != 1
+        or wait_calls[0].args
+        or len(wait_calls[0].keywords) != 1
+        or wait_calls[0].keywords[0].arg != "timeout"
+        or not is_name(wait_calls[0].keywords[0].value, "remaining")
+    ):
+        return False
+    outer_try = parents.get(while_node)
+    wait_statement = parents.get(wait_calls[0])
+    if not isinstance(wait_statement, ast.Expr):
+        return False
+    return_statement = returns[0]
+    if not (
+        isinstance(outer_try, ast.Try)
+        and while_node in outer_try.body
+        and wait_statement in outer_try.body
+        and return_statement in outer_try.body
+        and outer_try.body.index(while_node)
+        < outer_try.body.index(wait_statement)
+        < outer_try.body.index(return_statement)
+    ):
+        return False
+    read_loop = next(
+        (
+            parent for parent in _python_parent_chain(read_assignment, parents)
+            if isinstance(parent, ast.For)
+        ),
+        None,
+    )
+    if read_loop is not ready_loop or read_try not in ready_loop.body:
+        return False
+    guard_statement = budget_guard
+    if (
+        parents.get(guard_statement) is not ready_loop
+        or parents.get(extension_statement) is not ready_loop
+        or ready_loop.body.index(guard_statement) >= ready_loop.body.index(extension_statement)
+    ):
+        return False
+
+    read_stream_assignments = [
+        node for node in local_nodes
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and is_name(node.targets[0], "stream")
+        and isinstance(node.value, ast.Attribute)
+        and is_name(node.value.value, "key")
+        and node.value.attr == "fileobj"
+    ]
+    if len(read_stream_assignments) != 1 or parents.get(read_stream_assignments[0]) is not ready_loop:
+        return False
+    output_loops = [
+        node for node in local_nodes
+        if isinstance(node, ast.For)
+        and is_name(node.target, "name")
+        and is_name(node.iter, "captures")
+    ]
+    if len(output_loops) != 1:
+        return False
+    output_loop = output_loops[0]
+    process_getattrs = [
+        node for node in local_calls
+        if is_name(node.func, "getattr")
+        and len(node.args) == 3
+        and is_name(node.args[0], "process")
+        and isinstance(node.args[2], ast.Constant)
+        and node.args[2].value is None
+        and not node.keywords
+        and python_unshadowed_builtin_call(node, {"getattr"}, tree, parents)
+    ]
+    stream_getattrs = [
+        node for node in process_getattrs if is_name(node.args[1], "name")
+    ]
+    stdin_getattrs = [
+        node for node in process_getattrs
+        if isinstance(node.args[1], ast.Constant) and node.args[1].value == "stdin"
+    ]
+    if len(stream_getattrs) != 1 or len(stdin_getattrs) != 1:
+        return False
+    if any(
+        not (
+            isinstance(parents.get(node), ast.Assign)
+            and len(parents[node].targets) == 1
+            and is_name(parents[node].targets[0], "stream")
+            and parents[node].value is node
+        )
+        for node in process_getattrs
+    ) or parents[stream_getattrs[0]] not in output_loop.body:
+        return False
+    process_loads = [
+        node for node in local_nodes
+        if is_name(node, "process") and isinstance(node.ctx, ast.Load)
+    ]
+    process_read_nodes = [call.args[0] for call in process_getattrs]
+    if wait_calls:
+        process_read_nodes.append(wait_calls[0].func.value)
+    if len(process_loads) != 3 or any(
+        all(node is not expected for expected in process_read_nodes)
+        for node in process_loads
+    ):
+        return False
+    read_registrations = [
+        node for node in local_calls
+        if python_dotted_name(node.func) == "selector.register"
+        and len(node.args) == 3
+        and python_dotted_name(node.args[1]) == "selectors.EVENT_READ"
+        and is_name(node.args[0], "stream")
+        and is_name(node.args[2], "name")
+        and not node.keywords
+    ]
+    write_registrations = [
+        node for node in local_calls
+        if python_dotted_name(node.func) == "selector.register"
+        and len(node.args) == 3
+        and python_dotted_name(node.args[1]) == "selectors.EVENT_WRITE"
+        and is_name(node.args[0], "stream")
+        and isinstance(node.args[2], ast.Constant)
+        and node.args[2].value == "stdin"
+        and not node.keywords
+    ]
+    if (
+        len(read_registrations) != 1
+        or len(write_registrations) != 1
+        or parents.get(read_registrations[0]) not in ast.walk(output_loop)
+    ):
+        return False
+    read_registration_statement = parents[read_registrations[0]]
+    read_registration_guard = parents.get(read_registration_statement)
+    if not (
+        isinstance(read_registration_guard, ast.If)
+        and isinstance(read_registration_guard.test, ast.Compare)
+        and is_name(read_registration_guard.test.left, "stream")
+        and len(read_registration_guard.test.ops) == 1
+        and isinstance(read_registration_guard.test.ops[0], ast.IsNot)
+        and len(read_registration_guard.test.comparators) == 1
+        and isinstance(read_registration_guard.test.comparators[0], ast.Constant)
+        and read_registration_guard.test.comparators[0].value is None
+        and read_registration_statement in read_registration_guard.body
+    ):
+        return False
+
+    capture_subscripts = [
+        node for node in local_nodes
+        if isinstance(node, ast.Subscript) and is_name(node.value, "captures")
+    ]
+    allowed_capture_subscripts = set(returned_buffers)
+    allowed_capture_subscripts.update(
+        node
+        for node in ast.walk(budget_guard.test)
+        if isinstance(node, ast.Subscript) and is_name(node.value, "captures")
+    )
+    allowed_capture_subscripts.add(extensions[0].func.value)
+    if set(capture_subscripts) != allowed_capture_subscripts:
+        return False
+    capture_stores = [
+        node for node in local_nodes
+        if is_name(node, "captures") and isinstance(node.ctx, ast.Store)
+    ]
+    if len(capture_stores) != 1 or capture_stores[0] is not captures_assignment.targets[0]:
+        return False
+    capture_loads = [
+        node for node in local_nodes
+        if is_name(node, "captures") and isinstance(node.ctx, ast.Load)
+    ]
+    if len(capture_loads) != len(allowed_capture_subscripts) + 1 or any(
+        parents.get(node) is not output_loop and parents.get(node) not in allowed_capture_subscripts
+        for node in capture_loads
+    ):
+        return False
+    chunk_stores = [
+        node for node in local_nodes
+        if is_name(node, "chunk") and isinstance(node.ctx, ast.Store)
+    ]
+    chunk_loads = [
+        node for node in local_nodes
+        if is_name(node, "chunk") and isinstance(node.ctx, ast.Load)
+    ]
+    if (
+        len(chunk_stores) != 1
+        or chunk_stores[0] is not read_assignment.targets[0]
+        or len(chunk_loads) != 3
+        or not any(
+            isinstance(parents.get(node), ast.UnaryOp)
+            and isinstance(parents[node].op, ast.Not)
+            and parents[node].operand is node
+            and isinstance(parents.get(parents[node]), ast.If)
+            and parents[parents[node]] in ready_loop.body
+            and not parents[parents[node]].orelse
+            and any(
+                isinstance(statement, ast.Continue)
+                for statement in parents[parents[node]].body
+            )
+            for node in chunk_loads
+        )
+        or not any(
+            isinstance(parents.get(node), ast.Call)
+            and python_dotted_name(parents[node].func) == "len"
+            and parents[node] in ast.walk(budget_guard.test)
+            and len(parents[node].args) == 1
+            and parents[node].args[0] is node
+            for node in chunk_loads
+        )
+        or not any(parents.get(node) is extension for node in chunk_loads)
+    ):
+        return False
+
+    bytes_calls = [node for node in local_calls if is_name(node.func, "bytes")]
+    if len(bytes_calls) != 2 or bytearrays != [value for value in captures.values if isinstance(value, ast.Call)]:
+        return False
+    return True
+
+
 def reviewed_python_git_query_capture(
     node, tree, parents, require_origin_comparison=True
 ):
@@ -14033,6 +14745,7 @@ def reviewed_python_git_query_capture(
         or python_dotted_name(node.func) != "subprocess.Popen"
         or not reviewed_python_helper_definition(node, parents)
         or not reviewed_python_helper_launcher(node, parents)
+        or not reviewed_python_git_query_collector(tree, parents)
         or (
             require_origin_comparison
             and not reviewed_python_git_origin_capture_is_compared(tree, parents)
@@ -14048,6 +14761,40 @@ def reviewed_python_git_query_capture(
         None,
     )
     if function_node is None:
+        return False
+    process_assignments = [
+        candidate
+        for candidate in ast.walk(function_node)
+        if isinstance(candidate, ast.Assign)
+        and python_enclosing_scope(candidate, parents) is function_node
+        and len(candidate.targets) == 1
+        and isinstance(candidate.targets[0], ast.Name)
+        and candidate.targets[0].id == "process"
+    ]
+    process_stores = [
+        candidate
+        for candidate in ast.walk(function_node)
+        if isinstance(candidate, ast.Name)
+        and candidate.id == "process"
+        and isinstance(candidate.ctx, ast.Store)
+        and python_enclosing_scope(candidate, parents) is function_node
+    ]
+    process_creation = parents.get(node)
+    if (
+        len(process_stores) != 5
+        or len(process_assignments) != 5
+        or any(parents.get(store) not in process_assignments for store in process_stores)
+        or sum(assignment.value is node for assignment in process_assignments) != 1
+        or process_creation not in process_assignments
+        or any(
+            assignment is not process_creation
+            and not (
+                isinstance(assignment.value, ast.Constant)
+                and assignment.value.value is None
+            )
+            for assignment in process_assignments
+        )
+    ):
         return False
     capture_assignments = [
         candidate
@@ -14079,6 +14826,29 @@ def reviewed_python_git_query_capture(
         or capture_assignment.value.keywords
     ):
         return False
+    if (
+        sum(
+            assignment.lineno < process_creation.lineno
+            for assignment in process_assignments
+            if assignment is not process_creation
+        ) != 1
+        or sum(
+            assignment.lineno > capture_assignment.lineno
+            for assignment in process_assignments
+            if assignment is not process_creation
+        ) != 3
+        or any(
+            process_creation.lineno < assignment.lineno < capture_assignment.lineno
+            for assignment in process_assignments
+            if assignment is not process_creation
+        )
+        or any(
+            isinstance(candidate, ast.ExceptHandler)
+            and candidate.name == "process"
+            for candidate in ast.walk(function_node)
+        )
+    ):
+        return False
 
     def on_unconditional_path(statement):
         current = statement
@@ -14103,7 +14873,9 @@ def reviewed_python_git_query_capture(
             current = parent
         return True
 
-    if not on_unconditional_path(capture_assignment):
+    if not on_unconditional_path(process_creation) or not on_unconditional_path(capture_assignment):
+        return False
+    if process_creation.lineno >= capture_assignment.lineno:
         return False
     output_stores = [
         candidate
@@ -15432,142 +16204,19 @@ def python_known_non_path_set_copy_receiver(node, tree, parents, active=None):
     ):
         return False
 
-    def preserves_parameter(value, function, parameter_name, seen=None):
-        if seen is None:
-            seen = set()
-        if id(value) in seen:
-            return False
-        seen = seen | {id(value)}
-        if isinstance(value, ast.Set):
-            return True
-        if isinstance(value, ast.Name):
-            return (
-                value.id == parameter_name
-                and python_enclosing_scope(value, parents) is function
-            )
-        if isinstance(value, ast.Call):
-            if python_unshadowed_builtin_call(value, {"set"}, tree, parents):
-                return True
-            return (
-                isinstance(value.func, ast.Attribute)
-                and value.func.attr == "copy"
-                and preserves_parameter(
-                    value.func.value, function, parameter_name, seen
-                )
-            )
-        if isinstance(value, ast.BinOp) and isinstance(value.op, ast.BitOr):
-            return (
-                preserves_parameter(value.left, function, parameter_name, seen)
-                and isinstance(value.right, ast.Set)
-            )
-        return False
-
-    if not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
-        return bool(assignments) and all(
-            python_known_non_path_set_copy_receiver(
-                value, tree, parents, active
-            )
-            for value in assignments
-        )
     parameters = (
         list(scope.args.posonlyargs) + list(scope.args.args) + list(scope.args.kwonlyargs)
+        if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef))
+        else []
     )
-    parameter_index = next(
-        (index for index, parameter in enumerate(parameters) if parameter.arg == node.id),
-        None,
-    )
-    if parameter_index is None:
-        return bool(assignments) and all(
-            python_known_non_path_set_copy_receiver(
-                value, tree, parents, active
-            )
-            for value in assignments
-        )
-    positional = list(scope.args.posonlyargs) + list(scope.args.args)
-    positional_default_start = len(positional) - len(scope.args.defaults)
-    default = None
-    if parameter_index < len(positional):
-        if parameter_index >= positional_default_start:
-            default = scope.args.defaults[parameter_index - positional_default_start]
-    else:
-        keyword_index = parameter_index - len(positional)
-        default = scope.args.kw_defaults[keyword_index]
-    default_none = isinstance(default, ast.Constant) and default.value is None
-    set_normalizer = default_none and any(
-        any(
-            isinstance(candidate, ast.Call)
-            and python_unshadowed_builtin_call(candidate, {"set"}, tree, parents)
-            for candidate in ast.walk(value)
+    if any(parameter.arg == node.id for parameter in parameters):
+        return False
+    return bool(assignments) and all(
+        python_known_non_path_set_copy_receiver(
+            value, tree, parents, active
         )
         for value in assignments
     )
-    callers = [
-        candidate for candidate in ast.walk(tree)
-        if isinstance(candidate, ast.Call)
-        and python_dotted_name(candidate.func) == scope.name
-        and scope in python_local_function_candidates(
-            scope.name, candidate, tree, parents
-        )
-    ]
-    if not all(
-        preserves_parameter(value, scope, node.id)
-        or python_known_non_path_set_copy_receiver(value, tree, parents, active)
-        or (
-            set_normalizer
-            and isinstance(value, ast.Constant)
-            and value.value is None
-        )
-        for value in assignments
-    ):
-        return False
-    if not callers:
-        return False
-    for candidate in ast.walk(tree):
-        if not (
-            isinstance(candidate, ast.Name)
-            and candidate.id == scope.name
-            and isinstance(candidate.ctx, ast.Load)
-        ):
-            continue
-        parent = parents.get(candidate)
-        if not (
-            isinstance(parent, ast.Call)
-            and parent.func is candidate
-            and parent in callers
-        ):
-            return False
-    seeded = False
-    for caller in callers:
-        keyword_values = [
-            keyword.value for keyword in caller.keywords if keyword.arg == node.id
-        ]
-        if len(keyword_values) > 1:
-            return False
-        if keyword_values:
-            argument = keyword_values[0]
-        elif parameter_index < len(caller.args) and not any(
-            isinstance(value, ast.Starred) for value in caller.args
-        ):
-            argument = caller.args[parameter_index]
-        else:
-            argument = None
-        if argument is None or (
-            isinstance(argument, ast.Constant) and argument.value is None
-        ):
-            if not set_normalizer:
-                return False
-            seeded = True
-        elif python_enclosing_scope(caller, parents) is scope and preserves_parameter(
-            argument, scope, node.id
-        ):
-            continue
-        elif python_known_non_path_set_copy_receiver(
-            argument, tree, parents, active
-        ):
-            seeded = True
-        else:
-            return False
-    return seeded
 
 
 def python_filesystem_mutator_alias_violation(tree, parents):
@@ -35703,3 +36352,64 @@ Ran 1 test in 0.176s — OK
 This follow-up changes only the regression source and this ledger; scanner
 source and executable compiler recipes are unchanged. The witness remains an
 inert Python source string parsed by the harness.
+
+#### Bounded Git output provenance and unknown Path receiver correction
+
+The prior coordinator full harness result remains pinned to
+dba804f69cafcf2a1f171ad72a3db98288b70ed8: 168 tests passed in 160.796s,
+with 261 shell commands, 86 Python bodies, zero packet violations, 119 actual
+compiler-helper calls and ten historical-loader controls. It predates this
+correction and is not claimed for the current source.
+
+At the 628c3b4d1171fc63c2120e5bf78c9c4f0c891e90 source checkpoint, the
+collector selector failed in 0.839s: return process.communicate() was
+accepted. Its second fabricated-output variant was also accepted, but that
+initial fixture contained the two literal bytes backslash and n instead of a
+newline and is not counted as a faithful reproduction of the origin-comparison
+P1. Before this batch, the coordinator independently confirmed against the
+immutable dba804f Git objects that a true newline in
+b"https://github.com/1XP-AI/gh-runnerd.git\n" was accepted alongside the
+communicate variant. The final focused selector now uses that correct inert
+newline-byte constant and refuses it. The seeded Path keyword-forwarding
+witness in
+test_new_path_mutators_require_owned_sources_and_destinations failed in
+0.176s because copier(**{"seen": Path("synthetic-unowned-source")}) could
+reach a .copy(Path("synthetic-unowned-destination")) call through an
+optional parameter whose default branch creates a set.
+
+The collector proof now checks the finite numeric output and chunk caps,
+explicit stdout/stderr pipes on the real Popen, empty bytearray buffers,
+selector registration from the process streams, os.read(stream.fileno(), …)
+chunk provenance, and the reachable cumulative stdout + stderr + chunk guard
+that raises before extension. It then requires only those same buffers to be
+converted and returned after the read loop and process wait. Exact local store
+and call shapes reject added aliases, rebindings, and unreviewed consumers;
+malformed budget operands, a deletion, and a returned-buffer alias are inert
+AST regression controls. No source hash, compiler input, or helper allowlist
+was added. The Path receiver proof no longer infers safety for an unknown
+parameter from a visible caller or default assignment; literal/local set
+controls remain in the focused method.
+
+Two intermediate combined selector attempts failed in 0.463s and 0.483s
+because the new structural proof initially misread the nested budget
+expression and omitted the canonical EOF chunk use. After correcting those
+false negatives, a later five-selector attempt failed in 5.081s because the
+runner definition itself was counted as a nested binding. That scope check was
+narrowed to nested definitions, and the fabricated-output fixture was
+corrected to use an actual newline byte. The final bounded verification passed:
+
+    python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+      Issue79RegressionTests.test_git_query_collector_must_return_bounded_pipe_bytes \
+      Issue79RegressionTests.test_git_query_capture_must_be_on_the_active_result_path \
+      Issue79RegressionTests.test_bounded_git_origin_capture_requires_reviewed_comparison_and_no_output_escape \
+      Issue79RegressionTests.test_new_path_mutators_require_owned_sources_and_destinations \
+      Issue79RegressionTests.test_actual_packet_compile_helpers_retain_provenance
+    Ran 5 tests in 7.367s — OK
+    packet compile-source boundary: 119 actual helper calls checked
+
+The final selection retained the real collector, active-result, bounded
+origin-comparison, and owned Path controls while refusing both new inert
+P1 witnesses and the malformed/alias mutations. Only the five listed focused
+methods ran at this checkpoint; the full harness, packet-wide selector, Go
+checks, hosted CI, and live operations were not run and are not claimed.
+The coordinator owns final exact-head integration validation and review.
