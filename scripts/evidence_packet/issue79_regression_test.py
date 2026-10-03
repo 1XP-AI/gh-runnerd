@@ -3483,6 +3483,23 @@ class Issue79RegressionTests(unittest.TestCase):
             'from os import environ as inherited\nprint("reviewed")\n'
         ))
 
+    def test_byte_environment_mappings_are_sensitive(self) -> None:
+        for body in (
+            'import os\nprint(os.environb)\n',
+            'from os import environb\nprint(environb)\n',
+            'from os import getenvb as read_bytes\nprint(read_bytes(b"GH_TOKEN"))\n',
+        ):
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+    def test_warning_sink_and_absolute_path_do_not_disclose_local_data(self) -> None:
+        self.assertIsNotNone(self.inspect(
+            'import os, warnings\nwarnings.showwarning(os.environ, UserWarning, "x", 1)\n'
+        ))
+        self.assertIsNotNone(self.inspect(
+            'from pathlib import Path\nprint(Path(".").absolute())\n'
+        ))
+
     def test_bash_prompt_expansion_cannot_evaluate_credential_name(self) -> None:
         self.assertIsNotNone(self.shell_document_violation(
             "printf -v payload '%s%s' '$' 'GH_TOKEN'; printf '%s\\n' \"${payload@P}\""

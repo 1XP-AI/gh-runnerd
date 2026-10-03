@@ -9373,12 +9373,20 @@ def python_credential_reader_aliases(tree):
     """Resolve only aliases of credential-bearing environment readers."""
     reader_names = {
         "os.getenv",
+        "os.getenvb",
         "os.environ.get",
         "os.environ.setdefault",
         "os.environ.pop",
         "os.environ.__getitem__",
     }
     aliases = set()
+    aliases.update(
+        alias.asname or alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "os"
+        for alias in node.names
+        if alias.name == "getenvb"
+    )
     assignments = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
@@ -10038,10 +10046,10 @@ def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen
                 for value in python_join_assignment_index(tree).get(node.id, ())
             )
         return False
-    if isinstance(node, ast.Attribute) and python_dotted_name(node) == "os.environ":
+    if isinstance(node, ast.Attribute) and python_dotted_name(node) in {"os.environ", "os.environb"}:
         return True
     if isinstance(node, ast.Subscript):
-        if python_dotted_name(node.value) == "os.environ":
+        if python_dotted_name(node.value) in {"os.environ", "os.environb"}:
             key = node.slice.value if isinstance(node.slice, ast.Constant) else None
             return key is None or not isinstance(key, str) or key == "HOME" or credential_environment_name(key)
         if getattr(tree, "_issue79_member_taint_enabled", False) and python_sensitive_member_assignment_value(
@@ -10109,7 +10117,7 @@ def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen
                 for value in list(node.args)
                 + [keyword.value for keyword in node.keywords]
             )
-        if dotted == "os.getenv":
+        if dotted in {"os.getenv", "os.getenvb"}:
             return True
         if dotted == "os.environ.get":
             key = node.args[0].value if node.args and isinstance(node.args[0], ast.Constant) else None
@@ -10459,7 +10467,7 @@ def python_sensitive_value_names(tree, parents):
         for node in ast.walk(tree)
         if isinstance(node, ast.ImportFrom) and node.module == "os"
         for alias in node.names
-        if alias.name == "environ"
+        if alias.name in {"environ", "environb"}
     }
     assignments = []
     for node in ast.walk(tree):
@@ -14270,7 +14278,7 @@ def python_reviewed_read_path(node, tree, parents, seen=None):
             return python_reviewed_read_path(node.args[0], tree, parents, seen)
         if (
             isinstance(node.func, ast.Attribute)
-            and node.func.attr == "resolve"
+            and node.func.attr in {"resolve", "absolute"}
             and not node.args
             and not node.keywords
         ):
@@ -14641,7 +14649,7 @@ def python_resolved_local_path_expression(
                     return True
         if (
             isinstance(node.func, ast.Attribute)
-            and node.func.attr == "resolve"
+            and node.func.attr in {"resolve", "absolute"}
         ):
             return True
         path_preserving_calls = {
@@ -14732,6 +14740,7 @@ def python_sensitive_output_sink(node, tree=None):
         "sys.exit",
         "warnings.warn",
         "warnings.warn_explicit",
+        "warnings.showwarning",
         "traceback.print_exc",
         "traceback.print_exception",
     }:
@@ -14744,6 +14753,7 @@ def python_sensitive_output_sink(node, tree=None):
             "sys.exit",
             "warnings.warn",
             "warnings.warn_explicit",
+            "warnings.showwarning",
             "traceback.print_exc",
             "traceback.print_exception",
         )
@@ -16039,7 +16049,7 @@ def python_sensitive_read_violation(tree, parents):
                 )
         if isinstance(node, ast.Call):
             dotted = python_dotted_name(node.func)
-            if dotted == "os.getenv":
+            if dotted in {"os.getenv", "os.getenvb"}:
                 key = node.args[0].value if node.args and isinstance(node.args[0], ast.Constant) else None
                 if key is None or not isinstance(key, str) or credential_environment_name(key):
                     return f"Python credential/environment read os.getenv is not allowed on line {node.lineno}"
