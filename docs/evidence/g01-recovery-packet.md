@@ -13724,6 +13724,98 @@ def reviewed_python_git_child_environment(node, tree, parents):
     )
 
 
+def reviewed_python_git_sensitive_output(node, tree, parents, seen=None):
+    """Trace a certified Git argv far enough to guard raw origin-URL output."""
+    if seen is None:
+        seen = set()
+    if id(node) in seen:
+        return True
+    seen = seen | {id(node)}
+    if isinstance(node, ast.Call):
+        if python_dotted_name(node.func) not in {"git_command", "git_query"}:
+            return False
+        if not reviewed_python_git_builder(node, tree, parents):
+            return True
+        arguments = node.args[0]
+        tokens = []
+        for element in arguments.elts:
+            if isinstance(element, ast.Constant) and isinstance(element.value, str):
+                tokens.append(element.value)
+            elif reviewed_python_dynamic_path_value(element, tree, parents):
+                tokens.append("__g01_reviewed_dynamic_path__")
+            else:
+                return True
+        return git_sensitive_shell_output_violation(["git", *tokens]) is not None
+    if not isinstance(node, ast.Name):
+        return True
+    scope = python_enclosing_scope(node, parents)
+    assignments = []
+    for candidate in ast.walk(tree):
+        if isinstance(candidate, ast.Assign):
+            targets, value = candidate.targets, candidate.value
+        elif isinstance(candidate, (ast.AnnAssign, ast.NamedExpr)):
+            targets, value = [candidate.target], candidate.value
+        else:
+            continue
+        if python_enclosing_scope(candidate, parents) is scope and any(
+            isinstance(target, ast.Name) and target.id == node.id for target in targets
+        ):
+            assignments.append(value)
+    if assignments:
+        return len(assignments) != 1 or reviewed_python_git_sensitive_output(
+            assignments[0], tree, parents, seen
+        )
+    if not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return True
+    parameters = (
+        list(scope.args.posonlyargs) + list(scope.args.args) + list(scope.args.kwonlyargs)
+    )
+    parameter_index = next(
+        (index for index, parameter in enumerate(parameters) if parameter.arg == node.id),
+        None,
+    )
+    if parameter_index is None or id(scope) in seen:
+        return True
+    callers = [
+        candidate for candidate in ast.walk(tree)
+        if isinstance(candidate, ast.Call)
+        and python_dotted_name(candidate.func) == scope.name
+    ]
+    if not callers:
+        return True
+    for caller in callers:
+        keywords = [keyword.value for keyword in caller.keywords if keyword.arg == node.id]
+        if len(keywords) > 1:
+            return True
+        if keywords:
+            argument = keywords[0]
+        elif parameter_index < len(caller.args) and not any(
+            isinstance(value, ast.Starred) for value in caller.args
+        ):
+            argument = caller.args[parameter_index]
+        else:
+            return True
+        if reviewed_python_git_sensitive_output(argument, tree, parents, seen):
+            return True
+    return False
+
+
+def reviewed_python_git_query_capture(node, parents):
+    """Keep raw Git query output only in the existing bounded capture helper."""
+    if (
+        enclosing_python_function(node, parents) != "run_bounded_git_query"
+        or python_dotted_name(node.func) != "subprocess.Popen"
+        or not reviewed_python_helper_definition(node, parents)
+        or not reviewed_python_helper_launcher(node, parents)
+    ):
+        return False
+    keywords = {keyword.arg: keyword.value for keyword in node.keywords}
+    return all(
+        python_dotted_name(keywords.get(name)) == "subprocess.PIPE"
+        for name in ("stdout", "stderr")
+    )
+
+
 def reviewed_python_static_loop_binding(node, tree):
     """Recognize literal command loops without granting a marker blanket trust."""
     if not isinstance(node, ast.Name):
@@ -13949,6 +14041,11 @@ def reviewed_python_dynamic_call(
         python_dotted_name(node.func) in python_command_functions
         and reviewed_python_git_command_origin(argument, tree, parents)
     ):
+        if (
+            reviewed_python_git_sensitive_output(argument, tree, parents)
+            and not reviewed_python_git_query_capture(node, parents)
+        ):
+            return False
         return reviewed_python_git_child_environment(node, tree, parents)
     if reviewed_python_case_args(argument, tree):
         return True
@@ -14169,11 +14266,15 @@ def reviewed_source_snapshot_path(node, tree, parents, seen=None):
 python_filesystem_mutating_methods = {
     "chmod",
     "chown",
+    "copy",
+    "copy_into",
     "hardlink_to",
+    "lchmod",
     "link_to",
     "mkdir",
     "makedirs",
     "move",
+    "move_into",
     "open",
     "rename",
     "replace",
@@ -14832,6 +14933,48 @@ def python_subprocess_os_reexport_violation(tree):
     return None
 
 
+python_path_mutator_destination_keywords = {
+    "copy": "target",
+    "copy_into": "target_dir",
+    "move_into": "target_dir",
+}
+
+
+def python_path_mutator_destination(call, method):
+    """Return only a statically visible destination for new Path mutators."""
+    keyword_name = python_path_mutator_destination_keywords.get(method)
+    if keyword_name is None:
+        return None
+    if len(call.args) > 1 or any(
+        isinstance(argument, ast.Starred) for argument in call.args
+    ):
+        return None
+    named_destinations = [
+        keyword.value for keyword in call.keywords if keyword.arg == keyword_name
+    ]
+    if (
+        len(named_destinations) > 1
+        or any(keyword.arg is None for keyword in call.keywords)
+        or (call.args and named_destinations)
+    ):
+        return None
+    for keyword in call.keywords:
+        if keyword.arg == keyword_name:
+            continue
+        if not (
+            method in {"copy", "copy_into"}
+            and keyword.arg == "follow_symlinks"
+            and isinstance(keyword.value, ast.Constant)
+            and isinstance(keyword.value.value, bool)
+        ):
+            return None
+    if call.args:
+        return call.args[0]
+    if named_destinations:
+        return named_destinations[0]
+    return None
+
+
 def python_filesystem_mutator_alias_violation(tree, parents):
     """Reject extracted mutator methods unless their receiver is temp-owned."""
     shutil_names = python_assigned_module_names(tree, "shutil")
@@ -14921,6 +15064,45 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                     "Python heredoc extracts an unowned filesystem mutator "
                     f"{method!r} into alias {target.id!r} on line {node.lineno}"
                 )
+            if method in python_path_mutator_destination_keywords:
+                alias_scope = python_enclosing_scope(node, parents)
+                alias_calls = []
+                for candidate in ast.walk(tree):
+                    if not (
+                        isinstance(candidate, ast.Name)
+                        and candidate.id == target.id
+                        and isinstance(candidate.ctx, ast.Load)
+                    ):
+                        continue
+                    candidate_scope = python_enclosing_scope(candidate, parents)
+                    if candidate_scope is alias_scope:
+                        parent = parents.get(candidate)
+                        if not (
+                            isinstance(parent, ast.Call) and parent.func is candidate
+                        ):
+                            return (
+                                "Python heredoc lets an extracted Path mutator escape "
+                                f"its reviewed call site on line {candidate.lineno}"
+                            )
+                        alias_calls.append(parent)
+                    elif alias_scope in python_lexical_scope_chain(
+                        candidate_scope, parents
+                    ) and not reviewed_python_git_name_bound_in_scope(
+                        tree, parents, candidate_scope, target.id
+                    ):
+                        return (
+                            "Python heredoc captures an extracted Path mutator "
+                            f"outside its reviewed scope on line {candidate.lineno}"
+                        )
+                for call in alias_calls:
+                    destination = python_path_mutator_destination(call, method)
+                    if destination is None or not temporary_path_expression(
+                        destination, tree, parents
+                    ):
+                        return (
+                            "Python heredoc calls an extracted Path mutator with an "
+                            f"unreviewed destination on line {call.lineno}"
+                        )
     return None
 
 
@@ -15156,7 +15338,11 @@ def python_filesystem_mutation_violation(tree, parents):
                 continue
             mutation = True
             path_arguments = [node.func.value]
-            if node.func.attr in {
+            if node.func.attr in python_path_mutator_destination_keywords:
+                path_arguments.append(
+                    python_path_mutator_destination(node, node.func.attr)
+                )
+            elif node.func.attr in {
                 "hardlink_to",
                 "link_to",
                 "symlink_to",
@@ -16713,8 +16899,9 @@ def python_warning_sink_targets(tree):
             for method in ("warn", "warn_explicit", "showwarning")
         }
         targets.update(
-            name + ".displayhook"
+            name + "." + method
             for name in python_assigned_module_names(tree, "sys")
+            for method in ("displayhook", "excepthook")
         )
         tree._issue79_warning_sink_targets = targets
     return targets
@@ -16732,6 +16919,7 @@ def python_sensitive_output_sink(node, tree=None):
         "print",
         "sys.exit",
         "sys.displayhook",
+        "sys.excepthook",
         "warnings.warn",
         "warnings.warn_explicit",
         "warnings.showwarning",
@@ -16746,6 +16934,7 @@ def python_sensitive_output_sink(node, tree=None):
             "builtins.print",
             "sys.exit",
             "sys.displayhook",
+            "sys.excepthook",
             "warnings.warn",
             "warnings.warn_explicit",
             "warnings.showwarning",
@@ -16775,6 +16964,7 @@ def python_sensitive_output_sink(node, tree=None):
                 "builtins.print",
                 "sys.exit",
                 "sys.displayhook",
+                "sys.excepthook",
                 "warnings.warn",
                 "warnings.warn_explicit",
                 "warnings.showwarning",
@@ -16794,7 +16984,7 @@ def python_sensitive_output_sink(node, tree=None):
             }
             imported_functions = {
                 "builtins": {"print"},
-                "sys": {"exit", "displayhook"},
+                "sys": {"exit", "displayhook", "excepthook"},
                 "warnings": {"warn", "warn_explicit", "showwarning"},
                 "traceback": {"print_exc", "print_exception"},
             }
@@ -34658,3 +34848,69 @@ specimen, private path, hook or live resource was executed or read. No new
 compiler input, helper allowlist or source revision was added. The full harness
 and exact packet selector remain coordinator-owned and are not claimed as
 passed for this correction.
+
+#### Writer response to three exact-head Codex findings from `6a069ab6`
+
+At entry the worktree was clean at `6a069ab6766880c4d36c758f209c3970d22b1928`.
+The three reported P1 paths were limited to `sys.excepthook` output of an
+exception carrying environment values, Python 3.14 `Path.copy`, `copy_into`,
+`move_into` and `lchmod` mutations, and an isolated Git builder that sent the
+local origin URL query to inherited stdout. The [CPython 3.14 `sys.excepthook`
+reference](https://docs.python.org/3.14/library/sys.html#sys.excepthook) states
+that the hook prints the exception and traceback to standard error; the
+[CPython 3.14 `pathlib` reference](https://docs.python.org/3.14/library/pathlib.html#pathlib.Path.copy)
+documents the new copy/move methods and their destination arguments. This
+worker did not run the full harness, packet selector, any specimen, or any
+live Git query.
+
+The three new focused methods first ran against the original scanner and failed
+in 0.168s with 15 unsafe-acceptance assertions: direct, imported and assigned
+`sys.excepthook` sinks (3); all four unowned-receiver pathlib mutators, an
+extracted unowned method, and six temporary-source/external-destination forms
+including keyword and extracted-call forms (11); and an isolated builder query
+whose raw origin URL output was inherited (1). Reflection-based hook lookups
+already refused and remained negative controls. All source witnesses were
+inert strings parsed by the harness.
+
+The minimal scanner correction classifies `sys.excepthook` through direct,
+module-alias, imported and assigned-callable paths while preserving literal
+exception controls. It classifies the four pathlib mutators and requires both
+source and destination to stay within the active `TemporaryDirectory`; direct,
+keyword and extracted callable destinations are checked, while malformed or
+unpacked destinations fail closed. The existing canonical Git argv proof now
+also inspects the builder's read-only arguments and refuses the sensitive
+`remote.origin.url` query at ordinary child launchers. The existing
+`run_bounded_git_query` launcher remains accepted only with its bounded capture
+helper and explicit stdout/stderr pipes, and the existing origin comparison
+remains intact. No compiler input, source revision, module-wide exemption or
+helper allowlist was added.
+
+The bounded post-fix selection passed all three new finding methods and the
+existing displayhook, pathlib-reader/mutator, OS-re-export, isolated-Git,
+builder-rebinding and argv-mutation controls, plus the current compiler-helper
+and historical-loader controls:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_excepthook_aliases_are_sensitive_error_sinks \
+  Issue79RegressionTests.test_displayhook_aliases_are_sensitive_output_sinks \
+  Issue79RegressionTests.test_new_path_mutators_require_owned_sources_and_destinations \
+  Issue79RegressionTests.test_filesystem_mutator_cannot_hide_in_container_binding \
+  Issue79RegressionTests.test_path_filesystem_readers_require_reviewed_paths \
+  Issue79RegressionTests.test_os_reexports_from_allowed_modules_are_not_certified \
+  Issue79RegressionTests.test_reexported_os_module_does_not_bypass_heredoc_checks \
+  Issue79RegressionTests.test_shell_origin_url_query_is_rejected_but_verifier_capture_remains \
+  Issue79RegressionTests.test_python_git_queries_require_isolated_environment_and_known_builder \
+  Issue79RegressionTests.test_python_git_builder_rebinding_is_not_certified \
+  Issue79RegressionTests.test_python_git_argv_mutation_is_not_certified \
+  Issue79RegressionTests.test_actual_packet_compile_helpers_retain_provenance \
+  Issue79RegressionTests.test_historic_scanner_loaders_export_only_their_required_helpers
+Ran 13 tests in 5.567s — OK
+packet compile-source boundary: 119 actual helper calls checked
+```
+
+The run retained all 119 current compiler-helper checks and ten historical
+loader controls. This is focused evidence only; the coordinator owns the exact
+candidate packet selector, complete harness, final reviews and merge gates.
+`git diff --check` passed; the added-line personal-path, credential-token and
+private-key scan covered 373 lines with zero matches.

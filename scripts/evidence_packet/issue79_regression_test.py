@@ -2604,6 +2604,42 @@ class Issue79RegressionTests(unittest.TestCase):
                 '"remote.origin.url"], check=True)\n'
             )
         )
+        canonical_builder_prefix = (
+            'import subprocess\n'
+            'git_environment = {"PATH": "/usr/bin:/bin", '
+            '"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", '
+            '"GIT_CONFIG_SYSTEM": "/dev/null", "GIT_ATTR_NOSYSTEM": "1"}\n'
+            'def git_command(arguments):\n'
+            '    return ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", '
+            '"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", '
+            '"GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", '
+            '"-P", "-c", "core.fsmonitor=false", "-c", '
+            '"core.hooksPath=/dev/null", *arguments]\n'
+        )
+        unsafe_builders = (
+            'subprocess.run(git_command(["config", "--local", "--get-all", '
+            '"remote.origin.url"]), env=git_environment)\n',
+            'argv = git_command(["config", "--local", "--get-all", '
+            '"remote.origin.url"])\n'
+            'subprocess.run(argv, env=git_environment)\n',
+            'subprocess.run(git_command(["config", "--local", "--get-all", '
+            '"remote.origin.url"]), env=git_environment, '
+            'stdout=subprocess.PIPE, stderr=subprocess.PIPE)\n',
+        )
+        for body in unsafe_builders:
+            with self.subTest(body=body):
+                self.assertIsNotNone(
+                    self.inspect(canonical_builder_prefix + body),
+                    "an isolated builder must not expose raw origin URL output",
+                )
+        self.assertIsNone(
+            self.inspect(
+                canonical_builder_prefix
+                + 'subprocess.run(git_command(["status", "--short"]), '
+                'env=git_environment)\n'
+            ),
+            "a non-sensitive isolated status query remains accepted",
+        )
 
         origin_capture = _top_level_assignment(self.verification, "origin_result")
         self.assertEqual(
@@ -3634,6 +3670,84 @@ class Issue79RegressionTests(unittest.TestCase):
                 self.assertIsNotNone(self.inspect(body))
         self.assertIsNone(self.inspect('import sys\nsys.displayhook("offline fixture")\n'))
         self.assertIsNone(self.inspect('from sys import displayhook as emit\nemit("offline fixture")\n'))
+
+    def test_excepthook_aliases_are_sensitive_error_sinks(self) -> None:
+        unsafe = (
+            'import os, sys\n'
+            'sys.excepthook(RuntimeError, RuntimeError(os.environ), None)\n',
+            'import os\nfrom sys import excepthook as emit\n'
+            'emit(RuntimeError, RuntimeError(os.environ), None)\n',
+            'import os, sys\nemit = sys.excepthook\n'
+            'emit(RuntimeError, RuntimeError(os.environ), None)\n',
+            'import os, sys\nemit = getattr(sys, "excepthook")\n'
+            'emit(RuntimeError, RuntimeError(os.environ), None)\n',
+            'import os, sys\nruntime = sys\nlookup = getattr\n'
+            'emit = lookup(runtime, "excepthook")\n'
+            'emit(RuntimeError, RuntimeError(os.environ), None)\n',
+            'import os, sys\n'
+            'getattr(sys, "excepthook")(RuntimeError, RuntimeError(os.environ), None)\n',
+            'import os, sys\nruntime = sys\n'
+            'runtime.excepthook(RuntimeError, RuntimeError(os.environ), None)\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+        self.assertIsNone(self.inspect(
+            'import sys\nsys.excepthook(RuntimeError, RuntimeError("offline fixture"), None)\n'
+        ))
+        self.assertIsNone(self.inspect(
+            'from sys import excepthook as emit\n'
+            'emit(RuntimeError, RuntimeError("offline fixture"), None)\n'
+        ))
+
+    def test_new_path_mutators_require_owned_sources_and_destinations(self) -> None:
+        unsafe = (
+            'from pathlib import Path\nPath("synthetic-owned").copy(Path("synthetic-destination"))\n',
+            'from pathlib import Path\nPath("synthetic-owned").copy_into(Path("synthetic-destination"))\n',
+            'from pathlib import Path\nPath("synthetic-owned").move_into(Path("synthetic-destination"))\n',
+            'from pathlib import Path\nPath("synthetic-owned").lchmod(0o600)\n',
+            'from pathlib import Path\n'
+            'action = Path("synthetic-owned").move_into\n'
+            'action(Path("synthetic-destination"))\n',
+            'from pathlib import Path\nfrom tempfile import TemporaryDirectory\n'
+            'with TemporaryDirectory() as td:\n'
+            '    Path(td).joinpath("source").copy(Path("synthetic-destination"))\n',
+            'from pathlib import Path\nfrom tempfile import TemporaryDirectory\n'
+            'with TemporaryDirectory() as td:\n'
+            '    Path(td).joinpath("source").copy(target=Path("synthetic-destination"))\n',
+            'from pathlib import Path\nfrom tempfile import TemporaryDirectory\n'
+            'with TemporaryDirectory() as td:\n'
+            '    Path(td).joinpath("source").copy_into(target_dir=Path("synthetic-destination"))\n',
+            'from pathlib import Path\nfrom tempfile import TemporaryDirectory\n'
+            'with TemporaryDirectory() as td:\n'
+            '    Path(td).joinpath("source").move_into(target_dir=Path("synthetic-destination"))\n',
+            'from pathlib import Path\nfrom tempfile import TemporaryDirectory\n'
+            'with TemporaryDirectory() as td:\n'
+            '    source = Path(td).joinpath("source")\n'
+            '    action = source.move_into\n'
+            '    action(Path("synthetic-destination"))\n',
+            'from pathlib import Path\nfrom tempfile import TemporaryDirectory\n'
+            'with TemporaryDirectory() as td:\n'
+            '    Path(td).joinpath("source").copy(**{"target": Path("synthetic-destination")})\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+        safe = (
+            'from pathlib import Path\nfrom tempfile import TemporaryDirectory\n'
+            'with TemporaryDirectory() as td:\n'
+            '    source = Path(td) / "source"\n'
+            '    copied = Path(td) / "copied"\n'
+            '    destination_dir = Path(td) / "destination"\n'
+            '    source.copy(copied)\n'
+            '    source.copy_into(destination_dir)\n'
+            '    source.move_into(destination_dir)\n'
+            '    source.copy(target=copied)\n'
+            '    action = source.move_into\n'
+            '    action(destination_dir)\n'
+            '    source.lchmod(0o600)\n'
+        )
+        self.assertIsNone(self.inspect(safe))
 
     def test_standalone_git_queries_require_explicit_hook_isolation(self) -> None:
         unsafe = (
