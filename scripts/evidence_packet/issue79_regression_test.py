@@ -3890,6 +3890,39 @@ class Issue79RegressionTests(unittest.TestCase):
                 self.assertIsNotNone(self.inspect(setup + extraction +
                     'exec(compile(' + argument + ', "<probe>", "exec"), {"os": os})\n'))
 
+    def test_packet_slice_bounds_do_not_fall_back_across_parameter_shadows(self) -> None:
+        specimen = (
+            'import os\nfrom pathlib import Path\n'
+            'packet = Path("docs/evidence/g01-recovery-packet.md").read_text()\n'
+            'start = packet.index("\\nimport hashlib\\n", packet.index("go_test_checked()")) + 1\n'
+            'end = packet.index("\\nPY\\n}", start)\n'
+            'def execute(start, end):\n'
+            '    exec(compile(packet[start:end], "<probe>", "exec"), {"os": os})\n'
+            'needle = "print(os.environ)"\nbad_start = packet.index(needle)\n'
+            'execute(bad_start, bad_start + len(needle))\n'
+        )
+        self.assertIsNotNone(self.inspect(specimen))
+
+    def test_direct_packet_slice_retains_existing_compile_base_allowlist(self) -> None:
+        specimen = (
+            'import os\nfrom pathlib import Path\n'
+            'unlisted_source = Path("docs/evidence/g01-recovery-packet.md").read_text()\n'
+            'start = unlisted_source.index("\\nimport hashlib\\n", unlisted_source.index("go_test_checked()")) + 1\n'
+            'end = unlisted_source.index("\\nPY\\n}", start)\n'
+            'exec(compile(unlisted_source[start:end], "<probe>", "exec"), {"os": os})\n'
+        )
+        self.assertIsNotNone(self.inspect(specimen))
+
+    def test_same_line_packet_bound_reassignments_invalidate_slice_recipe(self) -> None:
+        specimen = (
+            'import os\nfrom pathlib import Path\n'
+            'packet = Path("docs/evidence/g01-recovery-packet.md").read_text()\n'
+            'start = packet.index("\\nimport hashlib\\n") + 1; start = packet.index("print(os.environ)")\n'
+            'end = packet.index("\\nPY\\n}", start); end = packet.index("print(os.environ)") + 17\n'
+            'exec(compile(packet[start:end], "<probe>", "exec"), {"os": os})\n'
+        )
+        self.assertIsNotNone(self.inspect(specimen))
+
     def test_actual_packet_compile_helpers_retain_provenance(self) -> None:
         checked = 0
         for number, body, safe_marker, _ in self.scanner["python_heredoc_bodies"](PACKET_TEXT):

@@ -11104,6 +11104,9 @@ def reviewed_python_source_slice(node, source_names, tree):
     if node in slice_recipe_results:
         return slice_recipe_results[node]
 
+    def slice_position(value, end=False):
+        return (value.end_lineno, value.end_col_offset) if end else (value.lineno, value.col_offset)
+
     def slice_point(value, seen=None):
         if value is None:
             return (None, 0)
@@ -11117,11 +11120,29 @@ def reviewed_python_source_slice(node, source_names, tree):
                 candidates = [
                     statement for statement in slice_definitions.get(value.id, ())
                     if python_enclosing_scope(statement, slice_parents) is slice_scope
-                    and statement.lineno < value.lineno
+                    and slice_position(statement, end=True) < slice_position(value)
                 ]
                 if not candidates:
+                    # Local binders must not borrow same-spelled outer bounds.
+                    if any(
+                        isinstance(part, (ast.Name, ast.arg))
+                        and (part.id if isinstance(part, ast.Name) else part.arg) == value.id
+                        and (not isinstance(part, ast.Name) or isinstance(part.ctx, ast.Store))
+                        and python_enclosing_scope(part, slice_parents) is slice_scope
+                        for part in ast.walk(tree)
+                    ):
+                        return None
                     continue
-                latest = max(candidates, key=lambda statement: statement.lineno)
+                latest = max(candidates, key=lambda statement: slice_position(statement, end=True))
+                if isinstance(slice_scope, ast.Module) and python_enclosing_scope(value, slice_parents) is not slice_scope:
+                    # A deferred outer capture needs one immutable assignment;
+                    # definition-line ordering cannot exclude later rebindings.
+                    if sum(
+                        isinstance(part, ast.Name) and isinstance(part.ctx, ast.Store) and part.id == value.id
+                        and python_enclosing_scope(part, slice_parents) is slice_scope
+                        for part in ast.walk(tree)
+                    ) != 1:
+                        return None
                 if not isinstance(slice_parents.get(latest), (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef)):
                     return None
                 if any(
@@ -11129,7 +11150,7 @@ def reviewed_python_source_slice(node, source_names, tree):
                     and (part.id if isinstance(part, ast.Name) else part.arg) == value.id
                     and (not isinstance(part, ast.Name) or isinstance(part.ctx, ast.Store))
                     and python_enclosing_scope(part, slice_parents) is slice_scope
-                    and latest.lineno < getattr(part, "lineno", 0) <= value.lineno
+                    and slice_position(latest, end=True) < slice_position(part) <= slice_position(value)
                     for part in ast.walk(tree)
                 ):
                     return None
@@ -11673,7 +11694,10 @@ def reviewed_python_compile_source(node, provenance=None, tree=None):
             and node.id in ast_provenance
         )
     if isinstance(node, ast.Subscript):
-        return reviewed_python_source_slice(node, source_provenance, tree)
+        return (
+            isinstance(node.value, ast.Name) and node.value.id in reviewed_python_compile_slice_bases
+            and reviewed_python_source_slice(node, source_provenance, tree)
+        )
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
         return reviewed_python_compile_source(node.left, provenance, tree) and reviewed_python_compile_source(
             node.right, provenance, tree
@@ -32906,3 +32930,57 @@ packet scan and independent review remain required. Old d618c229 internal
 approvals/hosted success do not approve these corrections. No new correction
 push, merge, full-current harness or product live test is claimed. #79 and
 parent #1 remain In progress with G01/G02/live gates unchanged.
+
+#### Extraction-bound follow-up: lexical parameters and same-line rebinding
+
+The exact `29ca0d57d9dc9d16020e86c605cf3e1dd195ab3d` packet selector
+passed in 40.273s, inspecting 331 shell commands and 95 Python bodies with
+zero reported violations. Its independent security review nevertheless retained
+HOLD P1: function parameters could borrow same-spelled global extraction bounds,
+and two semicolon-separated assignments on one line selected the earlier safe
+recipe despite later arbitrary bounds. Both witnesses stayed inert AST data;
+the latter's extracted 17-byte text was parsed, never executed. The completed
+security report was processed, released without a process action and acknowledged.
+The contract review also retained HOLD after four pinned methods passed in
+4.221s, including 128 helper checks: its same-line witness selected a different
+311-node parseable slice. Later-line rebinding and same-line source invalidation
+controls were refused. Repeated-marker probes selected parseable seven- and
+263-node slices, but a bounded direct-sink check found no compiler, process,
+network or file-write sink; these probes establish no additional confirmed P1.
+Those routine hardening observations are triaged once without a fix or follow-up
+issue, not promoted to universal safety proof. The reviewer confirmed the Go
+1.26.8 metadata, made no edits and used pinned source only. Its report was
+processed, released without a process action and acknowledged.
+
+The parameter-shadow regression was meaningfully RED (one failed assertion,
+0.127s). Local binders now prevent fallback to outer bounds, and a deferred
+module capture requires one assignment rather than definition-line ordering.
+An initial blanket outer-capture refusal broke one existing positive control
+(nine methods, 5.542s); refining it preserved legitimate immutable prefixes
+(three methods PASS in 5.394s; nine methods PASS in 5.536s).
+
+A separate compatibility invariant was RED (one failed assertion, 0.127s):
+direct compiler slices must retain the pre-existing base-name allowlist as well
+as satisfy the new extraction recipe. Restoring that check passed four focused
+methods in 5.449s. The security review's same-line witness then produced its
+own canonical RED (one failed assertion, 0.126s). Bound selection now compares
+statement end and read start line/column positions, choosing the latest fully
+evaluated assignment and observing intervening binders. Five focused methods
+passed in 5.455s; the combined eleven-method group passed in 5.528s, preserving
+all 128 actual compiler-helper checks and ten historical loader controls.
+
+The eleven selectors are the preceding eight-method boundary group plus
+`test_packet_slice_bounds_do_not_fall_back_across_parameter_shadows`,
+`test_direct_packet_slice_retains_existing_compile_base_allowlist` and
+`test_same_line_packet_bound_reassignments_invalidate_slice_recipe`, each under
+`Issue79RegressionTests` in the isolated regression harness. No specimen was
+executed, no source revision or compiler-input name was added, and no full
+current harness, production protocol or live result is claimed. The corrected
+candidate needs its own packet result and fresh exact-source delta dispositions;
+the earlier packet success does not clear either review finding. No correction
+push or merge has occurred. #79 and parent #1 remain In progress.
+
+Before this ledger entry was appended, the corrected writer-source packet
+selector passed in 40.680s: 331 shell commands, 95 Python bodies and zero
+reported violations. This is an intermediate writer checkpoint, not approval
+of an immutable final head or a substitute for either independent disposition.
