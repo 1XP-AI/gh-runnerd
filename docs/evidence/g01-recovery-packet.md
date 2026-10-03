@@ -13193,6 +13193,7 @@ def python_module_value_escape_violation(tree, parents, safe_marker):
         if alias.name == "path"
     }
     names.update(path_modules)
+    os_names = python_assigned_module_names(tree, "os")
     changed = True
     while changed:
         changed = False
@@ -13209,10 +13210,7 @@ def python_module_value_escape_violation(tree, parents, safe_marker):
                         names.add(target.id)
                         changed = True
 
-    rebound_names = {
-        node.id for node in ast.walk(tree)
-        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
-    } | {
+    non_store_bound_names = {
         node.arg for node in ast.walk(tree) if isinstance(node, ast.arg)
     } | {
         node.name for node in ast.walk(tree)
@@ -13222,6 +13220,17 @@ def python_module_value_escape_violation(tree, parents, safe_marker):
         for node in ast.walk(tree)
         if isinstance(node, (ast.Import, ast.ImportFrom))
         for alias in node.names
+    } | {
+        node.name for node in ast.walk(tree)
+        if isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar))
+        and node.name is not None
+    } | {
+        node.rest for node in ast.walk(tree)
+        if isinstance(node, ast.MatchMapping) and node.rest is not None
+    }
+    rebound_names = non_store_bound_names | {
+        node.id for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
     }
 
     def reviewed_namespace_argument(node, parent):
@@ -13260,11 +13269,7 @@ def python_module_value_escape_violation(tree, parents, safe_marker):
             and isinstance(candidate.ctx, ast.Store)
             and candidate.id == name
             for candidate in ast.walk(tree)
-        ) != 1 or any(
-            isinstance(candidate, ast.arg) and candidate.arg == name
-            or isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and candidate.name == name
-            for candidate in ast.walk(tree)
-        ):
+        ) != 1 or name in non_store_bound_names:
             return False
         module_keys = {
             key for key, value in zip(keys, dictionary.values)
@@ -13298,11 +13303,20 @@ def python_module_value_escape_violation(tree, parents, safe_marker):
         if isinstance(value, ast.Name) and value.id in names
     }
     for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and python_dotted_name(node) in {"os.path.abspath", "os.path.realpath"}
+        ):
+            parent = parents.get(node)
+            if not isinstance(parent, ast.Call) or parent.func is not node:
+                return f"Python OS path callable escapes its reviewed direct call on line {node.lineno}"
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in names:
             if node.attr.startswith("__"):
                 return f"Python security module reflection is not reviewed on line {node.lineno}"
             if node.value.id in path_modules:
                 return f"Python OS path module alias is not reviewed on line {node.lineno}"
+            if node.attr == "path" and node.value.id in os_names and node.value.id != "os":
+                return f"Python OS path module through an OS alias is not reviewed on line {node.lineno}"
             if python_dotted_name(node) == "os.path":
                 parent = parents.get(node)
                 if not isinstance(parent, ast.Attribute) or parent.value is not node:
@@ -31620,3 +31634,44 @@ The canonical isolated packet selector then passed one test in 119.911s:
 incremental correction evidence, not a claim that the earlier full invocation
 passed. The final combined candidate still requires independent delta
 sign-off, hosted PR quick checks and completed exact-head GitHub Codex review.
+
+#### Completed contract review of `55c5f6f` and path-callable correction
+
+The GPT-6-Luna/max contract reviewer completed the immutable `55c5f6f`
+delta review and successfully delivered its result through Orca. Its five
+focused methods passed in 0.150s, including the mixed-subprocess dictionary
+positive. The code verdict remained HOLD: assigned `os.path.abspath` and
+`os.path.realpath` callables bypassed local-path output classification.
+The review attempt was settled and retained without process action; a new
+attempt is required for final candidate sign-off.
+
+`test_os_path_callable_recovery_cannot_hide_local_output` failed three
+assertions in 0.110s for the assigned callables and a list-held callable.
+After a direct-call-only guard closed those forms, neutral OS alias names
+reproduced two additional accepted forms in 0.115s. First-class
+`os.path.abspath`/`os.path.realpath` recovery and OS path-module access
+through assigned/imported OS aliases are now rejected as unsupported
+indirection. Canonical direct calls still allow normalization comparisons
+without output. The new selector and the four neighboring module/alias
+selectors passed in 0.121s after both corrections. All specimens remained
+inert AST inputs; no inherited value or local path was printed.
+
+The packet-only `1b10507709bcc5eae34e606e036bd077441d4ecb` correction
+also received a post-ledger canonical packet scan: one test passed in
+118.865s, 331 shell commands and 95 Python heredoc bodies with zero
+violations. This evidence does not certify the subsequent source change.
+Security review and final combined candidate verification/reviews remain
+pending. Neither the parent live gates nor the merge gates are waived.
+
+The security review's inert namespace witness used a `match` capture named
+`exec` to call a local helper with a module-bearing dictionary, bypassing
+the proof's builtin-shadow check. The coordinator's
+`test_pattern_bindings_cannot_shadow_reviewed_namespace_builtins` was RED:
+three assertions failed in 0.118s. Binding collection now includes exception
+handler names, match captures/star captures and mapping-rest names, alongside
+ordinary stores, imports, parameters and definitions. These names also
+invalidate the helper dictionary's one-declaration proof. The new pattern
+and path selectors, the namespace/reflection selectors and the pre-existing
+mixed-subprocess dictionary selector passed together in 0.150s. No specimen
+was executed. The completed immutable security report, final delta verdicts
+and candidate checks must be recorded in the PR before merge.

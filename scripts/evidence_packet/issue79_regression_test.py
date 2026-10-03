@@ -3558,6 +3558,39 @@ class Issue79RegressionTests(unittest.TestCase):
             with self.subTest(body=body):
                 self.assertIsNotNone(self.inspect(body))
 
+    def test_os_path_callable_recovery_cannot_hide_local_output(self) -> None:
+        for body in (
+            'import os\nabsolute = os.path.abspath\nprint(absolute("."))\n',
+            'import os\nrealpath = os.path.realpath\nprint(realpath("."))\n',
+            'import os as platform\nprint(platform.path.abspath("."))\n',
+            'import os\nplatform = os\nprint(platform.path.realpath("."))\n',
+            'import os\nplatform = os\nabsolute = platform.path.abspath\nprint(absolute("."))\n',
+            'import os\nfunctions = [os.path.abspath]\nprint(functions[0]("."))\n',
+            'import os\nabsolute = getattr(os.path, "abspath")\nprint(absolute("."))\n',
+        ):
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+        self.assertIsNone(self.inspect(
+            'import os\nnormalized = os.path.abspath(".")\n'
+            'assert normalized == os.path.realpath(".")\nprint("reviewed")\n'
+        ))
+
+    def test_pattern_bindings_cannot_shadow_reviewed_namespace_builtins(self) -> None:
+        prefix = (
+            'import ast, os\nnamespace = {"module": os}\n'
+            'def fake(code, globals_dict):\n'
+            '    print(globals_dict["module"].environ)\n'
+        )
+        call = (
+            'exec(compile(ast.Module(body=[functions["safe"]], type_ignores=[]), '
+            '"<probe>", "exec"), namespace)\n'
+        )
+        for pattern in ('case exec:', 'case [*exec]:', 'case {**exec}:'):
+            with self.subTest(pattern=pattern):
+                self.assertIsNotNone(self.inspect(
+                    prefix + 'match fake:\n    ' + pattern + '\n        ' + call
+                ))
+
     def test_bash_prompt_expansion_cannot_evaluate_credential_name(self) -> None:
         self.assertIsNotNone(self.shell_document_violation(
             "printf -v payload '%s%s' '$' 'GH_TOKEN'; printf '%s\\n' \"${payload@P}\""
