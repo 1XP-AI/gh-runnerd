@@ -10939,16 +10939,16 @@ def python_compile_primitive_is_shadowed(name, tree, provider_call=None):
         if isinstance(value, ast.IfExp):
             return any(provider_value_borrows_class(element, seen) for element in (value.body, value.orelse))
         if isinstance(value, ast.Subscript) and isinstance(value.slice, ast.Constant):
-            containers = provider_bindings.get(value.value.id, ()) if isinstance(value.value, ast.Name) else [value.value]
-            for container in containers:
-                if isinstance(container, ast.Dict):
-                    selected = [element for key, element in zip(container.keys, container.values)
+            provider_container_values = provider_bindings.get(value.value.id, ()) if isinstance(value.value, ast.Name) else [value.value]
+            for provider_container_value in provider_container_values:
+                if isinstance(provider_container_value, ast.Dict):
+                    selected = [element for key, element in zip(provider_container_value.keys, provider_container_value.values)
                                 if key is None or isinstance(key, ast.Constant) and key.value == value.slice.value]
-                elif isinstance(container, (ast.List, ast.Tuple)) and isinstance(value.slice.value, int) and not isinstance(value.slice.value, bool):
+                elif isinstance(provider_container_value, (ast.List, ast.Tuple)) and isinstance(value.slice.value, int) and not isinstance(value.slice.value, bool):
                     index = value.slice.value
-                    selected = [container.elts[index]] if -len(container.elts) <= index < len(container.elts) else []
+                    selected = [provider_container_value.elts[index]] if -len(provider_container_value.elts) <= index < len(provider_container_value.elts) else []
                 else:
-                    selected = [container]
+                    selected = [provider_container_value]
                 if any(provider_value_borrows_class(element, seen) for element in selected):
                     return True
             return False
@@ -32576,3 +32576,13 @@ contract/security delta sign-off before a stable batch push. The passing
 `ee513f8` scan does not certify the changed source. Previous HOLDs remain
 historical; no current approval, push, GitHub Codex request, merge or live
 operation occurred. #79 and parent G01 #1 remain In progress.
+
+The `97353eaa4ca1a26927de0979b166193869546a0e` packet selector completed
+FAIL1 in 46.046s: the scanner's new local `container` iterator collided with
+the existing Markdown-prefix regex receiver of the same name, reporting
+an unresolved Path receiver for `.group`. The new provider-local iterator
+and collection are alpha-renamed to `provider_container_value` and
+`provider_container_values`; no provider or mutation rule is relaxed.
+Five focused methods passed in 4.900s after the rename, including all 128
+compiler calls and ten loaders. The renamed source still needs its own
+packet result and explicitly exact-head independent delta disposition.
