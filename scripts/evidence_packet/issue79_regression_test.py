@@ -2641,6 +2641,82 @@ class Issue79RegressionTests(unittest.TestCase):
             "a non-sensitive isolated status query remains accepted",
         )
 
+
+    def test_bounded_git_origin_capture_requires_reviewed_comparison_and_no_output_escape(self) -> None:
+        verification_body, verification_marker = self.packet_heredoc_containing(
+            "expected_origin_url =",
+            "origin_result = run_bounded_git_query(",
+            "if origin_urls != [expected_origin_url]:",
+        )
+        inspect_verification = self.scanner["inspect_python_heredoc"]
+        self.assertIsNone(
+            inspect_verification(verification_body, verification_marker),  # type: ignore[operator]
+            "the current bounded, captured-and-compared verifier remains accepted",
+        )
+        comparison_proof = self.scanner["reviewed_python_git_origin_capture_is_compared"]
+        verification_tree = ast.parse(verification_body)
+        verification_parents = {
+            child: parent
+            for parent in ast.walk(verification_tree)
+            for child in ast.iter_child_nodes(parent)
+        }
+        self.assertTrue(
+            comparison_proof(verification_tree, verification_parents)  # type: ignore[operator]
+        )
+        for label, mutant in (
+            (
+                "raw stdout output",
+                verification_body + "\nprint(origin_result.stdout)\n",
+            ),
+            (
+                "captured stdout alias output",
+                verification_body
+                + "\nraw_origin = origin_result.stdout\nprint(raw_origin)\n",
+            ),
+            (
+                "decoded origin list output",
+                verification_body + "\nprint(origin_urls)\n",
+            ),
+            (
+                "origin comparison removed",
+                self._verification_without_origin_comparison(
+                    verification_body
+                ),
+            ),
+            ):
+                with self.subTest(mutant=label):
+                    mutant_tree = ast.parse(mutant)
+                    mutant_parents = {
+                        child: parent
+                        for parent in ast.walk(mutant_tree)
+                        for child in ast.iter_child_nodes(parent)
+                    }
+                    self.assertFalse(
+                        comparison_proof(mutant_tree, mutant_parents)  # type: ignore[operator]
+                    )
+                    self.assertIsNotNone(
+                    inspect_verification(mutant, verification_marker),  # type: ignore[operator]
+                    label,
+                )
+
+    @staticmethod
+    def _verification_without_origin_comparison(body: str) -> str:
+        mutated = ast.parse(body, filename="<verification-output-data>")
+        comparisons = [
+            statement
+            for statement in mutated.body
+            if isinstance(statement, ast.If)
+            and isinstance(statement.test, ast.Compare)
+            and any(
+                isinstance(node, ast.Name) and node.id == "origin_urls"
+                for node in ast.walk(statement.test)
+            )
+        ]
+        if len(comparisons) != 1:
+            raise AssertionError("current origin comparison shape changed")
+        mutated.body.remove(comparisons[0])
+        return ast.unparse(mutated)
+
         origin_capture = _top_level_assignment(self.verification, "origin_result")
         self.assertEqual(
             self.scanner["python_dotted_name"](origin_capture.value.func),  # type: ignore[operator,union-attr]
@@ -3706,6 +3782,8 @@ class Issue79RegressionTests(unittest.TestCase):
             'from pathlib import Path\nPath("synthetic-owned").copy_into(Path("synthetic-destination"))\n',
             'from pathlib import Path\nPath("synthetic-owned").move_into(Path("synthetic-destination"))\n',
             'from pathlib import Path\nPath("synthetic-owned").lchmod(0o600)\n',
+            'from pathlib import Path\nseen = Path("synthetic-owned")\n'
+            'seen.copy(Path("synthetic-destination"))\n',
             'from pathlib import Path\n'
             'action = Path("synthetic-owned").move_into\n'
             'action(Path("synthetic-destination"))\n',
@@ -3729,6 +3807,7 @@ class Issue79RegressionTests(unittest.TestCase):
             'from pathlib import Path\nfrom tempfile import TemporaryDirectory\n'
             'with TemporaryDirectory() as td:\n'
             '    Path(td).joinpath("source").copy(**{"target": Path("synthetic-destination")})\n',
+            'unknown_receiver.copy(Path("synthetic-destination"))\n',
         )
         for body in unsafe:
             with self.subTest(body=body):
@@ -3746,6 +3825,10 @@ class Issue79RegressionTests(unittest.TestCase):
             '    action = source.move_into\n'
             '    action(destination_dir)\n'
             '    source.lchmod(0o600)\n'
+            'seen = {"ast-node"}\n'
+            'seen_copy = seen.copy()\n'
+            'seen_alias = seen\n'
+            'seen_alias_copy = seen_alias.copy()\n'
         )
         self.assertIsNone(self.inspect(safe))
 

@@ -13741,7 +13741,7 @@ def reviewed_python_git_sensitive_output(node, tree, parents, seen=None):
         for element in arguments.elts:
             if isinstance(element, ast.Constant) and isinstance(element.value, str):
                 tokens.append(element.value)
-            elif reviewed_python_dynamic_path_value(element, tree, parents):
+            elif reviewed_python_dynamic_path_value(element, tree):
                 tokens.append("__g01_reviewed_dynamic_path__")
             else:
                 return True
@@ -13800,13 +13800,237 @@ def reviewed_python_git_sensitive_output(node, tree, parents, seen=None):
     return False
 
 
-def reviewed_python_git_query_capture(node, parents):
-    """Keep raw Git query output only in the existing bounded capture helper."""
+def reviewed_python_git_origin_query_results(tree, parents):
+    """Find bounded results of the exact sensitive Git origin query."""
+    result_bindings = []
+    for candidate in ast.walk(tree):
+        if not isinstance(candidate, ast.Assign) or len(candidate.targets) != 1:
+            continue
+        target = candidate.targets[0]
+        value = candidate.value
+        if (
+            isinstance(target, ast.Name)
+            and isinstance(value, ast.Call)
+            and python_dotted_name(value.func) == "run_bounded_git_query"
+            and value.args
+            and isinstance(value.args[0], ast.Call)
+            and python_dotted_name(value.args[0].func) in {"git_query", "git_command"}
+            and reviewed_python_git_builder(value.args[0], tree, parents)
+            and value.args[0].args
+            and isinstance(value.args[0].args[0], (ast.List, ast.Tuple))
+            and all(
+                isinstance(argument, ast.Constant)
+                and isinstance(argument.value, str)
+                for argument in value.args[0].args[0].elts
+            )
+            and [
+                argument.value for argument in value.args[0].args[0].elts
+            ] == ["config", "--local", "--get-all", "remote.origin.url"]
+        ):
+            result_bindings.append((target.id, candidate))
+    return result_bindings
+
+
+def reviewed_python_git_origin_capture_is_compared(tree, parents):
+    """Certify the one bounded origin query only while its literal check is intact."""
+    result_bindings = reviewed_python_git_origin_query_results(tree, parents)
+    if len(result_bindings) != 1:
+        return False
+    result_name, result_assignment = result_bindings[0]
+    result_target_nodes = [
+        candidate
+        for candidate in ast.walk(tree)
+        if isinstance(candidate, ast.Name)
+        and candidate.id == result_name
+        and isinstance(candidate.ctx, ast.Store)
+    ]
+    if (
+        len(result_target_nodes) != 1
+        or parents.get(result_target_nodes[0]) is not result_assignment
+    ):
+        return False
+    expected_assignments = [
+        candidate
+        for candidate in tree.body
+        if isinstance(candidate, ast.Assign)
+        and len(candidate.targets) == 1
+        and isinstance(candidate.targets[0], ast.Name)
+        and candidate.targets[0].id == "expected_origin_url"
+        and isinstance(candidate.value, ast.Constant)
+        and isinstance(candidate.value.value, str)
+        and candidate.value.value == "https://github.com/1XP-AI/gh-runnerd.git"
+    ]
+    if len(expected_assignments) != 1:
+        return False
+    expected_targets = [
+        candidate
+        for candidate in ast.walk(tree)
+        if isinstance(candidate, ast.Name)
+        and candidate.id == "expected_origin_url"
+        and isinstance(candidate.ctx, ast.Store)
+    ]
+    if (
+        len(expected_targets) != 1
+        or parents.get(expected_targets[0]) is not expected_assignments[0]
+    ):
+        return False
+    status_attributes = []
+    stdout_attributes = []
+    result_loads = [
+        candidate
+        for candidate in ast.walk(tree)
+        if isinstance(candidate, ast.Name)
+        and candidate.id == result_name
+        and isinstance(candidate.ctx, ast.Load)
+    ]
+    for candidate in ast.walk(tree):
+        if (
+            isinstance(candidate, ast.Attribute)
+            and isinstance(candidate.value, ast.Name)
+            and candidate.value.id == result_name
+        ):
+            if candidate.attr in {"returncode", "stderr"}:
+                status_attributes.append(candidate)
+            elif candidate.attr == "stdout":
+                stdout_attributes.append(candidate)
+    if len(status_attributes) != 2 or len(stdout_attributes) != 1:
+        return False
+    if any(
+        parents.get(candidate) is not attribute
+        for candidate in result_loads
+        for attribute in status_attributes + stdout_attributes
+        if attribute.value is candidate
+    ) or len(result_loads) != 3:
+        return False
+    stdout = stdout_attributes[0]
+    decode_attribute = parents.get(stdout)
+    decode = (
+        parents.get(decode_attribute)
+        if isinstance(decode_attribute, ast.Attribute)
+        else None
+    )
+    splitlines_attribute = parents.get(decode)
+    splitlines = (
+        parents.get(splitlines_attribute)
+        if isinstance(splitlines_attribute, ast.Attribute)
+        else None
+    )
+    origin_assignment = parents.get(splitlines) if isinstance(splitlines, ast.Call) else None
+    if not (
+        isinstance(decode_attribute, ast.Attribute)
+        and decode_attribute.attr == "decode"
+        and python_dotted_name(decode_attribute) == result_name + ".stdout.decode"
+        and isinstance(decode, ast.Call)
+        and decode.func is decode_attribute
+        and len(decode.args) == 1
+        and isinstance(decode.args[0], ast.Constant)
+        and decode.args[0].value == "utf-8"
+        and isinstance(splitlines_attribute, ast.Attribute)
+        and splitlines_attribute.attr == "splitlines"
+        and splitlines_attribute.value is decode
+        and isinstance(splitlines, ast.Call)
+        and splitlines.func is splitlines_attribute
+        and isinstance(origin_assignment, ast.Assign)
+        and origin_assignment in tree.body
+        and len(origin_assignment.targets) == 1
+        and isinstance(origin_assignment.targets[0], ast.Name)
+        and origin_assignment.targets[0].id == "origin_urls"
+    ):
+        return False
+    status_checks = [
+        candidate
+        for candidate in tree.body
+        if isinstance(candidate, ast.If)
+        and isinstance(candidate.test, ast.BoolOp)
+        and isinstance(candidate.test.op, ast.Or)
+        and len(candidate.test.values) == 2
+        and any(
+            isinstance(value, ast.Compare)
+            and isinstance(value.left, ast.Attribute)
+            and isinstance(value.left.value, ast.Name)
+            and value.left.value.id == result_name
+            and value.left.attr == "returncode"
+            and len(value.ops) == 1
+            and isinstance(value.ops[0], ast.NotEq)
+            and len(value.comparators) == 1
+            and isinstance(value.comparators[0], ast.Constant)
+            and type(value.comparators[0].value) is int
+            and value.comparators[0].value == 0
+            for value in candidate.test.values
+        )
+        and any(
+            isinstance(value, ast.Attribute)
+            and isinstance(value.value, ast.Name)
+            and value.value.id == result_name
+            and value.attr == "stderr"
+            for value in candidate.test.values
+        )
+        and any(isinstance(item, ast.Raise) for item in candidate.body)
+    ]
+    origin_targets = [
+        candidate
+        for candidate in ast.walk(tree)
+        if isinstance(candidate, ast.Name)
+        and candidate.id == "origin_urls"
+        and isinstance(candidate.ctx, ast.Store)
+    ]
+    if (
+        len(status_checks) != 1
+        or len(origin_targets) != 1
+        or parents.get(origin_targets[0]) is not origin_assignment
+    ):
+        return False
+    origin_name_loads = [
+        candidate
+        for candidate in ast.walk(tree)
+        if isinstance(candidate, ast.Name)
+        and candidate.id == "origin_urls"
+        and isinstance(candidate.ctx, ast.Load)
+    ]
+    checks = [
+        candidate
+        for candidate in tree.body
+        if isinstance(candidate, ast.If)
+        and isinstance(candidate.test, ast.Compare)
+        and isinstance(candidate.test.left, ast.Name)
+        and candidate.test.left.id == "origin_urls"
+        and len(candidate.test.ops) == 1
+        and isinstance(candidate.test.ops[0], ast.NotEq)
+        and len(candidate.test.comparators) == 1
+        and isinstance(candidate.test.comparators[0], ast.List)
+        and len(candidate.test.comparators[0].elts) == 1
+        and isinstance(candidate.test.comparators[0].elts[0], ast.Name)
+        and candidate.test.comparators[0].elts[0].id == "expected_origin_url"
+        and any(isinstance(item, ast.Raise) for item in candidate.body)
+    ]
+    return (
+        len(origin_name_loads) == 1
+        and len(checks) == 1
+        and result_assignment in tree.body
+        and tree.body.index(result_assignment) < tree.body.index(origin_assignment)
+        and tree.body.index(result_assignment) < tree.body.index(status_checks[0])
+        and tree.body.index(status_checks[0]) < tree.body.index(origin_assignment)
+        and tree.body.index(origin_assignment) < tree.body.index(checks[0])
+    )
+
+
+def python_git_origin_capture_violation(tree, parents):
+    """Refuse the bounded origin exception if its output is exposed or unchecked."""
+    if not reviewed_python_git_origin_query_results(tree, parents):
+        return None
+    if reviewed_python_git_origin_capture_is_compared(tree, parents):
+        return None
+    return "Python bounded Git origin output is not compared or escapes its verifier"
+
+
+def reviewed_python_git_query_capture(node, tree, parents):
+    """Keep raw Git query output bounded and compared before its exception."""
     if (
         enclosing_python_function(node, parents) != "run_bounded_git_query"
         or python_dotted_name(node.func) != "subprocess.Popen"
         or not reviewed_python_helper_definition(node, parents)
         or not reviewed_python_helper_launcher(node, parents)
+        or not reviewed_python_git_origin_capture_is_compared(tree, parents)
     ):
         return False
     keywords = {keyword.arg: keyword.value for keyword in node.keywords}
@@ -14043,7 +14267,7 @@ def reviewed_python_dynamic_call(
     ):
         if (
             reviewed_python_git_sensitive_output(argument, tree, parents)
-            and not reviewed_python_git_query_capture(node, parents)
+            and not reviewed_python_git_query_capture(node, tree, parents)
         ):
             return False
         return reviewed_python_git_child_environment(node, tree, parents)
@@ -14975,6 +15199,196 @@ def python_path_mutator_destination(call, method):
     return None
 
 
+def python_known_non_path_set_copy_receiver(node, tree, parents, active=None):
+    """Prove .copy() receives a set from literals, builtins or set-preserving calls."""
+    if active is None:
+        active = set()
+    if isinstance(node, ast.Set):
+        return True
+    if isinstance(node, ast.Call):
+        if python_unshadowed_builtin_call(node, {"set"}, tree, parents):
+            return True
+        return (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "copy"
+            and python_known_non_path_set_copy_receiver(
+                node.func.value, tree, parents, active | {id(node)}
+            )
+        )
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        return (
+            python_known_non_path_set_copy_receiver(
+                node.left, tree, parents, active | {id(node)}
+            )
+            and isinstance(node.right, ast.Set)
+        )
+    if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
+        return all(
+            python_known_non_path_set_copy_receiver(
+                value, tree, parents, active | {id(node)}
+            )
+            for value in node.values
+        )
+    if not isinstance(node, ast.Name) or id(node) in active:
+        return False
+    scope = python_enclosing_scope(node, parents)
+    key = (id(scope), node.id)
+    if key in active:
+        return False
+    active = active | {key}
+    assignments = []
+    for candidate in ast.walk(scope):
+        if isinstance(candidate, ast.Assign):
+            targets, value = candidate.targets, candidate.value
+        elif isinstance(candidate, (ast.AnnAssign, ast.NamedExpr)):
+            targets, value = [candidate.target], candidate.value
+        elif isinstance(candidate, ast.AugAssign):
+            targets, value = [candidate.target], ast.Constant(None)
+        else:
+            continue
+        if python_enclosing_scope(candidate, parents) is scope and any(
+            isinstance(target, ast.Name) and target.id == node.id for target in targets
+        ):
+            assignments.append(value)
+
+    def preserves_parameter(value, function, parameter_name, seen=None):
+        if seen is None:
+            seen = set()
+        if id(value) in seen:
+            return False
+        seen = seen | {id(value)}
+        if isinstance(value, ast.Set):
+            return True
+        if isinstance(value, ast.Name):
+            return (
+                value.id == parameter_name
+                and python_enclosing_scope(value, parents) is function
+            )
+        if isinstance(value, ast.Call):
+            if python_unshadowed_builtin_call(value, {"set"}, tree, parents):
+                return True
+            return (
+                isinstance(value.func, ast.Attribute)
+                and value.func.attr == "copy"
+                and preserves_parameter(
+                    value.func.value, function, parameter_name, seen
+                )
+            )
+        if isinstance(value, ast.BinOp) and isinstance(value.op, ast.BitOr):
+            return (
+                preserves_parameter(value.left, function, parameter_name, seen)
+                and isinstance(value.right, ast.Set)
+            )
+        return False
+
+    if not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return bool(assignments) and all(
+            python_known_non_path_set_copy_receiver(
+                value, tree, parents, active
+            )
+            for value in assignments
+        )
+    parameters = (
+        list(scope.args.posonlyargs) + list(scope.args.args) + list(scope.args.kwonlyargs)
+    )
+    parameter_index = next(
+        (index for index, parameter in enumerate(parameters) if parameter.arg == node.id),
+        None,
+    )
+    if parameter_index is None:
+        return bool(assignments) and all(
+            python_known_non_path_set_copy_receiver(
+                value, tree, parents, active
+            )
+            for value in assignments
+        )
+    positional = list(scope.args.posonlyargs) + list(scope.args.args)
+    positional_default_start = len(positional) - len(scope.args.defaults)
+    default = None
+    if parameter_index < len(positional):
+        if parameter_index >= positional_default_start:
+            default = scope.args.defaults[parameter_index - positional_default_start]
+    else:
+        keyword_index = parameter_index - len(positional)
+        default = scope.args.kw_defaults[keyword_index]
+    default_none = isinstance(default, ast.Constant) and default.value is None
+    set_normalizer = default_none and any(
+        any(
+            isinstance(candidate, ast.Call)
+            and python_unshadowed_builtin_call(candidate, {"set"}, tree, parents)
+            for candidate in ast.walk(value)
+        )
+        for value in assignments
+    )
+    callers = [
+        candidate for candidate in ast.walk(tree)
+        if isinstance(candidate, ast.Call)
+        and python_dotted_name(candidate.func) == scope.name
+        and scope in python_local_function_candidates(
+            scope.name, candidate, tree, parents
+        )
+    ]
+    if not all(
+        preserves_parameter(value, scope, node.id)
+        or python_known_non_path_set_copy_receiver(value, tree, parents, active)
+        or (
+            set_normalizer
+            and isinstance(value, ast.Constant)
+            and value.value is None
+        )
+        for value in assignments
+    ):
+        return False
+    if not callers:
+        return False
+    for candidate in ast.walk(tree):
+        if not (
+            isinstance(candidate, ast.Name)
+            and candidate.id == scope.name
+            and isinstance(candidate.ctx, ast.Load)
+        ):
+            continue
+        parent = parents.get(candidate)
+        if not (
+            isinstance(parent, ast.Call)
+            and parent.func is candidate
+            and parent in callers
+        ):
+            return False
+    seeded = False
+    for caller in callers:
+        keyword_values = [
+            keyword.value for keyword in caller.keywords if keyword.arg == node.id
+        ]
+        if len(keyword_values) > 1:
+            return False
+        if keyword_values:
+            argument = keyword_values[0]
+        elif parameter_index < len(caller.args) and not any(
+            isinstance(value, ast.Starred) for value in caller.args
+        ):
+            argument = caller.args[parameter_index]
+        else:
+            argument = None
+        if argument is None or (
+            isinstance(argument, ast.Constant) and argument.value is None
+        ):
+            if not set_normalizer:
+                return False
+            seeded = True
+        elif python_enclosing_scope(caller, parents) is scope and preserves_parameter(
+            argument, scope, node.id
+        ):
+            continue
+        elif python_known_non_path_set_copy_receiver(
+            argument, tree, parents, active
+        ):
+            seeded = True
+        else:
+            return False
+    return seeded
+
+
 def python_filesystem_mutator_alias_violation(tree, parents):
     """Reject extracted mutator methods unless their receiver is temp-owned."""
     shutil_names = python_assigned_module_names(tree, "shutil")
@@ -15058,6 +15472,10 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                     f"on line {node.lineno}"
                 )
             if receiver is None:
+                continue
+            if method == "copy" and python_known_non_path_set_copy_receiver(
+                receiver, tree, parents
+            ):
                 continue
             if not temporary_path_expression(receiver, tree, parents):
                 return (
@@ -15331,6 +15749,10 @@ def python_filesystem_mutation_violation(tree, parents):
         mutation = False
         path_arguments = []
         if isinstance(node.func, ast.Attribute) and node.func.attr in python_filesystem_mutating_methods:
+            if node.func.attr == "copy" and python_known_non_path_set_copy_receiver(
+                node.func.value, tree, parents
+            ):
+                continue
             if (
                 node.func.attr == "replace"
                 and not python_path_receiver_expression(node.func.value, tree, parents)
@@ -18944,6 +19366,9 @@ def inspect_python_heredoc(body, safe_marker):
         for parent in ast.walk(tree)
         for child in ast.iter_child_nodes(parent)
     }
+    git_origin_capture_violation = python_git_origin_capture_violation(tree, parents)
+    if git_origin_capture_violation:
+        return git_origin_capture_violation
     module_escape_violation = python_module_value_escape_violation(tree, parents, safe_marker)
     if module_escape_violation:
         return module_escape_violation
@@ -34914,3 +35339,88 @@ loader controls. This is focused evidence only; the coordinator owns the exact
 candidate packet selector, complete harness, final reviews and merge gates.
 `git diff --check` passed; the added-line personal-path, credential-token and
 private-key scan covered 373 lines with zero matches.
+
+#### Writer compatibility and bounded-origin-output correction from `3e597eb2`
+
+At entry on 2026-10-03, the clean checkpoint was
+`3e597eb276fd473f788d86e7136f6903700f53f0`. The coordinator's exact packet
+selector had reported two compatibility violations: five reviewed dynamic
+Git path arguments in the current Go wrapper and a normal set `seen.copy()`
+classified as a filesystem mutation. The three blocking Codex findings from
+that source remain linked here: [`sys.excepthook` output of exception data](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4173265743),
+[Python 3.14 pathlib copy/move mutators](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4173265747),
+and [raw `remote.origin.url` output through the isolated Git builder](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4173265750).
+
+The first focused RED command reproduced the two compatibility failures and
+the then-unchecked bounded-origin output path:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_current_executable_recipes_keep_git_and_path_provenance \
+  Issue79RegressionTests.test_new_path_mutators_require_owned_sources_and_destinations \
+  Issue79RegressionTests.test_shell_origin_url_query_is_rejected_but_verifier_capture_remains
+Ran 3 tests in 4.761s — FAILED (3 failures)
+```
+
+Before changing the scanner, the actual current verification heredoc was also
+mutated only as AST/source data: one variant appended
+`print(origin_result.stdout)` and another removed the
+`origin_urls != [expected_origin_url]` rejection. The focused RED result was:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_bounded_git_origin_capture_requires_reviewed_comparison_and_no_output_escape
+Ran 1 test in 0.847s — FAILED (2 subtest failures)
+```
+
+The security follow-up also reproduced printing the decoded `origin_urls`
+list as accepted at the entry source. The new regression includes raw stdout,
+an assigned stdout alias, decoded-list output and removal of the comparison;
+each is refused against the current scanner, while the unmodified verified
+query stays accepted.
+
+The Git path-argument check now uses the same fixed-name dynamic-path
+recognition already used by the canonical Git-builder proof, preserving the
+current wrapper's five reviewed arguments. Filesystem `.copy()` is skipped
+only when the receiver is proven to be an ordinary set through literal/set
+construction, set-preserving operations, scoped assignments and statically
+visible helper callers. Unknown receivers and non-temporary Path receivers
+remain refused; temporary-source Path copies still require an owned
+destination. The bounded-origin exception now certifies only the exact
+`remote.origin.url` query through the canonical builder when its unique result
+has the reviewed return-code/stderr rejection, one UTF-8 line decode, and the
+literal expected-origin comparison. Extra result/list reads and any rebound
+result are outside the certified shape; the bounded child capture, explicit
+pipes and exact expected URL stay required. The tests directly exercise raw,
+aliased and decoded output plus a removed comparison.
+
+The post-correction focused verification passed 15 methods in 10.789s:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_bounded_git_origin_capture_requires_reviewed_comparison_and_no_output_escape \
+  Issue79RegressionTests.test_current_executable_recipes_keep_git_and_path_provenance \
+  Issue79RegressionTests.test_new_path_mutators_require_owned_sources_and_destinations \
+  Issue79RegressionTests.test_filesystem_mutator_cannot_hide_in_container_binding \
+  Issue79RegressionTests.test_shell_origin_url_query_is_rejected_but_verifier_capture_remains \
+  Issue79RegressionTests.test_python_git_queries_require_isolated_environment_and_known_builder \
+  Issue79RegressionTests.test_python_git_builder_rebinding_is_not_certified \
+  Issue79RegressionTests.test_python_git_argv_mutation_is_not_certified \
+  Issue79RegressionTests.test_excepthook_aliases_are_sensitive_error_sinks \
+  Issue79RegressionTests.test_displayhook_aliases_are_sensitive_output_sinks \
+  Issue79RegressionTests.test_path_filesystem_readers_require_reviewed_paths \
+  Issue79RegressionTests.test_os_reexports_from_allowed_modules_are_not_certified \
+  Issue79RegressionTests.test_reexported_os_module_does_not_bypass_heredoc_checks \
+  Issue79RegressionTests.test_actual_packet_compile_helpers_retain_provenance \
+  Issue79RegressionTests.test_historic_scanner_loaders_export_only_their_required_helpers
+Ran 15 tests in 10.789s — OK
+packet compile-source boundary: 119 actual helper calls checked
+```
+
+The selector retained the ten historical loader controls and the existing
+`sys.excepthook`, displayhook, pathlib ownership, OS-re-export, Git isolation,
+builder-rebinding and argv-mutation denials. Adversarial inputs remained
+inert strings/AST mutations; only the reviewed scanner and local offline
+harness ran. This worker did not run the full harness, the packet-wide
+selector, Go/hosted CI or any live query. The coordinator owns those exact-head
+checks and independent reviews; no full-scan or merge approval is implied.
