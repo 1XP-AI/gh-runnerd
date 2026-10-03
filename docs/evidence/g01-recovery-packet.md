@@ -10906,6 +10906,8 @@ def python_compile_primitive_is_shadowed(name, tree, provider_call=None):
                 break
             enclosing_provider = provider_parents.get(enclosing_provider)
     module_aliases = ({name} | python_assigned_module_names(tree, name)) if name in {"ast", "subprocess", "pathlib", "Path"} else {name}
+    pathlib_provider_modules = {"pathlib"} | python_assigned_module_names(tree, "pathlib") if name == "Path" else set()
+    class_borrow_parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)} if name == "Path" else {}
     if name == "Path":
         module_aliases.update(
             imported.asname or imported.name
@@ -10932,12 +10934,24 @@ def python_compile_primitive_is_shadowed(name, tree, provider_call=None):
         seen = seen | {id(value)}
         if isinstance(value, ast.Name):
             return value.id in module_aliases
-        if isinstance(value, (ast.List, ast.Tuple)):
+        if isinstance(value, (ast.List, ast.Tuple, ast.Set)):
             return any(provider_value_borrows_class(element, seen) for element in value.elts)
         if isinstance(value, ast.Dict):
             return any(provider_value_borrows_class(element, seen) for element in value.values)
         if isinstance(value, ast.IfExp):
             return any(provider_value_borrows_class(element, seen) for element in (value.body, value.orelse))
+        if isinstance(value, ast.Call):
+            return (
+                isinstance(value.func, ast.Attribute)
+                and value.func.attr in {"get", "pop", "popitem", "copy", "items", "values", "__getitem__"}
+                and provider_value_borrows_class(value.func.value, seen)
+            ) or (
+                isinstance(value.func, ast.Name) and value.func.id in {"next", "iter"}
+                and any(provider_value_borrows_class(argument, seen) for argument in value.args)
+            ) or any(
+                provider_value_borrows_class(returned, seen)
+                for returned in python_local_call_return_values(value, tree, class_borrow_parents)
+            )
         if isinstance(value, ast.Subscript) and isinstance(value.slice, ast.Constant):
             provider_container_values = provider_bindings.get(value.value.id, ()) if isinstance(value.value, ast.Name) else [value.value]
             for provider_container_value in provider_container_values:
@@ -10952,7 +10966,10 @@ def python_compile_primitive_is_shadowed(name, tree, provider_call=None):
                 if any(provider_value_borrows_class(element, seen) for element in selected):
                     return True
             return False
-        return python_dotted_name(value) == "pathlib.Path"
+        return (
+            isinstance(value, ast.Attribute) and value.attr == "Path"
+            and isinstance(value.value, ast.Name) and value.value.id in pathlib_provider_modules
+        )
 
     for _ in range(sum(isinstance(statement, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) for statement in ast.walk(tree)) + 1 if name in {"ast", "subprocess", "pathlib", "Path"} else 0):
         before = set(module_aliases)
@@ -32586,3 +32603,45 @@ and collection are alpha-renamed to `provider_container_value` and
 Five focused methods passed in 4.900s after the rename, including all 128
 compiler calls and ten loaders. The renamed source still needs its own
 packet result and explicitly exact-head independent delta disposition.
+
+At immutable `70b29ce5d922b46efb8a8f684f61c108cfb8bda2`, the packet
+selector passed in 53.064s (331 shell commands, 95 Python bodies, zero
+violations). The completed GPT-6-Luna/max contract delta review explicitly
+approved that head, covering the alpha rename and shared exact-head evidence;
+its pinned five-selector delta run passed in 0.176s. The completed security
+review retained HOLD: set destructuring, dictionary `get` and list `pop`
+could borrow the Path class without preserving provider mutation origins.
+Both reports were processed, released without a process action and acked.
+
+The coordinator reproduced those three forms in the canonical provider
+method (three failed assertions, 0.146s). Set values and container-reader
+results now carry class-borrow origins. An overly broad call-result rule
+rejected three safe compiler controls (six methods, 5.038s, FAIL3); it was
+narrowed so `Path.cwd()` and other constructed path instances are not
+mistaken for the Path class. A neighboring module-alias class attribute
+was RED (one assertion, 0.145s), while the literal reflective getter control
+was already refused. A local helper returning the Path class was RED
+(one assertion, 0.151s). Class borrowing now follows imported/assigned
+pathlib module aliases and the existing static local-return resolver rather
+than evaluating calls. These rules invalidate mutation authority; they do
+not certify additional compiler inputs or snapshot revisions.
+
+Final focused eight methods passed in 5.263s, preserving all 128 actual
+compiler calls and ten loader exports:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_path_provider_patch_aliases_do_not_retain_source_authority \
+  Issue79RegressionTests.test_deferred_git_provider_does_not_ignore_later_monkeypatch \
+  Issue79RegressionTests.test_opaque_ast_receiver_methods_cannot_replace_compiled_children \
+  Issue79RegressionTests.test_actual_packet_compile_helpers_retain_provenance \
+  Issue79RegressionTests.test_historic_scanner_loaders_export_only_their_required_helpers \
+  Issue79RegressionTests.test_packet_derived_ast_helper_selection_remains_supported \
+  Issue79RegressionTests.test_augmented_assignment_and_forged_source_providers_invalidate_compile_proof \
+  Issue79RegressionTests.test_compile_primitives_and_source_parameters_need_proven_bindings
+```
+
+The old contract approval and packet PASS apply to `70b29ce`, not this changed
+source. A new exact-candidate packet result and focused independent delta
+dispositions remain required before pushing. Unsafe examples stayed AST
+data; no full current harness, hosted Python, merge or live evidence is claimed.

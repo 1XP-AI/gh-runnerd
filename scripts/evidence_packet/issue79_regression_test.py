@@ -3811,6 +3811,12 @@ class Issue79RegressionTests(unittest.TestCase):
             'def alter(cls):\n    cls.read_text = fake\nalter(Path)\n',
             'classes = {"reader": Path}\nclasses["reader"].read_text = fake\n',
             'PathAlias, = [Path]\nPathAlias.read_text = fake\n',
+            'PathAlias, = {Path}\nPathAlias.read_text = fake\n',
+            'classes = {"reader": Path}\nPathAlias = classes.get("reader")\nPathAlias.read_text = fake\n',
+            'classes = [Path]\nPathAlias = classes.pop()\nPathAlias.read_text = fake\n',
+            'import pathlib as p\nPathAlias = p.Path\nPathAlias.read_text = fake\n',
+            'import pathlib\nPathAlias = getattr(pathlib, "Path")\nPathAlias.read_text = fake\n',
+            'def reader_class():\n    return Path\nPathAlias = reader_class()\nPathAlias.read_text = fake\n',
         ):
             with self.subTest(mutation=mutation):
                 self.assertIsNotNone(self.inspect(setup + mutation + suffix))
