@@ -533,6 +533,21 @@ def _run_git_checked(arguments: list[str], cwd: Path, env: dict[str, str]) -> by
     return result.stdout
 
 
+def _isolated_git_shell_command(arguments: list[str]) -> str:
+    """Build inert scanner data for the explicit standalone Git boundary."""
+    return shlex.join(
+        [
+            "/usr/bin/env", "-i",
+            "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null",
+            "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1",
+            "/usr/bin/git", "--no-replace-objects", "-P",
+            "-c", "core.fsmonitor=false",
+            "-c", "core.hooksPath=/dev/null",
+            *arguments,
+        ]
+    )
+
+
 class Issue79RegressionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -2148,6 +2163,19 @@ class Issue79RegressionTests(unittest.TestCase):
         self.assertEqual(child_environment.get("LANG"), "C")
         self.assertEqual(child_environment.get("GIT_CONFIG_NOSYSTEM"), "1")
         self.assertEqual(child_environment.get("GIT_CONFIG_GLOBAL"), "/dev/null")
+        self.assertEqual(child_environment.get("GIT_CONFIG_SYSTEM"), "/dev/null")
+        query_runtime = _bounded_git_query_namespace(self.verification)
+        query = query_runtime["git_query"](["status", "--short"])
+        self.assertEqual(
+            query,
+            [
+                "/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1",
+                "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+                "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects",
+                "-P", "-c", "core.fsmonitor=false", "-c",
+                "core.hooksPath=/dev/null", "status", "--short",
+            ],
+        )
 
     def test_final_parity_helper_rejects_intent_bits_and_raw_byte_divergence(self) -> None:
         function = _verification_function(self.verification, "require_packet_head_parity")
@@ -2407,9 +2435,15 @@ class Issue79RegressionTests(unittest.TestCase):
         ):
             with self.subTest(command=command):
                 self.assertIsNotNone(self.shell_violation(command))
-        for command in ("git -P status", "git -c core.fsmonitor=false status"):
+        for command in (
+            "git -P status",
+            "git -c core.fsmonitor=false status",
+            _isolated_git_shell_command(["status"]).replace(
+                "-c core.hooksPath=/dev/null", "-c core.hooksPath=/tmp/synthetic-hook"
+            ),
+        ):
             with self.subTest(command=command):
-                self.assertIsNone(self.shell_violation(command))
+                self.assertIsNotNone(self.shell_violation(command))
 
     def test_core_worktree_override_cannot_mask_a_dirty_invocation_worktree(self) -> None:
         with tempfile.TemporaryDirectory(prefix="issue79-core-worktree-") as temporary:
@@ -2482,7 +2516,7 @@ class Issue79RegressionTests(unittest.TestCase):
                 "git -c core.worktree=/synthetic/alternate status --short"
             )
         )
-        self.assertIsNone(self.shell_violation("git status --short"))
+        self.assertIsNone(self.shell_violation(_isolated_git_shell_command(["status", "--short"])))
 
     def test_unbounded_git_config_dumps_are_rejected(self) -> None:
         for command in (
@@ -2494,10 +2528,16 @@ class Issue79RegressionTests(unittest.TestCase):
         for command in (
             "git config --get core.repositoryformatversion",
             "git config --local --get-regexp '^filter\\.'",
-            "git status --short",
         ):
             with self.subTest(command=command):
-                self.assertIsNone(self.shell_violation(command))
+                self.assertIsNone(
+                    self.shell_violation(
+                        _isolated_git_shell_command(shlex.split(command)[1:])
+                    )
+                )
+        self.assertIsNone(
+            self.shell_violation(_isolated_git_shell_command(["status", "--short"]))
+        )
 
     def test_git_config_queries_allow_only_reviewed_keys(self) -> None:
         for command in (
@@ -2517,14 +2557,18 @@ class Issue79RegressionTests(unittest.TestCase):
             "git config --get-urlmatch http.sslverify https://github.com/1XP-AI/gh-runnerd",
         ):
             with self.subTest(command=command):
-                self.assertIsNone(self.shell_violation(command))
+                self.assertIsNone(
+                    self.shell_violation(_isolated_git_shell_command(shlex.split(command)[1:]))
+                )
 
     def test_shell_origin_url_query_is_rejected_but_verifier_capture_remains(self) -> None:
         query = "git config --local --get-all remote.origin.url"
+        safe_query = _isolated_git_shell_command(shlex.split(query)[1:])
+        safe_tokens = self.scanner["executable_tokens"](shlex.split(safe_query))  # type: ignore[operator]
         self.assertIsNone(
-            self.scanner["git_read_only_violation"](shlex.split(query))  # type: ignore[operator]
+            self.scanner["git_read_only_violation"](safe_tokens)  # type: ignore[operator]
         )
-        self.assertIsNotNone(self.shell_violation(query))
+        self.assertIsNotNone(self.shell_violation(safe_query))
         self.assertIsNotNone(
             self.shell_violation("trap 'git config --local --get-all remote.origin.url' EXIT")
         )
@@ -2560,7 +2604,9 @@ class Issue79RegressionTests(unittest.TestCase):
         ):
             with self.subTest(command=command):
                 self.assertIsNotNone(self.shell_violation(command))
-        self.assertIsNone(self.shell_violation("git status --porcelain=v1"))
+        self.assertIsNone(
+            self.shell_violation(_isolated_git_shell_command(["status", "--porcelain=v1"]))
+        )
 
     def test_git_config_assignments_cannot_replace_reviewed_fence_state(self) -> None:
         commands = (
@@ -2592,7 +2638,7 @@ class Issue79RegressionTests(unittest.TestCase):
         ):
             with self.subTest(command=command):
                 self.assertIsNotNone(self.shell_violation(command))
-        self.assertIsNone(self.shell_violation("git diff HEAD^ HEAD"))
+        self.assertIsNone(self.shell_violation(_isolated_git_shell_command(["diff", "HEAD^", "HEAD"])))
 
     def test_nested_raise_does_not_prove_module_root_guard(self) -> None:
         bodies = [
@@ -3538,18 +3584,181 @@ class Issue79RegressionTests(unittest.TestCase):
         self.assertIsNone(self.inspect('from sys import displayhook as emit\nemit("offline fixture")\n'))
 
     def test_standalone_git_queries_require_explicit_hook_isolation(self) -> None:
-        for command in (
+        unsafe = (
             "git status --short", "git -P status --short",
             "git -c core.fsmonitor=false status --short",
             "git diff --stat", "git ls-files --cached",
-        ):
+            "env GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null "
+            "GIT_CONFIG_SYSTEM=/dev/null git -P -c core.fsmonitor=false "
+            "-c core.hooksPath=/dev/null status --short",
+            "env -i PATH=/usr/bin:/bin GIT_CONFIG_NOSYSTEM=1 "
+            "GIT_CONFIG_GLOBAL=/dev/null git -P -c core.fsmonitor=false "
+            "-c core.hooksPath=/dev/null status --short",
+            "env -i PATH=/usr/bin:/bin GIT_CONFIG_NOSYSTEM=1 "
+            "GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null "
+            "git -P -c core.fsmonitor=false status --short",
+            "env -i PATH=/usr/bin:/bin GIT_CONFIG_NOSYSTEM=1 "
+            "GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null "
+            "git -P -c core.hooksPath=/dev/null status --short",
+            "env -i PATH=/usr/bin:/bin GIT_CONFIG_NOSYSTEM=1 "
+            "GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null "
+            "git -P -c core.fsmonitor=false -c core.hooksPath=/dev/null "
+            "-c core.fsmonitor=/synthetic/hook status --short",
+        )
+        for command in unsafe:
             with self.subTest(command=command):
                 self.assertIsNotNone(self.shell_violation(command))
-        self.assertIsNone(self.shell_violation(
-            "env -i GIT_CONFIG_NOSYSTEM=1 "
-            "GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null "
-            "git -P -c core.fsmonitor=false -c core.hooksPath=/dev/null status --short"
-        ))
+        for args in (
+            ["status", "--short"],
+            ["diff", "--stat"],
+            ["ls-files", "--cached"],
+        ):
+            with self.subTest(args=args):
+                self.assertIsNone(self.shell_violation(_isolated_git_shell_command(args)))
+        self.assertIsNotNone(
+            self.shell_document_violation(
+                "export PATH=/usr/bin:/bin\n"
+                "git -P -c core.fsmonitor=false -c core.hooksPath=/dev/null status --short"
+            )
+        )
+
+    def test_python_git_queries_require_isolated_environment_and_known_builder(self) -> None:
+        unsafe = (
+            'import subprocess\n'
+            'subprocess.run(["git", "-P", "-c", "core.fsmonitor=false", '
+            '"-c", "core.hooksPath=/dev/null", "status"])\n',
+            'import subprocess\n'
+            'git_environment = {"GIT_CONFIG_NOSYSTEM": "1"}\n'
+            'subprocess.run(["git", "-P", "-c", "core.fsmonitor=false", '
+            '"-c", "core.hooksPath=/dev/null", "status"], env=git_environment)\n',
+            'import subprocess\n'
+            'git_environment = {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", '
+            '"GIT_CONFIG_SYSTEM": "/dev/null", "GIT_ATTR_NOSYSTEM": "1", '
+            '"GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "core.fsmonitor", '
+            '"GIT_CONFIG_VALUE_0": "false", "GIT_CONFIG_KEY_1": "core.hooksPath", '
+            '"GIT_CONFIG_VALUE_1": "/dev/null"}\n'
+            'subprocess.run(["git", "-P", "-c", "core.fsmonitor=false", '
+            '"-c", "core.hooksPath=/dev/null", "status"], env=git_environment)\n',
+            'import subprocess\n'
+            'git_environment = {"PATH": "/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM": "1", '
+            '"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"}\n'
+            'def git_command(arguments):\n    return ["git", *arguments]\n'
+            'subprocess.run(git_command(["status"]), env=git_environment)\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+        canonical = (
+            'import subprocess\n'
+            'git_environment = {"PATH": "/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM": "1", '
+            '"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null", '
+            '"GIT_ATTR_NOSYSTEM": "1"}\n'
+            'def git_command(arguments):\n'
+            '    return ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", '
+            '"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", '
+            '"GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", '
+            '"-P", "-c", "core.fsmonitor=false", "-c", '
+            '"core.hooksPath=/dev/null", *arguments]\n'
+            'subprocess.run(git_command(["status", "--short"]), env=git_environment)\n'
+        )
+        self.assertIsNone(self.inspect(canonical))
+        self.assertIsNotNone(
+            self.inspect(canonical.rsplit("subprocess.run(", 1)[0]
+                         + 'subprocess.run(git_command(["status", "--short"]))\n')
+        )
+        self.assertIsNotNone(
+            self.inspect(
+                canonical.replace(
+                    '"GIT_ATTR_NOSYSTEM": "1"}',
+                    '"GIT_ATTR_NOSYSTEM": "1", "GIT_DIR": "/synthetic"}',
+                )
+            )
+        )
+        self.assertIsNotNone(
+            self.inspect(
+                canonical.replace(
+                    'subprocess.run(git_command(["status", "--short"]), env=git_environment)',
+                    'git_environment |= {"GIT_CONFIG_PARAMETERS": "synthetic"}\n'
+                    'subprocess.run(git_command(["status", "--short"]), env=git_environment)',
+                )
+            )
+        )
+        self.assertIsNotNone(
+            self.inspect(
+                canonical.replace(
+                    'subprocess.run(git_command(["status", "--short"]), env=git_environment)',
+                    'git_environment_alias = git_environment\n'
+                    'git_environment_alias.update({"GIT_CONFIG_PARAMETERS": "synthetic"})\n'
+                    'subprocess.run(git_command(["status", "--short"]), env=git_environment)',
+                )
+            )
+        )
+        self.assertIsNotNone(
+            self.inspect(
+                canonical.replace(
+                    'subprocess.run(git_command(["status", "--short"]), env=git_environment)',
+                    'git_environment["GIT_DIR"] = "/synthetic"\n'
+                    'subprocess.run(git_command(["status", "--short"]), env=git_environment)',
+                )
+            )
+        )
+        self.assertIsNotNone(
+            self.inspect(
+                canonical.replace(
+                    'subprocess.run(git_command(["status", "--short"]), env=git_environment)',
+                    'def change_git_environment():\n'
+                    '    git_environment.update({"GIT_CONFIG_PARAMETERS": "synthetic"})\n'
+                    'change_git_environment()\n'
+                    'subprocess.run(git_command(["status", "--short"]), env=git_environment)',
+                )
+            )
+        )
+
+    def test_python_git_builder_rebinding_is_not_certified(self) -> None:
+        for builder in ("git_command", "git_query"):
+            prelude = (
+                'import subprocess\n'
+                'git_environment = {"PATH": "/usr/bin:/bin", '
+                '"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", '
+                '"GIT_CONFIG_SYSTEM": "/dev/null", "GIT_ATTR_NOSYSTEM": "1"}\n'
+                f'def {builder}(arguments):\n'
+                '    return ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", '
+                '"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", '
+                '"GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", '
+                '"-P", "-c", "core.fsmonitor=false", "-c", '
+                '"core.hooksPath=/dev/null", *arguments]\n'
+            )
+            call = f'subprocess.run({builder}(["status", "--short"]), env=git_environment)\n'
+            with self.subTest(builder=builder, kind="safe literal builder"):
+                self.assertIsNone(self.inspect(prelude + call))
+            with self.subTest(builder=builder, kind="rebound builder"):
+                self.assertIsNotNone(self.inspect(
+                    prelude + f'{builder} = lambda arguments: ["/usr/bin/git", "status"]\n' + call
+                ))
+
+    def test_python_git_argv_mutation_is_not_certified(self) -> None:
+        prelude = (
+            'import subprocess\n'
+            'git_environment = {"PATH": "/usr/bin:/bin", '
+            '"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", '
+            '"GIT_CONFIG_SYSTEM": "/dev/null", "GIT_ATTR_NOSYSTEM": "1"}\n'
+            'def git_command(arguments):\n'
+            '    return ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", '
+            '"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", '
+            '"GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", '
+            '"-P", "-c", "core.fsmonitor=false", "-c", '
+            '"core.hooksPath=/dev/null", *arguments]\n'
+            'argv = git_command(["status", "--short"])\n'
+        )
+        call = 'subprocess.run(argv, env=git_environment)\n'
+        self.assertIsNone(self.inspect(prelude + call))
+        for mutation in (
+            'argv[:] = ["/usr/bin/git", "status"]\n',
+            'saved_argv = argv\nsaved_argv[:] = ["/usr/bin/git", "status"]\n',
+        ):
+            with self.subTest(mutation=mutation):
+                self.assertIsNotNone(self.inspect(prelude + mutation + call))
 
     def test_warning_sink_and_absolute_path_do_not_disclose_local_data(self) -> None:
         self.assertIsNotNone(self.inspect(
@@ -3573,6 +3782,35 @@ class Issue79RegressionTests(unittest.TestCase):
                 self.assertIsNotNone(self.inspect(body))
         self.assertIsNone(self.inspect('import os\nprint("reviewed")\n'))
         self.assertIsNone(self.inspect('import os\nalias = os\nprint("reviewed")\n'))
+
+    def test_private_standard_library_reexports_are_refused(self) -> None:
+        unsafe = (
+            'import tempfile\ntempfile._shutil.rmtree("synthetic-owned")\n',
+            'import tempfile\nprivate_tools = tempfile._shutil\n'
+            'private_tools.rmtree("synthetic-owned")\n',
+            'from tempfile import _shutil as private_tools\n'
+            'private_tools.rmtree("synthetic-owned")\n',
+            'import tempfile\n'
+            'private_tools = getattr(tempfile, "_shutil")\n'
+            'private_tools.rmtree("synthetic-owned")\n',
+            'import tempfile\n'
+            'module_items = vars(tempfile)\n'
+            'module_items["_shutil"].rmtree("synthetic-owned")\n',
+            'import tempfile\n'
+            'module_items = tempfile.__dict__\n'
+            'module_items["_shutil"].rmtree("synthetic-owned")\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+        self.assertIsNone(self.inspect(
+            'import tempfile\n'
+            'with tempfile.TemporaryDirectory() as temporary:\n'
+            '    print("reviewed")\n'
+        ))
+        self.assertIsNone(self.inspect(
+            'from pathlib import Path\nPath("docs/backlog.json")\n'
+        ))
 
     def test_warning_and_absolute_path_aliases_preserve_sensitive_values(self) -> None:
         unsafe = (

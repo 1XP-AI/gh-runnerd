@@ -1036,7 +1036,14 @@ env.update(
 
 def git_command(arguments):
     return [
-        "git",
+        "/usr/bin/env",
+        "-i",
+        "GIT_CONFIG_NOSYSTEM=1",
+        "GIT_CONFIG_GLOBAL=/dev/null",
+        "GIT_CONFIG_SYSTEM=/dev/null",
+        "GIT_ATTR_NOSYSTEM=1",
+        "/usr/bin/git",
+        "--no-replace-objects",
         "-P",
         "-c", "core.fsmonitor=false",
         "-c", "core.hooksPath=/dev/null",
@@ -4740,7 +4747,7 @@ from pathlib import Path
 
 prior_head = "22a2923033c875ddd4f755774f79f60b94649449"
 previous = subprocess.check_output(
-    ["git", "--no-replace-objects", "show", f"{prior_head}:docs/evidence/g01-recovery-packet.md"],
+    ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{prior_head}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 wrapper_start = previous.index("\nimport hashlib\n", previous.index("go_test_checked()")) + 1
@@ -4896,7 +4903,7 @@ from pathlib import Path
 
 prior_head = "22a2923033c875ddd4f755774f79f60b94649449"
 previous = subprocess.check_output(
-    ["git", "--no-replace-objects", "show", f"{prior_head}:docs/evidence/g01-recovery-packet.md"],
+    ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{prior_head}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 wrapper_start = previous.index("\nimport hashlib\n", previous.index("go_test_checked()")) + 1
@@ -5063,7 +5070,11 @@ import subprocess
 
 previous = subprocess.check_output(
     [
-        "git", "show",
+        "/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1",
+        "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+        "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects",
+        "-P", "-c", "core.fsmonitor=false", "-c",
+        "core.hooksPath=/dev/null", "show",
         "36ec84b27c934a25484b0a5391af0a20c7643912:docs/evidence/g01-recovery-packet.md",
     ],
     text=True,
@@ -5120,8 +5131,11 @@ import subprocess
 prior_head = "ec5eb8087420bbbbb2a8ccf5c5df190b3c644895"
 previous = subprocess.check_output(
     [
-        "git",
-        "show",
+        "/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1",
+        "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+        "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects",
+        "-P", "-c", "core.fsmonitor=false", "-c",
+        "core.hooksPath=/dev/null", "show",
         f"{prior_head}:docs/evidence/g01-recovery-packet.md",
     ],
     text=True,
@@ -5196,9 +5210,11 @@ from tempfile import TemporaryDirectory
 starting_head = "3bc8445567fe68cc355cf3f88f0c962a41e9cad5"
 previous = subprocess.check_output(
     [
-        "git",
-        "--no-replace-objects",
-        "show",
+        "/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1",
+        "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+        "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects",
+        "-P", "-c", "core.fsmonitor=false", "-c",
+        "core.hooksPath=/dev/null", "show",
         f"{starting_head}:docs/evidence/g01-recovery-packet.md",
     ],
     text=True,
@@ -5327,9 +5343,11 @@ from pathlib import Path
 starting_head = "3bc8445567fe68cc355cf3f88f0c962a41e9cad5"
 previous = subprocess.check_output(
     [
-        "git",
-        "--no-replace-objects",
-        "show",
+        "/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1",
+        "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+        "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects",
+        "-P", "-c", "core.fsmonitor=false", "-c",
+        "core.hooksPath=/dev/null", "show",
         f"{starting_head}:docs/evidence/g01-recovery-packet.md",
     ],
     text=True,
@@ -5450,9 +5468,11 @@ import subprocess
 starting_head = "3bc8445567fe68cc355cf3f88f0c962a41e9cad5"
 previous = subprocess.check_output(
     [
-        "git",
-        "--no-replace-objects",
-        "show",
+        "/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1",
+        "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+        "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects",
+        "-P", "-c", "core.fsmonitor=false", "-c",
+        "core.hooksPath=/dev/null", "show",
         f"{starting_head}:docs/evidence/g01-recovery-packet.md",
     ],
     text=True,
@@ -5502,7 +5522,16 @@ import unicodedata
 from pathlib import Path
 from urllib.parse import unquote
 
-files = subprocess.check_output(["git", "ls-files", "*.md"], text=True).splitlines()
+files = subprocess.check_output(
+    [
+        "/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1",
+        "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+        "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects",
+        "-P", "-c", "core.fsmonitor=false", "-c",
+        "core.hooksPath=/dev/null", "ls-files", "*.md",
+    ],
+    text=True,
+).splitlines()
 link = re.compile(r"(?<!!)" + re.escape("[") + r"[^]]*" + re.escape("]") + re.escape("(") + r"([^)]+)" + re.escape(")"))
 heading = re.compile(r"^#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$")
 
@@ -5682,7 +5711,7 @@ the later packet fix has the same SHA, and it must not be combined with the
 historical `5979...` snapshot block or the earlier `82ee...` head block as one
 passing checkout.
 
-```sh
+```text
 set -euo pipefail
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=false GIT_CONFIG_KEY_1=core.hooksPath GIT_CONFIG_VALUE_1=/dev/null
 packet_correction_head='6b1535ee7b6f08582ff162eca30f1e4294dbf32b'
@@ -5705,7 +5734,7 @@ existing packet-correction exact-head audit: passed; HEAD=6b1535ee7b6f08582ff162
 
 ### Stable checkout and selector audit
 
-```sh
+```text
 set -euo pipefail
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=false GIT_CONFIG_KEY_1=core.hooksPath GIT_CONFIG_VALUE_1=/dev/null
 git rev-parse HEAD | grep -Fxq "5979b7d722f3bf8e24404912f9b1f3e888d0828d"
@@ -5747,7 +5776,7 @@ asserted in one passing checkout. It was run before editing and is retained as
 historical provenance; after this packet-only fix is pushed, both literals must
 fail closed and the new pushed head must be verified independently:
 
-```sh
+```text
 set -euo pipefail
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=false GIT_CONFIG_KEY_1=core.hooksPath GIT_CONFIG_VALUE_1=/dev/null
 git rev-parse HEAD | grep -Fxq "82eeef99f9bb5ec85c8cb3bea7a9a5947e8df26a"
@@ -6020,7 +6049,13 @@ def run_bounded_git_query(
 
 def git_query(arguments):
     return [
-        "git",
+        "/usr/bin/env",
+        "-i",
+        "GIT_CONFIG_NOSYSTEM=1",
+        "GIT_CONFIG_GLOBAL=/dev/null",
+        "GIT_CONFIG_SYSTEM=/dev/null",
+        "GIT_ATTR_NOSYSTEM=1",
+        "/usr/bin/git",
         "--no-replace-objects",
         "-P",
         "-c",
@@ -6562,7 +6597,7 @@ could affect the list, and no test body ran.
 The declaration consistency check also avoids self-referential line numbers and
 uses immutable source/tree assertions plus quiet presence/absence checks:
 
-```sh
+```text
 set -euo pipefail
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=false GIT_CONFIG_KEY_1=core.hooksPath GIT_CONFIG_VALUE_1=/dev/null
 git rev-parse 95cd9210620c54e098ecbe0df1217af1659f0c74 | grep -Fxq "95cd9210620c54e098ecbe0df1217af1659f0c74"
@@ -7016,7 +7051,7 @@ from tempfile import TemporaryDirectory
 
 prior_head = "22a2923033c875ddd4f755774f79f60b94649449"
 previous = subprocess.check_output(
-    ["git", "--no-replace-objects", "show", f"{prior_head}:docs/evidence/g01-recovery-packet.md"],
+    ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{prior_head}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 wrapper_start = previous.index("\nimport hashlib\n", previous.index("go_test_checked()")) + 1
@@ -7080,7 +7115,7 @@ namespace = {"label": "synthetic-init-boundary"}
 exec(compile(wrapper[helper_start:helper_end], "<source-derivation>", "exec"), namespace)
 prior_head = "22a2923033c875ddd4f755774f79f60b94649449"
 previous = subprocess.check_output(
-    ["git", "--no-replace-objects", "show", f"{prior_head}:docs/evidence/g01-recovery-packet.md"],
+    ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{prior_head}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 prior_start = previous.index("\nimport hashlib\n", previous.index("go_test_checked()")) + 1
@@ -7171,7 +7206,7 @@ RED source-name gap: prior 22a2923033c875ddd4f755774f79f60b94649449 omitted Test
 
 After staging only this packet file, the final local checks were:
 
-```sh
+```text
 set -euo pipefail
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=false GIT_CONFIG_KEY_1=core.hooksPath GIT_CONFIG_VALUE_1=/dev/null
 git -P diff --cached --name-only | grep -Fxq "docs/evidence/g01-recovery-packet.md"
@@ -7425,6 +7460,38 @@ def shell_git_config_assignment_violation(tokens):
         name = token.split("=", 1)[0]
         if name.startswith("GIT_CONFIG_") and token not in reviewed_shell_export_assignments:
             return "unreviewed Git configuration environment assignment"
+    return None
+
+
+reviewed_git_query_environment = {
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_SYSTEM": "/dev/null",
+    "GIT_ATTR_NOSYSTEM": "1",
+}
+
+
+def git_query_environment_violation(tokens):
+    """Require standalone Git reads to clear inherited config before exec."""
+    tokens = list(tokens)
+    while tokens and tokens[0] in {"if", "then", "else", "elif", "do", "while", "until", "!"}:
+        tokens.pop(0)
+    if not tokens or executable_basename(tokens[0]) != "env":
+        return "Git query requires an isolated env -i configuration"
+    if len(tokens) < 3 or tokens[1] != "-i":
+        return "Git query requires an isolated env -i configuration"
+    index = 2
+    environment = {}
+    while index < len(tokens) and assignment.fullmatch(tokens[index]):
+        name, value = tokens[index].split("=", 1)
+        if name in environment:
+            return "Git query isolated environment contains a duplicate setting"
+        environment[name] = value
+        index += 1
+    if environment != reviewed_git_query_environment:
+        return "Git query isolated environment must contain only reviewed Git settings"
+    if index >= len(tokens) or executable_basename(tokens[index]) != "git":
+        return "Git query isolation must invoke Git directly"
     return None
 
 def fence_details(line):
@@ -8411,6 +8478,62 @@ def git_diff_path_violation(tokens):
     return None
 
 
+def git_query_protection_violation(tokens):
+    """Require pager, fsmonitor and hook protections on every read-only query."""
+    if not tokens or executable_basename(tokens[0]) != "git":
+        return None
+    subcommand_index = git_subcommand_index(tokens)
+    if subcommand_index is None:
+        return "Git query must name an approved read-only subcommand"
+    global_options = tokens[1:subcommand_index]
+    if not any(option in {"-P", "--no-pager"} for option in global_options):
+        return "Git query must disable the configured pager"
+    required = {
+        "core.fsmonitor": "false",
+        "core.hookspath": "/dev/null",
+    }
+    observed = {}
+    index = 0
+    while index < len(global_options):
+        token = global_options[index]
+        if token == "--config-env" and index + 1 < len(global_options):
+            key = normalized_git_config_key(global_options[index + 1])
+            if key in required:
+                return f"Git query {key} protection cannot be environment-overridden"
+            index += 2
+            continue
+        if token.startswith("--config-env="):
+            key = normalized_git_config_key(token.split("=", 1)[1])
+            if key in required:
+                return f"Git query {key} protection cannot be environment-overridden"
+            index += 1
+            continue
+        setting = None
+        if token == "-c" and index + 1 < len(global_options):
+            setting = global_options[index + 1]
+            index += 2
+        elif token.startswith("-c="):
+            setting = token[3:]
+            index += 1
+        elif token.startswith("-c") and len(token) > 2:
+            setting = token[2:]
+            index += 1
+        else:
+            index += 1
+        if setting is None:
+            continue
+        key = normalized_git_config_key(setting)
+        if key in required:
+            if "=" not in setting or setting.split("=", 1)[1] != required[key]:
+                return f"Git query {key} protection has an unreviewed value"
+            if key in observed:
+                return f"Git query {key} protection is duplicated"
+            observed[key] = setting.split("=", 1)[1]
+    if observed != required:
+        return "Git query requires explicit core.fsmonitor=false and core.hooksPath=/dev/null"
+    return None
+
+
 def git_read_only_violation(tokens):
     """Allow only the packet's read-only Git queries; reject remote/mutating Git."""
     if not tokens or executable_basename(tokens[0]) != "git":
@@ -8431,6 +8554,9 @@ def git_read_only_violation(tokens):
         if subcommand is None:
             return "Git command must name an approved read-only subcommand"
         return f"Git {subcommand} subcommand is not allowed"
+    protection_violation = git_query_protection_violation(tokens)
+    if protection_violation:
+        return protection_violation
     if subcommand == "ls-remote":
         index = 1
         while index < len(tokens):
@@ -9081,6 +9207,10 @@ def forbidden_command(tokens, depth=0):
         if any(executable_basename(token) == "env" for token in original_tokens):
             return "env without a child command can print inherited environment values"
         return None
+    if executable_basename(tokens[0]) == "git":
+        git_environment_violation = git_query_environment_violation(original_tokens)
+        if git_environment_violation:
+            return git_environment_violation
     if "/" in tokens[0] and tokens[0] not in reviewed_absolute_executable_paths:
         return "executable path is outside the reviewed absolute locations"
     environment_builtin_violation = shell_environment_builtin_violation(tokens)
@@ -11318,10 +11448,16 @@ def python_compile_provenance(tree):
                 if python_compile_primitive_is_shadowed("subprocess", tree, node) or not node.args:
                     return False
                 command = node.args[0]
-                if not isinstance(command, (ast.List, ast.Tuple)) or len(command.elts) not in {4, 5}:
+                if not isinstance(command, (ast.List, ast.Tuple)) or len(command.elts) != 15:
                     return False
                 prefix = [part.value if isinstance(part, ast.Constant) else None for part in command.elts[:-1]]
-                if prefix not in (["git", "--no-replace-objects", "show"], ["git", "--no-replace-objects", "-P", "show"]):
+                if prefix != [
+                    "/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1",
+                    "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+                    "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects",
+                    "-P", "-c", "core.fsmonitor=false", "-c",
+                    "core.hooksPath=/dev/null", "show",
+                ]:
                     return False
                 def literal_reference(value, seen=None):
                     seen = seen or set()
@@ -13210,9 +13346,62 @@ def python_process_signal_violation(tree, parents):
     return None
 
 
-def reviewed_python_git_builder(node):
-    """Allow only the packet's fixed read-only Git argv builder."""
-    if not isinstance(node, ast.Call) or python_dotted_name(node.func) != "git_command":
+def reviewed_python_git_builder_definition(tree, name):
+    """Require the unique module-level builder to clear config and protect Git."""
+    definitions = [
+        statement for statement in tree.body
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and statement.name == name
+    ]
+    if len(definitions) != 1:
+        return False
+    definition = definitions[0]
+    if (
+        not isinstance(definition, ast.FunctionDef)
+        or definition.decorator_list
+        or definition.returns is not None
+        or getattr(definition, "type_params", ())
+        or len(definition.args.args) != 1
+        or definition.args.args[0].arg != "arguments"
+        or definition.args.posonlyargs
+        or definition.args.kwonlyargs
+        or definition.args.vararg is not None
+        or definition.args.kwarg is not None
+        or definition.args.defaults
+        or definition.body.__len__() != 1
+        or not isinstance(definition.body[0], ast.Return)
+        or not isinstance(definition.body[0].value, ast.List)
+    ):
+        return False
+    returned = definition.body[0].value
+    expected = (
+        "/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1",
+        "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+        "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects",
+        "-P", "-c", "core.fsmonitor=false", "-c",
+        "core.hooksPath=/dev/null",
+    )
+    if len(returned.elts) != len(expected) + 1:
+        return False
+    for element, value in zip(returned.elts, expected):
+        if not isinstance(element, ast.Constant) or element.value != value:
+            return False
+    tail = returned.elts[-1]
+    return (
+        isinstance(tail, ast.Starred)
+        and isinstance(tail.value, ast.Name)
+        and tail.value.id == "arguments"
+    )
+
+
+def reviewed_python_git_builder(node, tree):
+    """Allow only calls to the packet's exact config-isolated Git builders."""
+    if not isinstance(node, ast.Call):
+        return False
+    builder_name = python_dotted_name(node.func)
+    if builder_name not in {"git_command", "git_query"}:
+        return False
+    if not reviewed_python_git_builder_definition(tree, builder_name):
         return False
     if len(node.args) != 1 or node.keywords:
         return False
@@ -13220,7 +13409,104 @@ def reviewed_python_git_builder(node):
     if not isinstance(arguments, (ast.List, ast.Tuple)) or not arguments.elts:
         return False
     first = arguments.elts[0]
-    return isinstance(first, ast.Constant) and first.value in git_read_only_subcommands
+    if not isinstance(first, ast.Constant) or first.value not in git_read_only_subcommands:
+        return False
+    prefix = [
+        "/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1",
+        "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+        "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects",
+        "-P", "-c", "core.fsmonitor=false", "-c",
+        "core.hooksPath=/dev/null",
+    ]
+    reconstructed = list(prefix)
+    for element in arguments.elts:
+        if isinstance(element, ast.Constant) and isinstance(element.value, str):
+            reconstructed.append(element.value)
+        elif reviewed_python_dynamic_path_value(element, tree):
+            reconstructed.append("__g01_reviewed_dynamic_path__")
+        else:
+            return False
+    return (
+        git_query_environment_violation(reconstructed) is None
+        and git_command_delegation(reconstructed) is None
+        and git_diff_path_violation(reconstructed) is None
+        and git_filter_attribute_violation(reconstructed) is None
+        and git_read_only_violation(reconstructed) is None
+    )
+
+
+def reviewed_python_git_command_origin(node, tree, parents, seen=None):
+    """Trace a child argv only through unique bindings to the canonical builder."""
+    if seen is None:
+        seen = set()
+    if id(node) in seen:
+        return False
+    seen = seen | {id(node)}
+    if isinstance(node, ast.Call):
+        return reviewed_python_git_builder(node, tree)
+    if not isinstance(node, ast.Name):
+        return False
+    scope = python_enclosing_scope(node, parents)
+    assignments = []
+    for candidate in ast.walk(tree):
+        if isinstance(candidate, ast.Assign):
+            targets, value = candidate.targets, candidate.value
+        elif isinstance(candidate, (ast.AnnAssign, ast.NamedExpr)):
+            targets, value = [candidate.target], candidate.value
+        else:
+            continue
+        if python_enclosing_scope(candidate, parents) is scope and any(
+            isinstance(target, ast.Name) and target.id == node.id for target in targets
+        ):
+            assignments.append(value)
+    if assignments:
+        return len(assignments) == 1 and reviewed_python_git_command_origin(
+            assignments[0], tree, parents, seen
+        )
+    if not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return False
+    parameters = (
+        list(scope.args.posonlyargs) + list(scope.args.args) + list(scope.args.kwonlyargs)
+    )
+    parameter_index = next(
+        (index for index, parameter in enumerate(parameters) if parameter.arg == node.id),
+        None,
+    )
+    if parameter_index is None or id(scope) in seen:
+        return False
+    callers = [
+        candidate for candidate in ast.walk(tree)
+        if isinstance(candidate, ast.Call)
+        and python_dotted_name(candidate.func) == scope.name
+    ]
+    if not callers:
+        return False
+    for caller in callers:
+        keywords = [keyword.value for keyword in caller.keywords if keyword.arg == node.id]
+        if len(keywords) > 1:
+            return False
+        if keywords:
+            argument = keywords[0]
+        elif parameter_index < len(caller.args) and not any(
+            isinstance(value, ast.Starred) for value in caller.args
+        ):
+            argument = caller.args[parameter_index]
+        else:
+            return False
+        if not reviewed_python_git_command_origin(
+            argument, tree, parents, seen | {id(scope)}
+        ):
+            return False
+    return True
+
+
+def reviewed_python_git_child_environment(node, tree, parents):
+    """Require a known Git argv and the reviewed child environment together."""
+    environments = [keyword.value for keyword in node.keywords if keyword.arg == "env"]
+    return len(environments) == 1 and (
+        python_environment_mapping_state(environments[0], tree, parents=parents) == "safe"
+        and python_git_environment_isolated(environments[0], tree, parents)
+    )
 
 
 def reviewed_python_static_loop_binding(node, tree):
@@ -13384,25 +13670,8 @@ def reviewed_python_dynamic_path_value(node, tree=None, parents=None, seen=None)
 
 
 def reviewed_python_dynamic_git_call(argument, tree=None, parents=None):
-    """Allow only read-only Git argv with reviewed immutable path components."""
+    """Allow only isolated read-only Git argv with reviewed path components."""
     if not isinstance(argument, (ast.List, ast.Tuple)) or len(argument.elts) < 2:
-        return False
-    subcommand_index = 1
-    while (
-        subcommand_index < len(argument.elts)
-        and isinstance(argument.elts[subcommand_index], ast.Constant)
-        and argument.elts[subcommand_index].value in {"-P", "--no-pager", "--no-replace-objects"}
-    ):
-        subcommand_index += 1
-    if subcommand_index >= len(argument.elts):
-        return False
-    first, second = argument.elts[0], argument.elts[subcommand_index]
-    if not (
-        isinstance(first, ast.Constant)
-        and first.value == "git"
-        and isinstance(second, ast.Constant)
-        and second.value in git_read_only_subcommands
-    ):
         return False
     reconstructed = []
     for element in argument.elts:
@@ -13412,18 +13681,35 @@ def reviewed_python_dynamic_git_call(argument, tree=None, parents=None):
             reconstructed.append("__g01_reviewed_dynamic_path__")
         else:
             return False
+    if git_query_environment_violation(reconstructed) is not None:
+        return False
+    git_index = 0
+    if executable_basename(reconstructed[0]) == "env":
+        if len(reconstructed) < 4 or reconstructed[1] != "-i":
+            return False
+        git_index = 2
+        while git_index < len(reconstructed) and assignment.fullmatch(reconstructed[git_index]):
+            git_index += 1
+    git_tokens = reconstructed[git_index:]
+    if not git_tokens or executable_basename(git_tokens[0]) != "git":
+        return False
+    subcommand_index = git_subcommand_index(git_tokens)
     if (
-        git_command_delegation(reconstructed) is not None
-        or git_diff_path_violation(reconstructed) is not None
-        or git_filter_attribute_violation(reconstructed) is not None
-        or git_read_only_violation(reconstructed) is not None
+        subcommand_index is None
+        or subcommand_index >= len(git_tokens)
+        or git_tokens[subcommand_index] not in git_read_only_subcommands
+        or git_command_delegation(git_tokens) is not None
+        or git_diff_path_violation(git_tokens) is not None
+        or git_filter_attribute_violation(git_tokens) is not None
+        or git_read_only_violation(git_tokens) is not None
     ):
         return False
+    original_subcommand_index = git_index + subcommand_index
     return all(
         isinstance(element, ast.Constant)
         and isinstance(element.value, str)
         or reviewed_python_dynamic_path_value(element, tree, parents)
-        for element in argument.elts[subcommand_index + 1:]
+        for element in argument.elts[original_subcommand_index + 1:]
     )
 
 
@@ -13444,8 +13730,11 @@ def reviewed_python_dynamic_call(
         and argument.elts[3].value == "import json; print(json.__file__)"
     ):
         return True
-    if reviewed_python_git_builder(argument):
-        return True
+    if (
+        python_dotted_name(node.func) in python_command_functions
+        and reviewed_python_git_command_origin(argument, tree, parents)
+    ):
+        return reviewed_python_git_child_environment(node, tree, parents)
     if reviewed_python_case_args(argument, tree):
         return True
     if reviewed_python_static_loop_binding(argument, tree):
@@ -13861,7 +14150,7 @@ def python_unknown_os_call_violation(tree):
 
 def python_module_value_escape_violation(tree, parents, safe_marker):
     """Keep security-sensitive modules on direct, inspectable attribute paths."""
-    protected = {"os", "subprocess", "shutil", "signal", "sys", "pathlib", "warnings", "builtins", "importlib", "ast"}
+    protected = {"os", "subprocess", "shutil", "signal", "sys", "pathlib", "tempfile", "warnings", "builtins", "importlib", "ast"}
     names = {
         alias.asname or alias.name.split(".")[0]
         for node in ast.walk(tree)
@@ -13878,6 +14167,24 @@ def python_module_value_escape_violation(tree, parents, safe_marker):
     }
     names.update(path_modules)
     os_names = python_assigned_module_names(tree, "os")
+    tempfile_names = {"tempfile"} | python_assigned_module_names(tree, "tempfile")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module in protected and any(
+            imported.name.startswith("_") for imported in node.names
+        ):
+            return f"Python private standard-library re-export is not reviewed on line {node.lineno}"
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id == "getattr" and len(node.args) >= 2:
+            module_value = node.args[0]
+            if isinstance(module_value, ast.Name) and module_value.id in tempfile_names:
+                attributes = python_static_string_values(node.args[1], tree)
+                if not attributes or any(attribute.startswith("_") for attribute in attributes):
+                    return f"Python dynamic private standard-library lookup is not reviewed on line {node.lineno}"
+        if node.func.id == "vars" and node.args:
+            module_value = node.args[0]
+            if isinstance(module_value, ast.Name) and module_value.id in tempfile_names:
+                return f"Python standard-library module dictionary lookup is not reviewed on line {node.lineno}"
     changed = True
     while changed:
         changed = False
@@ -13994,8 +14301,8 @@ def python_module_value_escape_violation(tree, parents, safe_marker):
     }
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in names:
-            if node.attr.startswith("__"):
-                return f"Python security module reflection is not reviewed on line {node.lineno}"
+            if node.attr.startswith("_"):
+                return f"Python private standard-library module attribute is not reviewed on line {node.lineno}"
             if node.value.id in path_modules:
                 return f"Python OS path module alias is not reviewed on line {node.lineno}"
             if node.attr == "path" and node.value.id in os_names and node.value.id != "os":
@@ -14834,6 +15141,268 @@ def python_environment_mapping_state(node, tree, seen=None, parents=None):
             return "safe"
         return "unknown"
     return "unknown"
+
+
+def python_git_environment_values_are_isolated(values):
+    if not isinstance(values, dict) or any(
+        not isinstance(key, str) or not isinstance(value, str)
+        for key, value in values.items()
+    ):
+        return False
+    required = {
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+    }
+    if any(values.get(name) != value for name, value in required.items()):
+        return False
+    config_names = {name for name in values if name.startswith("GIT_CONFIG_")}
+    safe_config_names = set(required)
+    numbered_settings = {
+        "GIT_CONFIG_COUNT": "2",
+        "GIT_CONFIG_KEY_0": "core.fsmonitor",
+        "GIT_CONFIG_VALUE_0": "false",
+        "GIT_CONFIG_KEY_1": "core.hooksPath",
+        "GIT_CONFIG_VALUE_1": "/dev/null",
+    }
+    present_numbered = config_names.intersection(numbered_settings)
+    if present_numbered:
+        if present_numbered != set(numbered_settings) or any(
+            values.get(name) != value for name, value in numbered_settings.items()
+        ):
+            return False
+        safe_config_names.update(numbered_settings)
+    if config_names != safe_config_names:
+        return False
+    attribute_names = {name for name in values if name.startswith("GIT_ATTR_")}
+    if any(
+        name.startswith("GIT_")
+        and name not in safe_config_names | {"GIT_ATTR_NOSYSTEM"}
+        for name in values
+    ):
+        return False
+    if not attribute_names <= {"GIT_ATTR_NOSYSTEM"}:
+        return False
+    return (
+        "GIT_ATTR_NOSYSTEM" not in values or values["GIT_ATTR_NOSYSTEM"] == "1"
+    )
+
+
+def python_git_environment_isolated(node, tree, parents, seen=None):
+    """Trace only literal Git config maps or the packet's two filtered child maps."""
+    if seen is None:
+        seen = set()
+    if id(node) in seen:
+        return False
+    seen = seen | {id(node)}
+    if isinstance(node, ast.Dict):
+        try:
+            return python_git_environment_values_are_isolated(ast.literal_eval(node))
+        except (ValueError, TypeError, SyntaxError, RecursionError):
+            return False
+    if not isinstance(node, ast.Name):
+        return False
+    scope = python_enclosing_scope(node, parents)
+    for candidate in ast.walk(tree):
+        if (
+            isinstance(candidate, ast.Name)
+            and candidate.id == node.id
+            and python_enclosing_scope(candidate, parents) is not scope
+        ):
+            return False
+        if python_enclosing_scope(candidate, parents) is not scope:
+            continue
+        if (
+            isinstance(candidate, ast.AugAssign)
+            and isinstance(candidate.target, ast.Name)
+            and candidate.target.id == node.id
+        ):
+            return False
+        if (
+            isinstance(candidate, ast.Name)
+            and candidate.id == node.id
+            and isinstance(candidate.ctx, ast.Load)
+        ):
+            parent = parents.get(candidate)
+            if (
+                isinstance(parent, ast.keyword)
+                and parent.arg == "env"
+                and parent.value is candidate
+            ):
+                continue
+            if (
+                isinstance(parent, ast.Attribute)
+                and parent.value is candidate
+                and parent.attr == "update"
+                and isinstance(parents.get(parent), ast.Call)
+                and parents[parent].func is parent
+            ):
+                continue
+            return False
+    assignments = []
+    for candidate in ast.walk(tree):
+        if isinstance(candidate, ast.Assign):
+            targets, value = candidate.targets, candidate.value
+        elif isinstance(candidate, (ast.AnnAssign, ast.NamedExpr)):
+            targets, value = [candidate.target], candidate.value
+        else:
+            continue
+        if python_enclosing_scope(candidate, parents) is scope and any(
+            isinstance(target, ast.Name) and target.id == node.id for target in targets
+        ):
+            assignments.append(value)
+    if not assignments:
+        if not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return False
+        parameters = (
+            list(scope.args.posonlyargs) + list(scope.args.args) + list(scope.args.kwonlyargs)
+        )
+        parameter_index = next(
+            (index for index, parameter in enumerate(parameters) if parameter.arg == node.id),
+            None,
+        )
+        if parameter_index is None or id(scope) in seen:
+            return False
+        callers = [
+            candidate for candidate in ast.walk(tree)
+            if isinstance(candidate, ast.Call)
+            and python_dotted_name(candidate.func) == scope.name
+        ]
+        if not callers:
+            return False
+        for caller in callers:
+            keywords = [keyword.value for keyword in caller.keywords if keyword.arg == node.id]
+            if len(keywords) > 1:
+                return False
+            if keywords:
+                argument = keywords[0]
+            elif parameter_index < len(caller.args) and not any(
+                isinstance(value, ast.Starred) for value in caller.args
+            ):
+                argument = caller.args[parameter_index]
+            else:
+                return False
+            if not python_git_environment_isolated(argument, tree, parents, seen | {id(scope)}):
+                return False
+        return True
+    if len(assignments) != 1:
+        return False
+    base = assignments[0]
+    config_values = {}
+    if isinstance(base, ast.Dict):
+        try:
+            literal = ast.literal_eval(base)
+        except (ValueError, TypeError, SyntaxError, RecursionError):
+            return False
+        if not isinstance(literal, dict):
+            return False
+        config_values.update({
+            key: value for key, value in literal.items()
+            if isinstance(key, str) and key.startswith("GIT_")
+        })
+    elif isinstance(base, ast.DictComp) and len(base.generators) == 1:
+        generator = base.generators[0]
+        allowlist_name = None
+        if (
+            isinstance(generator.iter, ast.Call)
+            and python_dotted_name(generator.iter.func) == "os.environ.items"
+            and len(generator.target.elts) == 2
+            and isinstance(generator.target.elts[0], ast.Name)
+            and isinstance(generator.target.elts[1], ast.Name)
+            and isinstance(base.key, ast.Name)
+            and base.key.id == generator.target.elts[0].id
+            and isinstance(base.value, ast.Name)
+            and base.value.id == generator.target.elts[1].id
+        ):
+            allowlist_name = "reviewed_child_environment_names"
+        elif (
+            isinstance(generator.iter, ast.Name)
+            and generator.iter.id == "git_child_environment_names"
+            and isinstance(generator.target, ast.Name)
+            and isinstance(base.key, ast.Name)
+            and base.key.id == generator.target.id
+            and isinstance(base.value, ast.Subscript)
+            and python_dotted_name(base.value.value) == "os.environ"
+            and isinstance(base.value.slice, ast.Name)
+            and base.value.slice.id == generator.target.id
+        ):
+            allowlist_name = "git_child_environment_names"
+        if allowlist_name is None:
+            return False
+        allowlist_assignments = [
+            candidate.value for candidate in ast.walk(tree)
+            if isinstance(candidate, ast.Assign)
+            and python_enclosing_scope(candidate, parents) is python_enclosing_scope(base, parents)
+            and any(isinstance(target, ast.Name) and target.id == allowlist_name for target in candidate.targets)
+        ]
+        if len(allowlist_assignments) != 1:
+            return False
+        try:
+            allowlist = ast.literal_eval(allowlist_assignments[0])
+        except (ValueError, TypeError, SyntaxError, RecursionError):
+            return False
+        if not isinstance(allowlist, (set, tuple, list)) or any(
+            not isinstance(name, str) or name.startswith("GIT_CONFIG_")
+            for name in allowlist
+        ):
+            return False
+        if allowlist_name == "git_child_environment_names" and set(allowlist) != {"PATH", "LANG", "LC_ALL"}:
+            return False
+        if allowlist_name == "reviewed_child_environment_names" and not any(
+            isinstance(candidate, ast.Compare)
+            and isinstance(candidate.left, ast.Name)
+            and candidate.left.id == generator.target.elts[0].id
+            and any(isinstance(operator, ast.In) for operator in candidate.ops)
+            and any(isinstance(value, ast.Name) and value.id == allowlist_name for value in candidate.comparators)
+            for condition in generator.ifs for candidate in ast.walk(condition)
+        ):
+            return False
+        if allowlist_name == "git_child_environment_names" and not any(
+            isinstance(candidate, ast.Compare)
+            and isinstance(candidate.left, ast.Name)
+            and candidate.left.id == generator.target.id
+            and any(isinstance(operator, ast.In) for operator in candidate.ops)
+            and isinstance(candidate.comparators[0], ast.Attribute)
+            and python_dotted_name(candidate.comparators[0]) == "os.environ"
+            for condition in generator.ifs for candidate in ast.walk(condition)
+            if isinstance(candidate, ast.Compare) and candidate.comparators
+        ):
+            return False
+    else:
+        return False
+    for candidate in ast.walk(tree):
+        if python_enclosing_scope(candidate, parents) is not scope:
+            continue
+        if isinstance(candidate, ast.Call) and isinstance(candidate.func, ast.Attribute) and isinstance(candidate.func.value, ast.Name) and candidate.func.value.id == node.id:
+            if candidate.func.attr != "update" or len(candidate.args) != 1 or candidate.keywords:
+                return False
+            try:
+                update = ast.literal_eval(candidate.args[0])
+            except (ValueError, TypeError, SyntaxError, RecursionError):
+                return False
+            if not isinstance(update, dict):
+                return False
+            config_values.update({
+                key: value for key, value in update.items()
+                if isinstance(key, str) and key.startswith("GIT_")
+            })
+        if isinstance(candidate, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            targets = candidate.targets if isinstance(candidate, ast.Assign) else [candidate.target]
+            if any(
+                isinstance(target, ast.Subscript)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == node.id
+                for target in targets
+            ):
+                return False
+        if isinstance(candidate, ast.Delete) and any(
+            isinstance(target, ast.Subscript)
+            and isinstance(target.value, ast.Name)
+            and target.value.id == node.id
+            for target in candidate.targets
+        ):
+            return False
+    return python_git_environment_values_are_isolated(config_values)
 
 
 def python_child_environment_violation(tree, modules, functions, parents=None):
@@ -18183,9 +18752,11 @@ from tempfile import TemporaryDirectory
 starting_head = "423d4fc501120a014e63f77d3ef6652606d0326a"
 previous = subprocess.check_output(
     [
-        "git",
-        "--no-replace-objects",
-        "show",
+        "/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1",
+        "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+        "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects",
+        "-P", "-c", "core.fsmonitor=false", "-c",
+        "core.hooksPath=/dev/null", "show",
         f"{starting_head}:docs/evidence/g01-recovery-packet.md",
     ],
     text=True,
@@ -18306,9 +18877,11 @@ import warnings
 starting_head = "423d4fc501120a014e63f77d3ef6652606d0326a"
 previous = subprocess.check_output(
     [
-        "git",
-        "--no-replace-objects",
-        "show",
+        "/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1",
+        "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+        "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects",
+        "-P", "-c", "core.fsmonitor=false", "-c",
+        "core.hooksPath=/dev/null", "show",
         f"{starting_head}:docs/evidence/g01-recovery-packet.md",
     ],
     text=True,
@@ -18608,9 +19181,11 @@ import sys
 starting_head = "01764bbed0a387129d2a2abbc9e27a87e073f87e"
 previous = subprocess.check_output(
     [
-        "git",
-        "--no-replace-objects",
-        "show",
+        "/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1",
+        "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+        "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects",
+        "-P", "-c", "core.fsmonitor=false", "-c",
+        "core.hooksPath=/dev/null", "show",
         f"{starting_head}:docs/evidence/g01-recovery-packet.md",
     ],
     text=True,
@@ -18846,7 +19421,7 @@ from contextlib import redirect_stdout
 
 starting_head = "4bd66186ea8d980a06ed8a4adf7f51e76b5028ef"
 previous = subprocess.check_output(
-    ["git", "--no-replace-objects", "show", f"{starting_head}:docs/evidence/g01-recovery-packet.md"],
+    ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{starting_head}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 start = previous.index("\nimport hashlib\n", previous.index("go_test_checked()")) + 1
@@ -18952,7 +19527,7 @@ import subprocess
 
 starting_head = "4bd66186ea8d980a06ed8a4adf7f51e76b5028ef"
 previous = subprocess.check_output(
-    ["git", "--no-replace-objects", "show", f"{starting_head}:docs/evidence/g01-recovery-packet.md"],
+    ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{starting_head}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 scanner_start = previous.index('fence_languages = {"sh", "bash", "shell", "zsh"}')
@@ -19021,7 +19596,7 @@ import subprocess
 
 starting_head = "4bd66186ea8d980a06ed8a4adf7f51e76b5028ef"
 previous = subprocess.check_output(
-    ["git", "--no-replace-objects", "show", f"{starting_head}:docs/evidence/g01-recovery-packet.md"],
+    ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{starting_head}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 old_selector = re.compile(
@@ -19097,7 +19672,7 @@ from pathlib import Path
 
 starting_head = "943ebece04882a0faf055d73e5988bd8954088f8"
 previous = subprocess.check_output(
-    ["git", "--no-replace-objects", "show", f"{starting_head}:docs/evidence/g01-recovery-packet.md"],
+    ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{starting_head}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 start = previous.index("\nimport hashlib\n", previous.index("go_test_checked()")) + 1
@@ -19507,7 +20082,7 @@ from pathlib import Path
 starting_head = "d85f99fa70a6f563079b1ed4f29a1bc97740a3c5"
 packet_path = "docs/evidence/g01-recovery-packet.md"
 previous = subprocess.check_output(
-    ["git", "--no-replace-objects", "show", f"{starting_head}:{packet_path}"], text=True
+    ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{starting_head}:{packet_path}"], text=True
 )
 wrapper_start = previous.index("\nimport hashlib\n", previous.index("go_test_checked()")) + 1
 wrapper_end = previous.index("\nPY\n}", wrapper_start)
@@ -19858,7 +20433,7 @@ from pathlib import Path
 
 parent = "da1af0d041e37e5df9f3ed8028b51a69ec58ed8c"
 packet = subprocess.check_output(
-    ["git", "--no-replace-objects", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
@@ -19951,7 +20526,16 @@ from types import SimpleNamespace
 parent = "da1af0d041e37e5df9f3ed8028b51a69ec58ed8c"
 packet_path = Path("docs/evidence/g01-recovery-packet.md")
 packet = packet_path.read_text(encoding="utf-8")
-if subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip() != parent:
+if subprocess.check_output(
+    [
+        "/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1",
+        "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+        "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects",
+        "-P", "-c", "core.fsmonitor=false", "-c",
+        "core.hooksPath=/dev/null", "rev-parse", "HEAD",
+    ],
+    text=True,
+).strip() != parent:
     raise SystemExit("green probe must run at the immutable exact parent")
 
 wrapper_start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
@@ -20249,7 +20833,7 @@ from pathlib import Path
 
 parent = "5297b3c3b05afedf97723b7b58806cdd5519a2b6"
 packet = subprocess.check_output(
-    ["git", "--no-replace-objects", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 
@@ -21019,7 +21603,7 @@ import sys
 
 parent = "81787b2e90df496a9c5a51fddc7607d3019834b7"
 packet = subprocess.check_output(
-    ["git", "--no-replace-objects", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 lines = packet.splitlines()
@@ -21431,7 +22015,7 @@ import tempfile
 from pathlib import Path
 
 parent = "6c55f5b67035fb1c7ac334984499cfe80d6bb86b"
-packet = subprocess.check_output(["git", "--no-replace-objects", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"], text=True)
+packet = subprocess.check_output(["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"], text=True)
 status_start = packet.index('        [\n            "git",\n            "status",')
 status_end = packet.index('        ],', status_start) + len('        ],')
 status_argv = packet[status_start:status_end]
@@ -21469,7 +22053,7 @@ import subprocess
 from pathlib import Path
 
 parent = "6c55f5b67035fb1c7ac334984499cfe80d6bb86b"
-packet = subprocess.check_output(["git", "--no-replace-objects", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"], text=True)
+packet = subprocess.check_output(["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"], text=True)
 scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
 scanner_start = packet.rfind("source = Path(", 0, scanner_anchor)
 scanner_end = packet.index("\nmatches = []", scanner_anchor)
@@ -21496,7 +22080,7 @@ import subprocess
 import sys
 
 parent = "6c55f5b67035fb1c7ac334984499cfe80d6bb86b"
-packet = subprocess.check_output(["git", "--no-replace-objects", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"], text=True)
+packet = subprocess.check_output(["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"], text=True)
 wrapper_start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
 wrapper_end = packet.index("\nPY\n}", wrapper_start)
 wrapper = packet[wrapper_start:wrapper_end]
@@ -21734,7 +22318,7 @@ from pathlib import Path
 
 parent = "13b463086a0e7aa710067cafb44dcd9aed118654"
 packet = subprocess.check_output(
-    ["git", "--no-replace-objects", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
@@ -21937,7 +22521,7 @@ from pathlib import Path
 
 parent = "5f42598b94ce5339c35f55be42eb108973850d24"
 packet = subprocess.check_output(
-    ["git", "--no-replace-objects", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"], text=True
+    ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"], text=True
 )
 heredoc_pattern = re.compile(
     r"\\bpython3\\s+-I\\b[^\\n]*<<-?\\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\\1"
@@ -22192,7 +22776,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 parent = "055a05bd9d5a9bb101e4400dd7a9236e3afd9f48"
-packet = subprocess.check_output(["git", "--no-replace-objects", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"], text=True)
+packet = subprocess.check_output(["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"], text=True)
 scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
 scanner_start = packet.rfind("source = Path(", 0, scanner_anchor)
 scanner_end = packet.index("\nmatches = []", scanner_anchor)
@@ -22695,7 +23279,7 @@ import sys
 
 parent = "4ee7c855b1e79f9478e5cf73c270731dfbf58cf7"
 packet = subprocess.check_output(
-    ["git", "--no-replace-objects", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
@@ -23188,7 +23772,7 @@ from pathlib import Path
 
 parent = "6af854fb660bc7d9c31c9920a6cec5c2fbb1966d"
 packet = subprocess.check_output(
-    ["git", "--no-replace-objects", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
@@ -23564,7 +24148,7 @@ from pathlib import Path
 
 parent = "3f6de0b227e4b44aa3d5e259e937e7dc1f0856bb"
 packet = subprocess.check_output(
-    ["git", "--no-replace-objects", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 
@@ -23957,7 +24541,7 @@ from pathlib import Path
 
 parent = "7d91bed688dbea21bea7dff62f41d48d1d57ce4b"
 packet = subprocess.check_output(
-    ["git", "--no-replace-objects", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 
@@ -24280,7 +24864,7 @@ from pathlib import Path
 
 parent = "71a7a599de567914158b05e3c480f7e0d48c709f"
 packet = subprocess.check_output(
-    ["git", "--no-replace-objects", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
@@ -24548,7 +25132,7 @@ from pathlib import Path
 
 parent = "8dfa9a031bc321f2ccc208104268f7c5ead9281b"
 packet = subprocess.check_output(
-    ["git", "--no-replace-objects", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
@@ -24934,7 +25518,7 @@ from pathlib import Path
 
 parent = "2abe394ee32f09888892c4adea5fc08121845d6b"
 packet = subprocess.check_output(
-    ["git", "--no-replace-objects", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 
@@ -25375,7 +25959,7 @@ from pathlib import Path
 
 parent = "14f998f32710f122f5861edfac8fdbc89ef95bfb"
 packet = subprocess.check_output(
-    ["git", "--no-replace-objects", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 
@@ -25756,7 +26340,7 @@ from pathlib import Path
 
 parent = "ce417347aa100562722477ea1126a5cf6372ec3a"
 packet = subprocess.check_output(
-    ["git", "--no-replace-objects", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 wrapper_start = packet.index("\nimport hashlib\n", packet.index("go_test_checked()")) + 1
@@ -25852,7 +26436,7 @@ from pathlib import Path
 
 parent_sha = "21f258a4215c667c245abb44ea419eb7901de2ad"
 parent_packet = subprocess.check_output(
-    ["git", "--no-replace-objects", "show", f"{parent_sha}:docs/evidence/g01-recovery-packet.md"],
+    ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{parent_sha}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 anchor = parent_packet.index("def forbidden_command(tokens, depth=0):")
@@ -26174,7 +26758,7 @@ if fences:
 print(f"GREEN certification shape: {fresh_shell_probes} scoped fresh shell probes (exact-parent RED/current GREEN), four-row ledger, rollback parent {rollback_parent}, Markdown fences balanced")
 PY
 jq empty docs/backlog.json
-git diff --check
+/usr/bin/env -i GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_ATTR_NOSYSTEM=1 /usr/bin/git --no-replace-objects -P -c core.fsmonitor=false -c core.hooksPath=/dev/null diff --check
 ```
 
 Recorded final packet-shape certification output:
@@ -26294,7 +26878,7 @@ parent_sha = "755968f9b4343c860cd8ddeca12a97b277c6e1b5"
 packet_path = "docs/evidence/g01-recovery-packet.md"
 packet = Path(packet_path).read_text(encoding="utf-8")
 parent_packet = subprocess.check_output(
-    ["git", "--no-replace-objects", "show", f"{parent_sha}:{packet_path}"], text=True
+    ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{parent_sha}:{packet_path}"], text=True
 )
 
 def load_scanner(text):
@@ -26403,10 +26987,10 @@ print("GREEN 5674030950 explicit default build tag/CURRENT: current rejected sen
 if tag_outcome(packet, []) != "default":
     raise SystemExit("GREEN failure: current rejected no-tags default sentinel")
 print("GREEN 5674030950 no-tags sentinel/CURRENT: reviewed implicit default remained accepted")
-safe("Git ls-remote local repository", shell(current, "git ls-remote ."))
+safe("Git ls-remote local repository", shell(current, "/usr/bin/env -i GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_ATTR_NOSYSTEM=1 /usr/bin/git --no-replace-objects -P -c core.fsmonitor=false -c core.hooksPath=/dev/null ls-remote ."))
 safe("GNU awk literal print", shell(current, "awk 'BEGIN { print \"safe\" }' docs/backlog.json"))
 safe("Python reviewed packet read", inspect(current, 'from pathlib import Path\nPath("docs/evidence/g01-recovery-packet.md").read_text()'))
-safe("Python canonical child env", inspect(current, 'import subprocess\nsubprocess.run(["git", "status"], env={"PATH": "/usr/bin:/bin"})'))
+safe("Python canonical child env", inspect(current, 'import subprocess\nsubprocess.run(["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "status"])'))
 safe("Python owned temporary copyfile", inspect(current, 'import shutil\nfrom pathlib import Path\nfrom tempfile import TemporaryDirectory\nwith TemporaryDirectory() as td:\n    shutil.copyfile(Path(td) / "source", Path(td) / "destination")'))
 safe("shell owned cleanup", shell(current, 'pair_fragment_tmp=/tmp/g01-paired-fragment.$$\nmkdir "$pair_fragment_tmp"\ntrap \'rm -rf "$pair_fragment_tmp"\' EXIT'))
 print("focused 5674030950 nine-finding RED/GREEN/CURRENT boundaries: passed")
@@ -26867,7 +27451,7 @@ from pathlib import Path
 
 parent = "1fc2cede68f2692de0fad7a18d6faf7810544845"
 packet = subprocess.check_output(
-    ["git", "--no-replace-objects", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
+    ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 scanner_anchor = packet.index("def forbidden_command(tokens, depth=0):")
@@ -27294,7 +27878,7 @@ def inspected(body, safe_marker=True):
 # Reproduce every RED against the immutable parent scanner loaded only by git show.
 parent_sha = "b85839cc801395f4ec9560b056a2a6706c7aa306"
 parent_packet = subprocess.check_output(
-    ["git", "--no-replace-objects", "show", f"{parent_sha}:docs/evidence/g01-recovery-packet.md"],
+    ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{parent_sha}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 parent_anchor = parent_packet.index("def forbidden_command(tokens, depth=0):")
@@ -27525,7 +28109,7 @@ def load_scanner(text, label):
 
 current = load_scanner(packet, "current-scanner-401034")
 parent_packet = subprocess.check_output(
-    ["git", "--no-replace-objects", "show", f"{parent_sha}:docs/evidence/g01-recovery-packet.md"],
+    ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{parent_sha}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 parent = load_scanner(parent_packet, "exact-parent-3c4eb91-scanner")
@@ -27810,7 +28394,7 @@ from pathlib import Path
 parent_sha = "390c89b5e431a165dfbf8fa986cbf2594e3444ce"
 current_packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
 parent_packet = subprocess.check_output(
-    ["git", "--no-replace-objects", "show", f"{parent_sha}:docs/evidence/g01-recovery-packet.md"],
+    ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{parent_sha}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 
@@ -28045,7 +28629,7 @@ from pathlib import Path
 parent_sha = "c9f986d0256e47aba7fd273c1ae03993193a39c8"
 packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
 parent_packet = subprocess.check_output(
-    ["git", "--no-replace-objects", "show", f"{parent_sha}:docs/evidence/g01-recovery-packet.md"],
+    ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{parent_sha}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 
@@ -28294,7 +28878,7 @@ from pathlib import Path
 parent_sha = "f84113bf38dd77dacb5dd3ea9b6018c2f2d06471"
 packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
 parent_packet = subprocess.check_output(
-    ["git", "--no-replace-objects", "show", f"{parent_sha}:docs/evidence/g01-recovery-packet.md"],
+    ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{parent_sha}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 
@@ -28605,7 +29189,7 @@ from pathlib import Path
 parent_sha = "393d029975139b9d28900d477f62e8de392ace96"
 packet = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")
 parent_packet = subprocess.check_output(
-    ["git", "--no-replace-objects", "show", f"{parent_sha}:docs/evidence/g01-recovery-packet.md"],
+    ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{parent_sha}:docs/evidence/g01-recovery-packet.md"],
     text=True,
 )
 
@@ -28828,7 +29412,7 @@ parent_sha = "b16a349509535d6dcb179c9c0bd7a6a313c48bcd"
 packet_path = "docs/evidence/g01-recovery-packet.md"
 packet = Path(packet_path).read_text(encoding="utf-8")
 parent_packet = subprocess.check_output(
-    ["git", "--no-replace-objects", "show", f"{parent_sha}:{packet_path}"], text=True
+    ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{parent_sha}:{packet_path}"], text=True
 )
 
 def load_scanner(text):
@@ -29043,7 +29627,7 @@ from pathlib import Path
 parent_sha = "8958ec9a5c1e8de6c43d29e389a706f1c9ba75dd"
 packet_path = "docs/evidence/g01-recovery-packet.md"
 parent_packet = subprocess.check_output(
-    ["git", "--no-replace-objects", "show", f"{parent_sha}:{packet_path}"], text=True
+    ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{parent_sha}:{packet_path}"], text=True
 )
 anchor = parent_packet.index("def forbidden_command(tokens, depth=0):")
 start = parent_packet.rfind("source = Path(", 0, anchor)
@@ -29214,7 +29798,7 @@ safe = [
     ("reviewed no-sensitive printf", shell("printf '%s\\n' safe")),
     ("reviewed owned mkdir", shell('pair_fragment_tmp=/tmp/g01-paired-fragment.$$\nmkdir "$pair_fragment_tmp"\nmkdir -p "$pair_fragment_tmp/nested"')),
     ("reviewed literal subprocess", inspect('import subprocess\nsubprocess.run(["printf", "safe"])')),
-    ("reviewed Git dynamic path", inspect('import subprocess\nparent = "8958ec9a5c1e8de6c43d29e389a706f1c9ba75dd"\nsubprocess.check_output(["git", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"], text=True)')),
+    ("reviewed Git dynamic path", inspect('import subprocess\nparent = "8958ec9a5c1e8de6c43d29e389a706f1c9ba75dd"\nsubprocess.check_output(["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{parent}:docs/evidence/g01-recovery-packet.md"], text=True)')),
 ]
 for label, result in safe:
     if rejected(result):
@@ -29369,7 +29953,7 @@ from pathlib import Path
 parent_sha = "518f23c3c875bfda8c8c65239e5171d23c444fc6"
 packet_path = "docs/evidence/g01-recovery-packet.md"
 parent_packet = subprocess.check_output(
-    ["git", "--no-replace-objects", "show", f"{parent_sha}:{packet_path}"], text=True
+    ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{parent_sha}:{packet_path}"], text=True
 )
 anchor = parent_packet.index("def forbidden_command(tokens, depth=0):")
 start = parent_packet.rfind("source = Path(", 0, anchor)
@@ -29574,7 +30158,7 @@ safe = [
     ("reviewed repository file iteration", inspect('list(open("docs/backlog.json"))')),
     ("reviewed ordinary callback", inspect('list(map(str, [["safe"]]))')),
     ("reviewed import-path read", inspect('import sys\nvalue=sys.path[0]')),
-    ("reviewed dynamic Git show", inspect('import subprocess\nparent_sha=f"518f23c3c875bfda8c8c65239e5171d23c444fc6"\nsubprocess.run(["git","show",f"{parent_sha}:docs/evidence/g01-recovery-packet.md"])')),
+    ("reviewed dynamic Git show", inspect('import subprocess\nparent_sha=f"518f23c3c875bfda8c8c65239e5171d23c444fc6"\nsubprocess.run(["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{parent_sha}:docs/evidence/g01-recovery-packet.md"])')),
     ("reviewed os.path query", inspect('import os\nos.path.basename("docs/backlog.json")')),
 ]
 for label, result in safe:
@@ -29725,7 +30309,7 @@ from pathlib import Path
 parent_sha = "2d6a1f700e2fb3aa918f2166e4dd4611601b10be"
 packet_path = "docs/evidence/g01-recovery-packet.md"
 parent_packet = subprocess.check_output(
-    ["git", "--no-replace-objects", "show", f"{parent_sha}:{packet_path}"], text=True
+    ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{parent_sha}:{packet_path}"], text=True
 )
 
 def load_scanner(packet, label):
@@ -30092,7 +30676,7 @@ from pathlib import Path
 parent_sha = "f44a4871f87c1a8165593549d58ece6ffee61bf2"
 packet_path = "docs/evidence/g01-recovery-packet.md"
 parent_packet = subprocess.check_output(
-    ["git", "--no-replace-objects", "-P", "show", f"{parent_sha}:{packet_path}"], text=True
+    ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "show", f"{parent_sha}:{packet_path}"], text=True
 )
 
 def load_scanner(packet, label):
@@ -33031,3 +33615,59 @@ named OS-re-export probes were refused; no adversarial program was executed.
 The Git isolation correction, new exact-source review and fresh pushed-head
 Codex/hosted gates remain required. No new correction push, merge, full current
 harness or live operation is claimed; #79 and parent #1 remain In progress.
+
+#### Local correction checkpoint: Git query isolation and private module values
+
+At the 2026-10-03 local checkpoint, repository `HEAD` was `35c18f3d6f564273287acbff2c103599e05505d4`; the edited working tree had no commit SHA. This checkpoint addresses the Git hook/config isolation P1 in Codex review [5399684772](https://github.com/1XP-AI/gh-runnerd/pull/103#pullrequestreview-5399684772) and the independently reproduced `tempfile._shutil` escape. No commit, push, packet-selector result, full-harness result or live Git hook execution is claimed here.
+
+The Git boundary now requires the complete direct shell prefix: `env -i`, system/global config isolation, `GIT_ATTR_NOSYSTEM=1`, the absolute Git path, `--no-replace-objects`, pager suppression, `core.fsmonitor=false` and `core.hooksPath=/dev/null`. Python process queries additionally require the unique literal packet builder and an isolated child map. The map checker retains and rejects unexpected `GIT_*` values rather than discarding non-`GIT_CONFIG_*` entries; direct, aliased, augmented, subscript and nested-scope environment mutation fail closed. Local AST-only witnesses include `GIT_DIR`, `GIT_CONFIG_PARAMETERS`, a saved dictionary alias whose `.update()` adds a config override, `|=` rebinding, and a nested helper that mutates the outer map. None was executed. Existing config include, unbounded config, output, filters/attributes, executable-location, source provenance and replacement-ref guards remain in the focused controls. The exact historical `--no-replace-objects` source reader allowlist is unchanged; formerly bare historical shell transcripts are visibly marked as text records, with their recorded results retained.
+
+The private module correction refuses `tempfile._shutil` through direct and assigned module access, `from tempfile import _shutil`, reflective `getattr`, `vars(tempfile)` and `tempfile.__dict__`. Public `tempfile.TemporaryDirectory` and `pathlib.Path` controls remain accepted. The only code reviewed by the local harness is the packet scanner itself; every adversarial example remains a string parsed for AST inspection.
+
+TDD checkpoints were observed locally. The original isolated Git selector pair was RED with 12 failed assertions in 0.131s. The saved-environment-alias witness then failed its expected-refusal assertion once; a `GIT_DIR` map witness and a nested helper mutation witness each separately reproduced one accepted unsafe case before their corresponding provenance/state checks were added. The private module selector was RED with four failed assertions in 0.128s before the private-attribute/re-export rule. After those changes the final combined focused command, including the direct and dictionary-reflection private-module regressions, passed 20 methods in 5.533s; it retained all 128 actual compiler-helper checks and all ten historical loader controls:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_standalone_git_queries_require_explicit_hook_isolation \
+  Issue79RegressionTests.test_python_git_queries_require_isolated_environment_and_known_builder \
+  Issue79RegressionTests.test_git_child_environment_uses_a_positive_allowlist \
+  Issue79RegressionTests.test_git_config_include_options_are_rejected_before_read_only_classification \
+  Issue79RegressionTests.test_unbounded_git_config_dumps_are_rejected \
+  Issue79RegressionTests.test_git_config_queries_allow_only_reviewed_keys \
+  Issue79RegressionTests.test_shell_origin_url_query_is_rejected_but_verifier_capture_remains \
+  Issue79RegressionTests.test_explicit_executable_paths_require_reviewed_locations \
+  Issue79RegressionTests.test_git_config_assignments_cannot_replace_reviewed_fence_state \
+  Issue79RegressionTests.test_git_show_output_and_reader_option_paths_are_reviewed \
+  Issue79RegressionTests.test_git_diff_output_cannot_replace_reviewed_source \
+  Issue79RegressionTests.test_private_standard_library_reexports_are_refused \
+  Issue79RegressionTests.test_os_reexports_from_allowed_modules_are_not_certified \
+  Issue79RegressionTests.test_displayhook_aliases_are_sensitive_output_sinks \
+  Issue79RegressionTests.test_warning_and_absolute_path_aliases_preserve_sensitive_values \
+  Issue79RegressionTests.test_module_values_cannot_escape_through_containers_or_helpers \
+  Issue79RegressionTests.test_module_reflection_and_os_path_outputs_are_rejected \
+  Issue79RegressionTests.test_module_namespace_storage_requires_reviewed_uses \
+  Issue79RegressionTests.test_actual_packet_compile_helpers_retain_provenance \
+  Issue79RegressionTests.test_historic_scanner_loaders_export_only_their_required_helpers
+```
+
+The isolated diff hygiene check is `git diff --check`; the added-line scan covered 940 lines and found zero personal-machine path or credential-pattern matches. At handoff, only `docs/evidence/g01-recovery-packet.md` and `scripts/evidence_packet/issue79_regression_test.py` were dirty. #79 and parent #1 remain In progress, and the coordinator still owns the exact packet selector and final-source review gates.
+
+#### Coordinator delta audit: builder rebinding and mutable argv remain HOLD
+
+After the writer's handoff, the coordinator read the complete source delta and
+reproduced two related gaps using inert AST data only. A correctly shaped
+module-level `git_command` or `git_query` can be reassigned to a lambda returning
+unprotected Git arguments before its use. Separately, a list produced by the
+canonical builder can be overwritten directly or through a saved alias before
+the child invocation. The origin checker still certifies these changed values.
+No Git query, hook or adversarial specimen was executed.
+
+Two meaningful regressions were added before implementation:
+`test_python_git_builder_rebinding_is_not_certified` and
+`test_python_git_argv_mutation_is_not_certified`, under `Issue79RegressionTests`.
+Their isolated command was RED: two methods, four expected-refusal assertions
+failed in 0.157s. The three canonical direct/list positive controls remained
+accepted. The earlier 20-method GREEN result does not cover these new gaps.
+The local checkpoint is held pending a fail-closed binding/mutation correction;
+no packet selector, final independent approval, correction push or live result
+is claimed for it.
