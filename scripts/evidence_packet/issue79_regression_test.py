@@ -3518,12 +3518,43 @@ class Issue79RegressionTests(unittest.TestCase):
     def test_warning_and_absolute_path_aliases_preserve_sensitive_values(self) -> None:
         unsafe = (
             'import os, warnings\nemit = warnings.showwarning\nemit(os.environ, UserWarning, "x", 1)\n',
+            'import os\nimport warnings as w\nw.showwarning(os.environ, UserWarning, "x", 1)\n',
+            'import os, warnings\nalias = warnings\nemit = alias.showwarning\nemit(os.environ, UserWarning, "x", 1)\n',
             'import os\nfrom warnings import showwarning as emit\nemit(os.environ, UserWarning, "x", 1)\n',
             'from pathlib import Path\nabsolute = Path(".").absolute\nprint(absolute())\n',
             'from pathlib import Path\nabsolute = getattr(Path("."), "absolute")\nprint(absolute())\n',
             'import os\nalias = os\nprint(alias.environb)\n',
         )
         for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+    def test_module_namespace_storage_requires_reviewed_uses(self) -> None:
+        self.assertIsNone(self.inspect(
+            'import os\nnamespace = {"module": os, "safe": "reviewed"}\n'
+            'value = namespace["safe"]\nnamespace["safe"] = value\n'
+        ))
+        for suffix in (
+            'print(namespace["module"].environ)\n',
+            'key = "module"\nprint(namespace[key].environ)\n',
+            'alias = namespace\nprint(alias["module"].environ)\n',
+            'print(namespace.get("module").environ)\n',
+            'print(list(namespace.values())[0].environ)\n',
+            'namespace["safe"] = os\nprint(namespace["safe"].environ)\n',
+        ):
+            body = 'import os\nnamespace = {"module": os, "safe": "reviewed"}\n' + suffix
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
+    def test_module_reflection_and_os_path_outputs_are_rejected(self) -> None:
+        for body in (
+            'import os, warnings\nemit = warnings.__dict__["showwarning"]\nemit(os.environ, UserWarning, "x", 1)\n',
+            'import os\nprint(os.path.abspath("."))\n',
+            'import os\nprint(os.path.realpath("."))\n',
+            'import os\np = os.path\nprint(p.abspath("."))\n',
+            'from os import path as p\nprint(p.abspath("."))\n',
+            'from os import path as p\nmodules = [p]\nprint(modules[0].abspath("."))\n',
+        ):
             with self.subTest(body=body):
                 self.assertIsNotNone(self.inspect(body))
 

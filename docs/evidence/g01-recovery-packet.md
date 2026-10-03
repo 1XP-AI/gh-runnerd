@@ -13175,7 +13175,7 @@ def python_unknown_os_call_violation(tree):
     return None
 
 
-def python_module_value_escape_violation(tree, parents):
+def python_module_value_escape_violation(tree, parents, safe_marker):
     """Keep security-sensitive modules on direct, inspectable attribute paths."""
     protected = {"os", "subprocess", "shutil", "signal", "sys", "pathlib", "warnings", "builtins", "importlib"}
     names = {
@@ -13185,6 +13185,14 @@ def python_module_value_escape_violation(tree, parents):
         for alias in node.names
         if alias.name.split(".")[0] in protected
     }
+    path_modules = {
+        alias.asname or alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "os"
+        for alias in node.names
+        if alias.name == "path"
+    }
+    names.update(path_modules)
     changed = True
     while changed:
         changed = False
@@ -13200,10 +13208,111 @@ def python_module_value_escape_violation(tree, parents):
                     if isinstance(target, ast.Name) and target.id not in names:
                         names.add(target.id)
                         changed = True
+
+    rebound_names = {
+        node.id for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+    } | {
+        node.arg for node in ast.walk(tree) if isinstance(node, ast.arg)
+    } | {
+        node.name for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    } | {
+        alias.asname or alias.name.split(".")[0]
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+        for alias in node.names
+    }
+
+    def reviewed_namespace_argument(node, parent):
+        return (
+            isinstance(parent, ast.Call)
+            and len(parent.args) in {2, 3}
+            and not parent.keywords
+            and node in parent.args[1:]
+            and not {"exec", "compile"}.intersection(rebound_names)
+            and reviewed_python_exec_call(parent, safe_marker, tree)
+        )
+
+    def reviewed_dictionary_storage(dictionary):
+        if not dictionary.keys or not all(
+            isinstance(key, ast.Constant) and isinstance(key.value, str)
+            for key in dictionary.keys
+        ):
+            return False
+        keys = [key.value for key in dictionary.keys]
+        if len(keys) != len(set(keys)):
+            return False
+        declaration = parents.get(dictionary)
+        if reviewed_namespace_argument(dictionary, declaration):
+            return True
+        if not (
+            isinstance(declaration, ast.Assign)
+            and declaration.value is dictionary
+            and len(declaration.targets) == 1
+            and isinstance(declaration.targets[0], ast.Name)
+            and not isinstance(python_enclosing_scope(declaration, parents), ast.ClassDef)
+        ):
+            return False
+        name = declaration.targets[0].id
+        if sum(
+            isinstance(candidate, ast.Name)
+            and isinstance(candidate.ctx, ast.Store)
+            and candidate.id == name
+            for candidate in ast.walk(tree)
+        ) != 1 or any(
+            isinstance(candidate, ast.arg) and candidate.arg == name
+            or isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and candidate.name == name
+            for candidate in ast.walk(tree)
+        ):
+            return False
+        module_keys = {
+            key for key, value in zip(keys, dictionary.values)
+            if isinstance(value, ast.Name) and value.id in names
+        }
+        for reference in ast.walk(tree):
+            if not isinstance(reference, ast.Name) or not isinstance(reference.ctx, ast.Load) or reference.id != name:
+                continue
+            parent = parents.get(reference)
+            if (
+                isinstance(parent, ast.Subscript) and parent.value is reference
+                and isinstance(parent.slice, ast.Constant)
+                and isinstance(parent.slice.value, str)
+                and parent.slice.value not in module_keys
+            ):
+                continue
+            if reviewed_namespace_argument(reference, parent):
+                continue
+            if isinstance(parent, ast.Compare) and reference in parent.comparators and all(
+                isinstance(operator, (ast.In, ast.NotIn)) for operator in parent.ops
+            ):
+                continue
+            return False
+        return True
+
+    safe_storage = {
+        id(value)
+        for dictionary in ast.walk(tree)
+        if isinstance(dictionary, ast.Dict) and reviewed_dictionary_storage(dictionary)
+        for value in dictionary.values
+        if isinstance(value, ast.Name) and value.id in names
+    }
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in names:
+            if node.attr.startswith("__"):
+                return f"Python security module reflection is not reviewed on line {node.lineno}"
+            if node.value.id in path_modules:
+                return f"Python OS path module alias is not reviewed on line {node.lineno}"
+            if python_dotted_name(node) == "os.path":
+                parent = parents.get(node)
+                if not isinstance(parent, ast.Attribute) or parent.value is not node:
+                    return f"Python OS path module value escapes its reviewed attribute path on line {node.lineno}"
     for node in ast.walk(tree):
         if not isinstance(node, ast.Name) or not isinstance(node.ctx, ast.Load) or node.id not in names:
             continue
         parent = parents.get(node)
+        if id(node) in safe_storage:
+            continue
         if isinstance(parent, ast.Attribute) and parent.value is node:
             continue
         if isinstance(parent, ast.Assign) and parent.value is node and all(
@@ -14606,6 +14715,8 @@ def python_resolved_local_path_expression(
         return False
     if isinstance(node, ast.Call):
         dotted = python_dotted_name(node.func)
+        if dotted in {"os.path.abspath", "os.path.realpath"}:
+            return True
         is_path_home = python_path_method_expression_visible(
             node.func, "home", node, tree, parents
         )
@@ -14774,11 +14885,26 @@ def python_assigned_sink_method_alias(name, tree):
     )
 
 
+def python_warning_sink_targets(tree):
+    targets = getattr(tree, "_issue79_warning_sink_targets", None)
+    if targets is None:
+        targets = {
+            name + "." + method
+            for name in python_assigned_module_names(tree, "warnings")
+            for method in ("warn", "warn_explicit", "showwarning")
+        }
+        tree._issue79_warning_sink_targets = targets
+    return targets
+
+
 def python_sensitive_output_sink(node, tree=None):
     """Recognize output/error sinks without tainting ordinary containers/helpers."""
     if not isinstance(node, ast.Call):
         return False
     dotted = python_dotted_name(node.func)
+    warning_targets = python_warning_sink_targets(tree) if tree is not None else set()
+    if dotted in warning_targets:
+        return True
     if dotted in {
         "print",
         "sys.exit",
@@ -14801,6 +14927,7 @@ def python_sensitive_output_sink(node, tree=None):
             "traceback.print_exc",
             "traceback.print_exception",
         )
+        named_targets = named_targets + tuple(warning_targets)
         if python_dotted_name(named_value) in named_targets:
             return True
         if (
@@ -14827,7 +14954,7 @@ def python_sensitive_output_sink(node, tree=None):
                 "warnings.showwarning",
                 "traceback.print_exc",
                 "traceback.print_exception",
-            )
+            ) + tuple(warning_targets)
             python_assigned_callable_alias("", targets[0], tree)
             assignment_index = getattr(tree, "_issue79_callable_alias_index", {})
             sink_aliases = {
@@ -16787,7 +16914,7 @@ def inspect_python_heredoc(body, safe_marker):
         for parent in ast.walk(tree)
         for child in ast.iter_child_nodes(parent)
     }
-    module_escape_violation = python_module_value_escape_violation(tree, parents)
+    module_escape_violation = python_module_value_escape_violation(tree, parents, safe_marker)
     if module_escape_violation:
         return module_escape_violation
     sink_storage_violation = python_sensitive_sink_storage_violation(tree, parents)
@@ -29978,10 +30105,10 @@ the final worktree head.
 
 | # | Finding | RED against exact base | Correction and safe control |
 |---|---|---|---|
-| 1 | A local factory could return `Path("synthetic-private/file").read_text`, then its result could be called as an unchecked reader. | `test_path_filesystem_readers_require_reviewed_paths` accepted the factory-returned reader. | Path-reader alias analysis now inspects local helper return expressions. A factory returning the reviewed packet reader remains accepted. |
-| 2 | `launchers = {"x": subprocess.run}; launch = launchers.pop("x")` left a callable launcher alias unresolved. | `test_launcher_alias_returned_by_mapping_pop_is_rejected` accepted the launcher invocation. | Launcher provenance now follows mapping `pop` values. A `str.upper` callback popped from a local map remains accepted. |
-| 3 | Credential taint did not bind arguments to local method or assigned-lambda parameters, so `C().emit(os.environ)` and its lambda equivalent reached `print(payload)`. | `test_sensitive_values_are_tainted_into_method_and_lambda_parameters` accepted both inert specimens. | Taint binding now covers known local method receivers and assigned local lambdas. Safe status values passed through each callable remain accepted. |
-| 4 | Final parity checked intent bits and raw HEAD bytes only for the packet, leaving `scripts/evidence_packet/issue79_regression_test.py` maskable by Git intent bits. | The parity regression failed because the template had no reviewed-source path list or parity check for the harness. A temporary repository reproduced clean porcelain status while either protected path had `skip-worktree` or `assume-unchanged` set and modified bytes. | The template checks both #79 evidence paths before status, and the bounded blob reader permits exactly those paths under the existing packet-blob output cap. The temporary Git fixture verifies clean parity, both hidden intent bits on each path, and unmasked byte divergence. |
+| 1 | [4118778407](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4118778407): a local factory could return `Path("synthetic-private/file").read_text`, then its result could be called as an unchecked reader. | `test_path_filesystem_readers_require_reviewed_paths` accepted the factory-returned reader. | Path-reader alias analysis now inspects local helper return expressions. A factory returning the reviewed packet reader remains accepted. |
+| 2 | [4118778413](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4118778413): `launchers = {"x": subprocess.run}; launch = launchers.pop("x")` left a callable launcher alias unresolved. | `test_launcher_alias_returned_by_mapping_pop_is_rejected` accepted the launcher invocation. | Launcher provenance now follows mapping `pop` values. A `str.upper` callback popped from a local map remains accepted. |
+| 3 | [4118778418](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4118778418): credential taint did not bind arguments to local method or assigned-lambda parameters, so `C().emit(os.environ)` and its lambda equivalent reached `print(payload)`. | `test_sensitive_values_are_tainted_into_method_and_lambda_parameters` accepted both inert specimens. | Taint binding now covers known local method receivers and assigned local lambdas. Safe status values passed through each callable remain accepted. |
+| 4 | [4118778422](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4118778422): final parity checked intent bits and raw HEAD bytes only for the packet, leaving `scripts/evidence_packet/issue79_regression_test.py` maskable by Git intent bits. | The parity regression failed because the template had no reviewed-source path list or parity check for the harness. A temporary repository reproduced clean porcelain status while either protected path had `skip-worktree` or `assume-unchanged` set and modified bytes. | The template checks both #79 evidence paths before status, and the bounded blob reader permits exactly those paths under the existing packet-blob output cap. The temporary Git fixture verifies clean parity, both hidden intent bits on each path, and unmasked byte divergence. |
 
 Exact pre-fix RED command:
 
@@ -31433,5 +31560,49 @@ with 11 assertions before their corrections. Its GREEN rerun, including the
 two earlier direct tests and the lexical-shadowing control, passed five
 methods in 0.123s. Results for the canonical isolated full invocation and
 independent review are recorded in the PR against the combined candidate
-when those gates settle. No live qualification result is claimed. Rollback is a reviewed reversal of this correction's
+when those gates settle. No live qualification result is claimed. Rollback
+is a reviewed reversal of this correction's
 packet/harness delta; the parent G01 and G02 live gates remain open.
+
+#### Independent HOLD at `98da2a8` and compatibility correction
+
+Two read-only GPT-6-Luna/max sessions reviewed immutable
+`98da2a8567d0dedbc7289ed14582a89138268cb0`. Contract review confirmed the
+four requested direct/alias negative groups and literal positive controls,
+but reproduced both compatibility failures. Security review reproduced
+additional `warnings.__dict__["showwarning"]` and `os.path.abspath` output
+bypasses. Both verdicts were HOLD. Their final reports were read from the
+Orca transcripts because the deliberately read-only sandbox blocked Orca
+completion delivery with EPERM; these were not accepted `worker_done`
+settlements. Both finished attempts were abandoned and only their locally
+created reviewer terminals closed. Source and worktrees were preserved.
+
+The canonical command `python3 -I -B
+scripts/evidence_packet/issue79_regression_test.py` ran 120 tests in
+262.017s and failed two controls: 15 existing reviewed compile/exec helper
+namespace bodies were rejected, and inert mixed-dictionary storage followed
+by an unrelated literal-key read was rejected. This run preceded the final
+prose-only ledger sentence edit; it is failure evidence for the unchanged
+scanner/test source, not a passing validation of immutable `98da2a8`.
+
+`test_module_namespace_storage_requires_reviewed_uses` and
+`test_module_reflection_and_os_path_outputs_are_rejected` subsequently
+failed seven assertions in 0.111s before correction: one rejected safe
+dictionary and six accepted reflection/path witnesses. Dictionary module
+storage is now permitted only with unique literal keys and one declaration,
+where every use is a static non-module-key access, key membership check, or
+namespace argument of an already reviewed compile/exec call with unshadowed
+builtins. Module-key recovery, mapping aliases, copy/iteration, dynamic keys,
+class namespace storage and module insertion into an unrelated slot remain
+unsupported. Protected-module reflection and first-class OS path-module
+recovery are rejected, and direct `abspath`/`realpath` results are local-path
+sources. The five focused methods, including the old mixed-subprocess
+dictionary control, then passed in 0.154s.
+
+Two additional warning-module alias specimens failed RED in 0.121s under
+`test_warning_and_absolute_path_aliases_preserve_sensitive_values`.
+Warning sink classification now follows imported/assigned module names
+alongside function aliases. That selector and the direct output selector
+passed GREEN in 0.116s. All unsafe specimens remained inert AST inputs.
+Combined isolated verification and independent review of this refinement
+must still be recorded against its candidate before merge.
