@@ -2641,6 +2641,172 @@ class Issue79RegressionTests(unittest.TestCase):
             "a non-sensitive isolated status query remains accepted",
         )
 
+        origin_capture = _top_level_assignment(self.verification, "origin_result")
+        self.assertEqual(
+            self.scanner["python_dotted_name"](origin_capture.value.func),  # type: ignore[operator,union-attr]
+            "run_bounded_git_query",
+        )
+        self.assertIn("remote.origin.url", ast.unparse(origin_capture.value))
+        expected_origin = _top_level_assignment(self.verification, "expected_origin_url")
+        self.assertEqual(
+            _literal_assignment_value(expected_origin),
+            "https://github.com/1XP-AI/gh-runnerd.git",
+        )
+        origin_check = next(
+            statement
+            for statement in self.verification.body
+            if isinstance(statement, ast.If)
+            and any(
+                isinstance(node, ast.Name) and node.id == "origin_urls"
+                for node in ast.walk(statement.test)
+            )
+        )
+        self.assertIsInstance(origin_check.test, ast.Compare)
+
+        bounded_helper = _verification_function(self.verification, "run_bounded_git_query")
+        popen = next(
+            node
+            for node in ast.walk(bounded_helper)
+            if isinstance(node, ast.Call)
+            and self.scanner["python_dotted_name"](node.func) == "subprocess.Popen"  # type: ignore[operator]
+        )
+        popen_keywords = {keyword.arg: keyword.value for keyword in popen.keywords}
+        for stream in ("stdout", "stderr"):
+            self.assertEqual(
+                self.scanner["python_dotted_name"](popen_keywords[stream]),  # type: ignore[operator]
+                "subprocess.PIPE",
+            )
+
+        bounded_capture = _verification_function(self.verification, "capture_git_query_output")
+        budget_guards = [
+            node
+            for node in ast.walk(bounded_capture)
+            if isinstance(node, ast.Compare)
+            and len(node.ops) == 1
+            and isinstance(node.ops[0], ast.Gt)
+            and len(node.comparators) == 1
+            and isinstance(node.comparators[0], ast.Name)
+            and node.comparators[0].id == "output_limit"
+            and isinstance(node.left, ast.BinOp)
+            and isinstance(node.left.op, ast.Add)
+        ]
+        self.assertEqual(1, len(budget_guards))
+        bounded_lengths = [
+            node
+            for node in ast.walk(budget_guards[0].left)
+            if isinstance(node, ast.Call)
+            and self.scanner["python_dotted_name"](node.func) == "len"  # type: ignore[operator]
+            and len(node.args) == 1
+        ]
+        captured_streams = {
+            node.args[0].slice.value
+            for node in bounded_lengths
+            if isinstance(node.args[0], ast.Subscript)
+            and isinstance(node.args[0].value, ast.Name)
+            and node.args[0].value.id == "captures"
+            and isinstance(node.args[0].slice, ast.Constant)
+        }
+        self.assertEqual({"stdout", "stderr"}, captured_streams)
+        self.assertTrue(
+            any(
+                isinstance(node.args[0], ast.Name)
+                and node.args[0].id == "chunk"
+                for node in bounded_lengths
+            )
+        )
+
+    def test_origin_capture_checker_remains_self_audit_compatible(self) -> None:
+        scanner_body, marker = self.packet_heredoc_containing(
+            "def reviewed_python_git_origin_capture_is_compared(tree, parents):",
+            "isinstance(value.comparators[0].value, int)",
+            "not isinstance(value.comparators[0].value, bool)",
+            "def python_git_origin_capture_violation(tree, parents):",
+        )
+        self.assertIsNone(
+            self.scanner["inspect_python_heredoc"](scanner_body, marker),  # type: ignore[operator]
+            "the current origin-capture proof must pass the scanner's own source checks",
+        )
+
+    def test_git_query_capture_must_be_on_the_active_result_path(self) -> None:
+        bounded_body, marker = self.packet_heredoc_containing(
+            "def run_bounded_git_query(",
+            "stdout, stderr = capture_git_query_output(",
+        )
+        self.assertIsNone(self.scanner["inspect_python_heredoc"](bounded_body, marker))  # type: ignore[operator]
+        tree = ast.parse(bounded_body, filename="<bounded-query-capture-data>")
+        function = _verification_function(tree, "run_bounded_git_query")
+        capture_assignment = next(
+            node
+            for node in ast.walk(function)
+            if isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Call)
+            and self.scanner["python_dotted_name"](node.value.func) == "capture_git_query_output"  # type: ignore[operator]
+        )
+        bounded_call = capture_assignment.value
+        capture_assignment.value = ast.Call(
+            func=ast.Attribute(
+                value=ast.Name(id="process", ctx=ast.Load()),
+                attr="communicate",
+                ctx=ast.Load(),
+            ),
+            args=[],
+            keywords=[],
+        )
+        function.body.insert(
+            0,
+            ast.If(
+                test=ast.Constant(value=False),
+                body=[ast.Expr(value=bounded_call)],
+                orelse=[],
+            ),
+        )
+        ast.fix_missing_locations(tree)
+        self.assertIsNotNone(
+            self.scanner["inspect_python_heredoc"](ast.unparse(tree), marker),  # type: ignore[operator]
+            "a dead bounded collector must not certify an unbounded communicate result",
+        )
+
+        after_return_tree = ast.parse(bounded_body, filename="<late-query-capture-data>")
+        after_return_function = _verification_function(
+            after_return_tree, "run_bounded_git_query"
+        )
+        after_return_parents = {
+            child: parent
+            for parent in ast.walk(after_return_tree)
+            for child in ast.iter_child_nodes(parent)
+        }
+        late_capture = next(
+            node
+            for node in ast.walk(after_return_function)
+            if isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Call)
+            and self.scanner["python_dotted_name"](node.value.func)  # type: ignore[operator]
+            == "capture_git_query_output"
+        )
+        completed_return = next(
+            node
+            for node in ast.walk(after_return_function)
+            if isinstance(node, ast.Return)
+            and isinstance(node.value, ast.Call)
+            and self.scanner["python_dotted_name"](node.value.func)  # type: ignore[operator]
+            == "subprocess.CompletedProcess"
+        )
+        capture_parent = after_return_parents[late_capture]
+        return_parent = after_return_parents[completed_return]
+        self.assertIsInstance(capture_parent, ast.Try)
+        self.assertIsInstance(return_parent, ast.Try)
+        capture_parent.body.remove(late_capture)  # type: ignore[union-attr]
+        return_parent.body.insert(  # type: ignore[union-attr]
+            return_parent.body.index(completed_return) + 1, late_capture
+        )
+        ast.fix_missing_locations(after_return_tree)
+        self.assertIsNotNone(
+            self.scanner["inspect_python_heredoc"](  # type: ignore[operator]
+                ast.unparse(after_return_tree), marker
+            ),
+            "a collector placed after the returned result must not certify its output",
+        )
+
 
     def test_bounded_git_origin_capture_requires_reviewed_comparison_and_no_output_escape(self) -> None:
         verification_body, verification_marker = self.packet_heredoc_containing(
@@ -2683,18 +2849,18 @@ class Issue79RegressionTests(unittest.TestCase):
                     verification_body
                 ),
             ),
-            ):
-                with self.subTest(mutant=label):
-                    mutant_tree = ast.parse(mutant)
-                    mutant_parents = {
-                        child: parent
-                        for parent in ast.walk(mutant_tree)
-                        for child in ast.iter_child_nodes(parent)
-                    }
-                    self.assertFalse(
-                        comparison_proof(mutant_tree, mutant_parents)  # type: ignore[operator]
-                    )
-                    self.assertIsNotNone(
+        ):
+            with self.subTest(mutant=label):
+                mutant_tree = ast.parse(mutant)
+                mutant_parents = {
+                    child: parent
+                    for parent in ast.walk(mutant_tree)
+                    for child in ast.iter_child_nodes(parent)
+                }
+                self.assertFalse(
+                    comparison_proof(mutant_tree, mutant_parents)  # type: ignore[operator]
+                )
+                self.assertIsNotNone(
                     inspect_verification(mutant, verification_marker),  # type: ignore[operator]
                     label,
                 )
@@ -2716,23 +2882,6 @@ class Issue79RegressionTests(unittest.TestCase):
             raise AssertionError("current origin comparison shape changed")
         mutated.body.remove(comparisons[0])
         return ast.unparse(mutated)
-
-        origin_capture = _top_level_assignment(self.verification, "origin_result")
-        self.assertEqual(
-            self.scanner["python_dotted_name"](origin_capture.value.func),  # type: ignore[operator,union-attr]
-            "run_bounded_git_query",
-        )
-        self.assertIn("remote.origin.url", ast.unparse(origin_capture.value))
-        origin_check = next(
-            statement
-            for statement in self.verification.body
-            if isinstance(statement, ast.If)
-            and any(
-                isinstance(node, ast.Name) and node.id == "origin_urls"
-                for node in ast.walk(statement.test)
-            )
-        )
-        self.assertIsInstance(origin_check.test, ast.Compare)
 
     def test_explicit_executable_paths_require_reviewed_locations(self) -> None:
         for command in (
@@ -3807,6 +3956,20 @@ class Issue79RegressionTests(unittest.TestCase):
             'from pathlib import Path\nfrom tempfile import TemporaryDirectory\n'
             'with TemporaryDirectory() as td:\n'
             '    Path(td).joinpath("source").copy(**{"target": Path("synthetic-destination")})\n',
+            'from pathlib import Path\n'
+            'seen = {"node"}\n'
+            'for seen in [Path("synthetic-unowned-source")]:\n'
+            '    seen.copy(Path("synthetic-unowned-destination"))\n',
+            'from pathlib import Path\n'
+            'seen, other = (Path("synthetic-unowned-source"), None)\n'
+            'seen.copy(Path("synthetic-unowned-destination"))\n',
+            'from pathlib import Path\n'
+            'seen = set()\n'
+            'def retarget():\n'
+            '    global seen\n'
+            '    seen = Path("synthetic-unowned-source")\n'
+            'retarget()\n'
+            'seen.copy(Path("synthetic-unowned-destination"))\n',
             'unknown_receiver.copy(Path("synthetic-destination"))\n',
         )
         for body in unsafe:

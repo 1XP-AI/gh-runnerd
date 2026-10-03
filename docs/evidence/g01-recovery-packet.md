@@ -9756,8 +9756,8 @@ def python_static_string_values(node, tree):
         if isinstance(value, ast.Constant) and isinstance(value.value, str):
             return {value.value}
         if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add):
-            left = resolve_literal_string_values(value.left, seen.copy())
-            right = resolve_literal_string_values(value.right, seen.copy())
+            left = resolve_literal_string_values(value.left, set(seen))
+            right = resolve_literal_string_values(value.right, set(seen))
             if not left or not right or len(left) * len(right) > 16:
                 return set()
             combined = {first + second for first in left for second in right}
@@ -9790,14 +9790,14 @@ def python_static_string_values_from_local_calls(node, tree, parents, seen=None)
             if isinstance(value, ast.Call):
                 values.update(
                     python_static_string_values_from_local_calls(
-                        value, tree, parents, seen.copy()
+                        value, tree, parents, set(seen)
                     )
                 )
     elif isinstance(node, ast.Call):
         for returned in python_local_call_return_values(node, tree, parents):
             values.update(
                 python_static_string_values_from_local_calls(
-                    returned, tree, parents, seen.copy()
+                    returned, tree, parents, set(seen)
                 )
             )
     return values
@@ -9888,7 +9888,7 @@ def python_local_call_return_values(call, tree, parents):
                     methods_by_scope, assignments_by_scope,
                 ))
                 for returned in python_local_call_return_values(value, tree, parents):
-                    resolve_receiver(returned, seen_names.copy(), seen_nodes.copy())
+                    resolve_receiver(returned, set(seen_names), set(seen_nodes))
             elif isinstance(value, ast.Name) and value.id not in seen_names:
                 seen_names.add(value.id)
                 if value.id != "self":
@@ -9899,7 +9899,7 @@ def python_local_call_return_values(call, tree, parents):
                         for assignment in assignments_by_scope.get(
                             (id(scope), value.id), ()
                         ):
-                            resolve_receiver(assignment, seen_names.copy(), seen_nodes.copy())
+                            resolve_receiver(assignment, set(seen_names), set(seen_nodes))
                 else:
                     enclosing = call_scope
                     while enclosing is not None and not isinstance(enclosing, ast.ClassDef):
@@ -10046,7 +10046,7 @@ def python_local_method_candidates(attribute, call, tree, parents):
                 methods_by_scope, assignments_by_scope,
             ))
             for returned in python_local_call_return_values(value, tree, parents):
-                resolve_receiver(returned, seen_names.copy(), seen_nodes.copy())
+                resolve_receiver(returned, set(seen_names), set(seen_nodes))
         elif isinstance(value, ast.Name) and value.id not in seen_names:
             seen_names.add(value.id)
             if value.id != "self":
@@ -10058,7 +10058,7 @@ def python_local_method_candidates(attribute, call, tree, parents):
                         (id(scope), value.id), ()
                     ):
                         resolve_receiver(
-                            assignment, seen_names.copy(), seen_nodes.copy()
+                            assignment, set(seen_names), set(seen_nodes)
                         )
             else:
                 enclosing = call_scope
@@ -10259,7 +10259,7 @@ def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen
             return any(
                 isinstance(value, (ast.Name, ast.Attribute, ast.Subscript))
                 and python_sensitive_value_expression(
-                    value, sensitive_names, tree, parents, seen.copy()
+                    value, sensitive_names, tree, parents, set(seen)
                 )
                 for value in python_join_assignment_index(tree).get(node.id, ())
             )
@@ -10271,14 +10271,14 @@ def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen
             key = node.slice.value if isinstance(node.slice, ast.Constant) else None
             return key is None or not isinstance(key, str) or key == "HOME" or credential_environment_name(key)
         if getattr(tree, "_issue79_member_taint_enabled", False) and python_sensitive_member_assignment_value(
-            node, sensitive_names, tree, parents, seen.copy()
+            node, sensitive_names, tree, parents, set(seen)
         ):
             return True
         return python_sensitive_value_expression(
-            node.value, sensitive_names, tree, parents, seen.copy()
+            node.value, sensitive_names, tree, parents, set(seen)
         )
     if isinstance(node, ast.Attribute) and getattr(tree, "_issue79_member_taint_enabled", False) and python_sensitive_member_assignment_value(
-        node, sensitive_names, tree, parents, seen.copy()
+        node, sensitive_names, tree, parents, set(seen)
     ):
         return True
     if isinstance(node, ast.Call):
@@ -10286,14 +10286,14 @@ def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen
         if dotted == "urllib.parse.urlencode" or dotted in python_imported_urlencode_aliases(tree):
             return any(
                 python_sensitive_value_expression(
-                    value, sensitive_names, tree, parents, seen.copy()
+                    value, sensitive_names, tree, parents, set(seen)
                 )
                 for value in list(node.args)
                 + [keyword.value for keyword in node.keywords]
             )
         if python_reviewed_string_join_callable(node.func, tree, parents) and any(
             python_sensitive_join_argument(
-                value, sensitive_names, tree, parents, seen.copy()
+                value, sensitive_names, tree, parents, set(seen)
             )
             for value in list(node.args)
             + [keyword.value for keyword in node.keywords]
@@ -10309,7 +10309,7 @@ def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen
             if local_format_callables:
                 sensitive_return = any(
                     python_sensitive_value_expression(
-                        value, sensitive_names, tree, parents, seen.copy()
+                        value, sensitive_names, tree, parents, set(seen)
                     )
                     for value in python_local_call_return_values(
                         node, tree, parents
@@ -10330,7 +10330,7 @@ def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen
         ):
             return any(
                 python_sensitive_value_expression(
-                    value, sensitive_names, tree, parents, seen.copy()
+                    value, sensitive_names, tree, parents, set(seen)
                 )
                 for value in list(node.args)
                 + [keyword.value for keyword in node.keywords]
@@ -10376,17 +10376,17 @@ def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen
                 constructor_aliases[node.func.id] = is_sensitive_constructor
         if isinstance(node.func, ast.Attribute) and node.func.attr == "format":
             return python_sensitive_value_expression(
-                node.func.value, sensitive_names, tree, parents, seen.copy()
+                node.func.value, sensitive_names, tree, parents, set(seen)
             ) or any(
                 python_sensitive_value_expression(
-                    value, sensitive_names, tree, parents, seen.copy()
+                    value, sensitive_names, tree, parents, set(seen)
                 )
                 for value in list(node.args)
                 + [keyword.value for keyword in node.keywords]
             )
         if is_sensitive_constructor and any(
             python_sensitive_value_expression(
-                value, sensitive_names, tree, parents, seen.copy()
+                value, sensitive_names, tree, parents, set(seen)
             )
             for value in list(node.args)
             + [keyword.value for keyword in node.keywords]
@@ -10394,7 +10394,7 @@ def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen
             return True
         if any(
             python_sensitive_value_expression(
-                value, sensitive_names, tree, parents, seen.copy()
+                value, sensitive_names, tree, parents, set(seen)
             )
             for value in python_local_call_return_values(node, tree, parents)
         ):
@@ -10405,7 +10405,7 @@ def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen
         ):
             return any(
                 python_sensitive_value_expression(
-                    value, sensitive_names, tree, parents, seen.copy()
+                    value, sensitive_names, tree, parents, set(seen)
                 )
                 for value in list(node.args)
                 + [keyword.value for keyword in node.keywords]
@@ -10416,7 +10416,7 @@ def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen
         }:
             return any(
                 python_sensitive_value_expression(
-                    argument, sensitive_names, tree, parents, seen.copy()
+                    argument, sensitive_names, tree, parents, set(seen)
                 )
                 for argument in node.args
             )
@@ -10426,13 +10426,13 @@ def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen
         }:
             return any(
                 python_sensitive_value_expression(
-                    argument, sensitive_names, tree, parents, seen.copy()
+                    argument, sensitive_names, tree, parents, set(seen)
                 )
                 for argument in node.args
             )
         if isinstance(node.func, ast.Attribute):
             sensitive_receiver = python_sensitive_value_expression(
-                node.func.value, sensitive_names, tree, parents, seen.copy()
+                node.func.value, sensitive_names, tree, parents, set(seen)
             )
             return sensitive_receiver
     if isinstance(node, (ast.DictComp, ast.ListComp, ast.SetComp, ast.GeneratorExp)):
@@ -10444,22 +10444,22 @@ def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen
             return False
         return any(
             python_sensitive_value_expression(
-                generator.iter, sensitive_names, tree, parents, seen.copy()
+                generator.iter, sensitive_names, tree, parents, set(seen)
             )
             for generator in node.generators
         )
     if isinstance(node, (ast.BinOp, ast.BoolOp, ast.UnaryOp, ast.IfExp, ast.JoinedStr)):
         return any(
-            python_sensitive_value_expression(child, sensitive_names, tree, parents, seen.copy())
+            python_sensitive_value_expression(child, sensitive_names, tree, parents, set(seen))
             for child in ast.iter_child_nodes(node)
         )
     if isinstance(node, ast.Starred):
         return python_sensitive_value_expression(
-            node.value, sensitive_names, tree, parents, seen.copy()
+            node.value, sensitive_names, tree, parents, set(seen)
         )
     if isinstance(node, (ast.List, ast.Tuple, ast.Set, ast.Dict)):
         return any(
-            python_sensitive_value_expression(child, sensitive_names, tree, parents, seen.copy())
+            python_sensitive_value_expression(child, sensitive_names, tree, parents, set(seen))
             for child in ast.iter_child_nodes(node)
         )
     return False
@@ -10546,7 +10546,7 @@ def python_sensitive_member_assignment_value(
     next_seen = seen | {marker}
     return any(
         python_sensitive_value_expression(
-            value, sensitive_names, tree, parents, next_seen.copy()
+            value, sensitive_names, tree, parents, set(next_seen)
         )
         for value in python_sensitive_member_assignment_index(tree, parents).get(key, ())
     )
@@ -10637,7 +10637,7 @@ def python_sensitive_join_argument(node, sensitive_names, tree, parents, seen=No
     if isinstance(node, ast.Name):
         return any(
             python_sensitive_join_argument(
-                candidate, sensitive_names, tree, parents, seen.copy()
+                candidate, sensitive_names, tree, parents, set(seen)
             )
             for candidate in python_join_assignment_index(tree).get(node.id, ())
         )
@@ -10647,33 +10647,33 @@ def python_sensitive_join_argument(node, sensitive_names, tree, parents, seen=No
             and node.func.attr in {"values", "items"}
         ):
             return python_sensitive_value_expression(
-                node.func.value, sensitive_names, tree, parents, seen.copy()
+                node.func.value, sensitive_names, tree, parents, set(seen)
             )
         if python_unshadowed_builtin_call(node, {"list", "tuple", "iter", "next"}, tree, parents):
             return any(
                 python_sensitive_join_argument(
-                    argument, sensitive_names, tree, parents, seen.copy()
+                    argument, sensitive_names, tree, parents, set(seen)
                 )
                 for argument in node.args
             )
         if python_unshadowed_builtin_call(node, {"map"}, tree, parents):
             return any(
                 python_sensitive_join_argument(
-                    argument, sensitive_names, tree, parents, seen.copy()
+                    argument, sensitive_names, tree, parents, set(seen)
                 )
                 for argument in node.args[1:]
             )
     if isinstance(node, (ast.GeneratorExp, ast.ListComp, ast.SetComp)):
         return any(
             python_sensitive_join_argument(
-                generator.iter, sensitive_names, tree, parents, seen.copy()
+                generator.iter, sensitive_names, tree, parents, set(seen)
             )
             for generator in node.generators
         )
     if isinstance(node, (ast.List, ast.Tuple)):
         return any(
             python_sensitive_join_argument(
-                element, sensitive_names, tree, parents, seen.copy()
+                element, sensitive_names, tree, parents, set(seen)
             )
             for element in node.elts
         )
@@ -10917,7 +10917,7 @@ def python_dynamic_execution_bindings(tree):
         if isinstance(node, ast.Constant):
             return "safe"
         if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
-            states = [dynamic_state(element, seen.copy()) for element in node.elts]
+            states = [dynamic_state(element, set(seen)) for element in node.elts]
             if "dynamic" in states:
                 return "dynamic"
             if "unresolved" in states:
@@ -10927,7 +10927,7 @@ def python_dynamic_execution_bindings(tree):
             return "safe"
         if isinstance(node, ast.Dict):
             states = [
-                dynamic_state(element, seen.copy())
+                dynamic_state(element, set(seen))
                 for element in node.values
                 if element is not None
             ]
@@ -10939,7 +10939,7 @@ def python_dynamic_execution_bindings(tree):
                 return "unknown"
             return "safe"
         if isinstance(node, ast.Subscript):
-            source = container_source(node.value, seen.copy())
+            source = container_source(node.value, set(seen))
             if source is None:
                 return "unknown"
             key = node.slice
@@ -10961,8 +10961,8 @@ def python_dynamic_execution_bindings(tree):
                             selected = value
                             break
             if selected is not None:
-                return dynamic_state(selected, seen.copy())
-            container_state = dynamic_state(source, seen.copy())
+                return dynamic_state(selected, set(seen))
+            container_state = dynamic_state(source, set(seen))
             if container_state in {"dynamic", "unresolved"}:
                 return "unresolved"
             return "unknown"
@@ -11566,7 +11566,7 @@ def python_compile_provenance(tree):
                                 if part.conversion != -1 or part.format_spec is not None:
                                     return None
                                 part = part.value
-                            resolved = literal_reference(part, seen.copy())
+                            resolved = literal_reference(part, set(seen))
                             if resolved is None:
                                 return None
                             parts.append(resolved)
@@ -13954,7 +13954,8 @@ def reviewed_python_git_origin_capture_is_compared(tree, parents):
             and isinstance(value.ops[0], ast.NotEq)
             and len(value.comparators) == 1
             and isinstance(value.comparators[0], ast.Constant)
-            and type(value.comparators[0].value) is int
+            and isinstance(value.comparators[0].value, int)
+            and not isinstance(value.comparators[0].value, bool)
             and value.comparators[0].value == 0
             for value in candidate.test.values
         )
@@ -14023,14 +14024,116 @@ def python_git_origin_capture_violation(tree, parents):
     return "Python bounded Git origin output is not compared or escapes its verifier"
 
 
-def reviewed_python_git_query_capture(node, tree, parents):
-    """Keep raw Git query output bounded and compared before its exception."""
+def reviewed_python_git_query_capture(
+    node, tree, parents, require_origin_comparison=True
+):
+    """Keep raw Git query output on the bounded collector's active path."""
     if (
         enclosing_python_function(node, parents) != "run_bounded_git_query"
         or python_dotted_name(node.func) != "subprocess.Popen"
         or not reviewed_python_helper_definition(node, parents)
         or not reviewed_python_helper_launcher(node, parents)
-        or not reviewed_python_git_origin_capture_is_compared(tree, parents)
+        or (
+            require_origin_comparison
+            and not reviewed_python_git_origin_capture_is_compared(tree, parents)
+        )
+    ):
+        return False
+    function_node = next(
+        (
+            parent
+            for parent in _python_parent_chain(node, parents)
+            if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ),
+        None,
+    )
+    if function_node is None:
+        return False
+    capture_assignments = [
+        candidate
+        for candidate in ast.walk(function_node)
+        if isinstance(candidate, ast.Assign)
+        and python_enclosing_scope(candidate, parents) is function_node
+        and isinstance(candidate.value, ast.Call)
+        and python_dotted_name(candidate.value.func) == "capture_git_query_output"
+    ]
+    if len(capture_assignments) != 1:
+        return False
+    capture_assignment = capture_assignments[0]
+    if (
+        len(capture_assignment.targets) != 1
+        or not isinstance(capture_assignment.targets[0], ast.Tuple)
+        or [
+            target.id
+            for target in capture_assignment.targets[0].elts
+            if isinstance(target, ast.Name)
+        ] != ["stdout", "stderr"]
+        or len(capture_assignment.targets[0].elts) != 2
+        or not all(
+            isinstance(target, ast.Name)
+            for target in capture_assignment.targets[0].elts
+        )
+        or len(capture_assignment.value.args) != 4
+        or [python_dotted_name(argument) for argument in capture_assignment.value.args]
+        != ["process", "command", "output_limit", "input_bytes"]
+        or capture_assignment.value.keywords
+    ):
+        return False
+
+    def on_unconditional_path(statement):
+        current = statement
+        while current is not function_node:
+            parent = parents.get(current)
+            if parent is None or isinstance(
+                parent,
+                (
+                    ast.If,
+                    ast.IfExp,
+                    ast.While,
+                    ast.For,
+                    ast.AsyncFor,
+                    ast.Match,
+                    ast.ExceptHandler,
+                    ast.TryStar,
+                ),
+            ):
+                return False
+            if isinstance(parent, ast.Try) and current not in parent.body:
+                return False
+            current = parent
+        return True
+
+    if not on_unconditional_path(capture_assignment):
+        return False
+    output_stores = [
+        candidate
+        for candidate in ast.walk(function_node)
+        if isinstance(candidate, ast.Name)
+        and python_enclosing_scope(candidate, parents) is function_node
+        and candidate.id in {"stdout", "stderr"}
+        and isinstance(candidate.ctx, ast.Store)
+    ]
+    if len(output_stores) != 2 or {
+        candidate.id for candidate in output_stores
+    } != {"stdout", "stderr"} or any(
+        parents.get(parents.get(candidate)) is not capture_assignment
+        for candidate in output_stores
+    ):
+        return False
+    returns = [
+        candidate
+        for candidate in ast.walk(function_node)
+        if isinstance(candidate, ast.Return)
+        and python_enclosing_scope(candidate, parents) is function_node
+    ]
+    if (
+        len(returns) != 1
+        or not on_unconditional_path(returns[0])
+        or not isinstance(returns[0].value, ast.Call)
+        or python_dotted_name(returns[0].value.func) != "subprocess.CompletedProcess"
+        or [python_dotted_name(argument) for argument in returns[0].value.args]
+        != ["command", "returncode", "stdout", "stderr"]
+        or returns[0].value.keywords
     ):
         return False
     keywords = {keyword.arg: keyword.value for keyword in node.keywords}
@@ -14177,7 +14280,7 @@ def reviewed_python_dynamic_path_value(node, tree=None, parents=None, seen=None)
             ):
                 assignments.append(candidate.value)
         return bool(assignments) and all(
-            reviewed_python_dynamic_path_value(value, tree, parents, seen.copy())
+            reviewed_python_dynamic_path_value(value, tree, parents, set(seen))
             for value in assignments
         )
     if isinstance(node, ast.JoinedStr):
@@ -14186,16 +14289,16 @@ def reviewed_python_dynamic_path_value(node, tree=None, parents=None, seen=None)
             or (
                 isinstance(value, ast.FormattedValue)
                 and reviewed_python_dynamic_path_value(
-                    value.value, tree, parents, seen.copy()
+                    value.value, tree, parents, set(seen)
                 )
             )
             for value in node.values
         )
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
         return reviewed_python_dynamic_path_value(
-            node.left, tree, parents, seen.copy()
+            node.left, tree, parents, set(seen)
         ) and reviewed_python_dynamic_path_value(
-            node.right, tree, parents, seen.copy()
+            node.right, tree, parents, set(seen)
         )
     return False
 
@@ -14261,6 +14364,14 @@ def reviewed_python_dynamic_call(
         and argument.elts[3].value == "import json; print(json.__file__)"
     ):
         return True
+    if (
+        python_dotted_name(node.func) == "subprocess.Popen"
+        and enclosing_python_function(node, parents) == "run_bounded_git_query"
+        and not reviewed_python_git_query_capture(
+            node, tree, parents, require_origin_comparison=False
+        )
+    ):
+        return False
     if (
         python_dotted_name(node.func) in python_command_functions
         and reviewed_python_git_command_origin(argument, tree, parents)
@@ -14468,7 +14579,7 @@ def reviewed_source_snapshot_path(node, tree, parents, seen=None):
             ):
                 continue
             if reviewed_source_snapshot_path(
-                candidate.value, tree, parents, seen.copy()
+                candidate.value, tree, parents, set(seen)
             ):
                 return True
         return False
@@ -15203,6 +15314,7 @@ def python_known_non_path_set_copy_receiver(node, tree, parents, active=None):
     """Prove .copy() receives a set from literals, builtins or set-preserving calls."""
     if active is None:
         active = set()
+
     if isinstance(node, ast.Set):
         return True
     if isinstance(node, ast.Call):
@@ -15232,6 +15344,8 @@ def python_known_non_path_set_copy_receiver(node, tree, parents, active=None):
     if not isinstance(node, ast.Name) or id(node) in active:
         return False
     scope = python_enclosing_scope(node, parents)
+    if scope is None:
+        return False
     key = (id(scope), node.id)
     if key in active:
         return False
@@ -15250,6 +15364,73 @@ def python_known_non_path_set_copy_receiver(node, tree, parents, active=None):
             isinstance(target, ast.Name) and target.id == node.id for target in targets
         ):
             assignments.append(value)
+
+    def target_binds_name(target):
+        if isinstance(target, ast.Name):
+            return target.id == node.id
+        if isinstance(target, ast.Starred):
+            return target_binds_name(target.value)
+        if isinstance(target, (ast.Tuple, ast.List)):
+            return any(target_binds_name(item) for item in target.elts)
+        return False
+
+    for candidate in ast.walk(scope):
+        if python_enclosing_scope(candidate, parents) is not scope:
+            continue
+        if isinstance(candidate, ast.Assign):
+            targets = candidate.targets
+            if any(
+                target_binds_name(target)
+                and not (isinstance(target, ast.Name) and target.id == node.id)
+                for target in targets
+            ):
+                return False
+        elif isinstance(candidate, (ast.For, ast.AsyncFor)):
+            if target_binds_name(candidate.target):
+                return False
+        elif isinstance(candidate, (ast.With, ast.AsyncWith)):
+            if any(
+                item.optional_vars is not None
+                and target_binds_name(item.optional_vars)
+                for item in candidate.items
+            ):
+                return False
+        elif isinstance(candidate, ast.ExceptHandler) and candidate.name == node.id:
+            return False
+        elif isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if (
+                candidate.name == node.id
+                and python_enclosing_scope(parents.get(candidate), parents) is scope
+            ):
+                return False
+        elif isinstance(candidate, ast.Import) and any(
+            (alias.asname or alias.name.split(".")[0]) == node.id
+            for alias in candidate.names
+        ):
+            return False
+        elif isinstance(candidate, ast.ImportFrom) and any(
+            (alias.asname or alias.name) == node.id
+            for alias in candidate.names
+        ):
+            return False
+        elif isinstance(candidate, (ast.MatchAs, ast.MatchStar)):
+            if candidate.name == node.id:
+                return False
+        elif isinstance(candidate, ast.MatchMapping) and candidate.rest == node.id:
+            return False
+        elif isinstance(candidate, (ast.Global, ast.Nonlocal)) and node.id in candidate.names:
+            return False
+
+    if isinstance(scope, ast.Module) and any(
+        isinstance(candidate, ast.Global) and node.id in candidate.names
+        for candidate in ast.walk(tree)
+    ):
+        return False
+    if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
+        isinstance(candidate, ast.Nonlocal) and node.id in candidate.names
+        for candidate in ast.walk(scope)
+    ):
+        return False
 
     def preserves_parameter(value, function, parameter_name, seen=None):
         if seen is None:
@@ -15578,7 +15759,7 @@ def python_path_receiver_expression(node, tree, parents, seen=None):
             return python_path_receiver_expression(node.func.value, tree, parents, seen)
         if any(
             python_path_receiver_expression(
-                returned, tree, parents, seen.copy()
+                returned, tree, parents, set(seen)
             )
             for returned in python_local_call_return_values(node, tree, parents)
         ):
@@ -15620,7 +15801,7 @@ def temporary_path_expression(node, tree, parents, seen=None):
         return False
     if seen is None:
         seen = set()
-    if reviewed_source_snapshot_path(node, tree, parents, seen.copy()):
+    if reviewed_source_snapshot_path(node, tree, parents, set(seen)):
         return True
     binding = temporary_directory_binding(node, parents)
     if binding is None:
@@ -15912,7 +16093,7 @@ def python_environment_mapping_state(node, tree, seen=None, parents=None):
         for key, value in zip(node.keys, node.values):
             if key is None:
                 unpacked_state = python_environment_mapping_state(
-                    value, tree, seen.copy(), parents
+                    value, tree, set(seen), parents
                 )
                 if unpacked_state != "safe":
                     return unpacked_state
@@ -15975,7 +16156,7 @@ def python_environment_mapping_state(node, tree, seen=None, parents=None):
             if any(isinstance(target, ast.Name) and target.id == node.id for target in targets):
                 states.append(
                     python_environment_mapping_state(
-                        candidate.value, tree, seen.copy(), parents
+                        candidate.value, tree, set(seen), parents
                     )
                 )
         if "unsafe" in states:
@@ -16824,7 +17005,7 @@ def python_reviewed_read_path(node, tree, parents, seen=None):
                 assignments.append(candidate.value)
         if assignments:
             return all(
-                python_reviewed_read_path(value, tree, parents, seen.copy())
+                python_reviewed_read_path(value, tree, parents, set(seen))
                 for value in assignments
             )
         if python_reviewed_read_path_parameter(node, tree, parents):
@@ -18376,7 +18557,7 @@ def python_regex_match_receiver(node, tree, seen=None):
         if isinstance(value, ast.Name):
             candidates = assignments.get(value.id, ())
             return bool(candidates) and all(
-                compiled_pattern(candidate, visited.copy())
+                compiled_pattern(candidate, set(visited))
                 for candidate in candidates
             )
         return False
@@ -18394,7 +18575,7 @@ def python_regex_match_receiver(node, tree, seen=None):
                 return True
             candidates = assignments.get(value.id, ())
             return bool(candidates) and all(
-                regex_match_callable(candidate, visited.copy())
+                regex_match_callable(candidate, set(visited))
                 for candidate in candidates
             )
         if isinstance(value, ast.Attribute) and value.attr in {
@@ -18418,7 +18599,7 @@ def python_regex_match_receiver(node, tree, seen=None):
                 iterable_bindings.get(value.id, ())
             )
             return bool(candidates) and all(
-                yields_match(candidate, visited.copy())
+                yields_match(candidate, set(visited))
                 for candidate in candidates
             )
         if isinstance(value, ast.Call):
@@ -18429,7 +18610,7 @@ def python_regex_match_receiver(node, tree, seen=None):
                 "sorted", "tuple",
             }:
                 return bool(value.args) and all(
-                    yields_match(argument, visited.copy())
+                    yields_match(argument, set(visited))
                     for argument in value.args
                 )
             if isinstance(value.func, ast.Name) and value.func.id == "map":
@@ -18437,16 +18618,16 @@ def python_regex_match_receiver(node, tree, seen=None):
                     return True
             if isinstance(value.func, ast.Name) and value.func.id == "zip":
                 return bool(value.args) and all(
-                    yields_match(argument, visited.copy()) for argument in value.args
+                    yields_match(argument, set(visited)) for argument in value.args
                 )
         if isinstance(value, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
-            return yields_match(value.elt, visited.copy()) and all(
-                yields_match(generator.iter, visited.copy())
+            return yields_match(value.elt, set(visited)) and all(
+                yields_match(generator.iter, set(visited))
                 for generator in value.generators
             )
         if isinstance(value, (ast.List, ast.Tuple, ast.Set)):
             return bool(value.elts) and all(
-                yields_match(element, visited.copy()) for element in value.elts
+                yields_match(element, set(visited)) for element in value.elts
             )
         return False
 
@@ -35424,3 +35605,66 @@ inert strings/AST mutations; only the reviewed scanner and local offline
 harness ran. This worker did not run the full harness, the packet-wide
 selector, Go/hosted CI or any live query. The coordinator owns those exact-head
 checks and independent reviews; no full-scan or merge approval is implied.
+
+#### Origin-capture self-audit and active-result correction from `a9d602e5`
+
+At entry, the exact `a9d602e5bce88545a8652e9d4286b35cea985fd4` packet
+selector had failed in 23.713s on one scanner self-audit finding: the literal
+integer check in `reviewed_python_git_origin_capture_is_compared` used a
+runtime `type(...)` construction. Before correcting it, the focused
+self-audit regression failed in 10.876s with
+`Python heredoc constructs or obtains an unreviewed runtime type`. The proof
+now checks an integer AST constant with `isinstance(..., int)` and excludes
+booleans explicitly; it introduces no runtime type construction.
+
+The same audit exposed two provenance gaps. An AST-only mutation moved the
+bounded collector under `if False` while making `process.communicate()` the
+active output source; its new focused check failed in 0.672s because the
+mutated source was accepted. The scanner now requires one unconditional
+`capture_git_query_output` assignment, explicit stdout/stderr pipes, and the
+single unconditional `CompletedProcess` return to carry those captured
+streams. The existing raw-output and origin-comparison checks still apply.
+The original `test_shell_origin_url_query_is_rejected_but_verifier_capture_remains`
+also now owns its expected URL, bounded pipe capture, and stdout/stderr
+accounting assertions again; those assertions had been placed after the
+unreachable return in the AST mutation helper.
+
+The Path mutation regression produced two failures in 0.138s for loop-target
+and nested-global rebinding of an ordinary set name to an unowned `Path`; the
+third destructuring form was already rejected by the scanner at this source.
+The receiver proof now refuses reassignment through those binding forms. A
+scanner self-audit run then found its own safe `seen.copy()` set clones as
+filesystem `Path.copy()` calls (the combined intermediate run failed after
+37.078s, and the focused retry failed after 47.426s). Internal visited-set
+clones in the scanner are now written as `set(...)`, preserving the
+filesystem-mutator check without a method-name exemption.
+
+The final focused run passed all five affected selectors in 45.850s:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_shell_origin_url_query_is_rejected_but_verifier_capture_remains \
+  Issue79RegressionTests.test_bounded_git_origin_capture_requires_reviewed_comparison_and_no_output_escape \
+  Issue79RegressionTests.test_origin_capture_checker_remains_self_audit_compatible \
+  Issue79RegressionTests.test_git_query_capture_must_be_on_the_active_result_path \
+  Issue79RegressionTests.test_new_path_mutators_require_owned_sources_and_destinations
+Ran 5 tests in 45.850s — OK
+```
+
+The active-result regression was then extended with a second inert AST
+mutation that moves the collector call below the `CompletedProcess` return.
+Its focused rerun passed in 0.741s, confirming the scanner refuses that
+unreachable collector placement as well:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_git_query_capture_must_be_on_the_active_result_path
+Ran 1 test in 0.741s — OK
+```
+
+The earlier 15-method focused result at `3e597eb2` remains the recorded
+119-compiler-helper/10-loader evidence; this correction ran the focused
+self-audit selector but did not rerun those broader selectors. The adversarial
+programs remained source strings and AST mutations. The coordinator owns the
+next exact-head packet scan and any full-suite validation; neither is claimed
+here.
