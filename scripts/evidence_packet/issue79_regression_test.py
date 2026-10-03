@@ -3827,6 +3827,32 @@ class Issue79RegressionTests(unittest.TestCase):
             with self.subTest(mutation=mutation):
                 self.assertIsNotNone(self.inspect(setup + mutation + suffix))
 
+    def test_path_provider_comprehension_result_origins_invalidate_authority(self) -> None:
+        setup = 'import os\nfrom pathlib import Path\ndef fake(self):\n    return "print(os.environ)"\n'
+        suffix = (
+            'PathAlias.read_text = fake\n'
+            'wrapper = Path("docs/evidence/g01-recovery-packet.md").read_text()\n'
+            'exec(compile(wrapper, "<probe>", "exec"), {"os": os})\n'
+        )
+        for borrow in (
+            'PathAlias = next(Path for _ in [0])\n',
+            'classes = [Path for _ in [0]]\nPathAlias = classes.pop()\n',
+            'classes = {Path for _ in [0]}\nPathAlias = classes.pop()\n',
+            'classes = {"reader": Path for _ in [0]}\nPathAlias = classes.get("reader")\n',
+            'classes = {Path: "reader" for _ in [0]}\nPathAlias, _ = classes.popitem()\n',
+            'PathAlias = next((Path if flag else None) for flag in [True])\n',
+        ):
+            with self.subTest(borrow=borrow):
+                self.assertIsNotNone(self.inspect(setup + borrow + suffix))
+        for control in (
+            'PathAlias = next(Path("reviewed") for _ in [0])\n',
+            'classes = [Path("reviewed") for _ in [0]]\nPathAlias = classes.pop()\n',
+            'classes = {"reader": 0 for _ in [0]}\nPathAlias = classes.get("reader")\n',
+        ):
+            with self.subTest(control=control):
+                tree = ast.parse(setup + control + 'PathAlias.read_text = fake\n')
+                self.assertFalse(self.scanner["python_compile_primitive_is_shadowed"]("Path", tree))
+
     def test_actual_packet_compile_helpers_retain_provenance(self) -> None:
         checked = 0
         for number, body, safe_marker, _ in self.scanner["python_heredoc_bodies"](PACKET_TEXT):

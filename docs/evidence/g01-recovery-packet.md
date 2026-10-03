@@ -10941,7 +10941,11 @@ def python_compile_primitive_is_shadowed(name, tree, provider_call=None):
         if isinstance(value, ast.IfExp):
             return any(provider_value_borrows_class(element, seen) for element in (value.body, value.orelse))
         if isinstance(value, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
-            return any(provider_value_borrows_class(generator.iter, seen) for generator in value.generators)
+            provider_result_values = (value.key, value.value) if isinstance(value, ast.DictComp) else (value.elt,)
+            return any(
+                provider_value_borrows_class(provider_result_value, seen)
+                for provider_result_value in provider_result_values
+            ) or any(provider_value_borrows_class(generator.iter, seen) for generator in value.generators)
         if isinstance(value, ast.Call):
             return (
                 isinstance(value.func, ast.Attribute)
@@ -32707,3 +32711,33 @@ the mismatch and correction. No artificial Go RED/GREEN, fresh protocol,
 runner or live result is claimed. Whitespace and added-line private-path/
 credential checks remain required; the final candidate's review must include
 this metadata delta. Product live authorization/evidence gates remain open.
+
+#### Comprehension result-origin correction
+
+Both independent GPT-6-Luna/max Codex reviews completed against immutable
+`0aac0dfcb4d4fd2c02be2a98db948fac55a3914b`. One approved the saved-reader,
+iterator and alias-cycle delta after inert negative probes and a positive
+helper-selection control. The other retained HOLD P1: class borrowing followed
+comprehension iterables but omitted their returned expressions. Consequently,
+`next(Path for _ in [0])` and `[Path for _ in [0]].pop()` could patch the
+reader class without invalidating packet-source authority. Both reports were
+processed, released without a process action and acknowledged. Neither report
+reviewed the later module-directive metadata correction.
+
+The new focused result-origin regression was RED: one method in 0.159s with
+six failed assertions covering generator, list, set, dictionary value,
+dictionary key and conditional yielded expressions. Three instance/scalar
+controls did not acquire class mutation taint. All programs stayed inert AST
+data. The minimal fix follows comprehension result expressions (both key and
+value for dictionaries), in addition to the existing iterable origins. It does
+not add compiler-input authority, dependencies or historical source revisions.
+
+The nine-method focused boundary group passed in 5.438s, including all 128
+actual packet compiler-helper calls and ten historical loader controls. The
+command is the eight-selector boundary group recorded above, prefixed with
+`Issue79RegressionTests.test_path_provider_comprehension_result_origins_invalidate_authority`.
+Whitespace and added-line private-path/credential checks are required for the
+batch. An exact-candidate packet selector and new independent dispositions
+covering both this result-origin fix and the pin metadata remain required before
+a stable push. Old packet passes and the prior scoped approval are not approval
+of this changed candidate. No live experiment or production Go change occurred.
