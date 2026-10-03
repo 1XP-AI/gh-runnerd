@@ -1049,6 +1049,19 @@ def git_command(arguments):
         "-c", "core.hooksPath=/dev/null",
         *arguments,
     ]
+
+
+root_git_environment = {
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_SYSTEM": "/dev/null",
+    "GIT_ATTR_NOSYSTEM": "1",
+    "GIT_CONFIG_COUNT": "2",
+    "GIT_CONFIG_KEY_0": "core.fsmonitor",
+    "GIT_CONFIG_VALUE_0": "false",
+    "GIT_CONFIG_KEY_1": "core.hooksPath",
+    "GIT_CONFIG_VALUE_1": "/dev/null",
+}
 loader_assignment_names = {
     "PATH",
     "LD_PRELOAD",
@@ -1096,7 +1109,7 @@ repo_root = Path(
     subprocess.check_output(
         git_command(["rev-parse", "--show-toplevel"]),
         cwd=invocation_root,
-        env=env,
+        env=root_git_environment,
         text=True,
     ).strip()
 ).resolve()
@@ -2206,7 +2219,9 @@ def create_immutable_source_snapshot(repo_root, module_dir, env):
     """Materialize reviewed source bytes into a private read-only test tree."""
     snapshot_directory = tempfile.TemporaryDirectory()
     snapshot_root = Path(snapshot_directory.name)
-    source_blobs = git_worktree_matches_pinned_blobs(repo_root, module_dir, env)
+    source_blobs = git_worktree_matches_pinned_blobs(
+        repo_root, module_dir, env=env
+    )
     directories = {Path(module_dir)}
     for relative_path, payload in sorted(source_blobs.items()):
         relative = Path(relative_path)
@@ -2244,10 +2259,21 @@ def create_immutable_source_snapshot(repo_root, module_dir, env):
 
 def recheck_reviewed_source_checkout(phase):
     """Recheck the reviewed tree, raw bytes, status and intent at a boundary."""
+    recheck_git_environment = {
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_ATTR_NOSYSTEM": "1",
+        "GIT_CONFIG_COUNT": "2",
+        "GIT_CONFIG_KEY_0": "core.fsmonitor",
+        "GIT_CONFIG_VALUE_0": "false",
+        "GIT_CONFIG_KEY_1": "core.hooksPath",
+        "GIT_CONFIG_VALUE_1": "/dev/null",
+    }
     source_tree = subprocess.run(
         git_command(["rev-parse", f"HEAD:{module_dir}"]),
         cwd=repo_root,
-        env=env,
+        env=recheck_git_environment,
         text=True,
         capture_output=True,
         check=False,
@@ -2256,22 +2282,39 @@ def recheck_reviewed_source_checkout(phase):
         raise SystemExit(f"{label}: {phase} source-tree query failed")
     if source_tree.stdout.strip() != reviewed_module_tree:
         raise SystemExit(f"{label}: {phase} source tree drifted from the reviewed pin")
-    git_worktree_matches_pinned_blobs(repo_root, module_dir, env)
-    source_status = run_bounded_git_status(repo_root, module_dir, env)
+    git_worktree_matches_pinned_blobs(
+        repo_root, module_dir, env=recheck_git_environment
+    )
+    source_status = run_bounded_git_status(
+        repo_root, module_dir, env=recheck_git_environment
+    )
     if source_status.returncode != 0 or source_status.stderr.strip():
         raise SystemExit(f"{label}: {phase} source status query failed")
     if source_status.stdout.strip():
         raise SystemExit(f"{label}: {phase} source checkout was not clean")
-    if git_source_control_entries(repo_root, module_dir, env):
+    if git_source_control_entries(
+        repo_root, module_dir, env=recheck_git_environment
+    ):
         raise SystemExit(f"{label}: {phase} source has intent-bit overrides")
 
 
 def package_initialization_guard():
     global go_repo_root, source_snapshot_directory, source_snapshot_root, source_snapshot_digest
+    package_git_environment = {
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_ATTR_NOSYSTEM": "1",
+        "GIT_CONFIG_COUNT": "2",
+        "GIT_CONFIG_KEY_0": "core.fsmonitor",
+        "GIT_CONFIG_VALUE_0": "false",
+        "GIT_CONFIG_KEY_1": "core.hooksPath",
+        "GIT_CONFIG_VALUE_1": "/dev/null",
+    }
     source_tree = subprocess.run(
         git_command(["rev-parse", f"HEAD:{module_dir}"]),
         cwd=repo_root,
-        env=env,
+        env=package_git_environment,
         text=True,
         capture_output=True,
         check=False,
@@ -2282,8 +2325,12 @@ def package_initialization_guard():
         raise SystemExit(
             f"{label}: package-initialization guard requires reviewed source tree"
         )
-    git_worktree_matches_pinned_blobs(repo_root, module_dir, env)
-    source_status = run_bounded_git_status(repo_root, module_dir, env)
+    git_worktree_matches_pinned_blobs(
+        repo_root, module_dir, env=package_git_environment
+    )
+    source_status = run_bounded_git_status(
+        repo_root, module_dir, env=package_git_environment
+    )
     if source_status.returncode != 0 or source_status.stderr.strip():
         raise SystemExit(f"{label}: package source status query failed")
     if source_status.stdout.strip():
@@ -2291,7 +2338,9 @@ def package_initialization_guard():
             f"{label}: package-initialization guard requires a clean source tree "
             "with no tracked, untracked or ignored paths"
         )
-    source_control_entries = git_source_control_entries(repo_root, module_dir, env)
+    source_control_entries = git_source_control_entries(
+        repo_root, module_dir, env=package_git_environment
+    )
     if source_control_entries:
         raise SystemExit(
             f"{label}: source has skip-worktree or assume-unchanged entries"
@@ -2303,7 +2352,9 @@ def package_initialization_guard():
         source_snapshot_directory,
         source_snapshot_root,
         source_snapshot_digest,
-    ) = create_immutable_source_snapshot(repo_root, module_dir, env)
+    ) = create_immutable_source_snapshot(
+        repo_root, module_dir, env=package_git_environment
+    )
     go_repo_root = source_snapshot_root
     verify_downloaded_module_sources()
     recheck_reviewed_source_checkout("after module download before metadata")
@@ -5522,14 +5573,30 @@ import unicodedata
 from pathlib import Path
 from urllib.parse import unquote
 
-files = subprocess.check_output(
-    [
+git_query_environment = {
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_SYSTEM": "/dev/null",
+    "GIT_ATTR_NOSYSTEM": "1",
+    "GIT_CONFIG_COUNT": "2",
+    "GIT_CONFIG_KEY_0": "core.fsmonitor",
+    "GIT_CONFIG_VALUE_0": "false",
+    "GIT_CONFIG_KEY_1": "core.hooksPath",
+    "GIT_CONFIG_VALUE_1": "/dev/null",
+}
+
+def git_command(arguments):
+    return [
         "/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1",
         "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
         "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects",
         "-P", "-c", "core.fsmonitor=false", "-c",
-        "core.hooksPath=/dev/null", "ls-files", "*.md",
-    ],
+        "core.hooksPath=/dev/null", *arguments,
+    ]
+
+files = subprocess.check_output(
+    git_command(["ls-files", "--", "*.md"]),
+    env=git_query_environment,
     text=True,
 ).splitlines()
 link = re.compile(r"(?<!!)" + re.escape("[") + r"[^]]*" + re.escape("]") + re.escape("(") + r"([^)]+)" + re.escape(")"))
@@ -5540,8 +5607,8 @@ def slug(value):
     value = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode()
     return re.sub(r"[^\w\s-]", "", value).replace(" ", "-").strip("-")
 
-def anchors(path):
-    return {slug(m.group(1)) for m in map(heading.match, path.read_text(encoding="utf-8").splitlines()) if m}
+def anchors(markdown):
+    return {slug(m.group(1)) for m in map(heading.match, markdown.splitlines()) if m}
 
 def markdown_outside_fences(markdown):
     in_fence = False
@@ -5573,29 +5640,42 @@ checked = 0
 repository_root = Path.cwd().resolve()
 for name in files:
     source = Path(name)
-    markdown = "\n".join(markdown_outside_fences(source.read_text(encoding="utf-8")))
+    if source.is_absolute() or ".." in source.parts:
+        errors.append(f"{name}: tracked Markdown path was not relative")
+        continue
+    if source.is_symlink():
+        errors.append(f"{name}: tracked Markdown path was a symlink")
+        continue
+    source_path = (repository_root / source).resolve()
+    try:
+        source_path.relative_to(repository_root)
+    except ValueError:
+        errors.append(f"{name}: tracked Markdown path escapes repository")
+        continue
+    markdown = "\n".join(markdown_outside_fences(source_path.read_text(encoding="utf-8")))
     for match in link.finditer(markdown):
         target = match.group(1).strip().strip("<>")
         if target.startswith(("http://", "https://", "mailto:")):
             continue
         if target.startswith("#"):
-            path, fragment = source, target[1:]
+            fragment = target[1:]
+            target = source.name
         else:
             target, separator, fragment = target.partition("#")
             if Path(target).is_absolute() or target.startswith(("~", "$HOME", "${HOME}")):
                 errors.append(f"{name}: absolute local link target is not allowed {target}")
                 continue
-            path = (source.parent / target).resolve()
             fragment = fragment if separator else None
-            try:
-                path.relative_to(repository_root)
-            except ValueError:
-                errors.append(f"{name}: local link target escapes repository {target}")
-                continue
+        path = (source.parent / target).resolve()
+        try:
+            path.relative_to(repository_root)
+        except ValueError:
+            errors.append(f"{name}: local link target escapes repository {target}")
+            continue
         checked += 1
         if not path.is_file():
             errors.append(f"{name}: missing target {target}")
-        elif fragment and slug(fragment) not in anchors(path):
+        elif fragment and slug(fragment) not in anchors(path.read_text(encoding="utf-8")):
             errors.append(f"{name}: missing anchor {path}#{fragment}")
 if errors:
     raise SystemExit("\n".join(errors))
@@ -6381,7 +6461,7 @@ mismatch. It runs from the repository root with literal subprocess arguments,
 so a missing or renamed build-tagged alternative cannot produce a false green.
 The `-tags=osusergo` case is intentionally included in that fail-closed set.
 
-```sh
+```text
 set -euo pipefail
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=false GIT_CONFIG_KEY_1=core.hooksPath GIT_CONFIG_VALUE_1=/dev/null
 # g01-safe-python-heredoc: reviewed synthetic Go test argv
@@ -6851,10 +6931,11 @@ Go files selected by the exact build tags, and rejects any active `func init`
 before source derivation. Because selector validation parses those source files
 instead of invoking `go test -list`, effectful package-level variable
 initializers and imported initialization paths cannot run before validation;
-package-source changes still require a new source-tree review. The guard audit
-was read-only and did not run test bodies or live resources:
+package-source changes still require a new source-tree review. The next
+block is the historical pre-isolation package-init audit, retained as inert
+source data with its original output; it is not a current prescription:
 
-```sh
+```text
 set -euo pipefail
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=false GIT_CONFIG_KEY_1=core.hooksPath GIT_CONFIG_VALUE_1=/dev/null
 # g01-safe-python-heredoc: reviewed synthetic Go metadata argv
@@ -13540,6 +13621,7 @@ def reviewed_python_git_argv_name_has_no_escape(node, tree, parents, scope):
             parent = parents.get(candidate)
             direct_assignment = (
                 isinstance(parent, ast.Assign)
+                and len(parent.targets) == 1
                 and candidate in parent.targets
                 or isinstance(parent, ast.AnnAssign)
                 and parent.target is candidate
@@ -15319,6 +15401,54 @@ def python_git_environment_values_are_isolated(values):
     )
 
 
+def reviewed_python_git_environment_argument(node, tree, parents):
+    """Recognize only a direct value passed to one statically bound env parameter."""
+    parent = parents.get(node)
+    if isinstance(parent, ast.keyword):
+        call = parents.get(parent)
+        argument_name = parent.arg
+    elif isinstance(parent, ast.Call) and node in parent.args:
+        call = parent
+        argument_name = None
+    else:
+        return False
+    if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name):
+        return False
+    function_name = call.func.id
+    call_scope = python_enclosing_scope(call, parents)
+    definitions = [
+        candidate for candidate in ast.walk(tree)
+        if isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and candidate.name == function_name
+        and python_enclosing_scope(parents.get(candidate), parents) is call_scope
+    ]
+    if len(definitions) != 1:
+        return False
+    definition = definitions[0]
+    for scope in python_lexical_scope_chain(call_scope, parents):
+        allowed = definition if scope is call_scope else None
+        if reviewed_python_git_name_bound_in_scope(
+            tree, parents, scope, function_name, allowed
+        ):
+            return False
+    parameters = list(definition.args.posonlyargs) + list(definition.args.args)
+    keyword_only = {parameter.arg for parameter in definition.args.kwonlyargs}
+    if argument_name is not None:
+        return argument_name == "env" and (
+            any(parameter.arg == "env" for parameter in parameters)
+            or "env" in keyword_only
+        ) and sum(keyword.arg == "env" for keyword in call.keywords) == 1
+    if any(isinstance(argument, ast.Starred) for argument in call.args):
+        return False
+    if any(keyword.arg == "env" for keyword in call.keywords):
+        return False
+    return any(
+        index < len(parameters) and parameters[index].arg == "env"
+        for index, argument in enumerate(call.args)
+        if argument is node
+    )
+
+
 def python_git_environment_isolated(node, tree, parents, seen=None):
     """Trace only literal Git config maps or the packet's two filtered child maps."""
     if seen is None:
@@ -15340,7 +15470,12 @@ def python_git_environment_isolated(node, tree, parents, seen=None):
             and candidate.id == node.id
             and python_enclosing_scope(candidate, parents) is not scope
         ):
-            return False
+            candidate_scope = python_enclosing_scope(candidate, parents)
+            if not reviewed_python_git_name_bound_in_scope(
+                tree, parents, candidate_scope, node.id
+            ):
+                return False
+            continue
         if python_enclosing_scope(candidate, parents) is not scope:
             continue
         if (
@@ -15359,6 +15494,10 @@ def python_git_environment_isolated(node, tree, parents, seen=None):
                 isinstance(parent, ast.keyword)
                 and parent.arg == "env"
                 and parent.value is candidate
+            ):
+                continue
+            if reviewed_python_git_environment_argument(
+                candidate, tree, parents
             ):
                 continue
             if (
@@ -15662,7 +15801,6 @@ python_reviewed_read_path_names = {
 # this packet. All other function parameters, including path-like names, are
 # rejected unless the function body assigns them from a reviewed path value.
 python_reviewed_read_path_parameters = {
-    ("anchors", "path"),
     ("assignment", "path"),
     ("git_worktree_matches_pinned_blobs", "repo_root"),
     ("git_worktree_matches_pinned_blobs", "relative_path"),
@@ -15702,8 +15840,8 @@ def python_reviewed_read_path_parameter(node, tree, parents):
     return (current.name, node.id) in python_reviewed_read_path_parameters
 
 
-def python_reviewed_markdown_file_value(node, tree):
-    """Prove the link checker Path(name) value came from Git's Markdown list."""
+def python_reviewed_markdown_file_value(node, tree, parents=None):
+    """Prove the link checker Path(name) value came from isolated Git output."""
     if not (
         isinstance(node, ast.Call)
         and python_dotted_name(node.func) in {"Path", "pathlib.Path"}
@@ -15713,48 +15851,261 @@ def python_reviewed_markdown_file_value(node, tree):
         and node.args[0].id == "name"
     ):
         return False
-    files_from_git = False
+    if parents is None:
+        parents = {
+            child: parent
+            for parent in ast.walk(tree)
+            for child in ast.iter_child_nodes(parent)
+        }
+    scope = python_enclosing_scope(node, parents)
+    files_assignments = []
     for candidate in ast.walk(tree):
-        if not isinstance(candidate, ast.Assign):
+        if not isinstance(candidate, (ast.Assign, ast.AnnAssign)):
             continue
-        if not any(
+        targets = candidate.targets if isinstance(candidate, ast.Assign) else [candidate.target]
+        if python_enclosing_scope(candidate, parents) is not scope:
+            continue
+        if any(
             isinstance(target, ast.Name) and target.id == "files"
-            for target in candidate.targets
+            for target in targets
         ):
-            continue
-        value = candidate.value
-        if (
-            isinstance(value, ast.Call)
-            and isinstance(value.func, ast.Attribute)
-            and value.func.attr == "splitlines"
-            and isinstance(value.func.value, ast.Call)
-        ):
-            value = value.func.value
-        if not (
-            isinstance(value, ast.Call)
-            and python_dotted_name(value.func) == "subprocess.check_output"
-            and value.args
-            and isinstance(value.args[0], (ast.List, ast.Tuple))
-            and [
-                item.value
-                for item in value.args[0].elts
-                if isinstance(item, ast.Constant)
-            ][:3]
-            == ["git", "ls-files", "*.md"]
-        ):
-            continue
-        files_from_git = True
-        break
-    if not files_from_git:
+            files_assignments.append(candidate)
+    if len(files_assignments) != 1:
         return False
-    return any(
-        isinstance(candidate, ast.For)
+    value = files_assignments[0].value
+    if not (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Attribute)
+        and value.func.attr == "splitlines"
+        and not value.args
+        and not value.keywords
+    ):
+        return False
+    query = value.func.value
+    if not (
+        isinstance(query, ast.Call)
+        and python_dotted_name(query.func) == "subprocess.check_output"
+        and query.args
+        and len(query.args) == 1
+        and reviewed_python_git_child_environment(query, tree, parents)
+    ):
+        return False
+    builder = query.args[0]
+    if not (
+        isinstance(builder, ast.Call)
+        and python_dotted_name(builder.func) == "git_command"
+        and len(builder.args) == 1
+        and not builder.keywords
+        and isinstance(builder.args[0], (ast.List, ast.Tuple))
+        and [
+            item.value for item in builder.args[0].elts
+            if isinstance(item, ast.Constant)
+        ] == ["ls-files", "--", "*.md"]
+        and reviewed_python_git_command_origin(builder, tree, parents)
+    ):
+        return False
+    files_targets = (
+        files_assignments[0].targets
+        if isinstance(files_assignments[0], ast.Assign)
+        else [files_assignments[0].target]
+    )
+    if not (
+        len(files_targets) == 1
+        and isinstance(files_targets[0], ast.Name)
+        and files_targets[0].id == "files"
+    ):
+        return False
+    source_loops = [
+        candidate
+        for candidate in ast.walk(tree)
+        if isinstance(candidate, ast.For)
         and isinstance(candidate.target, ast.Name)
         and candidate.target.id == "name"
         and isinstance(candidate.iter, ast.Name)
         and candidate.iter.id == "files"
+        and python_enclosing_scope(candidate, parents) is scope
+        and any(current is candidate for current in _python_parent_chain(node, parents))
+    ]
+    if len(source_loops) != 1:
+        return False
+    source_loop = source_loops[0]
+    files_names = [
+        candidate
         for candidate in ast.walk(tree)
+        if isinstance(candidate, ast.Name)
+        and candidate.id == "files"
+    ]
+    name_stores = [
+        candidate
+        for candidate in ast.walk(tree)
+        if isinstance(candidate, ast.Name)
+        and candidate.id == "name"
+        and isinstance(candidate.ctx, (ast.Store, ast.Del))
+    ]
+    return (
+        len(files_names) == 2
+        and files_targets[0] in files_names
+        and source_loop.iter in files_names
+        and len(name_stores) == 1
+        and name_stores[0] is source_loop.target
     )
+
+
+def python_reviewed_markdown_source_path(node, tree, parents):
+    """Allow tracked Markdown reads only after rejecting symlink/path escapes."""
+    if not isinstance(node, ast.Name) or node.id != "source_path":
+        return False
+    scope = python_enclosing_scope(node, parents)
+    source_loops = [
+        candidate for candidate in ast.walk(tree)
+        if isinstance(candidate, ast.For)
+        and isinstance(candidate.target, ast.Name)
+        and candidate.target.id == "name"
+        and isinstance(candidate.iter, ast.Name)
+        and candidate.iter.id == "files"
+        and python_enclosing_scope(candidate, parents) is scope
+        and any(current is candidate for current in _python_parent_chain(node, parents))
+    ]
+    if len(source_loops) != 1:
+        return False
+    source_loop = source_loops[0]
+
+    def inside_source_loop(candidate):
+        return any(
+            current is source_loop
+            for current in _python_parent_chain(candidate, parents)
+        )
+
+    source_assignments = [
+        candidate for candidate in ast.walk(tree)
+        if isinstance(candidate, ast.Assign)
+        and python_enclosing_scope(candidate, parents) is scope
+        and inside_source_loop(candidate)
+        and any(
+            isinstance(target, ast.Name) and target.id == "source"
+            for target in candidate.targets
+        )
+    ]
+    path_assignments = [
+        candidate for candidate in ast.walk(tree)
+        if isinstance(candidate, ast.Assign)
+        and python_enclosing_scope(candidate, parents) is scope
+        and inside_source_loop(candidate)
+        and any(
+            isinstance(target, ast.Name) and target.id == "source_path"
+            for target in candidate.targets
+        )
+    ]
+    root_assignments = [
+        candidate for candidate in ast.walk(tree)
+        if isinstance(candidate, ast.Assign)
+        and python_enclosing_scope(candidate, parents) is scope
+        and any(
+            isinstance(target, ast.Name) and target.id == "repository_root"
+            for target in candidate.targets
+        )
+    ]
+    if not (
+        len(source_assignments) == 1
+        and isinstance(source_assignments[0].value, ast.Call)
+        and python_reviewed_markdown_file_value(
+            source_assignments[0].value, tree, parents
+        )
+        and len(path_assignments) == 1
+        and isinstance(path_assignments[0].value, ast.Call)
+        and isinstance(path_assignments[0].value.func, ast.Attribute)
+        and path_assignments[0].value.func.attr == "resolve"
+        and not path_assignments[0].value.args
+        and not path_assignments[0].value.keywords
+        and isinstance(path_assignments[0].value.func.value, ast.BinOp)
+        and isinstance(path_assignments[0].value.func.value.op, ast.Div)
+        and isinstance(path_assignments[0].value.func.value.left, ast.Name)
+        and path_assignments[0].value.func.value.left.id == "repository_root"
+        and isinstance(path_assignments[0].value.func.value.right, ast.Name)
+        and path_assignments[0].value.func.value.right.id == "source"
+        and len(root_assignments) == 1
+        and isinstance(root_assignments[0].value, ast.Call)
+        and ast.dump(root_assignments[0].value, include_attributes=False)
+        == ast.dump(ast.parse("Path.cwd().resolve()", mode="eval").body, include_attributes=False)
+    ):
+        return False
+    if any(
+        isinstance(candidate, ast.Name)
+        and candidate.id == "source_path"
+        and isinstance(candidate.ctx, ast.Store)
+        and candidate is not next(
+            name for name in ast.walk(path_assignments[0])
+            if isinstance(name, ast.Name) and name.id == "source_path"
+        )
+        for candidate in ast.walk(tree)
+    ):
+        return False
+    read_position = (node.lineno, node.col_offset)
+
+    def before_read(candidate):
+        return (candidate.lineno, candidate.col_offset) < read_position
+
+    def has_continue(node):
+        return any(isinstance(child, ast.Continue) for child in node.body)
+
+    safe_path_guards = [
+        candidate for candidate in ast.walk(source_loop)
+        if isinstance(candidate, ast.If)
+        and before_read(candidate)
+        and has_continue(candidate)
+    ]
+    lexical_guard = False
+    symlink_guard = False
+    for candidate in safe_path_guards:
+        test = candidate.test
+        if (
+            isinstance(test, ast.BoolOp)
+            and isinstance(test.op, ast.Or)
+            and len(test.values) == 2
+            and isinstance(test.values[0], ast.Call)
+            and python_dotted_name(test.values[0].func) == "source.is_absolute"
+            and not test.values[0].args
+            and not test.values[0].keywords
+            and isinstance(test.values[1], ast.Compare)
+            and isinstance(test.values[1].left, ast.Constant)
+            and test.values[1].left.value == ".."
+            and len(test.values[1].ops) == 1
+            and isinstance(test.values[1].ops[0], ast.In)
+            and isinstance(test.values[1].comparators[0], ast.Attribute)
+            and test.values[1].comparators[0].attr == "parts"
+            and isinstance(test.values[1].comparators[0].value, ast.Name)
+            and test.values[1].comparators[0].value.id == "source"
+        ):
+            lexical_guard = True
+        if (
+            isinstance(test, ast.Call)
+            and python_dotted_name(test.func) == "source.is_symlink"
+            and not test.args
+            and not test.keywords
+        ):
+            symlink_guard = True
+    containment_guard = any(
+        isinstance(candidate, ast.Try)
+        and candidate.end_lineno < node.lineno
+        and any(
+            isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Call)
+            and python_dotted_name(statement.value.func) == "source_path.relative_to"
+            and len(statement.value.args) == 1
+            and isinstance(statement.value.args[0], ast.Name)
+            and statement.value.args[0].id == "repository_root"
+            for statement in candidate.body
+        )
+        and any(
+            isinstance(handler.type, ast.Name)
+            and handler.type.id == "ValueError"
+            and has_continue(handler)
+            for handler in candidate.handlers
+        )
+        and not python_try_in_unreachable_if_body(candidate, parents)
+        for candidate in ast.walk(source_loop)
+    )
+    return lexical_guard and symlink_guard and containment_guard
 
 
 def python_reviewed_read_path(node, tree, parents, seen=None):
@@ -16608,7 +16959,10 @@ def python_reviewed_go_package_directory(node, tree, parents):
         and isinstance(check_output_keywords["cwd"], ast.Name)
         and check_output_keywords["cwd"].id == "invocation_root"
         and isinstance(check_output_keywords["env"], ast.Name)
-        and check_output_keywords["env"].id == "env"
+        and check_output_keywords["env"].id == "root_git_environment"
+        and python_git_environment_isolated(
+            check_output_keywords["env"], tree, parents
+        )
         and isinstance(check_output_keywords["text"], ast.Constant)
         and check_output_keywords["text"].value is True
     ):
@@ -16664,11 +17018,18 @@ def python_reviewed_go_package_directory(node, tree, parents):
         and snapshot_binding is not None
         and isinstance(snapshot_binding.value, ast.Call)
         and python_dotted_name(snapshot_binding.value.func) == "create_immutable_source_snapshot"
-        and len(snapshot_binding.value.args) == 3
+        and len(snapshot_binding.value.args) == 2
         and [
             argument.id for argument in snapshot_binding.value.args
             if isinstance(argument, ast.Name)
-        ] == ["repo_root", "module_dir", "env"]
+        ] == ["repo_root", "module_dir"]
+        and len(snapshot_binding.value.keywords) == 1
+        and snapshot_binding.value.keywords[0].arg == "env"
+        and isinstance(snapshot_binding.value.keywords[0].value, ast.Name)
+        and snapshot_binding.value.keywords[0].value.id == "package_git_environment"
+        and python_git_environment_isolated(
+            snapshot_binding.value.keywords[0].value, tree, parents
+        )
         and root_binding is not None
         and isinstance(root_binding.value, ast.Name)
         and root_binding.value.id == "source_snapshot_root"
@@ -16927,7 +17288,7 @@ def python_reviewed_markdown_link_target_path(node, tree, parents):
             for target in candidate.targets
         )
         and isinstance(candidate.value, ast.Call)
-        and python_reviewed_markdown_file_value(candidate.value, tree)
+        and python_reviewed_markdown_file_value(candidate.value, tree, parents)
         for candidate in ast.walk(source_loop)
     )
     target_from_link_text = any(
@@ -17070,6 +17431,10 @@ def python_reviewed_markdown_link_target_path(node, tree, parents):
 def python_reviewed_path_reader(node, method, tree, parents):
     if python_reviewed_read_path(node, tree, parents):
         return True
+    if method == "read_text" and python_reviewed_markdown_source_path(
+        node, tree, parents
+    ):
+        return True
     if method in {"glob", "rglob", "iterdir", "walk", "is_dir"} and (
         python_reviewed_go_package_directory(node, tree, parents)
     ):
@@ -17078,7 +17443,7 @@ def python_reviewed_path_reader(node, method, tree, parents):
         node, tree, parents
     ):
         return True
-    return method == "is_file" and python_reviewed_markdown_link_target_path(
+    return method in {"is_file", "read_text"} and python_reviewed_markdown_link_target_path(
         node, tree, parents
     )
 
@@ -20197,7 +20562,7 @@ sanitized synthetic environment; the historical Git probe used a temporary
 repository only and did not touch this worktree. The exact command is retained
 below for reproducibility:
 
-```sh
+```text
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
 [ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
@@ -22134,7 +22499,7 @@ after supplying inherited custom `GOSUMDB`/`GOPROXY`, proving that the old
 wrapper neither refused the trust settings nor queried effective `GOVERSION`.
 No Go child, test body, live operation or credential-bearing process ran.
 
-```sh
+```text
 set -euo pipefail
 export PATH=/opt/homebrew/bin:/usr/bin:/bin
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
@@ -22380,6 +22745,29 @@ for inherited, assignment, expected in (({"GOSUMDB": "sum.invalid+deadbeef"}, ()
         os.environ.clear()
         os.environ.update(saved_env)
 
+git_query_environment = {
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_SYSTEM": "/dev/null",
+    "GIT_ATTR_NOSYSTEM": "1",
+    "GIT_CONFIG_COUNT": "2",
+    "GIT_CONFIG_KEY_0": "core.fsmonitor",
+    "GIT_CONFIG_VALUE_0": "false",
+    "GIT_CONFIG_KEY_1": "core.hooksPath",
+    "GIT_CONFIG_VALUE_1": "/dev/null",
+}
+
+
+def git_command(arguments):
+    return [
+        "/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1",
+        "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+        "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects",
+        "-P", "-c", "core.fsmonitor=false", "-c",
+        "core.hooksPath=/dev/null", *arguments,
+    ]
+
+
 with tempfile.TemporaryDirectory() as td:
     root = Path(td)
     env = {"PATH": "/opt/homebrew/bin:/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null", "HOME": td}
@@ -22392,8 +22780,14 @@ with tempfile.TemporaryDirectory() as td:
     hook.write_text(f"#!/bin/sh\nprintf invoked > {marker}\nprintf 'builtin:fake\\n'\n", encoding="utf-8")
     hook.chmod(0o700)
     subprocess.run(["git", "config", "core.fsmonitor", str(hook)], cwd=root, env=env, check=True)
-    guarded = ["git", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching", "--", "."]
-    result = subprocess.run(guarded, cwd=root, env=env, capture_output=True, text=True, check=False)
+    guarded = git_command([
+        "status", "--porcelain=v1", "--untracked-files=all",
+        "--ignored=matching", "--", ".",
+    ])
+    result = subprocess.run(
+        guarded, cwd=root, env=git_query_environment,
+        capture_output=True, text=True, check=False,
+    )
     if result.returncode != 0 or marker.exists():
         raise SystemExit("guarded status invoked configured fsmonitor hook")
 print("GREEN focused packet regression: passed; all source-status/intent Git queries use core.fsmonitor=false and core.hooksPath=/dev/null with isolated config; inherited/command custom GOSUMDB/GOPROXY refused before child, reviewed trust/effective GOVERSION query and identity binding present; subprocess/os aliases and unresolved command-capable calls fail closed; no Go/live child started")
@@ -22637,7 +23031,7 @@ parent's static scanner text, synthetic shell/AST inputs and a temporary Git
 repository; it did not execute the Python heredoc body, a forbidden command, a
 Go child or any live operation:
 
-```sh
+```text
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
 [ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
@@ -23546,8 +23940,9 @@ synthetic temporary Git repository for the mutation witness, and patched child
 boundaries. It uses a short synthetic deadline and a reduced test byte cap, so
 it never waits for the reviewed 300-second deadline and starts no compiler, Go
 child, test body, workflow, live operation or credential-bearing process.
+This retained probe is historical source data, not a current run prescription.
 
-```sh
+```text
 set -euo pipefail
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
 [ -z "${LD_PRELOAD-}" ] && [ -z "${LD_PRELOAD_32-}" ] && [ -z "${LD_PRELOAD_64-}" ] && [ -z "${LD_LIBRARY_PATH-}" ] && [ -z "${LD_LIBRARY_PATH_32-}" ] && [ -z "${LD_LIBRARY_PATH_64-}" ] && [ -z "${LD_AUDIT-}" ] && [ -z "${DYLD_INSERT_LIBRARIES-}" ] && [ -z "${DYLD_LIBRARY_PATH-}" ] && [ -z "${DYLD_FALLBACK_LIBRARY_PATH-}" ] && [ -z "${DYLD_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_FALLBACK_FRAMEWORK_PATH-}" ] && [ -z "${DYLD_ROOT_PATH-}" ] || { printf '%s\n' 'inherited dynamic-loader hooks are not allowed before Python startup' >&2; exit 1; }
@@ -24262,7 +24657,7 @@ Git delegation strings were passed only to pure token functions; the parent
 wrapper's prospective Go-child environment was inspected without starting Go,
 and the temporary fsmonitor hook was the only synthetic external Git behavior.
 
-```sh
+```text
 set -euo pipefail
 # g01-safe-python-heredoc: reviewed immutable-parent fresh-P2 red probes
 [ "${PATH-}" = "/opt/homebrew/bin:/usr/bin:/bin" ] && [ -x /opt/homebrew/bin/python3 ] || { printf '%s\n' 'reviewed canonical PATH and absolute Python interpreter required' >&2; exit 1; }
@@ -33850,3 +34245,143 @@ and the added-line path/credential scan examined 230 lines with zero matches.
 Independent final-source review and the coordinator packet selector remain
 required before a candidate can be considered complete. These focused checks
 do not claim a universal Python sandbox or resolve broader live-operation gates.
+
+#### Writer bounded executable-prescription correction at local 3b7202bc
+
+At entry on 2026-10-03, local `HEAD` was
+`3b7202bca95d647e495363703b0a805d58c52d2e`; the worktree was clean. The
+coordinator's frozen packet selector had failed one test in 43.662s with ten
+violations; this worker did not rerun that selector, the full harness, or any
+live command. Edits remained limited to this packet and
+`scripts/evidence_packet/issue79_regression_test.py`.
+
+The compatibility correction makes the currently executable Go wrapper pass
+the literal isolated Git environment to source-root lookup, package
+initialization, checkout rechecks, status, intent-bit, raw-blob and snapshot
+queries. Scope-specific environment names keep the read-only path proof
+distinct from function-local maps; the proof now checks the exact two-argument
+snapshot call and its isolated `env` keyword. The environment checker accepts
+only a direct positional/keyword value passed to one statically bound `env`
+parameter, then follows all helper callers; captured outer maps and extra uses
+remain refused.
+
+The current Markdown audit retains an executable canonical `git_command` and
+the complete isolated environment. It reads only paths from the literal
+`git ls-files -- "*.md"` selection, rejects absolute, parent-traversal and
+symlink names, resolves each source under the repository root before reading,
+and checks resolved link targets inside the same root. The broad
+`anchors(path)` parameter exception was removed; anchors now consume Markdown
+text. An inert `anchors(path)` plus synthetic private-file disclosure witness
+is refused. The current temporary-repository fsmonitor control remains an
+executable probe; its status query now uses the same canonical builder and
+isolated environment, while fixture setup stays scoped to its temporary tree.
+
+The argv regression now includes the concrete sibling-alias witness
+`argv = saved = git_command([...]); saved[:] = ["/usr/bin/git", "status"];
+subprocess.run(argv, env=git_environment)`. It was RED as one unexpected
+acceptance (one method, 0.163s). A canonical argv assignment must now have one
+target, so chained bindings and their aliases cannot mutate a certified
+command. Parameterized safe environments and canonical direct/helper flows
+remain covered; an inner capture of the outer environment remains refused.
+
+Older selector, package-init, exact-parent red and focused-Git transcript
+blocks that predate these guards are now fenced as `text`. Their code and
+recorded output are unchanged. The selector regression checks those historical
+fences, and a separate static recipe selector ensures the active wrapper,
+Markdown checker and synthetic Git control remain executable and accepted.
+
+The final seven-method focused command passed in 4.679s. It covered
+`test_python_git_queries_require_isolated_environment_and_known_builder`,
+`test_python_git_builder_rebinding_is_not_certified`,
+`test_python_git_argv_mutation_is_not_certified`,
+`test_current_executable_recipes_keep_git_and_path_provenance`,
+`test_unbound_anchor_reader_cannot_read_or_disclose_paths`,
+`test_historical_unsafe_git_transcripts_are_inert_source_text`, and
+`test_markdown_link_containment_guard_must_be_direct_and_reachable`. The
+dedicated compile-helper and historical-loader controls each also passed once;
+the helper control reported 119 calls, while earlier shared evidence of 128
+compiler-helper checks and ten loader exports remains unchanged. The path
+fixture was updated to model the current tracked-file and containment proof;
+its negative variants still reject unreachable, nested, rebound and
+pre-assignment guards.
+
+The correction has no new source revisions, compiler-input names or helper
+whitelists. Review specimens were parsed as source data only; no hook,
+adversarial body, Go child, packet selector, full suite or live resource was
+executed. Final whitespace/private-path hygiene, local commit and exact
+candidate SHA are reported at handoff; coordinator-owned packet and independent
+review gates remain outstanding.
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_python_git_queries_require_isolated_environment_and_known_builder \
+  Issue79RegressionTests.test_python_git_builder_rebinding_is_not_certified \
+  Issue79RegressionTests.test_python_git_argv_mutation_is_not_certified \
+  Issue79RegressionTests.test_current_executable_recipes_keep_git_and_path_provenance \
+  Issue79RegressionTests.test_unbound_anchor_reader_cannot_read_or_disclose_paths \
+  Issue79RegressionTests.test_historical_unsafe_git_transcripts_are_inert_source_text \
+  Issue79RegressionTests.test_markdown_link_containment_guard_must_be_direct_and_reachable
+Ran 7 tests in 4.679s — OK
+```
+
+#### Follow-up Markdown source-list provenance closure at local 3b7202bc
+
+A bounded AST-data probe found three accepted mutations of the active Markdown
+link audit: appending a path to the Git-derived `files` list, appending through
+a saved alias, and rebinding the `name` loop target before `Path(name)`. The
+new `test_markdown_source_paths_cannot_escape_git_list_origin` first accepted
+the unchanged recipe and then failed on all three mutations in 0.399s; no
+mutated source body was executed. An added nested-helper mutation was also
+accepted and failed its regression in 0.387s. The scanner now requires exactly
+the Git query assignment and its one `for name in files` consumer, with no
+other `files` references or `name` stores/deletes anywhere in the heredoc,
+including nested scopes. This keeps the existing tracked-Markdown recipe
+accepted while rejecting direct and aliased list mutation, closure mutation
+and loop-target reassignment.
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_markdown_source_paths_cannot_escape_git_list_origin \
+  Issue79RegressionTests.test_current_executable_recipes_keep_git_and_path_provenance \
+  Issue79RegressionTests.test_unbound_anchor_reader_cannot_read_or_disclose_paths \
+  Issue79RegressionTests.test_markdown_link_containment_guard_must_be_direct_and_reachable \
+  Issue79RegressionTests.test_python_git_queries_require_isolated_environment_and_known_builder \
+  Issue79RegressionTests.test_python_git_builder_rebinding_is_not_certified \
+  Issue79RegressionTests.test_python_git_argv_mutation_is_not_certified \
+  Issue79RegressionTests.test_historical_unsafe_git_transcripts_are_inert_source_text
+Ran 8 tests in 4.770s — OK
+
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_actual_packet_compile_helpers_retain_provenance \
+  Issue79RegressionTests.test_historic_scanner_loaders_export_only_their_required_helpers
+Ran 2 tests in 5.203s — OK
+packet compile-source boundary: 119 actual helper calls checked
+```
+
+After extending the proof to reject nested-scope references, the final bounded
+combined run executed the same eight path/Git/history selectors together with
+the two actual-helper and historic-loader controls above:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_markdown_source_paths_cannot_escape_git_list_origin \
+  Issue79RegressionTests.test_current_executable_recipes_keep_git_and_path_provenance \
+  Issue79RegressionTests.test_unbound_anchor_reader_cannot_read_or_disclose_paths \
+  Issue79RegressionTests.test_markdown_link_containment_guard_must_be_direct_and_reachable \
+  Issue79RegressionTests.test_python_git_queries_require_isolated_environment_and_known_builder \
+  Issue79RegressionTests.test_python_git_builder_rebinding_is_not_certified \
+  Issue79RegressionTests.test_python_git_argv_mutation_is_not_certified \
+  Issue79RegressionTests.test_historical_unsafe_git_transcripts_are_inert_source_text \
+  Issue79RegressionTests.test_actual_packet_compile_helpers_retain_provenance \
+  Issue79RegressionTests.test_historic_scanner_loaders_export_only_their_required_helpers
+Ran 10 tests in 10.087s — OK
+packet compile-source boundary: 119 actual helper calls checked
+```
+
+No new compiler input or source revision was added. These focused selectors
+preserved the active recipes and 119 actual helper checks plus the historical
+loader controls; they are not a full harness or packet-wide scan. Final
+whitespace and added-line private-path/credential hygiene, the exact local
+commit state and coordinator-owned packet/review gates are reported at handoff.
+Final `git diff --check` passed; the added-line personal-path, credential-token
+and private-key pattern scan covered 798 lines with zero matches.

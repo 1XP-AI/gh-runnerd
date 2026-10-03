@@ -557,6 +557,17 @@ class Issue79RegressionTests(unittest.TestCase):
     def inspect(self, code: str) -> str | None:
         return self.scanner["inspect_python_heredoc"](code, False)  # type: ignore[operator]
 
+    def packet_heredoc_containing(self, *fragments: str) -> tuple[str, bool]:
+        matches = [
+            (body, marker)
+            for _number, body, marker, _invocation in self.scanner[
+                "python_heredoc_bodies"
+            ](PACKET_TEXT)  # type: ignore[operator]
+            if all(fragment in body for fragment in fragments)
+        ]
+        self.assertEqual(1, len(matches), f"expected one packet heredoc containing {fragments!r}")
+        return matches[0]
+
     def markdown_link_target_path_is_reviewed(self, code: str) -> bool:
         tree = ast.parse(code, filename="<markdown-link-check-specimen>")
         parents = {
@@ -580,41 +591,55 @@ class Issue79RegressionTests(unittest.TestCase):
         canonical = (
             'import subprocess\n'
             'from pathlib import Path\n'
-            'files = subprocess.check_output(["git", "ls-files", "*.md"], text=True).splitlines()\n'
+            'git_query_environment = {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null", "GIT_ATTR_NOSYSTEM": "1", "GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "core.fsmonitor", "GIT_CONFIG_VALUE_0": "false", "GIT_CONFIG_KEY_1": "core.hooksPath", "GIT_CONFIG_VALUE_1": "/dev/null"}\n'
+            'def git_command(arguments):\n'
+            '    return ["/usr/bin/env", "-i", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_ATTR_NOSYSTEM=1", "/usr/bin/git", "--no-replace-objects", "-P", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", *arguments]\n'
+            'files = subprocess.check_output(git_command(["ls-files", "--", "*.md"]), env=git_query_environment, text=True).splitlines()\n'
             'repository_root = Path.cwd().resolve()\n'
             'for name in files:\n'
             '    source = Path(name)\n'
-            '    markdown = source.read_text(encoding="utf-8")\n'
+            '    if source.is_absolute() or ".." in source.parts:\n'
+            '        continue\n'
+            '    if source.is_symlink():\n'
+            '        continue\n'
+            '    source_path = (repository_root / source).resolve()\n'
+            '    try:\n'
+            '        source_path.relative_to(repository_root)\n'
+            '    except ValueError:\n'
+            '        continue\n'
+            '    markdown = source_path.read_text(encoding="utf-8")\n'
             '    for match in link.finditer(markdown):\n'
             '        target = match.group(1).strip().strip("<>")\n'
             '        if target.startswith("#"):\n'
-            '            path, fragment = source, target[1:]\n'
+            '            fragment = target[1:]\n'
+            '            target = source.name\n'
             '        else:\n'
             '            target, separator, fragment = target.partition("#")\n'
-            '            path = (source.parent / target).resolve()\n'
-            '            try:\n'
-            '                path.relative_to(repository_root)\n'
-            '            except ValueError:\n'
-            '                continue\n'
+            '            fragment = fragment if separator else None\n'
+            '        path = (source.parent / target).resolve()\n'
+            '        try:\n'
+            '            path.relative_to(repository_root)\n'
+            '        except ValueError:\n'
+            '            continue\n'
             '        if not path.is_file():\n'
             '            errors.append(target)\n'
         )
         nested_relative_to = canonical.replace(
+            '            path.relative_to(repository_root)\n',
+            '            if False:\n'
             '                path.relative_to(repository_root)\n',
-            '                if False:\n'
-            '                    path.relative_to(repository_root)\n',
             1,
         )
         unreachable_try = canonical.replace(
+            '        try:\n'
+            '            path.relative_to(repository_root)\n'
+            '        except ValueError:\n'
+            '            continue\n',
+            '        if False:\n'
             '            try:\n'
             '                path.relative_to(repository_root)\n'
             '            except ValueError:\n'
             '                continue\n',
-            '            if False:\n'
-            '                try:\n'
-            '                    path.relative_to(repository_root)\n'
-            '                except ValueError:\n'
-            '                    continue\n',
             1,
         )
         path_rebound_after_guard = canonical.replace(
@@ -624,16 +649,16 @@ class Issue79RegressionTests(unittest.TestCase):
             1,
         )
         guard_before_approved_path_assignment = canonical.replace(
-            '            path = (source.parent / target).resolve()\n'
-            '            try:\n'
-            '                path.relative_to(repository_root)\n'
-            '            except ValueError:\n'
-            '                continue\n',
-            '            try:\n'
-            '                path.relative_to(repository_root)\n'
-            '            except ValueError:\n'
-            '                continue\n'
-            '            path = (source.parent / target).resolve()\n',
+            '        path = (source.parent / target).resolve()\n'
+            '        try:\n'
+            '            path.relative_to(repository_root)\n'
+            '        except ValueError:\n'
+            '            continue\n',
+            '        try:\n'
+            '            path.relative_to(repository_root)\n'
+            '        except ValueError:\n'
+            '            continue\n'
+            '        path = (source.parent / target).resolve()\n',
             1,
         )
         self.assertNotEqual(canonical, nested_relative_to)
@@ -3622,6 +3647,113 @@ class Issue79RegressionTests(unittest.TestCase):
             )
         )
 
+    def test_current_executable_recipes_keep_git_and_path_provenance(self) -> None:
+        recipes = (
+            (
+                "current bounded Go wrapper Git queries",
+                (
+                    "def git_source_control_entries(repo_root, module_dir, env):",
+                    "def git_command(arguments):",
+                    "package_initialization_guard()",
+                ),
+            ),
+            (
+                "current Markdown link audit",
+                (
+                    'files = subprocess.check_output(',
+                    "def anchors(markdown):",
+                    "source_path.read_text(encoding=\"utf-8\")",
+                ),
+            ),
+            (
+                "current synthetic Git hook control",
+                (
+                    'marker = root / "fsmonitor-invoked"',
+                    'guarded = git_command([',
+                    '"core.hooksPath=/dev/null", *arguments',
+                    'print("GREEN focused packet regression:',
+                ),
+            ),
+        )
+        for label, fragments in recipes:
+            with self.subTest(recipe=label):
+                body, marker = self.packet_heredoc_containing(*fragments)
+                self.assertIsNone(
+                    self.scanner["inspect_python_heredoc"](body, marker),  # type: ignore[operator]
+                    label,
+                )
+
+    def test_markdown_source_paths_cannot_escape_git_list_origin(self) -> None:
+        body, marker = self.packet_heredoc_containing(
+            'files = subprocess.check_output(',
+            'def anchors(markdown):',
+            'source_path.read_text(encoding="utf-8")',
+        )
+        inspect = self.scanner["inspect_python_heredoc"]
+        self.assertIsNone(inspect(body, marker))  # type: ignore[operator]
+        mutations = {
+            "direct append": body.replace(
+                'repository_root = Path.cwd().resolve()\n',
+                'files.append("experiments/g01-scaleset/.env")\n'
+                'repository_root = Path.cwd().resolve()\n',
+                1,
+            ),
+            "saved-list append": body.replace(
+                'repository_root = Path.cwd().resolve()\n',
+                'files_alias = files\n'
+                'files_alias.append("experiments/g01-scaleset/.env")\n'
+                'repository_root = Path.cwd().resolve()\n',
+                1,
+            ),
+            "nested mutator": body.replace(
+                'repository_root = Path.cwd().resolve()\n',
+                'def append_untracked_path():\n'
+                '    files.append("experiments/g01-scaleset/.env")\n'
+                'append_untracked_path()\n'
+                'repository_root = Path.cwd().resolve()\n',
+                1,
+            ),
+            "loop variable rebound": body.replace(
+                '    source = Path(name)\n',
+                '    name = "experiments/g01-scaleset/.env"\n'
+                '    source = Path(name)\n',
+                1,
+            ),
+        }
+        for label, source in mutations.items():
+            with self.subTest(mutation=label):
+                self.assertIsNotNone(
+                    inspect(source, marker),  # type: ignore[operator]
+                    f"Markdown read lost Git-list provenance after {label}",
+                )
+
+    def test_unbound_anchor_reader_cannot_read_or_disclose_paths(self) -> None:
+        self.assertIsNotNone(self.inspect(
+            'from pathlib import Path\n'
+            'def anchors(path):\n'
+            '    return path.read_text(encoding="utf-8")\n'
+            'print(anchors(Path("synthetic-private/file")))\n'
+        ))
+
+    def test_historical_unsafe_git_transcripts_are_inert_source_text(self) -> None:
+        historical_sections = (
+            "The four focused offline selector checks below are historical list-only source",
+            "block is the historical pre-isolation package-init audit",
+            "The red extraction and assertions were run from the immutable parent with a",
+            "The three red probes ran first against the exact immutable parent.",
+            "The red probe ran first against the exact immutable parent. It used only the\nparent's static scanner text",
+            "The focused green probe uses fake Go Popen objects backed by synthetic pipes",
+            "The red probes ran first against immutable parent\n`3f6de0b227e4b44aa3d5e259e937e7dc1f0856bb`",
+        )
+        for section in historical_sections:
+            with self.subTest(section=section):
+                section_start = PACKET_TEXT.index(section)
+                fence_start = PACKET_TEXT.index("```", section_start)
+                self.assertTrue(
+                    PACKET_TEXT.startswith("```text", fence_start),
+                    "historical executable examples must be visibly inert source text",
+                )
+
     def test_python_git_queries_require_isolated_environment_and_known_builder(self) -> None:
         unsafe = (
             'import subprocess\n'
@@ -3663,6 +3795,27 @@ class Issue79RegressionTests(unittest.TestCase):
             'subprocess.run(git_command(["status", "--short"]), env=git_environment)\n'
         )
         self.assertIsNone(self.inspect(canonical))
+        direct_call = 'subprocess.run(git_command(["status", "--short"]), env=git_environment)'
+        self.assertIsNone(
+            self.inspect(
+                canonical.replace(
+                    direct_call,
+                    'def query(env):\n'
+                    '    subprocess.run(git_command(["status", "--short"]), env=env)\n'
+                    'query(git_environment)',
+                )
+            )
+        )
+        self.assertIsNotNone(
+            self.inspect(
+                canonical.replace(
+                    direct_call,
+                    'def query():\n'
+                    '    subprocess.run(git_command(["status", "--short"]), env=git_environment)\n'
+                    'query()',
+                )
+            )
+        )
         self.assertIsNotNone(
             self.inspect(canonical.rsplit("subprocess.run(", 1)[0]
                          + 'subprocess.run(git_command(["status", "--short"]))\n')
@@ -3807,6 +3960,15 @@ class Issue79RegressionTests(unittest.TestCase):
             'wrapper()\n'
         )
         self.assertIsNotNone(self.inspect(prelude + nonlocal_mutation))
+        chained_alias = (
+            prelude.replace(
+                'argv = git_command(["status", "--short"])\n',
+                'argv = saved_argv = git_command(["status", "--short"])\n',
+            )
+            + 'saved_argv[:] = ["/usr/bin/git", "status"]\n'
+            + call
+        )
+        self.assertIsNotNone(self.inspect(chained_alias))
 
     def test_warning_sink_and_absolute_path_do_not_disclose_local_data(self) -> None:
         self.assertIsNotNone(self.inspect(
