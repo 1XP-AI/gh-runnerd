@@ -10956,7 +10956,8 @@ def python_compile_provenance(tree):
                     and all(isinstance(argument, ast.Constant) for argument in node.args)
                     and node.args[0].value == 'source = Path("docs/evidence/g01-recovery-packet.md").read_text(encoding="utf-8")'
                     and node.args[1].value in {'source = ""', 'source = packet'}
-                    and type(node.args[2].value) is int and node.args[2].value == 1
+                    and isinstance(node.args[2].value, int) and not isinstance(node.args[2].value, bool)
+                    and node.args[2].value == 1
                 )
             if isinstance(node.func, ast.Attribute) and node.func.attr == "read_text":
                 receiver = node.func.value
@@ -25879,9 +25880,15 @@ def load_scanner(text):
         'source = ""',
         1,
     )
-    namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
-    exec(compile(scanner, "<nine-finding-scanner>", "exec"), namespace)
-    return namespace
+    loader_namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+    exec(compile(scanner, "<nine-finding-scanner>", "exec"), loader_namespace)
+    return {
+        "forbidden_command": loader_namespace["forbidden_command"],
+        "inspect_python_heredoc": loader_namespace["inspect_python_heredoc"],
+        "python_heredoc_bodies": loader_namespace["python_heredoc_bodies"],
+        "shell_commands": loader_namespace["shell_commands"],
+        "shell_token_segments": loader_namespace["shell_token_segments"],
+    }
 
 parent = load_scanner(parent_packet)
 current = load_scanner(packet)
@@ -27082,9 +27089,13 @@ def load_scanner(text, label):
         'source = ""',
         1,
     )
-    namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
-    exec(compile(scanner, "<scanner>", "exec"), namespace)
-    return namespace
+    loader_namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+    exec(compile(scanner, "<scanner>", "exec"), loader_namespace)
+    return {
+        "forbidden_command": loader_namespace["forbidden_command"],
+        "inspect_python_heredoc": loader_namespace["inspect_python_heredoc"],
+        "shell_token_segments": loader_namespace["shell_token_segments"],
+    }
 
 current = load_scanner(packet, "current-scanner-401034")
 parent_packet = subprocess.check_output(
@@ -27386,9 +27397,13 @@ def load_scanner(text, label):
         'source = ""',
         1,
     )
-    namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
-    exec(compile(scanner, "<evidence-scanner>", "exec"), namespace)
-    return namespace
+    loader_namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+    exec(compile(scanner, "<evidence-scanner>", "exec"), loader_namespace)
+    return {
+        "forbidden_command": loader_namespace["forbidden_command"],
+        "inspect_python_heredoc": loader_namespace["inspect_python_heredoc"],
+        "shell_token_segments": loader_namespace["shell_token_segments"],
+    }
 
 def wrapper_source(text):
     start = text.index("\nimport hashlib\n", text.index("go_test_checked()")) + 1
@@ -27617,9 +27632,14 @@ def load_scanner(text):
         "source = \"\"",
         1,
     )
-    namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
-    exec(compile(scanner, "<fresh-c9f-scanner>", "exec"), namespace)
-    return namespace
+    loader_namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+    exec(compile(scanner, "<fresh-c9f-scanner>", "exec"), loader_namespace)
+    return {
+        "executable_tokens": loader_namespace["executable_tokens"],
+        "forbidden_command": loader_namespace["forbidden_command"],
+        "inspect_python_heredoc": loader_namespace["inspect_python_heredoc"],
+        "shell_token_segments": loader_namespace["shell_token_segments"],
+    }
 
 parent = load_scanner(parent_packet)
 current = load_scanner(packet)
@@ -27861,9 +27881,13 @@ def load_scanner(text, label):
         'source = ""',
         1,
     )
-    namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
-    exec(compile(scanner, "<f841-scanner>", "exec"), namespace)
-    return namespace
+    loader_namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+    exec(compile(scanner, "<f841-scanner>", "exec"), loader_namespace)
+    return {
+        "forbidden_command": loader_namespace["forbidden_command"],
+        "inspect_python_heredoc": loader_namespace["inspect_python_heredoc"],
+        "shell_token_segments": loader_namespace["shell_token_segments"],
+    }
 
 def wrapper_source(text):
     start = text.index("\nimport hashlib\n", text.index("go_test_checked()")) + 1
@@ -28168,9 +28192,13 @@ def load_scanner(text):
         'source = ""',
         1,
     )
-    namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
-    exec(compile(scanner, "<six-finding-scanner>", "exec"), namespace)
-    return namespace
+    loader_namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+    exec(compile(scanner, "<six-finding-scanner>", "exec"), loader_namespace)
+    return {
+        "forbidden_command": loader_namespace["forbidden_command"],
+        "inspect_python_heredoc": loader_namespace["inspect_python_heredoc"],
+        "shell_token_segments": loader_namespace["shell_token_segments"],
+    }
 
 parent = load_scanner(parent_packet)
 current = load_scanner(packet)
@@ -28386,9 +28414,13 @@ def load_scanner(text):
         'source = ""',
         1,
     )
-    namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
-    exec(compile(scanner, "<four-finding-scanner>", "exec"), namespace)
-    return namespace
+    loader_namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+    exec(compile(scanner, "<four-finding-scanner>", "exec"), loader_namespace)
+    return {
+        "forbidden_command": loader_namespace["forbidden_command"],
+        "inspect_python_heredoc": loader_namespace["inspect_python_heredoc"],
+        "shell_token_segments": loader_namespace["shell_token_segments"],
+    }
 
 parent = load_scanner(parent_packet)
 current = load_scanner(packet)
@@ -29279,9 +29311,15 @@ def load_scanner(packet, label):
         'source = ""',
         1,
     )
-    namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
-    exec(compile(scanner, "<evidence-scanner>", "exec"), namespace)
-    return namespace
+    loader_namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+    exec(compile(scanner, "<evidence-scanner>", "exec"), loader_namespace)
+    return {
+        "forbidden_command": loader_namespace["forbidden_command"],
+        "inspect_python_heredoc": loader_namespace["inspect_python_heredoc"],
+        "shell_owned_directory_proof": loader_namespace["shell_owned_directory_proof"],
+        "shell_packet_owned_path": loader_namespace["shell_packet_owned_path"],
+        "shell_token_segments": loader_namespace["shell_token_segments"],
+    }
 
 parent = load_scanner(parent_packet, "exact-parent-2d6a1f7-scanner")
 
@@ -29640,9 +29678,15 @@ def load_scanner(packet, label):
         'source = ""',
         1,
     )
-    namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
-    exec(compile(scanner, "<exact-parent-f44-scanner>", "exec"), namespace)
-    return namespace
+    loader_namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+    exec(compile(scanner, "<exact-parent-f44-scanner>", "exec"), loader_namespace)
+    return {
+        "executable_tokens": loader_namespace["executable_tokens"],
+        "forbidden_command": loader_namespace["forbidden_command"],
+        "inspect_python_heredoc": loader_namespace["inspect_python_heredoc"],
+        "shell_commands": loader_namespace["shell_commands"],
+        "shell_token_segments": loader_namespace["shell_token_segments"],
+    }
 
 parent = load_scanner(parent_packet, "exact-parent-f44")
 
@@ -29808,9 +29852,15 @@ def load_scanner(packet, label):
         'source = ""',
         1,
     )
-    namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
-    exec(compile(scanner, "<current-5676911476-scanner>", "exec"), namespace)
-    return namespace
+    loader_namespace = {"Path": Path, "ast": ast, "re": re, "shlex": shlex}
+    exec(compile(scanner, "<current-5676911476-scanner>", "exec"), loader_namespace)
+    return {
+        "executable_tokens": loader_namespace["executable_tokens"],
+        "forbidden_command": loader_namespace["forbidden_command"],
+        "inspect_python_heredoc": loader_namespace["inspect_python_heredoc"],
+        "shell_commands": loader_namespace["shell_commands"],
+        "shell_token_segments": loader_namespace["shell_token_segments"],
+    }
 
 current = load_scanner(packet, "current-5676911476")
 
@@ -32054,3 +32104,24 @@ combined packet scan and independent exact-commit contract/security delta
 reviews remain pending, as do the fresh pushed-head hosted PR quick check
 and GitHub Codex review. No push, merge, live dispatch or runner operation
 is claimed by this entry; G01 and #79 remain incomplete.
+
+The first combined selector on immutable
+`e378ba418fe70fba01b6b8b68bf7405fba610aad` failed one test in 39.465s,
+with 11 scanner violations: one new `type()` spelling in the scanner itself
+and ten historic scanner loaders returning their full AST-bearing namespace.
+No passing combined scan is claimed for that head. The compiler-source
+helper probe still accepted all 128 legitimate calls.
+
+The follow-up keeps the AST-module escape guard closed: historic loaders
+now return only the literal helper members their callers actually use,
+leaving the full module-bearing execution dictionary local. It changes
+no immutable source SHA or historic RED assertion. An AST-only structural
+test verifies all ten loaders expose exactly their required helper keys
+and remain scanner-compatible, without running historical packet code.
+The scanner's integer-count check uses `isinstance` with explicit boolean
+exclusion instead of its own unsupported runtime-type construction form.
+Four focused methods passed in 2.141s, covering those ten loaders, all 128
+compile calls, opaque/parameter provenance and source-replacement denial.
+Independent reviews target `e378ba4`; they do not automatically approve
+this later compatibility delta. The subsequent combined selector and
+exact-candidate delta approval remain required before pushing.

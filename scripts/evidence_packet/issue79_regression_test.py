@@ -3712,6 +3712,36 @@ class Issue79RegressionTests(unittest.TestCase):
         self.assertGreater(checked, 0)
         print(f"packet compile-source boundary: {checked} actual helper calls checked")
 
+    def test_historic_scanner_loaders_export_only_their_required_helpers(self) -> None:
+        checked = 0
+        for number, body, safe_marker, _ in self.scanner["python_heredoc_bodies"](PACKET_TEXT):
+            tree = ast.parse(body, filename="<historic-loader-data>")
+            for function in ast.walk(tree):
+                if not isinstance(function, ast.FunctionDef) or function.name != "load_scanner":
+                    continue
+                checked += 1
+                with self.subTest(packet_line=number):
+                    exported = [node.value for node in function.body if isinstance(node, ast.Return)]
+                    self.assertEqual(1, len(exported))
+                    self.assertIsInstance(exported[0], ast.Dict)
+                    exports = exported[0]
+                    keys = {key.value for key in exports.keys if isinstance(key, ast.Constant)}
+                    required = {
+                        node.slice.value for node in ast.walk(tree)
+                        if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant)
+                        and isinstance(node.slice.value, str) and node.slice.value in self.scanner
+                        and not (isinstance(node.value, ast.Name) and node.value.id == "loader_namespace")
+                    }
+                    self.assertEqual(required, keys)
+                    self.assertTrue(all(
+                        isinstance(value, ast.Subscript) and isinstance(value.value, ast.Name)
+                        and value.value.id == "loader_namespace" and isinstance(value.slice, ast.Constant)
+                        and value.slice.value == key.value
+                        for key, value in zip(exports.keys, exports.values)
+                    ))
+                    self.assertIsNone(self.scanner["inspect_python_heredoc"](body, safe_marker))
+        self.assertEqual(10, checked)
+
     def test_ast_alias_and_nested_mutations_invalidate_helper_origins(self) -> None:
         mutations = (
             'alias = functions\nalias["run_go_child"] = ast.parse("print(os.environ)").body[0]\n',
