@@ -179,7 +179,7 @@ or exercise the tagged controller driver, and does not close G01.
 | Boundary | Exact selection | Classification / exposure limit |
 |---|---|---|
 | Scale Set SDK | `github.com/actions/scaleset v0.4.0`; tag/source `6ce025902cd964747a078c2aabe7340ebc667eca`; [release](https://github.com/actions/scaleset/releases/tag/v0.4.0), [listener source](https://github.com/actions/scaleset/blob/6ce025902cd964747a078c2aabe7340ebc667eca/listener/listener.go), [module](https://github.com/actions/scaleset/blob/6ce025902cd964747a078c2aabe7340ebc667eca/go.mod) | Source + fixture pin. The module declares Go `1.25.3`; the audited comparison is not the selected release. |
-| Go toolchain | Experiment module directive `go 1.26.3`; verification toolchain `GOTOOLCHAIN=go1.26.8` / `go1.26.8`; reviewed `GOEXPERIMENT=none` | Fixture/toolchain evidence only; every rerun records the exact toolchain and experiment setting. |
+| Go toolchain | Current experiment module directive `go 1.26.8`; verification toolchain `GOTOOLCHAIN=go1.26.8` / `go1.26.8`; reviewed `GOEXPERIMENT=none` | Fixture/toolchain evidence only; every rerun records the exact toolchain and experiment setting. The historical `go 1.26.3` directive was replaced by `go 1.26.8` at [the #93 merge](https://github.com/1XP-AI/gh-runnerd/commit/94d00b0b07b43c156c0311cfb1f16eb6ca280bb3); older evidence retains its original source pins. |
 | Go root/FIPS mode | Reviewed `GOROOT` mode is the toolchain default (`GOROOT=""`, identity `goroot-default`); reviewed `GOFIPS140=off` (identity `gofips140-off`) | Fixture/toolchain evidence only; non-empty inherited or command-prefix `GOROOT` and any `GOFIPS140` other than `off` are refused before a guarded Go child. The effective modes are bound in every guarded build identity; raw root paths are never recorded. |
 | Runner | `v2.337.0`, source `397b032cbf865e9c3ddfab89d533ec19325e1273`; [release](https://github.com/actions/runner/releases/tag/v2.337.0), [command parser](https://github.com/actions/runner/blob/397b032cbf865e9c3ddfab89d533ec19325e1273/src/Runner.Listener/CommandSettings.cs), [JIT materialization](https://github.com/actions/runner/blob/397b032cbf865e9c3ddfab89d533ec19325e1273/src/Runner.Listener/Runner.cs) | Source pin; no runner binary was downloaded or executed by the contract evidence. |
 | JIT bootstrap | Select worker-only `ACTIONS_RUNNER_INPUT_JITCONFIG` as parsed by runner `v2.337.0`; [environment parsing](https://github.com/actions/runner/blob/397b032cbf865e9c3ddfab89d533ec19325e1273/src/Runner.Listener/CommandSettings.cs) | Source-supported fallback, with no separate transport version. It avoids argv but remains sensitive in initial environment, process memory, container metadata and runner-written files. `--jitconfig` exposes argv; stdin/FD/file transport is not established and is not claimed. |
@@ -32689,3 +32689,21 @@ and fresh exact-head contract/security delta dispositions. Previous HOLDs
 and older packet passes are not approval of this correction. No new push,
 GitHub Codex request, merge or live operation occurred; #79 and parent #1
 remain In progress, with G01/G02 production and live gates unchanged.
+
+#### Parent pin-metadata reconciliation
+
+A read-only G01 acceptance audit found that the toolchain table still named
+the historical experiment directive `go 1.26.3`, although current
+`experiments/g01-scaleset/go.mod` declares `go 1.26.8`. The immutable #93
+merge `94d00b0b07b43c156c0311cfb1f16eb6ca280bb3` records that directive
+change and removal of the separate toolchain suggestion. The table now
+distinguishes the current directive from the historical record rather than
+rewriting old results. SDK `v0.4.0`, runner/JIT pins, verification toolchain,
+all Go/scanner/harness sources and executable prescriptions are unchanged.
+
+This is a prose/source-identity correction, not a new application behavior
+test: the authoritative module directive and immutable Git diff establish
+the mismatch and correction. No artificial Go RED/GREEN, fresh protocol,
+runner or live result is claimed. Whitespace and added-line private-path/
+credential checks remain required; the final candidate's review must include
+this metadata delta. Product live authorization/evidence gates remain open.
