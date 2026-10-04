@@ -4599,6 +4599,36 @@ def synthetic_read(_fd, _size):
             'import os\nfrom sys import excepthook as emit\n'
             'def unrelated(emit):\n    pass\n'
             'emit(RuntimeError, RuntimeError(os.environ), None)\n',
+            'import os\n'
+            'def outer():\n'
+            '    from sys import excepthook as emit\n'
+            '    def inner():\n'
+            '        nonlocal emit\n'
+            '        emit(RuntimeError, RuntimeError(os.environ), None)\n'
+            '    inner()\n'
+            'outer()\n',
+            'import os\n'
+            'def outer():\n'
+            '    from sys import excepthook as emit\n'
+            '    def inner():\n'
+            '        nonlocal emit\n'
+            '        handlers = [emit]\n'
+            '        handlers[0](RuntimeError, RuntimeError(os.environ), None)\n'
+            '    inner()\n'
+            'outer()\n',
+            'import os\nfrom sys import excepthook as emit\n'
+            'saved = emit\nemit = None\nhandlers = [saved]\n'
+            'handlers[0](RuntimeError, RuntimeError(os.environ), None)\n',
+            'import os\nfrom sys import excepthook as emit\n'
+            'def outer():\n'
+            '    def emit(*args):\n'
+            '        pass\n'
+            '    def inner():\n'
+            '        global emit\n'
+            '        handlers = [emit]\n'
+            '        handlers[0](RuntimeError, RuntimeError(os.environ), None)\n'
+            '    inner()\n'
+            'outer()\n',
         )
         for body in unsafe:
             with self.subTest(body=body):

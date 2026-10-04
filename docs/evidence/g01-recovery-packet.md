@@ -19738,10 +19738,11 @@ def python_sensitive_imported_function_alias(node, tree, parents=None, seen=None
                 )
         tree._issue79_sensitive_imported_alias_bindings = binding_index
 
-    def resolves(reference, visited):
+    def resolves(reference, visited, scope_chain=None):
         if not isinstance(reference, ast.Name):
             return False
-        scope_chain = python_sensitive_alias_scope_chain(reference, parents)
+        if scope_chain is None:
+            scope_chain = python_sensitive_alias_scope_chain(reference, parents)
         for scope in scope_chain:
             key = (id(scope), reference.id)
             if key in visited:
@@ -19749,32 +19750,48 @@ def python_sensitive_imported_function_alias(node, tree, parents=None, seen=None
             bindings = binding_index.get(key, ())
             if not bindings:
                 continue
-            if len(bindings) != 1:
-                return False
-            kind, binding = bindings[0]
-            if kind == "global":
-                continue
-            if kind == "import":
-                imported, alias = binding
-                return (
-                    imported.level == 0
-                    and imported.module in {
-                        "builtins",
-                        "sys",
-                        "warnings",
-                        "traceback",
-                    }
-                    and alias.name
-                    in {
-                        "builtins": {"print"},
-                        "sys": {"exit", "displayhook", "excepthook"},
-                        "warnings": {"warn", "warn_explicit", "showwarning"},
-                        "traceback": {"print_exc", "print_exception"},
-                    }[imported.module]
+            kinds = {kind for kind, _ in bindings}
+            if "global" in kinds:
+                module_scope = next(
+                    (candidate for candidate in reversed(scope_chain)
+                     if isinstance(candidate, ast.Module)),
+                    None,
                 )
-            if kind == "assignment" and isinstance(binding.value, ast.Name):
-                visited.add(key)
-                return resolves(binding.value, visited)
+                if module_scope is None or module_scope is scope:
+                    return False
+                return resolves(
+                    reference,
+                    visited | {key},
+                    [module_scope],
+                )
+            if "nonlocal" in kinds:
+                continue
+            for kind, binding in bindings:
+                if kind == "import":
+                    imported, alias = binding
+                    if (
+                        imported.level == 0
+                        and imported.module in {
+                            "builtins",
+                            "sys",
+                            "warnings",
+                            "traceback",
+                        }
+                        and alias.name
+                        in {
+                            "builtins": {"print"},
+                            "sys": {"exit", "displayhook", "excepthook"},
+                            "warnings": {"warn", "warn_explicit", "showwarning"},
+                            "traceback": {"print_exc", "print_exception"},
+                        }[imported.module]
+                    ):
+                        return True
+                elif (
+                    kind == "assignment"
+                    and isinstance(binding.value, ast.Name)
+                    and resolves(binding.value, visited | {key})
+                ):
+                    return True
             return False
         return False
 
@@ -37370,3 +37387,22 @@ Ran 7 tests in 49.059s — OK
 ```
 
 The tests retained the canonical bounded collector, all four direct cleanup paths, the existing process-stream authority negatives, the canonical scanner namespace, local callback safety and unresolved command-alias refusal. The new AST examples were parsed and inspected only; no verifier body, hook, Git child or adversarial recipe was executed. Compiler-source provenance logic was unchanged, so the 119-helper selector was not repeated. No full harness, packet scan, Go/hosted CI or live operation is claimed; exact-head packet validation and both new-head independent reviews remain with the coordinator.
+
+#### Scope-sensitive imported-hook source flow from `746c1c14`
+
+At entry on 2026-10-04 the worktree was clean at `746c1c148c882dede9ea9e12fc47bbec69855097`. The coordinator and both independent read-only reviews found the previous hook pass incomplete: a `nonlocal` reference did not resolve to the nearest enclosing imported binding, a saved alias lost its imported-hook source after the original name was rebound, and `global` lookup could stop at an intervening outer local definition. The security review and coordinator separately reproduced the first two cases; the coordinator also reproduced the global-routing case. These findings extend the stored imported `sys.excepthook` callable family recorded at [Codex finding 4173966622](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4173966622); no separate external review URL was supplied for the lexical binding variants.
+
+Four inert source cases were added to `test_excepthook_aliases_are_sensitive_error_sinks`: a direct call through a `nonlocal` import, a container-held `nonlocal` import, a saved imported alias after a later `None` rebinding, and a `global` reference with an intervening outer local function of the same name. Before the scanner change, the focused hook selector failed all four new assertions in 0.184s. The resolver now follows `nonlocal` references through enclosing lexical scopes, sends `global` references directly to the module binding, and checks each candidate source in an ambiguous binding set so an earlier proven imported sink is retained for copied aliases. Existing local parameter callbacks with literal arguments remain accepted.
+
+The post-change focused command passed four methods in 0.200s:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_excepthook_aliases_are_sensitive_error_sinks \
+  Issue79RegressionTests.test_displayhook_aliases_are_sensitive_output_sinks \
+  Issue79RegressionTests.test_imported_exit_alias_and_system_exit_preserve_sensitive_taint \
+  Issue79RegressionTests.test_output_sink_method_alias_keeps_sensitive_taint
+Ran 4 tests in 0.200s — OK
+```
+
+These cases were parsed as AST data; no hook or specimen was executed. The change is confined to sensitive imported-callable reference resolution and its focused regression cases; compiler-source provenance was not changed, so the 119-helper selector was not repeated. No full suite, packet selector, whole scanner self-audit, Go/hosted CI or live operation is claimed; final packet integration and exact-head independent reviews remain with the coordinator.
