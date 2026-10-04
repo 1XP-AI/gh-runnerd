@@ -19668,6 +19668,58 @@ def python_sensitive_imported_function_alias(node, tree, parents=None, seen=None
                 for name in candidate.names:
                     declarations.setdefault((id(scope), name), set()).add(kind)
 
+        local_names = {}
+
+        def record_local(scope, name):
+            if scope is None:
+                return
+            kinds = declarations.get((id(scope), name), set())
+            if not isinstance(scope, ast.Module) and kinds.intersection(
+                {"global", "nonlocal"}
+            ):
+                return
+            local_names.setdefault(id(scope), set()).add(name)
+
+        for candidate in ast.walk(tree):
+            if isinstance(candidate, ast.Name) and isinstance(candidate.ctx, ast.Store):
+                record_local(
+                    python_sensitive_alias_scope(candidate, parents),
+                    candidate.id,
+                )
+            elif isinstance(candidate, ast.arg):
+                record_local(
+                    python_sensitive_alias_scope(candidate, parents),
+                    candidate.arg,
+                )
+            elif isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                record_local(
+                    python_sensitive_alias_scope(parents.get(candidate), parents),
+                    candidate.name,
+                )
+            elif isinstance(candidate, ast.Import):
+                scope = python_sensitive_alias_scope(candidate, parents)
+                for alias in candidate.names:
+                    record_local(scope, alias.asname or alias.name.split(".", 1)[0])
+            elif isinstance(candidate, ast.ImportFrom):
+                scope = python_sensitive_alias_scope(candidate, parents)
+                for alias in candidate.names:
+                    record_local(scope, alias.asname or alias.name)
+            elif isinstance(candidate, ast.ExceptHandler) and candidate.name:
+                record_local(
+                    python_sensitive_alias_scope(candidate, parents),
+                    candidate.name,
+                )
+            elif isinstance(candidate, (ast.MatchAs, ast.MatchStar)) and candidate.name:
+                record_local(
+                    python_sensitive_alias_scope(candidate, parents),
+                    candidate.name,
+                )
+            elif isinstance(candidate, ast.MatchMapping) and candidate.rest:
+                record_local(
+                    python_sensitive_alias_scope(candidate, parents),
+                    candidate.rest,
+                )
+
         def binding_owner(scope, name, context):
             kinds = declarations.get((id(scope), name), ())
             if "global" in kinds and not isinstance(scope, ast.Module):
@@ -19684,9 +19736,13 @@ def python_sensitive_imported_function_alias(node, tree, parents=None, seen=None
                     if candidate is scope:
                         passed_current = True
                         continue
-                    if passed_current and isinstance(
-                        candidate,
-                        (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
+                    if (
+                        passed_current
+                        and isinstance(
+                            candidate,
+                            (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
+                        )
+                        and name in local_names.get(id(candidate), ())
                     ):
                         return candidate
                 return None
@@ -19695,7 +19751,7 @@ def python_sensitive_imported_function_alias(node, tree, parents=None, seen=None
         def add_owned(scope, name, kind, binding, context):
             owner = binding_owner(scope, name, context)
             if owner is None:
-                add(scope, name, "unknown", binding)
+                add(scope, name, "unresolved", binding)
             else:
                 add(owner, name, kind, binding)
 
@@ -19802,6 +19858,8 @@ def python_sensitive_imported_function_alias(node, tree, parents=None, seen=None
                 continue
             kinds = {kind for kind, _ in bindings}
             if "global" in kinds and not isinstance(scope, ast.Module):
+                if "unresolved" in kinds:
+                    return True
                 module_scope = next(
                     (candidate for candidate in reversed(scope_chain)
                      if isinstance(candidate, ast.Module)),
@@ -19815,6 +19873,8 @@ def python_sensitive_imported_function_alias(node, tree, parents=None, seen=None
                     [module_scope],
                 )
             if "nonlocal" in kinds:
+                if "unresolved" in kinds:
+                    return True
                 continue
             for kind, binding in bindings:
                 if kind == "import":
@@ -37493,3 +37553,23 @@ Ran 5 tests in 0.211s — OK
 ```
 
 The examples were parsed and inspected as AST data only; no specimen, hook or environment value was executed or read. No symbol-table/compiler helper, compiler-source allowlist, Git/Popen/path/cwd proof or other provenance boundary changed. The 119-helper selector, packet selector, full suite, Go/hosted CI and live operations were not repeated; the 1377 packet result remains historical evidence, and final packet integration plus exact-head reviews remain with the coordinator.
+
+#### `nonlocal` store resolves through unbound intermediate functions from `8f24ad69`
+
+At entry on 2026-10-04 the worktree was clean at `8f24ad697700fe3b31d7240f472d2ba044bbe7cb`. The 1377 packet result of one selector passing in 54.918s remains historical; the 8f24 hook and adjacent focused run passed five methods in 0.210s but did not include a transparent intermediate function. The coordinator reproduced two accepted AST-only P1 variants at 8f24: a nested `nonlocal emit` import and a nested `nonlocal saved = source` assignment both skipped an intermediate function with no such local binding, so the scanner attributed the store to that intermediate scope and missed the later outer-cell read. These extend the imported `sys.excepthook` callable family at [Codex finding 4173966622](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4173966622); no new external finding URL was provided.
+
+The two transparent-middle source cases were added to `test_excepthook_aliases_are_sensitive_error_sinks`. Before correction, the focused hook selector failed two assertions in 0.195s. The scanner now gathers AST-local binding names as well as `global`/`nonlocal` declarations; each `nonlocal` store skips enclosing function scopes that do not bind the referenced name and targets the nearest actual enclosing function cell. Imported callables and alias assignments use the same owner routing, while unresolved ownership remains explicitly unresolved and refuses rather than being treated as a safe local callback. One implementation attempt raised 14 focused errors because the declaration lookup used a tuple default where the new set operation required a set; the default was corrected and the focused hook selector then passed.
+
+The final post-ledger changed-boundary command passed five methods in 0.219s:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_excepthook_aliases_are_sensitive_error_sinks \
+  Issue79RegressionTests.test_displayhook_aliases_are_sensitive_output_sinks \
+  Issue79RegressionTests.test_imported_exit_alias_and_system_exit_preserve_sensitive_taint \
+  Issue79RegressionTests.test_output_sink_method_alias_keeps_sensitive_taint \
+  Issue79RegressionTests.test_launcher_aliases_returned_by_local_helpers_are_rejected
+Ran 5 tests in 0.219s — OK
+```
+
+All examples were parsed and checked as AST data; no specimen, hook, environment value or source program was executed, compiled or passed through a symbol-table helper. No other scanner boundary or compiler-source allowlist changed. No 119-helper sweep, packet selector, full suite, Go/hosted CI or live operation was run; exact-head packet integration and independent reviews remain with the coordinator.
