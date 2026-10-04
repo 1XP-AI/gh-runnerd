@@ -5049,6 +5049,7 @@ def synthetic_read(_fd, _size):
             'from pathlib import Path\nPath("synthetic-owned").copy(Path("synthetic-destination"))\n',
             'from pathlib import Path\nPath("synthetic-owned").copy_into(Path("synthetic-destination"))\n',
             'from pathlib import Path\nPath("synthetic-owned").move_into(Path("synthetic-destination"))\n',
+            'from pathlib import Path\nPath("synthetic-owned").replace(Path("synthetic-destination"))\n',
             'from pathlib import Path\nPath("synthetic-owned").lchmod(0o600)\n',
             'from pathlib import Path\nseen = Path("synthetic-owned")\n'
             'seen.copy(Path("synthetic-destination"))\n',
@@ -5093,6 +5094,11 @@ def synthetic_read(_fd, _size):
             '    move(Path("synthetic-unowned-destination"))\n',
             'from pathlib import Path\nfrom tempfile import TemporaryDirectory\n'
             'with TemporaryDirectory() as td:\n'
+            '    source = Path(td) / "source"\n'
+            '    move = ((tmp := getattr(source, "move_into")),)[0]\n'
+            '    move(Path("synthetic-unowned-destination"))\n',
+            'from pathlib import Path\nfrom tempfile import TemporaryDirectory\n'
+            'with TemporaryDirectory() as td:\n'
             '    Path(td).joinpath("source").copy(**{"target": Path("synthetic-destination")})\n',
             'from pathlib import Path\n'
             'seen = {"node"}\n'
@@ -5129,6 +5135,7 @@ def synthetic_read(_fd, _size):
             '    source.copy(copied)\n'
             '    source.copy_into(destination_dir)\n'
             '    source.move_into(destination_dir)\n'
+            '    source.replace(copied)\n'
             '    source.copy(target=copied)\n'
             '    action = source.move_into\n'
             '    action(destination_dir)\n'
@@ -5139,6 +5146,14 @@ def synthetic_read(_fd, _size):
             'seen_alias_copy = seen_alias.copy()\n'
         )
         self.assertIsNone(self.inspect(safe))
+
+    def test_string_replace_result_is_not_an_extracted_path_mutator(self) -> None:
+        body = (
+            'token = "docs\\\\evidence"\n'
+            'normalized = token.replace("\\\\", "/")\n'
+            'print(normalized)\n'
+        )
+        self.assertIsNone(self.inspect(body))
 
     def test_standalone_git_queries_require_explicit_hook_isolation(self) -> None:
         unsafe = (

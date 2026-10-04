@@ -16926,13 +16926,42 @@ def python_filesystem_mutator_alias_violation(tree, parents):
             if receiver is None:
                 wrapped_mutators = [
                     candidate for candidate in ast.walk(value)
-                    if isinstance(candidate, ast.Attribute)
+                    if (
+                        (
+                            isinstance(candidate, ast.Attribute)
+                            and candidate.attr in python_filesystem_mutating_methods
+                        )
+                        or (
+                            isinstance(candidate, ast.Call)
+                            and isinstance(candidate.func, ast.Name)
+                            and candidate.func.id == "getattr"
+                            and len(candidate.args) == 2
+                            and isinstance(candidate.args[1], ast.Constant)
+                            and candidate.args[1].value
+                            in python_filesystem_mutating_methods
+                        )
+                    )
                     and candidate is not value
-                    and candidate.attr in python_filesystem_mutating_methods
                     and not (
-                        candidate.attr == "copy"
-                        and python_known_non_path_set_copy_receiver(
-                            candidate.value, tree, parents
+                        isinstance(parents.get(candidate), ast.Call)
+                        and parents[candidate].func is candidate
+                    )
+                    and not (
+                        (
+                            isinstance(candidate, ast.Attribute)
+                            and candidate.attr == "copy"
+                            and python_known_non_path_set_copy_receiver(
+                                candidate.value, tree, parents
+                            )
+                        )
+                        or (
+                            isinstance(candidate, ast.Call)
+                            and len(candidate.args) == 2
+                            and isinstance(candidate.args[1], ast.Constant)
+                            and candidate.args[1].value == "copy"
+                            and python_known_non_path_set_copy_receiver(
+                                candidate.args[0], tree, parents
+                            )
                         )
                     )
                 ]
@@ -37822,3 +37851,20 @@ Ran 4 tests in 5.265s — FAILED (failures=5)
 The scanner now fails closed on literal dynamic imports of `os` or `contextlib`, on unsupported wrapped expressions carrying an imported sensitive callable, and on wrapped extracted filesystem mutators while retaining the proven local set-copy case. The bounded Git dependency check rejects function-global namespace access, reflective `__globals__` access and namespace-inspection calls before relying on the reviewed helper definition. The same four methods passed in 5.180s after the change; their canonical-verifier and reviewed provider controls remained green, as did the safe `contextlib.nullcontext`, ordinary callback and temporary-owned Path controls in those methods.
 
 The focused probes used the same exact command shown above with the four selectors and `python3 -I -B`; no finding specimen or packet recipe was executed, compiled or evaluated, and no hook, environment value, path mutation, Git command or process was used. No full suite, packet selector, compiler self-audit, 119-helper sweep, Go/hosted CI or live operation was run for this delta; the parent `74e865e` results are not evidence for the new candidate, and the coordinator owns final packet integration and exact-head review.
+
+#### Immediate-call receiver compatibility follow-up from `1fde7b9e`
+
+The coordinator reported the exact `1fde7b9ef333504885e31e173e6a4175c1c153db` packet selector failing one test in 54.076s with 24 diagnostics: the newly added wrapped-mutator fallback treated immediately called methods such as `token.replace(...)` as extracted filesystem mutators. A focused inert text case, `normalized = token.replace("\\", "/")`, reproduced this false positive on that parent; its single selected test failed in 0.166s.
+
+The fallback now ignores an attribute only when it is directly the `func` of its parent `ast.Call`, leaving that call to the existing receiver and destination checks. A follow-up security probe found that the same wrapper could hide `getattr(source, "move_into")`; the focused path-mutator selector failed on that inert source in 0.215s. The fallback now also recognizes a literal `getattr` call for a listed filesystem mutator when it is carried in an unreviewed wrapper, while still leaving an immediately invoked call to the existing call checks. This is a shape-specific provenance check, not a method-name exemption: direct and wrapped unowned Path mutators remain refused, and known local set-copy plus temp-owned direct mutation controls remain accepted.
+
+The initial focused string/path run passed in 0.213s before the reflective-`getattr` regression was added. After the follow-up RED and narrow correction, this exact focused command passed both the string compatibility control and the path mutator boundary in 0.219s. The path test keeps unowned direct `Path.replace`, tuple-wrapped `Path.move_into`, and wrapped reflective `getattr(source, "move_into")` refused while temporary-owned direct replace/move operations and literal set-copy remain accepted:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_string_replace_result_is_not_an_extracted_path_mutator \
+  Issue79RegressionTests.test_new_path_mutators_require_owned_sources_and_destinations
+Ran 2 tests in 0.219s — OK
+```
+
+The specimen remained source text for the scanner; no recipe or filesystem method was executed. The coordinator owns rerunning the final packet selector; no full suite, packet selector, 119-helper sweep, compiler self-audit, Go/hosted CI or live action was repeated for this narrow correction.
