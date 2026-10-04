@@ -16815,6 +16815,52 @@ def python_known_non_path_set_copy_receiver(node, tree, parents, active=None):
 def python_filesystem_mutator_alias_violation(tree, parents):
     """Reject extracted mutator methods unless their receiver is temp-owned."""
     shutil_names = python_assigned_module_names(tree, "shutil")
+    getattr_aliases = {"getattr"}
+    alias_edges = []
+    for candidate in ast.walk(tree):
+        if isinstance(candidate, ast.Assign):
+            targets, value = candidate.targets, candidate.value
+        elif (
+            isinstance(candidate, (ast.AnnAssign, ast.NamedExpr))
+            and candidate.value is not None
+        ):
+            targets, value = [candidate.target], candidate.value
+        else:
+            continue
+        if isinstance(value, ast.Name):
+            alias_edges.extend(
+                (target.id, value.id)
+                for target in targets
+                if isinstance(target, ast.Name)
+            )
+    while True:
+        prior_count = len(getattr_aliases)
+        getattr_aliases.update(
+            target for target, source in alias_edges if source in getattr_aliases
+        )
+        if len(getattr_aliases) == prior_count:
+            break
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Name)
+            and isinstance(node.ctx, ast.Load)
+            and node.id in getattr_aliases
+        ):
+            continue
+        parent = parents.get(node)
+        if isinstance(parent, ast.Call) and parent.func is node:
+            continue
+        if (
+            isinstance(parent, ast.Assign)
+            and parent.value is node
+            and all(isinstance(target, ast.Name) for target in parent.targets)
+        ) or (
+            isinstance(parent, ast.AnnAssign)
+            and parent.value is node
+            and isinstance(parent.target, ast.Name)
+        ):
+            continue
+        return "Python heredoc lets a reflective getter callable escape its direct call path"
     for node in ast.walk(tree):
         if (
             isinstance(node, ast.Attribute)
@@ -16907,12 +16953,7 @@ def python_filesystem_mutator_alias_violation(tree, parents):
             elif (
                 isinstance(value, ast.Call)
                 and isinstance(value.func, ast.Name)
-                and (
-                    value.func.id == "getattr"
-                    or python_assigned_callable_alias(
-                        value.func.id, "getattr", tree
-                    )
-                )
+                and value.func.id in getattr_aliases
                 and len(value.args) >= 2
             ):
                 possible_names = python_static_string_values(value.args[1], tree)
@@ -16944,6 +16985,20 @@ def python_filesystem_mutator_alias_violation(tree, parents):
             if receiver is None:
                 wrapped_mutators = []
                 for candidate in ast.walk(value):
+                    if isinstance(candidate, ast.Call):
+                        for returned in python_local_call_return_values(
+                            candidate, tree, parents
+                        ):
+                            if any(
+                                isinstance(returned_node, ast.Call)
+                                and isinstance(returned_node.func, ast.Name)
+                                and returned_node.func.id in getattr_aliases
+                                for returned_node in ast.walk(returned)
+                            ):
+                                return (
+                                    "Python heredoc assigns an unreviewed reflective "
+                                    f"helper result to alias {target.id!r} on line {node.lineno}"
+                                )
                     candidate_method = None
                     candidate_receiver = None
                     if (
@@ -16955,12 +17010,7 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                     elif (
                         isinstance(candidate, ast.Call)
                         and isinstance(candidate.func, ast.Name)
-                        and (
-                            candidate.func.id == "getattr"
-                            or python_assigned_callable_alias(
-                                candidate.func.id, "getattr", tree
-                            )
-                        )
+                        and candidate.func.id in getattr_aliases
                         and len(candidate.args) >= 2
                     ):
                         possible_names = python_static_string_values(
@@ -37919,3 +37969,30 @@ Ran 2 tests in 0.239s — OK
 ```
 
 The selector retains the benign `str.replace` transformation, literal local set-copy, temp-owned direct mutators, and the prior direct/wrapped unowned Path source or destination refusals. All new specimens remained inert source strings inspected by the trusted harness; no specimen, filesystem method or verifier recipe was executed. No packet selector, full suite, 119-helper sweep, compiler self-audit, Go/hosted CI or live action was run; final packet integration and exact-head reviews remain with the coordinator.
+
+#### Reflective getter escape through holders and helper results from `0cbe8207`
+
+The focused security follow-up against clean parent `0cbe8207bd9333b181230ab6edc9da76fb4c61d0` found that reflective getter authority could escape into dictionaries, tuples, lists, conditional or assignment-expression values, callbacks and helper results before extracting a `Path` mutator. The accepted forms included `getters = {"get": getattr}; member = getters["get"]; move = ((tmp := member(source, "move_into")),)[0]` and a helper returning `getattr(receiver, name)`; the extracted method was then called with a synthetic unowned destination. A direct reflective call through a container and a conditional getter alias were also accepted. These were reported in the scoped security review; no separate public finding URL was supplied.
+
+Before the correction, the focused mutator method failed eight refusal assertions in 0.272s:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_new_path_mutators_require_owned_sources_and_destinations
+Ran 1 test in 0.272s — FAILED (failures=8)
+```
+
+The scanner now follows only simple local name aliases of `getattr`, requires getter names to be consumed directly as call targets or simple name assignments, and rejects getter values passed through unsupported holders, conditionals, named expressions and callbacks. Direct calls through a simple getter alias still use the existing static member-name and temporary-source/destination checks. Helper return values containing reflective getter calls are refused when assigned as mutator candidates; no general expression evaluator or method-name exception was added. A list-held getter case was added after the RED run and is covered by the final focused pass.
+
+The final changed-boundary command passed four methods in 5.531s:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_new_path_mutators_require_owned_sources_and_destinations \
+  Issue79RegressionTests.test_string_replace_result_is_not_an_extracted_path_mutator \
+  Issue79RegressionTests.test_reviewed_scanner_namespace_remains_accepted_with_cwd_guards \
+  Issue79RegressionTests.test_git_query_runtime_dependencies_cannot_be_patched_around_capture
+Ran 4 tests in 5.531s — OK
+```
+
+The controls retain benign string replacement, literal local set-copy, simple direct getter aliasing of a temporary-owned mutator, canonical reviewed namespace acceptance and the bounded Git verifier. The synthetic source remained inert AST input; no specimen, filesystem method or verifier recipe was executed. No full suite, packet selector, 119-helper sweep, compiler self-audit, Go/hosted CI or live action was run; final packet integration and exact-head independent review remain with the coordinator.
