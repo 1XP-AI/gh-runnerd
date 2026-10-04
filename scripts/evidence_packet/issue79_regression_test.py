@@ -2807,6 +2807,106 @@ class Issue79RegressionTests(unittest.TestCase):
             "a collector placed after the returned result must not certify its output",
         )
 
+    def test_git_query_process_stream_authority_cannot_be_replaced(self) -> None:
+        bounded_body, marker = self.packet_heredoc_containing(
+            "def run_bounded_git_query(",
+            "stdout, stderr = capture_git_query_output(",
+        )
+        inspect = self.scanner["inspect_python_heredoc"]
+        self.assertIsNone(inspect(bounded_body, marker))  # type: ignore[operator]
+        mutations = (
+            (
+                "drop stdout before bounded capture",
+                [
+                    ast.If(
+                        test=ast.Compare(
+                            left=ast.Constant(value="status"),
+                            ops=[ast.In()],
+                            comparators=[ast.Name(id="command", ctx=ast.Load())],
+                        ),
+                        body=[
+                            ast.Assign(
+                                targets=[
+                                    ast.Attribute(
+                                        value=ast.Name(id="process", ctx=ast.Load()),
+                                        attr="stdout",
+                                        ctx=ast.Store(),
+                                    )
+                                ],
+                                value=ast.Constant(value=None),
+                            )
+                        ],
+                        orelse=[],
+                    )
+                ],
+            ),
+            (
+                "save then replace stdout before bounded capture",
+                [
+                    ast.Assign(
+                        targets=[ast.Name(id="saved_stdout", ctx=ast.Store())],
+                        value=ast.Attribute(
+                            value=ast.Name(id="process", ctx=ast.Load()),
+                            attr="stdout",
+                            ctx=ast.Load(),
+                        ),
+                    ),
+                    ast.Assign(
+                        targets=[
+                            ast.Attribute(
+                                value=ast.Name(id="process", ctx=ast.Load()),
+                                attr="stdout",
+                                ctx=ast.Store(),
+                            )
+                        ],
+                        value=ast.Constant(value=None),
+                    ),
+                ],
+            ),
+            (
+                "replace stdout through setattr before bounded capture",
+                [
+                    ast.Expr(
+                        value=ast.Call(
+                            func=ast.Name(id="setattr", ctx=ast.Load()),
+                            args=[
+                                ast.Name(id="process", ctx=ast.Load()),
+                                ast.Constant(value="stdout"),
+                                ast.Constant(value=None),
+                            ],
+                            keywords=[],
+                        )
+                    )
+                ],
+            ),
+        )
+        for label, statements in mutations:
+            with self.subTest(mutation=label):
+                tree = ast.parse(bounded_body, filename="<mutable-git-pipe-data>")
+                function = _verification_function(tree, "run_bounded_git_query")
+                creation = next(
+                    node
+                    for node in ast.walk(function)
+                    if isinstance(node, ast.Assign)
+                    and isinstance(node.value, ast.Call)
+                    and self.scanner["python_dotted_name"](node.value.func)  # type: ignore[operator]
+                    == "subprocess.Popen"
+                )
+                parents = {
+                    child: parent
+                    for parent in ast.walk(function)
+                    for child in ast.iter_child_nodes(parent)
+                }
+                block = parents[creation]
+                self.assertIsInstance(block, ast.Try)
+                insertion = block.body.index(creation) + 1  # type: ignore[union-attr]
+                block.body[insertion:insertion] = statements  # type: ignore[union-attr]
+                ast.fix_missing_locations(tree)
+                self.assertIsNotNone(
+                    inspect(ast.unparse(tree), marker),  # type: ignore[operator]
+                    f"mutable Popen stream authority was certified: {label}",
+                )
+
     def test_git_query_collector_must_return_bounded_pipe_bytes(self) -> None:
         collector_body, marker = self.packet_heredoc_containing(
             "def capture_git_query_output(process, git_command, output_limit, input_bytes=None):",
@@ -4372,6 +4472,20 @@ def synthetic_read(_fd, _size):
             'hooks["error"](RuntimeError, RuntimeError(os.environ), None)\n',
             'import os, sys\nhooks = [sys.excepthook]\nhandlers = hooks\n'
             'handlers[0](RuntimeError, RuntimeError(os.environ), None)\n',
+            'import os\nfrom sys import excepthook as emit\n'
+            'handlers = [emit]\n'
+            'handlers[0](RuntimeError, RuntimeError(os.environ), None)\n',
+            'import os\nfrom sys import excepthook as emit\n'
+            'handlers = (emit,)\n'
+            'handlers[0](RuntimeError, RuntimeError(os.environ), None)\n',
+            'import os\nfrom sys import excepthook as emit\n'
+            'handlers = {"error": emit}\n'
+            'handlers["error"](RuntimeError, RuntimeError(os.environ), None)\n',
+            'import os, sys\nemit = sys.excepthook\nhandlers = [emit]\n'
+            'handlers[0](RuntimeError, RuntimeError(os.environ), None)\n',
+            'import os, sys\nemit = getattr(sys, "excepthook")\n'
+            'handlers = [emit]\n'
+            'handlers[0](RuntimeError, RuntimeError(os.environ), None)\n',
         )
         for body in unsafe:
             with self.subTest(body=body):
@@ -4387,6 +4501,22 @@ def synthetic_read(_fd, _size):
             'def callback(*args):\n    return None\n'
             'callbacks = [callback]\ncallbacks[0]("offline fixture")\n'
         ))
+
+    def test_reviewed_scanner_namespace_remains_accepted_with_cwd_guards(self) -> None:
+        scanner_body_matches = [
+            (body, marker)
+            for _number, body, marker, _invocation in self.scanner[
+                "python_heredoc_bodies"
+            ](PACKET_TEXT)  # type: ignore[operator]
+            if 'scanner = {"Path": Path, "ast": ast, "os": os, "re": re, "shlex": shlex}'
+            in body
+        ]
+        self.assertTrue(scanner_body_matches, "expected the canonical scanner heredoc")
+        scanner_body, marker = scanner_body_matches[0]
+        self.assertIsNone(
+            self.scanner["inspect_python_heredoc"](scanner_body, marker),  # type: ignore[operator]
+            "the canonical reviewed scanner namespace should pass the complete body checks",
+        )
 
     def test_new_path_mutators_require_owned_sources_and_destinations(self) -> None:
         unsafe = (

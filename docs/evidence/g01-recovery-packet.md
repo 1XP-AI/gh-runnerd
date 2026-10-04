@@ -14879,6 +14879,49 @@ def reviewed_python_git_query_capture(
         )
     ):
         return False
+    process_reads = [
+        candidate
+        for candidate in ast.walk(function_node)
+        if isinstance(candidate, ast.Name)
+        and candidate.id == "process"
+        and isinstance(candidate.ctx, ast.Load)
+        and python_enclosing_scope(candidate, parents) is function_node
+    ]
+    process_read_kinds = {"capture": 0, "terminate": 0, "returncode": 0, "cleanup": 0}
+    for reference in process_reads:
+        parent = parents.get(reference)
+        if isinstance(parent, ast.Attribute) and parent.value is reference:
+            if parent.attr != "returncode" or not isinstance(parent.ctx, ast.Load):
+                return False
+            process_read_kinds["returncode"] += 1
+            continue
+        if isinstance(parent, ast.Call) and parent.args and parent.args[0] is reference:
+            if parent.keywords:
+                return False
+            callee = python_dotted_name(parent.func)
+            if callee == "capture_git_query_output":
+                process_read_kinds["capture"] += 1
+            elif callee == "terminate_git_query_group":
+                process_read_kinds["terminate"] += 1
+            else:
+                return False
+            continue
+        if (
+            isinstance(parent, ast.Compare)
+            and parent.left is reference
+            and len(parent.ops) == 1
+            and isinstance(parent.ops[0], (ast.Is, ast.IsNot))
+            and len(parent.comparators) == 1
+            and isinstance(parent.comparators[0], ast.Constant)
+            and parent.comparators[0].value is None
+        ):
+            process_read_kinds["cleanup"] += 1
+            continue
+        return False
+    if process_read_kinds != {
+        "capture": 1, "terminate": 4, "returncode": 1, "cleanup": 1
+    }:
+        return False
     capture_assignments = [
         candidate
         for candidate in ast.walk(function_node)
@@ -15712,6 +15755,9 @@ def reviewed_python_git_query_runtime_dependencies_stable(tree, parents):
 
 def python_working_directory_change_violation(tree, parents):
     """Reject cwd-changing APIs through module, imported, or container aliases."""
+    reviewed_module_storage = getattr(
+        tree, "_issue79_reviewed_module_value_storage", set()
+    )
     sensitive_modules = {
         "contextlib": python_assigned_module_names(tree, "contextlib"),
         "os": python_assigned_module_names(tree, "os"),
@@ -15726,6 +15772,8 @@ def python_working_directory_change_violation(tree, parents):
             and isinstance(node.ctx, ast.Load)
             and any(node.id in names for names in sensitive_modules.values())
         ):
+            if id(node) in reviewed_module_storage:
+                continue
             parent = parents.get(node)
             if isinstance(parent, ast.Attribute) and parent.value is node:
                 continue
@@ -15999,6 +16047,7 @@ def python_module_value_escape_violation(tree, parents, safe_marker):
         for value in dictionary.values
         if isinstance(value, ast.Name) and value.id in names
     }
+    tree._issue79_reviewed_module_value_storage = safe_storage
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in names:
             if node.attr.startswith("_"):
@@ -18050,6 +18099,24 @@ def python_sensitive_sink_storage_violation(tree, parents):
         ):
             continue
         return f"Python heredoc stores an output sink method in an unreviewed holder on line {node.lineno}"
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Name) or not isinstance(node.ctx, ast.Load):
+            continue
+        probe = ast.Call(func=node, args=[], keywords=[])
+        if not python_sensitive_output_sink(probe, tree):
+            continue
+        parent = parents.get(node)
+        if isinstance(parent, ast.Call) and parent.func is node:
+            continue
+        if isinstance(parent, ast.Assign) and parent.value is node and len(
+            parent.targets
+        ) == 1 and isinstance(parent.targets[0], ast.Name):
+            continue
+        if isinstance(parent, (ast.AnnAssign, ast.NamedExpr)) and parent.value is node and isinstance(
+            parent.target, ast.Name
+        ):
+            continue
+        return f"Python heredoc stores an imported output sink in an unreviewed holder on line {node.lineno}"
     return None
 
 
@@ -20502,6 +20569,9 @@ def inspect_python_heredoc(body, safe_marker):
         for parent in ast.walk(tree)
         for child in ast.iter_child_nodes(parent)
     }
+    module_escape_violation = python_module_value_escape_violation(tree, parents, safe_marker)
+    if module_escape_violation:
+        return module_escape_violation
     working_directory_violation = python_working_directory_change_violation(
         tree, parents
     )
@@ -20510,9 +20580,6 @@ def inspect_python_heredoc(body, safe_marker):
     git_origin_capture_violation = python_git_origin_capture_violation(tree, parents)
     if git_origin_capture_violation:
         return git_origin_capture_violation
-    module_escape_violation = python_module_value_escape_violation(tree, parents, safe_marker)
-    if module_escape_violation:
-        return module_escape_violation
     sink_storage_violation = python_sensitive_sink_storage_violation(tree, parents)
     if sink_storage_violation:
         return sink_storage_violation
@@ -36841,3 +36908,77 @@ python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
 Ran 8 tests in 9.892s — OK
 packet compile-source boundary: 119 actual helper calls checked
 ```
+
+#### Three follow-up corrections from immutable `82fe7ba3`
+
+At immutable parent `82fe7ba3619595f7cd92a337bacf12c8f81877b6`, the
+coordinator and independent contract review confirmed that a bounded Git
+query could lose its actual `Popen` pipe before capture, and that an imported
+`sys.excepthook` callable could leave the reviewed call path through a
+container. The exact exception-hook form is also recorded in
+[Codex finding 4173966622](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4173966622).
+The coordinator and independent security review separately confirmed that
+the cwd guard refused the packet's canonical static-scanner heredoc after
+the earlier cwd tightening; this positive-recipe regression had no separate
+GitHub finding URL.
+
+The new data-only AST regressions were run before the scanner change. The
+combined run of `test_git_query_process_stream_authority_cannot_be_replaced`,
+`test_excepthook_aliases_are_sensitive_error_sinks`, and
+`test_reviewed_scanner_namespace_remains_accepted_with_cwd_guards` reported
+six failures in 1.079s: both stream mutations and all three imported-hook
+container forms were accepted, while the first version of the canonical-body
+fixture selector found no match. The selector was corrected to choose the
+first current heredoc containing the canonical `scanner` mapping; its
+standalone rerun failed in 0.174s because the scanner refused that actual
+heredoc with “working-directory module escape.” The selector failure is not
+counted as a reproduced scanner defect.
+
+The bounded capture proof now requires every `process` reference in
+`run_bounded_git_query` to be one of the canonical collector, four group
+termination, return-code read, or final `None` cleanup uses. This rejects
+stream replacement, saved stream aliases, `setattr`, and other process-object
+escapes while retaining the actual Popen-to-pipe collector and cleanup path.
+Sensitive imported sink callables are now checked at their loaded-name uses:
+direct calls and simple local callable aliases remain reviewable, while
+list, tuple, dictionary, argument, and return escapes fail closed. For cwd
+checking, the inspector now runs the existing module-value proof first and
+shares only its proven literal reviewed-namespace value nodes with the cwd
+guard; direct/imported cwd-change APIs and unreviewed module escapes remain
+rejected. No source hash, helper-name trust, compiler-input allowlist, or
+marker exemption was added.
+
+The first post-change focused attempt reported one false negative in 0.624s:
+the new exact process-reference count expected three termination calls, but
+the canonical runner has four. The count was corrected to the observed
+canonical shape, and the focused verification passed:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_git_query_process_stream_authority_cannot_be_replaced \
+  Issue79RegressionTests.test_excepthook_aliases_are_sensitive_error_sinks \
+  Issue79RegressionTests.test_reviewed_scanner_namespace_remains_accepted_with_cwd_guards \
+  Issue79RegressionTests.test_new_path_mutators_require_owned_sources_and_destinations \
+  Issue79RegressionTests.test_contextlib_chdir_is_rejected_through_aliases_and_containers \
+  Issue79RegressionTests.test_git_query_runtime_dependencies_cannot_be_patched_around_capture \
+  Issue79RegressionTests.test_git_query_capture_must_be_on_the_active_result_path \
+  Issue79RegressionTests.test_git_query_collector_must_return_bounded_pipe_bytes \
+  Issue79RegressionTests.test_bounded_git_origin_capture_requires_reviewed_comparison_and_no_output_escape \
+  Issue79RegressionTests.test_displayhook_aliases_are_sensitive_output_sinks \
+  Issue79RegressionTests.test_warning_sink_and_absolute_path_do_not_disclose_local_data \
+  Issue79RegressionTests.test_warning_and_absolute_path_aliases_preserve_sensitive_values
+Ran 12 tests in 7.354s — OK
+
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_actual_packet_compile_helpers_retain_provenance
+Ran 1 test in 4.097s — OK
+packet compile-source boundary: 119 actual helper calls checked
+```
+
+These focused checks covered the three new boundaries, the canonical
+reviewed scanner body, the prior hooks, Path ownership, cwd/provider/
+active-result/bounded-output, warning/absolute-path and origin-comparison
+controls, and 119 actual compile-helper calls. The
+full harness, packet-wide static scan, Go checks, hosted CI, and live
+operations were not run for this correction; the coordinator owns final
+exact-head integration validation and subsequent independent review.
