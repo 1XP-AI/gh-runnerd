@@ -15850,6 +15850,24 @@ def reviewed_python_git_query_runtime_dependencies_stable(tree, parents):
         and node.func.id in builder_names
     }
     stable_names = helper_names | used_builders
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr == "__globals__":
+            return False
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id in {"globals", "locals"} or (
+            node.func.id == "vars" and not node.args
+        ):
+            return False
+        if (
+            (
+                node.func.id == "getattr"
+                or python_assigned_callable_alias(node.func.id, "getattr", tree)
+            )
+            and len(node.args) > 1
+            and "__globals__" in python_static_string_values(node.args[1], tree)
+        ):
+            return False
     definitions = {name: 0 for name in stable_names}
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -15995,6 +16013,15 @@ def python_working_directory_change_violation(tree, parents):
     }
     cwd_methods = {"chdir", "fchdir"}
     for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "__import__"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and node.args[0].value in sensitive_modules
+        ):
+            return "Python heredoc dynamically imports a working-directory module"
         if isinstance(node, ast.ImportFrom) and node.module in sensitive_modules:
             if any(alias.name == "*" or alias.name in cwd_methods for alias in node.names):
                 return "Python heredoc imports an unreviewed working-directory change API"
@@ -16897,6 +16924,23 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                     f"on line {node.lineno}"
                 )
             if receiver is None:
+                wrapped_mutators = [
+                    candidate for candidate in ast.walk(value)
+                    if isinstance(candidate, ast.Attribute)
+                    and candidate is not value
+                    and candidate.attr in python_filesystem_mutating_methods
+                    and not (
+                        candidate.attr == "copy"
+                        and python_known_non_path_set_copy_receiver(
+                            candidate.value, tree, parents
+                        )
+                    )
+                ]
+                if wrapped_mutators:
+                    return (
+                        "Python heredoc wraps an extracted filesystem mutator "
+                        f"in an unreviewed value on line {node.lineno}"
+                    )
                 continue
             if method == "copy" and python_known_non_path_set_copy_receiver(
                 receiver, tree, parents
@@ -20007,6 +20051,13 @@ def python_sensitive_imported_function_alias(node, tree, parents=None, seen=None
                     if (
                         isinstance(assigned_value, ast.Name)
                         and resolves(assigned_value, visited | {key})
+                    ):
+                        return True
+                    if any(
+                        isinstance(candidate, ast.Name)
+                        and isinstance(candidate.ctx, ast.Load)
+                        and resolves(candidate, visited | {key})
+                        for candidate in ast.walk(assigned_value)
                     ):
                         return True
             return False
@@ -37752,3 +37803,22 @@ Ran 1 test in 0.292s — OK
 ```
 
 These probes parsed and inspected source strings only; no verifier recipe, pattern specimen, Git query, hook, process or filesystem action was executed. No full suite, packet selector, compiler self-audit, 119-helper sweep, Go/hosted CI or live operation was repeated; exact-head packet integration and independent review remain pending with the coordinator.
+
+#### Four unique blocking variants from the 2026-10-04 Codex comment
+
+The completed Codex review on `74e865e5ed4c8096b4e0a83cb5897df11cb04310` recorded five entries in [one issue comment](https://github.com/1XP-AI/gh-runnerd/pull/103#issuecomment-5977232555); two entries repeated the same tuple-extracted hook case, so this ledger treats it once and records four unique variants. The coordinator reproduced the four as accepted inert AST mutations on that exact parent: a saved `__import__("contextlib")` module alias reaching `chdir`; an imported `sys.excepthook` passed through a tuple/subscript wrapper containing a walrus; a temporary-owned `Path.move_into` extracted through the same wrapper and called with an unowned destination; and a synthetic bounded-Git runner installed through a function `__globals__` mapping, directly or through `getattr`.
+
+Before the correction, the four changed-boundary methods failed five assertions in 5.265s:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_contextlib_chdir_is_rejected_through_aliases_and_containers \
+  Issue79RegressionTests.test_excepthook_aliases_are_sensitive_error_sinks \
+  Issue79RegressionTests.test_new_path_mutators_require_owned_sources_and_destinations \
+  Issue79RegressionTests.test_git_query_runtime_dependencies_cannot_be_patched_around_capture
+Ran 4 tests in 5.265s — FAILED (failures=5)
+```
+
+The scanner now fails closed on literal dynamic imports of `os` or `contextlib`, on unsupported wrapped expressions carrying an imported sensitive callable, and on wrapped extracted filesystem mutators while retaining the proven local set-copy case. The bounded Git dependency check rejects function-global namespace access, reflective `__globals__` access and namespace-inspection calls before relying on the reviewed helper definition. The same four methods passed in 5.180s after the change; their canonical-verifier and reviewed provider controls remained green, as did the safe `contextlib.nullcontext`, ordinary callback and temporary-owned Path controls in those methods.
+
+The focused probes used the same exact command shown above with the four selectors and `python3 -I -B`; no finding specimen or packet recipe was executed, compiled or evaluated, and no hook, environment value, path mutation, Git command or process was used. No full suite, packet selector, compiler self-audit, 119-helper sweep, Go/hosted CI or live operation was run for this delta; the parent `74e865e` results are not evidence for the new candidate, and the coordinator owns final packet integration and exact-head review.
