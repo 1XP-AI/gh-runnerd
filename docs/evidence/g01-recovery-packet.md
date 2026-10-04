@@ -16907,13 +16907,31 @@ def python_filesystem_mutator_alias_violation(tree, parents):
             elif (
                 isinstance(value, ast.Call)
                 and isinstance(value.func, ast.Name)
-                and value.func.id == "getattr"
-                and len(value.args) == 2
-                and isinstance(value.args[1], ast.Constant)
-                and value.args[1].value in python_filesystem_mutating_methods
+                and (
+                    value.func.id == "getattr"
+                    or python_assigned_callable_alias(
+                        value.func.id, "getattr", tree
+                    )
+                )
+                and len(value.args) >= 2
             ):
-                receiver = value.args[0]
-                method = value.args[1].value
+                possible_names = python_static_string_values(value.args[1], tree)
+                possible_methods = (
+                    possible_names & python_filesystem_mutating_methods
+                )
+                if len(possible_methods) == 1 and possible_names == possible_methods:
+                    receiver = value.args[0]
+                    method = next(iter(possible_methods))
+                elif possible_methods or (
+                    not possible_names
+                    and python_path_receiver_expression(
+                        value.args[0], tree, parents
+                    )
+                ):
+                    return (
+                        "Python heredoc extracts an unresolved reflective filesystem "
+                        f"mutator into alias {target.id!r} on line {node.lineno}"
+                    )
             elif (
                 isinstance(value, ast.Attribute)
                 and python_dotted_name(value) in python_filesystem_mutating_functions
@@ -16924,47 +16942,61 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                     f"on line {node.lineno}"
                 )
             if receiver is None:
-                wrapped_mutators = [
-                    candidate for candidate in ast.walk(value)
+                wrapped_mutators = []
+                for candidate in ast.walk(value):
+                    candidate_method = None
+                    candidate_receiver = None
                     if (
-                        (
-                            isinstance(candidate, ast.Attribute)
-                            and candidate.attr in python_filesystem_mutating_methods
+                        isinstance(candidate, ast.Attribute)
+                        and candidate.attr in python_filesystem_mutating_methods
+                    ):
+                        candidate_method = candidate.attr
+                        candidate_receiver = candidate.value
+                    elif (
+                        isinstance(candidate, ast.Call)
+                        and isinstance(candidate.func, ast.Name)
+                        and (
+                            candidate.func.id == "getattr"
+                            or python_assigned_callable_alias(
+                                candidate.func.id, "getattr", tree
+                            )
                         )
-                        or (
-                            isinstance(candidate, ast.Call)
-                            and isinstance(candidate.func, ast.Name)
-                            and candidate.func.id == "getattr"
-                            and len(candidate.args) == 2
-                            and isinstance(candidate.args[1], ast.Constant)
-                            and candidate.args[1].value
-                            in python_filesystem_mutating_methods
+                        and len(candidate.args) >= 2
+                    ):
+                        possible_names = python_static_string_values(
+                            candidate.args[1], tree
                         )
-                    )
-                    and candidate is not value
-                    and not (
+                        possible_methods = (
+                            possible_names & python_filesystem_mutating_methods
+                        )
+                        if not possible_names and python_path_receiver_expression(
+                            candidate.args[0], tree, parents
+                        ):
+                            possible_methods = python_filesystem_mutating_methods
+                        if possible_methods:
+                            candidate_method = (
+                                next(iter(possible_methods))
+                                if len(possible_methods) == 1
+                                else None
+                            )
+                            candidate_receiver = candidate.args[0]
+                    if candidate_method is None and candidate_receiver is None:
+                        continue
+                    if candidate is value:
+                        continue
+                    if (
                         isinstance(parents.get(candidate), ast.Call)
                         and parents[candidate].func is candidate
-                    )
-                    and not (
-                        (
-                            isinstance(candidate, ast.Attribute)
-                            and candidate.attr == "copy"
-                            and python_known_non_path_set_copy_receiver(
-                                candidate.value, tree, parents
-                            )
+                    ):
+                        continue
+                    if (
+                        candidate_method == "copy"
+                        and python_known_non_path_set_copy_receiver(
+                            candidate_receiver, tree, parents
                         )
-                        or (
-                            isinstance(candidate, ast.Call)
-                            and len(candidate.args) == 2
-                            and isinstance(candidate.args[1], ast.Constant)
-                            and candidate.args[1].value == "copy"
-                            and python_known_non_path_set_copy_receiver(
-                                candidate.args[0], tree, parents
-                            )
-                        )
-                    )
-                ]
+                    ):
+                        continue
+                    wrapped_mutators.append(candidate)
                 if wrapped_mutators:
                     return (
                         "Python heredoc wraps an extracted filesystem mutator "
@@ -37868,3 +37900,22 @@ Ran 2 tests in 0.219s — OK
 ```
 
 The specimen remained source text for the scanner; no recipe or filesystem method was executed. The coordinator owns rerunning the final packet selector; no full suite, packet selector, 119-helper sweep, compiler self-audit, Go/hosted CI or live action was repeated for this narrow correction.
+
+#### Reflective mutator alias follow-up from `51384422`
+
+The security review of exact parent `513844225017403261b0aa2524837c079f7e8e81` found that wrapping `getattr(source, "move_into")` was still accepted when the mutator name came from a local variable, the getter was assigned to an alias, or the name was statically concatenated. The focused path-mutator selector reproduced those three accepted inert AST forms as three failed refusal assertions in 0.230s. An unresolved method name on the proven Path receiver, a direct saved literal `getattr` method value, and an immediately invoked reflective method were refused and remain controls.
+
+Fixture review found an intermediate pair of source lines had been concatenated, making one combined negative specimen syntactically invalid; its earlier 2-test, 0.231s output is not counted as valid GREEN evidence. After separating the fixtures, a direct saved getter alias (`member = getattr; move = member(source, "move_into")`) produced one failed refusal assertion in 0.241s. The stable correction now routes direct getter aliases through the same receiver and destination ownership checks as the literal `getattr` form.
+
+The wrapped-value check now follows the existing local callable-alias and static-string resolvers for literal `getattr` calls. If the method name is unresolved but the receiver is a proven Path expression, it refuses the wrapped value; immediately invoked receiver calls remain delegated to the existing filesystem source/destination checks. No method-name, source-hash or recipe exception was added.
+
+The focused string and Path selectors passed together after the final correction in 0.239s:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_string_replace_result_is_not_an_extracted_path_mutator \
+  Issue79RegressionTests.test_new_path_mutators_require_owned_sources_and_destinations
+Ran 2 tests in 0.239s — OK
+```
+
+The selector retains the benign `str.replace` transformation, literal local set-copy, temp-owned direct mutators, and the prior direct/wrapped unowned Path source or destination refusals. All new specimens remained inert source strings inspected by the trusted harness; no specimen, filesystem method or verifier recipe was executed. No packet selector, full suite, 119-helper sweep, compiler self-audit, Go/hosted CI or live action was run; final packet integration and exact-head reviews remain with the coordinator.

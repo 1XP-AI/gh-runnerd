@@ -5099,6 +5099,48 @@ def synthetic_read(_fd, _size):
             '    move(Path("synthetic-unowned-destination"))\n',
             'from pathlib import Path\nfrom tempfile import TemporaryDirectory\n'
             'with TemporaryDirectory() as td:\n'
+            '    source = Path(td) / "source"\n'
+            '    method = "move_into"\n'
+            '    move = ((tmp := getattr(source, method)),)[0]\n'
+            '    move(Path("synthetic-unowned-destination"))\n',
+            'from pathlib import Path\nfrom tempfile import TemporaryDirectory\n'
+            'with TemporaryDirectory() as td:\n'
+            '    source = Path(td) / "source"\n'
+            '    member = getattr\n'
+            '    move = ((tmp := member(source, "move_into")),)[0]\n'
+            '    move(Path("synthetic-unowned-destination"))\n',
+            'from pathlib import Path\nfrom tempfile import TemporaryDirectory\n'
+            'with TemporaryDirectory() as td:\n'
+            '    source = Path(td) / "source"\n'
+            '    move = ((tmp := getattr(source, "move" + "_into")),)[0]\n'
+            '    move(Path("synthetic-unowned-destination"))\n',
+            'from pathlib import Path\nfrom tempfile import TemporaryDirectory\n'
+            'with TemporaryDirectory() as td:\n'
+            '    source = Path(td) / "source"\n'
+            '    move = ((tmp := getattr(source, method_name)),)[0]\n'
+            '    move(Path("synthetic-unowned-destination"))\n',
+            'from pathlib import Path\nfrom tempfile import TemporaryDirectory\n'
+            'with TemporaryDirectory() as td:\n'
+            '    source = Path(td) / "source"\n'
+            '    move = getattr(source, "move_into")\n'
+            '    move(Path("synthetic-unowned-destination"))\n',
+            'from pathlib import Path\nfrom tempfile import TemporaryDirectory\n'
+            'with TemporaryDirectory() as td:\n'
+            '    source = Path(td) / "source"\n'
+            '    getattr(source, "move_into")(Path("synthetic-unowned-destination"))\n',
+            'from pathlib import Path\nfrom tempfile import TemporaryDirectory\n'
+            'with TemporaryDirectory() as td:\n'
+            '    source = Path(td) / "source"\n'
+            '    member = getattr\n'
+            '    move = member(source, "move_into")\n'
+            '    move(Path("synthetic-unowned-destination"))\n',
+            'from pathlib import Path\nfrom tempfile import TemporaryDirectory\n'
+            'with TemporaryDirectory() as td:\n'
+            '    source = Path(td) / "source"\n'
+            '    member = getattr\n'
+            '    member(source, "move_into")(Path("synthetic-unowned-destination"))\n',
+            'from pathlib import Path\nfrom tempfile import TemporaryDirectory\n'
+            'with TemporaryDirectory() as td:\n'
             '    Path(td).joinpath("source").copy(**{"target": Path("synthetic-destination")})\n',
             'from pathlib import Path\n'
             'seen = {"node"}\n'
