@@ -14860,7 +14860,6 @@ def reviewed_python_git_query_capture(
         if isinstance(candidate, ast.Name)
         and candidate.id == "process"
         and isinstance(candidate.ctx, ast.Store)
-        and python_enclosing_scope(candidate, parents) is function_node
     ]
     process_creation = parents.get(node)
     if (
@@ -14885,7 +14884,6 @@ def reviewed_python_git_query_capture(
         if isinstance(candidate, ast.Name)
         and candidate.id == "process"
         and isinstance(candidate.ctx, ast.Load)
-        and python_enclosing_scope(candidate, parents) is function_node
     ]
     process_read_kinds = {"capture": 0, "terminate": 0, "returncode": 0, "cleanup": 0}
     for reference in process_reads:
@@ -36982,3 +36980,42 @@ controls, and 119 actual compile-helper calls. The
 full harness, packet-wide static scan, Go checks, hosted CI, and live
 operations were not run for this correction; the coordinator owns final
 exact-head integration validation and subsequent independent review.
+
+#### Captured Popen reference follow-up from immutable `6574b875`
+
+After commit `6574b875297a70aa1a644415433c7d797e726c97`, the coordinator
+confirmed two remaining AST-only variants of the mutable-stream P1: a nested
+function capturing `process` and a lambda calling `setattr(process, ...)`
+were both accepted, although direct field assignment, a saved stream alias,
+and direct `setattr` were refused. These are the same bounded Git pipe
+authority finding recorded above; no separate public review URL was supplied.
+
+Before the follow-up scanner edit, the focused
+`test_git_query_process_stream_authority_cannot_be_replaced` run failed its
+two nested-function/lambda subcases in 1.951s, reproducing the accepted
+mutations without executing either AST specimen. The capture proof now counts
+all `process` name reads and stores in the runner subtree, including nested
+functions, lambdas, classes, and definition defaults. Any nested use must
+therefore match the same finite collector, termination, return-code, or
+cleanup shapes; the canonical runner has no nested Popen references and its
+four cleanup calls and real pipe capture remain required.
+
+The changed-boundary focused verification passed:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_git_query_process_stream_authority_cannot_be_replaced \
+  Issue79RegressionTests.test_excepthook_aliases_are_sensitive_error_sinks \
+  Issue79RegressionTests.test_reviewed_scanner_namespace_remains_accepted_with_cwd_guards \
+  Issue79RegressionTests.test_contextlib_chdir_is_rejected_through_aliases_and_containers \
+  Issue79RegressionTests.test_git_query_runtime_dependencies_cannot_be_patched_around_capture \
+  Issue79RegressionTests.test_git_query_capture_must_be_on_the_active_result_path \
+  Issue79RegressionTests.test_git_query_collector_must_return_bounded_pipe_bytes \
+  Issue79RegressionTests.test_bounded_git_origin_capture_requires_reviewed_comparison_and_no_output_escape
+Ran 8 tests in 7.855s — OK
+```
+
+The compiler-source provenance code did not change, so the 119-helper
+selector was not repeated. No full harness, packet-wide scan, Go/hosted CI,
+or live operation was run; those integration and exact-head review gates
+remain with the coordinator.

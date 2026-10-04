@@ -2879,6 +2879,104 @@ class Issue79RegressionTests(unittest.TestCase):
                     )
                 ],
             ),
+            (
+                "nested closure replaces stdout before bounded capture",
+                [
+                    ast.FunctionDef(
+                        name="hide_status_output",
+                        args=ast.arguments(
+                            posonlyargs=[],
+                            args=[],
+                            vararg=None,
+                            kwonlyargs=[],
+                            kw_defaults=[],
+                            kwarg=None,
+                            defaults=[],
+                        ),
+                        body=[
+                            ast.If(
+                                test=ast.Compare(
+                                    left=ast.Constant(value="status"),
+                                    ops=[ast.In()],
+                                    comparators=[
+                                        ast.Name(id="command", ctx=ast.Load())
+                                    ],
+                                ),
+                                body=[
+                                    ast.Assign(
+                                        targets=[
+                                            ast.Attribute(
+                                                value=ast.Name(
+                                                    id="process", ctx=ast.Load()
+                                                ),
+                                                attr="stdout",
+                                                ctx=ast.Store(),
+                                            )
+                                        ],
+                                        value=ast.Constant(value=None),
+                                    )
+                                ],
+                                orelse=[],
+                            )
+                        ],
+                        decorator_list=[],
+                    ),
+                    ast.Expr(
+                        value=ast.Call(
+                            func=ast.Name(
+                                id="hide_status_output", ctx=ast.Load()
+                            ),
+                            args=[],
+                            keywords=[],
+                        )
+                    ),
+                ],
+            ),
+            (
+                "lambda closure replaces stdout before bounded capture",
+                [
+                    ast.If(
+                        test=ast.Compare(
+                            left=ast.Constant(value="status"),
+                            ops=[ast.In()],
+                            comparators=[ast.Name(id="command", ctx=ast.Load())],
+                        ),
+                        body=[
+                            ast.Expr(
+                                value=ast.Call(
+                                    func=ast.Lambda(
+                                        args=ast.arguments(
+                                            posonlyargs=[],
+                                            args=[],
+                                            vararg=None,
+                                            kwonlyargs=[],
+                                            kw_defaults=[],
+                                            kwarg=None,
+                                            defaults=[],
+                                        ),
+                                        body=ast.Call(
+                                            func=ast.Name(
+                                                id="setattr", ctx=ast.Load()
+                                            ),
+                                            args=[
+                                                ast.Name(
+                                                    id="process", ctx=ast.Load()
+                                                ),
+                                                ast.Constant(value="stdout"),
+                                                ast.Constant(value=None),
+                                            ],
+                                            keywords=[],
+                                        ),
+                                    ),
+                                    args=[],
+                                    keywords=[],
+                                )
+                            )
+                        ],
+                        orelse=[],
+                    )
+                ],
+            ),
         )
         for label, statements in mutations:
             with self.subTest(mutation=label):
