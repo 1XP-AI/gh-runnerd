@@ -4709,6 +4709,38 @@ def synthetic_read(_fd, _size):
             '        handlers[0](RuntimeError, RuntimeError(os.environ), None)\n'
             '    inner()\n'
             'outer()\n',
+            'import os\nfrom sys import excepthook as source\n'
+            'def install():\n'
+            '    [emit := source for _ in (0,)]\n'
+            '    emit(RuntimeError, RuntimeError(os.environ), None)\n'
+            'install()\n',
+            'import os\nfrom sys import excepthook as source\n'
+            'def install():\n'
+            '    global saved\n'
+            '    [saved := source for _ in (0,)]\n'
+            'install()\n'
+            'handlers = [saved]\n'
+            'handlers[0](RuntimeError, RuntimeError(os.environ), None)\n',
+            'import os\nfrom sys import excepthook as source\n'
+            'def outer():\n'
+            '    saved = None\n'
+            '    def install():\n'
+            '        nonlocal saved\n'
+            '        [saved := source for _ in (0,)]\n'
+            '    install()\n'
+            '    handlers = [saved]\n'
+            '    handlers[0](RuntimeError, RuntimeError(os.environ), None)\n'
+            'outer()\n',
+            'import os\nfrom sys import excepthook as source\n'
+            'def outer():\n'
+            '    saved = None\n'
+            '    def install():\n'
+            '        nonlocal saved\n'
+            '        [[saved := source for _ in (0,)] for __ in (0,)]\n'
+            '    install()\n'
+            '    handlers = [saved]\n'
+            '    handlers[0](RuntimeError, RuntimeError(os.environ), None)\n'
+            'outer()\n',
         )
         for body in unsafe:
             with self.subTest(body=body):
@@ -4728,6 +4760,13 @@ def synthetic_read(_fd, _size):
             'from sys import excepthook as emit\n'
             'def local_callback(emit):\n'
             '    handlers = [emit]\n    handlers[0]("offline fixture")\n'
+        ))
+        self.assertIsNone(self.inspect(
+            'def callback(*args):\n    return None\n'
+            'def install():\n'
+            '    [handler := callback for _ in (0,)]\n'
+            '    handler("offline fixture")\n'
+            'install()\n'
         ))
 
     def test_git_query_timeout_cleanup_must_remain_reachable(self) -> None:

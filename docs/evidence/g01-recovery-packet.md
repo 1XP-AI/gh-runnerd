@@ -19637,6 +19637,20 @@ def python_sensitive_alias_scope_chain(node, parents):
     return chain
 
 
+def python_sensitive_alias_binding_scope(node, parents):
+    """Map comprehension walrus stores to their containing Python scope."""
+    scope = python_sensitive_alias_scope(node, parents)
+    target = parents.get(node)
+    if not isinstance(target, ast.NamedExpr) or target.target is not node:
+        return scope
+    while isinstance(
+        scope,
+        (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp),
+    ):
+        scope = python_sensitive_alias_scope(parents.get(scope), parents)
+    return scope
+
+
 def python_sensitive_imported_function_alias(node, tree, parents=None, seen=None):
     """Resolve sensitive imported callables in the reference's binding scope."""
     if not isinstance(node, ast.Name) or tree is None:
@@ -19683,7 +19697,7 @@ def python_sensitive_imported_function_alias(node, tree, parents=None, seen=None
         for candidate in ast.walk(tree):
             if isinstance(candidate, ast.Name) and isinstance(candidate.ctx, ast.Store):
                 record_local(
-                    python_sensitive_alias_scope(candidate, parents),
+                    python_sensitive_alias_binding_scope(candidate, parents),
                     candidate.id,
                 )
             elif isinstance(candidate, ast.arg):
@@ -19757,7 +19771,7 @@ def python_sensitive_imported_function_alias(node, tree, parents=None, seen=None
 
         for candidate in ast.walk(tree):
             if isinstance(candidate, ast.Name) and isinstance(candidate.ctx, ast.Store):
-                scope = python_sensitive_alias_scope(candidate, parents)
+                scope = python_sensitive_alias_binding_scope(candidate, parents)
                 target = parents.get(candidate)
                 if (
                     isinstance(target, ast.Assign)
@@ -37573,3 +37587,23 @@ Ran 5 tests in 0.219s — OK
 ```
 
 All examples were parsed and checked as AST data; no specimen, hook, environment value or source program was executed, compiled or passed through a symbol-table helper. No other scanner boundary or compiler-source allowlist changed. No 119-helper sweep, packet selector, full suite, Go/hosted CI or live operation was run; exact-head packet integration and independent reviews remain with the coordinator.
+
+#### Comprehension walrus hook stores use their containing scope from `734ef68b`
+
+At entry on 2026-10-04 the worktree was clean at `734ef68b6036f86f5a6ecc68014e9888e07de80f`. The prior focused hook and adjacent run passed five methods in 0.220s, but the coordinator reproduced four new AST-only accepts at that source: a direct local alias, a module-global alias stored through a list, a nonlocal alias stored through a list, and a nonlocal alias assigned in a nested comprehension before a later list-held call. Each source used a comprehension assignment expression to store an imported `sys.excepthook` alias; Python binds that named expression in the containing scope rather than the comprehension scope. These cases extend the imported-hook family linked to [Codex finding 4173966622](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4173966622); no separate external URL was provided for the comprehension variants.
+
+The four source strings were added to `test_excepthook_aliases_are_sensitive_error_sinks`; the direct and container-held forms exercise local, `global`, `nonlocal`, and nested-comprehension ownership. Before the correction, the focused selector failed four assertions in 0.206s. The scanner now maps a `NamedExpr` target out of all enclosing comprehension AST scopes to its containing Python binding scope before collecting local names and indexing stores. Existing `global` and nearest-actual-cell `nonlocal` ownership logic then handles those stores; unresolved ownership remains fail-closed. A safe local callback assigned through a comprehension walrus was added as a positive control and remains accepted.
+
+The final post-ledger changed-boundary command passed five methods in 0.231s:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_excepthook_aliases_are_sensitive_error_sinks \
+  Issue79RegressionTests.test_displayhook_aliases_are_sensitive_output_sinks \
+  Issue79RegressionTests.test_imported_exit_alias_and_system_exit_preserve_sensitive_taint \
+  Issue79RegressionTests.test_output_sink_method_alias_keeps_sensitive_taint \
+  Issue79RegressionTests.test_launcher_aliases_returned_by_local_helpers_are_rejected
+Ran 5 tests in 0.231s — OK
+```
+
+The specimens remained inert source strings parsed by the reviewed scanner; no hook, environment value, specimen, or verifier/compiler recipe was executed. Only imported-hook binding-scope handling and its tests changed; Git/Popen, path, cwd, process-cleanup, compiler-source provenance, helper names and source allowlists are unchanged. No packet selector, 119-helper sweep, full suite, Go/hosted CI, or live operation was run; those checks and exact-head independent reviews remain with the coordinator.
