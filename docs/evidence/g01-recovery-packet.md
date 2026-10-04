@@ -19751,13 +19751,13 @@ def python_sensitive_imported_function_alias(node, tree, parents=None, seen=None
             if not bindings:
                 continue
             kinds = {kind for kind, _ in bindings}
-            if "global" in kinds:
+            if "global" in kinds and not isinstance(scope, ast.Module):
                 module_scope = next(
                     (candidate for candidate in reversed(scope_chain)
                      if isinstance(candidate, ast.Module)),
                     None,
                 )
-                if module_scope is None or module_scope is scope:
+                if module_scope is None:
                     return False
                 return resolves(
                     reference,
@@ -37406,3 +37406,20 @@ Ran 4 tests in 0.200s — OK
 ```
 
 These cases were parsed as AST data; no hook or specimen was executed. The change is confined to sensitive imported-callable reference resolution and its focused regression cases; compiler-source provenance was not changed, so the 119-helper selector was not repeated. No full suite, packet selector, whole scanner self-audit, Go/hosted CI or live operation is claimed; final packet integration and exact-head independent reviews remain with the coordinator.
+
+#### Module-level `global` keeps imported-hook provenance from `8d9bd7f0`
+
+At entry on 2026-10-04 the worktree was clean at `8d9bd7f0b28ba6423dc8fe1237b0c244a2ed5ca8`. The coordinator's prior two focused selectors passed in 59.373s, including 119 actual compiler-helper checks and the packet scan of 261 shell commands and 86 Python bodies with zero violations; this was not a full-suite result and did not cover the newly identified module-scope `global` case. A module-level `global emit` declaration before `from sys import excepthook as emit` is a legal no-op, but the resolver treated it as a routing directive and discarded the imported sink. Both direct and list-held `emit` calls with `RuntimeError(os.environ)` were accepted by the 8d9 scanner. This remains part of the imported-hook callable family linked to [Codex finding 4173966622](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4173966622); no separate external review URL was supplied for this variant.
+
+The two module-level source forms were added to `test_excepthook_aliases_are_sensitive_error_sinks` and failed as two assertions in 0.182s before the correction. The resolver now redirects `global` references to module scope only when resolving a function-scope binding; at module scope it continues examining the imported and copied callable sources. The final post-ledger focused hook, displayhook, imported-exit and output-alias selectors passed together in 0.203s:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_excepthook_aliases_are_sensitive_error_sinks \
+  Issue79RegressionTests.test_displayhook_aliases_are_sensitive_output_sinks \
+  Issue79RegressionTests.test_imported_exit_alias_and_system_exit_preserve_sensitive_taint \
+  Issue79RegressionTests.test_output_sink_method_alias_keeps_sensitive_taint
+Ran 4 tests in 0.203s — OK
+```
+
+The module-level and prior nested-hook examples are inert AST source strings; no hook, environment value or specimen was executed. Compiler-source provenance is unchanged, so the 119-helper selector was not repeated. No full suite, packet selector, Go/hosted CI or live operation is claimed; final exact-head packet integration and reviews remain with the coordinator.

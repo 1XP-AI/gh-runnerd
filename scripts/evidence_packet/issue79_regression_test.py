@@ -4599,6 +4599,13 @@ def synthetic_read(_fd, _size):
             'import os\nfrom sys import excepthook as emit\n'
             'def unrelated(emit):\n    pass\n'
             'emit(RuntimeError, RuntimeError(os.environ), None)\n',
+            'import os\nglobal emit\n'
+            'from sys import excepthook as emit\n'
+            'emit(RuntimeError, RuntimeError(os.environ), None)\n',
+            'import os\nglobal emit\n'
+            'from sys import excepthook as emit\n'
+            'handlers = [emit]\n'
+            'handlers[0](RuntimeError, RuntimeError(os.environ), None)\n',
             'import os\n'
             'def outer():\n'
             '    from sys import excepthook as emit\n'
