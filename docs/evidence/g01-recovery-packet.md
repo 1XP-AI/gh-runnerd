@@ -16982,6 +16982,38 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                     f"{python_dotted_name(value)!r} into alias {target.id!r} "
                     f"on line {node.lineno}"
                 )
+            unresolved_reflective_results = [
+                candidate
+                for candidate in ast.walk(value)
+                if (
+                    isinstance(candidate, ast.Call)
+                    and isinstance(candidate.func, ast.Name)
+                    and candidate.func.id in getattr_aliases
+                    and len(candidate.args) >= 2
+                    and not python_static_string_values(candidate.args[1], tree)
+                    and not (
+                        isinstance(parents.get(candidate), ast.Call)
+                        and parents[candidate].func is candidate
+                    )
+                )
+            ]
+            target_scope = python_enclosing_scope(node, parents)
+            reflective_result_is_called = any(
+                isinstance(candidate, ast.Name)
+                and candidate.id == target.id
+                and isinstance(candidate.ctx, ast.Load)
+                and isinstance(parents.get(candidate), ast.Call)
+                and parents[candidate].func is candidate
+                and target_scope in python_lexical_scope_chain(
+                    python_enclosing_scope(candidate, parents), parents
+                )
+                for candidate in ast.walk(tree)
+            )
+            if unresolved_reflective_results and reflective_result_is_called:
+                return (
+                    "Python heredoc stores an unresolved reflective result "
+                    f"in alias {target.id!r} on line {node.lineno}"
+                )
             if receiver is None:
                 wrapped_mutators = []
                 for candidate in ast.walk(value):
@@ -37996,3 +38028,30 @@ Ran 4 tests in 5.531s — OK
 ```
 
 The controls retain benign string replacement, literal local set-copy, simple direct getter aliasing of a temporary-owned mutator, canonical reviewed namespace acceptance and the bounded Git verifier. The synthetic source remained inert AST input; no specimen, filesystem method or verifier recipe was executed. No full suite, packet selector, 119-helper sweep, compiler self-audit, Go/hosted CI or live action was run; final packet integration and exact-head independent review remain with the coordinator.
+
+#### Function-parameter reflective mutator extraction from `2a2ee6c8`
+
+The security retry against immutable parent `2a2ee6c8ae397e2ce5a4703bca6f96d98ec8ca67` confirmed that a function could save `getattr(receiver, attribute)` through a wrapped assignment and call the resulting alias with an unowned destination. The receiver and member are parameters, so the existing direct reflective-member check treated the unresolved member as no filesystem mutation; passing a `TemporaryDirectory`-owned `Path` and the literal `"move_into"` at the call site did not close the unresolved extraction. A simple `getattr(receiver, "move_into")` with an untyped receiver parameter was already refused by the existing source-ownership check; that control was retained. The scoped security report did not provide a separate public finding URL.
+
+Three new inert AST cases were added for the dynamic direct getter, an assigned `getattr` alias, and a default member name with keyword receiver forwarding. Two adjacent static-name cases—direct `getattr` and a simple getter alias on an untyped receiver parameter—exercise the existing source-ownership refusal and passed on the parent. Before the fix, the focused path-mutator selector failed all three new dynamic-member refusal assertions in 0.285s:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_new_path_mutators_require_owned_sources_and_destinations
+Ran 1 test in 0.285s — FAILED (failures=3)
+```
+
+The first guard attempt rejected any unresolved reflective result stored in an alias, but the canonical Git collector positive then failed because it stores an unresolved-name stream handle for later `.read()` calls; that four-method run failed one assertion in 0.717s. The final guard refuses the unresolved reflective result when the stored alias is used as a call target in a visible lexical scope, while leaving non-callable stream handles and statically named reflective methods to their existing checks. This keeps the correction bounded to extracted call authority rather than treating every dynamic attribute read as a filesystem mutator.
+
+After narrowing, the four changed-boundary and compatibility selectors passed in 6.526s:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_new_path_mutators_require_owned_sources_and_destinations \
+  Issue79RegressionTests.test_string_replace_result_is_not_an_extracted_path_mutator \
+  Issue79RegressionTests.test_reviewed_scanner_namespace_remains_accepted_with_cwd_guards \
+  Issue79RegressionTests.test_git_query_runtime_dependencies_cannot_be_patched_around_capture
+Ran 4 tests in 6.526s — OK
+```
+
+The Path selector retains simple direct getter aliases over temporary-owned paths, direct mutator source/destination checks, local set-copy and the existing helper/holder refusals; string replacement, reviewed scanner namespace and canonical Git capture positives also remain accepted. All inputs were inert source strings inspected as AST data; no specimen, filesystem method, hook, verifier recipe or compiler recipe was executed. No full suite, packet selector, 119-helper sweep, slow compiler self-audit, Go/hosted CI or live operation was run; final packet integration and exact-head independent review remain with the coordinator.
