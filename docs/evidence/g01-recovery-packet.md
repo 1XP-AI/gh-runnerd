@@ -9643,7 +9643,7 @@ def python_lexical_scope_chain(scope, parents):
     return chain
 
 
-def python_local_function_candidates(name, call, tree, parents):
+def python_local_function_candidates(name, call_node, tree, parents):
     """Resolve same-name helpers visible from the call's lexical scope."""
     index = getattr(tree, "_issue79_local_function_index", None)
     if index is None:
@@ -9672,7 +9672,7 @@ def python_local_function_candidates(name, call, tree, parents):
         tree._issue79_local_function_index = index
     functions_by_scope, aliases_by_scope = index
     visible_scopes = set(
-        python_lexical_scope_chain(python_enclosing_scope(call, parents), parents)
+        python_lexical_scope_chain(python_enclosing_scope(call_node, parents), parents)
     )
     names = {name}
     for _ in range(len(aliases_by_scope) + 1):
@@ -9694,10 +9694,10 @@ def python_local_function_candidates(name, call, tree, parents):
     ]
 
 
-def python_local_lambda_candidates(name, call, tree, parents):
+def python_local_lambda_candidates(name, call_node, tree, parents):
     """Resolve assigned lambdas visible from a local call site."""
     visible_scopes = set(
-        python_lexical_scope_chain(python_enclosing_scope(call, parents), parents)
+        python_lexical_scope_chain(python_enclosing_scope(call_node, parents), parents)
     )
     assignments_by_scope = {}
     for candidate in ast.walk(tree):
@@ -9803,11 +9803,11 @@ def python_static_string_values_from_local_calls(node, tree, parents, seen=None)
     return values
 
 
-def python_local_call_return_values(call, tree, parents):
+def python_local_call_return_values(call_node, tree, parents):
     """Resolve returned expressions from visible local functions, methods, and lambdas."""
-    if not isinstance(call, ast.Call):
+    if not isinstance(call_node, ast.Call):
         return []
-    call_scope = python_enclosing_scope(call, parents)
+    call_scope = python_enclosing_scope(call_node, parents)
     visible_scopes = set(python_lexical_scope_chain(call_scope, parents))
     index = getattr(tree, "_issue79_local_return_index", None)
     if index is None:
@@ -9946,7 +9946,7 @@ def python_local_call_return_values(call, tree, parents):
                             values.extend(
                                 result
                                 for candidate in python_local_function_candidates(
-                                    fallback.id, call, tree, parents
+                                    fallback.id, call_node, tree, parents
                                 )
                                 for result in returned_values(candidate)
                             )
@@ -9954,14 +9954,14 @@ def python_local_call_return_values(call, tree, parents):
                     values.extend(bound_method_bindings(value.id, set(seen)))
         return values
 
-    function = call.func
+    function = call_node.func
     if isinstance(function, ast.Lambda):
         return returned_values(function)
     if isinstance(function, ast.Name):
         values = [
             value
             for candidate in python_local_function_candidates(
-                function.id, call, tree, parents
+                function.id, call_node, tree, parents
             )
             for value in returned_values(candidate)
         ]
@@ -10011,18 +10011,18 @@ def python_local_class_alias_names(name, method_name, scopes, methods_by_scope, 
     return found
 
 
-def python_local_method_candidates(attribute, call, tree, parents):
+def python_local_method_candidates(attribute, call_node, tree, parents):
     """Resolve local methods for known instance and local-factory receivers."""
     if not isinstance(attribute, ast.Attribute):
         return []
     index = getattr(tree, "_issue79_local_return_index", None)
     if index is None:
-        python_local_call_return_values(call, tree, parents)
+        python_local_call_return_values(call_node, tree, parents)
         index = getattr(tree, "_issue79_local_return_index", None)
     if index is None:
         return []
     assignments_by_scope, methods_by_scope = index
-    call_scope = python_enclosing_scope(call, parents)
+    call_scope = python_enclosing_scope(call_node, parents)
     visible_scopes = set(python_lexical_scope_chain(call_scope, parents))
     if not any(
         binding_scope_id == id(scope) and method_name == attribute.attr
@@ -10080,15 +10080,15 @@ def python_local_method_candidates(attribute, call, tree, parents):
     ]
 
 
-def python_local_bound_method_candidates(name, call, tree, parents):
+def python_local_bound_method_candidates(name, call_node, tree, parents):
     """Resolve assigned bound methods, including static getattr aliases."""
     index = getattr(tree, "_issue79_local_return_index", None)
     if index is None:
-        python_local_call_return_values(call, tree, parents)
+        python_local_call_return_values(call_node, tree, parents)
         index = getattr(tree, "_issue79_local_return_index", None)
     assignments_by_scope, _methods_by_scope = index
     visible_scopes = set(python_lexical_scope_chain(
-        python_enclosing_scope(call, parents), parents
+        python_enclosing_scope(call_node, parents), parents
     ))
 
     def methods(candidate_name, seen):
@@ -10100,7 +10100,7 @@ def python_local_bound_method_candidates(name, call, tree, parents):
             for value in assignments_by_scope.get((id(scope), candidate_name), ()):
                 if isinstance(value, ast.Attribute):
                     found.extend(python_local_method_candidates(
-                        value, call, tree, parents
+                        value, call_node, tree, parents
                     ))
                 elif (
                     isinstance(value, ast.Call)
@@ -10112,13 +10112,13 @@ def python_local_bound_method_candidates(name, call, tree, parents):
                             ast.Attribute(
                                 value=value.args[0], attr=attribute,
                                 ctx=ast.Load(),
-                            ), call, tree, parents
+                            ), call_node, tree, parents
                         ))
                     if len(value.args) == 3 and isinstance(value.args[2], ast.Name):
                         found.extend(methods(value.args[2].id, set(seen)))
                     elif len(value.args) == 3 and isinstance(value.args[2], ast.Attribute):
                         found.extend(python_local_method_candidates(
-                            value.args[2], call, tree, parents
+                            value.args[2], call_node, tree, parents
                         ))
                 elif isinstance(value, ast.Name):
                     found.extend(methods(value.id, set(seen)))
@@ -10128,7 +10128,7 @@ def python_local_bound_method_candidates(name, call, tree, parents):
                     ):
                         if isinstance(returned, ast.Attribute):
                             found.extend(python_local_method_candidates(
-                                returned, call, tree, parents
+                                returned, call_node, tree, parents
                             ))
         return found
 
@@ -10718,7 +10718,7 @@ def python_sensitive_value_names(tree, parents):
         positional = list(function.args.posonlyargs) + list(function.args.args)
         return positional + list(function.args.kwonlyargs)
 
-    def call_arguments(call, function, bound_method=False):
+    def call_arguments(call_node, function, bound_method=False):
         positional_parameters = list(function.args.posonlyargs) + list(
             function.args.args
         )
@@ -10736,7 +10736,7 @@ def python_sensitive_value_names(tree, parents):
             positional_parameters = positional_parameters[1:]
         parameters = positional_parameters + list(function.args.kwonlyargs)
         bound = []
-        for index, argument in enumerate(call.args):
+        for index, argument in enumerate(call_node.args):
             if isinstance(argument, ast.Starred):
                 for parameter in positional_parameters[index:]:
                     bound.append((parameter.arg, argument.value))
@@ -10745,7 +10745,7 @@ def python_sensitive_value_names(tree, parents):
             if function.args.vararg is not None:
                 bound.append((function.args.vararg.arg, argument))
         parameter_by_name = {parameter.arg: parameter.arg for parameter in parameters}
-        for keyword in call.keywords:
+        for keyword in call_node.keywords:
             if keyword.arg in parameter_by_name:
                 bound.append((keyword.arg, keyword.value))
             if keyword.arg is None:
@@ -11954,17 +11954,17 @@ def reviewed_python_compile_source(node, provenance=None, tree=None):
     return True
 
 
-def reviewed_python_exec_call(call, safe_marker, tree=None):
+def reviewed_python_exec_call(call_node, safe_marker, tree=None):
     """Allow only the packet's static compile/exec metaprogramming path."""
-    if not isinstance(call.func, ast.Name) or call.func.id != "exec":
+    if not isinstance(call_node.func, ast.Name) or call_node.func.id != "exec":
         return False
     if tree is not None and any(
         python_compile_primitive_is_shadowed(name, tree) for name in ("exec", "compile")
     ):
         return False
-    if not call.args or not isinstance(call.args[0], ast.Call):
+    if not call_node.args or not isinstance(call_node.args[0], ast.Call):
         return False
-    compiler = call.args[0]
+    compiler = call_node.args[0]
     if not isinstance(compiler.func, ast.Name) or compiler.func.id != "compile":
         return False
     if len(compiler.args) != 3 or compiler.keywords:
@@ -12011,13 +12011,13 @@ def python_indirect_execution_violation(tree, parents, safe_marker):
     return None
 
 
-def reviewed_python_import_call(call, safe_marker):
+def reviewed_python_import_call(call_node, safe_marker):
     """Allow only literal imports used by packet-only probes."""
-    if not isinstance(call.func, ast.Name) or call.func.id != "__import__":
+    if not isinstance(call_node.func, ast.Name) or call_node.func.id != "__import__":
         return False
-    if not call.args or not isinstance(call.args[0], ast.Constant):
+    if not call_node.args or not isinstance(call_node.args[0], ast.Constant):
         return False
-    module = call.args[0].value
+    module = call_node.args[0].value
     return isinstance(module, str) and module in reviewed_python_import_modules
 
 
@@ -12955,10 +12955,10 @@ def python_guarded_child_kwargs_violation(tree, modules, functions):
     return None
 
 
-def python_command_argument(call):
-    if call.args:
-        return call.args[0]
-    for keyword in call.keywords:
+def python_command_argument(call_node):
+    if call_node.args:
+        return call_node.args[0]
+    for keyword in call_node.keywords:
         if keyword.arg in {"args", "cmd", "command"}:
             return keyword.value
     return None
@@ -14176,10 +14176,10 @@ def reviewed_python_git_query_output_budget(tree, parents, runner):
         parent = parents.get(node)
         if not isinstance(parent, ast.Call) or parent.func is not node or parent not in calls:
             return False
-    for call in calls:
-        if len(call.args) != 1 or any(keyword.arg is None for keyword in call.keywords):
+    for call_node in calls:
+        if len(call_node.args) != 1 or any(keyword.arg is None for keyword in call_node.keywords):
             return False
-        supplied_limits = [keyword.value for keyword in call.keywords if keyword.arg == "output_limit"]
+        supplied_limits = [keyword.value for keyword in call_node.keywords if keyword.arg == "output_limit"]
         if len(supplied_limits) > 1 or (
             supplied_limits
             and not (
@@ -14624,7 +14624,7 @@ def reviewed_python_git_query_collector(tree, parents):
         node for node in local_nodes
         if is_name(node, "process") and isinstance(node.ctx, ast.Load)
     ]
-    process_read_nodes = [call.args[0] for call in process_getattrs]
+    process_read_nodes = [call_node.args[0] for call_node in process_getattrs]
     if wait_calls:
         process_read_nodes.append(wait_calls[0].func.value)
     if len(process_loads) != 3 or any(
@@ -14885,6 +14885,29 @@ def reviewed_python_git_query_capture(
         and candidate.id == "process"
         and isinstance(candidate.ctx, ast.Load)
     ]
+
+    def in_runner_lexical_scope(node):
+        current = parents.get(node)
+        while current is not None and current is not function_node:
+            if isinstance(
+                current,
+                (
+                    ast.FunctionDef,
+                    ast.AsyncFunctionDef,
+                    ast.ClassDef,
+                    ast.Lambda,
+                    ast.ListComp,
+                    ast.SetComp,
+                    ast.DictComp,
+                    ast.GeneratorExp,
+                ),
+            ):
+                return False
+            current = parents.get(current)
+        return current is function_node
+
+    if any(not in_runner_lexical_scope(reference) for reference in process_reads):
+        return False
     process_read_kinds = {"capture": 0, "terminate": 0, "returncode": 0, "cleanup": 0}
     for reference in process_reads:
         parent = parents.get(reference)
@@ -15000,6 +15023,137 @@ def reviewed_python_git_query_capture(
     if not on_unconditional_path(process_creation) or not on_unconditional_path(capture_assignment):
         return False
     if process_creation.lineno >= capture_assignment.lineno:
+        return False
+    capture_try = parents.get(capture_assignment)
+    outer_try = parents.get(process_creation)
+    termination_calls = [
+        candidate
+        for candidate in ast.walk(function_node)
+        if isinstance(candidate, ast.Call)
+        and python_dotted_name(candidate.func) == "terminate_git_query_group"
+    ]
+    if (
+        not isinstance(capture_try, ast.Try)
+        or not isinstance(outer_try, ast.Try)
+        or capture_try is outer_try
+        or capture_assignment not in capture_try.body
+        or len(termination_calls) != 4
+        or any(not in_runner_lexical_scope(candidate) for candidate in termination_calls)
+    ):
+        return False
+
+    def termination_call(statement):
+        return (
+            isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Call)
+            and python_dotted_name(statement.value.func)
+            == "terminate_git_query_group"
+            and len(statement.value.args) == 1
+            and isinstance(statement.value.args[0], ast.Name)
+            and statement.value.args[0].id == "process"
+            and not statement.value.keywords
+        )
+
+    expected_exception_types = {"subprocess.TimeoutExpired", "BaseException"}
+    if (
+        len(capture_try.handlers) != 2
+        or {python_dotted_name(handler.type) for handler in capture_try.handlers}
+        != expected_exception_types
+    ):
+        return False
+    exception_terminations = set()
+    for handler in capture_try.handlers:
+        expected_exit = (
+            "SystemExit"
+            if python_dotted_name(handler.type) == "subprocess.TimeoutExpired"
+            else None
+        )
+        if (
+            len(handler.body) != 3
+            or not termination_call(handler.body[0])
+            or not isinstance(handler.body[1], ast.Assign)
+            or len(handler.body[1].targets) != 1
+            or not isinstance(handler.body[1].targets[0], ast.Name)
+            or handler.body[1].targets[0].id != "process"
+            or not isinstance(handler.body[1].value, ast.Constant)
+            or handler.body[1].value.value is not None
+            or not isinstance(handler.body[2], ast.Raise)
+            or (
+                expected_exit == "SystemExit"
+                and (
+                    not isinstance(handler.body[2].exc, ast.Call)
+                    or python_dotted_name(handler.body[2].exc.func) != expected_exit
+                )
+            )
+            or (expected_exit is None and handler.body[2].exc is not None)
+        ):
+            return False
+        exception_terminations.add(handler.body[0].value)
+
+    direct_capture_attempts = [
+        statement
+        for statement in outer_try.body
+        if statement is capture_try
+    ]
+    returncode_assignments = [
+        statement
+        for statement in outer_try.body
+        if isinstance(statement, ast.Assign)
+        and len(statement.targets) == 1
+        and isinstance(statement.targets[0], ast.Name)
+        and statement.targets[0].id == "returncode"
+        and isinstance(statement.value, ast.Attribute)
+        and python_dotted_name(statement.value) == "process.returncode"
+    ]
+    normal_termination_statements = [
+        statement
+        for statement in outer_try.body
+        if termination_call(statement)
+    ]
+    normal_process_clears = [
+        statement
+        for statement in outer_try.body
+        if isinstance(statement, ast.Assign)
+        and len(statement.targets) == 1
+        and isinstance(statement.targets[0], ast.Name)
+        and statement.targets[0].id == "process"
+        and isinstance(statement.value, ast.Constant)
+        and statement.value.value is None
+    ]
+    if (
+        len(direct_capture_attempts) != 1
+        or len(returncode_assignments) != 1
+        or len(normal_termination_statements) != 1
+        or len(normal_process_clears) != 1
+        or not (
+            outer_try.body.index(capture_try)
+            < outer_try.body.index(returncode_assignments[0])
+            < outer_try.body.index(normal_termination_statements[0])
+            < outer_try.body.index(normal_process_clears[0])
+        )
+    ):
+        return False
+
+    if (
+        len(outer_try.finalbody) != 1
+        or not isinstance(outer_try.finalbody[0], ast.If)
+        or not isinstance(outer_try.finalbody[0].test, ast.Compare)
+        or python_dotted_name(outer_try.finalbody[0].test.left) != "process"
+        or len(outer_try.finalbody[0].test.ops) != 1
+        or not isinstance(outer_try.finalbody[0].test.ops[0], ast.IsNot)
+        or len(outer_try.finalbody[0].test.comparators) != 1
+        or not isinstance(outer_try.finalbody[0].test.comparators[0], ast.Constant)
+        or outer_try.finalbody[0].test.comparators[0].value is not None
+        or outer_try.finalbody[0].orelse
+        or len(outer_try.finalbody[0].body) != 1
+        or not termination_call(outer_try.finalbody[0].body[0])
+    ):
+        return False
+    expected_terminations = exception_terminations | {
+        normal_termination_statements[0].value,
+        outer_try.finalbody[0].body[0].value,
+    }
+    if len(expected_terminations) != 4 or set(termination_calls) != expected_terminations:
         return False
     output_stores = [
         candidate
@@ -16371,25 +16525,25 @@ python_path_mutator_destination_keywords = {
 }
 
 
-def python_path_mutator_destination(call, method):
+def python_path_mutator_destination(call_node, method):
     """Return only a statically visible destination for new Path mutators."""
     keyword_name = python_path_mutator_destination_keywords.get(method)
     if keyword_name is None:
         return None
-    if len(call.args) > 1 or any(
-        isinstance(argument, ast.Starred) for argument in call.args
+    if len(call_node.args) > 1 or any(
+        isinstance(argument, ast.Starred) for argument in call_node.args
     ):
         return None
     named_destinations = [
-        keyword.value for keyword in call.keywords if keyword.arg == keyword_name
+        keyword.value for keyword in call_node.keywords if keyword.arg == keyword_name
     ]
     if (
         len(named_destinations) > 1
-        or any(keyword.arg is None for keyword in call.keywords)
-        or (call.args and named_destinations)
+        or any(keyword.arg is None for keyword in call_node.keywords)
+        or (call_node.args and named_destinations)
     ):
         return None
-    for keyword in call.keywords:
+    for keyword in call_node.keywords:
         if keyword.arg == keyword_name:
             continue
         if not (
@@ -16399,8 +16553,8 @@ def python_path_mutator_destination(call, method):
             and isinstance(keyword.value.value, bool)
         ):
             return None
-    if call.args:
-        return call.args[0]
+    if call_node.args:
+        return call_node.args[0]
     if named_destinations:
         return named_destinations[0]
     return None
@@ -16693,14 +16847,14 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                             "Python heredoc captures an extracted Path mutator "
                             f"outside its reviewed scope on line {candidate.lineno}"
                         )
-                for call in alias_calls:
-                    destination = python_path_mutator_destination(call, method)
+                for call_node in alias_calls:
+                    destination = python_path_mutator_destination(call_node, method)
                     if destination is None or not temporary_path_expression(
                         destination, tree, parents
                     ):
                         return (
                             "Python heredoc calls an extracted Path mutator with an "
-                            f"unreviewed destination on line {call.lineno}"
+                            f"unreviewed destination on line {call_node.lineno}"
                         )
     return None
 
@@ -18576,6 +18730,7 @@ def python_sensitive_output_sink(node, tree=None):
                     for target in named_targets
                 )
                 or python_assigned_sink_method_alias(named_value.id, tree)
+                or python_sensitive_imported_function_alias(named_value, tree)
             )
         ):
             return True
@@ -18605,27 +18760,10 @@ def python_sensitive_output_sink(node, tree=None):
                 )
                 or python_assigned_sink_method_alias(name, tree)
             }
-            imported_functions = {
-                "builtins": {"print"},
-                "sys": {"exit", "displayhook", "excepthook"},
-                "warnings": {"warn", "warn_explicit", "showwarning"},
-                "traceback": {"print_exc", "print_exception"},
-            }
-            for candidate in ast.walk(tree):
-                if not isinstance(candidate, ast.ImportFrom):
-                    continue
-                for imported in candidate.names:
-                    if imported.name not in imported_functions.get(
-                        candidate.module or "", set()
-                    ):
-                        continue
-                    local_name = imported.asname or imported.name
-                    if python_imported_function_alias_is_stable(
-                        local_name, candidate.module, imported.name, tree
-                    ):
-                        sink_aliases.add(local_name)
             tree._issue79_sensitive_output_sink_aliases = sink_aliases
         if node.func.id in sink_aliases:
+            return True
+        if python_sensitive_imported_function_alias(node.func, tree):
             return True
     return (
         isinstance(node.func, ast.Attribute)
@@ -19456,6 +19594,191 @@ def python_imported_function_alias_is_stable(name, module, function, tree):
                     return False
                 imported = True
     return imported
+
+
+def python_sensitive_alias_scope(node, parents):
+    """Return the nearest function, class, comprehension, or module scope."""
+    current = node
+    while current is not None:
+        if isinstance(
+            current,
+            (
+                ast.FunctionDef,
+                ast.AsyncFunctionDef,
+                ast.Lambda,
+                ast.ClassDef,
+                ast.ListComp,
+                ast.SetComp,
+                ast.DictComp,
+                ast.GeneratorExp,
+                ast.Module,
+            ),
+        ):
+            return current
+        current = parents.get(current)
+    return None
+
+
+def python_sensitive_alias_scope_chain(node, parents):
+    """Resolve lexical scopes for sink aliases without counting unrelated locals."""
+    scope = python_sensitive_alias_scope(node, parents)
+    chain = []
+    seen = set()
+    while scope is not None and id(scope) not in seen:
+        seen.add(id(scope))
+        chain.append(scope)
+        if isinstance(scope, ast.Module):
+            break
+        parent = parents.get(scope)
+        if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            if isinstance(parent, ast.ClassDef):
+                parent = parents.get(parent)
+        scope = python_sensitive_alias_scope(parent, parents)
+    return chain
+
+
+def python_sensitive_imported_function_alias(node, tree, parents=None, seen=None):
+    """Resolve sensitive imported callables in the reference's binding scope."""
+    if not isinstance(node, ast.Name) or tree is None:
+        return False
+    if parents is None:
+        parents = getattr(tree, "_issue79_sensitive_alias_parents", None)
+        if parents is None:
+            parents = {
+                child: parent
+                for parent in ast.walk(tree)
+                for child in ast.iter_child_nodes(parent)
+            }
+            tree._issue79_sensitive_alias_parents = parents
+    if seen is None:
+        seen = set()
+    scopes = python_sensitive_alias_scope_chain(node, parents)
+    binding_index = getattr(tree, "_issue79_sensitive_imported_alias_bindings", None)
+    if binding_index is None:
+        binding_index = {}
+
+        def add(scope, name, kind, binding):
+            binding_index.setdefault((id(scope), name), []).append((kind, binding))
+
+        for candidate in ast.walk(tree):
+            if isinstance(candidate, ast.Name) and isinstance(candidate.ctx, ast.Store):
+                scope = python_sensitive_alias_scope(candidate, parents)
+                target = parents.get(candidate)
+                if (
+                    isinstance(target, ast.Assign)
+                    and len(target.targets) == 1
+                    and target.targets[0] is candidate
+                ) or (
+                    isinstance(target, (ast.AnnAssign, ast.NamedExpr))
+                    and target.target is candidate
+                ):
+                    add(scope, candidate.id, "assignment", target)
+                else:
+                    add(scope, candidate.id, "unknown", candidate)
+            elif isinstance(candidate, ast.arg):
+                add(
+                    python_sensitive_alias_scope(candidate, parents),
+                    candidate.arg,
+                    "unknown",
+                    candidate,
+                )
+            elif isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                add(
+                    python_sensitive_alias_scope(parents.get(candidate), parents),
+                    candidate.name,
+                    "unknown",
+                    candidate,
+                )
+            elif isinstance(candidate, ast.Import):
+                scope = python_sensitive_alias_scope(candidate, parents)
+                for alias in candidate.names:
+                    add(
+                        scope,
+                        alias.asname or alias.name.split(".", 1)[0],
+                        "unknown",
+                        candidate,
+                    )
+            elif isinstance(candidate, ast.ImportFrom):
+                scope = python_sensitive_alias_scope(candidate, parents)
+                for alias in candidate.names:
+                    add(
+                        scope,
+                        alias.asname or alias.name,
+                        "import",
+                        (candidate, alias),
+                    )
+            elif isinstance(candidate, ast.Global):
+                scope = python_sensitive_alias_scope(candidate, parents)
+                for name in candidate.names:
+                    add(scope, name, "global", candidate)
+            elif isinstance(candidate, ast.Nonlocal):
+                scope = python_sensitive_alias_scope(candidate, parents)
+                for name in candidate.names:
+                    add(scope, name, "nonlocal", candidate)
+            elif isinstance(candidate, ast.ExceptHandler) and candidate.name:
+                add(
+                    python_sensitive_alias_scope(candidate, parents),
+                    candidate.name,
+                    "unknown",
+                    candidate,
+                )
+            elif isinstance(candidate, (ast.MatchAs, ast.MatchStar)) and candidate.name:
+                add(
+                    python_sensitive_alias_scope(candidate, parents),
+                    candidate.name,
+                    "unknown",
+                    candidate,
+                )
+            elif isinstance(candidate, ast.MatchMapping) and candidate.rest:
+                add(
+                    python_sensitive_alias_scope(candidate, parents),
+                    candidate.rest,
+                    "unknown",
+                    candidate,
+                )
+        tree._issue79_sensitive_imported_alias_bindings = binding_index
+
+    def resolves(reference, visited):
+        if not isinstance(reference, ast.Name):
+            return False
+        scope_chain = python_sensitive_alias_scope_chain(reference, parents)
+        for scope in scope_chain:
+            key = (id(scope), reference.id)
+            if key in visited:
+                return False
+            bindings = binding_index.get(key, ())
+            if not bindings:
+                continue
+            if len(bindings) != 1:
+                return False
+            kind, binding = bindings[0]
+            if kind == "global":
+                continue
+            if kind == "import":
+                imported, alias = binding
+                return (
+                    imported.level == 0
+                    and imported.module in {
+                        "builtins",
+                        "sys",
+                        "warnings",
+                        "traceback",
+                    }
+                    and alias.name
+                    in {
+                        "builtins": {"print"},
+                        "sys": {"exit", "displayhook", "excepthook"},
+                        "warnings": {"warn", "warn_explicit", "showwarning"},
+                        "traceback": {"print_exc", "print_exception"},
+                    }[imported.module]
+                )
+            if kind == "assignment" and isinstance(binding.value, ast.Name):
+                visited.add(key)
+                return resolves(binding.value, visited)
+            return False
+        return False
+
+    return resolves(node, set(seen))
 
 
 def python_known_non_path_reader_call(node, tree):
@@ -37019,3 +37342,31 @@ The compiler-source provenance code did not change, so the 119-helper
 selector was not repeated. No full harness, packet-wide scan, Go/hosted CI,
 or live operation was run; those integration and exact-head review gates
 remain with the coordinator.
+
+#### Scope-sensitive hook sinks, reachable Git cleanup and scanner self-audit from `86f4f8fc`
+
+At entry on 2026-10-04 the worktree was clean at immutable `86f4f8fcc4c54782079b8502b6f2359414a82203`. The coordinator's exact packet selector at that source had one canonical compiler-body self-audit failure in 50.995s; the two independent read-only reviews retained HOLDs, including the newly reproduced process-cleanup P1. This correction did not rerun the packet selector or full suite.
+
+Three concrete boundaries were covered in one focused batch. First, the imported `sys.excepthook` alias remained a sensitive sink after unrelated nested function-parameter, function-definition, or class-definition shadows; direct calls and list-held hook references with `os.environ` now fail closed, while a parameter-shadowed local callback with a literal argument remains accepted. This closes the same sink-storage family as [Codex finding 4173966622](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4173966622); no additional external review URL was provided for the lexical-shadow variants.
+
+Second, timeout and process-group cleanup calls must occupy the direct timeout, general-exception, normal-result and outer-finally paths before the process reference is cleared or an exception is raised. The proof refuses process reads inside nested functions, lambdas, classes or comprehensions and matches each cleanup call to its owning path; it does not infer safety from four matching call spellings. The coordinator and contract reviewer independently accepted, at immutable `86f4f8fc`, a timeout cleanup moved into an uncalled nested function, and the coordinator separately accepted each of the four original cleanup calls wrapped in `if False`; these were static AST-data probes only. No process was spawned, terminated, or deliberately leaked.
+
+Third, the current canonical scanner/compiler heredoc passed its own callback audit after renaming three local AST call-node bindings (`call` to `call_node`) in the comprehension and loop targets identified by the contract review. No callback classification rule, compiler-source proof, source hash, marker exemption, or helper allowlist was relaxed or added; an existing unresolved launcher-alias refusal remains covered.
+
+The pre-correction bounded command produced meaningful RED evidence: four newly added hook-shadow/direct-call subcases, one deferred-timeout-cleanup mutation, and the exact current canonical scanner-body selector failed—six assertions across three methods in 38.495s. The coordinator's immutable-source probes also established RED for all four false-condition cleanup wrappers. An initial implementation pass exposed a canonical-positive regression because it checked the normal cleanup inside the inner capture `try`; a three-method focused rerun failed that one positive in 42.680s. The proof was corrected to check the capture attempt and result/cleanup ordering across the containing runner `try`, including the existing bare re-raise on `BaseException`.
+
+The final bounded focused command passed seven methods in 49.059s:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_excepthook_aliases_are_sensitive_error_sinks \
+  Issue79RegressionTests.test_git_query_timeout_cleanup_must_remain_reachable \
+  Issue79RegressionTests.test_git_query_process_stream_authority_cannot_be_replaced \
+  Issue79RegressionTests.test_current_scanner_compiler_body_remains_self_audit_compatible \
+  Issue79RegressionTests.test_current_scanner_self_audit_ast_parameters_are_not_callbacks \
+  Issue79RegressionTests.test_launcher_aliases_returned_by_local_helpers_are_rejected \
+  Issue79RegressionTests.test_reviewed_scanner_namespace_remains_accepted_with_cwd_guards
+Ran 7 tests in 49.059s — OK
+```
+
+The tests retained the canonical bounded collector, all four direct cleanup paths, the existing process-stream authority negatives, the canonical scanner namespace, local callback safety and unresolved command-alias refusal. The new AST examples were parsed and inspected only; no verifier body, hook, Git child or adversarial recipe was executed. Compiler-source provenance logic was unchanged, so the 119-helper selector was not repeated. No full harness, packet scan, Go/hosted CI or live operation is claimed; exact-head packet validation and both new-head independent reviews remain with the coordinator.

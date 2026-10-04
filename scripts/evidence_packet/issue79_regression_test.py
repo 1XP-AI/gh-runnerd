@@ -4584,6 +4584,21 @@ def synthetic_read(_fd, _size):
             'import os, sys\nemit = getattr(sys, "excepthook")\n'
             'handlers = [emit]\n'
             'handlers[0](RuntimeError, RuntimeError(os.environ), None)\n',
+            'import os\nfrom sys import excepthook as emit\n'
+            'def unrelated(emit):\n    pass\n'
+            'handlers = [emit]\n'
+            'handlers[0](RuntimeError, RuntimeError(os.environ), None)\n',
+            'import os\nfrom sys import excepthook as emit\n'
+            'def unrelated():\n    def emit():\n        pass\n'
+            'handlers = [emit]\n'
+            'handlers[0](RuntimeError, RuntimeError(os.environ), None)\n',
+            'import os\nfrom sys import excepthook as emit\n'
+            'def unrelated():\n    class emit:\n        pass\n'
+            'handlers = [emit]\n'
+            'handlers[0](RuntimeError, RuntimeError(os.environ), None)\n',
+            'import os\nfrom sys import excepthook as emit\n'
+            'def unrelated(emit):\n    pass\n'
+            'emit(RuntimeError, RuntimeError(os.environ), None)\n',
         )
         for body in unsafe:
             with self.subTest(body=body):
@@ -4599,6 +4614,104 @@ def synthetic_read(_fd, _size):
             'def callback(*args):\n    return None\n'
             'callbacks = [callback]\ncallbacks[0]("offline fixture")\n'
         ))
+        self.assertIsNone(self.inspect(
+            'from sys import excepthook as emit\n'
+            'def local_callback(emit):\n'
+            '    handlers = [emit]\n    handlers[0]("offline fixture")\n'
+        ))
+
+    def test_git_query_timeout_cleanup_must_remain_reachable(self) -> None:
+        bounded_body, marker = self.packet_heredoc_containing(
+            "def run_bounded_git_query(",
+            "stdout, stderr = capture_git_query_output(",
+        )
+        inspect = self.scanner["inspect_python_heredoc"]
+        self.assertIsNone(inspect(bounded_body, marker))  # type: ignore[operator]
+        tree = ast.parse(bounded_body, filename="<deferred-git-timeout-cleanup-data>")
+        runner = _verification_function(tree, "run_bounded_git_query")
+        timeout_handler = next(
+            node
+            for node in ast.walk(runner)
+            if isinstance(node, ast.ExceptHandler)
+            and isinstance(node.type, ast.Attribute)
+            and self.scanner["python_dotted_name"](node.type)  # type: ignore[operator]
+            == "subprocess.TimeoutExpired"
+        )
+        self.assertTrue(timeout_handler.body)
+        cleanup = timeout_handler.body[0]
+        self.assertIsInstance(cleanup, ast.Expr)
+        self.assertIsInstance(cleanup.value, ast.Call)  # type: ignore[union-attr]
+        timeout_handler.body[0] = ast.FunctionDef(
+            name="deferred_timeout_cleanup",
+            args=ast.arguments(
+                posonlyargs=[],
+                args=[],
+                vararg=None,
+                kwonlyargs=[],
+                kw_defaults=[],
+                kwarg=None,
+                defaults=[],
+            ),
+            body=[cleanup],
+            decorator_list=[],
+        )
+        ast.fix_missing_locations(tree)
+        self.assertIsNotNone(
+            inspect(ast.unparse(tree), marker),  # type: ignore[operator]
+            "unreachable nested timeout termination must not certify process cleanup",
+        )
+
+        for cleanup_index in range(4):
+            with self.subTest(unreachable_cleanup=cleanup_index):
+                tree = ast.parse(
+                    bounded_body,
+                    filename="<conditional-git-timeout-cleanup-data>",
+                )
+                runner = _verification_function(tree, "run_bounded_git_query")
+                parents = {
+                    child: parent
+                    for parent in ast.walk(tree)
+                    for child in ast.iter_child_nodes(parent)
+                }
+                cleanup_calls = [
+                    node
+                    for node in ast.walk(runner)
+                    if isinstance(node, ast.Call)
+                    and self.scanner["python_dotted_name"](node.func)  # type: ignore[operator]
+                    == "terminate_git_query_group"
+                ]
+                self.assertEqual(4, len(cleanup_calls))
+                cleanup_statement = parents[cleanup_calls[cleanup_index]]
+                self.assertIsInstance(cleanup_statement, ast.Expr)
+                container = parents[cleanup_statement]
+                list_field = next(
+                    field
+                    for field in ("body", "orelse", "finalbody")
+                    if isinstance(getattr(container, field, None), list)
+                    and cleanup_statement in getattr(container, field)
+                )
+                statements = getattr(container, list_field)
+                statement_index = statements.index(cleanup_statement)
+                statements[statement_index] = ast.If(
+                    test=ast.Constant(value=False),
+                    body=[cleanup_statement],
+                    orelse=[],
+                )
+                ast.fix_missing_locations(tree)
+                self.assertIsNotNone(
+                    inspect(ast.unparse(tree), marker),  # type: ignore[operator]
+                    "a cleanup hidden behind a false condition must not certify its path",
+                )
+
+    def test_current_scanner_compiler_body_remains_self_audit_compatible(self) -> None:
+        scanner_body, marker = self.packet_heredoc_containing(
+            "def python_import_bindings(tree):",
+            "def python_local_call_return_values(call_node, tree, parents):",
+        )
+        self.assertIsNone(
+            self.scanner["inspect_python_heredoc"](scanner_body, marker),  # type: ignore[operator]
+            "the canonical scanner/compiler body must pass its own AST audit",
+        )
 
     def test_reviewed_scanner_namespace_remains_accepted_with_cwd_guards(self) -> None:
         scanner_body_matches = [
