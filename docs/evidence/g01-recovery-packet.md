@@ -14207,6 +14207,8 @@ def reviewed_python_git_query_collector(tree, parents):
     ]
     if len(collectors) != 1 or len(runners) != 1:
         return False
+    if not reviewed_python_git_query_runtime_dependencies_stable(tree, parents):
+        return False
     function = collectors[0]
     runner = runners[0]
     if not reviewed_python_git_query_output_budget(tree, parents, runner):
@@ -15590,6 +15592,200 @@ def python_assigned_module_names(tree, module):
     return names
 
 
+def reviewed_python_git_query_runtime_dependencies_stable(tree, parents):
+    """Keep the bounded Git capture's imported providers on stable bindings."""
+    exported_members = {
+        "os": {"environ", "killpg", "read", "set_blocking", "write"},
+        "selectors": {"DefaultSelector", "EVENT_READ", "EVENT_WRITE"},
+        "signal": {"SIGKILL", "SIGTERM"},
+        "subprocess": {
+            "CompletedProcess", "DEVNULL", "PIPE", "Popen", "TimeoutExpired"
+        },
+        "time": {"monotonic", "sleep"},
+    }
+    import_counts = {module: 0 for module in exported_members}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in exported_members:
+                    if alias.asname is not None or parents.get(node) is not tree:
+                        return False
+                    import_counts[alias.name] += 1
+                if alias.name == "builtins":
+                    return False
+        elif isinstance(node, ast.ImportFrom):
+            if node.module in exported_members or node.module == "builtins":
+                return False
+    if any(count != 1 for count in import_counts.values()):
+        return False
+
+    provider_names = set(exported_members)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in provider_names:
+            if isinstance(node.ctx, (ast.Store, ast.Del)):
+                return False
+            if isinstance(node.ctx, ast.Load):
+                parent = parents.get(node)
+                if not isinstance(parent, ast.Attribute) or parent.value is not node:
+                    return False
+        elif isinstance(node, ast.arg) and node.arg in provider_names:
+            return False
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name in provider_names:
+            return False
+        elif isinstance(node, ast.ExceptHandler) and node.name in provider_names:
+            return False
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name in provider_names:
+            return False
+        elif isinstance(node, ast.MatchMapping) and node.rest in provider_names:
+            return False
+        elif isinstance(node, ast.Name) and node.id == "__builtins__":
+            return False
+
+    callable_members = set()
+    references = []
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in exported_members
+        ):
+            continue
+        member = (node.value.id, node.attr)
+        if node.attr not in exported_members[node.value.id]:
+            return False
+        if isinstance(node.ctx, (ast.Store, ast.Del)):
+            return False
+        parent = parents.get(node)
+        if isinstance(parent, ast.Call) and parent.func is node:
+            callable_members.add(member)
+        elif isinstance(parent, ast.ExceptHandler) and parent.type is node:
+            callable_members.add(member)
+        references.append((node, member))
+
+    def passive_value_reference(node):
+        parent = parents.get(node)
+        if isinstance(parent, ast.Call) and node in parent.args:
+            return True
+        if isinstance(parent, ast.keyword) and parent.value is node:
+            return True
+        if isinstance(parent, ast.IfExp) and node in {parent.body, parent.orelse}:
+            keyword = parents.get(parent)
+            return isinstance(keyword, ast.keyword) and keyword.value is parent
+        if node.attr == "environ" and node.value.id == "os":
+            if isinstance(parent, ast.Compare):
+                return node in parent.comparators or parent.left is node
+            if isinstance(parent, ast.Subscript):
+                return parent.value is node and isinstance(parent.ctx, ast.Load)
+            if isinstance(parent, ast.comprehension):
+                return parent.iter is node
+        return False
+
+    for node, member in references:
+        if member in callable_members:
+            parent = parents.get(node)
+            if not (
+                isinstance(parent, ast.Call) and parent.func is node
+            ) and not (
+                isinstance(parent, ast.ExceptHandler) and parent.type is node
+            ):
+                return False
+        elif not passive_value_reference(node):
+            return False
+
+    builtin_names = {
+        "BaseException", "BlockingIOError", "BrokenPipeError", "OSError",
+        "ProcessLookupError", "SystemExit", "bytearray", "bytes", "getattr",
+        "len", "max", "memoryview", "min",
+    }
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Name)
+            and node.id in builtin_names
+            and isinstance(node.ctx, ast.Load)
+            and not python_unshadowed_builtin_reference(
+                node, {node.id}, tree, parents
+            )
+        ):
+            return False
+    return True
+
+
+def python_working_directory_change_violation(tree, parents):
+    """Reject cwd-changing APIs through module, imported, or container aliases."""
+    sensitive_modules = {
+        "contextlib": python_assigned_module_names(tree, "contextlib"),
+        "os": python_assigned_module_names(tree, "os"),
+    }
+    cwd_methods = {"chdir", "fchdir"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module in sensitive_modules:
+            if any(alias.name == "*" or alias.name in cwd_methods for alias in node.names):
+                return "Python heredoc imports an unreviewed working-directory change API"
+        if (
+            isinstance(node, ast.Name)
+            and isinstance(node.ctx, ast.Load)
+            and any(node.id in names for names in sensitive_modules.values())
+        ):
+            parent = parents.get(node)
+            if isinstance(parent, ast.Attribute) and parent.value is node:
+                continue
+            if (
+                isinstance(parent, ast.Assign)
+                and parent.value is node
+                and all(isinstance(target, ast.Name) for target in parent.targets)
+            ):
+                continue
+            return "Python heredoc lets a working-directory module escape its reviewed attribute path"
+        if isinstance(node, ast.Attribute) and node.attr in cwd_methods:
+            if (
+                isinstance(node.value, ast.Name)
+                and any(node.value.id in names for names in sensitive_modules.values())
+            ):
+                return "Python heredoc accesses an unreviewed working-directory change API"
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Name) and (
+            node.func.id in {"getattr", "vars"}
+            or python_assigned_callable_alias(node.func.id, "getattr", tree)
+            or python_assigned_callable_alias(node.func.id, "vars", tree)
+        ):
+            module_argument = node.args[0] if node.args else None
+            if isinstance(module_argument, ast.Name) and any(
+                module_argument.id in names for names in sensitive_modules.values()
+            ):
+                attributes = (
+                    python_static_string_values(node.args[1], tree)
+                    if node.func.id != "vars" and len(node.args) > 1
+                    else set()
+                )
+                if not attributes or any(attribute in cwd_methods for attribute in attributes):
+                    return "Python heredoc reflects over working-directory module APIs"
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "__getattribute__"
+        ):
+            if (
+                isinstance(node.func.value, ast.Name)
+                and node.func.value.id in {"object", "type"}
+                and node.args
+            ):
+                module_argument = node.args[0]
+                attribute_argument = node.args[1] if len(node.args) > 1 else None
+            else:
+                module_argument = node.func.value
+                attribute_argument = node.args[0] if node.args else None
+            if isinstance(module_argument, ast.Name) and any(
+                module_argument.id in names for names in sensitive_modules.values()
+            ):
+                attributes = (
+                    python_static_string_values(attribute_argument, tree)
+                    if attribute_argument is not None else set()
+                )
+                if not attributes or any(attribute in cwd_methods for attribute in attributes):
+                    return "Python heredoc reflects over working-directory module APIs"
+    return None
+
+
 def python_unknown_os_call_violation(tree):
     """Fail closed for OS calls whose path/effect surface is not reviewed."""
     os_names = python_assigned_module_names(tree, "os")
@@ -16331,6 +16527,33 @@ def python_filesystem_mutator_alias_violation(tree, parents):
             for alias in node.names
         ):
             return "Python heredoc imports an unreviewed filesystem mutator"
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Attribute)
+            and node.attr in python_filesystem_mutating_methods
+        ):
+            continue
+        parent = parents.get(node)
+        if isinstance(parent, ast.Call) and parent.func is node:
+            continue
+        if (
+            isinstance(parent, ast.Assign)
+            and parent.value is node
+            and all(isinstance(target, ast.Name) for target in parent.targets)
+        ) or (
+            isinstance(parent, (ast.AnnAssign, ast.NamedExpr))
+            and parent.value is node
+            and isinstance(parent.target, ast.Name)
+        ):
+            continue
+        if node.attr == "copy" and python_known_non_path_set_copy_receiver(
+            node.value, tree, parents
+        ):
+            continue
+        return (
+            "Python heredoc stores or passes a filesystem mutator in an "
+            f"unreviewed holder on line {node.lineno}"
+        )
     for node in ast.walk(tree):
         if (
             isinstance(node, ast.Attribute)
@@ -17800,6 +18023,8 @@ python_sensitive_sink_methods = {
     "info",
     "debug",
     "log",
+    "displayhook",
+    "excepthook",
 }
 
 
@@ -20277,6 +20502,11 @@ def inspect_python_heredoc(body, safe_marker):
         for parent in ast.walk(tree)
         for child in ast.iter_child_nodes(parent)
     }
+    working_directory_violation = python_working_directory_change_violation(
+        tree, parents
+    )
+    if working_directory_violation:
+        return working_directory_violation
     git_origin_capture_violation = python_git_origin_capture_violation(tree, parents)
     if git_origin_capture_violation:
         return git_origin_capture_violation
@@ -36547,3 +36777,67 @@ The probes inspected source and AST only; no verifier recipe, Git query, or
 adversarial specimen was run. This correction did not rerun the full harness,
 packet-wide selector, Go checks, hosted CI, or live operations. The coordinator
 owns the next exact-head integration scan and independent reviews.
+
+#### Four exact-head Codex P1 corrections from `034c1313`
+
+At immutable base
+`034c131329a00f315b81bd11956e1fd0744037ee`, the four reported AST witnesses
+were accepted by the packet and harness scanners:
+
+- [Stored exception hook](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4173966622): a `sys.excepthook` bound method stored in a list, tuple, or dictionary could later receive `RuntimeError(os.environ)`. The scanner now classifies `excepthook` and `displayhook` as sensitive output methods; the controls retain direct offline callbacks with literal data.
+- [Stored Path mutator](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4173966624): bound `copy`, `copy_into`, `move_into`, and related mutators could escape through a container before source and destination ownership was checked. Stored methods in unreviewed containers are refused; direct calls and simple aliases still use the existing owned-source and owned-destination proof, and a proven ordinary set `.copy()` remains accepted.
+- [Patched Git capture providers](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4173966626): saving, replacing, and restoring `selectors.DefaultSelector` and `os.read` around the real query let a synthetic reader supply the expected newline-terminated origin bytes. The collector now requires its standard-library providers to be imported once under their canonical bindings, rejects module/callable escapes and provider writes, and proves the used selector, OS, signal, subprocess, and time attributes remain stable. Relevant byte and guard builtins must also remain unshadowed; inert controls cover direct patching, module aliases, and a shadowed `SystemExit`.
+- [Changed working directory](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4173966627): `contextlib.chdir` and imported `os.chdir` forms could move a later repository-relative read outside the reviewed root. The scanner now refuses `chdir`/`fchdir` imports and module attributes, including name and container aliases and dynamic module reflection; the `contextlib.nullcontext()` control remains accepted.
+
+Before scanner changes, the four focused regression methods failed in 0.820s
+with 15 assertions showing the unsafe forms were accepted. After adding
+inert module-alias and builtin-shadow variants to the provider test, its
+standalone rerun against the unchanged scanner failed in 0.762s on the
+saved-and-restored provider mutation. The fake selector and reader were
+inserted into the verifier as AST data; the newline byte was asserted from
+the literal value. No fixture or verifier specimen was executed.
+
+The focused correction selectors passed:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_excepthook_aliases_are_sensitive_error_sinks \
+  Issue79RegressionTests.test_new_path_mutators_require_owned_sources_and_destinations \
+  Issue79RegressionTests.test_git_query_runtime_dependencies_cannot_be_patched_around_capture \
+  Issue79RegressionTests.test_contextlib_chdir_is_rejected_through_aliases_and_containers \
+  Issue79RegressionTests.test_git_query_capture_must_be_on_the_active_result_path \
+  Issue79RegressionTests.test_git_query_collector_must_return_bounded_pipe_bytes \
+  Issue79RegressionTests.test_bounded_git_origin_capture_requires_reviewed_comparison_and_no_output_escape
+Ran 7 tests in 5.849s — OK
+
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_actual_packet_compile_helpers_retain_provenance
+Ran 1 test in 4.122s — OK
+packet compile-source boundary: 119 actual helper calls checked
+```
+
+These focused runs retain the direct and aliased hook, filesystem ownership,
+collector active-result, bounded-byte and origin-comparison controls, plus
+the actual 119 helper calls. The full harness, packet-wide selector, Go or
+hosted CI, and live operations were not run in this correction; the
+coordinator owns the final exact-head integration scan and independent
+reviews.
+
+The provider regression was extended with a `globals()` lookup mutation and
+still passed: the existing module-reflection guard refuses that route before
+it can replace the imported providers. After that addition and the final cwd
+module-escape tightening, the exact final focused selection passed:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_excepthook_aliases_are_sensitive_error_sinks \
+  Issue79RegressionTests.test_new_path_mutators_require_owned_sources_and_destinations \
+  Issue79RegressionTests.test_git_query_runtime_dependencies_cannot_be_patched_around_capture \
+  Issue79RegressionTests.test_contextlib_chdir_is_rejected_through_aliases_and_containers \
+  Issue79RegressionTests.test_git_query_capture_must_be_on_the_active_result_path \
+  Issue79RegressionTests.test_git_query_collector_must_return_bounded_pipe_bytes \
+  Issue79RegressionTests.test_bounded_git_origin_capture_requires_reviewed_comparison_and_no_output_escape \
+  Issue79RegressionTests.test_actual_packet_compile_helpers_retain_provenance
+Ran 8 tests in 9.892s — OK
+packet compile-source boundary: 119 actual helper calls checked
+```

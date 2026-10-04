@@ -3076,6 +3076,212 @@ class Issue79RegressionTests(unittest.TestCase):
                     label,
                 )
 
+    def test_git_query_runtime_dependencies_cannot_be_patched_around_capture(self) -> None:
+        verification_body, marker = self.packet_heredoc_containing(
+            "expected_origin_url =",
+            "origin_result = run_bounded_git_query(",
+            "if origin_urls != [expected_origin_url]:",
+        )
+        inspect_verification = self.scanner["inspect_python_heredoc"]
+        self.assertIsNone(
+            inspect_verification(verification_body, marker),  # type: ignore[operator]
+            "the original imported collector dependencies remain accepted",
+        )
+        origin_bytes = b"https://github.com/1XP-AI/gh-runnerd.git\n"
+        self.assertTrue(origin_bytes.endswith(b"\n"))
+        synthetic_code = '''
+class SyntheticSelectorKey:
+    def __init__(self, stream, data):
+        self.fileobj = stream
+        self.data = data
+
+class SyntheticSelector:
+    def __init__(self):
+        self.entries = []
+    def register(self, stream, _event, data):
+        self.entries.append(SyntheticSelectorKey(stream, data))
+    def get_map(self):
+        return self.entries
+    def select(self, _timeout):
+        return [(self.entries[0], 1)] if self.entries else []
+    def unregister(self, stream):
+        self.entries = [entry for entry in self.entries if entry.fileobj is not stream]
+    def close(self):
+        self.entries = []
+
+synthetic_origin = __ORIGIN_BYTES__
+synthetic_chunks = iter((synthetic_origin, b""))
+def synthetic_read(_fd, _size):
+    return next(synthetic_chunks, b"")
+'''
+        synthetic_tree = ast.parse(synthetic_code, filename="<collector-dependency-data>")
+        placeholders = [
+            node for node in ast.walk(synthetic_tree)
+            if isinstance(node, ast.Name)
+            and node.id == "__ORIGIN_BYTES__"
+            and isinstance(node.ctx, ast.Load)
+        ]
+        self.assertEqual(1, len(placeholders))
+        synthetic_origin_assignment = next(
+            node for node in synthetic_tree.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "synthetic_origin"
+                for target in node.targets
+            )
+        )
+        synthetic_origin_assignment.value = ast.Constant(value=origin_bytes)
+        self.assertEqual(
+            origin_bytes,
+            synthetic_origin_assignment.value.value,
+            "the inert replacement reader must yield the actual newline-terminated origin bytes",
+        )
+        tree = ast.parse(verification_body, filename="<git-origin-verifier-data>")
+        origin_query = next(
+            statement for statement in tree.body
+            if isinstance(statement, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "origin_result"
+                for target in statement.targets
+            )
+            and isinstance(statement.value, ast.Call)
+            and ast.unparse(statement.value.func) == "run_bounded_git_query"
+        )
+        comparison = next(
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.If)
+            and isinstance(node.test, ast.Compare)
+            and any(
+                isinstance(part, ast.Name) and part.id == "origin_urls"
+                for part in ast.walk(node.test)
+            )
+        )
+        query_index = tree.body.index(origin_query)
+        tree.body[query_index:query_index] = synthetic_tree.body
+        query_index = tree.body.index(origin_query)
+        patch = ast.parse(
+            "saved_default_selector = selectors.DefaultSelector\n"
+            "saved_os_read = os.read\n"
+            "selectors.DefaultSelector = SyntheticSelector\n"
+            "os.read = synthetic_read\n"
+        ).body
+        tree.body[query_index:query_index] = patch
+        comparison_index = tree.body.index(comparison)
+        restore = ast.parse(
+            "selectors.DefaultSelector = saved_default_selector\n"
+            "os.read = saved_os_read\n"
+        ).body
+        tree.body[comparison_index + 1:comparison_index + 1] = restore
+        ast.fix_missing_locations(tree)
+        self.assertIsNotNone(
+            inspect_verification(ast.unparse(tree), marker),  # type: ignore[operator]
+            "saved, patched, and restored selector/read callables must not certify Git output",
+        )
+
+        aliased = ast.parse(verification_body, filename="<git-provider-alias-data>")
+        alias_query = next(
+            statement for statement in aliased.body
+            if isinstance(statement, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "origin_result"
+                for target in statement.targets
+            )
+        )
+        alias_comparison = next(
+            node for node in ast.walk(aliased)
+            if isinstance(node, ast.If)
+            and isinstance(node.test, ast.Compare)
+            and any(
+                isinstance(part, ast.Name) and part.id == "origin_urls"
+                for part in ast.walk(node.test)
+            )
+        )
+        alias_query_index = aliased.body.index(alias_query)
+        aliased.body[alias_query_index:alias_query_index] = ast.parse(
+            "selector_provider = selectors\n"
+            "reader_provider = os\n"
+            "process_provider = subprocess\n"
+            "saved_selector = selector_provider.DefaultSelector\n"
+            "saved_reader = reader_provider.read\n"
+            "saved_popen = process_provider.Popen\n"
+            "selector_provider.DefaultSelector = SyntheticSelector\n"
+            "reader_provider.read = synthetic_read\n"
+            "process_provider.Popen = replacement_popen\n"
+        ).body
+        alias_comparison_index = aliased.body.index(alias_comparison)
+        aliased.body[alias_comparison_index + 1:alias_comparison_index + 1] = ast.parse(
+            "selector_provider.DefaultSelector = saved_selector\n"
+            "reader_provider.read = saved_reader\n"
+            "process_provider.Popen = saved_popen\n"
+        ).body
+        ast.fix_missing_locations(aliased)
+        self.assertIsNotNone(
+            inspect_verification(ast.unparse(aliased), marker),  # type: ignore[operator]
+            "module aliases and saved launcher callables must not certify Git output",
+        )
+
+        reflected = ast.parse(
+            verification_body, filename="<git-provider-reflection-data>"
+        )
+        reflected_query = next(
+            statement for statement in reflected.body
+            if isinstance(statement, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "origin_result"
+                for target in statement.targets
+            )
+        )
+        reflected_comparison = next(
+            node for node in ast.walk(reflected)
+            if isinstance(node, ast.If)
+            and isinstance(node.test, ast.Compare)
+            and any(
+                isinstance(part, ast.Name) and part.id == "origin_urls"
+                for part in ast.walk(node.test)
+            )
+        )
+        reflected_index = reflected.body.index(reflected_query)
+        reflected.body[reflected_index:reflected_index] = ast.parse(
+            "provider_namespace = globals()\n"
+            "selector_provider = provider_namespace['selectors']\n"
+            "reader_provider = provider_namespace['os']\n"
+            "saved_selector = selector_provider.DefaultSelector\n"
+            "saved_reader = reader_provider.read\n"
+            "selector_provider.DefaultSelector = SyntheticSelector\n"
+            "reader_provider.read = synthetic_read\n"
+        ).body
+        reflected_comparison_index = reflected.body.index(reflected_comparison)
+        reflected.body[reflected_comparison_index + 1:reflected_comparison_index + 1] = ast.parse(
+            "selector_provider.DefaultSelector = saved_selector\n"
+            "reader_provider.read = saved_reader\n"
+        ).body
+        ast.fix_missing_locations(reflected)
+        self.assertIsNotNone(
+            inspect_verification(ast.unparse(reflected), marker),  # type: ignore[operator]
+            "global provider lookup must not bypass stable imported-module bindings",
+        )
+
+        shadowed_builtin = ast.parse(
+            verification_body, filename="<git-provider-builtin-data>"
+        )
+        builtin_query = next(
+            statement for statement in shadowed_builtin.body
+            if isinstance(statement, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "origin_result"
+                for target in statement.targets
+            )
+        )
+        shadowed_builtin.body.insert(
+            shadowed_builtin.body.index(builtin_query),
+            ast.parse("SystemExit = RuntimeError").body[0],
+        )
+        ast.fix_missing_locations(shadowed_builtin)
+        self.assertIsNotNone(
+            inspect_verification(ast.unparse(shadowed_builtin), marker),  # type: ignore[operator]
+            "rebinding the budget guard's builtin must not certify Git output",
+        )
+
     @staticmethod
     def _verification_without_origin_comparison(body: str) -> str:
         mutated = ast.parse(body, filename="<verification-output-data>")
@@ -3815,6 +4021,40 @@ class Issue79RegressionTests(unittest.TestCase):
             with self.subTest(body=body):
                 self.assertIsNone(self.inspect(body))
 
+    def test_contextlib_chdir_is_rejected_through_aliases_and_containers(self) -> None:
+        unsafe = (
+            'import contextlib\n'
+            'with contextlib.chdir("synthetic-other-root"):\n'
+            '    print(open("docs/backlog.json").read())\n',
+            'from contextlib import chdir as switch_root\n'
+            'with switch_root("synthetic-other-root"):\n'
+            '    print(open("docs/backlog.json").read())\n',
+            'import contextlib as cwd_tools\n'
+            'switch_root = cwd_tools.chdir\n'
+            'with switch_root("synthetic-other-root"):\n'
+            '    print(open("docs/backlog.json").read())\n',
+            'import contextlib as cwd_tools\n'
+            'actions = {"root": cwd_tools.chdir}\n'
+            'with actions["root"]("synthetic-other-root"):\n'
+            '    print(open("docs/backlog.json").read())\n',
+            'import contextlib as cwd_tools\n'
+            'actions = [cwd_tools.chdir]\nalias = actions\n'
+            'with alias[0]("synthetic-other-root"):\n'
+            '    print(open("docs/backlog.json").read())\n',
+            'import contextlib\nmodules = {"context": contextlib}\n'
+            'with modules["context"].chdir("synthetic-other-root"):\n'
+            '    print(open("docs/backlog.json").read())\n',
+            'from os import chdir as switch_root\n'
+            'with switch_root("synthetic-other-root"):\n'
+            '    print(open("docs/backlog.json").read())\n',
+        )
+        for body in unsafe:
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+        self.assertIsNone(self.inspect(
+            'import contextlib\nwith contextlib.nullcontext():\n    pass\n'
+        ))
+
     def test_path_method_alias_chains_respect_lexical_shadowing(self) -> None:
         unsafe = (
             'from pathlib import Path\n'
@@ -4124,6 +4364,14 @@ class Issue79RegressionTests(unittest.TestCase):
             'getattr(sys, "excepthook")(RuntimeError, RuntimeError(os.environ), None)\n',
             'import os, sys\nruntime = sys\n'
             'runtime.excepthook(RuntimeError, RuntimeError(os.environ), None)\n',
+            'import os, sys\nhooks = [sys.excepthook]\n'
+            'hooks[0](RuntimeError, RuntimeError(os.environ), None)\n',
+            'import os, sys\nhooks = (sys.excepthook,)\n'
+            'hooks[0](RuntimeError, RuntimeError(os.environ), None)\n',
+            'import os, sys\nhooks = {"error": sys.excepthook}\n'
+            'hooks["error"](RuntimeError, RuntimeError(os.environ), None)\n',
+            'import os, sys\nhooks = [sys.excepthook]\nhandlers = hooks\n'
+            'handlers[0](RuntimeError, RuntimeError(os.environ), None)\n',
         )
         for body in unsafe:
             with self.subTest(body=body):
@@ -4134,6 +4382,10 @@ class Issue79RegressionTests(unittest.TestCase):
         self.assertIsNone(self.inspect(
             'from sys import excepthook as emit\n'
             'emit(RuntimeError, RuntimeError("offline fixture"), None)\n'
+        ))
+        self.assertIsNone(self.inspect(
+            'def callback(*args):\n    return None\n'
+            'callbacks = [callback]\ncallbacks[0]("offline fixture")\n'
         ))
 
     def test_new_path_mutators_require_owned_sources_and_destinations(self) -> None:
@@ -4147,6 +4399,15 @@ class Issue79RegressionTests(unittest.TestCase):
             'from pathlib import Path\n'
             'action = Path("synthetic-owned").move_into\n'
             'action(Path("synthetic-destination"))\n',
+            'from pathlib import Path\n'
+            'actions = {"move": Path("synthetic-unowned-source").move_into}\n'
+            'actions["move"](Path("synthetic-unowned-destination"))\n',
+            'from pathlib import Path\n'
+            'actions = (Path("synthetic-unowned-source").move_into,)\n'
+            'actions[0](Path("synthetic-unowned-destination"))\n',
+            'from pathlib import Path\n'
+            'actions = [Path("synthetic-unowned-source").move_into]\n'
+            'alias = actions\nalias[0](Path("synthetic-unowned-destination"))\n',
             'from pathlib import Path\nfrom tempfile import TemporaryDirectory\n'
             'with TemporaryDirectory() as td:\n'
             '    Path(td).joinpath("source").copy(Path("synthetic-destination"))\n',
