@@ -19660,6 +19660,45 @@ def python_sensitive_imported_function_alias(node, tree, parents=None, seen=None
         def add(scope, name, kind, binding):
             binding_index.setdefault((id(scope), name), []).append((kind, binding))
 
+        declarations = {}
+        for candidate in ast.walk(tree):
+            if isinstance(candidate, (ast.Global, ast.Nonlocal)):
+                scope = python_sensitive_alias_scope(candidate, parents)
+                kind = "global" if isinstance(candidate, ast.Global) else "nonlocal"
+                for name in candidate.names:
+                    declarations.setdefault((id(scope), name), set()).add(kind)
+
+        def binding_owner(scope, name, context):
+            kinds = declarations.get((id(scope), name), ())
+            if "global" in kinds and not isinstance(scope, ast.Module):
+                return next(
+                    (candidate for candidate in reversed(
+                        python_sensitive_alias_scope_chain(context, parents)
+                    ) if isinstance(candidate, ast.Module)),
+                    None,
+                )
+            if "nonlocal" in kinds:
+                scopes = python_sensitive_alias_scope_chain(context, parents)
+                passed_current = False
+                for candidate in scopes:
+                    if candidate is scope:
+                        passed_current = True
+                        continue
+                    if passed_current and isinstance(
+                        candidate,
+                        (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
+                    ):
+                        return candidate
+                return None
+            return scope
+
+        def add_owned(scope, name, kind, binding, context):
+            owner = binding_owner(scope, name, context)
+            if owner is None:
+                add(scope, name, "unknown", binding)
+            else:
+                add(owner, name, kind, binding)
+
         for candidate in ast.walk(tree):
             if isinstance(candidate, ast.Name) and isinstance(candidate.ctx, ast.Store):
                 scope = python_sensitive_alias_scope(candidate, parents)
@@ -19672,9 +19711,9 @@ def python_sensitive_imported_function_alias(node, tree, parents=None, seen=None
                     isinstance(target, (ast.AnnAssign, ast.NamedExpr))
                     and target.target is candidate
                 ):
-                    add(scope, candidate.id, "assignment", target)
+                    add_owned(scope, candidate.id, "assignment", target, candidate)
                 else:
-                    add(scope, candidate.id, "unknown", candidate)
+                    add_owned(scope, candidate.id, "unknown", candidate, candidate)
             elif isinstance(candidate, ast.arg):
                 add(
                     python_sensitive_alias_scope(candidate, parents),
@@ -19683,29 +19722,34 @@ def python_sensitive_imported_function_alias(node, tree, parents=None, seen=None
                     candidate,
                 )
             elif isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                add(
-                    python_sensitive_alias_scope(parents.get(candidate), parents),
+                context = parents.get(candidate)
+                scope = python_sensitive_alias_scope(context, parents)
+                add_owned(
+                    scope,
                     candidate.name,
                     "unknown",
                     candidate,
+                    context,
                 )
             elif isinstance(candidate, ast.Import):
                 scope = python_sensitive_alias_scope(candidate, parents)
                 for alias in candidate.names:
-                    add(
+                    add_owned(
                         scope,
                         alias.asname or alias.name.split(".", 1)[0],
                         "unknown",
+                        candidate,
                         candidate,
                     )
             elif isinstance(candidate, ast.ImportFrom):
                 scope = python_sensitive_alias_scope(candidate, parents)
                 for alias in candidate.names:
-                    add(
+                    add_owned(
                         scope,
                         alias.asname or alias.name,
                         "import",
                         (candidate, alias),
+                        candidate,
                     )
             elif isinstance(candidate, ast.Global):
                 scope = python_sensitive_alias_scope(candidate, parents)
@@ -19716,24 +19760,30 @@ def python_sensitive_imported_function_alias(node, tree, parents=None, seen=None
                 for name in candidate.names:
                     add(scope, name, "nonlocal", candidate)
             elif isinstance(candidate, ast.ExceptHandler) and candidate.name:
-                add(
-                    python_sensitive_alias_scope(candidate, parents),
+                scope = python_sensitive_alias_scope(candidate, parents)
+                add_owned(
+                    scope,
                     candidate.name,
                     "unknown",
+                    candidate,
                     candidate,
                 )
             elif isinstance(candidate, (ast.MatchAs, ast.MatchStar)) and candidate.name:
-                add(
-                    python_sensitive_alias_scope(candidate, parents),
+                scope = python_sensitive_alias_scope(candidate, parents)
+                add_owned(
+                    scope,
                     candidate.name,
                     "unknown",
                     candidate,
+                    candidate,
                 )
             elif isinstance(candidate, ast.MatchMapping) and candidate.rest:
-                add(
-                    python_sensitive_alias_scope(candidate, parents),
+                scope = python_sensitive_alias_scope(candidate, parents)
+                add_owned(
+                    scope,
                     candidate.rest,
                     "unknown",
+                    candidate,
                     candidate,
                 )
         tree._issue79_sensitive_imported_alias_bindings = binding_index
@@ -37423,3 +37473,23 @@ Ran 4 tests in 0.203s — OK
 ```
 
 The module-level and prior nested-hook examples are inert AST source strings; no hook, environment value or specimen was executed. Compiler-source provenance is unchanged, so the 119-helper selector was not repeated. No full suite, packet selector, Go/hosted CI or live operation is claimed; final exact-head packet integration and reviews remain with the coordinator.
+
+#### Declaration-owned imported-hook stores from `1377bad9`
+
+At entry on 2026-10-04 the worktree was clean at `1377bad93401b8b437d6b5b1b009db55e65d417b`. The prior coordinator packet selector at that exact source passed one selector in 54.918s over 261 shell commands and 86 Python bodies with zero violations, and the scoped hook review passed; the security review nevertheless held on imported-hook stores whose Python binding owner differs from their lexical AST scope. The coordinator and security reviewer confirmed these AST-only forms were accepted: an imported hook stored by a function-scope `global` import, the same import through `nonlocal`, a `global saved` alias assignment, and a `nonlocal saved` alias assignment. Direct and container-held calls were both covered for the import-store cases; no separate external review URL was supplied for these declaration-owned-store variants, which extend [Codex finding 4173966622](https://github.com/1XP-AI/gh-runnerd/pull/103#discussion_r4173966622).
+
+Six inert source cases were added to `test_excepthook_aliases_are_sensitive_error_sinks`. Before the scanner correction, the focused hook selector failed six assertions in 0.195s. The scanner now gathers `global` and `nonlocal` declarations before indexing stores, then attributes import, assignment, definition and other named stores to the declared module or nearest enclosing function scope; the declarations themselves remain in the lexical scope for reference routing. A module-level `global` remains a no-op, unresolved ownership stays unknown, and existing local literal-callback controls remain accepted.
+
+The final post-ledger changed-boundary focused command passed five methods in 0.211s:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_excepthook_aliases_are_sensitive_error_sinks \
+  Issue79RegressionTests.test_displayhook_aliases_are_sensitive_output_sinks \
+  Issue79RegressionTests.test_imported_exit_alias_and_system_exit_preserve_sensitive_taint \
+  Issue79RegressionTests.test_output_sink_method_alias_keeps_sensitive_taint \
+  Issue79RegressionTests.test_launcher_aliases_returned_by_local_helpers_are_rejected
+Ran 5 tests in 0.211s — OK
+```
+
+The examples were parsed and inspected as AST data only; no specimen, hook or environment value was executed or read. No symbol-table/compiler helper, compiler-source allowlist, Git/Popen/path/cwd proof or other provenance boundary changed. The 119-helper selector, packet selector, full suite, Go/hosted CI and live operations were not repeated; the 1377 packet result remains historical evidence, and final packet integration plus exact-head reviews remain with the coordinator.
