@@ -15868,6 +15868,12 @@ def reviewed_python_git_query_runtime_dependencies_stable(tree, parents):
                     return False
         elif isinstance(node, ast.arg) and node.arg in stable_names:
             return False
+        elif isinstance(node, ast.ExceptHandler) and node.name in stable_names:
+            return False
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name in stable_names:
+            return False
+        elif isinstance(node, ast.MatchMapping) and node.rest in stable_names:
+            return False
         elif isinstance(node, ast.Import):
             if any(
                 (alias.asname or alias.name.split(".", 1)[0]) in stable_names
@@ -37724,3 +37730,25 @@ Ran 4 tests in 3.904s — OK
 ```
 
 The changed scanner/compiler body passed `test_current_scanner_compiler_body_remains_self_audit_compatible` in 43.062s, and the reviewed scanner namespace cwd positive passed `test_reviewed_scanner_namespace_remains_accepted_with_cwd_guards` in 0.292s. The first combined invocation yielded before its completion output was captured; after it had exited, these two selectors were rerun individually to retain their reported results, so each was invoked twice. Existing `contextlib.nullcontext`, safe callback, temporary-owned Path mutation and bounded-and-compared Git-origin positives remained accepted within the focused methods. All injected source stayed inert AST data; only the trusted harness and reviewed scanner definitions executed. No packet-wide selector, full suite, 119-helper sweep, Go/hosted CI or live action was run; the coordinator owns final packet integration and the exact-head independent reviews.
+
+#### Pattern-capture rebinding follow-up from `e9ab4dc6`
+
+The focused follow-up to `e9ab4dc6b7ab6ef14f8dde5bc86d60d081cd04fa` closed a remaining binding form in the same helper-rebinding family as the fifth finding in [the immutable Codex review comment](https://github.com/1XP-AI/gh-runnerd/pull/103#issuecomment-5976946399). The runtime-dependency stability check already rejected ordinary name stores, imports, function parameters, definitions and global/nonlocal declarations, but did not inspect pattern-capture binder fields. Inert AST mutations inserting `match 0: case run_bounded_git_query: pass` and a nested mapping capture of `run_bounded_git_query` immediately before the canonical origin query both left the verifier accepted on the parent source.
+
+Before the correction, this exact focused command failed both new subtests in 4.462s:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_git_query_runtime_dependencies_cannot_be_patched_around_capture
+Ran 1 test in 4.462s — FAILED (failures=2)
+```
+
+The stability check now rejects stable helper or builder names captured by `ast.MatchAs`, `ast.MatchStar` or `ast.MatchMapping.rest`, and also rejects competing `ast.ExceptHandler.name` bindings. The same focused command passed after the change in 4.453s, including its unchanged canonical-verifier positive and the existing provider/helper replacement negatives. The quick reviewed-namespace positive also passed:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_reviewed_scanner_namespace_remains_accepted_with_cwd_guards
+Ran 1 test in 0.292s — OK
+```
+
+These probes parsed and inspected source strings only; no verifier recipe, pattern specimen, Git query, hook, process or filesystem action was executed. No full suite, packet selector, compiler self-audit, 119-helper sweep, Go/hosted CI or live operation was repeated; exact-head packet integration and independent review remain pending with the coordinator.

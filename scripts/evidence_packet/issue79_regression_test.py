@@ -3561,6 +3561,42 @@ def synthetic_read(_fd, _size):
                     f"rebinding {helper} must not inherit the reviewed collector proof",
                 )
 
+        for label, pattern_binding in (
+            (
+                "match capture",
+                "match 0:\n"
+                "    case run_bounded_git_query:\n"
+                "        pass\n",
+            ),
+            (
+                "nested mapping capture",
+                'match {"query": {"runner": 1}}:\n'
+                '    case {"query": {"runner": run_bounded_git_query}}:\n'
+                "        pass\n",
+            ),
+        ):
+            with self.subTest(pattern_bound_git_helper=label):
+                mutated = ast.parse(
+                    verification_body, filename="<git-helper-pattern-binding-data>"
+                )
+                origin_query = next(
+                    statement for statement in mutated.body
+                    if isinstance(statement, ast.Assign)
+                    and any(
+                        isinstance(target, ast.Name) and target.id == "origin_result"
+                        for target in statement.targets
+                    )
+                )
+                insertion = mutated.body.index(origin_query)
+                mutated.body[insertion:insertion] = ast.parse(
+                    pattern_binding, filename="<inert-helper-pattern-binding-data>"
+                ).body
+                ast.fix_missing_locations(mutated)
+                self.assertIsNotNone(
+                    inspect_verification(ast.unparse(mutated), marker),  # type: ignore[operator]
+                    f"pattern capture {label} must not replace the reviewed Git runner",
+                )
+
     @staticmethod
     def _verification_without_origin_comparison(body: str) -> str:
         mutated = ast.parse(body, filename="<verification-output-data>")
