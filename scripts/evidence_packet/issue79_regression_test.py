@@ -3480,6 +3480,87 @@ def synthetic_read(_fd, _size):
             "rebinding the budget guard's builtin must not certify Git output",
         )
 
+        reexported = ast.parse(
+            verification_body, filename="<git-private-provider-reexport-data>"
+        )
+        reexport_query = next(
+            statement for statement in reexported.body
+            if isinstance(statement, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "origin_result"
+                for target in statement.targets
+            )
+        )
+        reexport_patch = ast.parse(
+            f"synthetic_chunks = iter(({origin_bytes!r}, b''))\n"
+            "def synthetic_read(_fd, _size):\n"
+            "    return next(synthetic_chunks, b'')\n"
+            "__import__('tempfile')._os.read = synthetic_read\n",
+            filename="<inert-private-provider-patch-data>",
+        )
+        reexported.body[
+            reexported.body.index(reexport_query):reexported.body.index(reexport_query)
+        ] = reexport_patch.body
+        ast.fix_missing_locations(reexported)
+        with self.subTest(mutated_provider="dynamic tempfile OS re-export"):
+            self.assertIsNotNone(
+                inspect_verification(ast.unparse(reexported), marker),  # type: ignore[operator]
+                "a dynamic tempfile OS re-export must not supply the bounded Git pipe bytes",
+            )
+
+        for helper, replacement in (
+            (
+                "run_bounded_git_query",
+                f"run_bounded_git_query = lambda *args, **kwargs: "
+                f"subprocess.CompletedProcess([], 0, {origin_bytes!r}, b'')\n",
+            ),
+            (
+                "capture_git_query_output",
+                "capture_git_query_output = lambda *args: (b'', b'')\n",
+            ),
+            (
+                "terminate_git_query_group",
+                "terminate_git_query_group = lambda process: None\n",
+            ),
+            (
+                "close_git_query_streams",
+                "close_git_query_streams = lambda process: None\n",
+            ),
+            (
+                "wait_for_git_query_group_exit",
+                "wait_for_git_query_group_exit = lambda process, deadline: True\n",
+            ),
+            (
+                "git_query_group_exists",
+                "git_query_group_exists = lambda process: False\n",
+            ),
+            (
+                "git_query",
+                "git_query = lambda arguments: []\n",
+            ),
+        ):
+            with self.subTest(rebound_git_helper=helper):
+                mutated = ast.parse(
+                    verification_body, filename="<git-helper-rebinding-data>"
+                )
+                origin_query = next(
+                    statement for statement in mutated.body
+                    if isinstance(statement, ast.Assign)
+                    and any(
+                        isinstance(target, ast.Name) and target.id == "origin_result"
+                        for target in statement.targets
+                    )
+                )
+                insertion = mutated.body.index(origin_query)
+                mutated.body[insertion:insertion] = ast.parse(
+                    replacement, filename="<inert-helper-rebinding-data>"
+                ).body
+                ast.fix_missing_locations(mutated)
+                self.assertIsNotNone(
+                    inspect_verification(ast.unparse(mutated), marker),  # type: ignore[operator]
+                    f"rebinding {helper} must not inherit the reviewed collector proof",
+                )
+
     @staticmethod
     def _verification_without_origin_comparison(body: str) -> str:
         mutated = ast.parse(body, filename="<verification-output-data>")
@@ -4245,6 +4326,8 @@ def synthetic_read(_fd, _size):
             'from os import chdir as switch_root\n'
             'with switch_root("synthetic-other-root"):\n'
             '    print(open("docs/backlog.json").read())\n',
+            'with __import__("contextlib").chdir("synthetic-other-root"):\n'
+            '    print(open("docs/backlog.json").read())\n',
         )
         for body in unsafe:
             with self.subTest(body=body):
@@ -4550,6 +4633,9 @@ def synthetic_read(_fd, _size):
             'import os, sys\n'
             'sys.excepthook(RuntimeError, RuntimeError(os.environ), None)\n',
             'import os\nfrom sys import excepthook as emit\n'
+            'emit(RuntimeError, RuntimeError(os.environ), None)\n',
+            'import os\nfrom sys import excepthook as source\n'
+            'emit = (tmp := source)\n'
             'emit(RuntimeError, RuntimeError(os.environ), None)\n',
             'import os, sys\nemit = sys.excepthook\n'
             'emit(RuntimeError, RuntimeError(os.environ), None)\n',
@@ -4915,6 +5001,11 @@ def synthetic_read(_fd, _size):
             '    source = Path(td).joinpath("source")\n'
             '    action = source.move_into\n'
             '    action(Path("synthetic-destination"))\n',
+            'from pathlib import Path\nfrom tempfile import TemporaryDirectory\n'
+            'with TemporaryDirectory() as td:\n'
+            '    source = Path(td) / "source"\n'
+            '    move = (tmp := source.move_into)\n'
+            '    move(Path("/tmp/maintainer-owned-directory"))\n',
             'from pathlib import Path\nfrom tempfile import TemporaryDirectory\n'
             'with TemporaryDirectory() as td:\n'
             '    Path(td).joinpath("source").copy(**{"target": Path("synthetic-destination")})\n',

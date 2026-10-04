@@ -15799,6 +15799,25 @@ def reviewed_python_git_query_runtime_dependencies_stable(tree, parents):
         "time": {"monotonic", "sleep"},
     }
     import_counts = {module: 0 for module in exported_members}
+    if any(
+        isinstance(node, ast.Name) and node.id == "__import__"
+        or isinstance(node, ast.Attribute) and node.attr == "_os"
+        or (
+            isinstance(node, ast.ImportFrom)
+            and node.module == "tempfile"
+            and any(alias.name in {"_os", "*"} for alias in node.names)
+        )
+        or (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and len(node.args) > 1
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value == "_os"
+        )
+        for node in ast.walk(tree)
+    ):
+        return False
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -15812,6 +15831,60 @@ def reviewed_python_git_query_runtime_dependencies_stable(tree, parents):
             if node.module in exported_members or node.module == "builtins":
                 return False
     if any(count != 1 for count in import_counts.values()):
+        return False
+
+    helper_names = {
+        "run_bounded_git_query",
+        "capture_git_query_output",
+        "terminate_git_query_group",
+        "close_git_query_streams",
+        "wait_for_git_query_group_exit",
+        "git_query_group_exists",
+    }
+    builder_names = {"git_query", "git_command"}
+    used_builders = {
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in builder_names
+    }
+    stable_names = helper_names | used_builders
+    definitions = {name: 0 for name in stable_names}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name in stable_names:
+                if parents.get(node) is not tree or not isinstance(
+                    node, (ast.FunctionDef, ast.AsyncFunctionDef)
+                ):
+                    return False
+                definitions[node.name] += 1
+        elif isinstance(node, ast.Name) and node.id in stable_names:
+            if isinstance(node.ctx, (ast.Store, ast.Del)):
+                return False
+            if isinstance(node.ctx, ast.Load):
+                parent = parents.get(node)
+                if not isinstance(parent, ast.Call) or parent.func is not node:
+                    return False
+        elif isinstance(node, ast.arg) and node.arg in stable_names:
+            return False
+        elif isinstance(node, ast.Import):
+            if any(
+                (alias.asname or alias.name.split(".", 1)[0]) in stable_names
+                for alias in node.names
+            ):
+                return False
+        elif isinstance(node, ast.ImportFrom):
+            if any(
+                (alias.asname or alias.name) in stable_names
+                for alias in node.names
+            ):
+                return False
+        elif isinstance(node, (ast.Global, ast.Nonlocal)) and any(
+            name in stable_names for name in node.names
+        ):
+            return False
+    if any(count != 1 for count in definitions.values()):
         return False
 
     provider_names = set(exported_members)
@@ -15940,6 +16013,15 @@ def python_working_directory_change_violation(tree, parents):
             if (
                 isinstance(node.value, ast.Name)
                 and any(node.value.id in names for names in sensitive_modules.values())
+            ):
+                return "Python heredoc accesses an unreviewed working-directory change API"
+            if (
+                isinstance(node.value, ast.Call)
+                and isinstance(node.value.func, ast.Name)
+                and node.value.func.id == "__import__"
+                and node.value.args
+                and isinstance(node.value.args[0], ast.Constant)
+                and node.value.args[0].value in sensitive_modules
             ):
                 return "Python heredoc accesses an unreviewed working-directory change API"
         if not isinstance(node, ast.Call):
@@ -16779,6 +16861,8 @@ def python_filesystem_mutator_alias_violation(tree, parents):
         for target, value in assignments:
             if not isinstance(target, ast.Name):
                 continue
+            while isinstance(value, ast.NamedExpr):
+                value = value.value
             receiver = None
             method = None
             if (
@@ -19910,12 +19994,15 @@ def python_sensitive_imported_function_alias(node, tree, parents=None, seen=None
                         }[imported.module]
                     ):
                         return True
-                elif (
-                    kind == "assignment"
-                    and isinstance(binding.value, ast.Name)
-                    and resolves(binding.value, visited | {key})
-                ):
-                    return True
+                elif kind == "assignment":
+                    assigned_value = binding.value
+                    while isinstance(assigned_value, ast.NamedExpr):
+                        assigned_value = assigned_value.value
+                    if (
+                        isinstance(assigned_value, ast.Name)
+                        and resolves(assigned_value, visited | {key})
+                    ):
+                        return True
             return False
         return False
 
@@ -37607,3 +37694,33 @@ Ran 5 tests in 0.231s — OK
 ```
 
 The specimens remained inert source strings parsed by the reviewed scanner; no hook, environment value, specimen, or verifier/compiler recipe was executed. Only imported-hook binding-scope handling and its tests changed; Git/Popen, path, cwd, process-cleanup, compiler-source provenance, helper names and source allowlists are unchanged. No packet selector, 119-helper sweep, full suite, Go/hosted CI, or live operation was run; those checks and exact-head independent reviews remain with the coordinator.
+
+#### Five exact-head Codex P1s from `1fbd7a1f`
+
+The pushed `1fbd7a1fd4c186036f6d367f385cf0f2165c6e30` had completed GitHub Codex review on 2026-10-04; its five blocking findings are recorded together at [the review issue comment](https://github.com/1XP-AI/gh-runnerd/pull/103#issuecomment-5976946399). The coordinator independently reproduced all five as accepted inert AST mutations against that immutable source. This correction covers: `__import__("contextlib").chdir(...)` around a repository-relative read; a `sys.excepthook` alias passed through an assignment expression; an owned `Path.move_into` stored through a walrus and called with an unowned destination; replacement of `tempfile._os.read` with a synthetic reader yielding the expected origin bytes; and reassignment of `run_bounded_git_query` to a fabricated `CompletedProcess`. The Git-provider test also checks reassignment of the capture, termination, stream-close, group-wait, group-existence and `git_query` helpers so their reviewed names cannot stand in for stable definitions.
+
+Before scanner changes, the four relevant methods failed 11 assertions in 3.949s:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_contextlib_chdir_is_rejected_through_aliases_and_containers \
+  Issue79RegressionTests.test_excepthook_aliases_are_sensitive_error_sinks \
+  Issue79RegressionTests.test_new_path_mutators_require_owned_sources_and_destinations \
+  Issue79RegressionTests.test_git_query_runtime_dependencies_cannot_be_patched_around_capture
+Ran 4 tests in 3.949s — FAILED (11 failures)
+```
+
+The scanner now checks literal dynamic-import receivers for `os` and `contextlib` cwd mutators, follows assignment-expression values when tracing imported sensitive callables, and unwraps walrus values while classifying extracted Path mutators. The bounded Git proof refuses dynamic imports and private `tempfile._os` re-exports/reflection in its verifier body, then requires one top-level definition and no competing binding for the runner, collector, cleanup helpers and the builder used by the origin query. It retains the direct canonical verifier, bounded collector, imported providers and cleanup control-flow checks; no source hash, marker exception, helper-name allowlist or compiler-input expansion was added.
+
+The same four focused methods passed after the correction in 3.904s:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_contextlib_chdir_is_rejected_through_aliases_and_containers \
+  Issue79RegressionTests.test_excepthook_aliases_are_sensitive_error_sinks \
+  Issue79RegressionTests.test_new_path_mutators_require_owned_sources_and_destinations \
+  Issue79RegressionTests.test_git_query_runtime_dependencies_cannot_be_patched_around_capture
+Ran 4 tests in 3.904s — OK
+```
+
+The changed scanner/compiler body passed `test_current_scanner_compiler_body_remains_self_audit_compatible` in 43.062s, and the reviewed scanner namespace cwd positive passed `test_reviewed_scanner_namespace_remains_accepted_with_cwd_guards` in 0.292s. The first combined invocation yielded before its completion output was captured; after it had exited, these two selectors were rerun individually to retain their reported results, so each was invoked twice. Existing `contextlib.nullcontext`, safe callback, temporary-owned Path mutation and bounded-and-compared Git-origin positives remained accepted within the focused methods. All injected source stayed inert AST data; only the trusted harness and reviewed scanner definitions executed. No packet-wide selector, full suite, 119-helper sweep, Go/hosted CI or live action was run; the coordinator owns final packet integration and the exact-head independent reviews.
