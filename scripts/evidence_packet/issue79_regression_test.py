@@ -5327,6 +5327,27 @@ def synthetic_read(_fd, _size):
             'with TemporaryDirectory() as td:\n'
             '    relocate(Path(td), "move_into")\n',
             'from pathlib import Path\nfrom tempfile import TemporaryDirectory\n'
+            'def relocate(receiver, attribute):\n'
+            '    def invoke(callback):\n'
+            '        action = callback\n'
+            '        action(Path("synthetic-unowned-destination"))\n'
+            '    invoke(getattr(receiver, attribute))\n'
+            'with TemporaryDirectory() as td:\n'
+            '    relocate(Path(td), "move_into")\n',
+            'from pathlib import Path\nfrom tempfile import TemporaryDirectory\n'
+            'def relocate(receiver, attribute):\n'
+            '    actions = {}\n'
+            '    actions.update(move=getattr(receiver, attribute))\n'
+            '    actions["move"](Path("synthetic-unowned-destination"))\n'
+            'with TemporaryDirectory() as td:\n'
+            '    relocate(Path(td), "move_into")\n',
+            'from pathlib import Path\nfrom tempfile import TemporaryDirectory\n'
+            'def relocate(receiver, attribute):\n'
+            '    actions = list([getattr(receiver, attribute)])\n'
+            '    actions[0](Path("synthetic-unowned-destination"))\n'
+            'with TemporaryDirectory() as td:\n'
+            '    relocate(Path(td), "move_into")\n',
+            'from pathlib import Path\nfrom tempfile import TemporaryDirectory\n'
             'def member(receiver, attribute):\n'
             '    return getattr(receiver, attribute)\n'
             'def relocate(receiver, attribute):\n'

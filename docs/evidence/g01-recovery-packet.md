@@ -17090,6 +17090,18 @@ def python_filesystem_mutator_alias_violation(tree, parents):
             )
         if isinstance(node, ast.Attribute) and node.attr == "__call__":
             return reflective_value_flows(node.value)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in {"dict", "frozenset", "list", "set", "tuple"}
+        ):
+            return any(
+                reflective_value_flows(value)
+                for value in [
+                    *node.args,
+                    *(keyword.value for keyword in node.keywords),
+                ]
+            )
         return False
 
     for _ in range(len(assignment_records) + 1):
@@ -17108,7 +17120,13 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                 and isinstance(candidate.func, ast.Attribute)
                 and candidate.func.attr in holder_methods
                 and isinstance(candidate.func.value, ast.Name)
-                and any(reflective_value_flows(argument) for argument in candidate.args)
+                and any(
+                    reflective_value_flows(value)
+                    for value in [
+                        *candidate.args,
+                        *(keyword.value for keyword in candidate.keywords),
+                    ]
+                )
             ):
                 continue
             binding = (
@@ -17151,26 +17169,66 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                 + list(function.args.kwonlyargs)
             )
         }
+        alias_origins = {parameter: {parameter} for parameter in parameters}
+        function_nodes = [
+            candidate
+            for candidate in ast.walk(function)
+            if python_enclosing_scope(candidate, parents) is function
+        ]
+        for _ in range(len(function_nodes) + 1):
+            changed = False
+            for candidate in function_nodes:
+                if isinstance(candidate, ast.Assign):
+                    targets, value = candidate.targets, candidate.value
+                elif isinstance(candidate, (ast.AnnAssign, ast.NamedExpr)):
+                    if candidate.value is None:
+                        continue
+                    targets, value = [candidate.target], candidate.value
+                else:
+                    continue
+                origins = set().union(*(
+                    alias_origins.get(source.id, set())
+                    for source in ast.walk(value)
+                    if isinstance(source, ast.Name)
+                    and isinstance(source.ctx, ast.Load)
+                    and python_enclosing_scope(source, parents) is function
+                ))
+                if not origins:
+                    continue
+                for target in targets:
+                    if not isinstance(target, ast.Name):
+                        continue
+                    stored_origins = alias_origins.setdefault(target.id, set())
+                    prior_count = len(stored_origins)
+                    stored_origins.update(origins)
+                    changed |= len(stored_origins) != prior_count
+            if not changed:
+                break
         called = set()
-        for candidate in ast.walk(function):
+        for candidate in function_nodes:
             if not (
                 isinstance(candidate, ast.Name)
-                and candidate.id in parameters
+                and candidate.id in alias_origins
                 and isinstance(candidate.ctx, ast.Load)
-                and python_enclosing_scope(candidate, parents) is function
             ):
                 continue
             parent = parents.get(candidate)
             if isinstance(parent, ast.Call) and parent.func is candidate:
-                called.add(candidate.id)
+                called.update(alias_origins[candidate.id])
             elif (
                 isinstance(parent, ast.Attribute)
                 and parent.attr == "__call__"
                 and isinstance(parents.get(parent), ast.Call)
                 and parents[parent].func is parent
             ):
-                called.add(candidate.id)
-        return called
+                called.update(alias_origins[candidate.id])
+            elif (
+                isinstance(parent, ast.Subscript)
+                and isinstance(parents.get(parent), ast.Call)
+                and parents[parent].func is parent
+            ):
+                called.update(alias_origins[candidate.id])
+        return called & parameters
 
     for candidate in ast.walk(tree):
         if not isinstance(candidate, ast.Call):
@@ -38379,3 +38437,28 @@ Ran 4 tests in 6.812s — OK
 ```
 
 The focused mutator selector retains direct and wrapped unowned Path source/destination refusals, container and callback refusal cases, and accepted temporary-owned direct/reflected mutations, local set-copy and a locally constant reflected method name. The separate selectors retain the benign `str.replace` result, canonical scanner namespace and canonical bounded Git stream control. All new examples remained inert AST strings; no specimen, filesystem method, verifier recipe, environment value, Git action or live operation was executed. No full suite, packet selector, 119-helper sweep, compiler self-audit, Go/hosted CI or live operation was run; final packet integration remains with the coordinator, and the exact parent results are not evidence for this candidate.
+
+#### Secondary callback and collection transfers from immutable `3ad98c59`
+
+The coordinator's AST-only audit of exact parent `3ad98c59f8b14d10d11c4c86e0f3ccc21265c68c` found three remaining accepted transfers of an unresolved reflective mutator: a local callback parameter was copied to an alias before invocation; a dictionary holder received the value through `update` keyword arguments; and a list constructor wrapped a list containing the reflective value before it was called by subscript. These three inert forms were added to the existing path-mutator regression method; the untouched scanner at parent `3ad98c59` then failed exactly those three refusal assertions in 0.380s:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_new_path_mutators_require_owned_sources_and_destinations
+Ran 1 test in 0.380s — FAILED (failures=3)
+```
+
+The bounded correction propagates reflective callback provenance through same-function simple aliases and recognizes an alias used through a subscript call target. It also carries unresolved reflective values through the selected collection constructors and through positional or keyword values supplied to the existing holder-insertion methods. This extends only the existing conservative flow rule; it does not add a source, method-name, variable-name or recipe exception.
+
+After the correction, the path-mutator method passed in 0.423s. The changed-boundary and adjacent compatibility command passed four methods in 7.134s:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_new_path_mutators_require_owned_sources_and_destinations \
+  Issue79RegressionTests.test_string_replace_result_is_not_an_extracted_path_mutator \
+  Issue79RegressionTests.test_reviewed_scanner_namespace_remains_accepted_with_cwd_guards \
+  Issue79RegressionTests.test_git_query_runtime_dependencies_cannot_be_patched_around_capture
+Ran 4 tests in 7.134s — OK
+```
+
+These selectors preserve the existing direct and wrapped Path ownership refusals, temporary-owned mutation controls, benign string replacement, canonical scanner namespace and bounded Git collector. The three added snippets were parsed only as inert AST strings; no specimen, filesystem method or verifier recipe ran. No full suite, packet selector, 119-helper sweep, compiler self-audit, Go/hosted CI or live operation was run. This closes the three reproduced transfer forms only; arbitrary unmodeled helper or container semantics still require their own evidence and review.
