@@ -222,15 +222,21 @@ documents that JSON, SARIF, and VEX formats can exit 0 despite findings.
 Each scanner invocation used
 `govulncheck -mode=source -format=text -db=https://vuln.go.dev -test [-tags=<profile>] ./...`
 from the G01 module. The child environment was built from an allowlist with
-Go `1.26.8`, Darwin/ARM64 (`GOARM64=v8.0`), `GOENV=off`,
-`GOWORK=off`, `GOFLAGS=-mod=readonly -p=2`, `GOAUTH=off`, public-only
+Go `1.26.8` (`GOTOOLCHAIN=go1.26.8`), Darwin/ARM64
+(`GOARM64=v8.0`), `GOENV=off`, `GOWORK=off`,
+`GOFLAGS=-mod=readonly -p=2`, `GOEXPERIMENT=none`, `GOFIPS140=off`,
+`GOMAXPROCS=2`, and `GOAUTH=off`, public-only
 `GOPROXY=https://proxy.golang.org`, `GOSUMDB=sum.golang.org`, and empty
-private-module/no-proxy scopes. No HOME, Git/GitHub credentials, SSH settings,
-proxy credentials, or ambient Go overlays/tool overrides were passed. For
-`CGO_ENABLED=1`, `CC`/`CXX` were set to Apple Clang 21.0.0. Profiles ran
-sequentially with a 15-minute per-profile deadline and two-way Go parallelism.
-No G01/G02 test or application binary was run; `-test` caused test source to
-be analyzed only.
+private-module/no-proxy scopes. `GOROOT` was omitted and derived by Go from
+the selected toolchain; `GOCACHEPROG` was unset. No HOME, Git/GitHub
+credentials, SSH settings, proxy credentials, or ambient Go overlays/tool
+overrides were passed. For `CGO_ENABLED=1`, `CC`/`CXX` were set to Apple
+Clang 21.0.0. Profiles ran sequentially with a 15-minute per-profile deadline
+and two-way Go parallelism. No G01/G02 application or test binary was launched,
+no fixture was executed, and no `go test` command ran. `-test` caused test
+source to be included in source analysis; Go package loading may compile or
+load package export data, and the `govulncheck` tool itself was installed with
+`go install`.
 
 The scanner queried the live, unpinned `https://vuln.go.dev` database. A
 read-only request to the [database index](https://vuln.go.dev/index/db.json)
@@ -335,12 +341,13 @@ selection changed. These results do not qualify the tenant, archived runner
 bytes, image or bundled runtime, live credentials, safe drain, or production
 execution, and do not close full G01/G02.
 
-No Go tests, application builds, fixture execution, live runner operations,
-GitHub writes, or GitHub advisory submissions occurred. The `govulncheck`
-tool itself was installed in a temporary directory; the source scanner then
-loaded the selected source and test files without running them. Rollback for
-this checkpoint is limited to reverting this local evidence addendum; retain
-the earlier advisory and release-source evidence unchanged.
+No Go tests, application/test-binary launches, fixture execution, live runner
+operations, GitHub writes, or GitHub advisory submissions occurred. The
+`govulncheck` tool itself was installed in a temporary directory; source-mode
+analysis loaded the selected source and test files and may compile/load package
+export data without launching the application or tests. Rollback for this
+checkpoint is limited to reverting this local evidence addendum; retain the
+earlier advisory and release-source evidence unchanged.
 
 ## Source-analysis evidence validation
 
