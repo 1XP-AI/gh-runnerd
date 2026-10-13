@@ -16974,6 +16974,120 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                     (binding_scope, target.value.id, value)
                 )
 
+    collection_constructor_names = {
+        "dict", "frozenset", "list", "set", "tuple"
+    }
+
+    def known_collection_constructor(node, seen=None):
+        if seen is None:
+            seen = set()
+        if not isinstance(node, ast.Name):
+            return False
+        for scope in python_lexical_scope_chain(
+            python_enclosing_scope(node, parents), parents
+        ):
+            binding = (id(scope), node.id)
+            if binding in seen:
+                return False
+            if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                arguments = scope.args
+                parameters = (
+                    list(arguments.posonlyargs)
+                    + list(arguments.args)
+                    + list(arguments.kwonlyargs)
+                )
+                if any(parameter.arg == node.id for parameter in parameters):
+                    return False
+                if any(
+                    node.id in declaration.names
+                    for declaration in ast.walk(scope)
+                    if isinstance(declaration, (ast.Global, ast.Nonlocal))
+                    and python_enclosing_scope(declaration, parents) is scope
+                ):
+                    return False
+            for candidate in ast.walk(scope):
+                candidate_scope = (
+                    python_enclosing_scope(parents.get(candidate), parents)
+                    if isinstance(
+                        candidate,
+                        (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef),
+                    )
+                    else python_enclosing_scope(candidate, parents)
+                )
+                if candidate_scope is not scope:
+                    continue
+                if isinstance(candidate, (ast.Import, ast.ImportFrom)):
+                    imported_names = (
+                        [
+                            alias.asname or alias.name.split(".")[0]
+                            for alias in candidate.names
+                        ]
+                        if isinstance(candidate, ast.Import)
+                        else [alias.asname or alias.name for alias in candidate.names]
+                    )
+                    if node.id in imported_names:
+                        return False
+                if isinstance(candidate, ast.ExceptHandler) and candidate.name == node.id:
+                    return False
+                if isinstance(
+                    candidate, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+                ) and candidate.name == node.id and (
+                    python_enclosing_scope(parents.get(candidate), parents) is scope
+                ):
+                    return False
+            values = [
+                value
+                for binding_scope, name, value in assignment_records
+                if binding_scope is scope and name == node.id
+            ]
+            if values:
+                return all(
+                    known_collection_constructor(value, seen | {binding})
+                    for value in values
+                )
+            if any(
+                isinstance(candidate, ast.Name)
+                and candidate.id == node.id
+                and isinstance(candidate.ctx, ast.Store)
+                and python_enclosing_scope(candidate, parents) is scope
+                for candidate in ast.walk(scope)
+            ):
+                return False
+        return node.id in collection_constructor_names
+
+    holder_methods = {
+        "add", "append", "extend", "insert", "setdefault", "update"
+    }
+    holder_method_aliases = {}
+    holder_method_name_aliases = {}
+    for scope, name, value in assignment_records:
+        if (
+            isinstance(value, ast.Attribute)
+            and value.attr in holder_methods
+            and isinstance(value.value, ast.Name)
+        ):
+            holder_method_aliases.setdefault((scope, name), set()).add(
+                value.value.id
+            )
+        elif isinstance(value, ast.Name):
+            holder_method_name_aliases.setdefault((scope, name), set()).add(
+                value.id
+            )
+
+    def holder_receivers_for_alias(name, scope, seen=None):
+        if seen is None:
+            seen = set()
+        binding = (scope, name)
+        if binding in seen:
+            return set()
+        seen.add(binding)
+        receivers = set(holder_method_aliases.get(binding, ()))
+        for source_name in holder_method_name_aliases.get(binding, ()):
+            receivers.update(
+                holder_receivers_for_alias(source_name, scope, set(seen))
+            )
+        return receivers
+
     def reflective_member_name_is_closed(node, seen=None):
         if seen is None:
             seen = set()
@@ -17092,8 +17206,7 @@ def python_filesystem_mutator_alias_violation(tree, parents):
             return reflective_value_flows(node.value)
         if (
             isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id in {"dict", "frozenset", "list", "set", "tuple"}
+            and known_collection_constructor(node.func)
         ):
             return any(
                 reflective_value_flows(value)
@@ -17111,31 +17224,33 @@ def python_filesystem_mutator_alias_violation(tree, parents):
             if binding not in reflective_bindings and reflective_value_flows(value):
                 reflective_bindings.add(binding)
                 changed = True
-        holder_methods = {
-            "add", "append", "extend", "insert", "setdefault", "update"
-        }
         for candidate in ast.walk(tree):
-            if not (
-                isinstance(candidate, ast.Call)
-                and isinstance(candidate.func, ast.Attribute)
-                and candidate.func.attr in holder_methods
-                and isinstance(candidate.func.value, ast.Name)
-                and any(
-                    reflective_value_flows(value)
-                    for value in [
-                        *candidate.args,
-                        *(keyword.value for keyword in candidate.keywords),
-                    ]
-                )
+            if not isinstance(candidate, ast.Call) or not any(
+                reflective_value_flows(value)
+                for value in [
+                    *candidate.args,
+                    *(keyword.value for keyword in candidate.keywords),
+                ]
             ):
                 continue
-            binding = (
-                python_enclosing_scope(candidate, parents),
-                candidate.func.value.id,
-            )
-            if binding not in reflective_bindings:
-                reflective_bindings.add(binding)
-                changed = True
+            scope = python_enclosing_scope(candidate, parents)
+            if (
+                isinstance(candidate.func, ast.Attribute)
+                and candidate.func.attr in holder_methods
+                and isinstance(candidate.func.value, ast.Name)
+            ):
+                holder_names = {candidate.func.value.id}
+            elif isinstance(candidate.func, ast.Name):
+                holder_names = holder_receivers_for_alias(
+                    candidate.func.id, scope
+                )
+            else:
+                holder_names = set()
+            for holder_name in holder_names:
+                binding = (scope, holder_name)
+                if binding not in reflective_bindings:
+                    reflective_bindings.add(binding)
+                    changed = True
         if not changed:
             break
 
@@ -17228,6 +17343,83 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                 and parents[parent].func is parent
             ):
                 called.update(alias_origins[candidate.id])
+
+        def scope_binds_name(scope, name):
+            if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                arguments = scope.args
+                parameters = (
+                    list(arguments.posonlyargs)
+                    + list(arguments.args)
+                    + list(arguments.kwonlyargs)
+                )
+                if any(parameter.arg == name for parameter in parameters):
+                    return True
+                if any(
+                    name in declaration.names
+                    for declaration in ast.walk(scope)
+                    if isinstance(declaration, ast.Global)
+                    and python_enclosing_scope(declaration, parents) is scope
+                ):
+                    return True
+            for candidate in ast.walk(scope):
+                candidate_scope = (
+                    python_enclosing_scope(parents.get(candidate), parents)
+                    if isinstance(
+                        candidate,
+                        (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef),
+                    )
+                    else python_enclosing_scope(candidate, parents)
+                )
+                if candidate_scope is not scope:
+                    continue
+                if isinstance(candidate, ast.Name) and (
+                    candidate.id == name
+                    and isinstance(candidate.ctx, ast.Store)
+                ):
+                    return True
+                if isinstance(candidate, (ast.Import, ast.ImportFrom)):
+                    imported_names = (
+                        [
+                            alias.asname or alias.name.split(".")[0]
+                            for alias in candidate.names
+                        ]
+                        if isinstance(candidate, ast.Import)
+                        else [alias.asname or alias.name for alias in candidate.names]
+                    )
+                    if name in imported_names:
+                        return True
+                if isinstance(candidate, ast.ExceptHandler) and candidate.name == name:
+                    return True
+                if isinstance(
+                    candidate, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+                ) and candidate.name == name and (
+                    python_enclosing_scope(parents.get(candidate), parents) is scope
+                ):
+                    return True
+            return False
+
+        for candidate in ast.walk(function):
+            if not (
+                isinstance(candidate, ast.Name)
+                and isinstance(candidate.ctx, ast.Load)
+            ):
+                continue
+            use_scope = python_enclosing_scope(candidate, parents)
+            if use_scope is function:
+                continue
+            lexical_scopes = python_lexical_scope_chain(use_scope, parents)
+            if function not in lexical_scopes:
+                continue
+            origins = alias_origins.get(candidate.id, set())
+            if not origins:
+                continue
+            intervening_scopes = lexical_scopes[:lexical_scopes.index(function)]
+            if any(
+                scope_binds_name(scope, candidate.id)
+                for scope in intervening_scopes
+            ):
+                continue
+            called.update(origins)
         return called & parameters
 
     for candidate in ast.walk(tree):
@@ -38462,3 +38654,30 @@ Ran 4 tests in 7.134s — OK
 ```
 
 These selectors preserve the existing direct and wrapped Path ownership refusals, temporary-owned mutation controls, benign string replacement, canonical scanner namespace and bounded Git collector. The three added snippets were parsed only as inert AST strings; no specimen, filesystem method or verifier recipe ran. No full suite, packet selector, 119-helper sweep, compiler self-audit, Go/hosted CI or live operation was run. This closes the three reproduced transfer forms only; arbitrary unmodeled helper or container semantics still require their own evidence and review.
+
+#### Constructor, insertion and nested-callback transfers from immutable `30c9aa75`
+
+The coordinator's pinned AST probes against exact parent `30c9aa7588e717990739c687372d3512553e1cba` accepted three unresolved reflective-mutator transfers: a `list` constructor alias wrapping the getter result; an alias of a holder's `.append` method storing it; and a callback parameter captured and invoked by a nested closure. The independent review of that same immutable parent reproduced the same three P1 forms and confirmed the benign constructor, insertion, closure and shadowing controls; it reported no additional finding. The review predated this candidate, and its parent result is not approval of the current source.
+
+The three cases were added to the existing path-mutator method before scanner edits. An initial version of the benign closure control used `print`, which the existing sink guard correctly refused; that run failed four assertions in 0.366s and is not the targeted RED. After replacing it with a local echo callback, the untouched `30c9aa75` scanner failed exactly the three intended refusal assertions in 0.396s:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_new_path_mutators_require_owned_sources_and_destinations
+Ran 1 test in 0.396s — FAILED (failures=3)
+```
+
+The correction resolves simple local aliases of the selected collection constructors against lexical bindings, follows local aliases of the existing holder-insertion methods, and propagates reflective callback provenance through simple same-function aliases and nested closures. A captured name contributes the outer callback provenance only when nearer function scopes do not bind or shadow that name. The safe controls cover ordinary constructor and insertion aliases, a local echo callback, and nested closures that shadow the callback by parameter or local assignment; no source, helper-name or marker exception was added.
+
+During control refinement, one shadow fixture reused `invoke`, which collided with an earlier same-named helper candidate and caused one safe-control failure in 0.386s; renaming that fixture to `invoke_shadow` removed the ambiguity. The final path-mutator selector passed with the parameter-shadow and local-rebind controls, and the final changed-boundary command passed all four methods in 8.338s:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_new_path_mutators_require_owned_sources_and_destinations \
+  Issue79RegressionTests.test_string_replace_result_is_not_an_extracted_path_mutator \
+  Issue79RegressionTests.test_reviewed_scanner_namespace_remains_accepted_with_cwd_guards \
+  Issue79RegressionTests.test_git_query_runtime_dependencies_cannot_be_patched_around_capture
+Ran 4 tests in 8.338s — OK
+```
+
+This focused run retains the canonical bounded Git collector, reviewed scanner namespace, benign `str.replace`, temporary-owned Path operations and the existing unowned-path refusals. All added specimens remained inert AST strings; no specimen or packet recipe was compiled or executed. No full suite, packet selector, 119-helper sweep, compiler self-audit, Go/hosted CI or live operation was run; the coordinator owns packet integration. This delta covers only the reproduced constructor, insertion and nested-closure shapes. To roll back just this unit, revert its local two-file commit; earlier commits remain untouched.
