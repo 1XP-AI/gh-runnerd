@@ -445,8 +445,11 @@ the scan, and the scan batch ran no `go test` command.
 ### Pin admission and focused verification
 
 Tests were added before implementation. Against the prior Go 1.26.8 state,
-`TestToolingCheckToolchainRequiresGo1269` failed because the
-checker still accepted 1.26.8 and rejected the required 1.26.9 fixture;
+`TestToolingCheckToolchainRequiresGo1269` failed because its synthetic
+`go.mod` declares Go 1.26.9 and the prior checker exits on the Go-directive
+mismatch before reaching the fake reported-version cases. This showed that
+the prior checker rejected the Go 1.26.9 fixture; it did not establish that
+the checker accepted a fake Go 1.26.8 report.
 G01 live and worker `TestBuildRevisionAdmissionRequiresGo1269`
 also failed their Go 1.26.9 admission cases, and G02
 `TestBrokerBuildMustMatchReviewedController` rejected the new
@@ -488,3 +491,18 @@ qualification gates remain open; no issue or Project state changed. SDK and
 runner pins remain `v0.4.0` and `v2.337.0`. No Go
 dependency or checksum pin changed. Rollback for this local remediation is the
 single coherent local documentation/code pin commit; no external state changed.
+
+### Independent review of the Go 1.26.9 pin commit
+
+On 2026-10-13, independent Codex GPT-6-Luna/max reviewed the exact
+27-file commit `c81a17b654686600277474ae63376fdcb1210193`.
+The reviewer found its Go 1.26.9 pin and G01/G02 BuildInfo-admission changes
+internally consistent. Four focused synthetic selectors passed, and one
+Go 1.26.9 `govulncheck@v1.7.0` Profile A verbose source-only scan exited 0
+with no finding IDs.
+
+The review held on the inaccurate toolchain-test RED interpretation corrected
+above. It did not independently repeat all seven source profiles or the full
+module/CI matrix, qualify live behavior, or perform GitHub PR review. Those
+gates remain open. The documentation correction in this follow-up has not
+received an exact-head review; no new-head review approval is claimed.
