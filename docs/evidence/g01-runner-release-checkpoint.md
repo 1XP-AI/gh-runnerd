@@ -75,16 +75,19 @@ unresolved. No GitHub issue or Project status was changed.
 ## Public advisory and reporting-policy screen
 
 Read-only queries made on 2026-10-13 against public GitHub REST endpoints. List
-queries used `--paginate` with no explicit `per_page` override; the two
-repository feeds requested `state=published` only. Results are advisory-feed
-matches, not a vulnerability scan. Commands below show the endpoint and API
-filters; `--jq` was used only to project response counts or fields.
+queries used `--paginate` with no explicit `per_page` override. The two
+repository feeds requested `state=published`; the global list queries also
+specified `type=reviewed`. A zero from a global query means no matching
+GitHub-reviewed published advisory for that exact filter, not no unreviewed
+reports or all public reports. Results are not a vulnerability scan. Commands
+below show endpoint and API filters; `--jq` only projected response counts or
+fields.
 
 ```text
 gh api --paginate 'repos/actions/scaleset/security-advisories?state=published'
 gh api --paginate 'repos/actions/runner/security-advisories?state=published'
 gh api advisories/GHSA-2c6m-6gqh-6qg3
-gh api --paginate 'advisories?ecosystem=actions&affects=actions/runner@2.337.0'
+gh api --paginate 'advisories?type=reviewed&ecosystem=actions&affects=actions/runner@2.337.0'
 ```
 
 The Scale Set repository feed returned `[]` (0). The runner repository feed
@@ -92,7 +95,7 @@ returned one record: GHSA-2c6m-6gqh-6qg3 / CVE-2022-39321, severity `medium`,
 published and updated `2022-10-24T16:00:18Z`, with vulnerable range `<2.296.1`
 and listed patched versions `2.296.2`, `2.293.1`, `2.289.4`, `2.285.2`, and
 `2.283.4`. The exact Actions ecosystem query for `actions/runner@2.337.0`
-returned `[]` (0). ([runner repository advisory](https://github.com/actions/runner/security/advisories/GHSA-2c6m-6gqh-6qg3))
+returned `[]` (0 matching GitHub-reviewed published advisories). ([runner repository advisory](https://github.com/actions/runner/security/advisories/GHSA-2c6m-6gqh-6qg3))
 
 The successful global advisory detail GET returns the same GHSA/CVE as severity
 `high`, published `2022-10-25T19:54:27Z` and updated `2023-01-30T05:02:47Z`.
@@ -119,25 +122,25 @@ advisory entry above remains the canonical cross-version record.
 The exact-version Go global-advisory queries were:
 
 ```text
-gh api --paginate 'advisories?ecosystem=go&affects=github.com/actions/scaleset@v0.4.0'
-gh api --paginate 'advisories?ecosystem=go&affects=github.com/golang-jwt/jwt/v4@v4.5.2'
-gh api --paginate 'advisories?ecosystem=go&affects=github.com/google/uuid@v1.6.0'
-gh api --paginate 'advisories?ecosystem=go&affects=github.com/hashicorp/go-cleanhttp@v0.5.2'
-gh api --paginate 'advisories?ecosystem=go&affects=github.com/hashicorp/go-retryablehttp@v0.7.8'
+gh api --paginate 'advisories?type=reviewed&ecosystem=go&affects=github.com/actions/scaleset@v0.4.0'
+gh api --paginate 'advisories?type=reviewed&ecosystem=go&affects=github.com/golang-jwt/jwt/v4@v4.5.2'
+gh api --paginate 'advisories?type=reviewed&ecosystem=go&affects=github.com/google/uuid@v1.6.0'
+gh api --paginate 'advisories?type=reviewed&ecosystem=go&affects=github.com/hashicorp/go-cleanhttp@v0.5.2'
+gh api --paginate 'advisories?type=reviewed&ecosystem=go&affects=github.com/hashicorp/go-retryablehttp@v0.7.8'
 ```
 
-Each returned `[]` (0 matching published advisories) for the exact pinned
-external module version named in G01's existing dependency files. The positive
-query control was:
+Each returned `[]` (0 matching GitHub-reviewed published advisories) for the
+exact pinned external module version named in G01's existing dependency files.
+The positive query control was:
 
 ```text
-gh api --paginate 'advisories?ecosystem=go&affects=github.com/golang-jwt/jwt/v4@v4.5.1'
+gh api --paginate 'advisories?type=reviewed&ecosystem=go&affects=github.com/golang-jwt/jwt/v4@v4.5.1'
 ```
 
 It returned GHSA-mh63-6h87-95cp / CVE-2025-30204, severity `high`, published
 `2025-03-21T22:04:00Z`, updated `2025-04-10T13:02:35Z`, affected range
 `<4.5.2`, first patched `4.5.2`. This control is for the older `v4.5.1` query,
-not an advisory match for installed `v4.5.2`. ([query-control advisory](https://github.com/advisories/GHSA-mh63-6h87-95cp))
+not a matching advisory for the pinned `v4.5.2` dependency. ([query-control advisory](https://github.com/advisories/GHSA-mh63-6h87-95cp))
 
 The pinned SDK `SECURITY.md` was read with
 `gh api 'repos/actions/scaleset/contents/SECURITY.md?ref=6ce025902cd964747a078c2aabe7340ebc667eca'`
@@ -159,6 +162,10 @@ archive-byte verification, image/runtime auditing, tenant-specific version
 qualification, or a fresh public-feed check before a future canary. Existing
 G01/G02, live-authorization, and safe-drain gates remain open; no pin changes
 follow from this advisory screen.
+
+Rollback scope: remove only this file's advisory-screen addendum; preserve parent
+release/source commit `8ae0c1a3dd158360784de64232a4890f3f3b2be6` and its
+historical validation. No live cleanup is involved.
 
 ## Local documentation validation
 
