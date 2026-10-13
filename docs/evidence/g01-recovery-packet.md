@@ -16995,6 +16995,8 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                     list(arguments.posonlyargs)
                     + list(arguments.args)
                     + list(arguments.kwonlyargs)
+                    + ([arguments.vararg] if arguments.vararg is not None else [])
+                    + ([arguments.kwarg] if arguments.kwarg is not None else [])
                 )
                 if any(parameter.arg == node.id for parameter in parameters):
                     return False
@@ -17081,6 +17083,8 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                 list(arguments.posonlyargs)
                 + list(arguments.args)
                 + list(arguments.kwonlyargs)
+                + ([arguments.vararg] if arguments.vararg is not None else [])
+                + ([arguments.kwarg] if arguments.kwarg is not None else [])
             )
             if any(parameter.arg == name for parameter in parameters):
                 return True
@@ -17219,6 +17223,8 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                     list(arguments.posonlyargs)
                     + list(arguments.args)
                     + list(arguments.kwonlyargs)
+                    + ([arguments.vararg] if arguments.vararg is not None else [])
+                    + ([arguments.kwarg] if arguments.kwarg is not None else [])
                 )
                 if any(parameter.arg == node.id for parameter in parameters):
                     return False
@@ -17282,6 +17288,8 @@ def python_filesystem_mutator_alias_violation(tree, parents):
             return True
         if isinstance(node, ast.Name):
             return reflective_name_is_bound(node)
+        if isinstance(node, ast.Starred):
+            return reflective_value_flows(node.value)
         if isinstance(node, ast.NamedExpr):
             return reflective_value_flows(node.value)
         if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
@@ -17427,14 +17435,15 @@ def python_filesystem_mutator_alias_violation(tree, parents):
             return "Python heredoc calls an unresolved reflective mutator result"
 
     def callable_parameter_names(function):
+        positional = list(function.args.posonlyargs) + list(function.args.args)
         parameters = {
             parameter.arg
-            for parameter in (
-                list(function.args.posonlyargs)
-                + list(function.args.args)
-                + list(function.args.kwonlyargs)
-            )
+            for parameter in positional + list(function.args.kwonlyargs)
         }
+        if function.args.vararg is not None:
+            parameters.add(function.args.vararg.arg)
+        if function.args.kwarg is not None:
+            parameters.add(function.args.kwarg.arg)
         alias_origins = {parameter: {parameter} for parameter in parameters}
         function_nodes = [
             candidate
@@ -17502,6 +17511,8 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                     list(arguments.posonlyargs)
                     + list(arguments.args)
                     + list(arguments.kwonlyargs)
+                    + ([arguments.vararg] if arguments.vararg is not None else [])
+                    + ([arguments.kwarg] if arguments.kwarg is not None else [])
                 )
                 if any(parameter.arg == name for parameter in parameters):
                     return True
@@ -17588,11 +17599,22 @@ def python_filesystem_mutator_alias_violation(tree, parents):
             if not called_parameters:
                 continue
             positional = list(function.args.posonlyargs) + list(function.args.args)
+            variadic_positional = (
+                function.args.vararg.arg
+                if function.args.vararg is not None
+                else None
+            )
             for index, argument in enumerate(candidate.args):
                 if isinstance(argument, ast.Starred):
-                    if reflective_value_flows(argument.value) and any(
-                        parameter.arg in called_parameters
-                        for parameter in positional[index:]
+                    if (
+                        reflective_value_flows(argument.value)
+                        and (
+                            any(
+                                parameter.arg in called_parameters
+                                for parameter in positional[index:]
+                            )
+                            or variadic_positional in called_parameters
+                        )
                     ):
                         return "Python heredoc passes a reflective result to a local callback"
                 elif (
@@ -17601,13 +17623,29 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                     and reflective_value_flows(argument)
                 ):
                     return "Python heredoc passes a reflective result to a local callback"
+                elif (
+                    index >= len(positional)
+                    and variadic_positional in called_parameters
+                    and reflective_value_flows(argument)
+                ):
+                    return "Python heredoc passes a reflective result to a local callback"
             named_parameters = {
                 parameter.arg
                 for parameter in positional + list(function.args.kwonlyargs)
             }
+            variadic_keywords = (
+                function.args.kwarg.arg if function.args.kwarg is not None else None
+            )
             for keyword in candidate.keywords:
                 if (
                     keyword.arg in called_parameters
+                    and reflective_value_flows(keyword.value)
+                ):
+                    return "Python heredoc passes a reflective result to a local callback"
+                if (
+                    keyword.arg is not None
+                    and variadic_keywords in called_parameters
+                    and keyword.arg not in named_parameters
                     and reflective_value_flows(keyword.value)
                 ):
                     return "Python heredoc passes a reflective result to a local callback"
@@ -17622,8 +17660,18 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                             )
                         ):
                             return "Python heredoc passes a reflective result to a local callback"
+                        if (
+                            variadic_keywords in called_parameters
+                            and any(
+                                reflective_value_flows(value)
+                                for value in keyword.value.values
+                                if value is not None
+                            )
+                        ):
+                            return "Python heredoc passes a reflective result to a local callback"
                     elif reflective_value_flows(keyword.value) and (
                         called_parameters & named_parameters
+                        or variadic_keywords in called_parameters
                     ):
                         return "Python heredoc passes a reflective result to a local callback"
 
@@ -38859,3 +38907,30 @@ Ran 4 tests in 10.118s — OK
 ```
 
 These checks retain the existing unowned Path mutation refusals, temporary-owned mutation and local set-copy positives, benign `str.replace`, canonical reviewed scanner namespace, and stored Git stream collector. The new specimens were parsed only as inert source strings; no specimen, packet recipe, filesystem method, verifier, compiler or live operation was executed. No full suite, packet selector, 119-helper sweep, compiler self-audit, Go/hosted CI or live operation was run; the coordinator owns final packet integration. This evidence covers the five reproduced transfer shapes and adjacent controls only; unmodeled Python helper and container behavior is not claimed closed. Rollback is to revert this local two-file commit; earlier commits remain untouched.
+
+#### Variadic reflective-callback transfers from immutable `62e0fe6b`
+
+The independent review of exact parent `62e0fe6b6bfa53a43c229d30fa260e29781ed0af` found three unresolved reflective-mutator flows accepted by the scanner: a getter result passed to a `*callbacks` parameter and called through `callbacks[0]`; a getter result passed through `**{"callback": ...}` to a `**callbacks` parameter and called through `callbacks["callback"]`; and a starred tuple forwarding both a bound holder inserter and the getter result into a `*items` helper that stores and later invokes them. The coordinator reproduced those three forms with a pinned AST-only 21-case probe in 0.512s; eleven unsafe cases were refused, seven benign cases accepted, and these three unsafe cases accepted. The specimens were parsed as AST data only, not executed.
+
+I added the three refusal cases and benign variadic echo and same-name variadic-shadow controls before editing the scanner. Against untouched parent `62e0fe6b`, the focused path-mutator method failed exactly the three new refusal assertions in 0.516s (0.61s wall time):
+
+```text
+/usr/bin/time -p python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_new_path_mutators_require_owned_sources_and_destinations
+Ran 1 test in 0.516s — FAILED (failures=3); real 0.61s
+```
+
+The scanner now includes variadic positional and keyword parameters when finding locally invoked callback bindings, follows starred expressions when checking reflective-value flow, and maps reflective values entering `*args` or `**kwargs` to those invoked callback parameters. Lexical scope binding checks also include variadic parameters, so a nested same-name variadic parameter remains local. This stays within the existing reflective-mutator and local-call analysis; it adds no helper-name, source-name, marker or hash exception.
+
+The final focused command passed the path-mutator, benign string-replacement, reviewed scanner namespace and Git runtime-dependency selectors together in 8.394s (8.48s wall time):
+
+```text
+/usr/bin/time -p python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_new_path_mutators_require_owned_sources_and_destinations \
+  Issue79RegressionTests.test_string_replace_result_is_not_an_extracted_path_mutator \
+  Issue79RegressionTests.test_reviewed_scanner_namespace_remains_accepted_with_cwd_guards \
+  Issue79RegressionTests.test_git_query_runtime_dependencies_cannot_be_patched_around_capture
+Ran 4 tests in 8.394s — OK; real 8.48s
+```
+
+The controls retain benign `*callbacks` and `**callbacks` echo calls, variadic shadowing, temporary-owned Path mutation, the string transformation, the reviewed scanner namespace and the stored Git stream collector. The coordinator's earlier full packet AST selector on immutable `62e0fe6b` passed one scan in 511.238s (261 shell blocks, 86 Python blocks, zero violations); it is historical parent evidence and does not qualify this candidate. No full suite, packet selector, 119-helper sweep, compiler self-audit, Go/hosted CI or live operation was run for this correction. The new cases cover the reproduced variadic transfers only; other unmodeled Python helper or container flows are not claimed closed. Rollback is to revert this local two-file commit; earlier commits remain untouched.
