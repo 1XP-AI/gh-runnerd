@@ -180,3 +180,171 @@ On 2026-10-13, the added local links and heading fragments resolved;
 `git diff --check` emitted no diagnostics; and the credential/token/private-key/
 personal-path scan found no matches. No tests, builds, compilers, or vulnerability
 scanners were run for this documentation-only addendum.
+
+## Local source-mode Go vulnerability and reachability analysis
+
+The preceding advisory-screen validation is historical for that earlier
+metadata-only addendum; this source analysis is a separate later addition.
+
+Date: 2026-10-13. This is read-only source analysis of the committed G01 module
+and its local G02 replacement. It does not establish a clean security gate:
+the source scan returned findings, the Go toolchain pin remains unchanged, and
+separate remediation and re-verification are required before dependent G01,
+G02, live-canary, and safe-drain gates can close.
+
+### Source and tool identity
+
+The scan used parent commit
+`7fa9bce30e88bb214d2cc7aec47c76778e9d281d`, G01 tree
+`9636ee550304dc8f155a44faa78d93b80939a138`, and local G02 replacement tree
+`8015fedeccd7604cedef3e5e1814d190d7443757`. The G01
+[module file](../../experiments/g01-scaleset/go.mod) declares Go `1.26.8`
+and replaces
+`github.com/1XP-AI/gh-runnerd/experiments/g02-auth` with
+`../g02-auth`, whose [local module](../../experiments/g02-auth/go.mod) is in
+the same committed tree; both module trees were clean and contained no untracked Go,
+`go.mod`, or `go.sum` inputs.
+
+No `govulncheck` executable was present in the standard tool locations. The
+pinned tool was installed only into an ephemeral directory with
+`go install golang.org/x/vuln/cmd/govulncheck@v1.7.0`, then checked with
+`go version -m` before scanning target source. The binary reports module
+`golang.org/x/vuln v1.7.0` with checksum
+`h1:4MQBuhmXbz2uepNJrf3v+aaZLGDqw1JluwYboegA1qg=`; a public
+`go mod download -json golang.org/x/vuln@v1.7.0` returned the same checksum.
+The cached pinned documentation blob matches
+`8de6904a51b632fbb4c546ce7b50678798394312` at the immutable
+[govulncheck v1.7.0 source](https://github.com/golang/vuln/blob/617f44b718537dccdea1915395650e0529e3b72e/cmd/govulncheck/doc.go).
+The source documentation says `-test` includes test files, `-tags` selects
+build variants, and source analysis uses the Go command on `PATH`; it also
+documents that JSON, SARIF, and VEX formats can exit 0 despite findings.
+
+Each scanner invocation used
+`govulncheck -mode=source -format=text -db=https://vuln.go.dev -test [-tags=<profile>] ./...`
+from the G01 module. The child environment was built from an allowlist with
+Go `1.26.8`, Darwin/ARM64 (`GOARM64=v8.0`), `GOENV=off`,
+`GOWORK=off`, `GOFLAGS=-mod=readonly -p=2`, `GOAUTH=off`, public-only
+`GOPROXY=https://proxy.golang.org`, `GOSUMDB=sum.golang.org`, and empty
+private-module/no-proxy scopes. No HOME, Git/GitHub credentials, SSH settings,
+proxy credentials, or ambient Go overlays/tool overrides were passed. For
+`CGO_ENABLED=1`, `CC`/`CXX` were set to Apple Clang 21.0.0. Profiles ran
+sequentially with a 15-minute per-profile deadline and two-way Go parallelism.
+No G01/G02 test or application binary was run; `-test` caused test source to
+be analyzed only.
+
+The scanner queried the live, unpinned `https://vuln.go.dev` database. A
+read-only request to the [database index](https://vuln.go.dev/index/db.json)
+after the profile batch returned body
+`{"modified":"2026-10-08T22:31:09Z"}`, ETag
+`8875c8c67555e9c875a431c63837b83d`, and Last-Modified
+`2026-10-12T22:21:33Z` (response date `2026-10-13T03:42:05Z`). This is
+observed database metadata, not an immutable database snapshot bound to each
+scan. The advisory links below point to the public Go vulnerability database;
+no advisory publication dates are inferred.
+
+### Profiles and exit results
+
+The six requested source profiles ran once in the same batch. A separate
+`CGO=1,osusergo` profile was added after checking the build constraints:
+G01 imports `os/user`, and this combination selects the unsupported account
+lookup source while retaining cgo for other packages. The Android-only
+constraint is outside the selected Darwin/ARM64 target.
+
+| Profile | CGO | Build tags | Elapsed | Result |
+|---|---:|---|---:|---|
+| A | 1 | default | 3.2 s | exit 3; 10 symbol-result IDs |
+| B | 1 | `g01_live,g01_worker` | 2.2 s | exit 3; same 10 symbol-result IDs |
+| C | 1 | `g01_pair_fixture` | 2.3 s | exit 3; same 10 symbol-result IDs |
+| D | 1 | `g01_live,g01_worker,g01_pair_fixture` | 2.2 s | exit 3; same 10 symbol-result IDs |
+| E | 1 | `g01_pair_fixture,g01_pair_real_cadence` | 2.3 s | exit 3; same 10 symbol-result IDs |
+| F | 0 | default | 2.2 s | exit 3; same 10 symbol-result IDs |
+| G (additional) | 1 | `osusergo` | 2.7 s | exit 3; same 10 symbol-result IDs |
+
+Text format returned nonzero exit 3 with findings for every profile; none
+timed out. Complete raw logs were discarded after normalized result extraction,
+so this record does not claim a separate review of every diagnostic line.
+An A-profile `-show traces` replay (2.3 s, exit 3) collected call context.
+One A-profile and the additional G profile were also run with `-show verbose`
+(2.6 s and 2.7 s, exit 3) to distinguish symbol, package, and module results.
+Those verbose outputs each reported 10 symbol-level findings, one
+package-import finding, and two required-module findings. The non-symbol IDs
+below are classified from those A and G verbose outputs; they are not
+profile-by-profile verbose results for B–F.
+
+### Findings and source-call scope
+
+The text summaries classified these ten IDs as symbol-level findings from the
+Go standard library in every requested profile and in profile G:
+[GO-2026-6603](https://vuln.go.dev/ID/GO-2026-6603.json),
+[GO-2026-6604](https://vuln.go.dev/ID/GO-2026-6604.json),
+[GO-2026-6605](https://vuln.go.dev/ID/GO-2026-6605.json),
+[GO-2026-6607](https://vuln.go.dev/ID/GO-2026-6607.json),
+[GO-2026-6608](https://vuln.go.dev/ID/GO-2026-6608.json),
+[GO-2026-6610](https://vuln.go.dev/ID/GO-2026-6610.json),
+[GO-2026-6611](https://vuln.go.dev/ID/GO-2026-6611.json),
+[GO-2026-6612](https://vuln.go.dev/ID/GO-2026-6612.json),
+[GO-2026-6613](https://vuln.go.dev/ID/GO-2026-6613.json), and
+[GO-2026-6617](https://vuln.go.dev/ID/GO-2026-6617.json). The scanner reported
+the relevant standard-library packages at Go `1.26.8`, with Go `1.26.9`
+as the fix version. The Go `1.26.9` tag is
+[commit `2ae494ef9fb90e0da0073c31800ba38870249994`](https://github.com/golang/go/commit/2ae494ef9fb90e0da0073c31800ba38870249994);
+no toolchain or manifest pin was changed here.
+
+The trace examples included these source call paths:
+
+| Finding IDs | Scanner-reported source path |
+|---|---|
+| GO-2026-6603, GO-2026-6611, GO-2026-6612, GO-2026-6617 | `net/http.CanonicalHeaderKey` / trailer handling, with traces through G01 `drainPollHook.RoundTrip` and `SDKAPI` request paths |
+| GO-2026-6613 | `net/http.CanonicalHeaderKey` reached through `drainObservedBody.Close` and the drain response-body path |
+| GO-2026-6605, GO-2026-6610 | `net/http.Client.CloseIdleConnections` reached through `drainPollHook.RoundTrip` and `SDKAPI.Preflight` / `SDKAPI.get` |
+| GO-2026-6608 | `mime/multipart@go1.26.8`; trace includes `drainObservedBody.Read` and `net/textproto.Reader.ReadMIMEHeader` |
+| GO-2026-6607 | `crypto/tls.Conn.HandshakeContext`; the example trace includes test-source function `TestDockerInspectExactRejectsReplacedSocket` |
+| GO-2026-6604 | `os@go1.26.8` through `OpenJournal` / `openJournalAtAdmission`; the public Go database marks both affected imports Windows-only |
+
+GO-2026-6604 appears in the scanner's symbol results, but its Windows-only
+metadata makes it inapplicable to these Darwin/ARM64 profiles; this is not a
+Darwin exploitability finding. The other nine symbol results are analyzer
+call-reachability reports, not proof that attacker-controlled inputs satisfy
+the advisory's trigger conditions. Traces include test-source paths because
+`-test` was enabled; tests and fixtures were not run.
+
+The verbose A and G outputs also reported:
+
+| Result level | Finding | Found / fixed | Classification |
+|---|---|---|---|
+| Package | [GO-2026-6609](https://vuln.go.dev/ID/GO-2026-6609.json) | `net/http@go1.26.8` → `go1.26.9` | Package is imported; scanner did not find a call from analyzed source |
+| Required module | [GO-2026-6599](https://vuln.go.dev/ID/GO-2026-6599.json) | `stdlib@go1.26.8` → `go1.26.9` | Required module only; no package or call result |
+| Required module | [GO-2026-6600](https://vuln.go.dev/ID/GO-2026-6600.json) | `stdlib@go1.26.8` → `go1.26.9` | Required module only; no package or call result |
+
+The public Go database also lists `golang.org/x/net`, fixed at `v0.60.0`,
+for GO-2026-6603, GO-2026-6610, GO-2026-6611, GO-2026-6612, and
+GO-2026-6617. No `x/net` call, package, or required-module finding appeared
+in the verbose A or G output; this does not replace a full module-graph or
+SBOM inventory. The scanner's source-level symbol analysis is approximate:
+interface and function-pointer paths can be conservative, while reflection
+and unsafe can hide paths, as documented by the
+[pinned tool source](https://github.com/golang/vuln/blob/617f44b718537dccdea1915395650e0529e3b72e/cmd/govulncheck/doc.go).
+
+### Gate and scope
+
+This adds a Go standard-library security gate for the current Go `1.26.8`
+source profile. The listed fixes are in Go `1.26.9`, but shared toolchain
+remediation and fresh source re-verification need separate ownership and
+authorization; no Go pin, dependency, source, workflow, canary, or runner
+selection changed. These results do not qualify the tenant, archived runner
+bytes, image or bundled runtime, live credentials, safe drain, or production
+execution, and do not close full G01/G02.
+
+No Go tests, application builds, fixture execution, live runner operations,
+GitHub writes, or GitHub advisory submissions occurred. The `govulncheck`
+tool itself was installed in a temporary directory; the source scanner then
+loaded the selected source and test files without running them. Rollback for
+this checkpoint is limited to reverting this local evidence addendum; retain
+the earlier advisory and release-source evidence unchanged.
+
+## Source-analysis evidence validation
+
+On 2026-10-13, all four relative Markdown links and their heading fragments resolved;
+`git diff --check` emitted no diagnostics; and the added diff scan for
+credential/token/private-key and personal-machine-path patterns found no
+matches. No Go tests or application suite were run.
