@@ -41,6 +41,34 @@ in the driver. Bounded fixture rules preserve a later zero or absent
 observation from erasing an earlier work-bearing or uncertain observation; that
 is not a live or production reconciliation result.
 
+### Published offline protocol review and bounded reuse
+
+On 2026-10-03, Codex (GPT-6-Luna, max) approved only the offline protocol
+evidence for the provisional released SDK v0.4.0 listener and independent
+reconciliation in [the published review](https://github.com/1XP-AI/gh-runnerd/issues/1#issuecomment-5967217026)
+(08:33:02Z); it held full G01, production behavior and live qualification.
+[The 08:39:04Z supplement](https://github.com/1XP-AI/gh-runnerd/issues/1#issuecomment-5967258854)
+records the missing regex alternative for
+`TestSDKJITLookupBeforeCreationDoesNotDiscoverIdentity`: the original seven
+alternatives passed in the package run in 0.359s; the corrected standalone
+selector passed in 0.361s on reviewed source
+`9636e33781c72c32319db419334f49f1bc1866bc` with Go 1.26.8. These historical
+tests were not rerun for this documentation change.
+
+Read-only Git tree comparisons show that `experiments/g01-scaleset` is tree
+`9636ee550304dc8f155a44faa78d93b80939a138` and `experiments/g02-auth` is tree
+`8015fedeccd7604cedef3e5e1814d190d7443757` at the reviewed source, current
+`main` (`9a82a6a2b9c05c96c34a6ca9d0d8a6680ca209ff`), packet parent
+`39e42787e8e1a8a22c1dfd1c63b30b486df44d42`, and separate G01 documentation
+commit `8ae0c1a3dd158360784de64232a4890f3f3b2be6`. The G01 `go.mod` binds SDK
+`v0.4.0` and the local `../g02-auth` replacement; G02 declares Go 1.26.8 and
+no additional local replacement. This permits reuse of the review as historical
+offline source/fixture evidence for those unchanged module trees. Reuse is
+invalidated by a change to either tree or a relevant SDK/sum, toolchain,
+Runner/JIT, authorization, fixture or test-selection boundary. Tree identity
+does not prove external archive or runtime bytes, external GitHub semantics, the
+current Issue79 scanner/packet review, full G01 completion or live behavior.
+
 ## Classification and evidence index
 
 Use these classifications throughout the packet:
@@ -74,6 +102,7 @@ Use these classifications throughout the packet:
 | [Exact observation adapter](g01-exact-observations.md) | Fixture: bounded exact-ID/status/provenance readers; no affirmative live recovery or cleanup. | [d62242b07b779ff6f7414e97096d2c8828634a5d](https://github.com/1XP-AI/gh-runnerd/blob/d62242b07b779ff6f7414e97096d2c8828634a5d/docs/evidence/g01-exact-observations.md) |
 | [Worker/JIT harness](g01-worker-harness.md) | Source + fixture: worker profile and secret boundary; no image startup, JIT mint, workflow or Docker result. | [c1c0b6a6f2f94651546f533576eb3bbe8a4089b4](https://github.com/1XP-AI/gh-runnerd/blob/c1c0b6a6f2f94651546f533576eb3bbe8a4089b4/docs/evidence/g01-worker-harness.md) |
 | [Paired collection](g01-paired-baseline.md) and [terminal path](g01-paired-terminal.md) | Fixture: serialized controller/worker receipts and terminal correlation; no live cleanup or success claim. | [8dd64adc551ba5174892807a678e8bc614d0a474](https://github.com/1XP-AI/gh-runnerd/blob/8dd64adc551ba5174892807a678e8bc614d0a474/docs/evidence/g01-paired-baseline.md), [cf67d4aeb511116fee0de31a4ac38409f28fa29f](https://github.com/1XP-AI/gh-runnerd/blob/cf67d4aeb511116fee0de31a4ac38409f28fa29f/docs/evidence/g01-paired-terminal.md) |
+| [Published offline protocol review and supplement](#published-offline-protocol-review-and-bounded-reuse) | Source + fixture: Codex GPT-6-Luna/max approved only the provisional SDK listener and independent-reconciliation protocol evidence; the supplement records the corrected regex-alternative result. No full G01, production or live approval. | [Review, 2026-10-03 08:33:02Z](https://github.com/1XP-AI/gh-runnerd/issues/1#issuecomment-5967217026); [supplement, 08:39:04Z](https://github.com/1XP-AI/gh-runnerd/issues/1#issuecomment-5967258854); reviewed source `9636e33781c72c32319db419334f49f1bc1866bc`; G01/G02 trees recorded above. |
 | G01 evidence base | The selected safety/evidence base is the immutable merge below; this row intentionally does not identify a moving branch tip, and historical records retain their original source pins. | [G01 safety merge `070268968e440e52f11c7f3dea3cd9bff4eb0c34`](https://github.com/1XP-AI/gh-runnerd/commit/070268968e440e52f11c7f3dea3cd9bff4eb0c34) |
 | [Private canary infrastructure observation](#private-canary-infrastructure-observation) | Live infrastructure: authorized runner-group/identity/heartbeat only; public aliases only; native macOS ARM64 trust and reviewed source binding `match` required; not product Scale Set SDK listener, ACK, acquisition, JIT, drain, App/API authority, or cleanup. | Public aliases `canary-run-20260916-01` / `canary-job-runner-baseline-20260916-01`; source fingerprint `canary-workflow-source-20260916-01`; maintainer authorization [issue comment 5697441477](https://github.com/1XP-AI/gh-runnerd/issues/1#issuecomment-5697441477) bound to SHA-256 `09a806866c83d270f8b9dfaa4500c18b9422221657d10927921d1bf99c08ede8`; native macOS ARM64 trusted-execution [issue comment 5700601191](https://github.com/1XP-AI/gh-runnerd/issues/1#issuecomment-5700601191) bound to SHA-256 `111f8598241deabe172abc1527fb95bd067d46bb69089e112d071ad74dc89011`; private mapping not included |
 
@@ -238,9 +267,14 @@ The following are explicit open product gates. They are not implied by the
 fixture records and are not closed by the private canary infrastructure
 observation:
 
-1. Obtain an independent `gpt-luna-max` protocol/recovery review of the exact
-   candidate source and this packet. New work follows the current
-   `gpt-luna-max` route; historical Astra authorship is not current routing.
+1. The published Oct 3 review above is reusable only for the unchanged offline
+   protocol evidence and recorded source/module trees; it does not review this
+   Issue79 scanner/packet correction or approve full G01, production or live
+   behavior. Exact-candidate review of the current packet/source remains
+   separate, and any future live phase additionally requires review/approval
+   of the exact live source, harness/workflow and target plus explicit
+   authorization. New work follows the current `gpt-luna-max` route; historical
+   Astra authorship is not current routing.
 2. Name one disposable private repository, selected-only runner group,
    reviewed workflow/run attempt/source/head/path, owner nonce and immutable
    harness/workflow commits. Record an unchanged manual-runner inventory.
@@ -284,11 +318,11 @@ the count includes the actual live-canary gate row.
 
 | Boundary | Reuse unchanged evidence when | Exact focused rerun | Class/result to record |
 |---|---|---|---|
-| ACK, callback loss and acquisition order | SDK commit, listener source, adapter call order and root protocol fixtures are unchanged. | See the exact ACK/callback selector in the command block below, including `TestNoMessageDoesNotCountAsCompletedBarrier`. | Fixture: record ACK-before-acquisition and reservation/quarantine behavior; do not add server or exactly-once claims. |
+| ACK, callback loss and acquisition order | SDK commit, listener source, adapter call order, root protocol fixtures and the recorded G01/G02 module tree identities are unchanged. Reuse of the Oct 3 review also requires the relevant SDK/sum, toolchain, authorization, fixture and test selection to remain unchanged. | See the exact ACK/callback selector in the command block below, including `TestNoMessageDoesNotCountAsCompletedBarrier`. | Fixture: record ACK-before-acquisition and reservation/quarantine behavior; do not add server or exactly-once claims. |
 | Baseline listener/admission | listener, strict source reader, journal/lease, caps and selectors are unchanged. | See the exact baseline and admission selectors in the command block below, including the worker admission integrity suite and the tagged `TestUnsupportedAccountLookupRefusesBeforeJournal` selector. | Fixture: record actual test result and pinned SDK; no live result or production worker claim. |
 | Runner parser/JIT causality and transport | Runner version/source commit, parser/materialization behavior, JIT transport, causal fixture and response-loss controls are unchanged. | A Runner pin or source-commit change first requires the immutable source-audit gate above; then rerun the root-package and livecanary selectors in the command blocks below, with tagged worker input/refusal and worker transport selectors as applicable. Local Go fixture results cannot substitute for the source audit. | Source + fixture: record parser/materialization comparison, one-request controls and quarantine; never print or retain JIT. |
 | Controller update policy | pinned SDK update-setting request, confirmation and drift guards are unchanged. | See the exact `./livecanary` update-policy selectors in the worker/runtime command block below: `TestCreateRequestsDisabledRunnerUpdate`, `TestUnconfirmedUpdateSettingQuarantinesCreate`, `TestUpdateSettingDriftStopsBeforeSessionOrJIT` and `TestUpdateSettingDriftDoesNotBlockSafeEmptyCleanup`. | Source + fixture: record request/confirmation and pre-session/JIT refusal; no live service-setting result. |
-| Reconciliation, inventory/identity/quarantine | statistics readers, paged inventory normalization, generation fences, ownership checks and journal/authority schema are unchanged. | Retain the prior reconciliation selector and add the exact focused `TestObservation*` and `TestRoster*` families, inventory/quarantine and journal/authority selectors in the command block below, including controller-side `TestAmbiguousCreateNeverRetriesAfterRestart`, the four `TestInventory*` cases, `TestDemandStatisticsAllowControlledProbeButNeverCleanup`, `TestCleanupOnlyForNeverIssuedWorkerWithExactReceipt`, `TestWorkerPreparationReturnsCanonicalSnapshotAndRejectsPriorEffect`, and the named journal/authority contracts in both `./livecanary` and `./liveworker`. | Fixture: record normalized facts and retained uncertainty; no live equality/absence claim. |
+| Reconciliation, inventory/identity/quarantine | Statistics readers, paged inventory normalization, generation fences, ownership checks, journal/authority schema and the recorded G01/G02 module tree identities are unchanged. Reuse of the Oct 3 review is limited to its offline reconciliation evidence and requires the relevant toolchain, authorization, fixture and test selection to remain unchanged. | Retain the prior reconciliation selector and add the exact focused `TestObservation*` and `TestRoster*` families, inventory/quarantine and journal/authority selectors in the command block below, including controller-side `TestAmbiguousCreateNeverRetriesAfterRestart`, the four `TestInventory*` cases, `TestDemandStatisticsAllowControlledProbeButNeverCleanup`, `TestCleanupOnlyForNeverIssuedWorkerWithExactReceipt`, `TestWorkerPreparationReturnsCanonicalSnapshotAndRejectsPriorEffect`, and the named journal/authority contracts in both `./livecanary` and `./liveworker`. | Fixture: record normalized facts and retained uncertainty; no live equality/absence claim. |
 | Secret and error handling | SDK error sentinels, HTTP body/debug redaction and shared response-budget controls are unchanged. | See the exact root, livecanary and liveworker selectors in the secret/error command block below, including decoded-body truncation, gzip-budget, uncertain-start, bounded Unix-response/redirect, journal-create-failure and raw-runtime-status tests. | Fixture: record normalized sentinel/error and body-budget behavior; no secret-bearing output or live result is claimed. |
 | Tagged controller/JIT input and credential transport boundary | `g01_live` source, input reader, credential attestation and transport refusal tests are unchanged. | Run the tagged command below plus the livecanary credential/transport selector below, including `TestAuthoritySplitAndPolicyRejection`, `TestSDKTransportOwnership`, `TestCredentialAttestationMismatchAndExpiredTokenRejected` and `TestTransportRejectsPlaintextOffHostAndProxyBeforeNetwork`. | Fixture: record no-secret/no-echo/refusal result; no credential or live phase. |
 | Idle drain and withdrawal | Only reuse the historical PR #72 review head `f5560ba950f77343e57034cc1cf85dc67f5ac922` and its unchanged fixture/source. | On a checkout of that historical PR #72 review head, run the guarded `drain-pr72` and `drain-pr72-race` commands below; both carry the same exact selector/package digest, with `default+norace+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8` and `default+race+cgo1+cgo-cc-clang-apple21.0.0+goexperiment-none+darwin-arm64-goarm64-v8.0+goroot-default+gofips140-off+go1.26.8` metadata respectively. | Fixture/source: record physical-write markers as client facts and inconclusive server receipt; never reuse as live assignment/drain evidence. |
