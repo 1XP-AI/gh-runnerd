@@ -16929,6 +16929,303 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                 "Python heredoc stores or passes an unowned filesystem mutator "
                 f"{python_dotted_name(node)!r} on line {node.lineno}"
             )
+    def unresolved_reflective_call(node):
+        return (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in getattr_aliases
+            and len(node.args) >= 2
+            and not reflective_member_name_is_closed(node.args[1])
+        )
+
+    def unresolved_reflective_result(node):
+        return unresolved_reflective_call(node) and not (
+            isinstance(parents.get(node), ast.Call)
+            and parents[node].func is node
+        )
+
+    assignment_records = []
+    for candidate in ast.walk(tree):
+        if isinstance(candidate, ast.Assign):
+            targets, value = candidate.targets, candidate.value
+        elif (
+            isinstance(candidate, (ast.AnnAssign, ast.NamedExpr))
+            and candidate.value is not None
+        ):
+            targets, value = [candidate.target], candidate.value
+        elif isinstance(candidate, (ast.For, ast.AsyncFor)):
+            targets, value = [candidate.target], candidate.iter
+        elif isinstance(candidate, ast.comprehension):
+            targets, value = [candidate.target], candidate.iter
+        else:
+            continue
+        binding_scope = python_enclosing_scope(candidate, parents)
+        for target in targets:
+            assignment_records.extend(
+                (binding_scope, stored_name.id, value)
+                for stored_name in ast.walk(target)
+                if isinstance(stored_name, ast.Name)
+                and isinstance(stored_name.ctx, ast.Store)
+            )
+            if isinstance(target, ast.Subscript) and isinstance(
+                target.value, ast.Name
+            ):
+                assignment_records.append(
+                    (binding_scope, target.value.id, value)
+                )
+
+    def reflective_member_name_is_closed(node, seen=None):
+        if seen is None:
+            seen = set()
+        if isinstance(node, ast.Constant):
+            return isinstance(node.value, str)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            return reflective_member_name_is_closed(
+                node.left, set(seen)
+            ) and reflective_member_name_is_closed(node.right, set(seen))
+        if not isinstance(node, ast.Name) or node.id in seen:
+            return False
+        seen.add(node.id)
+        for scope in python_lexical_scope_chain(
+            python_enclosing_scope(node, parents), parents
+        ):
+            if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                arguments = scope.args
+                parameters = (
+                    list(arguments.posonlyargs)
+                    + list(arguments.args)
+                    + list(arguments.kwonlyargs)
+                )
+                if any(parameter.arg == node.id for parameter in parameters):
+                    return False
+                if any(
+                    node.id in declaration.names
+                    for declaration in ast.walk(scope)
+                    if isinstance(declaration, (ast.Global, ast.Nonlocal))
+                    and python_enclosing_scope(declaration, parents) is scope
+                ):
+                    return False
+            values = [
+                value
+                for binding_scope, name, value in assignment_records
+                if binding_scope is scope and name == node.id
+            ]
+            if values:
+                return all(
+                    reflective_member_name_is_closed(value, set(seen))
+                    for value in values
+                ) and bool(python_static_string_values(node, tree))
+            for candidate in ast.walk(scope):
+                if isinstance(candidate, (ast.Import, ast.ImportFrom)) and (
+                    python_enclosing_scope(candidate, parents) is scope
+                ):
+                    imported_names = (
+                        [
+                            alias.asname or alias.name.split(".")[0]
+                            for alias in candidate.names
+                        ]
+                        if isinstance(candidate, ast.Import)
+                        else [alias.asname or alias.name for alias in candidate.names]
+                    )
+                    if node.id in imported_names:
+                        return False
+                if isinstance(candidate, ast.ExceptHandler) and (
+                    candidate.name == node.id
+                    and python_enclosing_scope(candidate, parents) is scope
+                ):
+                    return False
+                if isinstance(
+                    candidate, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+                ) and candidate.name == node.id and (
+                    python_enclosing_scope(parents.get(candidate), parents) is scope
+                ):
+                    return False
+        return False
+
+    reflective_bindings = set()
+
+    def reflective_name_is_bound(node):
+        if not isinstance(node, ast.Name) or not isinstance(node.ctx, ast.Load):
+            return False
+        use_scope = python_enclosing_scope(node, parents)
+        return any(
+            (scope, node.id) in reflective_bindings
+            for scope in python_lexical_scope_chain(use_scope, parents)
+        )
+
+    def reflective_value_flows(node):
+        if unresolved_reflective_result(node):
+            return True
+        if isinstance(node, ast.Name):
+            return reflective_name_is_bound(node)
+        if isinstance(node, ast.NamedExpr):
+            return reflective_value_flows(node.value)
+        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+            return any(reflective_value_flows(item) for item in node.elts)
+        if isinstance(node, ast.Dict):
+            return any(
+                reflective_value_flows(item)
+                for item in [*node.keys, *node.values]
+                if item is not None
+            )
+        if isinstance(node, ast.Subscript):
+            return reflective_value_flows(node.value)
+        if isinstance(node, ast.IfExp):
+            return reflective_value_flows(node.body) or reflective_value_flows(node.orelse)
+        if isinstance(node, ast.BoolOp):
+            return any(reflective_value_flows(item) for item in node.values)
+        if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+            return reflective_value_flows(node.elt) or any(
+                reflective_value_flows(generator.iter)
+                for generator in node.generators
+            )
+        if isinstance(node, ast.DictComp):
+            return (
+                reflective_value_flows(node.key)
+                or reflective_value_flows(node.value)
+                or any(
+                    reflective_value_flows(generator.iter)
+                    for generator in node.generators
+                )
+            )
+        if isinstance(node, ast.Attribute) and node.attr == "__call__":
+            return reflective_value_flows(node.value)
+        return False
+
+    for _ in range(len(assignment_records) + 1):
+        changed = False
+        for scope, name, value in assignment_records:
+            binding = (scope, name)
+            if binding not in reflective_bindings and reflective_value_flows(value):
+                reflective_bindings.add(binding)
+                changed = True
+        holder_methods = {
+            "add", "append", "extend", "insert", "setdefault", "update"
+        }
+        for candidate in ast.walk(tree):
+            if not (
+                isinstance(candidate, ast.Call)
+                and isinstance(candidate.func, ast.Attribute)
+                and candidate.func.attr in holder_methods
+                and isinstance(candidate.func.value, ast.Name)
+                and any(reflective_value_flows(argument) for argument in candidate.args)
+            ):
+                continue
+            binding = (
+                python_enclosing_scope(candidate, parents),
+                candidate.func.value.id,
+            )
+            if binding not in reflective_bindings:
+                reflective_bindings.add(binding)
+                changed = True
+        if not changed:
+            break
+
+    def reflective_callable_target(node):
+        if isinstance(node, ast.Call):
+            return unresolved_reflective_result(node)
+        if isinstance(node, ast.Name):
+            return reflective_name_is_bound(node)
+        if isinstance(node, ast.Subscript):
+            return reflective_callable_target(node.value) or reflective_value_flows(
+                node.value
+            )
+        if isinstance(node, ast.Attribute) and node.attr == "__call__":
+            return reflective_callable_target(node.value)
+        return False
+
+    for candidate in ast.walk(tree):
+        if not isinstance(candidate, ast.Call):
+            continue
+        if unresolved_reflective_call(candidate.func) or reflective_callable_target(
+            candidate.func
+        ):
+            return "Python heredoc calls an unresolved reflective mutator result"
+
+    def callable_parameter_names(function):
+        parameters = {
+            parameter.arg
+            for parameter in (
+                list(function.args.posonlyargs)
+                + list(function.args.args)
+                + list(function.args.kwonlyargs)
+            )
+        }
+        called = set()
+        for candidate in ast.walk(function):
+            if not (
+                isinstance(candidate, ast.Name)
+                and candidate.id in parameters
+                and isinstance(candidate.ctx, ast.Load)
+                and python_enclosing_scope(candidate, parents) is function
+            ):
+                continue
+            parent = parents.get(candidate)
+            if isinstance(parent, ast.Call) and parent.func is candidate:
+                called.add(candidate.id)
+            elif (
+                isinstance(parent, ast.Attribute)
+                and parent.attr == "__call__"
+                and isinstance(parents.get(parent), ast.Call)
+                and parents[parent].func is parent
+            ):
+                called.add(candidate.id)
+        return called
+
+    for candidate in ast.walk(tree):
+        if not isinstance(candidate, ast.Call):
+            continue
+        if isinstance(candidate.func, ast.Name):
+            functions = python_local_function_candidates(
+                candidate.func.id, candidate, tree, parents
+            )
+        else:
+            functions = []
+        call_scope = python_enclosing_scope(candidate, parents)
+        for function in functions:
+            called_parameters = callable_parameter_names(function)
+            if not called_parameters:
+                continue
+            positional = list(function.args.posonlyargs) + list(function.args.args)
+            for index, argument in enumerate(candidate.args):
+                if isinstance(argument, ast.Starred):
+                    if reflective_value_flows(argument.value) and any(
+                        parameter.arg in called_parameters
+                        for parameter in positional[index:]
+                    ):
+                        return "Python heredoc passes a reflective result to a local callback"
+                elif (
+                    index < len(positional)
+                    and positional[index].arg in called_parameters
+                    and reflective_value_flows(argument)
+                ):
+                    return "Python heredoc passes a reflective result to a local callback"
+            named_parameters = {
+                parameter.arg
+                for parameter in positional + list(function.args.kwonlyargs)
+            }
+            for keyword in candidate.keywords:
+                if (
+                    keyword.arg in called_parameters
+                    and reflective_value_flows(keyword.value)
+                ):
+                    return "Python heredoc passes a reflective result to a local callback"
+                if keyword.arg is None:
+                    if isinstance(keyword.value, ast.Dict):
+                        if any(
+                            isinstance(key, ast.Constant)
+                            and key.value in called_parameters
+                            and reflective_value_flows(value)
+                            for key, value in zip(
+                                keyword.value.keys, keyword.value.values
+                            )
+                        ):
+                            return "Python heredoc passes a reflective result to a local callback"
+                    elif reflective_value_flows(keyword.value) and (
+                        called_parameters & named_parameters
+                    ):
+                        return "Python heredoc passes a reflective result to a local callback"
+
     for node in ast.walk(tree):
         assignments = []
         if isinstance(node, ast.Assign):
@@ -38055,3 +38352,30 @@ Ran 4 tests in 6.526s — OK
 ```
 
 The Path selector retains simple direct getter aliases over temporary-owned paths, direct mutator source/destination checks, local set-copy and the existing helper/holder refusals; string replacement, reviewed scanner namespace and canonical Git capture positives also remain accepted. All inputs were inert source strings inspected as AST data; no specimen, filesystem method, hook, verifier recipe or compiler recipe was executed. No full suite, packet selector, 119-helper sweep, slow compiler self-audit, Go/hosted CI or live operation was run; final packet integration and exact-head independent review remain with the coordinator.
+
+#### Secondary reflective-result transfers from immutable `cc4df01f`
+
+The coordinator's focused review of exact parent `cc4df01f377c9d6503356acf1bf41f70fb130728` found the same unresolved reflective-mutator result could escape a direct local assignment through a second alias, a list/dictionary/tuple, container `append` or subscript storage, a loop or comprehension, `.__call__`, or a local callback. Two additional accepted cases showed that a module-level literal such as `attribute = "read_text"` must not override a same-named function parameter supplied as `"move_into"`, and that a local `name = attribute` binding must not borrow a module-level literal. A pinned AST-only probe against that parent reported those cases accepted while its direct computed-call, unpack, immediate-alias and helper-return controls were refused; the canonical Git stream collector, benign string replacement and temporary-owned Path controls remained accepted.
+
+The focused path-mutator method first failed three refusal assertions in 0.285s for the direct dynamic getter, aliased getter and default/keyword receiver cases. After adding a second alias, holder, `.__call__` and callback variants, the same method failed four assertions in 0.329s. The coordinator's pinned parent probe then confirmed acceptance of the broader container/loop/comprehension and member-name shadow cases; after those were added, the focused method failed seven more refusal assertions in 0.355s for append/subscript storage, loop/comprehension extraction, direct reflective `.__call__`, and the two shadowed-name cases. The exact command for that expanded RED was:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_new_path_mutators_require_owned_sources_and_destinations
+Ran 1 test in 0.355s — FAILED (failures=7)
+```
+
+The scanner now treats a reflected member name as closed only when a literal or same-scope literal assignment chain proves it; parameters, imports, declaration overrides and unsupported bindings remain unresolved even when a same-named outer literal exists. It propagates unresolved callable provenance through name aliases, container literals and stores, common container insertions, loop/comprehension values, `.__call__` and local callback arguments, then refuses a call through that value. It does not refuse every stored `getattr` result: the canonical collector's stored process-stream handle is retained through its existing read/register/close shape proof, not by variable name or source marker.
+
+After the correction, the path-mutator method passed in 0.348s. The changed-boundary and compatibility selectors then passed together in 6.812s:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_new_path_mutators_require_owned_sources_and_destinations \
+  Issue79RegressionTests.test_string_replace_result_is_not_an_extracted_path_mutator \
+  Issue79RegressionTests.test_reviewed_scanner_namespace_remains_accepted_with_cwd_guards \
+  Issue79RegressionTests.test_git_query_runtime_dependencies_cannot_be_patched_around_capture
+Ran 4 tests in 6.812s — OK
+```
+
+The focused mutator selector retains direct and wrapped unowned Path source/destination refusals, container and callback refusal cases, and accepted temporary-owned direct/reflected mutations, local set-copy and a locally constant reflected method name. The separate selectors retain the benign `str.replace` result, canonical scanner namespace and canonical bounded Git stream control. All new examples remained inert AST strings; no specimen, filesystem method, verifier recipe, environment value, Git action or live operation was executed. No full suite, packet selector, 119-helper sweep, compiler self-audit, Go/hosted CI or live operation was run; final packet integration remains with the coordinator, and the exact parent results are not evidence for this candidate.
