@@ -355,3 +355,136 @@ On 2026-10-13, all four relative Markdown links and their heading fragments reso
 `git diff --check` emitted no diagnostics; and the added diff scan for
 credential/token/private-key and personal-machine-path patterns found no
 matches. No Go tests or application suite were run.
+
+## Go 1.26.9 remediation and source re-verification
+
+This addendum follows the Go 1.26.8 source-mode findings recorded above. The
+authorized local remediation selects Go 1.26.9 across the active shared
+toolchain pins and updates G01/G02 executable BuildInfo admission to require
+the exact version. SDK `v0.4.0` and runner `v2.337.0`
+remain unchanged; earlier release, advisory, and Go 1.26.8 scan records are
+historical evidence and remain intact.
+
+### Toolchain and scan provenance
+
+Go `1.26.9` was resolved as the native Darwin/ARM64
+`golang.org/toolchain@v0.0.1-go1.26.9.darwin-arm64` module through
+the public Go module proxy, with checksum verification through sum.golang.org:
+module `h1:u1IV5D8HPeURJjWAqzcC8QRXDJqvXlh7FpsA4lGIg1c=`, go.mod
+`h1:8wlg68NqwW7eMnI1aABk/C2pDYXj8mrMY4TyRfiLeS0=`. The official
+Go `1.26.9` source tag resolves to commit
+[`2ae494ef9fb90e0da0073c31800ba38870249994`](https://github.com/golang/go/commit/2ae494ef9fb90e0da0073c31800ba38870249994).
+The trusted `govulncheck@v1.7.0` module is
+`h1:4MQBuhmXbz2uepNJrf3v+aaZLGDqw1JluwYboegA1qg=`; its pinned
+source documentation is
+[`cmd/govulncheck/doc.go`](https://github.com/golang/vuln/blob/617f44b718537dccdea1915395650e0529e3b72e/cmd/govulncheck/doc.go).
+Before the batch, `go version` reported
+`go1.26.9 darwin/arm64` and `govulncheck -version`
+reported scanner `v1.7.0`, database URL
+`https://vuln.go.dev`, and database-modified metadata
+`2026-10-08T22:31:09Z`. The native cgo compiler was Apple Clang
+`21.0.0`.
+
+The seven-profile source tree was staged at tree
+`e37ee1834af7e6ba2543eed373396eb9da657b3a`; the G01 module
+subtree was `da98e542ea2a8066a3af664a4b5d3f7bdf655ebb` and the G02
+module subtree was `4526e7951921658b5b0fc13979e488667cc0d98b`.
+These identify the scanned local source before this evidence text was added;
+no untracked Go files were present.
+
+Each profile ran sequentially from `experiments/g01-scaleset`
+with `govulncheck -mode=source -format=text
+-db=https://vuln.go.dev -test [-tags=<profile>] ./...`, with a 900-second
+per-profile deadline. The child
+environment was built from an allowlist: exact Go `1.26.9` first
+on `PATH`; `GOTOOLCHAIN=go1.26.9`,
+`GOENV=off`, `GOWORK=off`,
+`GOFLAGS=-mod=readonly -p=2`, `GOAUTH=off`,
+`GOEXPERIMENT=none`, `GOFIPS140=off`,
+`GOMAXPROCS=2`; Darwin/ARM64 with `GOARM64=v8.0`;
+and `GOPROXY=https://proxy.golang.org` only,
+`GOSUMDB=sum.golang.org`, and empty private module/no-proxy
+scopes. The existing Go module/build caches were explicitly selected;
+`GOCACHEPROG` was unset, `GOROOT` was omitted for
+default toolchain derivation, and no `HOME`, Git/GitHub, SSH,
+proxy credentials, overlays, or ambient Go settings were passed. For cgo
+profiles, `CC`/`CXX` selected the recorded Apple
+Clang compiler. The scan date was 2026-10-13 UTC.
+
+| Profile | CGO | Build tags | Elapsed | Text result |
+|---|---:|---|---:|---|
+| A | 1 | default | 1.6 s | exit 0; no finding IDs |
+| B | 1 | `g01_live,g01_worker` | 1.3 s | exit 0; no finding IDs |
+| C | 1 | `g01_pair_fixture` | 1.3 s | exit 0; no finding IDs |
+| D | 1 | `g01_live,g01_worker,g01_pair_fixture` | 1.3 s | exit 0; no finding IDs |
+| E | 1 | `g01_pair_fixture,g01_pair_real_cadence` | 1.3 s | exit 0; no finding IDs |
+| F | 0 | default | 1.5 s | exit 0; no finding IDs |
+| G | 1 | `osusergo` | 1.3 s | exit 0; no finding IDs |
+
+All seven invocations completed without scanner, package-loading, or database
+errors; text output contained no vulnerability IDs. The scanner queried the
+mutable public database without an immutable snapshot identifier. A separate
+GET to the database index after the batch returned body field
+`modified=2026-10-08T22:31:09Z`, ETag
+`8875c8c67555e9c875a431c63837b83d`, Last-Modified
+`2026-10-13T04:17:36Z`, and HTTP Date
+`2026-10-13T06:33:35Z`; its
+`Cache-Control` was `public, max-age=3600`. These
+mutable index/response times are not per-invocation scan timestamps or a
+database snapshot bound to every profile.
+
+The Go 1.26.8 findings and exit-3 results above remain historical. This
+Go 1.26.9 run found no known vulnerabilities in the seven stated source
+profiles; that is not a guarantee that the toolchain, dependencies, tests, or
+all runtime paths are vulnerability-free. `-test` loaded test
+source for analysis but did not execute tests or fixtures. The source analyzer
+may load or compile package export data; the scanner itself was installed with
+`go install`. No G01/G02 application or test binary was launched by
+the scan, and the scan batch ran no `go test` command.
+
+### Pin admission and focused verification
+
+Tests were added before implementation. Against the prior Go 1.26.8 state,
+`TestToolingCheckToolchainRequiresGo1269` failed because the
+checker still accepted 1.26.8 and rejected the required 1.26.9 fixture;
+G01 live and worker `TestBuildRevisionAdmissionRequiresGo1269`
+also failed their Go 1.26.9 admission cases, and G02
+`TestBrokerBuildMustMatchReviewedController` rejected the new
+reviewed-build metadata. After the pin and exact BuildInfo gates changed,
+the focused tests passed under Go 1.26.9. The tests accept only the exact
+`go1.26.9` build value and reject Go 1.26.8, Go 1.27.1, and an
+empty version while retaining the existing revision, SDK, tag, cgo, and
+platform checks.
+
+Focused verification under the controlled Go 1.26.9 environment:
+
+- `make toolchain`: exit 0; selected `go1.26.9`.
+- Root tooling subset
+  `go test -count=1 -run '^(TestToolingCheckToolchainRequiresGo1269|TestToolingPinsNewerSystemGo|TestToolingEstablishedModulesAreRequired|TestToolingOfflineModuleSelection|TestToolingDefaultG01PartitionsRun|TestToolingDefaultG02PartitionsRun|TestFastCheck.*)$' ./scripts`:
+  exit 0, 304.652 s; the subsequent exact toolchain-table rerun also passed
+  (0.809 s).
+- G01 admission tests
+  `go test -count=1 -tags=g01_live -run '^TestBuildRevisionAdmissionRequiresGo1269$' ./cmd/g01-live`
+  and the corresponding `g01_worker`/`./cmd/g01-worker`
+  command: both exit 0 (0.351 s and 0.298 s).
+- G02 focused build-admission tests
+  `go test -count=1 -run '^(TestBrokerBuildMustMatchReviewedController|TestBrokerBuildRejectsFixtureCapability|TestBrokerBuildUnsupportedNativeAdmissionRefuses|TestPairedFixtureBuildRequiresExactGo1269)$' .`:
+  exit 0 (0.334 s).
+- Final `go vet` checks for `./scripts`,
+  G01 `./cmd/g01-live` with `g01_live`, G01
+  `./cmd/g01-worker` with `g01_worker`, and G02
+  `.`: all exit 0.
+- `go mod tidy -diff` for the root, G01, G02, and R1 modules:
+  exit 0 with no module changes. No `go.sum` changed.
+  `gofmt -d` on changed Go files and `git diff --check`
+  emitted no differences or diagnostics.
+
+The focused Go tests exercise synthetic tooling and admission fixtures only;
+they do not run the full root, G01, G02, or R1 suites and do not execute
+production runner, live-canary, or real-cadence operations. No packet specimen,
+live service, runner, credential, Docker, or host operation was used. Existing
+G01/G02 source, authorization, safe-drain, tenant/archive/image, and live
+qualification gates remain open; no issue or Project state changed. SDK and
+runner pins remain `v0.4.0` and `v2.337.0`. No Go
+dependency or checksum pin changed. Rollback for this local remediation is the
+single coherent local documentation/code pin commit; no external state changed.

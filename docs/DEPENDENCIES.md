@@ -21,7 +21,7 @@ runtime graph contains only the local module; nested experiments remain separate
 
 ## Toolchain
 
-Go standard library: `go1.26.8`, BSD-3-Clause, the language/runtime baseline;
+Go standard library: `go1.26.9`, BSD-3-Clause, the language/runtime baseline;
 [official release history](https://go.dev/doc/devel/release).
 
 The selector matcher helper adapted from the Go standard library is documented
@@ -40,7 +40,7 @@ Both immutable manifests declare `runs.using: node24`; the upstream action
 documentation lists Actions Runner `v2.327.1` or later as the Node 24 minimum.
 The workflows stay on GitHub-hosted `ubuntu-24.04`. Setup Go v7's ESM migration
 does not change its inputs or behavior. The workflow keeps `go-version-file:
-go.mod`, the Go 1.26.8 declaration and `GOTOOLCHAIN=go1.26.8`; `cache: false`
+go.mod`, the Go 1.26.9 declaration and `GOTOOLCHAIN=go1.26.9`; `cache: false`
 keeps module caching disabled. Checkout keeps the exact triggering SHA for
 Public CI, the PR head SHA with `fetch-depth: 0`, and
 `persist-credentials: false`. The v7 unsafe fork checkout opt-in remains unset.

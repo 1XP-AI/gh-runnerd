@@ -53,9 +53,13 @@ digest; the checkpoint is source/metadata evidence only and authorizes no swap.
   target after host headroom is checked, 10-minute job deadline. Increase any
   limit only with new concrete authorization. No service-container workloads in
   this protocol canary.
-- [ ] Use SDK `v0.4.0`, Go `1.26.8` and runner `2.337.0`; verify runner bytes
+- [ ] Use SDK `v0.4.0`, Go `1.26.9` and runner `2.337.0`; verify runner bytes
   against [published digests](g01-contract.md#runner-and-jit-transport) and record
   exact runtime/image digest. Recheck support/security status before execution.
+  This supersedes the earlier Go `1.26.8` source profile. Go `1.26.8` commands
+  embedded in the recovery packet remain inert historical/specimen text and are
+  not current execution instructions; this checklist does not authorize a
+  canary or live runner operation.
 - [ ] Independent Luna max reviews the immutable live harness, authority
   checks, cleanup, fault barriers and sanitized telemetry. The offline fixture
   must not be pointed at GitHub by replacing its URL. The separate tagged driver

@@ -10,7 +10,7 @@ go vet ./...
 go run ./cmd/g02-synthetic
 ```
 
-The command generates a new RSA key, verifies two synthetic organization/installation bindings through a fake API, commits them once to an in-memory sink, and prints only a sanitized summary. It has no live mode. Tests make a local random-port HTTP request and use fake GitHub responses. No existing credentials are read, no App/installation/runner is created, and the synthetic demo saves no key. Driver input tests create only their own temporary synthetic PEM fixture. Go 1.26.8 is pinned; there are no third-party module dependencies.
+The command generates a new RSA key, verifies two synthetic organization/installation bindings through a fake API, commits them once to an in-memory sink, and prints only a sanitized summary. It has no live mode. Tests make a local random-port HTTP request and use fake GitHub responses. No existing credentials are read, no App/installation/runner is created, and the synthetic demo saves no key. Driver input tests create only their own temporary synthetic PEM fixture. Go 1.26.9 is pinned; there are no third-party module dependencies.
 
 The library contains:
 
