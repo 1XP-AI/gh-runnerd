@@ -17074,17 +17074,127 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                 value.id
             )
 
+    def scope_binds_name(scope, name):
+        if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            arguments = scope.args
+            parameters = (
+                list(arguments.posonlyargs)
+                + list(arguments.args)
+                + list(arguments.kwonlyargs)
+            )
+            if any(parameter.arg == name for parameter in parameters):
+                return True
+            if any(
+                name in declaration.names
+                for declaration in ast.walk(scope)
+                if isinstance(declaration, (ast.Global, ast.Nonlocal))
+                and python_enclosing_scope(declaration, parents) is scope
+            ):
+                return False
+        for candidate in ast.walk(scope):
+            candidate_scope = (
+                python_enclosing_scope(parents.get(candidate), parents)
+                if isinstance(
+                    candidate,
+                    (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef),
+                )
+                else python_enclosing_scope(candidate, parents)
+            )
+            if candidate_scope is not scope:
+                continue
+            if isinstance(candidate, ast.Name) and (
+                candidate.id == name and isinstance(candidate.ctx, ast.Store)
+            ):
+                return True
+            if isinstance(candidate, (ast.Import, ast.ImportFrom)):
+                imported_names = (
+                    [
+                        alias.asname or alias.name.split(".")[0]
+                        for alias in candidate.names
+                    ]
+                    if isinstance(candidate, ast.Import)
+                    else [alias.asname or alias.name for alias in candidate.names]
+                )
+                if name in imported_names:
+                    return True
+            if isinstance(candidate, ast.ExceptHandler) and candidate.name == name:
+                return True
+            if isinstance(
+                candidate, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+            ) and candidate.name == name and (
+                python_enclosing_scope(parents.get(candidate), parents) is scope
+            ):
+                return True
+        return False
+
+    def holder_binding_scope(name, scope):
+        lexical_scopes = python_lexical_scope_chain(scope, parents)
+        if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            declarations = {
+                declaration_type: set().union(*(
+                    set(declaration.names)
+                    for declaration in ast.walk(scope)
+                    if isinstance(declaration, declaration_type)
+                    and python_enclosing_scope(declaration, parents) is scope
+                ))
+                for declaration_type in (ast.Global, ast.Nonlocal)
+            }
+            if name in declarations[ast.Global]:
+                module = next(
+                    (
+                        candidate
+                        for candidate in lexical_scopes
+                        if isinstance(candidate, ast.Module)
+                    ),
+                    None,
+                )
+                return (
+                    module
+                    if module is not None and scope_binds_name(module, name)
+                    else None
+                )
+            if name in declarations[ast.Nonlocal]:
+                return next(
+                    (
+                        candidate
+                        for candidate in lexical_scopes[1:]
+                        if isinstance(
+                            candidate,
+                            (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
+                        )
+                        and scope_binds_name(candidate, name)
+                    ),
+                    None,
+                )
+        return next(
+            (
+                candidate
+                for candidate in lexical_scopes
+                if scope_binds_name(candidate, name)
+            ),
+            None,
+        )
+
     def holder_receivers_for_alias(name, scope, seen=None):
         if seen is None:
             seen = set()
-        binding = (scope, name)
+        binding_scope = holder_binding_scope(name, scope)
+        if binding_scope is None:
+            return set()
+        binding = (binding_scope, name)
         if binding in seen:
             return set()
         seen.add(binding)
-        receivers = set(holder_method_aliases.get(binding, ()))
+        receivers = set()
+        for receiver_name in holder_method_aliases.get(binding, ()):
+            receiver_scope = holder_binding_scope(receiver_name, binding_scope)
+            if receiver_scope is not None:
+                receivers.add((receiver_scope, receiver_name))
         for source_name in holder_method_name_aliases.get(binding, ()):
             receivers.update(
-                holder_receivers_for_alias(source_name, scope, set(seen))
+                holder_receivers_for_alias(
+                    source_name, binding_scope, set(seen)
+                )
             )
         return receivers
 
@@ -17217,6 +17327,41 @@ def python_filesystem_mutator_alias_violation(tree, parents):
             )
         return False
 
+    def transfer_capable_argument(node, scope):
+        if isinstance(node, ast.Name):
+            return bool(holder_receivers_for_alias(node.id, scope)) or (
+                known_collection_constructor(node)
+            )
+        if isinstance(node, ast.Attribute):
+            return node.attr in holder_methods
+        return False
+
+    for candidate in ast.walk(tree):
+        if not isinstance(candidate, ast.Call) or not isinstance(
+            candidate.func, ast.Name
+        ):
+            continue
+        scope = python_enclosing_scope(candidate, parents)
+        if not python_local_function_candidates(
+            candidate.func.id, candidate, tree, parents
+        ):
+            continue
+        arguments = [
+            *candidate.args,
+            *(keyword.value for keyword in candidate.keywords),
+        ]
+        if not any(reflective_value_flows(value) for value in arguments):
+            continue
+        if any(
+            transfer_capable_argument(value, scope)
+            for value in arguments
+            if not reflective_value_flows(value)
+        ):
+            return (
+                "Python heredoc forwards a reflective filesystem result with a "
+                f"holder or constructor to a local helper on line {candidate.lineno}"
+            )
+
     for _ in range(len(assignment_records) + 1):
         changed = False
         for scope, name, value in assignment_records:
@@ -17239,15 +17384,21 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                 and candidate.func.attr in holder_methods
                 and isinstance(candidate.func.value, ast.Name)
             ):
-                holder_names = {candidate.func.value.id}
+                receiver_scope = holder_binding_scope(
+                    candidate.func.value.id, scope
+                )
+                holder_bindings = (
+                    {(receiver_scope, candidate.func.value.id)}
+                    if receiver_scope is not None
+                    else set()
+                )
             elif isinstance(candidate.func, ast.Name):
-                holder_names = holder_receivers_for_alias(
+                holder_bindings = holder_receivers_for_alias(
                     candidate.func.id, scope
                 )
             else:
-                holder_names = set()
-            for holder_name in holder_names:
-                binding = (scope, holder_name)
+                holder_bindings = set()
+            for binding in holder_bindings:
                 if binding not in reflective_bindings:
                     reflective_bindings.add(binding)
                     changed = True
@@ -38681,3 +38832,30 @@ Ran 4 tests in 8.338s — OK
 ```
 
 This focused run retains the canonical bounded Git collector, reviewed scanner namespace, benign `str.replace`, temporary-owned Path operations and the existing unowned-path refusals. All added specimens remained inert AST strings; no specimen or packet recipe was compiled or executed. No full suite, packet selector, 119-helper sweep, compiler self-audit, Go/hosted CI or live operation was run; the coordinator owns packet integration. This delta covers only the reproduced constructor, insertion and nested-closure shapes. To roll back just this unit, revert its local two-file commit; earlier commits remain untouched.
+
+#### Higher-order holder and constructor transfers from immutable `95385fde`
+
+The coordinator's immutable-source AST probes against exact parent `95385fdeb96bbdfbcfe35d319f685bc15583cf3f` accepted five unresolved reflective-mutator transfers: a module-level holder method alias passed with the reflective result to a local inserter helper; a holder-method alias captured by a nested population function; reflective values forwarded beside a bound `append` method or the `list.append` descriptor to local helper parameters; and a reflective value returned inside a list built through a constructor parameter. The independent review reproduced the parameterized inserter, descriptor and constructor forms; the coordinator reproduced all five. These were inert `Path.move_into` examples whose final call used an unowned destination; no new public finding URL was supplied.
+
+The five examples were added to `test_new_path_mutators_require_owned_sources_and_destinations` before scanner edits. On untouched parent `95385fde`, the focused method failed exactly the five new refusal assertions in 0.491s:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_new_path_mutators_require_owned_sources_and_destinations
+Ran 1 test in 0.491s — FAILED (failures=5)
+```
+
+The correction resolves holder aliases to the lexical scope that actually binds the receiver, including captures and local shadowing, and conservatively refuses unresolved reflective values forwarded with a holder method or collection constructor to a local helper. Harmless higher-order constructor and insertion calls, including a shadowed local holder, remain positive controls. The change stays within the existing reflective-mutator boundary and does not add source, variable-name, helper-name or marker exceptions.
+
+After the correction, the path-mutator method passed in 0.483s. The final four requested boundary and compatibility selectors passed together in 10.118s:
+
+```text
+python3 -I -B scripts/evidence_packet/issue79_regression_test.py \
+  Issue79RegressionTests.test_new_path_mutators_require_owned_sources_and_destinations \
+  Issue79RegressionTests.test_string_replace_result_is_not_an_extracted_path_mutator \
+  Issue79RegressionTests.test_reviewed_scanner_namespace_remains_accepted_with_cwd_guards \
+  Issue79RegressionTests.test_git_query_runtime_dependencies_cannot_be_patched_around_capture
+Ran 4 tests in 10.118s — OK
+```
+
+These checks retain the existing unowned Path mutation refusals, temporary-owned mutation and local set-copy positives, benign `str.replace`, canonical reviewed scanner namespace, and stored Git stream collector. The new specimens were parsed only as inert source strings; no specimen, packet recipe, filesystem method, verifier, compiler or live operation was executed. No full suite, packet selector, 119-helper sweep, compiler self-audit, Go/hosted CI or live operation was run; the coordinator owns final packet integration. This evidence covers the five reproduced transfer shapes and adjacent controls only; unmodeled Python helper and container behavior is not claimed closed. Rollback is to revert this local two-file commit; earlier commits remain untouched.
