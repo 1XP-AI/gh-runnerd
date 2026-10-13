@@ -26,6 +26,13 @@ provisioning/rotation remain unresolved, as does the provider-side conditional
 delete gate. This template correction closes neither gate and authorizes no live
 execution.
 
+Release/source freshness (2026-10-13): see the
+[runner release checkpoint](g01-runner-release-checkpoint.md). Keep this plan's
+`v2.337.0` selection unless a later authorized revision identifies the version
+offered to the named organization/repository. Before any candidate change, verify
+the archive bytes against the published digest and record the exact runtime/image
+digest; the checkpoint is source/metadata evidence only and authorizes no swap.
+
 ## Required environment and authorization record
 
 - [ ] Maintainer identifies one disposable **private** repository and one
