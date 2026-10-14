@@ -16138,6 +16138,13 @@ def python_working_directory_change_violation(tree, parents):
 def python_unknown_os_call_violation(tree):
     """Fail closed for OS calls whose path/effect surface is not reviewed."""
     os_names = python_assigned_module_names(tree, "os")
+    from_import_aliases = {
+        alias.asname or alias.name: f"{node.module}.{alias.name}"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module in {"os", "shutil"}
+        for alias in node.names
+        if alias.name != "*"
+    }
     for node in ast.walk(tree):
         if (
             isinstance(node, ast.Attribute)
@@ -16172,10 +16179,27 @@ def python_unknown_os_call_violation(tree):
         if not isinstance(node, ast.Call):
             continue
         dotted = python_dotted_name(node.func)
+        resolved_from_import = (
+            dotted is not None
+            and "." not in dotted
+            and dotted in from_import_aliases
+        )
+        if resolved_from_import:
+            dotted = from_import_aliases[dotted]
         if not dotted or "." not in dotted:
             continue
         root, remainder = dotted.split(".", 1)
-        if root not in os_names:
+        if root == "shutil" and resolved_from_import:
+            if (
+                dotted == "shutil.which"
+                or dotted in python_filesystem_mutating_functions
+            ):
+                continue
+            return (
+                "Python heredoc calls an unreviewed shutil entry point "
+                f"{dotted!r} on line {node.lineno}"
+            )
+        if root not in os_names and not resolved_from_import:
             continue
         canonical = "os." + remainder
         if root != "os" and canonical in python_filesystem_mutating_functions:

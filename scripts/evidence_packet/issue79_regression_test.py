@@ -6751,6 +6751,17 @@ def synthetic_read(_fd, _size):
         ))
         self.assertIsNone(self.inspect('import os\nprint("reviewed")\n'))
 
+    def test_from_imported_os_and_shutil_calls_use_fail_closed_classification(self) -> None:
+        for body in (
+            'from os import removedirs\nremovedirs("/tmp/maintainer-owned/empty/leaf")\n',
+            'from os import renames\nrenames("/tmp/a", "/tmp/b")\n',
+            'from os import removedirs as wipe\nwipe("/tmp/maintainer-owned/empty/leaf")\n',
+            'from shutil import disk_usage\nprint(disk_usage("/"))\n',
+        ):
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+        self.assertIsNone(self.inspect('from shutil import which\nprint(which("git"))\n'))
+
     def test_awk_program_cannot_rewrite_reader_argv(self) -> None:
         self.assertIsNotNone(self.shell_violation(
             'awk \'BEGIN { ARGV[1]="maintainer.pem" } {print}\' docs/EXECUTION.md'
