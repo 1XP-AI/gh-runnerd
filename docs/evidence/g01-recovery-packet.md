@@ -16848,6 +16848,17 @@ def python_known_non_path_set_copy_receiver(node, tree, parents, active=None):
 
 def python_filesystem_mutator_alias_violation(tree, parents):
     """Reject extracted mutator methods unless their receiver is temp-owned."""
+    _collection_constructor_cache = {}
+    _reflective_flow_true_cache = set()
+    _enclosing_scope_cache = {}
+    def _cached_enclosing_scope(node, parents):
+        key = id(node)
+        try:
+            return _enclosing_scope_cache[key]
+        except KeyError:
+            scope = python_enclosing_scope(node, parents)
+            _enclosing_scope_cache[key] = scope
+            return scope
     shutil_names = python_assigned_module_names(tree, "shutil")
     getattr_aliases = {"getattr"}
     alias_edges = []
@@ -16993,7 +17004,7 @@ def python_filesystem_mutator_alias_violation(tree, parents):
             targets, value = [candidate.target], candidate.iter
         else:
             continue
-        binding_scope = python_enclosing_scope(candidate, parents)
+        binding_scope = _cached_enclosing_scope(candidate, parents)
         for target in targets:
             assignment_records.extend(
                 (binding_scope, stored_name.id, value)
@@ -17012,13 +17023,13 @@ def python_filesystem_mutator_alias_violation(tree, parents):
         "dict", "frozenset", "list", "set", "tuple"
     }
 
-    def known_collection_constructor(node, seen=None):
+    def _known_collection_constructor_uncached(node, seen=None):
         if seen is None:
             seen = set()
         if not isinstance(node, ast.Name):
             return False
         for scope in python_lexical_scope_chain(
-            python_enclosing_scope(node, parents), parents
+            _cached_enclosing_scope(node, parents), parents
         ):
             binding = (id(scope), node.id)
             if binding in seen:
@@ -17038,17 +17049,17 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                     node.id in declaration.names
                     for declaration in ast.walk(scope)
                     if isinstance(declaration, (ast.Global, ast.Nonlocal))
-                    and python_enclosing_scope(declaration, parents) is scope
+                    and _cached_enclosing_scope(declaration, parents) is scope
                 ):
                     return False
             for candidate in ast.walk(scope):
                 candidate_scope = (
-                    python_enclosing_scope(parents.get(candidate), parents)
+                    _cached_enclosing_scope(parents.get(candidate), parents)
                     if isinstance(
                         candidate,
                         (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef),
                     )
-                    else python_enclosing_scope(candidate, parents)
+                    else _cached_enclosing_scope(candidate, parents)
                 )
                 if candidate_scope is not scope:
                     continue
@@ -17068,7 +17079,7 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                 if isinstance(
                     candidate, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
                 ) and candidate.name == node.id and (
-                    python_enclosing_scope(parents.get(candidate), parents) is scope
+                    _cached_enclosing_scope(parents.get(candidate), parents) is scope
                 ):
                     return False
             values = [
@@ -17085,11 +17096,20 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                 isinstance(candidate, ast.Name)
                 and candidate.id == node.id
                 and isinstance(candidate.ctx, ast.Store)
-                and python_enclosing_scope(candidate, parents) is scope
+                and _cached_enclosing_scope(candidate, parents) is scope
                 for candidate in ast.walk(scope)
             ):
                 return False
         return node.id in collection_constructor_names
+
+    def known_collection_constructor(node, seen=None):
+        key = (id(node), frozenset(seen) if seen else frozenset())
+        try:
+            return _collection_constructor_cache[key]
+        except KeyError:
+            result = _known_collection_constructor_uncached(node, seen)
+            _collection_constructor_cache[key] = result
+            return result
 
     holder_methods = {
         "add", "append", "extend", "insert", "setdefault", "update"
@@ -17126,17 +17146,17 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                 name in declaration.names
                 for declaration in ast.walk(scope)
                 if isinstance(declaration, (ast.Global, ast.Nonlocal))
-                and python_enclosing_scope(declaration, parents) is scope
+                and _cached_enclosing_scope(declaration, parents) is scope
             ):
                 return False
         for candidate in ast.walk(scope):
             candidate_scope = (
-                python_enclosing_scope(parents.get(candidate), parents)
+                _cached_enclosing_scope(parents.get(candidate), parents)
                 if isinstance(
                     candidate,
                     (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef),
                 )
-                else python_enclosing_scope(candidate, parents)
+                else _cached_enclosing_scope(candidate, parents)
             )
             if candidate_scope is not scope:
                 continue
@@ -17160,7 +17180,7 @@ def python_filesystem_mutator_alias_violation(tree, parents):
             if isinstance(
                 candidate, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
             ) and candidate.name == name and (
-                python_enclosing_scope(parents.get(candidate), parents) is scope
+                _cached_enclosing_scope(parents.get(candidate), parents) is scope
             ):
                 return True
         return False
@@ -17173,7 +17193,7 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                     set(declaration.names)
                     for declaration in ast.walk(scope)
                     if isinstance(declaration, declaration_type)
-                    and python_enclosing_scope(declaration, parents) is scope
+                    and _cached_enclosing_scope(declaration, parents) is scope
                 ))
                 for declaration_type in (ast.Global, ast.Nonlocal)
             }
@@ -17249,7 +17269,7 @@ def python_filesystem_mutator_alias_violation(tree, parents):
             return False
         seen.add(node.id)
         for scope in python_lexical_scope_chain(
-            python_enclosing_scope(node, parents), parents
+            _cached_enclosing_scope(node, parents), parents
         ):
             if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
                 arguments = scope.args
@@ -17266,7 +17286,7 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                     node.id in declaration.names
                     for declaration in ast.walk(scope)
                     if isinstance(declaration, (ast.Global, ast.Nonlocal))
-                    and python_enclosing_scope(declaration, parents) is scope
+                    and _cached_enclosing_scope(declaration, parents) is scope
                 ):
                     return False
             values = [
@@ -17281,7 +17301,7 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                 ) and bool(python_static_string_values(node, tree))
             for candidate in ast.walk(scope):
                 if isinstance(candidate, (ast.Import, ast.ImportFrom)) and (
-                    python_enclosing_scope(candidate, parents) is scope
+                    _cached_enclosing_scope(candidate, parents) is scope
                 ):
                     imported_names = (
                         [
@@ -17295,13 +17315,13 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                         return False
                 if isinstance(candidate, ast.ExceptHandler) and (
                     candidate.name == node.id
-                    and python_enclosing_scope(candidate, parents) is scope
+                    and _cached_enclosing_scope(candidate, parents) is scope
                 ):
                     return False
                 if isinstance(
                     candidate, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
                 ) and candidate.name == node.id and (
-                    python_enclosing_scope(parents.get(candidate), parents) is scope
+                    _cached_enclosing_scope(parents.get(candidate), parents) is scope
                 ):
                     return False
         return False
@@ -17311,13 +17331,13 @@ def python_filesystem_mutator_alias_violation(tree, parents):
     def reflective_name_is_bound(node):
         if not isinstance(node, ast.Name) or not isinstance(node.ctx, ast.Load):
             return False
-        use_scope = python_enclosing_scope(node, parents)
+        use_scope = _cached_enclosing_scope(node, parents)
         return any(
             (scope, node.id) in reflective_bindings
             for scope in python_lexical_scope_chain(use_scope, parents)
         )
 
-    def reflective_value_flows(node):
+    def _reflective_value_flows_uncached(node):
         if unresolved_reflective_result(node):
             return True
         if isinstance(node, ast.Name):
@@ -17369,6 +17389,15 @@ def python_filesystem_mutator_alias_violation(tree, parents):
             )
         return False
 
+    def reflective_value_flows(node):
+        key = id(node)
+        if key in _reflective_flow_true_cache:
+            return True
+        result = _reflective_value_flows_uncached(node)
+        if result:
+            _reflective_flow_true_cache.add(key)
+        return result
+
     def transfer_capable_argument(node, scope):
         if isinstance(node, ast.Name):
             return bool(holder_receivers_for_alias(node.id, scope)) or (
@@ -17383,7 +17412,7 @@ def python_filesystem_mutator_alias_violation(tree, parents):
             candidate.func, ast.Name
         ):
             continue
-        scope = python_enclosing_scope(candidate, parents)
+        scope = _cached_enclosing_scope(candidate, parents)
         if not python_local_function_candidates(
             candidate.func.id, candidate, tree, parents
         ):
@@ -17420,7 +17449,7 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                 ]
             ):
                 continue
-            scope = python_enclosing_scope(candidate, parents)
+            scope = _cached_enclosing_scope(candidate, parents)
             if (
                 isinstance(candidate.func, ast.Attribute)
                 and candidate.func.attr in holder_methods
@@ -17482,7 +17511,7 @@ def python_filesystem_mutator_alias_violation(tree, parents):
         function_nodes = [
             candidate
             for candidate in ast.walk(function)
-            if python_enclosing_scope(candidate, parents) is function
+            if _cached_enclosing_scope(candidate, parents) is function
         ]
         for _ in range(len(function_nodes) + 1):
             changed = False
@@ -17500,7 +17529,7 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                     for source in ast.walk(value)
                     if isinstance(source, ast.Name)
                     and isinstance(source.ctx, ast.Load)
-                    and python_enclosing_scope(source, parents) is function
+                    and _cached_enclosing_scope(source, parents) is function
                 ))
                 if not origins:
                     continue
@@ -17554,17 +17583,17 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                     name in declaration.names
                     for declaration in ast.walk(scope)
                     if isinstance(declaration, ast.Global)
-                    and python_enclosing_scope(declaration, parents) is scope
+                    and _cached_enclosing_scope(declaration, parents) is scope
                 ):
                     return True
             for candidate in ast.walk(scope):
                 candidate_scope = (
-                    python_enclosing_scope(parents.get(candidate), parents)
+                    _cached_enclosing_scope(parents.get(candidate), parents)
                     if isinstance(
                         candidate,
                         (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef),
                     )
-                    else python_enclosing_scope(candidate, parents)
+                    else _cached_enclosing_scope(candidate, parents)
                 )
                 if candidate_scope is not scope:
                     continue
@@ -17589,7 +17618,7 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                 if isinstance(
                     candidate, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
                 ) and candidate.name == name and (
-                    python_enclosing_scope(parents.get(candidate), parents) is scope
+                    _cached_enclosing_scope(parents.get(candidate), parents) is scope
                 ):
                     return True
             return False
@@ -17600,7 +17629,7 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                 and isinstance(candidate.ctx, ast.Load)
             ):
                 continue
-            use_scope = python_enclosing_scope(candidate, parents)
+            use_scope = _cached_enclosing_scope(candidate, parents)
             if use_scope is function:
                 continue
             lexical_scopes = python_lexical_scope_chain(use_scope, parents)
@@ -17627,7 +17656,7 @@ def python_filesystem_mutator_alias_violation(tree, parents):
             )
         else:
             functions = []
-        call_scope = python_enclosing_scope(candidate, parents)
+        call_scope = _cached_enclosing_scope(candidate, parents)
         for function in functions:
             called_parameters = callable_parameter_names(function)
             if not called_parameters:
@@ -17777,7 +17806,7 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                     )
                 )
             ]
-            target_scope = python_enclosing_scope(node, parents)
+            target_scope = _cached_enclosing_scope(node, parents)
             reflective_result_is_called = any(
                 isinstance(candidate, ast.Name)
                 and candidate.id == target.id
@@ -17785,7 +17814,7 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                 and isinstance(parents.get(candidate), ast.Call)
                 and parents[candidate].func is candidate
                 and target_scope in python_lexical_scope_chain(
-                    python_enclosing_scope(candidate, parents), parents
+                    _cached_enclosing_scope(candidate, parents), parents
                 )
                 for candidate in ast.walk(tree)
             )
@@ -17875,7 +17904,7 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                     f"{method!r} into alias {target.id!r} on line {node.lineno}"
                 )
             if method in python_path_mutator_destination_keywords:
-                alias_scope = python_enclosing_scope(node, parents)
+                alias_scope = _cached_enclosing_scope(node, parents)
                 alias_calls = []
                 for candidate in ast.walk(tree):
                     if not (
@@ -17884,7 +17913,7 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                         and isinstance(candidate.ctx, ast.Load)
                     ):
                         continue
-                    candidate_scope = python_enclosing_scope(candidate, parents)
+                    candidate_scope = _cached_enclosing_scope(candidate, parents)
                     if candidate_scope is alias_scope:
                         parent = parents.get(candidate)
                         if not (
