@@ -6775,6 +6775,47 @@ def synthetic_read(_fd, _size):
         self.assertIsNone(self.inspect('def f(fn=len):\n    print(fn("reviewed"))\nf()\n'))
         self.assertIsNone(self.inspect('import os\ndef f(launch=os.system):\n    print("reviewed")\nf()\n'))
 
+    def test_python_heredoc_requires_quoted_delimiter(self) -> None:
+        for opener in (
+            "/opt/homebrew/bin/python3 -I - <<PY",
+            "/opt/homebrew/bin/python3 -I - <<-PY",
+        ):
+            with self.subTest(opener=opener):
+                segments = list(self.scanner["shell_token_segments"](opener))  # type: ignore[operator]
+                self.assertTrue(
+                    any(
+                        self.scanner["python_stdin_command"](segment)  # type: ignore[operator]
+                        for segment in segments
+                    )
+                )
+                self.assertFalse(
+                    any(
+                        self.scanner["reviewed_python_heredoc_segment"](opener, segment)  # type: ignore[operator]
+                        for segment in segments
+                    )
+                )
+        for opener in (
+            "/opt/homebrew/bin/python3 -I - <<'PY'",
+            '/opt/homebrew/bin/python3 -I - <<"PY"',
+            "/opt/homebrew/bin/python3 -I - <<-'PY'",
+        ):
+            with self.subTest(opener=opener):
+                segments = list(self.scanner["shell_token_segments"](opener))  # type: ignore[operator]
+                self.assertTrue(
+                    any(
+                        self.scanner["reviewed_python_heredoc_segment"](opener, segment)  # type: ignore[operator]
+                        for segment in segments
+                    )
+                )
+        quoted_fixture = "```sh\n/opt/homebrew/bin/python3 -I - <<'PY'\nprint(\"reviewed\")\nPY\n```\n"
+        bodies = list(self.scanner["python_heredoc_bodies"](quoted_fixture))  # type: ignore[operator]
+        self.assertEqual(1, len(bodies))
+        self.assertTrue(bodies[0][3].get("quoted"))
+        unquoted_fixture = "```sh\n/opt/homebrew/bin/python3 -I - <<PY\nprint(\"reviewed\")\nPY\n```\n"
+        bodies = list(self.scanner["python_heredoc_bodies"](unquoted_fixture))  # type: ignore[operator]
+        self.assertEqual(1, len(bodies))
+        self.assertFalse(bodies[0][3].get("quoted"))
+
     def test_awk_program_cannot_rewrite_reader_argv(self) -> None:
         self.assertIsNotNone(self.shell_violation(
             'awk \'BEGIN { ARGV[1]="maintainer.pem" } {print}\' docs/EXECUTION.md'
@@ -6918,6 +6959,11 @@ def synthetic_read(_fd, _size):
             if not invocation["isolated"]:
                 matches.append(
                     f"line {number}: executable Python heredoc must use -I before body inspection"
+                )
+                continue
+            if not invocation["quoted"]:
+                matches.append(
+                    f"line {number}: executable Python heredoc must quote its delimiter before body inspection"
                 )
                 continue
             if invocation["interpreter"] != "/opt/homebrew/bin/python3":

@@ -7689,6 +7689,7 @@ def heredoc_descriptors(stripped):
                 "delimiter": heredoc_match.group(2),
                 "interpreter": tokens[0],
                 "isolated": isolated,
+                "quoted": bool(heredoc_match.group(1)),
             }
         descriptors.append(
             {"delimiter": heredoc_match.group(2), "invocation": invocation}
@@ -12157,6 +12158,7 @@ def reviewed_python_heredoc_segment(command, tokens):
     return any(
         descriptor["invocation"] is not None
         and descriptor["invocation"]["isolated"]
+        and descriptor["invocation"]["quoted"]
         and descriptor["invocation"]["interpreter"] == normalized[0]
         for descriptor in heredoc_descriptors(command)
     )
@@ -22420,6 +22422,11 @@ for number, body, safe_marker, invocation in python_heredoc_bodies(source):
     if not invocation["isolated"]:
         matches.append(
             f"line {number}: executable Python heredoc must use -I before body inspection"
+        )
+        continue
+    if not invocation["quoted"]:
+        matches.append(
+            f"line {number}: executable Python heredoc must quote its delimiter before body inspection"
         )
         continue
     if invocation["interpreter"] != "/opt/homebrew/bin/python3":
