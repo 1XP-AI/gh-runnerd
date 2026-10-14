@@ -395,11 +395,11 @@ func TestBrokerChildBoundsAndReplacedBinaryRefuse(t *testing.T) {
 }
 func TestBrokerBuildMustMatchReviewedController(t *testing.T) {
 	sha := strings.Repeat("a", 40)
-	good := debug.BuildInfo{GoVersion: "go1.26.8", Path: "github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/cmd/g01-live", Deps: []*debug.Module{{Path: "github.com/actions/scaleset", Version: "v0.4.0"}}, Settings: []debug.BuildSetting{{Key: "vcs.revision", Value: sha}, {Key: "vcs.modified", Value: "false"}, {Key: "GOOS", Value: runtime.GOOS}, {Key: "GOARCH", Value: runtime.GOARCH}, {Key: "CGO_ENABLED", Value: "1"}, {Key: "-tags", Value: "g01_live"}}}
+	good := debug.BuildInfo{GoVersion: "go1.26.9", Path: "github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/cmd/g01-live", Deps: []*debug.Module{{Path: "github.com/actions/scaleset", Version: "v0.4.0"}}, Settings: []debug.BuildSetting{{Key: "vcs.revision", Value: sha}, {Key: "vcs.modified", Value: "false"}, {Key: "GOOS", Value: runtime.GOOS}, {Key: "GOARCH", Value: runtime.GOARCH}, {Key: "CGO_ENABLED", Value: "1"}, {Key: "-tags", Value: "g01_live"}}}
 	if !validBrokerBuild(&good, sha) {
 		t.Fatal("reviewed controller metadata rejected")
 	}
-	for _, kind := range []string{"revision", "dirty", "SDK", "program"} {
+	for _, kind := range []string{"revision", "dirty", "SDK", "program", "toolchain"} {
 		bad := good
 		bad.Settings = append([]debug.BuildSetting(nil), good.Settings...)
 		switch kind {
@@ -411,16 +411,25 @@ func TestBrokerBuildMustMatchReviewedController(t *testing.T) {
 			bad.Deps = []*debug.Module{{Path: "github.com/actions/scaleset", Version: "v0.4.1"}}
 		case "program":
 			bad.Path = "arbitrary/program"
+		case "toolchain":
+			bad.GoVersion = "go1.26.8"
 		}
 		if validBrokerBuild(&bad, sha) {
 			t.Errorf("accepted %s", kind)
+		}
+	}
+	for _, version := range []string{"go1.27.1", ""} {
+		bad := good
+		bad.GoVersion = version
+		if validBrokerBuild(&bad, sha) {
+			t.Errorf("accepted toolchain %q", version)
 		}
 	}
 }
 
 func TestBrokerBuildRejectsFixtureCapability(t *testing.T) {
 	sha := strings.Repeat("a", 40)
-	fixture := debug.BuildInfo{GoVersion: "go1.26.8", Path: "github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/cmd/g01-live", Deps: []*debug.Module{{Path: "github.com/actions/scaleset", Version: "v0.4.0"}}, Settings: []debug.BuildSetting{{Key: "vcs.revision", Value: sha}, {Key: "vcs.modified", Value: "false"}, {Key: "GOOS", Value: runtime.GOOS}, {Key: "GOARCH", Value: runtime.GOARCH}, {Key: "CGO_ENABLED", Value: "1"}, {Key: "-tags", Value: "g01_live,g01_pair_fixture"}}}
+	fixture := debug.BuildInfo{GoVersion: "go1.26.9", Path: "github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/cmd/g01-live", Deps: []*debug.Module{{Path: "github.com/actions/scaleset", Version: "v0.4.0"}}, Settings: []debug.BuildSetting{{Key: "vcs.revision", Value: sha}, {Key: "vcs.modified", Value: "false"}, {Key: "GOOS", Value: runtime.GOOS}, {Key: "GOARCH", Value: runtime.GOARCH}, {Key: "CGO_ENABLED", Value: "1"}, {Key: "-tags", Value: "g01_live,g01_pair_fixture"}}}
 	if validBrokerBuild(&fixture, sha) {
 		t.Fatal("fixture-enabled controller build accepted by production broker gate")
 	}
@@ -428,7 +437,7 @@ func TestBrokerBuildRejectsFixtureCapability(t *testing.T) {
 
 func TestBrokerBuildUnsupportedNativeAdmissionRefuses(t *testing.T) {
 	sha := strings.Repeat("a", 40)
-	base := debug.BuildInfo{GoVersion: "go1.26.8", Path: "github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/cmd/g01-live", Deps: []*debug.Module{{Path: "github.com/actions/scaleset", Version: "v0.4.0"}}, Settings: []debug.BuildSetting{{Key: "vcs.revision", Value: sha}, {Key: "vcs.modified", Value: "false"}, {Key: "GOOS", Value: runtime.GOOS}, {Key: "GOARCH", Value: runtime.GOARCH}, {Key: "CGO_ENABLED", Value: "1"}, {Key: "-tags", Value: "g01_live"}}}
+	base := debug.BuildInfo{GoVersion: "go1.26.9", Path: "github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/cmd/g01-live", Deps: []*debug.Module{{Path: "github.com/actions/scaleset", Version: "v0.4.0"}}, Settings: []debug.BuildSetting{{Key: "vcs.revision", Value: sha}, {Key: "vcs.modified", Value: "false"}, {Key: "GOOS", Value: runtime.GOOS}, {Key: "GOARCH", Value: runtime.GOARCH}, {Key: "CGO_ENABLED", Value: "1"}, {Key: "-tags", Value: "g01_live"}}}
 	for _, tc := range []struct{ key, value string }{{"CGO_ENABLED", "0"}, {"CGO_ENABLED", ""}, {"-tags", "g01_live,osusergo"}, {"-tags", "g01_live osusergo"}, {"GOOS", "other"}, {"GOARCH", "other"}} {
 		t.Run(tc.key+tc.value, func(t *testing.T) {
 			bad := base

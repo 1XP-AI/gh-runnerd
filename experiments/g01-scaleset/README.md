@@ -8,15 +8,15 @@ own test server. Public dependency/toolchain downloads are separate from tests.
 
 ```sh
 cd experiments/g01-scaleset
-GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s ./...
-GOTOOLCHAIN=go1.26.8 go vet ./...
+GOTOOLCHAIN=go1.26.9 go test -race -count=1 -timeout=45s ./...
+GOTOOLCHAIN=go1.26.9 go vet ./...
 ./compare-sdk.sh
 ```
 
 `compare-sdk.sh` copies the module to a disposable directory and runs the same
 suite against release `v0.4.0` and the immutable audited pseudo-version. It does
 not change this module's pin. With dependencies cached, the tests are offline.
-`GOTOOLCHAIN=go1.26.8` makes the verification toolchain exact; the module's Go
+`GOTOOLCHAIN=go1.26.9` makes the verification toolchain exact; the module's Go
 directive alone is a minimum and the toolchain directive alone is a suggestion.
 
 The red commit contains a compiling callback-only recovery baseline. The green

@@ -21,7 +21,7 @@ runtime graph contains only the local module; nested experiments remain separate
 
 ## Toolchain
 
-Go standard library: `go1.26.8`, BSD-3-Clause, the language/runtime baseline;
+Go standard library: `go1.26.9`, BSD-3-Clause, the language/runtime baseline;
 [official release history](https://go.dev/doc/devel/release).
 
 The selector matcher helper adapted from the Go standard library is documented
