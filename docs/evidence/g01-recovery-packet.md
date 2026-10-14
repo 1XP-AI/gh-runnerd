@@ -17265,6 +17265,16 @@ def python_filesystem_mutator_alias_violation(tree, parents):
             return reflective_member_name_is_closed(
                 node.left, set(seen)
             ) and reflective_member_name_is_closed(node.right, set(seen))
+        if isinstance(node, ast.Call):
+            if id(node) in seen:
+                return False
+            returned = python_local_call_return_values(node, tree, parents)
+            if not returned:
+                return False
+            return all(
+                reflective_member_name_is_closed(value, set(seen) | {id(node)})
+                for value in returned
+            )
         if not isinstance(node, ast.Name) or node.id in seen:
             return False
         seen.add(node.id)
@@ -17738,6 +17748,14 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                     ):
                         return "Python heredoc passes a reflective result to a local callback"
 
+    def _resolved_member_names(member_node):
+        names = python_static_string_values(member_node, tree)
+        if names:
+            return names
+        return python_static_string_values_from_local_calls(
+            member_node, tree, parents
+        )
+
     for node in ast.walk(tree):
         assignments = []
         if isinstance(node, ast.Assign):
@@ -17765,7 +17783,7 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                 and value.func.id in getattr_aliases
                 and len(value.args) >= 2
             ):
-                possible_names = python_static_string_values(value.args[1], tree)
+                possible_names = _resolved_member_names(value.args[1])
                 possible_methods = (
                     possible_names & python_filesystem_mutating_methods
                 )
@@ -17799,7 +17817,7 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                     and isinstance(candidate.func, ast.Name)
                     and candidate.func.id in getattr_aliases
                     and len(candidate.args) >= 2
-                    and not python_static_string_values(candidate.args[1], tree)
+                    and not _resolved_member_names(candidate.args[1])
                     and not (
                         isinstance(parents.get(candidate), ast.Call)
                         and parents[candidate].func is candidate
@@ -17854,8 +17872,8 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                         and candidate.func.id in getattr_aliases
                         and len(candidate.args) >= 2
                     ):
-                        possible_names = python_static_string_values(
-                            candidate.args[1], tree
+                        possible_names = _resolved_member_names(
+                            candidate.args[1]
                         )
                         possible_methods = (
                             possible_names & python_filesystem_mutating_methods
