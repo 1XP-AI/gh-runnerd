@@ -6762,6 +6762,19 @@ def synthetic_read(_fd, _size):
                 self.assertIsNotNone(self.inspect(body))
         self.assertIsNone(self.inspect('from shutil import which\nprint(which("git"))\n'))
 
+    def test_launchers_bound_through_callable_defaults_stay_classified(self) -> None:
+        for body in (
+            'import os\n(lambda launch=os.system: launch("rm -rf /tmp/maintainer-owned"))()\n',
+            'import os\ndef f(launch=os.system):\n    launch("rm -rf /tmp/maintainer-owned")\nf()\n',
+            'import subprocess\ndef f(run=subprocess.run):\n    run(["gh", "workflow", "run", "ci.yml"])\nf()\n',
+            'import os\ndef f(*, launch=os.system):\n    launch("rm -rf /tmp/maintainer-owned")\nf()\n',
+        ):
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+        self.assertIsNone(self.inspect('def f(launch=None):\n    print("reviewed")\nf()\n'))
+        self.assertIsNone(self.inspect('def f(fn=len):\n    print(fn("reviewed"))\nf()\n'))
+        self.assertIsNone(self.inspect('import os\ndef f(launch=os.system):\n    print("reviewed")\nf()\n'))
+
     def test_awk_program_cannot_rewrite_reader_argv(self) -> None:
         self.assertIsNotNone(self.shell_violation(
             'awk \'BEGIN { ARGV[1]="maintainer.pem" } {print}\' docs/EXECUTION.md'

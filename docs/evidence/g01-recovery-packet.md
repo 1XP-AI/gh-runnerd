@@ -12821,6 +12821,27 @@ def python_import_bindings(tree):
             break
     # A command-capable assignment that cannot be resolved remains mapped to
     # None and is rejected when called below.
+    for node in ast.walk(tree):
+        if not isinstance(
+            node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+        ):
+            continue
+        positional = list(node.args.posonlyargs) + list(node.args.args)
+        defaults = list(node.args.defaults)
+        pairs = (
+            list(zip(positional[-len(defaults):], defaults)) if defaults else []
+        )
+        pairs.extend(
+            (parameter, default)
+            for parameter, default in zip(
+                node.args.kwonlyargs, node.args.kw_defaults
+            )
+            if default is not None
+        )
+        for parameter, default in pairs:
+            resolved = resolve_binding(default)
+            if resolved in python_command_functions:
+                functions[parameter.arg] = resolved
     return modules, functions, unresolved
 
 
