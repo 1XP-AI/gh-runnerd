@@ -16246,15 +16246,15 @@ def python_unknown_os_call_violation(tree):
             from_import_parents,
         )
         for depth, scope in enumerate(chain):
-            matches = sorted(
+            ordered_matches = sorted(
                 (position, dotted)
                 for bound, dotted, scope_node, position in from_import_bindings
                 if bound == name
                 and scope_node is scope
                 and (depth > 0 or position < call_position)
             )
-            if matches:
-                return [dotted for _position, dotted in matches]
+            if ordered_matches:
+                return [dotted for _position, dotted in ordered_matches]
         return []
 
     def from_import_call_violation(dotted, resolved_from_import, call):
@@ -21781,33 +21781,33 @@ def python_sensitive_read_violation(tree, parents):
                         return True
             return False
         if isinstance(func, ast.Subscript):
-            containers = []
+            option_containers = []
             target = func.value
             if isinstance(target, (ast.List, ast.Tuple)):
-                containers.append(target)
+                option_containers.append(target)
             elif isinstance(target, ast.Name):
                 chain = python_lexical_scope_chain(
                     python_enclosing_scope(target, parents), parents
                 )
                 for scope in chain:
-                    containers.extend(
+                    option_containers.extend(
                         binding
                         for binding_scope, binding, _keys in error_operand_bindings.get(
                             target.id, ()
                         )
                         if binding_scope is scope
                     )
-                    containers.extend(
+                    option_containers.extend(
                         source
                         for source_scope, source in assignments_by_name.get(
                             target.id, ()
                         )
                         if source_scope is scope
                     )
-            for container in containers:
-                if not isinstance(container, (ast.List, ast.Tuple)):
+            for option_container in option_containers:
+                if not isinstance(option_container, (ast.List, ast.Tuple)):
                     continue
-                elements = list(container.elts)
+                elements = list(option_container.elts)
                 index = func.slice
                 if (
                     isinstance(index, ast.Constant)
