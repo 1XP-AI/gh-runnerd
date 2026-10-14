@@ -6799,6 +6799,36 @@ def synthetic_read(_fd, _size):
         self.assertIsNone(self.inspect('def f(fn=len):\n    print(fn("reviewed"))\nf()\n'))
         self.assertIsNone(self.inspect('import os\ndef f(launch=os.system):\n    print("reviewed")\nf()\n'))
 
+    def test_launchers_nested_in_default_expressions_stay_classified(self) -> None:
+        for body in (
+            'import os\nflag = True\ndef f(launch=os.system if flag else len):\n'
+            '    launch("rm -rf /tmp/maintainer-owned")\nf()\n',
+            'import os\ndef f(launch=(os.system, len)[0]):\n'
+            '    launch("rm -rf /tmp/maintainer-owned")\nf()\n',
+            'import os\ndef f(launch={"a": os.system}["a"]):\n'
+            '    launch("rm -rf /tmp/maintainer-owned")\nf()\n',
+            'import os\ndef f(launch=len and os.system):\n'
+            '    launch("rm -rf /tmp/maintainer-owned")\nf()\n',
+            'import os\ndef f(launch=(lambda: os.system)()):\n'
+            '    launch("rm -rf /tmp/maintainer-owned")\nf()\n',
+            'import os\ndef f(launch=(runner := os.system)):\n'
+            '    launch("rm -rf /tmp/maintainer-owned")\nf()\n',
+            'from os import system\ndef f(launch=system if True else len):\n'
+            '    launch("rm -rf /tmp/maintainer-owned")\nf()\n',
+        ):
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+        self.assertIsNone(self.inspect(
+            'def f(cb=len if True else str):\n    print(cb("8"))\nf()\n'
+        ))
+        self.assertIsNone(self.inspect(
+            'def run(cmd):\n    return cmd\ndef f(cb=run):\n    print(cb("8"))\nf()\n'
+        ))
+        self.assertIsNone(self.inspect(
+            'import os\ndef f(launch=os.system if True else len):\n'
+            '    print("reviewed")\nf()\n'
+        ))
+
     def test_python_heredoc_requires_quoted_delimiter(self) -> None:
         for opener in (
             "/opt/homebrew/bin/python3 -I - <<PY",

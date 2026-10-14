@@ -12799,6 +12799,59 @@ def python_import_bindings(tree):
             return None
         return dotted
 
+    from_import_command_leaves = {
+        alias.asname or alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        and node.module in python_command_modules
+        for alias in node.names
+        if alias.name in python_command_leaf_names
+    }
+
+    def default_launcher_candidates(node, seen):
+        found = set()
+        stack = [node]
+        while stack:
+            current = stack.pop()
+            if current is None or id(current) in seen:
+                continue
+            seen.add(id(current))
+            if isinstance(current, ast.IfExp):
+                stack.extend((current.body, current.orelse))
+            elif isinstance(current, ast.BoolOp):
+                stack.extend(current.values)
+            elif isinstance(current, ast.NamedExpr):
+                stack.append(current.value)
+            elif isinstance(current, (ast.Tuple, ast.List, ast.Set)):
+                stack.extend(current.elts)
+            elif isinstance(current, ast.Dict):
+                stack.extend(key for key in current.keys if key is not None)
+                stack.extend(current.values)
+            elif isinstance(current, ast.Subscript):
+                stack.append(current.value)
+            elif isinstance(current, ast.Call) and isinstance(
+                current.func, ast.Lambda
+            ):
+                stack.append(current.func.body)
+            elif isinstance(current, ast.Lambda):
+                stack.append(current.body)
+            elif isinstance(current, ast.Call):
+                stack.append(current.func)
+                stack.extend(current.args)
+                stack.extend(
+                    keyword.value for keyword in current.keywords
+                )
+            else:
+                resolved = resolve_binding(current)
+                if resolved in python_command_functions:
+                    found.add(resolved)
+                elif (
+                    isinstance(current, ast.Name)
+                    and current.id in from_import_command_leaves
+                ):
+                    found.add(current.id)
+        return found
+
     # Resolve alias chains such as `launch = subprocess.run` and
     # `again = launch` without trusting their source order. Unknown or
     # shadowed assignment targets remain mapped to None and are rejected when
@@ -12844,6 +12897,8 @@ def python_import_bindings(tree):
             resolved = resolve_binding(default)
             if resolved in python_command_functions:
                 functions[parameter.arg] = resolved
+            elif default_launcher_candidates(default, set()):
+                functions[parameter.arg] = None
     return modules, functions, unresolved
 
 
