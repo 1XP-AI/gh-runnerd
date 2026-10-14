@@ -6762,6 +6762,30 @@ def synthetic_read(_fd, _size):
                 self.assertIsNotNone(self.inspect(body))
         self.assertIsNone(self.inspect('from shutil import which\nprint(which("git"))\n'))
 
+    def test_from_import_aliases_resolve_at_call_site(self) -> None:
+        for body in (
+            'from os import removedirs as action\n'
+            'action("/tmp/maintainer-owned/a")\n'
+            'from shutil import which as action\n',
+            'flag = True\n'
+            'from os import removedirs as action\n'
+            'if flag:\n'
+            '    from shutil import which as action\n'
+            'action("/tmp/maintainer-owned/a")\n',
+        ):
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+        self.assertIsNone(self.inspect(
+            'from os import removedirs as action\n'
+            'def f():\n'
+            '    from shutil import which as action\n'
+            '    action("git")\n'
+        ))
+        self.assertIsNone(self.inspect(
+            'action("/tmp/maintainer-owned/a")\n'
+            'from os import removedirs as action\n'
+        ))
+
     def test_launchers_bound_through_callable_defaults_stay_classified(self) -> None:
         for body in (
             'import os\n(lambda launch=os.system: launch("rm -rf /tmp/maintainer-owned"))()\n',

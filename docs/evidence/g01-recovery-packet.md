@@ -16161,13 +16161,78 @@ def python_working_directory_change_violation(tree, parents):
 def python_unknown_os_call_violation(tree):
     """Fail closed for OS calls whose path/effect surface is not reviewed."""
     os_names = python_assigned_module_names(tree, "os")
-    from_import_aliases = {
-        alias.asname or alias.name: f"{node.module}.{alias.name}"
+    from_import_parents = {
+        child: node
         for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom) and node.module in {"os", "shutil"}
-        for alias in node.names
-        if alias.name != "*"
+        for child in ast.iter_child_nodes(node)
     }
+    from_import_bindings = []
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.ImportFrom) and node.module in {"os", "shutil"}
+        ):
+            continue
+        for alias in node.names:
+            if alias.name == "*":
+                continue
+            from_import_bindings.append(
+                (
+                    alias.asname or alias.name,
+                    f"{node.module}.{alias.name}",
+                    python_enclosing_scope(node, from_import_parents),
+                    (node.lineno, node.col_offset),
+                )
+            )
+
+    def from_import_candidates(name, call):
+        call_position = (call.lineno, call.col_offset)
+        chain = python_lexical_scope_chain(
+            python_enclosing_scope(call, from_import_parents),
+            from_import_parents,
+        )
+        for depth, scope in enumerate(chain):
+            matches = sorted(
+                (position, dotted)
+                for bound, dotted, scope_node, position in from_import_bindings
+                if bound == name
+                and scope_node is scope
+                and (depth > 0 or position < call_position)
+            )
+            if matches:
+                return [dotted for _position, dotted in matches]
+        return []
+
+    def from_import_call_violation(dotted, resolved_from_import, call):
+        root, remainder = dotted.split(".", 1)
+        if root == "shutil" and resolved_from_import:
+            if (
+                dotted == "shutil.which"
+                or dotted in python_filesystem_mutating_functions
+            ):
+                return None
+            return (
+                "Python heredoc calls an unreviewed shutil entry point "
+                f"{dotted!r} on line {call.lineno}"
+            )
+        if root not in os_names and not resolved_from_import:
+            return None
+        canonical = "os." + remainder
+        if root != "os" and canonical in python_filesystem_mutating_functions:
+            return (
+                "Python heredoc calls a filesystem mutator through an OS module alias "
+                f"{dotted!r} on line {call.lineno}"
+            )
+        if (
+            canonical in python_filesystem_mutating_functions
+            or canonical in python_reviewed_os_calls
+            or canonical.startswith("os.path.")
+            or canonical.startswith("os.environ.")
+        ):
+            return None
+        return (
+            "Python heredoc contains an unreviewed OS call with possible path/effect "
+            f"surface {dotted!r} on line {call.lineno}"
+        )
     for node in ast.walk(tree):
         if (
             isinstance(node, ast.Attribute)
@@ -16202,45 +16267,23 @@ def python_unknown_os_call_violation(tree):
         if not isinstance(node, ast.Call):
             continue
         dotted = python_dotted_name(node.func)
-        resolved_from_import = (
-            dotted is not None
-            and "." not in dotted
-            and dotted in from_import_aliases
-        )
-        if resolved_from_import:
-            dotted = from_import_aliases[dotted]
-        if not dotted or "." not in dotted:
-            continue
-        root, remainder = dotted.split(".", 1)
-        if root == "shutil" and resolved_from_import:
-            if (
-                dotted == "shutil.which"
-                or dotted in python_filesystem_mutating_functions
-            ):
+        if dotted is not None and "." not in dotted:
+            candidates = [
+                (candidate_dotted, True)
+                for candidate_dotted in from_import_candidates(dotted, node)
+            ]
+            if not candidates:
                 continue
-            return (
-                "Python heredoc calls an unreviewed shutil entry point "
-                f"{dotted!r} on line {node.lineno}"
-            )
-        if root not in os_names and not resolved_from_import:
+        elif not dotted or "." not in dotted:
             continue
-        canonical = "os." + remainder
-        if root != "os" and canonical in python_filesystem_mutating_functions:
-            return (
-                "Python heredoc calls a filesystem mutator through an OS module alias "
-                f"{dotted!r} on line {node.lineno}"
+        else:
+            candidates = [(dotted, False)]
+        for candidate_dotted, resolved_from_import in candidates:
+            violation = from_import_call_violation(
+                candidate_dotted, resolved_from_import, node
             )
-        if (
-            canonical in python_filesystem_mutating_functions
-            or canonical in python_reviewed_os_calls
-            or canonical.startswith("os.path.")
-            or canonical.startswith("os.environ.")
-        ):
-            continue
-        return (
-            "Python heredoc contains an unreviewed OS call with possible path/effect "
-            f"surface {dotted!r} on line {node.lineno}"
-        )
+            if violation is not None:
+                return violation
     return None
 
 
