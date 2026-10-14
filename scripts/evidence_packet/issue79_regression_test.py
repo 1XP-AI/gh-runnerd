@@ -22,6 +22,7 @@ import tempfile
 import time
 import types
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -222,7 +223,18 @@ def _validated_scanner_statements(module: ast.Module) -> tuple[ast.stmt, ...]:
     return tuple(module.body)
 
 
+def _require_scanner_ast_runtime() -> None:
+    required = ("Match", "MatchAs", "MatchStar", "MatchMapping", "TryStar")
+    missing = [name for name in required if not isinstance(getattr(ast, name, None), type)]
+    if missing:
+        raise RuntimeError(
+            "scanner regression harness requires Python 3.11+ AST support; missing "
+            + ", ".join(missing)
+        )
+
+
 def _scanner_namespace() -> dict[str, object]:
+    _require_scanner_ast_runtime()
     source = _scanner_module_source(PACKET_TEXT)
     module = ast.parse(source, filename="<packet-scanner-data>")
     namespace: dict[str, object] = {
@@ -546,6 +558,24 @@ def _isolated_git_shell_command(arguments: list[str]) -> str:
             *arguments,
         ]
     )
+
+
+class ScannerRuntimeTests(unittest.TestCase):
+    def test_missing_ast_support_refuses_before_loading_scanner(self) -> None:
+        for name in ("Match", "MatchAs", "MatchStar", "MatchMapping", "TryStar"):
+            with self.subTest(feature=name), mock.patch.object(ast, name, None), mock.patch(
+                __name__ + "._scanner_module_source",
+                side_effect=AssertionError("scanner definitions must not load"),
+            ) as source:
+                with self.assertRaisesRegex(RuntimeError, "Python 3.11"):
+                    _scanner_namespace()
+                source.assert_not_called()
+
+    def test_supported_ast_runtime_keeps_loader_available(self) -> None:
+        with mock.patch(__name__ + "._scanner_module_source", return_value="") as source:
+            namespace = _scanner_namespace()
+        source.assert_called_once_with(PACKET_TEXT)
+        self.assertIs(namespace["ast"], ast)
 
 
 class Issue79RegressionTests(unittest.TestCase):
@@ -7187,4 +7217,8 @@ def synthetic_read(_fd, _size):
 
 
 if __name__ == "__main__":
+    try:
+        _require_scanner_ast_runtime()
+    except RuntimeError as error:
+        sys.exit(str(error))
     unittest.main(verbosity=2)
