@@ -956,7 +956,7 @@ class Issue79RegressionTests(unittest.TestCase):
             '    return subprocess.run\n'
             'def unrelated_scope():\n'
             '    def launcher_factory():\n'
-            '        return print\n'
+            '        return len\n'
             'launch = launcher_factory()\n'
             'launch(["gh", "workflow", "run", "ci.yml"])\n'
         )
@@ -964,7 +964,7 @@ class Issue79RegressionTests(unittest.TestCase):
 
         safe = (
             'def value_factory():\n'
-            '    return print\n'
+            '    return len\n'
             'def unrelated_scope():\n'
             '    def value_factory():\n'
             '        return str.upper\n'
