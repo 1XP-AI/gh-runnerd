@@ -6816,6 +6816,53 @@ def synthetic_read(_fd, _size):
         self.assertEqual(1, len(bodies))
         self.assertFalse(bodies[0][3].get("quoted"))
 
+    def test_sensitive_operands_are_rejected_before_implicit_exception_messages(self) -> None:
+        for body in (
+            'import os\n{}[str(os.environ)]\n',
+            'import os\nsecret = os.environ\n{}[secret]\n',
+            'import os\nsecret = str(os.environ)\n[][secret]\n',
+            'import os\nsecret = str(os.environ)\nint(secret)\n',
+            'import os\nsecret = str(os.environ)\nfloat(secret)\n',
+            'import os\nint(str(os.environ))\n',
+            'import os\nfor value in os.environ.values():\n    {}[value]\n',
+            'import os\nsecret = os.environ\nkey = str(secret).strip()\n{}[key]\n',
+            'import os\nsecret = str(os.environ)\ndel {}[secret]\n',
+            'import os\ndef k():\n    return str(os.environ)\n{}[k()]\n',
+            'import os\nsecrets = [str(os.environ)]\nfor _, v in enumerate(secrets):\n    {}[v]\n',
+            'import os\nfor key, value in os.environ.items():\n    {}[value]\n',
+            'import os\nto_int = int\nsecret = str(os.environ)\nto_int(secret)\n',
+            'import os\nto_float = float\nsecret = str(os.environ)\nto_float(secret)\n',
+        ):
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+        self.assertIsNone(self.inspect('d = {"a": 1}\nprint(d["a"])\n'))
+        self.assertIsNone(self.inspect('print(int("3"))\n'))
+        self.assertIsNone(self.inspect('items = [1, 2]\nprint(items[0])\n'))
+        self.assertIsNone(self.inspect('import sys\nprint(sys.argv[1:])\n'))
+        self.assertIsNone(self.inspect(
+            'import os\nsecret = str(os.environ)\nd = {}\nd[secret] = 1\n'
+        ))
+        self.assertIsNone(self.inspect(
+            'import os\ndefaults = {"PATH": "/x"}\n'
+            'for key in os.environ:\n'
+            '    print(defaults[key] if key in defaults else "none")\n'
+        ))
+        self.assertIsNone(self.inspect(
+            'import os\ndef other():\n    secret = os.environ\n    return 1\n'
+            'def f():\n    secret = 0\n    d = {}\n    return d[secret]\n'
+        ))
+        self.assertIsNone(self.inspect(
+            'import os\nenv = dict(os.environ)\ndefaults = {}\n'
+            'for key in env:\n    defaults[key] = 1\n'
+            'total = sum(defaults[key] for key in env)\n'
+        ))
+        self.assertIsNone(self.inspect(
+            'import os\nfor key in os.environ.keys():\n    {}[key]\n'
+        ))
+        self.assertIsNone(self.inspect(
+            'import os\nfor key in dict(os.environ):\n    {}[key]\n'
+        ))
+
     def test_awk_program_cannot_rewrite_reader_argv(self) -> None:
         self.assertIsNotNone(self.shell_violation(
             'awk \'BEGIN { ARGV[1]="maintainer.pem" } {print}\' docs/EXECUTION.md'
