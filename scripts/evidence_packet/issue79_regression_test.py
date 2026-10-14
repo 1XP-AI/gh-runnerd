@@ -6873,6 +6873,22 @@ def synthetic_read(_fd, _size):
         self.assertIsNone(self.inspect('print(complex(0, 1))\n'))
         self.assertIsNone(self.inspect('print(complex("3"))\n'))
 
+    def test_conversion_callables_in_defaults_and_containers_are_tracked(self) -> None:
+        for body in (
+            'import os\ndef f(convert=int):\n    convert(str(os.environ))\nf()\n',
+            'import os\nconverters = [float]\nconverters[0](str(os.environ))\n',
+            'import os\nto_int = int\ndef f(convert=to_int):\n    convert(str(os.environ))\nf()\n',
+            'import os\ndef f(convert):\n    convert(str(os.environ))\nf(int)\n',
+        ):
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+        self.assertIsNone(self.inspect(
+            'import os\ndef f(convert=len):\n    convert(str(os.environ))\nf()\n'
+        ))
+        self.assertIsNone(self.inspect(
+            'import os\nhandlers = [len]\nhandlers[0](str(os.environ))\n'
+        ))
+
     def test_awk_program_cannot_rewrite_reader_argv(self) -> None:
         self.assertIsNotNone(self.shell_violation(
             'awk \'BEGIN { ARGV[1]="maintainer.pem" } {print}\' docs/EXECUTION.md'

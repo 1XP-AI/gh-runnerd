@@ -21559,6 +21559,97 @@ def python_sensitive_read_violation(tree, parents):
                 bases.add(binding.id)
         return bases
 
+    error_operand_conversions = {
+        "int",
+        "float",
+        "complex",
+        "builtins.int",
+        "builtins.float",
+        "builtins.complex",
+    }
+
+    def error_operand_conversion_callable(func, seen):
+        if func is None or id(func) in seen:
+            return False
+        seen.add(id(func))
+        if python_dotted_name(func) in error_operand_conversions:
+            return True
+        if isinstance(func, ast.Name):
+            if (
+                python_assigned_callable_alias(func.id, "int", tree)
+                or python_assigned_callable_alias(func.id, "float", tree)
+                or python_assigned_callable_alias(func.id, "complex", tree)
+            ):
+                return True
+            chain = python_lexical_scope_chain(
+                python_enclosing_scope(func, parents), parents
+            )
+            for scope in chain:
+                for binding_scope, binding, _keys in error_operand_bindings.get(
+                    func.id, ()
+                ):
+                    if binding_scope is scope and error_operand_conversion_callable(
+                        binding, set(seen)
+                    ):
+                        return True
+                for source_scope, source in assignments_by_name.get(func.id, ()):
+                    if source_scope is scope and error_operand_conversion_callable(
+                        source, set(seen)
+                    ):
+                        return True
+            return False
+        if isinstance(func, ast.Subscript):
+            containers = []
+            target = func.value
+            if isinstance(target, (ast.List, ast.Tuple)):
+                containers.append(target)
+            elif isinstance(target, ast.Name):
+                chain = python_lexical_scope_chain(
+                    python_enclosing_scope(target, parents), parents
+                )
+                for scope in chain:
+                    containers.extend(
+                        binding
+                        for binding_scope, binding, _keys in error_operand_bindings.get(
+                            target.id, ()
+                        )
+                        if binding_scope is scope
+                    )
+                    containers.extend(
+                        source
+                        for source_scope, source in assignments_by_name.get(
+                            target.id, ()
+                        )
+                        if source_scope is scope
+                    )
+            for container in containers:
+                if not isinstance(container, (ast.List, ast.Tuple)):
+                    continue
+                elements = list(container.elts)
+                index = func.slice
+                if (
+                    isinstance(index, ast.Constant)
+                    and isinstance(index.value, int)
+                    and not isinstance(index.value, bool)
+                ):
+                    pick = (
+                        index.value
+                        if index.value >= 0
+                        else len(elements) + index.value
+                    )
+                    if 0 <= pick < len(elements):
+                        if error_operand_conversion_callable(
+                            elements[pick], set(seen)
+                        ):
+                            return True
+                        continue
+                if any(
+                    error_operand_conversion_callable(item, set(seen))
+                    for item in elements
+                ):
+                    return True
+        return False
+
     def error_operand_keys_sensitive(node, seen):
         if node is None or id(node) in seen:
             return False
@@ -21824,25 +21915,7 @@ def python_sensitive_read_violation(tree, parents):
                 )
         if isinstance(node, ast.Call):
             dotted = python_dotted_name(node.func)
-            if (
-                dotted
-                in {
-                    "int",
-                    "float",
-                    "complex",
-                    "builtins.int",
-                    "builtins.float",
-                    "builtins.complex",
-                }
-                or (
-                    isinstance(node.func, ast.Name)
-                    and (
-                        python_assigned_callable_alias(node.func.id, "int", tree)
-                        or python_assigned_callable_alias(node.func.id, "float", tree)
-                        or python_assigned_callable_alias(node.func.id, "complex", tree)
-                    )
-                )
-            ) and any(
+            if error_operand_conversion_callable(node.func, set()) and any(
                 error_operand_sensitive(value, set())
                 for value in list(node.args)
                 + [keyword.value for keyword in node.keywords]
