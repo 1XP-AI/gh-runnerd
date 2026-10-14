@@ -6889,6 +6889,23 @@ def synthetic_read(_fd, _size):
             'import os\nhandlers = [len]\nhandlers[0](str(os.environ))\n'
         ))
 
+    def test_sensitive_call_arguments_propagate_into_parameters(self) -> None:
+        for body in (
+            'import os\ndef lookup(key):\n    return {}[key]\nlookup(str(os.environ))\n',
+            'import os\ndef lookup(key=None):\n    return {}[key]\nlookup(key=str(os.environ))\n',
+            'import os\ndef lookup(*keys):\n    return {}[keys[0]]\nlookup(str(os.environ))\n',
+            'import os\ndef outer():\n    secret = str(os.environ)\n'
+            '    def inner():\n        return {}[secret]\n    return inner()\nouter()\n',
+        ):
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+        self.assertIsNone(self.inspect(
+            'import os\ndef lookup(key):\n    return {}[key]\nlookup("name")\n'
+        ))
+        self.assertIsNone(self.inspect(
+            'import os\ndef lookup(key):\n    return {}[key]\n'
+        ))
+
     def test_awk_program_cannot_rewrite_reader_argv(self) -> None:
         self.assertIsNotNone(self.shell_violation(
             'awk \'BEGIN { ARGV[1]="maintainer.pem" } {print}\' docs/EXECUTION.md'

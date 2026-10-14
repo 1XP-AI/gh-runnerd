@@ -21692,15 +21692,23 @@ def python_sensitive_read_violation(tree, parents):
                     )
                     if binding_scope is scope
                 ]
-                if entries:
-                    return any(
+                is_parameter = node.id in error_operand_parameters.get(scope, ())
+                if entries or is_parameter:
+                    resolutions = [
                         error_operand_keys_sensitive(binding, set(seen))
                         if keys_only
                         else error_operand_sensitive(binding, set(seen))
                         for binding, keys_only in entries
-                    )
-                if node.id in error_operand_parameters.get(scope, ()):
-                    return False
+                    ]
+                    if is_parameter:
+                        resolutions.extend(
+                            error_operand_keys_sensitive(source, set(seen))
+                            for source_scope, source in assignments_by_name.get(
+                                node.id, ()
+                            )
+                            if source_scope is scope
+                        )
+                    return any(resolutions)
             return False
         return error_operand_sensitive(node, set(seen))
 
@@ -21720,15 +21728,23 @@ def python_sensitive_read_violation(tree, parents):
                     )
                     if binding_scope is scope
                 ]
-                if entries:
-                    return any(
+                is_parameter = value.id in error_operand_parameters.get(scope, ())
+                if entries or is_parameter:
+                    resolutions = [
                         error_operand_keys_sensitive(binding, set(seen))
                         if keys_only
                         else error_operand_sensitive(binding, set(seen))
                         for binding, keys_only in entries
-                    )
-                if value.id in error_operand_parameters.get(scope, ()):
-                    return False
+                    ]
+                    if is_parameter:
+                        resolutions.extend(
+                            error_operand_sensitive(source, set(seen))
+                            for source_scope, source in assignments_by_name.get(
+                                value.id, ()
+                            )
+                            if source_scope is scope
+                        )
+                    return any(resolutions)
             return False
         if isinstance(value, ast.Attribute):
             if python_dotted_name(value) in {"os.environ", "os.environb"}:
