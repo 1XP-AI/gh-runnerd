@@ -6863,6 +6863,16 @@ def synthetic_read(_fd, _size):
             'import os\nfor key in dict(os.environ):\n    {}[key]\n'
         ))
 
+    def test_complex_conversions_are_rejected_before_implicit_exception_messages(self) -> None:
+        for body in (
+            'import os\ncomplex(str(os.environ))\n',
+            'import os\nto_complex = complex\nsecret = str(os.environ)\nto_complex(secret)\n',
+        ):
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+        self.assertIsNone(self.inspect('print(complex(0, 1))\n'))
+        self.assertIsNone(self.inspect('print(complex("3"))\n'))
+
     def test_awk_program_cannot_rewrite_reader_argv(self) -> None:
         self.assertIsNotNone(self.shell_violation(
             'awk \'BEGIN { ARGV[1]="maintainer.pem" } {print}\' docs/EXECUTION.md'

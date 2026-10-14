@@ -21825,12 +21825,21 @@ def python_sensitive_read_violation(tree, parents):
         if isinstance(node, ast.Call):
             dotted = python_dotted_name(node.func)
             if (
-                dotted in {"int", "float", "builtins.int", "builtins.float"}
+                dotted
+                in {
+                    "int",
+                    "float",
+                    "complex",
+                    "builtins.int",
+                    "builtins.float",
+                    "builtins.complex",
+                }
                 or (
                     isinstance(node.func, ast.Name)
                     and (
                         python_assigned_callable_alias(node.func.id, "int", tree)
                         or python_assigned_callable_alias(node.func.id, "float", tree)
+                        or python_assigned_callable_alias(node.func.id, "complex", tree)
                     )
                 )
             ) and any(
