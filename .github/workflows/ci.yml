@@ -36,7 +36,7 @@ jobs:
     timeout-minutes: 15
     env:
       # Match Make's explicit selection even if the installed default changes.
-      GOTOOLCHAIN: go1.26.8
+      GOTOOLCHAIN: go1.26.9
     steps:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -81,7 +81,7 @@ jobs:
     timeout-minutes: 15
     env:
       # Match Make's explicit selection even if the installed default changes.
-      GOTOOLCHAIN: go1.26.8
+      GOTOOLCHAIN: go1.26.9
     steps:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -111,7 +111,7 @@ jobs:
           - experiments/g02-auth
           - experiments/r1-credentials
     env:
-      GOTOOLCHAIN: go1.26.8
+      GOTOOLCHAIN: go1.26.9
       OFFLINE_EXPERIMENT_MODULE: ${{ matrix.module }}
     steps:
       - name: Check out source
@@ -136,7 +136,7 @@ jobs:
     timeout-minutes: 15
     env:
       # Match Make's explicit selection even if the installed default changes.
-      GOTOOLCHAIN: go1.26.8
+      GOTOOLCHAIN: go1.26.9
     steps:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2

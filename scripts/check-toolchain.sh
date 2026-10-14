@@ -3,8 +3,8 @@
 set -euo pipefail
 
 go_cmd="${GO:-go}"
-expected_toolchain="go1.26.8"
-expected_go_directive="1.26.8"
+expected_toolchain="go1.26.9"
+expected_go_directive="1.26.9"
 # Standalone invocation must select the pin too; auto never downgrades a newer Go.
 export GOTOOLCHAIN="${expected_toolchain}"
 

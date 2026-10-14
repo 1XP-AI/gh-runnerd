@@ -6,10 +6,32 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"runtime/debug"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestBuildRevisionAdmissionRequiresGo1269(t *testing.T) {
+	revision := strings.Repeat("a", 40)
+	good := &debug.BuildInfo{
+		GoVersion: "go1.26.9",
+		Settings: []debug.BuildSetting{
+			{Key: "vcs.revision", Value: revision},
+			{Key: "vcs.modified", Value: "false"},
+		},
+	}
+	if got, ok := buildRevisionFromInfo(good, true); !ok || got != revision {
+		t.Fatalf("Go 1.26.9 reviewed build rejected: revision=%q admitted=%v", got, ok)
+	}
+	for _, version := range []string{"go1.26.8", "go1.27.1", ""} {
+		bad := *good
+		bad.GoVersion = version
+		if _, ok := buildRevisionFromInfo(&bad, true); ok {
+			t.Errorf("build toolchain %q admitted", version)
+		}
+	}
+}
 
 type unreadable struct{ t *testing.T }
 

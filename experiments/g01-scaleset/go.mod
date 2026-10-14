@@ -1,6 +1,6 @@
 module github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset
 
-go 1.26.8
+go 1.26.9
 
 require (
 	github.com/1XP-AI/gh-runnerd/experiments/g02-auth v0.0.0

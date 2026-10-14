@@ -20,8 +20,8 @@ The upstream source identifies its notice as follows:
 // license that can be found in the LICENSE file.
 ```
 
-The applicable Go license text from the pinned Go 1.26.8 toolchain is reproduced
-verbatim below.
+The applicable Go license text from the Go 1.26.8 source used for this
+adaptation is reproduced verbatim below.
 
 ```text
 Copyright 2009 The Go Authors.

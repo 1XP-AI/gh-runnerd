@@ -3,7 +3,7 @@
 set -euo pipefail
 
 go_cmd="${GO:-go}"
-exact_toolchain="go1.26.8"
+exact_toolchain="go1.26.9"
 default_heavy_test_regex='^TestBaselineStatisticsPresenceAndEligibility$'
 default_handoff_test_regex='^TestControllerHandoff'
 default_heavy_and_handoff_skip_regex='^Test(BaselineStatisticsPresenceAndEligibility|ControllerHandoff.*)$'

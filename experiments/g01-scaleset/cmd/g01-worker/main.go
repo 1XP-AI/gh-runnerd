@@ -16,7 +16,11 @@ import (
 
 func buildRevision() (string, bool) {
 	info, ok := debug.ReadBuildInfo()
-	if !ok || info.GoVersion != "go1.26.8" {
+	return buildRevisionFromInfo(info, ok)
+}
+
+func buildRevisionFromInfo(info *debug.BuildInfo, ok bool) (string, bool) {
+	if !ok || info == nil || info.GoVersion != "go1.26.9" {
 		return "", false
 	}
 	revision := ""
