@@ -6906,6 +6906,38 @@ def synthetic_read(_fd, _size):
             'import os\ndef lookup(key):\n    return {}[key]\n'
         ))
 
+    def test_late_inserted_sensitive_keys_lose_keys_only_exemption(self) -> None:
+        for body in (
+            'import os\nd = {}\nd[str(os.environ)] = 1\nfor key in d:\n    {}[key]\n',
+            'import os\nd = {}\nd.update({str(os.environ): 1})\nfor key in d:\n    {}[key]\n',
+            'import os\nd = {}\nd.setdefault(str(os.environ), 1)\nfor key in d:\n    {}[key]\n',
+            'import os\nd = {}\nd |= {str(os.environ): 1}\nfor key in d:\n    {}[key]\n',
+            'import os\nd = {}\nd.__setitem__(str(os.environ), 1)\nfor key in d:\n    {}[key]\n',
+            'import os\nd = {}\nd.update([(str(os.environ), 1)])\nfor key in d:\n    {}[key]\n',
+            'import os\nfor ch in str(os.environ):\n    {}[ch]\n',
+        ):
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+        self.assertIsNone(self.inspect(
+            'import os\nd = {}\nd["static"] = 1\nfor key in d:\n    {}[key]\n'
+        ))
+        self.assertIsNone(self.inspect(
+            'import os\nd = {}\nd.update(os.environ)\nfor key in d:\n    {}[key]\n'
+        ))
+        self.assertIsNone(self.inspect(
+            'import os\nd = {}\nd.update(host="x")\nfor key in d:\n    {}[key]\n'
+        ))
+        self.assertIsNone(self.inspect(
+            'import os\ndef f():\n    d = {}\n    d[str(os.environ)] = 1\n'
+            'def g():\n    d = {}\n    for key in d:\n        {}[key]\n'
+        ))
+        self.assertIsNone(self.inspect(
+            'import os\nfor key in sorted(os.environ):\n    {}[key]\n'
+        ))
+        self.assertIsNone(self.inspect(
+            'import os\nfor key in list(os.environ):\n    {}[key]\n'
+        ))
+
     def test_awk_program_cannot_rewrite_reader_argv(self) -> None:
         self.assertIsNotNone(self.shell_violation(
             'awk \'BEGIN { ARGV[1]="maintainer.pem" } {print}\' docs/EXECUTION.md'

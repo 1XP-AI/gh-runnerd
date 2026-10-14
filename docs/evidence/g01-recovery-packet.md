@@ -21478,6 +21478,70 @@ def python_sensitive_read_violation(tree, parents):
                     error_operand_bindings.setdefault(name.id, []).append(
                         (binding_scope, value, error_loop_keys_only)
                     )
+    error_operand_mutated_keys = {}
+    for candidate in ast.walk(tree):
+        if isinstance(candidate, (ast.Assign, ast.AnnAssign)):
+            if isinstance(candidate, ast.AnnAssign) and candidate.value is None:
+                continue
+            targets = (
+                candidate.targets
+                if isinstance(candidate, ast.Assign)
+                else [candidate.target]
+            )
+            for target in targets:
+                if (
+                    isinstance(target, ast.Subscript)
+                    and isinstance(target.ctx, ast.Store)
+                    and isinstance(target.value, ast.Name)
+                ):
+                    error_operand_mutated_keys.setdefault(
+                        target.value.id, []
+                    ).append(
+                        (
+                            python_enclosing_scope(candidate, parents),
+                            target.slice,
+                            False,
+                        )
+                    )
+        elif isinstance(candidate, ast.AugAssign):
+            if isinstance(candidate.op, ast.BitOr) and isinstance(
+                candidate.target, ast.Name
+            ):
+                error_operand_mutated_keys.setdefault(candidate.target.id, []).append(
+                    (python_enclosing_scope(candidate, parents), candidate.value, True)
+                )
+        elif isinstance(candidate, ast.Call):
+            func = candidate.func
+            if not (
+                isinstance(func, ast.Attribute)
+                and isinstance(func.value, ast.Name)
+                and func.attr in {"update", "setdefault", "__setitem__"}
+            ):
+                continue
+            key_sources = []
+            if func.attr == "update":
+                for argument in candidate.args:
+                    if isinstance(argument, ast.Dict):
+                        key_sources.extend(
+                            (key, False)
+                            for key in argument.keys
+                            if key is not None
+                        )
+                    else:
+                        key_sources.append((argument, True))
+                key_sources.extend(
+                    (keyword.value, True)
+                    for keyword in candidate.keywords
+                    if keyword.arg is None
+                )
+            elif candidate.args:
+                key_sources.append((candidate.args[0], False))
+            if key_sources:
+                mutation_scope = python_enclosing_scope(candidate, parents)
+                error_operand_mutated_keys.setdefault(func.value.id, []).extend(
+                    (mutation_scope, key, is_mapping)
+                    for key, is_mapping in key_sources
+                )
     error_operand_parameters = {}
     for candidate in ast.walk(tree):
         if not isinstance(
@@ -21550,6 +21614,20 @@ def python_sensitive_read_violation(tree, parents):
         "isidentifier",
         "isprintable",
         "isnumeric",
+    }
+
+    error_operand_element_iterators = {
+        "sorted",
+        "reversed",
+        "list",
+        "tuple",
+        "set",
+        "frozenset",
+        "iter",
+        "enumerate",
+        "next",
+        "zip",
+        "chain",
     }
 
     def error_operand_callable_bases(name):
@@ -21662,6 +21740,18 @@ def python_sensitive_read_violation(tree, parents):
             )
         if isinstance(node, ast.DictComp):
             return error_operand_sensitive(node.key, set(seen))
+        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+            return any(
+                error_operand_sensitive(item, set(seen)) for item in node.elts
+            )
+        if isinstance(node, ast.BinOp):
+            return error_operand_keys_sensitive(
+                node.left, set(seen)
+            ) or error_operand_keys_sensitive(node.right, set(seen))
+        if isinstance(node, ast.IfExp):
+            return error_operand_keys_sensitive(
+                node.body, set(seen)
+            ) or error_operand_keys_sensitive(node.orelse, set(seen))
         if python_dotted_name(node) in {"os.environ", "os.environb"}:
             return False
         if isinstance(node, ast.Call):
@@ -21670,7 +21760,18 @@ def python_sensitive_read_violation(tree, parents):
                     node.args[0] if node.args else None, set(seen)
                 )
             if not isinstance(node.func, ast.Attribute):
-                return error_operand_sensitive(node, set(seen))
+                if (
+                    isinstance(node.func, ast.Name)
+                    and node.func.id in error_operand_element_iterators
+                ):
+                    return any(
+                        error_operand_keys_sensitive(part, set(seen))
+                        for part in list(node.args)
+                        + [keyword.value for keyword in node.keywords]
+                    )
+                unpoisoned = set(seen)
+                unpoisoned.discard(id(node))
+                return error_operand_sensitive(node, unpoisoned)
             if node.func.attr in {"keys", "fromkeys"}:
                 return error_operand_keys_sensitive(
                     node.args[0] if node.args else node.func.value, set(seen)
@@ -21679,11 +21780,26 @@ def python_sensitive_read_violation(tree, parents):
                 return error_operand_keys_sensitive(node.func.value, set(seen))
             if node.func.attr == "items":
                 return error_operand_keys_sensitive(node.func.value, set(seen))
-            return error_operand_sensitive(node, set(seen))
+            unpoisoned = set(seen)
+            unpoisoned.discard(id(node))
+            return error_operand_sensitive(node, unpoisoned)
         if isinstance(node, ast.Name):
             chain = python_lexical_scope_chain(
                 python_enclosing_scope(node, parents), parents
             )
+            visible_scopes = set(chain)
+            mutated_sensitive = False
+            for mutation_scope, key, is_mapping in error_operand_mutated_keys.get(
+                node.id, ()
+            ):
+                if mutation_scope not in visible_scopes:
+                    continue
+                if is_mapping:
+                    mutated_sensitive = error_operand_keys_sensitive(key, set(seen))
+                else:
+                    mutated_sensitive = error_operand_sensitive(key, set(seen))
+                if mutated_sensitive:
+                    return True
             for scope in chain:
                 entries = [
                     (binding, keys_only)
@@ -21710,7 +21826,9 @@ def python_sensitive_read_violation(tree, parents):
                         )
                     return any(resolutions)
             return False
-        return error_operand_sensitive(node, set(seen))
+        unpoisoned = set(seen)
+        unpoisoned.discard(id(node))
+        return error_operand_sensitive(node, unpoisoned)
 
     def error_operand_sensitive(value, seen):
         if value is None or id(value) in seen:
