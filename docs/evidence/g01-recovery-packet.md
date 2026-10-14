@@ -17848,12 +17848,40 @@ def python_filesystem_mutator_alias_violation(tree, parents):
                         for returned in python_local_call_return_values(
                             candidate, tree, parents
                         ):
-                            if any(
-                                isinstance(returned_node, ast.Call)
-                                and isinstance(returned_node.func, ast.Name)
-                                and returned_node.func.id in getattr_aliases
+                            returned_getattr_calls = [
+                                returned_node
                                 for returned_node in ast.walk(returned)
-                            ):
+                                if (
+                                    isinstance(returned_node, ast.Call)
+                                    and isinstance(returned_node.func, ast.Name)
+                                    and returned_node.func.id in getattr_aliases
+                                )
+                            ]
+                            if not returned_getattr_calls:
+                                continue
+                            for returned_node in returned_getattr_calls:
+                                if len(returned_node.args) < 2:
+                                    return (
+                                        "Python heredoc assigns an unreviewed reflective "
+                                        f"helper result to alias {target.id!r} on line {node.lineno}"
+                                    )
+                                returned_names = _resolved_member_names(
+                                    returned_node.args[1]
+                                )
+                                if (
+                                    len(returned_names) == 1
+                                    and not (
+                                        returned_names
+                                        & python_filesystem_mutating_methods
+                                    )
+                                    and python_reviewed_path_reader(
+                                        returned_node.args[0],
+                                        next(iter(returned_names)),
+                                        tree,
+                                        parents,
+                                    )
+                                ):
+                                    continue
                                 return (
                                     "Python heredoc assigns an unreviewed reflective "
                                     f"helper result to alias {target.id!r} on line {node.lineno}"
