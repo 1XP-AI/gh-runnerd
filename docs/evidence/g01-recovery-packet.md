@@ -21542,6 +21542,12 @@ def python_sensitive_read_violation(tree, parents):
                     (mutation_scope, key, is_mapping)
                     for key, is_mapping in key_sources
                 )
+    error_operand_classes = {}
+    for candidate in ast.walk(tree):
+        if isinstance(candidate, ast.ClassDef):
+            error_operand_classes.setdefault(candidate.name, []).append(
+                (python_enclosing_scope(candidate, parents), candidate)
+            )
     error_operand_parameters = {}
     for candidate in ast.walk(tree):
         if not isinstance(
@@ -21946,6 +21952,77 @@ def python_sensitive_read_violation(tree, parents):
             return False
         return False
 
+    def error_operand_repr_from_class(classdef, seen):
+        if id(classdef) in seen:
+            return False
+        seen.add(id(classdef))
+        for entry in classdef.body:
+            if (
+                isinstance(entry, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and entry.name == "__repr__"
+            ):
+                for candidate in ast.walk(entry):
+                    if (
+                        isinstance(candidate, ast.Return)
+                        and candidate.value is not None
+                        and error_operand_sensitive(candidate.value, set(seen))
+                    ):
+                        return True
+        for base in classdef.bases:
+            if isinstance(base, ast.Name):
+                for _scope, other in error_operand_classes.get(base.id, ()):
+                    if error_operand_repr_from_class(other, set(seen)):
+                        return True
+        return False
+
+    def error_operand_repr_sensitive(value, seen):
+        if value is None or id(value) in seen:
+            return False
+        seen.add(id(value))
+        if isinstance(value, ast.Call):
+            func = value.func
+            if not isinstance(func, ast.Name):
+                return False
+            chain = set(
+                python_lexical_scope_chain(
+                    python_enclosing_scope(value, parents), parents
+                )
+            )
+            return any(
+                error_operand_repr_from_class(classdef, set(seen))
+                for class_scope, classdef in error_operand_classes.get(func.id, ())
+                if class_scope in chain
+            )
+        if isinstance(value, ast.Name):
+            chain = python_lexical_scope_chain(
+                python_enclosing_scope(value, parents), parents
+            )
+            for scope in chain:
+                entries = [
+                    binding
+                    for binding_scope, binding, _keys in error_operand_bindings.get(
+                        value.id, ()
+                    )
+                    if binding_scope is scope
+                ]
+                is_parameter = value.id in error_operand_parameters.get(scope, ())
+                if entries or is_parameter:
+                    resolutions = [
+                        error_operand_repr_sensitive(binding, set(seen))
+                        for binding in entries
+                    ]
+                    if is_parameter:
+                        resolutions.extend(
+                            error_operand_repr_sensitive(source, set(seen))
+                            for source_scope, source in assignments_by_name.get(
+                                value.id, ()
+                            )
+                            if source_scope is scope
+                        )
+                    return any(resolutions)
+            return False
+        return False
+
     def exception_arguments(value, seen_names=None, follow_names=True):
         if value is None:
             return []
@@ -22014,6 +22091,17 @@ def python_sensitive_read_violation(tree, parents):
             return (
                 "Python sensitive value is used as a subscript that may surface "
                 f"in an exception message on line {node.lineno}"
+            )
+        if (
+            isinstance(node, ast.Subscript)
+            and not isinstance(node.ctx, ast.Store)
+            and python_dotted_name(node.value)
+            not in {"os.environ", "os.environb"}
+            and error_operand_repr_sensitive(node.slice, set())
+        ):
+            return (
+                "Python subscript uses a key whose representation may disclose "
+                f"sensitive values on line {node.lineno}"
             )
         if isinstance(node, ast.Assert) and node.msg is not None:
             if python_sensitive_value_expression(node.msg, sensitive_names, tree, parents):

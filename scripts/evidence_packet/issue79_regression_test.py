@@ -6938,6 +6938,32 @@ def synthetic_read(_fd, _size):
             'import os\nfor key in list(os.environ):\n    {}[key]\n'
         ))
 
+    def test_keys_with_sensitive_representations_are_rejected(self) -> None:
+        for body in (
+            'import os\nclass K:\n    def __repr__(self):\n'
+            '        return str(os.environ)\n{}[K()]\n',
+            'import os\nclass K:\n    def __repr__(self):\n'
+            '        return str(os.environ)\nk = K()\n{}[k]\n',
+            'import os\nclass K:\n    def __repr__(self):\n'
+            '        return str(os.environ)\nclass K2(K):\n    pass\n{}[K2()]\n',
+            'import os\nclass K:\n    def __repr__(self):\n'
+            '        return str(os.environ)\ndef f(k):\n    return {}[k]\nf(K())\n',
+        ):
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+        self.assertIsNone(self.inspect(
+            'class K:\n    pass\n{}[K()]\n'
+        ))
+        self.assertIsNone(self.inspect(
+            'class K:\n    def __repr__(self):\n        return "K()"\n{}[K()]\n'
+        ))
+        self.assertIsNone(self.inspect(
+            'def make():\n    return "k"\n{}[make()]\n'
+        ))
+        self.assertIsNone(self.inspect(
+            'class F:\n    def build(self):\n        return "k"\n{}[F().build()]\n'
+        ))
+
     def test_awk_program_cannot_rewrite_reader_argv(self) -> None:
         self.assertIsNotNone(self.shell_violation(
             'awk \'BEGIN { ARGV[1]="maintainer.pem" } {print}\' docs/EXECUTION.md'
