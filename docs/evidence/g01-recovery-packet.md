@@ -21832,222 +21832,216 @@ def python_sensitive_read_violation(tree, parents):
                     return True
         return False
 
-    def error_operand_keys_sensitive(node, seen):
-        if node is None or id(node) in seen:
-            return False
-        seen.add(id(node))
-        if isinstance(node, ast.Dict):
-            return any(
-                error_operand_sensitive(key, set(seen))
-                for key in node.keys
-                if key is not None
-            )
-        if isinstance(node, ast.DictComp):
-            return error_operand_sensitive(node.key, set(seen))
-        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
-            return any(
-                error_operand_sensitive(item, set(seen)) for item in node.elts
-            )
-        if isinstance(node, ast.BinOp):
-            return error_operand_keys_sensitive(
-                node.left, set(seen)
-            ) or error_operand_keys_sensitive(node.right, set(seen))
-        if isinstance(node, ast.IfExp):
-            return error_operand_keys_sensitive(
-                node.body, set(seen)
-            ) or error_operand_keys_sensitive(node.orelse, set(seen))
-        if python_dotted_name(node) in {"os.environ", "os.environb"}:
-            return False
-        if isinstance(node, ast.Call):
-            if isinstance(node.func, ast.Name) and node.func.id == "dict":
-                return error_operand_keys_sensitive(
-                    node.args[0] if node.args else None, set(seen)
-                )
-            if not isinstance(node.func, ast.Attribute):
-                if (
-                    isinstance(node.func, ast.Name)
-                    and node.func.id in error_operand_element_iterators
-                ):
-                    return any(
-                        error_operand_keys_sensitive(part, set(seen))
-                        for part in list(node.args)
-                        + [keyword.value for keyword in node.keywords]
+    def error_operand_sensitive(value, keys_mode=False):
+        """Iterative operand-sensitivity reachability over (node, domain) pairs.
+
+        A worklist (not mutual recursion) so launcher-index traversal cannot
+        blow up through call/return edges: each pair expands once.
+        """
+        stack = [(value, keys_mode)]
+        seen_pairs = set()
+        while stack:
+            node, keys_only_mode = stack.pop()
+            if node is None:
+                continue
+            pair = (id(node), keys_only_mode)
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            if keys_only_mode:
+                if isinstance(node, ast.Dict):
+                    stack.extend(
+                        (key, False) for key in node.keys if key is not None
                     )
-                unpoisoned = set(seen)
-                unpoisoned.discard(id(node))
-                return error_operand_sensitive(node, unpoisoned)
-            if node.func.attr in {"keys", "fromkeys"}:
-                return error_operand_keys_sensitive(
-                    node.args[0] if node.args else node.func.value, set(seen)
-                )
-            if node.func.attr == "copy":
-                return error_operand_keys_sensitive(node.func.value, set(seen))
-            if node.func.attr == "items":
-                return error_operand_keys_sensitive(node.func.value, set(seen))
-            unpoisoned = set(seen)
-            unpoisoned.discard(id(node))
-            return error_operand_sensitive(node, unpoisoned)
-        if isinstance(node, ast.Name):
-            chain = python_lexical_scope_chain(
-                python_enclosing_scope(node, parents), parents
-            )
-            visible_scopes = set(chain)
-            mutated_sensitive = False
-            for mutation_scope, key, is_mapping in error_operand_mutated_keys.get(
-                node.id, ()
-            ):
-                if mutation_scope not in visible_scopes:
+                elif isinstance(node, ast.DictComp):
+                    stack.append((node.key, False))
+                elif isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+                    stack.extend((item, False) for item in node.elts)
+                elif isinstance(node, ast.BinOp):
+                    stack.extend(((node.left, True), (node.right, True)))
+                elif isinstance(node, ast.IfExp):
+                    stack.extend(((node.body, True), (node.orelse, True)))
+                elif python_dotted_name(node) in {"os.environ", "os.environb"}:
                     continue
-                if is_mapping:
-                    mutated_sensitive = error_operand_keys_sensitive(key, set(seen))
-                else:
-                    mutated_sensitive = error_operand_sensitive(key, set(seen))
-                if mutated_sensitive:
-                    return True
-            for scope in chain:
-                entries = [
-                    (binding, keys_only)
-                    for binding_scope, binding, keys_only in error_operand_bindings.get(
-                        node.id, ()
+                elif isinstance(node, ast.Call):
+                    if isinstance(node.func, ast.Name) and node.func.id == "dict":
+                        stack.append(
+                            (node.args[0] if node.args else None, True)
+                        )
+                    elif not isinstance(node.func, ast.Attribute):
+                        if (
+                            isinstance(node.func, ast.Name)
+                            and node.func.id in error_operand_element_iterators
+                        ):
+                            stack.extend(
+                                (part, True)
+                                for part in list(node.args)
+                                + [keyword.value for keyword in node.keywords]
+                            )
+                        else:
+                            stack.append((node, False))
+                    elif node.func.attr in {"keys", "fromkeys"}:
+                        stack.append(
+                            (
+                                node.args[0]
+                                if node.args
+                                else node.func.value,
+                                True,
+                            )
+                        )
+                    elif node.func.attr == "copy":
+                        stack.append((node.func.value, True))
+                    elif node.func.attr == "items":
+                        stack.append((node.func.value, True))
+                    else:
+                        stack.append((node, False))
+                elif isinstance(node, ast.Name):
+                    chain = python_lexical_scope_chain(
+                        python_enclosing_scope(node, parents), parents
                     )
-                    if binding_scope is scope
-                ]
-                is_parameter = node.id in error_operand_parameters.get(scope, ())
-                if entries or is_parameter:
-                    resolutions = [
-                        error_operand_keys_sensitive(binding, set(seen))
-                        if keys_only
-                        else error_operand_sensitive(binding, set(seen))
-                        for binding, keys_only in entries
-                    ]
-                    if is_parameter:
-                        resolutions.extend(
-                            error_operand_keys_sensitive(source, set(seen))
-                            for source_scope, source in assignments_by_name.get(
+                    visible_scopes = set(chain)
+                    for (
+                        mutation_scope,
+                        key,
+                        is_mapping,
+                    ) in error_operand_mutated_keys.get(node.id, ()):
+                        if mutation_scope not in visible_scopes:
+                            continue
+                        stack.append((key, True if is_mapping else False))
+                    for scope in chain:
+                        entries = [
+                            (binding, keys_only)
+                            for binding_scope, binding, keys_only in error_operand_bindings.get(
                                 node.id, ()
                             )
-                            if source_scope is scope
+                            if binding_scope is scope
+                        ]
+                        is_parameter = node.id in error_operand_parameters.get(
+                            scope, ()
                         )
-                    return any(resolutions)
-            return False
-        unpoisoned = set(seen)
-        unpoisoned.discard(id(node))
-        return error_operand_sensitive(node, unpoisoned)
-
-    def error_operand_sensitive(value, seen):
-        if value is None or id(value) in seen:
-            return False
-        seen.add(id(value))
-        if isinstance(value, ast.Name):
-            chain = python_lexical_scope_chain(
-                python_enclosing_scope(value, parents), parents
-            )
-            for scope in chain:
-                entries = [
-                    (binding, keys_only)
-                    for binding_scope, binding, keys_only in error_operand_bindings.get(
-                        value.id, ()
-                    )
-                    if binding_scope is scope
-                ]
-                is_parameter = value.id in error_operand_parameters.get(scope, ())
-                if entries or is_parameter:
-                    resolutions = [
-                        error_operand_keys_sensitive(binding, set(seen))
-                        if keys_only
-                        else error_operand_sensitive(binding, set(seen))
-                        for binding, keys_only in entries
-                    ]
-                    if is_parameter:
-                        resolutions.extend(
-                            error_operand_sensitive(source, set(seen))
-                            for source_scope, source in assignments_by_name.get(
-                                value.id, ()
+                        if entries or is_parameter:
+                            stack.extend(
+                                (binding, True if keys_only else False)
+                                for binding, keys_only in entries
                             )
-                            if source_scope is scope
+                            if is_parameter:
+                                stack.extend(
+                                    (source, True)
+                                    for source_scope, source in assignments_by_name.get(
+                                        node.id, ()
+                                    )
+                                    if source_scope is scope
+                                )
+                            break
+                else:
+                    stack.append((node, False))
+            else:
+                if isinstance(node, ast.Name):
+                    chain = python_lexical_scope_chain(
+                        python_enclosing_scope(node, parents), parents
+                    )
+                    for scope in chain:
+                        entries = [
+                            (binding, keys_only)
+                            for binding_scope, binding, keys_only in error_operand_bindings.get(
+                                node.id, ()
+                            )
+                            if binding_scope is scope
+                        ]
+                        is_parameter = node.id in error_operand_parameters.get(
+                            scope, ()
                         )
-                    return any(resolutions)
-            return False
-        if isinstance(value, ast.Attribute):
-            if python_dotted_name(value) in {"os.environ", "os.environb"}:
-                return True
-            return error_operand_sensitive(value.value, set(seen))
-        if isinstance(value, ast.Call):
-            dotted = python_dotted_name(value.func)
-            if dotted in {"os.getenv", "os.getenvb"}:
-                return True
-            if isinstance(value.func, ast.Attribute):
-                if value.func.attr in error_operand_index_methods:
-                    return False
-                parts = (
-                    [value.func.value]
-                    + list(value.args)
-                    + [keyword.value for keyword in value.keywords]
-                )
-                return any(
-                    error_operand_sensitive(part, set(seen)) for part in parts
-                )
-            if isinstance(value.func, (ast.Name, ast.Lambda)):
-                returned = python_local_call_return_values(value, tree, parents)
-                if returned:
-                    return any(
-                        error_operand_sensitive(result, set(seen))
-                        for result in returned
+                        if entries or is_parameter:
+                            stack.extend(
+                                (binding, True if keys_only else False)
+                                for binding, keys_only in entries
+                            )
+                            if is_parameter:
+                                stack.extend(
+                                    (source, False)
+                                    for source_scope, source in assignments_by_name.get(
+                                        node.id, ()
+                                    )
+                                    if source_scope is scope
+                                )
+                            break
+                elif isinstance(node, ast.Attribute):
+                    if python_dotted_name(node) in {"os.environ", "os.environb"}:
+                        return True
+                    stack.append((node.value, False))
+                elif isinstance(node, ast.Call):
+                    dotted = python_dotted_name(node.func)
+                    if dotted in {"os.getenv", "os.getenvb"}:
+                        return True
+                    if isinstance(node.func, ast.Attribute):
+                        if node.func.attr not in error_operand_index_methods:
+                            stack.append((node.func.value, False))
+                            stack.extend(
+                                (argument, False) for argument in node.args
+                            )
+                            stack.extend(
+                                (keyword.value, False)
+                                for keyword in node.keywords
+                            )
+                    elif isinstance(node.func, (ast.Name, ast.Lambda)):
+                        returned = python_local_call_return_values(
+                            node, tree, parents
+                        )
+                        if returned:
+                            stack.extend(
+                                (result, False) for result in returned
+                            )
+                        elif isinstance(node.func, ast.Name) and (
+                            error_operand_callable_bases(node.func.id)
+                            & (error_operand_propagators | error_operand_iterators)
+                            or dotted
+                            in {
+                                "itertools.chain",
+                                "itertools.chain.from_iterable",
+                            }
+                        ):
+                            stack.extend(
+                                (part, False)
+                                for part in list(node.args)
+                                + [keyword.value for keyword in node.keywords]
+                            )
+                elif isinstance(node, ast.Subscript):
+                    if python_dotted_name(node.value) in {
+                        "os.environ",
+                        "os.environb",
+                    }:
+                        return True
+                    stack.extend(((node.value, False), (node.slice, False)))
+                elif isinstance(node, ast.NamedExpr):
+                    stack.append((node.value, False))
+                elif isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+                    stack.extend((item, False) for item in node.elts)
+                elif isinstance(node, ast.Dict):
+                    stack.extend(
+                        (item, False)
+                        for item in list(node.keys) + list(node.values)
+                        if item is not None
                     )
-                if isinstance(value.func, ast.Name) and (
-                    error_operand_callable_bases(value.func.id)
-                    & (error_operand_propagators | error_operand_iterators)
-                    or dotted
-                    in {
-                        "itertools.chain",
-                        "itertools.chain.from_iterable",
-                    }
-                ):
-                    parts = list(value.args) + [
-                        keyword.value for keyword in value.keywords
-                    ]
-                    return any(
-                        error_operand_sensitive(part, set(seen)) for part in parts
+                elif isinstance(node, ast.IfExp):
+                    stack.extend(((node.body, False), (node.orelse, False)))
+                elif isinstance(node, (ast.BinOp, ast.BoolOp, ast.UnaryOp)):
+                    stack.extend(
+                        (child, False)
+                        for child in ast.iter_child_nodes(node)
+                        if isinstance(child, ast.expr)
                     )
-            return False
-        if isinstance(value, ast.Subscript):
-            if python_dotted_name(value.value) in {"os.environ", "os.environb"}:
-                return True
-            return error_operand_sensitive(
-                value.value, set(seen)
-            ) or error_operand_sensitive(value.slice, set(seen))
-        if isinstance(value, ast.NamedExpr):
-            return error_operand_sensitive(value.value, set(seen))
-        if isinstance(value, (ast.List, ast.Tuple, ast.Set)):
-            return any(
-                error_operand_sensitive(item, set(seen)) for item in value.elts
-            )
-        if isinstance(value, ast.Dict):
-            return any(
-                error_operand_sensitive(item, set(seen))
-                for item in list(value.keys) + list(value.values)
-                if item is not None
-            )
-        if isinstance(value, ast.IfExp):
-            return error_operand_sensitive(
-                value.body, set(seen)
-            ) or error_operand_sensitive(value.orelse, set(seen))
-        if isinstance(value, (ast.BinOp, ast.BoolOp, ast.UnaryOp)):
-            return any(
-                error_operand_sensitive(child, set(seen))
-                for child in ast.iter_child_nodes(value)
-                if isinstance(child, ast.expr)
-            )
-        if isinstance(value, (ast.JoinedStr, ast.FormattedValue)):
-            return any(
-                error_operand_sensitive(child, set(seen))
-                for child in ast.iter_child_nodes(value)
-                if isinstance(child, ast.expr)
-            )
-        if isinstance(value, ast.Starred):
-            return error_operand_sensitive(value.value, set(seen))
-        if isinstance(value, (ast.Compare, ast.Slice)):
-            return False
+                elif isinstance(node, (ast.JoinedStr, ast.FormattedValue)):
+                    stack.extend(
+                        (child, False)
+                        for child in ast.iter_child_nodes(node)
+                        if isinstance(child, ast.expr)
+                    )
+                elif isinstance(node, ast.Starred):
+                    stack.append((node.value, False))
+                elif isinstance(node, (ast.Compare, ast.Slice)):
+                    continue
+                else:
+                    continue
         return False
 
     def error_operand_repr_from_class(classdef, seen):
@@ -22063,7 +22057,7 @@ def python_sensitive_read_violation(tree, parents):
                     if (
                         isinstance(candidate, ast.Return)
                         and candidate.value is not None
-                        and error_operand_sensitive(candidate.value, set(seen))
+                        and error_operand_sensitive(candidate.value)
                     ):
                         return True
         for base in classdef.bases:
@@ -22184,7 +22178,7 @@ def python_sensitive_read_violation(tree, parents):
             and not isinstance(node.ctx, ast.Store)
             and python_dotted_name(node.value)
             not in {"os.environ", "os.environb"}
-            and error_operand_sensitive(node.slice, set())
+            and error_operand_sensitive(node.slice)
         ):
             return (
                 "Python sensitive value is used as a subscript that may surface "
@@ -22236,7 +22230,7 @@ def python_sensitive_read_violation(tree, parents):
         if isinstance(node, ast.Call):
             dotted = python_dotted_name(node.func)
             if error_operand_conversion_callable(node.func, set()) and any(
-                error_operand_sensitive(value, set())
+                error_operand_sensitive(value)
                 for value in list(node.args)
                 + [keyword.value for keyword in node.keywords]
             ):
