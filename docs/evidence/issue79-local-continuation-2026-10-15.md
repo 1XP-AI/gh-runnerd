@@ -1,6 +1,6 @@
 # Issue #79 local continuation — 2026-10-15
 
-Issue: https://github.com/1XP-AI/gh-runner/issues/79
+Issue: https://github.com/1XP-AI/gh-runnerd/issues/79
 
 ## Source and scope
 
