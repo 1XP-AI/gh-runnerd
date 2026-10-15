@@ -606,3 +606,17 @@ CI, live qualification, or G01 completion. The live Project was read through
 status or resource was changed. This evidence-only addition has no behavior
 change and needs no artificial RED test; rollback is reverting its local
 documentation commit.
+
+#### Static compilation follow-up
+
+Using the same offline Go 1.26.9 environment, the following three static
+checks each exited 0 with no diagnostics:
+
+```text
+go vet ./...
+go vet -tags=g01_live,g01_worker ./cmd/g01-live ./cmd/g01-worker
+go vet -tags=g01_pair_fixture ./livecanary
+```
+
+These inspect the default, tagged command, and paired fixture sources. They
+do not turn the timed-out runtime partitions into passing tests.
