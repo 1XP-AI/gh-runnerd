@@ -8,6 +8,19 @@ this snapshot. This plan neither changes the board nor dispatches gated work.
 
 ## Current execution choice
 
+### 2026-10-22 authorization update
+
+The maintainer resumed push, PR creation, independent/GitHub review and merge.
+This supersedes the local-only/review-deferral bullets below, which describe the
+October 14 checkpoint. Exact-head review, finding triage and PR quick checks
+remain mandatory. The explicit Codex Sol medium model choice is unchanged.
+The coordinator owns GitHub writes and integration; delegated fixes stay local
+until a stable batch is reviewed. Canary preparation is authorized, but actual
+live execution still requires separate concrete approval. Keep G01 open and do
+not dispatch dependent production implementation from this permission change.
+
+### October 14 checkpoint
+
 - Cursor Agent: Muse Spark 1.3 Max.
 - Codex: GPT-6.1 Sol, medium reasoning; do not reuse Luna Max for new work.
 - At most two active workers. One issue per branch/worktree. Reuse suitable

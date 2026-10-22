@@ -35,6 +35,36 @@ digest; the checkpoint is source/metadata evidence only and authorizes no swap.
 
 ## Required environment and authorization record
 
+### Read-only preparation checkpoint — 2026-10-22
+
+The maintainer authorized preparation, not execution. A dedicated private,
+non-archived repository was located through `gh`; its name and local endpoint
+remain in the private approval conversation, not this public record. Its current
+workflow is manual-only, has empty token permissions, one ten-minute job and
+non-cancelling concurrency. However, it targets macOS ARM64 with a fixed label
+and prints the runner name. It is **not** the nonce-scoped Linux workload in
+`experiments/g01-canary-assets`, and is not approved for this experiment.
+
+The preparation host is macOS ARM64 and has a configured Docker Desktop Linux
+context. Only local context metadata was inspected: daemon availability, worker
+isolation and resources have not been verified. No context was switched, image
+pulled, container started or runner changed. Approximately 7.5 GiB free disk was
+observed, so runtime preparation must wait for adequate measured headroom.
+The proposed first scope is one disposable Linux ARM64 worker (1 vCPU / 1 GiB),
+one controller/session/scale set and one baseline job, with no host socket or
+controller mounts in the worker. No current native runner is a fallback target.
+
+The organization runner-group metadata request returned HTTP 403. Selected-only
+repository policy, group identity and existing-runner inventory therefore remain
+unverified; no authentication scopes or App permissions were changed. A reviewed
+nonce-bound workflow commit, immutable executor/runtime inputs, separate
+controller/broker identities, authenticated provenance/trust roots and supported
+conditional cleanup are still required. A configured context or a successful
+source review cannot clear these live gates. Later fault phases need their own
+explicit approval; do not dispatch even the baseline from this checkpoint.
+
+### Execution checklist
+
 - [ ] Maintainer identifies one disposable **private** repository and one
   organization; no public fork/PR execution. Record the reviewed workflow SHA.
 - [ ] Dedicated runner group allows only that repository, and a unique canary
