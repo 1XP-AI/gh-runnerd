@@ -22791,7 +22791,7 @@ def python_sensitive_read_violation(tree, parents):
         # Bounded literal-result proof, not a bound-method/effects interpreter.
         if value is None or id(value) in seen or error_operand_sensitive(value):
             return False
-        if any(isinstance(part, ast.Name) and any(isinstance(reference, (ast.List, ast.Tuple, ast.Dict, ast.Set))
+        if any(isinstance(part, (ast.Name, ast.Attribute)) and any(isinstance(reference, (ast.List, ast.Tuple, ast.Dict, ast.Set))
             and any(isinstance(item, (ast.List, ast.Dict, ast.Set)) for item in ast.walk(reference))
             for reference in python_value_provenance(part, tree, parents)) for part in ast.walk(value)):
             return False  # Named mutable dependencies/defaults cannot certify original literal contents.
@@ -22818,6 +22818,21 @@ def python_sensitive_read_violation(tree, parents):
         return bool(alternatives) and all(subscription_result_proven(reference, seen)
             for reference in alternatives)
 
+    def subscription_state_targets(value):
+        for reference in python_value_provenance(value, tree, parents):
+            if not isinstance(reference, ast.Name):
+                continue
+            inventory = getattr(tree, "_issue79_sensitive_imported_alias_bindings", {})
+            for scope in python_sensitive_alias_scope_chain(reference, parents):
+                bindings = inventory.get((id(scope), reference.id), ())
+                if not bindings or any(kind in {"global", "nonlocal"} for kind, _ in bindings):
+                    continue
+                if any(kind == "unknown" and isinstance(binding, ast.arg)
+                    and not mutation_parameter_calls_closed(binding) for kind, binding in bindings):
+                    return None  # Callback-supplied parameters cannot close from defaults alone.
+                break
+        return protocol_callable_targets(value, set())
+
     def subscription_implementation_unproven(implementation):
         if any(isinstance(part, (ast.Yield, ast.YieldFrom))
             and python_enclosing_scope(part, parents) is implementation for part in ast.walk(implementation)):
@@ -22825,7 +22840,7 @@ def python_sensitive_read_violation(tree, parents):
         state_names = {"__defaults__", "__kwdefaults__", "__code__", "__globals__", "__closure__", "__dict__"}
         for part in ast.walk(tree):
             if isinstance(part, ast.Attribute) and part.attr in state_names:
-                targets = protocol_callable_targets(part.value, set())
+                targets = subscription_state_targets(part.value)
                 if not targets or implementation in targets or any(isinstance(target, ast.ClassDef) for target in targets):
                     return True  # Computed/unknown protected-state targets cannot prove disjoint identity.
             if (isinstance(part, ast.Call) and len(part.args) >= 2
@@ -22833,7 +22848,7 @@ def python_sensitive_read_violation(tree, parents):
                     or python_unshadowed_builtin_reference(part.func, {"getattr", "delattr"}, tree, parents))):
                 names = mutation_literal_names(part.args[1], set())
                 if not names or names & state_names:
-                    targets = protocol_callable_targets(part.args[0], set())
+                    targets = subscription_state_targets(part.args[0])
                     if not targets or implementation in targets or any(isinstance(target, ast.ClassDef) for target in targets):
                         return True
         return False
@@ -22875,8 +22890,9 @@ def python_sensitive_read_violation(tree, parents):
                     for target in python_value_provenance(reference.func, tree, parents))):
                     if not subscription_wrapper_proven(reference.func, set()):
                         return None  # One visible builtin cannot certify unknown competing targets.
-                    pending.extend(reference.args)
-                    for argument in reference.args:
+                    arguments = list(reference.args) + [keyword.value for keyword in reference.keywords]
+                    pending.extend(arguments)
+                    for argument in arguments:
                         pending.extend(python_value_provenance(argument, tree, parents,
                             initial_selection="iterate", receiver_origins=True))
                         if any(python_unshadowed_builtin_reference(target, {"dict"}, tree, parents)
@@ -23278,7 +23294,7 @@ def python_sensitive_read_violation(tree, parents):
         return True
 
     assigned_display_methods = {}
-    display_protocol_names = {"__str__", "__repr__", "__format__", "__iter__", "__next__", "__getitem__", "__class_getitem__", "__aiter__", "__anext__", "__await__"}
+    display_protocol_names = {"__str__", "__repr__", "__format__", "__iter__", "__next__", "__getitem__", "__class_getitem__", "__aiter__", "__anext__", "__await__", "__set_name__"}
     def mutation_parameter_calls_closed(parameter):
         implementation = parents.get(parents.get(parameter))
         if not isinstance(implementation, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
@@ -23352,6 +23368,22 @@ def python_sensitive_read_violation(tree, parents):
                 if method in display_protocol_names:
                     for classdef in classes:
                         assigned_display_methods.setdefault(classdef, []).append((method, candidate.value))
+
+    for part in ast.walk(tree):
+        if (isinstance(part, ast.Attribute) and part.attr == "__set_name__"
+            and isinstance(part.ctx, (ast.Store, ast.Del))):
+            return "Python descriptor construction hooks are outside the reviewed protocol model"
+        if (isinstance(part, ast.Call) and len(part.args) >= 3
+            and receiver_setter_proven(part.func, set())
+            and "__set_name__" in mutation_literal_names(part.args[1], set())):
+            return "Python descriptor construction hooks are outside the reviewed protocol model"
+    for classdef in (part for part in ast.walk(tree) if isinstance(part, ast.ClassDef)):
+        if (any(method == "__set_name__" for method, _ in assigned_display_methods.get(classdef, ()))
+            or any(python_class_namespace_owner(part, parents) is classdef and (
+                isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef)) and part.name == "__set_name__"
+                or isinstance(part, ast.Name) and isinstance(part.ctx, ast.Store) and part.id == "__set_name__")
+                for part in ast.walk(classdef))):
+            return "Python descriptor construction hooks are outside the reviewed protocol model"
 
     def error_operand_repr_sensitive(value, seen, methods=("__repr__",)):
         # Factory/parameter graphs can contain cycles and many shared paths.

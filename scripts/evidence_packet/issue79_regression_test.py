@@ -8714,6 +8714,64 @@ def synthetic_read(_fd, _size):
             '    def __getitem__(self, key, state=["safe"]):\n        return state[0]\n'
             'print(K()[0])\n'))
 
+    def test_pr103_v20_keyword_mapping_receiver(self) -> None:
+        for value in ('os.environ', '"safe"'):
+            for body in ('print(dict(x=K)["x"][0])',
+                         'print(dict(**{"x": K})["x"][0])',
+                         'values = {"x": K}\nctor = dict\nprint(ctor(**values)["x"][0])'):
+                with self.subTest(value=value, body=body):
+                    self.assertEqual(self.inspect('import os\nclass K:\n'
+                        '    def __class_getitem__(cls, key):\n        return ' + value
+                        + '\n' + body + '\n') is None, value == '"safe"')
+
+    def test_pr103_v20_member_mutable_dependency_policy(self) -> None:
+        for value in ('os.environ', '"safe"'):
+            for returned in ('Holder.state[0]', 'alias.state[0]'):
+                with self.subTest(value=value, returned=returned):
+                    self.assertIsNotNone(self.inspect('import os\nclass Holder:\n'
+                        '    state = ["safe"]\nalias = Holder\nclass K:\n'
+                        '    def __getitem__(self, key):\n        return ' + returned
+                        + '\nHolder.state[0] = ' + value + '\nprint(K()[0])\n'))
+
+    def test_pr103_v20_descriptor_construction_hook_policy(self) -> None:
+        for value in ('os.environ', '"safe"'):
+            for setup in ('class Descriptor:\n    def __set_name__(self, owner, name):\n'
+                          '        owner.__class_getitem__ = lambda key: VALUE\n',
+                          'def install(self, owner, name):\n'
+                          '    owner.__class_getitem__ = lambda key: VALUE\n'
+                          'class Descriptor: pass\nDescriptor.__set_name__ = install\n'):
+                with self.subTest(value=value, setup=setup):
+                    self.assertIsNotNone(self.inspect('import os\n' + setup.replace('VALUE', value)
+                        + 'class K:\n    field = Descriptor()\nprint(K[0])\n'))
+
+    def test_pr103_v20_callback_state_target_policy(self) -> None:
+        for value in ('os.environ', '"safe"'):
+            for invoke in ('list(map(mutate, [K.__getitem__]))',
+                           'alias = mutate\nlist(map(alias, [K.__getitem__]))'):
+                with self.subTest(value=value, invoke=invoke):
+                    self.assertIsNotNone(self.inspect('import os\n'
+                        'def replacement(self, key):\n    return ' + value + '\n'
+                        'def safe(self, key):\n    return "safe"\n'
+                        'def mutate(target=safe):\n    target.__code__ = replacement.__code__\n'
+                        'class K:\n    def __getitem__(self, key):\n        return "safe"\n'
+                        + invoke + '\nprint(K()[0])\n'))
+        self.assertIsNone(self.inspect('def safe(self, key):\n    return "safe"\n'
+            'def replacement(self, key):\n    return "safe"\n'
+            'def mutate(target=safe):\n    target.__code__ = replacement.__code__\n'
+            'class K:\n    def __getitem__(self, key):\n        return "safe"\n'
+            'mutate()\nprint(K()[0])\n'))
+
+    def test_pr103_v20_computed_hook_installation_policy(self) -> None:
+        for value in ('os.environ', '"safe"'):
+            for mutation in ('alias.__set_name__ = install',
+                             'setattr(alias, "__set_name__", install)'):
+                with self.subTest(value=value, mutation=mutation):
+                    self.assertIsNotNone(self.inspect('import os\n'
+                        'def install(self, owner, name):\n'
+                        '    owner.__class_getitem__ = lambda key: ' + value + '\n'
+                        'class Descriptor: pass\nalias = tuple([Descriptor])[0]\n'
+                        + mutation + '\nclass K:\n    field = Descriptor()\nprint(K[0])\n'))
+
     def test_pr103_v13_factory_returned_protocol_classes(self) -> None:
         consumer = ('async def collect():\n    async for item in K():\n'
                     '        print(item)\n        break\ncollect().send(None)\n')
