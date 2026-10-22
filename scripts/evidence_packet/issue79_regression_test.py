@@ -7442,6 +7442,181 @@ def synthetic_read(_fd, _size):
                 else:
                     self.assertIsNone(self.inspect(code))
 
+    def test_pr103_review_handler_order(self) -> None:
+        prefix = 'from pathlib import Path\ntry:\n    Path.cwd().relative_to("/definitely-no")\n'
+        for first in ('except Exception as err:\n    print(err)\n',
+                      'except (TypeError, ValueError) as err:\n    print(err)\n',
+                      'except BaseException as err:\n    print(err)\n'):
+            with self.subTest(first=first):
+                self.assertIsNotNone(self.inspect(prefix + first + 'except ValueError:\n    pass\n'))
+        self.assertIsNone(self.inspect(prefix + 'except TypeError:\n    {}["safe"]\nexcept ValueError:\n    pass\n'))
+        self.assertIsNone(self.inspect(prefix + 'except ValueError:\n    pass\nexcept Exception as err:\n    print(err)\n'))
+
+    def test_pr103_review_handler_suppression(self) -> None:
+        prefix = ('from pathlib import Path\ndef fail():\n    raise RuntimeError("safe")\n'
+                  'try:\n    Path.cwd().relative_to("/definitely-no")\nexcept ValueError:\n')
+        for effect in ('{}["safe"]', '1 / 0', 'fail()',
+                       'raise RuntimeError({}["safe"]) from None',
+                       'try:\n        raise RuntimeError("safe") from None\n    finally:\n        1 / 0'):
+            with self.subTest(effect=effect):
+                self.assertIsNotNone(self.inspect(prefix + '    ' + effect + '\n'))
+        for effect in ('pass', 'raise RuntimeError("safe") from None', 'raise SystemExit("safe")'):
+            with self.subTest(safe_effect=effect):
+                self.assertIsNone(self.inspect(prefix + '    ' + effect + '\n'))
+        self.assertIsNotNone(self.inspect('from pathlib import Path\ndef f():\n    try:\n        Path.cwd().relative_to("/definitely-no")\n    except ValueError:\n        return {}["safe"]\nf()\n'))
+
+    def test_pr103_review_starred_mapping_identity(self) -> None:
+        for binding in ('a, *rest, b = (other, other, other, d)',
+                        '*rest, b = (other, other, d)',
+                        '(a, *rest, b), = ((other, other, d),)',
+                        'a, *rest, (b,) = (other, other, (d,))',
+                        'a, *rest, b = (other, d, *empty)'):
+            for key in ('str(os.environ)', '"safe"'):
+                code = 'import os\nd = {}\nother = {}\nempty = ()\n' + binding + '\nb[' + key + '] = 1\nfor key in d:\n    {}[key]\n'
+                with self.subTest(binding=binding, key=key):
+                    if key == '"safe"':
+                        self.assertIsNone(self.inspect(code))
+                    else:
+                        self.assertIsNotNone(self.inspect(code))
+        self.assertIsNotNone(self.inspect('import os\nd = {}\nother = {}\na, *rest, b = (d, other, other)\na[str(os.environ)] = 1\nfor key in d:\n    {}[key]\n'))
+
+    def test_pr103_review_handler_adjacent_proof(self) -> None:
+        prefix = 'from pathlib import Path\ntry:\n    Path.cwd().relative_to("/definitely-no")\n'
+        for handlers in ('except (missing, ValueError):\n    pass\n',
+                         'except ValueError:\n    raise SystemExit("safe")\nfinally:\n    1 / 0\n',
+                         'except ValueError:\n    raise RuntimeError(f"{missing}") from None\n'):
+            with self.subTest(handlers=handlers):
+                self.assertIsNotNone(self.inspect(prefix + handlers))
+        for setup in ('if False:\n    msg = "safe"\n', 'msg = "safe"\ndel msg\n',
+                      'args = sys.argv\nargs[0] = object()\nmsg = sys.argv[0]\n'):
+            with self.subTest(setup=setup):
+                self.assertIsNotNone(self.inspect('import sys\n' + setup + prefix
+                    + 'except ValueError:\n    raise SystemExit(f"{msg}")\n'))
+        self.assertIsNotNone(self.inspect(prefix
+            + 'except ValueError:\n    raise RuntimeError(msg) from None\nmsg = "safe"\n'))
+        self.assertIsNone(self.inspect('msg = "safe"\n' + prefix
+            + 'except ValueError:\n    raise RuntimeError(f"{msg}") from None\n'))
+
+    def test_pr103_review_assigned_display_provenance(self) -> None:
+        for expression in ('make()', '(leak,)[0]', 'box["display"]', 'again()'):
+            for install in ('class K:\n    __str__ = IMPL\n', 'class K: pass\nK.__str__ = IMPL\n'):
+                for result in ('str(os.environ)', '"safe"'):
+                    code = ('import os\ndef leak(self):\n    return ' + result + '\n'
+                            'def make():\n    return leak\ndef again():\n    return make()\n'
+                            'box = {"display": leak}\n' + install.replace('IMPL', expression) + 'print(K())\n')
+                    with self.subTest(expression=expression, install=install, result=result):
+                        if result == '"safe"':
+                            self.assertIsNone(self.inspect(code))
+                        else:
+                            self.assertIsNotNone(self.inspect(code))
+
+    def test_pr103_recheck_rhs_starred_mapping(self) -> None:
+        for binding in ('a, *rest, b = (other, *bundle)',
+                        '(a, *rest, b), = ((other, *bundle),)',
+                        'alias = bundle\nbundle = alias\na, *rest, b = (other, *alias)'):
+            for key in ('str(os.environ)', '"safe"'):
+                code = ('import os\nd = {}\nother = {}\nbundle = (other, d)\n'
+                        + binding + '\nb[' + key + '] = 1\nfor key in d:\n    {}[key]\n')
+                with self.subTest(binding=binding, key=key):
+                    if key == '"safe"':
+                        self.assertIsNone(self.inspect(code))
+                    else:
+                        self.assertIsNotNone(self.inspect(code))
+
+    def test_pr103_recheck_handler_message_binders(self) -> None:
+        prefix = 'from pathlib import Path\nmsg = "safe"\n'
+        body = 'try:\n    Path.cwd().relative_to("/definitely-no")\nexcept ValueError'
+        for replacement in ('SystemExit(msg)', 'RuntimeError(f"{msg}") from None'):
+            with self.subTest(replacement=replacement):
+                self.assertIsNotNone(self.inspect(prefix + body + ' as msg:\n    raise ' + replacement + '\n'))
+        for binder in ('try:\n    1 / 0\nexcept ZeroDivisionError as msg:\n    pass\n',
+                       'with object() as msg:\n    pass\n',
+                       'for msg in [object()]:\n    pass\n',
+                       'match object():\n    case msg:\n        pass\n',
+                       'import re as msg\n'):
+            with self.subTest(binder=binder):
+                self.assertIsNotNone(self.inspect(prefix + binder + body
+                    + ':\n    raise RuntimeError(f"{msg}") from None\n'))
+        self.assertIsNone(self.inspect(prefix + body + ':\n    raise RuntimeError(f"{msg}") from None\n'))
+
+    def test_pr103_recheck_enclosing_cleanup_context(self) -> None:
+        for replacement in ('SystemExit("safe")', 'RuntimeError("safe") from None'):
+            for effect in ('pass', '1 / 0'):
+                code = ('from pathlib import Path\ntry:\n    try:\n'
+                        '        Path.cwd().relative_to("/definitely-no")\n'
+                        '    except ValueError:\n        raise ' + replacement
+                        + '\nfinally:\n    ' + effect + '\n')
+                with self.subTest(replacement=replacement, effect=effect):
+                    if replacement.startswith('SystemExit') and effect != 'pass':
+                        self.assertIsNotNone(self.inspect(code))
+                    else:
+                        self.assertIsNone(self.inspect(code))
+        self.assertIsNotNone(self.inspect('from pathlib import Path\ntry:\n    try:\n        Path.cwd().relative_to("/definitely-no")\n    except ValueError:\n        raise SystemExit("safe")\nexcept BaseException:\n    raise RuntimeError("replacement")\n'))
+
+    def test_pr103_recheck_replacement_constructor_bindings(self) -> None:
+        for setup, handler in (('from re import compile as RuntimeError\n', 'except ValueError'),
+                               ('', 'except ValueError as RuntimeError')):
+            with self.subTest(setup=setup, handler=handler):
+                self.assertIsNotNone(self.inspect('from pathlib import Path\n' + setup
+                    + 'try:\n    Path.cwd().relative_to("/definitely-no")\n'
+                    + handler + ':\n    raise RuntimeError("[") from None\n'))
+        self.assertIsNone(self.inspect('from pathlib import Path\ntry:\n    Path.cwd().relative_to("/definitely-no")\nexcept ValueError:\n    raise RuntimeError("[") from None\n'))
+
+    def test_pr103_final_lambda_sensitive_defaults(self) -> None:
+        for definition in ('f = lambda value=VALUE: print(value)',
+                           'f = lambda *, value=VALUE: print(value)'):
+            for value in ('os.environ', '"safe"'):
+                with self.subTest(definition=definition, value=value):
+                    violation = self.inspect('import os\n' + definition.replace('VALUE', value) + '\nf()\n')
+                    if value == '"safe"':
+                        self.assertIsNone(violation)
+                    else:
+                        self.assertIsNotNone(violation)
+
+    def test_pr103_final_open_callable_defaults(self) -> None:
+        for definition in ('def f(reader=SOURCE):\n    print(reader(PATH).read())',
+                           'f = lambda reader=SOURCE: print(reader(PATH).read())',
+                           'def f(*, reader=SOURCE):\n    print(reader(PATH).read())'):
+            for path in ('"/tmp/synthetic-private"', '"docs/backlog.json"'):
+                code = definition.replace('SOURCE', 'open').replace('PATH', path) + '\nf()\n'
+                with self.subTest(definition=definition, path=path):
+                    if path == '"docs/backlog.json"':
+                        self.assertIsNone(self.inspect(code))
+                    else:
+                        self.assertIsNotNone(self.inspect(code))
+        self.assertIsNone(self.inspect('def f(reader=len):\n    print(reader("safe"))\nf()\n'))
+
+    def test_pr103_final_breakpoint_hook(self) -> None:
+        for call in ('breakpoint("synthetic-command")', 'hook = breakpoint\nhook("synthetic-command")'):
+            with self.subTest(call=call):
+                self.assertIsNotNone(self.inspect('import os, sys\nsys.breakpointhook = os.system\n' + call + '\n'))
+        self.assertIsNone(self.inspect('def breakpoint(value):\n    return len(value)\nprint(breakpoint("safe"))\n'))
+
+    def test_pr103_final_custom_iterator_values(self) -> None:
+        for implementation in ('__iter__ = lambda self: iter(VALUE)',
+                               'def __iter__(self):\n        yield from VALUE',
+                               'def __getitem__(self, index):\n        return VALUE[index]'):
+            for value in ('os.environ.items()', '[("safe", "value")]'):
+                for constructor in ('dict', 'list', 'tuple'):
+                    code = ('import os\nclass K:\n    ' + implementation.replace('VALUE', value)
+                            + '\nprint(' + constructor + '(K()))\n')
+                    with self.subTest(implementation=implementation, value=value, constructor=constructor):
+                        if value.startswith('os.'):
+                            self.assertIsNotNone(self.inspect(code))
+                        else:
+                            self.assertIsNone(self.inspect(code))
+
+    def test_pr103_final_iterator_adjacent_provenance(self) -> None:
+        for implementation in ('def __iter__(self):\n        return self\n    def __next__(self):\n        return VALUE',
+                               'def emit(self):\n    yield VALUE\nclass K:\n    __iter__ = emit'):
+            for value in ('str(os.environ)', '"safe"'):
+                code = 'import os\n' + (('class K:\n    ' + implementation) if implementation.startswith('def __iter__') else implementation).replace('VALUE', value) + '\ncollect = list\nprint(collect(K()))\n'
+                with self.subTest(implementation=implementation, value=value):
+                    if value == '"safe"':
+                        self.assertIsNone(self.inspect(code))
+                    else:
+                        self.assertIsNotNone(self.inspect(code))
+
     def test_pr103_current_scanner_regex_binding_control(self) -> None:
         module = ast.parse(_scanner_module_source(PACKET_TEXT))
         fence = next(node for node in module.body
@@ -7452,6 +7627,47 @@ def synthetic_read(_fd, _size):
         self.assertTrue(calls)
         for call in calls:
             self.assertTrue(self.scanner["python_known_non_path_reader_call"](call, module))  # type: ignore[operator]
+
+    def test_pr103_current_markdown_diagnostics_suppress_context(self) -> None:
+        bodies = [body for _line, body, _marker, _invocation
+                  in self.scanner["python_heredoc_bodies"](PACKET_TEXT)  # type: ignore[operator]
+                  if 'def markdown_outside_fences(markdown):' in body
+                  and 'local markdown link/anchor check: passed' in body]
+        self.assertEqual(len(bodies), 1)
+        module = ast.parse(bodies[0])
+        parents = {child: parent for parent in ast.walk(module)
+                   for child in ast.iter_child_nodes(parent)}
+        checks = [node for node in ast.walk(module) if isinstance(node, ast.Try)
+                  and len(node.body) == 1 and isinstance(node.body[0], ast.Expr)
+                  and isinstance(node.body[0].value, ast.Call)
+                  and isinstance(node.body[0].value.func, ast.Attribute)
+                  and node.body[0].value.func.attr == "relative_to"]
+        self.assertEqual(len(checks), 2)
+        # Each speculative diagnostic is the last list entry. Failure continues
+        # its own loop before pop; success removes only that entry, preserving
+        # earlier failures and their order for every sequence of path results.
+        for check in checks:
+            owner = parents[check]
+            self.assertIsInstance(owner, ast.For)
+            position = owner.body.index(check)
+            append = owner.body[position - 1]
+            pop = owner.body[position + 1]
+            self.assertIsInstance(append, ast.Expr)
+            self.assertIsInstance(pop, ast.Expr)
+            self.assertIsInstance(append.value, ast.Call)
+            self.assertIsInstance(pop.value, ast.Call)
+            self.assertEqual(ast.unparse(append.value.func), "errors.append")
+            self.assertEqual(len(append.value.args), 1)
+            self.assertEqual(ast.unparse(pop.value.func), "errors.pop")
+            self.assertEqual(pop.value.args, [])
+            self.assertEqual(pop.value.keywords, [])
+            self.assertEqual(len(check.handlers), 1)
+            self.assertEqual(ast.unparse(check.handlers[0].type), "ValueError")
+            self.assertEqual(len(check.handlers[0].body), 1)
+            self.assertIsInstance(check.handlers[0].body[0], ast.Continue)
+            self.assertEqual(check.orelse, [])
+            self.assertEqual(check.finalbody, [])
+        self.assertIsNone(self.inspect(bodies[0]))
 
     def test_pr103_current_scanner_method_helper_is_not_launcher_alias(self) -> None:
         module = ast.parse(_scanner_module_source(PACKET_TEXT))

@@ -5681,11 +5681,12 @@ for name in files:
         errors.append(f"{name}: tracked Markdown path was a symlink")
         continue
     source_path = (repository_root / source).resolve()
+    errors.append(f"{name}: tracked Markdown path escapes repository")
     try:
         source_path.relative_to(repository_root)
     except ValueError:
-        errors.append(f"{name}: tracked Markdown path escapes repository")
         continue
+    errors.pop()
     markdown = "\n".join(markdown_outside_fences(source_path.read_text(encoding="utf-8")))
     for match in link.finditer(markdown):
         target = match.group(1).strip().strip("<>")
@@ -5701,11 +5702,12 @@ for name in files:
                 continue
             fragment = fragment if separator else None
         path = (source.parent / target).resolve()
+        errors.append(f"{name}: local link target escapes repository {target}")
         try:
             path.relative_to(repository_root)
         except ValueError:
-            errors.append(f"{name}: local link target escapes repository {target}")
             continue
+        errors.pop()
         checked += 1
         if not path.is_file():
             errors.append(f"{name}: missing target {target}")
@@ -10850,13 +10852,13 @@ def python_sensitive_value_names(tree, parents):
     # call-site pass closes the exact environment-map laundering gap where a
     # helper parameter is later indexed or sent to a sink.
     function_count = sum(
-        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
         for node in ast.walk(tree)
     )
     for _ in range(len(assignments) + function_count + 1):
         changed = False
         for function in ast.walk(tree):
-            if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
                 continue
             positional = list(function.args.posonlyargs) + list(function.args.args)
             defaults = list(zip(positional[-len(function.args.defaults):], function.args.defaults)) if function.args.defaults else []
@@ -21663,15 +21665,59 @@ def python_sensitive_read_violation(tree, parents):
         )
     }
     error_operand_bindings = {}
+    def error_operand_starred_sources(value, seen):
+        if value is None or id(value) in seen:
+            return []
+        seen.add(id(value))
+        if isinstance(value, ast.Starred):
+            return error_operand_starred_sources(value.value, seen)
+        if isinstance(value, ast.Name):
+            for scope in python_lexical_scope_chain(python_enclosing_scope(value, parents), parents):
+                expanded_sources = [source for source_scope, source
+                    in assignments_by_name.get(value.id, ()) if source_scope is scope]
+                if expanded_sources:
+                    return [element for source in expanded_sources
+                        for element in error_operand_starred_sources(source, seen)]
+            return [value]
+        if isinstance(value, (ast.Tuple, ast.List)):
+            return [element for source in value.elts for element in (
+                error_operand_starred_sources(source, seen)
+                if isinstance(source, ast.Starred) else [source])]
+        if isinstance(value, ast.Call):
+            return [element for source in python_local_call_return_values(value, tree, parents)
+                for element in error_operand_starred_sources(source, seen)]
+        return [value]
+
     def error_operand_binding_pairs(target, value):
         if isinstance(target, ast.Name):
             return [(target, value)]
         if isinstance(target, (ast.Tuple, ast.List)):
             pairs = []
+            starred_positions = [position for position, element in enumerate(target.elts)
+                if isinstance(element, ast.Starred)]
             for index, item in enumerate(target.elts):
-                source = (value.elts[index] if isinstance(value, (ast.Tuple, ast.List))
-                    and index < len(value.elts) else value)
-                pairs.extend(error_operand_binding_pairs(item, source))
+                if (isinstance(value, (ast.Tuple, ast.List)) and len(starred_positions) <= 1
+                    and not any(isinstance(element, ast.Starred) for element in value.elts)):
+                    if starred_positions:
+                        star_position = starred_positions[0]
+                        tail_count = len(target.elts) - star_position - 1
+                        if isinstance(item, ast.Starred):
+                            for source in value.elts[star_position:len(value.elts) - tail_count]:
+                                pairs.extend(error_operand_binding_pairs(item, source))
+                            continue
+                        source_index = index if index < star_position else index - len(target.elts)
+                    else:
+                        source_index = index
+                    if -len(value.elts) <= source_index < len(value.elts):
+                        pairs.extend(error_operand_binding_pairs(item, value.elts[source_index]))
+                        continue
+                # Unresolved destructuring retains every possible source identity.
+                sources = value.elts if isinstance(value, (ast.Tuple, ast.List)) else [value]
+                for source in sources:
+                    alternatives = (error_operand_starred_sources(source, set())
+                        if isinstance(source, ast.Starred) else [source])
+                    for alternative in alternatives:
+                        pairs.extend(error_operand_binding_pairs(item, alternative))
             return pairs
         if isinstance(target, ast.Starred):
             return error_operand_binding_pairs(target.value, value)
@@ -22306,7 +22352,7 @@ def python_sensitive_read_violation(tree, parents):
             ):
                 for candidate in ast.walk(entry):
                     if (
-                        isinstance(candidate, ast.Return)
+                        isinstance(candidate, (ast.Return, ast.Yield, ast.YieldFrom))
                         and candidate.value is not None
                         and error_operand_sensitive(candidate.value)
                     ):
@@ -22325,6 +22371,12 @@ def python_sensitive_read_violation(tree, parents):
         functions = []
         if isinstance(value, ast.Lambda):
             return error_operand_sensitive(value.body)
+        if isinstance(value, ast.Call):
+            return any(display_implementation_sensitive(returned, seen)
+                for returned in python_local_call_return_values(value, tree, parents))
+        if isinstance(value, ast.Subscript):
+            return any(display_implementation_sensitive(selected, seen)
+                for selected in error_operand_subscript_values(value))
         if isinstance(value, ast.Name):
             functions = (python_local_function_candidates(value.id, value, tree, parents)
                 + python_local_lambda_candidates(value.id, value, tree, parents))
@@ -22337,7 +22389,8 @@ def python_sensitive_read_violation(tree, parents):
                     break
         for function in functions:
             returns = ([function.body] if isinstance(function, ast.Lambda) else
-                [node.value for node in ast.walk(function) if isinstance(node, ast.Return)])
+                [node.value for node in ast.walk(function)
+                    if isinstance(node, (ast.Return, ast.Yield, ast.YieldFrom))])
             if any(error_operand_sensitive(result) for result in returns):
                 return True
         return False
@@ -22358,6 +22411,112 @@ def python_sensitive_read_violation(tree, parents):
                     for classdef in display_class_targets(entry, seen)]
         return []
 
+    def path_handler_builtin_reference(expression, names):
+        if not python_unshadowed_builtin_reference(expression, names, tree, parents):
+            return False
+        python_sensitive_imported_function_alias(expression, tree, parents)
+        constructor_index = getattr(tree, "_issue79_sensitive_imported_alias_bindings", {})
+        return not any(constructor_index.get((id(scope), expression.id), ())
+            for scope in python_sensitive_alias_scope_chain(expression, parents))
+
+    def path_handler_suppresses_context(handler):
+        """Prove only inert control flow or literal builtin context suppression."""
+        def inert_message(expression, seen):
+            if id(expression) in seen:
+                return False
+            seen.add(id(expression))
+            if isinstance(expression, ast.Constant):
+                return True
+            if isinstance(expression, ast.JoinedStr):
+                return all(isinstance(part, ast.Constant) or (
+                    isinstance(part, ast.FormattedValue) and part.format_spec is None
+                    and inert_message(part.value, set(seen))) for part in expression.values)
+            if isinstance(expression, ast.Name):
+                if any(isinstance(part, ast.Name) and part.id == expression.id
+                    and isinstance(part.ctx, ast.Del) for part in ast.walk(tree)):
+                    return False
+                # Reuse the complete binder inventory: except targets clear
+                # implicitly, and for/with/match/import/parameter binders are
+                # not evidence of an available primitive message.
+                python_sensitive_imported_function_alias(expression, tree, parents)
+                message_index = getattr(tree, "_issue79_sensitive_imported_alias_bindings", {})
+                for scope in python_sensitive_alias_scope_chain(expression, parents):
+                    message_bindings = message_index.get((id(scope), expression.id), ())
+                    if message_bindings:
+                        if any(kind != "assignment" or binding.value is None
+                            for kind, binding in message_bindings):
+                            return False
+                        message_sources = [binding.value for _kind, binding in message_bindings]
+                        if any(not isinstance(parents.get(binding), (ast.Assign, ast.AnnAssign))
+                            or parents.get(parents.get(binding)) is not scope
+                            or binding.lineno >= handler.lineno for binding in message_sources):
+                            return False
+                        return all(inert_message(binding, set(seen)) or (
+                            isinstance(binding, ast.Subscript)
+                            and python_dotted_name(binding.value) == "sys.argv"
+                            and isinstance(binding.slice, ast.Constant)
+                            and isinstance(binding.slice.value, int)
+                            and python_imported_module_alias_is_stable("sys", "sys", tree)
+                            and all(isinstance(parents.get(part), ast.Subscript)
+                                and parents[part].value is part
+                                or isinstance(parents.get(part), ast.Call)
+                                and python_unshadowed_builtin_call(parents[part], {"len"}, tree, parents)
+                                for part in ast.walk(tree)
+                                if isinstance(part, ast.Attribute)
+                                and python_dotted_name(part) == "sys.argv")
+                            and not any(isinstance(part, (ast.Attribute, ast.Subscript))
+                                and isinstance(part.ctx, (ast.Store, ast.Del))
+                                and (python_dotted_name(part) == "sys.argv"
+                                    or isinstance(part, ast.Subscript)
+                                    and python_dotted_name(part.value) == "sys.argv")
+                                for part in ast.walk(tree))
+                        ) for binding in message_sources)
+                    if expression.id in error_operand_parameters.get(scope, ()):
+                        return False
+            return False
+
+        for statement in handler.body:
+            if isinstance(statement, (ast.Pass, ast.Continue, ast.Break)):
+                continue
+            if isinstance(statement, ast.Return) and (
+                statement.value is None or isinstance(statement.value, ast.Constant)
+            ):
+                continue
+            if isinstance(statement, ast.Raise) and isinstance(statement.exc, ast.Call):
+                replacement = statement.exc
+                if (path_handler_builtin_reference(replacement.func,
+                        {"RuntimeError", "ValueError", "Exception", "SystemExit"})
+                    and not replacement.keywords
+                    and all(inert_message(argument, set()) for argument in replacement.args)
+                    and (isinstance(statement.cause, ast.Constant) and statement.cause.value is None
+                        or statement.cause is None and path_handler_builtin_reference(
+                            replacement.func, {"SystemExit"}))):
+                    continue
+            return False
+        return True
+
+    def path_exit_context_is_contained(handler):
+        """An uncaused SystemExit must not be replaced during propagation."""
+        carries_context = any(isinstance(effect, ast.Raise) and effect.cause is None
+            and python_unshadowed_builtin_call(effect.exc, {"SystemExit"}, tree, parents)
+            for effect in handler.body)
+        if not carries_context:
+            return True
+        current = handler
+        while current in parents:
+            enclosing = parents[current]
+            if isinstance(enclosing, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                break
+            if isinstance(enclosing, (ast.With, ast.AsyncWith)):
+                return False
+            if isinstance(enclosing, (ast.Try, ast.TryStar)):
+                if any(not isinstance(effect, ast.Pass) for effect in enclosing.finalbody):
+                    return False
+                if enclosing is not parents.get(handler) and current in enclosing.body and enclosing.handlers:
+                    return False
+            current = enclosing
+        return True
+
     assigned_display_methods = {}
     if error_operand_classes:
         for candidate in ast.walk(tree):
@@ -22372,7 +22531,7 @@ def python_sensitive_read_violation(tree, parents):
                     classes, method = display_class_targets(target.value, set()), target.attr
                 else:
                     continue
-                if method in {"__str__", "__repr__", "__format__"}:
+                if method in {"__str__", "__repr__", "__format__", "__iter__", "__next__", "__getitem__"}:
                     for classdef in classes:
                         assigned_display_methods.setdefault(classdef, []).append((method, candidate.value))
 
@@ -22583,23 +22742,50 @@ def python_sensitive_read_violation(tree, parents):
                     parent = parents[current]
                     if isinstance(parent, ast.Try) and current in parent.body:
                         for handler in parent.handlers:
-                            if python_dotted_name(handler.type) != "ValueError":
+                            caught_types = (handler.type.elts if isinstance(handler.type, ast.Tuple)
+                                else [handler.type])
+                            caught_names = [python_dotted_name(caught) for caught in caught_types]
+                            # Unknown types may match: never skip them to a later safe handler.
+                            if handler.type is not None and all(name in {
+                                "TypeError", "KeyError", "IndexError", "RuntimeError",
+                                "OSError", "SystemExit", "KeyboardInterrupt",
+                            } and path_handler_builtin_reference(caught, {name})
+                                for caught, name in zip(caught_types, caught_names)):
                                 continue
-                            if any((isinstance(part, ast.Raise) and not (
-                                    isinstance(part.cause, ast.Constant) and part.cause.value is None
-                                    or part.cause is None and isinstance(part.exc, ast.Call)
-                                    and python_unshadowed_builtin_call(part.exc, {"SystemExit"}, tree, parents)))
-                                or (handler.name is not None and isinstance(part, ast.Name)
-                                    and part.id == handler.name and isinstance(part.ctx, ast.Load))
-                                for statement in handler.body for part in ast.walk(statement)):
-                                continue
-                            handled = True
+                            handled = (any(name in {"ValueError", "Exception", "BaseException"}
+                                and path_handler_builtin_reference(caught, {name})
+                                for caught, name in zip(caught_types, caught_names)) or handler.type is None)
+                            if handler.type is not None and not all(
+                                path_handler_builtin_reference(caught, {
+                                    "ValueError", "Exception", "BaseException", "TypeError", "KeyError",
+                                    "IndexError", "RuntimeError", "OSError", "SystemExit", "KeyboardInterrupt",
+                                }) for caught in caught_types):
+                                handled = False
+                            if handled:
+                                handled = (path_handler_suppresses_context(handler)
+                                    and path_exit_context_is_contained(handler))
+                            if any(not isinstance(effect, ast.Pass) for effect in parent.finalbody):
+                                handled = False
+                            break
+                        # The first applicable try owns the exception; unsafe handlers
+                        # cannot be rescued by an outer or later suppression proof.
+                        break
                     if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
                         break
                     current = parent
                 if not handled:
                     return ("Python local path may surface through an implicit pathlib exception "
                         f"on line {node.lineno}")
+            if (error_operand_classes and (
+                    python_unshadowed_builtin_reference(node.func,
+                        {"dict", "list", "tuple", "set", "frozenset", "iter", "next"}, tree, parents)
+                    or isinstance(node.func, ast.Name) and any(
+                        python_assigned_callable_alias(node.func.id, collection_name, tree)
+                        for collection_name in ("dict", "list", "tuple", "set", "frozenset", "iter", "next")))
+                and any(error_operand_repr_sensitive(argument, set(),
+                    ("__iter__", "__next__", "__getitem__")) for argument in node.args)):
+                return ("Python custom iterator may expose sensitive protocol values "
+                    f"on line {node.lineno}")
             if len(node.args) >= 2 and (
                 dotted in {"getattr", "delattr", "setattr", "builtins.getattr", "builtins.delattr", "builtins.setattr"}
                 or isinstance(node.func, ast.Name) and any(
@@ -22863,7 +23049,18 @@ def reviewed_python_synthetic_shell_input(node, value, tree, parents):
 
 def python_computed_callable_violation(tree):
     """Reject calls whose callable target is returned by another call."""
+    hook_parents = {child: parent for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)}
     for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            hook_targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(isinstance(target, ast.Attribute) and target.attr == "breakpointhook"
+                for target in hook_targets):
+                return f"Python breakpoint hook rebinding is not reviewed on line {node.lineno}"
+        if isinstance(node, ast.Call) and python_unshadowed_builtin_reference(
+            node.func, {"breakpoint"}, tree, hook_parents
+        ):
+            return f"Python indirect breakpoint execution is not reviewed on line {node.lineno}"
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Call):
             return (
                 "Python heredoc contains an unresolved computed callable target "
@@ -22962,6 +23159,12 @@ def python_open_aliases(tree):
             for imported in node.names:
                 if imported.name in {"open", "open_code"}:
                     aliases.add(imported.asname or imported.name)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            reader_parameters = list(node.args.posonlyargs) + list(node.args.args)
+            reader_defaults = list(zip(reader_parameters[-len(node.args.defaults):], node.args.defaults)) if node.args.defaults else []
+            reader_defaults.extend(zip(node.args.kwonlyargs, node.args.kw_defaults))
+            assignments.extend((ast.Name(id=parameter.arg, ctx=ast.Store()), default)
+                for parameter, default in reader_defaults if default is not None)
     def open_reference(value, seen):
         if value is None or id(value) in seen:
             return False
