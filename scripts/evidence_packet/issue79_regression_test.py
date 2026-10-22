@@ -8668,6 +8668,52 @@ def synthetic_read(_fd, _size):
                     '    def __class_getitem__(cls, key):\n        return ' + value + '\n'
                     'ctor = tuple if flag else unknown\nprint(ctor([K])[0][0])\n'))
 
+    def test_pr103_v19_mapping_value_class_receiver(self) -> None:
+        for value in ('os.environ', '"safe"'):
+            for body in ('print(dict({"x": K})["x"][0])',
+                         'ctor = dict\nA = K\nprint(ctor({"x": A})["x"][0])'):
+                with self.subTest(value=value, body=body):
+                    self.assertEqual(self.inspect('import os\nclass K:\n'
+                        '    def __class_getitem__(cls, key):\n        return ' + value
+                        + '\n' + body + '\n') is None, value == '"safe"')
+
+    def test_pr103_v19_computed_callable_state_policy(self) -> None:
+        for value in ('os.environ', '"safe"'):
+            for target in ('tuple([K.__getitem__])[0]', 'next(iter([K.__getitem__]))'):
+                with self.subTest(value=value, target=target):
+                    self.assertIsNotNone(self.inspect('import os\n'
+                        'def replacement(self, key):\n    return ' + value + '\nclass K:\n'
+                        '    def __getitem__(self, key):\n        return "safe"\n'
+                        'target = ' + target + '\ntarget.__code__ = replacement.__code__\n'
+                        'print(K()[0])\n'))
+
+    def test_pr103_v19_class_protocol_binder_policy(self) -> None:
+        for value in ('os.environ', '"safe"'):
+            for binder in ('for __class_getitem__ in [leak]:\n        pass',
+                           '__class_getitem__, other = (leak, None)',
+                           '(__class_getitem__ := leak)'):
+                with self.subTest(value=value, binder=binder):
+                    self.assertIsNotNone(self.inspect('import os\ndef leak(cls, key):\n'
+                        '    return ' + value + '\nclass K:\n    ' + binder + '\nprint(K[0])\n'))
+
+    def test_pr103_v19_mutable_protocol_dependencies_policy(self) -> None:
+        for value in ('os.environ', '"safe"'):
+            for setup, returned, mutation in (
+                ('state = ["safe"]', 'state[0]', 'state[0] = ' + value),
+                ('state = {"x": "safe"}', 'state["x"]', 'state["x"] = ' + value),
+                ('state = (["safe"],)', 'state[0][0]', 'state[0][0] = ' + value),
+            ):
+                with self.subTest(value=value, setup=setup):
+                    self.assertIsNotNone(self.inspect('import os\ndef factory():\n    ' + setup
+                        + '\n    class K:\n        def __getitem__(self, key):\n            return '
+                        + returned + '\n    ' + mutation + '\n    return K\n'
+                        'K = factory()\nprint(K()[0])\n'))
+        # A mutable default with an unclosed write is also unsupported, while
+        # the literal argument/default itself is not a sensitive value.
+        self.assertIsNotNone(self.inspect('class K:\n'
+            '    def __getitem__(self, key, state=["safe"]):\n        return state[0]\n'
+            'print(K()[0])\n'))
+
     def test_pr103_v13_factory_returned_protocol_classes(self) -> None:
         consumer = ('async def collect():\n    async for item in K():\n'
                     '        print(item)\n        break\ncollect().send(None)\n')

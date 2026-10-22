@@ -22791,6 +22791,10 @@ def python_sensitive_read_violation(tree, parents):
         # Bounded literal-result proof, not a bound-method/effects interpreter.
         if value is None or id(value) in seen or error_operand_sensitive(value):
             return False
+        if any(isinstance(part, ast.Name) and any(isinstance(reference, (ast.List, ast.Tuple, ast.Dict, ast.Set))
+            and any(isinstance(item, (ast.List, ast.Dict, ast.Set)) for item in ast.walk(reference))
+            for reference in python_value_provenance(part, tree, parents)) for part in ast.walk(value)):
+            return False  # Named mutable dependencies/defaults cannot certify original literal contents.
         seen = seen | {id(value)}
         if isinstance(value, ast.Constant):
             return True
@@ -22820,16 +22824,18 @@ def python_sensitive_read_violation(tree, parents):
             return True  # A generator's Return is not its exposed result.
         state_names = {"__defaults__", "__kwdefaults__", "__code__", "__globals__", "__closure__", "__dict__"}
         for part in ast.walk(tree):
-            if (isinstance(part, ast.Attribute) and part.attr in state_names
-                and implementation in python_value_provenance(part.value, tree, parents)):
-                return True  # Protected callable state access stays unsupported, even if harmless.
+            if isinstance(part, ast.Attribute) and part.attr in state_names:
+                targets = protocol_callable_targets(part.value, set())
+                if not targets or implementation in targets or any(isinstance(target, ast.ClassDef) for target in targets):
+                    return True  # Computed/unknown protected-state targets cannot prove disjoint identity.
             if (isinstance(part, ast.Call) and len(part.args) >= 2
                 and (receiver_setter_proven(part.func, set())
-                    or python_unshadowed_builtin_reference(part.func, {"getattr", "delattr"}, tree, parents))
-                and implementation in python_value_provenance(part.args[0], tree, parents)):
+                    or python_unshadowed_builtin_reference(part.func, {"getattr", "delattr"}, tree, parents))):
                 names = mutation_literal_names(part.args[1], set())
                 if not names or names & state_names:
-                    return True
+                    targets = protocol_callable_targets(part.args[0], set())
+                    if not targets or implementation in targets or any(isinstance(target, ast.ClassDef) for target in targets):
+                        return True
         return False
 
     def subscription_wrapper_proven(value, seen):
@@ -22873,6 +22879,10 @@ def python_sensitive_read_violation(tree, parents):
                     for argument in reference.args:
                         pending.extend(python_value_provenance(argument, tree, parents,
                             initial_selection="iterate", receiver_origins=True))
+                        if any(python_unshadowed_builtin_reference(target, {"dict"}, tree, parents)
+                            for target in python_value_provenance(reference.func, tree, parents)):
+                            pending.extend(python_value_provenance(argument, tree, parents,
+                                initial_selection=True, receiver_origins=True))
         return classes
 
     def error_operand_repr_from_class(classdef, seen, methods):
@@ -22919,6 +22929,12 @@ def python_sensitive_read_violation(tree, parents):
                     classdef, seen, set(), ("__await__",)) for result in returns):
                     return True
         for method in {"__getitem__", "__class_getitem__"}.intersection(methods):
+            bindings = getattr(tree, "_issue79_sensitive_imported_alias_bindings", {}).get((id(classdef), method), ())
+            if any(not (kind == "unknown" and isinstance(binding, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and parents.get(binding) is classdef
+                or kind == "assignment" and isinstance(binding, (ast.Assign, ast.AnnAssign)))
+                for kind, binding in bindings):
+                return True  # Unsupported class-namespace protocol binders cannot install a proven method.
             if any(isinstance(entry, (ast.FunctionDef, ast.AsyncFunctionDef))
                 and entry.name == method and python_class_namespace_owner(entry, parents) is classdef
                 and parents.get(entry) is not classdef for entry in ast.walk(classdef)):
