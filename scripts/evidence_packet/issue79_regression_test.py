@@ -8403,6 +8403,109 @@ def synthetic_read(_fd, _size):
                             + '    K.__aiter__ = start\n' + calls + '\n' + consumer)
                         self.assertEqual(result is None, calls in ('install()', 'install(setattr)'))
 
+    def test_pr103_v13_receiver_assignment_escapes(self) -> None:
+        consumer = ('async def collect():\n    async for item in K():\n'
+                    '        print(item)\n        break\ncollect().send(None)\n')
+        for value in ('os.environ', '"safe"'):
+            prefix = ('import os\nclass L:\n    async def __anext__(self):\n'
+                      '        return ' + value + '\n')
+            for setup, body in (
+                ('saved = None\ndef mutate():\n    object.__setattr__(saved, "__class__", L)\n',
+                 'global saved\n        saved = self\n        mutate()'),
+                ('holder = [None]\ndef mutate():\n    object.__setattr__(holder[0], "__class__", L)\n',
+                 'holder[0] = self\n        mutate()'),
+                ('class Holder: pass\nholder = Holder()\ndef mutate():\n'
+                 '    object.__setattr__(holder.saved, "__class__", L)\n',
+                 'holder.saved = self\n        mutate()'),
+                ('', 'saved = self\n        def mutate():\n'
+                 '            object.__setattr__(saved, "__class__", L)\n        mutate()'),
+                ('', 'box = [self]\n        def mutate():\n'
+                 '            object.__setattr__(box[0], "__class__", L)\n        mutate()'),
+            ):
+                with self.subTest(value=value, body=body):
+                    self.assertIsNotNone(self.inspect(prefix + setup + 'class K:\n'
+                        '    def __aiter__(self):\n        ' + body + '\n        return self\n'
+                        '    async def __anext__(self):\n        return "safe"\n' + consumer))
+            # Complete nonlocal scope; the module helper cannot see a method local.
+            with self.subTest(value=value, storage='nonlocal'):
+                self.assertIsNotNone(self.inspect(prefix + 'class K:\n'
+                    '    async def __anext__(self):\n        return "safe"\n'
+                    'def install():\n    saved = None\n'
+                    '    def mutate():\n        object.__setattr__(saved, "__class__", L)\n'
+                    '    def start(self):\n        nonlocal saved\n'
+                    '        saved = self\n        mutate()\n        return self\n'
+                    '    K.__aiter__ = start\ninstall()\n' + consumer))
+        for body in ('alias = self\n        other = alias\n        other.label = "safe"',
+                     'self.label = "safe"'):
+            self.assertIsNone(self.inspect('class K:\n    def __aiter__(self):\n        '
+                + body + '\n        return self\n    async def __anext__(self):\n'
+                '        return "safe"\n' + consumer))
+        # Harmless storage and unknown closure effects remain unsupported.
+        for body in ('box = [self]', 'saved = self\n        def helper():\n'
+                     '            return saved\n        helper()'):
+            with self.subTest(unsupported=body):
+                self.assertIsNotNone(self.inspect('class K:\n    def __aiter__(self):\n        '
+                    + body + '\n        return self\n    async def __anext__(self):\n'
+                    '        return "safe"\n' + consumer))
+
+    def test_pr103_v13_factory_returned_protocol_classes(self) -> None:
+        consumer = ('async def collect():\n    async for item in K():\n'
+                    '        print(item)\n        break\ncollect().send(None)\n')
+        for value in ('os.environ', '"safe"'):
+            with self.subTest(value=value, boundary='nonlocal factory'):
+                self.assertIsNotNone(self.inspect('import os\nclass L:\n'
+                    '    async def __anext__(self):\n        return ' + value + '\n'
+                    'def build():\n    saved = None\n    def mutate():\n'
+                    '        object.__setattr__(saved, "__class__", L)\n'
+                    '    class K:\n        def __aiter__(self):\n            nonlocal saved\n'
+                    '            saved = self\n            mutate()\n            return self\n'
+                    '        async def __anext__(self):\n            return "safe"\n'
+                    '    return K\nK = build()\n' + consumer))
+        for returned in ('Local', 'alias', 'Local if flag else Other',
+                         'Local if flag else unknown', 'build()'):
+            with self.subTest(returned=returned):
+                self.assertEqual(self.inspect('flag = True\ndef build():\n'
+                    '    class Local:\n        def __aiter__(self):\n            return self\n'
+                    '        async def __anext__(self):\n            return "safe"\n'
+                    '    class Other:\n        def __aiter__(self):\n            return self\n'
+                    '        async def __anext__(self):\n            return "safe"\n'
+                    '    alias = Local\n    return ' + returned + '\nK = build()\n'
+                    + consumer) is None, returned not in ('Local if flag else unknown', 'build()'))
+
+    def test_pr103_v13_assigned_await_all_targets(self) -> None:
+        consumer = ('class L:\n    def __anext__(self):\n        return Awaitable()\n'
+                    'class K:\n    def __aiter__(self):\n        return L()\n'
+                    'async def collect():\n    async for item in K():\n'
+                    '        print(item)\n        break\ncollect().send(None)\n')
+        for value in ('os.environ', '"safe"'):
+            for target in ('leak if flag else safe', 'alias', 'leak if flag else unknown'):
+                with self.subTest(value=value, target=target):
+                    self.assertEqual(self.inspect('import os\n'
+                        'def leak(self):\n    if False:\n        yield None\n    return ' + value + '\n'
+                        'def safe(self):\n    if False:\n        yield None\n    return "safe"\n'
+                        'flag = True\nalias = leak if flag else safe\nclass Awaitable: pass\n'
+                        'Awaitable.__await__ = ' + target + '\n' + consumer) is None,
+                        value == '"safe"' and 'unknown' not in target)
+
+    def test_pr103_v13_class_namespace_callback_escape(self) -> None:
+        for value in ('str(os.environ)', '"safe"'):
+            for assignment in ('__call__ = install', 'first = install\n    __call__ = first'):
+                with self.subTest(value=value, assignment=assignment):
+                    result = self.inspect('import os\nclass K: pass\n'
+                        'def leak(self):\n    return ' + value + '\n'
+                        'def install(receiver, name="label"):\n    setattr(K, name, leak)\n'
+                        'class Callback:\n    ' + assignment + '\ninstall(None)\n'
+                        'list(map(Callback(), ["__str__"]))\nprint(K())\n')
+                    self.assertIsNotNone(result)
+                    self.assertIn('unresolved member name', result)
+            for calls in ('install(None)', 'first = install\nalias = first\nalias(None)',
+                          'first = install\nalias = first\nalias(None, "__str__")'):
+                self.assertEqual(self.inspect('import os\nclass K: pass\n'
+                    'def leak(self):\n    return ' + value + '\n'
+                    'def install(receiver, name="label"):\n    setattr(K, name, leak)\n'
+                    + calls + '\nprint(K())\n') is None,
+                    value == '"safe"' or '"__str__"' not in calls)
+
     def test_pr103_four_classmethod_decorator_aliases(self) -> None:
         for setup, decorator in (('cm = classmethod', 'cm'),
                                  ('first = classmethod\ncm = first', 'cm')):

@@ -22830,9 +22830,17 @@ def python_sensitive_read_violation(tree, parents):
                 if not returns or any(returned_async_iterator_sensitive(result, implementation,
                     classdef, seen, set(), ("__await__",)) for result in returns):
                     return True
-        for method, implementation in assigned_display_methods.get(classdef, ()):
-            if method in methods and display_implementation_sensitive(implementation, set()):
-                return True
+        for method, implementations in assigned_functions.items():
+            for implementation in implementations:
+                if isinstance(implementation, ast.Lambda):
+                    if error_operand_sensitive(implementation.body):
+                        return True
+                elif any(isinstance(candidate, (ast.Return, ast.Yield, ast.YieldFrom))
+                    and candidate.value is not None
+                    and python_enclosing_scope(candidate, parents) is implementation
+                    and error_operand_sensitive(candidate.value)
+                    for candidate in ast.walk(implementation)):
+                    return True
         for entry in classdef.body:
             if (
                 isinstance(entry, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -22884,9 +22892,29 @@ def python_sensitive_read_violation(tree, parents):
         # A first formal proves identity, not an unchanged runtime class.
         # Refuse these mutations at this boundary, including receiver aliases.
         positional = list(implementation.args.posonlyargs) + list(implementation.args.args)
+        def reaches_receiver(value):
+            return positional and any(isinstance(reference, ast.Name)
+                and reference.id == positional[0].arg
+                and python_enclosing_scope(reference, parents) is implementation
+                for expression in ast.walk(value) if isinstance(expression, ast.expr)
+                for reference in python_value_provenance(expression, tree, parents))
         for part in ast.walk(implementation):
             if isinstance(part, ast.Attribute) and part.attr == "__class__" and isinstance(part.ctx, (ast.Store, ast.Del)):
                 return True
+            if (isinstance(part, ast.Name) and isinstance(part.ctx, ast.Load)
+                and python_enclosing_scope(part, parents) is not implementation
+                and reaches_receiver(part)):
+                return True  # Captured receivers cannot certify unchanged identity.
+            if isinstance(part, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) and part.value is not None:
+                if reaches_receiver(part.value):
+                    targets = part.targets if isinstance(part, ast.Assign) else [part.target]
+                    if not isinstance(part.value, ast.Name) or not all(
+                        isinstance(target, ast.Name)
+                        and python_sensitive_alias_binding_scope(target, parents) is implementation
+                        and all(kind not in {"global", "nonlocal"} for kind, _binding in
+                            getattr(tree, "_issue79_sensitive_imported_alias_bindings", {}).get(
+                                (id(implementation), target.id), ())) for target in targets):
+                        return True  # Only proven simple local receiver aliases remain supported.
             if not isinstance(part, ast.Call):
                 continue
             known_setter = len(part.args) >= 3 and receiver_setter_proven(part.func, set())
@@ -22900,12 +22928,7 @@ def python_sensitive_read_violation(tree, parents):
             escaped = list(part.args) + [keyword.value for keyword in part.keywords]
             if isinstance(part.func, ast.Attribute):
                 escaped.append(part.func.value)
-            if positional and any(isinstance(reference, ast.Name)
-                and reference.id == positional[0].arg
-                and python_enclosing_scope(reference, parents) is implementation
-                for argument in escaped for expression in ast.walk(argument)
-                if isinstance(expression, ast.expr)
-                for reference in python_value_provenance(expression, tree, parents)):
+            if any(reaches_receiver(argument) for argument in escaped):
                 return True
         return False
 
@@ -23125,6 +23148,7 @@ def python_sensitive_read_violation(tree, parents):
             if isinstance(owner, ast.Call) and owner.func is reference:
                 direct = True
             elif (isinstance(owner, (ast.Assign, ast.AnnAssign)) and owner.value is reference
+                and python_class_namespace_owner(owner, parents) is None
                 and all(isinstance(target, ast.Name) for target in
                     (owner.targets if isinstance(owner, ast.Assign) else [owner.target]))):
                 continue  # The same scan checks all uses of these local aliases.
@@ -23215,6 +23239,15 @@ def python_sensitive_read_violation(tree, parents):
                         constructors.extend((constructor.body, constructor.orelse))
                     elif isinstance(constructor, ast.Subscript):
                         constructors.extend(error_operand_subscript_values(constructor))
+                    elif isinstance(constructor, ast.Call):
+                        returned_classes = protocol_callable_targets(constructor, set())
+                        if not returned_classes or any(not isinstance(target, ast.ClassDef)
+                            for target in returned_classes):
+                            return True  # Unknown/cyclic returned constructors cannot close this edge.
+                        constructors.extend(returned_classes)
+                    elif isinstance(constructor, ast.ClassDef):
+                        if error_operand_repr_from_class(constructor, set(), methods):
+                            return True
                     if not isinstance(constructor, ast.Name):
                         continue
                     chain = python_lexical_scope_chain(
