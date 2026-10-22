@@ -10085,6 +10085,10 @@ def python_local_method_candidates(attribute, call_node, tree, parents):
         elif isinstance(value, ast.Name) and value.id not in seen_names:
             seen_names.add(value.id)
             if value.id != "self":
+                class_names.update(python_local_class_alias_names(
+                    value.id, attribute.attr, visible_scopes,
+                    methods_by_scope, assignments_by_scope,
+                ))
                 binding_scopes = set(python_lexical_scope_chain(
                     python_enclosing_scope(value, parents), parents
                 )) or visible_scopes
@@ -10122,6 +10126,8 @@ def python_local_bound_method_candidates(name, call_node, tree, parents):
         python_local_call_return_values(call_node, tree, parents)
         index = getattr(tree, "_issue79_local_return_index", None)
     assignments_by_scope, _methods_by_scope = index
+    if not _methods_by_scope:
+        return []
     visible_scopes = set(python_lexical_scope_chain(
         python_enclosing_scope(call_node, parents), parents
     ))
@@ -12827,6 +12833,14 @@ def python_import_bindings(tree):
             elif isinstance(current, ast.Dict):
                 stack.extend(key for key in current.keys if key is not None)
                 stack.extend(current.values)
+            elif isinstance(current, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+                if isinstance(current, ast.DictComp):
+                    stack.extend((current.key, current.value))
+                else:
+                    stack.append(current.elt)
+                for generator in current.generators:
+                    stack.append(generator.iter)
+                    stack.extend(generator.ifs)
             elif isinstance(current, ast.Subscript):
                 stack.append(current.value)
             elif isinstance(current, ast.Call) and isinstance(
@@ -12898,7 +12912,7 @@ def python_import_bindings(tree):
             if resolved in python_command_functions:
                 functions[parameter.arg] = resolved
             elif default_launcher_candidates(default, set()):
-                functions[parameter.arg] = None
+                functions[parameter.arg] = unresolved_starred_launcher_container
     return modules, functions, unresolved
 
 
@@ -12973,7 +12987,19 @@ def python_class_command_attribute_violation(tree, modules, functions):
             if node.name in python_command_modules:
                 continue
             for statement in node.body:
-                if isinstance(statement, ast.Assign):
+                if isinstance(statement, ast.ImportFrom):
+                    for alias in statement.names:
+                        resolved = f"{statement.module}.{alias.name}"
+                        if resolved in python_command_functions:
+                            attributes[f"{node.name}.{alias.asname or alias.name}"] = resolved
+                elif isinstance(statement, ast.Import):
+                    for alias in statement.names:
+                        for launcher in python_command_functions:
+                            module = alias.name if alias.asname else alias.name.split('.')[0]
+                            if launcher.startswith(module + '.'):
+                                member = alias.asname or module
+                                attributes[f"{node.name}.{member}.{launcher[len(module) + 1:]}"] = launcher
+                elif isinstance(statement, ast.Assign):
                     for target in statement.targets:
                         if isinstance(target, ast.Name):
                             resolved = python_resolved_name(statement.value, modules, functions)
@@ -13006,6 +13032,8 @@ unresolved_starred_launcher_container = "__g01_unresolved_starred_launcher_conta
 
 def python_call_target(node, modules, functions):
     """Resolve callable dunder invocation back to its launcher receiver."""
+    if python_resolved_name(node, modules, functions) == unresolved_starred_launcher_container:
+        return "unresolved", python_dotted_name(node) or "launcher-bearing default"
     if isinstance(node, ast.Subscript):
         resolved_container = python_resolved_name(node.value, modules, functions)
         if resolved_container == unresolved_starred_launcher_container:
@@ -21456,7 +21484,7 @@ def python_sensitive_read_violation(tree, parents):
         return None
 
     for function in ast.walk(tree):
-        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             continue
         positional = helper_parameters(function)
         default_offset = len(positional) - len(function.args.defaults)
@@ -21475,12 +21503,27 @@ def python_sensitive_read_violation(tree, parents):
                 )
 
     for call_node in ast.walk(tree):
-        if not isinstance(call_node, ast.Call) or not isinstance(call_node.func, ast.Name):
+        if not isinstance(call_node, ast.Call):
             continue
-        for function in python_local_function_candidates(
-            call_node.func.id, call_node, tree, parents
-        ):
+        candidates = []
+        if isinstance(call_node.func, ast.Name):
+            candidates.extend((function, False) for function in (
+                python_local_function_candidates(call_node.func.id, call_node, tree, parents)
+                + python_local_lambda_candidates(call_node.func.id, call_node, tree, parents)
+            ))
+            candidates.extend((function, True) for function in
+                python_local_bound_method_candidates(call_node.func.id, call_node, tree, parents))
+        elif isinstance(call_node.func, ast.Lambda):
+            candidates.append((call_node.func, False))
+        elif isinstance(call_node.func, ast.Attribute):
+            candidates.extend((function, True) for function in
+                python_local_method_candidates(call_node.func, call_node, tree, parents))
+        for function, bound_method in candidates:
             positional = helper_parameters(function)
+            is_static = any(python_dotted_name(decorator) == "staticmethod"
+                for decorator in getattr(function, "decorator_list", ()))
+            if bound_method and positional and not is_static:
+                positional = positional[1:]
             for index, argument in enumerate(call_node.args):
                 if isinstance(argument, ast.Starred):
                     for parameter in positional[index:]:
@@ -21640,6 +21683,35 @@ def python_sensitive_read_violation(tree, parents):
                     (mutation_scope, key, is_mapping)
                     for key, is_mapping in key_sources
                 )
+    # Mapping identity is shared in both directions across simple scoped aliases.
+    # Retain every possible binding conservatively; cycles converge by set union.
+    mutation_aliases = []
+    for name, entries in error_operand_bindings.items():
+        for scope, binding, keys_only in entries:
+            if keys_only or not isinstance(binding, ast.Name):
+                continue
+            for source_scope in python_lexical_scope_chain(scope, parents):
+                if any(entry_scope is source_scope for entry_scope, _value, _keys
+                    in error_operand_bindings.get(binding.id, ())):
+                    mutation_aliases.append(((scope, name), (source_scope, binding.id)))
+                    break
+    scoped_mutations = {}
+    for name, entries in error_operand_mutated_keys.items():
+        for scope, key, is_mapping in entries:
+            scoped_mutations.setdefault((scope, name), set()).add((key, is_mapping))
+    changed = True
+    while changed:
+        changed = False
+        for left, right in mutation_aliases:
+            merged = scoped_mutations.get(left, set()) | scoped_mutations.get(right, set())
+            for endpoint in (left, right):
+                if scoped_mutations.get(endpoint, set()) != merged:
+                    scoped_mutations[endpoint] = set(merged)
+                    changed = True
+    error_operand_mutated_keys = {}
+    for (scope, name), entries in scoped_mutations.items():
+        error_operand_mutated_keys.setdefault(name, []).extend(
+            (scope, key, is_mapping) for key, is_mapping in entries)
     error_operand_classes = {}
     for candidate in ast.walk(tree):
         if isinstance(candidate, ast.ClassDef):
@@ -21756,6 +21828,11 @@ def python_sensitive_read_violation(tree, parents):
         seen.add(id(func))
         if python_dotted_name(func) in error_operand_conversions:
             return True
+        if isinstance(func, ast.Dict):
+            # An unpacked dictionary contributes its values to the callable
+            # container; unknown keys conservatively retain every option.
+            return any(error_operand_conversion_callable(value, set(seen))
+                for value in func.values)
         if isinstance(func, ast.Name):
             if (
                 python_assigned_callable_alias(func.id, "int", tree)
@@ -21783,7 +21860,7 @@ def python_sensitive_read_violation(tree, parents):
         if isinstance(func, ast.Subscript):
             option_containers = []
             target = func.value
-            if isinstance(target, (ast.List, ast.Tuple)):
+            if isinstance(target, (ast.List, ast.Tuple, ast.Dict)):
                 option_containers.append(target)
             elif isinstance(target, ast.Name):
                 chain = python_lexical_scope_chain(
@@ -21805,6 +21882,16 @@ def python_sensitive_read_violation(tree, parents):
                         if source_scope is scope
                     )
             for option_container in option_containers:
+                if isinstance(option_container, ast.Dict):
+                    elements = list(option_container.values)
+                    if isinstance(func.slice, ast.Constant) and all(
+                        isinstance(key, ast.Constant) for key in option_container.keys
+                    ):
+                        elements = [value for key, value in zip(option_container.keys, option_container.values)
+                            if key.value == func.slice.value]
+                    if any(error_operand_conversion_callable(item, set(seen)) for item in elements):
+                        return True
+                    continue
                 if not isinstance(option_container, (ast.List, ast.Tuple)):
                     continue
                 elements = list(option_container.elts)
@@ -22044,14 +22131,14 @@ def python_sensitive_read_violation(tree, parents):
                     continue
         return False
 
-    def error_operand_repr_from_class(classdef, seen):
+    def error_operand_repr_from_class(classdef, seen, methods):
         if id(classdef) in seen:
             return False
         seen.add(id(classdef))
         for entry in classdef.body:
             if (
                 isinstance(entry, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and entry.name == "__repr__"
+                and entry.name in methods
             ):
                 for candidate in ast.walk(entry):
                     if (
@@ -22063,56 +22150,82 @@ def python_sensitive_read_violation(tree, parents):
         for base in classdef.bases:
             if isinstance(base, ast.Name):
                 for _scope, other in error_operand_classes.get(base.id, ()):
-                    if error_operand_repr_from_class(other, set(seen)):
+                    if error_operand_repr_from_class(other, set(seen), methods):
                         return True
         return False
 
-    def error_operand_repr_sensitive(value, seen):
-        if value is None or id(value) in seen:
+    def error_operand_repr_sensitive(value, seen, methods=("__repr__",)):
+        # Factory/parameter graphs can contain cycles and many shared paths.
+        # Expand each expression once, rather than cloning a recursive path set.
+        if not error_operand_classes:
             return False
-        seen.add(id(value))
-        if isinstance(value, ast.Call):
-            func = value.func
-            if not isinstance(func, ast.Name):
-                return False
-            chain = set(
-                python_lexical_scope_chain(
-                    python_enclosing_scope(value, parents), parents
-                )
-            )
-            return any(
-                error_operand_repr_from_class(classdef, set(seen))
-                for class_scope, classdef in error_operand_classes.get(func.id, ())
-                if class_scope in chain
-            )
-        if isinstance(value, ast.Name):
-            chain = python_lexical_scope_chain(
-                python_enclosing_scope(value, parents), parents
-            )
-            for scope in chain:
-                entries = [
-                    binding
-                    for binding_scope, binding, _keys in error_operand_bindings.get(
-                        value.id, ()
-                    )
-                    if binding_scope is scope
-                ]
-                is_parameter = value.id in error_operand_parameters.get(scope, ())
-                if entries or is_parameter:
-                    resolutions = [
-                        error_operand_repr_sensitive(binding, set(seen))
-                        for binding in entries
-                    ]
-                    if is_parameter:
-                        resolutions.extend(
-                            error_operand_repr_sensitive(source, set(seen))
-                            for source_scope, source in assignments_by_name.get(
-                                value.id, ()
-                            )
-                            if source_scope is scope
-                        )
-                    return any(resolutions)
-            return False
+        stack = [value]
+        seen = set(seen)
+        while stack:
+            value = stack.pop()
+            if value is None or id(value) in seen:
+                continue
+            seen.add(id(value))
+            if isinstance(value, ast.Call):
+                stack.extend(python_local_call_return_values(value, tree, parents))
+                if python_dotted_name(value.func) in {"str", "repr", "ascii", "format"}:
+                    stack.extend(value.args)
+                constructors = [value.func]
+                seen_constructors = set()
+                while constructors:
+                    constructor = constructors.pop()
+                    if id(constructor) in seen_constructors:
+                        continue
+                    seen_constructors.add(id(constructor))
+                    if isinstance(constructor, ast.IfExp):
+                        constructors.extend((constructor.body, constructor.orelse))
+                    if not isinstance(constructor, ast.Name):
+                        continue
+                    chain = python_lexical_scope_chain(
+                        python_enclosing_scope(constructor, parents), parents)
+                    for scope in chain:
+                        classes = [classdef for class_scope, classdef
+                            in error_operand_classes.get(constructor.id, ())
+                            if class_scope is scope]
+                        if any(error_operand_repr_from_class(classdef, set(), methods)
+                            for classdef in classes):
+                            return True
+                        entries = [binding for binding_scope, binding, _keys
+                            in error_operand_bindings.get(constructor.id, ())
+                            if binding_scope is scope]
+                        is_parameter = constructor.id in error_operand_parameters.get(scope, ())
+                        if classes or entries or is_parameter:
+                            constructors.extend(entries)
+                            if is_parameter:
+                                constructors.extend(source for source_scope, source
+                                    in assignments_by_name.get(constructor.id, ())
+                                    if source_scope is scope)
+                            break
+            elif isinstance(value, ast.Name):
+                chain = python_lexical_scope_chain(
+                    python_enclosing_scope(value, parents), parents)
+                for scope in chain:
+                    entries = [binding
+                        for binding_scope, binding, _keys in error_operand_bindings.get(value.id, ())
+                        if binding_scope is scope]
+                    is_parameter = value.id in error_operand_parameters.get(scope, ())
+                    if entries or is_parameter:
+                        stack.extend(entries)
+                        if is_parameter:
+                            stack.extend(source
+                                for source_scope, source in assignments_by_name.get(value.id, ())
+                                if source_scope is scope)
+                        break
+            elif isinstance(value, (ast.List, ast.Tuple, ast.Set)):
+                stack.extend(value.elts)
+            elif isinstance(value, ast.Dict):
+                stack.extend(list(value.keys) + list(value.values))
+            elif isinstance(value, ast.IfExp):
+                stack.extend((value.body, value.orelse))
+            elif isinstance(value, ast.JoinedStr):
+                stack.extend(value.values)
+            elif isinstance(value, ast.FormattedValue):
+                stack.append(value.value)
         return False
 
     def exception_arguments(value, seen_names=None, follow_names=True):
@@ -22229,6 +22342,14 @@ def python_sensitive_read_violation(tree, parents):
                 )
         if isinstance(node, ast.Call):
             dotted = python_dotted_name(node.func)
+            if len(node.args) >= 2 and (
+                dotted in {"getattr", "delattr", "builtins.getattr", "builtins.delattr"}
+                or isinstance(node.func, ast.Name) and any(
+                    python_assigned_callable_alias(node.func.id, lookup, tree)
+                    for lookup in ("getattr", "delattr"))
+            ) and (error_operand_sensitive(node.args[1]) or error_operand_repr_sensitive(node.args[1], set())):
+                return ("Python sensitive attribute name may surface in an exception "
+                    f"message on line {node.lineno}")
             if error_operand_conversion_callable(node.func, set()) and any(
                 error_operand_sensitive(value)
                 for value in list(node.args)
@@ -22292,7 +22413,8 @@ def python_sensitive_read_violation(tree, parents):
                     f"{dotted or '<call>'!r} on line {node.lineno}"
                 )
             if python_sensitive_output_sink(node, tree) and any(
-                python_sensitive_value_expression(
+                error_operand_repr_sensitive(argument, set(), ("__str__", "__repr__", "__format__"))
+                or python_sensitive_value_expression(
                     argument, sensitive_names, tree, parents
                 )
                 or (

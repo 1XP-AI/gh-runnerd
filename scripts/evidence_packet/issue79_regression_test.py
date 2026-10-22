@@ -7164,6 +7164,109 @@ def synthetic_read(_fd, _size):
         with self.assertRaises(AssertionError):
             _top_level_assignment(duplicate, "issue79_reviewed_evidence_paths")
 
+    def test_pr103_lambda_method_error_arguments(self) -> None:
+        for body in (
+            '(lambda key: {}[key])(str(os.environ))\n',
+            'lookup = lambda key: {}[key]\nlookup(str(os.environ))\n',
+            'class C:\n    def lookup(self, key):\n        return {}[key]\nC().lookup(str(os.environ))\n',
+            'class C:\n    @staticmethod\n    def lookup(key):\n        return {}[key]\nC.lookup(str(os.environ))\n',
+        ):
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect('import os\n' + body))
+        self.assertIsNone(self.inspect('(lambda key: {}[key])("reviewed")\n'))
+
+    def test_pr103_mapping_alias_mutations(self) -> None:
+        for mutation in (
+            'a[str(os.environ)] = 1',
+            'a.update({str(os.environ): 1})',
+            'a.setdefault(str(os.environ), 1)',
+            'a.__setitem__(str(os.environ), 1)',
+            'a |= {str(os.environ): 1}',
+        ):
+            with self.subTest(mutation=mutation):
+                self.assertIsNotNone(self.inspect(
+                    'import os\nd = {}\na = d\nb = a\na = b\n' + mutation + '\nfor key in d:\n    {}[key]\n'
+                ))
+        self.assertIsNone(self.inspect('d = {}\na = d\na["reviewed"] = 1\nfor key in d:\n    {}[key]\n'))
+
+    def test_pr103_dictionary_conversion_callables(self) -> None:
+        for conversion in ('int', 'float', 'complex'):
+            with self.subTest(conversion=conversion):
+                self.assertIsNotNone(self.inspect(
+                    f'import os\nconverters = {{"x": {conversion}}}\nconverters["x"](str(os.environ))\n'
+                ))
+        self.assertIsNone(self.inspect('converters = {"x": complex}\nconverters["x"]("1")\n'))
+        self.assertIsNone(self.inspect('import os\nconverters = {"x": complex, "safe": len}\nconverters["safe"](str(os.environ))\n'))
+
+    def test_pr103_factory_returned_repr_keys(self) -> None:
+        for result in ('K()', 'make()'):
+            with self.subTest(result=result):
+                self.assertIsNotNone(self.inspect(
+                    'import os\nclass K:\n    def __repr__(self):\n        return str(os.environ)\n'
+                    'def make():\n    return K()\ndef again():\n    return ' + result + '\n{}[again()]\n'
+                ))
+        self.assertIsNone(self.inspect(
+            'class K:\n    def __repr__(self):\n        return "reviewed"\ndef make():\n    return K()\n{}[make()]\n'
+        ))
+
+    def test_pr103_comprehension_launcher_defaults(self) -> None:
+        for default, call in (
+            ('[x for x in [os.system]]', 'box[0]("synthetic-command")'),
+            ('{x for x in [os.system]}', 'next(iter(box))("synthetic-command")'),
+            ('(x for x in [os.system])', 'next(box)("synthetic-command")'),
+            ('{"x": x for x in [os.system]}', 'box["x"]("synthetic-command")'),
+            ('[os.system for x in [0]]', 'box[0]("synthetic-command")'),
+            ('[x for x in [subprocess.run]]', 'box[0](["gh", "workflow", "run", "synthetic"])'),
+        ):
+            with self.subTest(default=default):
+                self.assertIsNotNone(self.inspect(
+                    'import os, subprocess\ndef f(box=' + default + '):\n    ' + call + '\nf()\n'
+                ))
+        self.assertIsNone(self.inspect('def f(box=[x for x in [len]]):\n    box[0]("reviewed")\nf()\n'))
+
+    def test_pr103_sensitive_attribute_names(self) -> None:
+        for lookup in ('getattr', 'delattr'):
+            with self.subTest(lookup=lookup):
+                self.assertIsNotNone(self.inspect(f'import os\n{lookup}(object(), str(os.environ))\n'))
+                self.assertIsNotNone(self.inspect(f'import os\nlookup = {lookup}\nlookup(object(), str(os.environ))\n'))
+        self.assertIsNone(self.inspect('getattr(object(), "reviewed", None)\n'))
+
+    def test_pr103_class_namespace_launchers(self) -> None:
+        for member, call in (
+            ('from os import system as go', 'C.go("synthetic-command")'),
+            ('import os as tools', 'C.tools.system("synthetic-command")'),
+            ('from subprocess import run as go', 'C.go(["gh", "workflow", "run", "synthetic"])'),
+        ):
+            with self.subTest(member=member):
+                self.assertIsNotNone(self.inspect('class C:\n    ' + member + '\n' + call + '\n'))
+        self.assertIsNone(self.inspect('class C:\n    import re as tools\nprint(C.tools.escape("reviewed"))\n'))
+
+    def test_pr103_display_methods_at_sinks(self) -> None:
+        for method in ('__str__', '__repr__', '__format__'):
+            for sink in ('print(K())', 'sys.exit(K())', 'print(make())', 'print(str(K()))', 'print(f"{K()}")'):
+                with self.subTest(method=method, sink=sink):
+                    self.assertIsNotNone(self.inspect(
+                        'import os, sys\nclass K:\n    def ' + method + '(self, *args):\n        return str(os.environ)\n'
+                        'def make():\n    return K()\n' + sink + '\n'
+                    ))
+        self.assertIsNone(self.inspect('class K:\n    def __str__(self):\n        return "reviewed"\nprint(K())\n'))
+
+    def test_pr103_display_constructor_aliases(self) -> None:
+        self.assertIsNotNone(self.inspect(
+            'import os\nclass K:\n    def __str__(self):\n        return str(os.environ)\nAlias = K\nprint(Alias())\n'
+        ))
+        self.assertIsNone(self.inspect(
+            'class K:\n    def __str__(self):\n        return "reviewed"\nAlias = K\nprint(Alias())\n'
+        ))
+
+    def test_pr103_unpacked_dictionary_converters(self) -> None:
+        self.assertIsNotNone(self.inspect(
+            'import os\nconverters = {**{"x": complex}}\nconverters["x"](str(os.environ))\n'
+        ))
+        self.assertIsNone(self.inspect(
+            'import os\nconverters = {**{"x": len}}\nconverters["x"](str(os.environ))\n'
+        ))
+
     def test_current_packet_has_no_static_scanner_violations(self) -> None:
         matches: list[str] = []
         shell_command_count = 0
