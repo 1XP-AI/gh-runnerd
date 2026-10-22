@@ -45,7 +45,7 @@ func pairedChildDeadline(parent context.Context, now time.Time) (time.Time, erro
 }
 
 func validBrokerBuild(info *debug.BuildInfo, expected string) bool {
-	if info == nil || info.GoVersion != "go1.26.8" || info.Path != "github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/cmd/g01-live" || !brokerSHA40.MatchString(expected) {
+	if info == nil || info.GoVersion != "go1.26.9" || info.Path != "github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/cmd/g01-live" || !brokerSHA40.MatchString(expected) {
 		return false
 	}
 	revision, clean, sdk := "", false, false

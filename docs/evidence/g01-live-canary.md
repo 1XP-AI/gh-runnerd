@@ -26,7 +26,44 @@ provisioning/rotation remain unresolved, as does the provider-side conditional
 delete gate. This template correction closes neither gate and authorizes no live
 execution.
 
+Release/source freshness (2026-10-13): see the
+[runner release checkpoint](g01-runner-release-checkpoint.md). Keep this plan's
+`v2.337.0` selection unless a later authorized revision identifies the version
+offered to the named organization/repository. Before any candidate change, verify
+the archive bytes against the published digest and record the exact runtime/image
+digest; the checkpoint is source/metadata evidence only and authorizes no swap.
+
 ## Required environment and authorization record
+
+### Read-only preparation checkpoint — 2026-10-22
+
+The maintainer authorized preparation, not execution. A dedicated private,
+non-archived repository was located through `gh`; its name and local endpoint
+remain in the private approval conversation, not this public record. Its current
+workflow is manual-only, has empty token permissions, one ten-minute job and
+non-cancelling concurrency. However, it targets macOS ARM64 with a fixed label
+and prints the runner name. It is **not** the nonce-scoped Linux workload in
+`experiments/g01-canary-assets`, and is not approved for this experiment.
+
+The preparation host is macOS ARM64 and has a configured Docker Desktop Linux
+context. Only local context metadata was inspected: daemon availability, worker
+isolation and resources have not been verified. No context was switched, image
+pulled, container started or runner changed. Approximately 7.5 GiB free disk was
+observed, so runtime preparation must wait for adequate measured headroom.
+The proposed first scope is one disposable Linux ARM64 worker (1 vCPU / 1 GiB),
+one controller/session/scale set and one baseline job, with no host socket or
+controller mounts in the worker. No current native runner is a fallback target.
+
+The organization runner-group metadata request returned HTTP 403. Selected-only
+repository policy, group identity and existing-runner inventory therefore remain
+unverified; no authentication scopes or App permissions were changed. A reviewed
+nonce-bound workflow commit, immutable executor/runtime inputs, separate
+controller/broker identities, authenticated provenance/trust roots and supported
+conditional cleanup are still required. A configured context or a successful
+source review cannot clear these live gates. Later fault phases need their own
+explicit approval; do not dispatch even the baseline from this checkpoint.
+
+### Execution checklist
 
 - [ ] Maintainer identifies one disposable **private** repository and one
   organization; no public fork/PR execution. Record the reviewed workflow SHA.
@@ -46,9 +83,13 @@ execution.
   target after host headroom is checked, 10-minute job deadline. Increase any
   limit only with new concrete authorization. No service-container workloads in
   this protocol canary.
-- [ ] Use SDK `v0.4.0`, Go `1.26.8` and runner `2.337.0`; verify runner bytes
+- [ ] Use SDK `v0.4.0`, Go `1.26.9` and runner `2.337.0`; verify runner bytes
   against [published digests](g01-contract.md#runner-and-jit-transport) and record
   exact runtime/image digest. Recheck support/security status before execution.
+  This supersedes the earlier Go `1.26.8` source profile. Go `1.26.8` commands
+  embedded in the recovery packet remain inert historical/specimen text and are
+  not current execution instructions; this checklist does not authorize a
+  canary or live runner operation.
 - [ ] Independent Luna max reviews the immutable live harness, authority
   checks, cleanup, fault barriers and sanitized telemetry. The offline fixture
   must not be pointed at GitHub by replacing its URL. The separate tagged driver

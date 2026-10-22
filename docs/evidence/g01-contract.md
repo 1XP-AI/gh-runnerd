@@ -141,6 +141,12 @@ API (must verify bytes before execution):
 
 Source: [official runner release](https://github.com/actions/runner/releases/tag/v2.337.0).
 
+Release/source freshness update (2026-10-13): the
+[runner release checkpoint](g01-runner-release-checkpoint.md) records official
+`v2.338.0` metadata and reviewed source changes. The existing `v2.337.0`
+selection remains in force until a named tenant's availability and candidate
+archive bytes are qualified; the checkpoint does not change this pin.
+
 | Transport | Evidence and exposure |
 |---|---|
 | `Runner.Listener run --jitconfig <encoded>` / `run.sh --jitconfig <encoded>` | Command parser recognizes `jitconfig`; argv exposes the encoded credential to process inspection and command capture. Avoid for the canary. |
