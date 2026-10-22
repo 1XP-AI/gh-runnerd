@@ -8559,6 +8559,43 @@ def synthetic_read(_fd, _size):
             '        return "safe"\nflag = True\nobj = K() if flag else ["literal"]\n'
             'print(obj[0])\nprint(["safe"][0])\nprint({"key": "safe"}["key"])\n'))
 
+    def test_pr103_v17_subscription_display_result(self) -> None:
+        for value in ('str(os.environ)', '"safe"'):
+            for result in ('L()', 'L() if flag else unknown'):
+                with self.subTest(value=value, result=result):
+                    # Safe object results remain unsupported policy controls.
+                    self.assertIsNotNone(self.inspect('import os\nflag = True\nclass L:\n'
+                        '    def __str__(self):\n        return ' + value + '\n'
+                        'class K:\n    def __getitem__(self, key):\n        return '
+                        + result + '\nprint(K()[0])\n'))
+
+    def test_pr103_v17_subscription_bound_result(self) -> None:
+        for value in ('os.environ', '"safe"'):
+            for result in ('self.leak()', 'self.leak() if flag else unknown'):
+                with self.subTest(value=value, result=result):
+                    self.assertIsNotNone(self.inspect('import os\nflag = True\nclass K:\n'
+                        '    def leak(self):\n        return ' + value + '\n'
+                        '    def __getitem__(self, key):\n        return ' + result
+                        + '\nprint(K()[0])\n'))
+        self.assertIsNotNone(self.inspect('class K:\n    def __getitem__(self, key):\n'
+            '        return unknown\nprint(K()[0])\n'))
+
+    def test_pr103_v17_class_subscription(self) -> None:
+        for value in ('os.environ', '"safe"'):
+            for body in ('print(K[0])', 'alias = K\nprint(alias[0])',
+                         'flag = True\nalias = K if flag else unknown\nprint(alias[0])'):
+                with self.subTest(value=value, body=body):
+                    self.assertEqual(self.inspect('import os\nclass K:\n'
+                        '    def __class_getitem__(cls, key):\n        return ' + value
+                        + '\n' + body + '\n') is None, value == '"safe"')
+        for result in ('literal', 'literal if flag else "other"', 'safe()', '["safe"]'):
+            with self.subTest(safe_result=result):
+                self.assertIsNone(self.inspect('literal = "safe"\nflag = True\n'
+                    'def safe():\n    return "safe"\nclass K:\n'
+                    '    def __getitem__(self, key):\n        return ' + result + '\n'
+                    '    def __class_getitem__(cls, key):\n        return ' + result + '\n'
+                    'alias = K\nprint(K()[0])\nprint(alias[0])\n'))
+
     def test_pr103_v13_factory_returned_protocol_classes(self) -> None:
         consumer = ('async def collect():\n    async for item in K():\n'
                     '        print(item)\n        break\ncollect().send(None)\n')
