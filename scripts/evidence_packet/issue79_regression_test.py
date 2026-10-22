@@ -8124,6 +8124,132 @@ def synthetic_read(_fd, _size):
                         + '\nclass K: pass\n' + installation
                         + '\nasync def collect():\n    print([item async for item in K()])\n') is None, value == '"safe"')
 
+    def test_pr103_two_callback_protocol_names(self) -> None:
+        for callback in ('list(map(install, ["__str__"]))',
+                         '[install(part) for part in ["__str__"]]'):
+            for expression in ('name', 'alias'):
+                for value in ('str(os.environ)', '"safe"'):
+                    with self.subTest(callback=callback, expression=expression, value=value):
+                        result = self.inspect('import os\nname = "label"\nalias = "label"\n'
+                            + 'def leak(self):\n    return ' + value + '\nclass K: pass\n'
+                            + 'def install(name):\n    alias = name\n    setattr(K, ' + expression
+                            + ', leak)\n' + callback + '\nprint(K())\n')
+                        if callback.startswith('list(map'):
+                            self.assertIsNotNone(result)
+                            self.assertIn('unresolved member name', result)
+                        else:
+                            self.assertEqual(result is None, value == '"safe"')
+        self.assertIsNone(self.inspect('class K: pass\nfirst = "label"\nname = first\n'
+            + 'setattr(K, name, "safe")\nprint(K())\n'))
+
+    def test_pr103_two_returned_async_iterators(self) -> None:
+        for returned in ('L()', 'iterator', 'alias', 'L() if flag else self'):
+            for installation in ('direct', 'K.__aiter__ = start', 'setattr(K, "__aiter__", start)'):
+                for value in ('os.environ', '"safe"'):
+                    with self.subTest(returned=returned, installation=installation, value=value):
+                        start = 'def start(self):\n    return ' + returned + '\n'
+                        definition = ('class K:\n    def __aiter__(self):\n        return ' + returned
+                            + '\n' if installation == 'direct' else 'class K: pass\n' + start + installation + '\n')
+                        result = self.inspect('import os\nclass L:\n    async def __anext__(self):\n'
+                            + '        return ' + value + '\niterator = L()\nalias = iterator\n'
+                            + definition + 'async def collect():\n    print([item async for item in K()])\n'
+                            + 'collect().send(None)\n')
+                        self.assertEqual(result is None, value == '"safe"')
+        for returned in ('unknown', 'alias'):
+            self.assertIsNotNone(self.inspect('alias = alias\nclass K:\n'
+                + '    def __aiter__(self):\n        return ' + returned
+                + '\nasync def collect():\n    print([item async for item in K()])\n'))
+        self.assertIsNone(self.inspect('class K:\n    def __aiter__(self):\n        return L()\n'
+            + 'class L:\n    def __aiter__(self):\n        return K()\n'
+            + '    async def __anext__(self):\n        return "safe"\n'
+            + 'async def collect():\n    print([item async for item in K()])\n'))
+        for setter in ('L.__anext__ = next_item', 'setattr(L, "__anext__", next_item)'):
+            for value in ('os.environ', '"safe"'):
+                for sink in ('async for item in K():\n        print(item)',
+                             'print({item async for item in K()})',
+                             'print({"key": item async for item in K()})',
+                             'print((item async for item in K()))'):
+                    with self.subTest(setter=setter, value=value, sink=sink):
+                        self.assertEqual(self.inspect('import os\nclass L: pass\n'
+                            + 'async def next_item(self):\n    return ' + value + '\n' + setter
+                            + '\nclass K: pass\nK.__aiter__ = lambda self: L()\n'
+                            + 'async def collect():\n    ' + sink + '\n') is None, value == '"safe"')
+
+    def test_pr103_two_async_return_binding_alternatives(self) -> None:
+        consumer = ('async def collect():\n    async for item in K():\n'
+                    + '        print(item)\n        break\ncollect().send(None)\n')
+        for value in ('os.environ', '"safe"'):
+            for definition in (
+                'class K:\n    def __aiter__(self):\n        self = L()\n        return self\n',
+                'class K:\n    def __aiter__(receiver):\n        receiver = L()\n        return receiver\n',
+                'class K: pass\ndef start(receiver):\n    receiver = L()\n    return receiver\nK.__aiter__ = start\n',
+                'class K:\n    @staticmethod\n    def __aiter__(receiver=L()):\n        return receiver\n',
+            ):
+                with self.subTest(value=value, definition=definition):
+                    self.assertEqual(self.inspect('import os\nclass L:\n'
+                        + '    async def __anext__(self):\n        return ' + value + '\n'
+                        + definition + consumer) is None, value == '"safe"')
+        self.assertIsNone(self.inspect('class K:\n    def __aiter__(receiver):\n'
+            + '        return receiver\n    async def __anext__(receiver):\n'
+            + '        return "safe"\n' + consumer))
+        for returned in ('L()', 'L() if flag else unknown', 'L() if flag else M()',
+                         '(L if flag else unknown)()', '(L if flag else M)()'):
+            for value in ('os.environ', '"safe"'):
+                with self.subTest(returned=returned, value=value):
+                    self.assertEqual(self.inspect('import os\nclass L:\n'
+                        + '    async def __anext__(self):\n        return ' + value + '\n'
+                        + 'class M:\n    async def __anext__(self):\n        return "safe"\n'
+                        + 'def choose():\n    return ' + returned + '\nclass K:\n'
+                        + '    def __aiter__(self):\n        return choose()\n' + consumer) is None,
+                        value == '"safe"' and 'unknown' not in returned and not returned.startswith('('))
+
+    def test_pr103_two_protocol_callable_proofs(self) -> None:
+        consumer = ('async def collect():\n    async for item in K():\n'
+                    + '        print(item)\n        break\ncollect().send(None)\n')
+        for value in ('os.environ', '"safe"'):
+            for method in ('__aiter__', '__anext__'):
+                for implementation in ('staticmethod(start)', 'unknown'):
+                    with self.subTest(value=value, method=method, implementation=implementation):
+                        result = self.inspect('import os\nclass L:\n'
+                            + '    async def __anext__(self):\n        return ' + value + '\n'
+                            + 'def start(receiver=L()):\n    return receiver\nclass K: pass\n'
+                            + 'K.' + method + ' = ' + implementation + '\n' + consumer)
+                        self.assertIsNotNone(result)
+        for setup in ('factory = L if flag else unknown', 'factory = L\nfactory = unknown',
+                      'factory = choose if flag else unknown', 'factory = choose\nfactory = unknown',
+                      'factory = L', 'factory = choose', 'factory = L if flag else M',
+                      'factory = L if flag else choose'):
+            with self.subTest(setup=setup):
+                result = self.inspect('class L:\n    async def __anext__(self):\n        return "safe"\n'
+                    + 'class M:\n    async def __anext__(self):\n        return "safe"\n'
+                    + 'def choose():\n    return L()\n' + setup + '\nclass K:\n'
+                    + '    def __aiter__(self):\n        return factory()\n' + consumer)
+                self.assertEqual(result is None, 'unknown' not in setup)
+
+    def test_pr103_two_assigned_protocol_receiver_proof(self) -> None:
+        consumer = ('async def collect():\n    async for item in K():\n'
+                    + '        print(item)\n        break\ncollect().send(None)\n')
+        for value in ('os.environ', '"safe"'):
+            for method in ('__aiter__', '__anext__'):
+                for setup, implementation in (
+                    ('', 'L().start'), ('bound = L().start\nalias = bound\n', 'alias'),
+                    ('def implementation():\n    return L().start\n', 'implementation()'),
+                ):
+                    with self.subTest(value=value, method=method, setup=setup):
+                        start = ('    def start(self):\n        return self\n'
+                            + '    async def __anext__(self):\n        return ' + value + '\n'
+                            if method == '__aiter__' else
+                            '    async def start(self):\n        return ' + value + '\n')
+                        other = '' if method == '__aiter__' else '    def __aiter__(self):\n        return self\n'
+                        result = self.inspect('import os\nclass L:\n' + start
+                            + 'class K:\n' + (other or '    pass\n') + setup
+                            + 'K.' + method + ' = ' + implementation + '\n' + consumer)
+                        self.assertIsNotNone(result)
+        self.assertIsNone(self.inspect('def start(receiver):\n    return receiver\n'
+            + 'first = start\nalias = first\nclass K:\n'
+            + '    async def __anext__(self):\n        return "safe"\n'
+            + 'K.__aiter__ = alias\n' + consumer))
+
     def test_pr103_four_classmethod_decorator_aliases(self) -> None:
         for setup, decorator in (('cm = classmethod', 'cm'),
                                  ('first = classmethod\ncm = first', 'cm')):

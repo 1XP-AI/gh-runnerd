@@ -22765,10 +22765,52 @@ def python_sensitive_read_violation(tree, parents):
                     continue
         return False
 
+    def protocol_callable_targets(value, seen, assigned_protocol=False):
+        """Prove all local callable alternatives at the inspected protocol boundary."""
+        if value is None or id(value) in seen:
+            return None
+        if assigned_protocol and isinstance(value, ast.Attribute):
+            return None  # Extracted methods have unproven receiver/descriptor binding.
+        if isinstance(value, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            return [value]
+        seen = seen | {id(value)}
+        if isinstance(value, ast.Call):
+            targets = protocol_callable_targets(value.func, seen, assigned_protocol)
+            if not targets or any(isinstance(target, ast.ClassDef) for target in targets):
+                return None
+            alternatives = python_local_call_return_values(value, tree, parents)
+        else:
+            alternatives = [reference for reference in python_value_provenance(value, tree, parents)
+                if reference is not value]
+        resolved = [protocol_callable_targets(reference, seen, assigned_protocol) for reference in alternatives]
+        if not resolved or any(targets is None for targets in resolved):
+            return None
+        return [target for targets in resolved for target in targets]
+
     def error_operand_repr_from_class(classdef, seen, methods):
         if id(classdef) in seen:
             return False
         seen.add(id(classdef))
+        assigned_functions = {}
+        for method, implementation in assigned_display_methods.get(classdef, ()):
+            if method not in methods:
+                continue
+            targets = protocol_callable_targets(implementation, set(), assigned_protocol=True)
+            if not targets or any(isinstance(target, ast.ClassDef) for target in targets):
+                return True  # Unproven wrappers/implementations refuse, even if harmless.
+            assigned_functions.setdefault(method, []).extend(targets)
+        if "__aiter__" in methods:
+            implementations = [entry for entry in classdef.body
+                if isinstance(entry, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and entry.name == "__aiter__"]
+            implementations.extend(assigned_functions.get("__aiter__", ()))
+            for implementation in implementations:
+                returns = ([implementation.body] if isinstance(implementation, ast.Lambda) else
+                    [part.value for part in ast.walk(implementation)
+                        if isinstance(part, ast.Return) and part.value is not None])
+                if any(returned_async_iterator_sensitive(result, implementation, classdef, seen, set())
+                    for result in returns):
+                    return True
         for method, implementation in assigned_display_methods.get(classdef, ()):
             if method in methods and display_implementation_sensitive(implementation, set()):
                 return True
@@ -22790,6 +22832,54 @@ def python_sensitive_read_violation(tree, parents):
                     if error_operand_repr_from_class(other, set(seen), methods):
                         return True
         return False
+
+    def returned_async_iterator_sensitive(value, implementation, classdef, seen_classes, seen_values):
+        if id(value) in seen_values:
+            return True
+        seen_values = seen_values | {id(value)}
+        if isinstance(value, ast.Name):
+            positional = list(implementation.args.posonlyargs) + list(implementation.args.args)
+            python_sensitive_imported_function_alias(value, tree, parents)
+            bindings = getattr(tree, "_issue79_sensitive_imported_alias_bindings", {}).get(
+                (id(implementation), value.id), ())
+            if (positional and value.id == positional[0].arg
+                and python_enclosing_scope(value, parents) is implementation
+                and not getattr(implementation, "decorator_list", ())
+                and bindings and all(kind == "unknown" and binding is positional[0]
+                    for kind, binding in bindings)):
+                return False  # This class's protocols are already inspected.
+            alternatives = [reference for reference in python_value_provenance(value, tree, parents)
+                if reference is not value]
+            return not alternatives or any(returned_async_iterator_sensitive(reference,
+                implementation, classdef, seen_classes, seen_values) for reference in alternatives)
+        if isinstance(value, ast.IfExp):
+            return any(returned_async_iterator_sensitive(reference, implementation, classdef,
+                seen_classes, seen_values) for reference in (value.body, value.orelse))
+        if isinstance(value, ast.Call):
+            targets = protocol_callable_targets(value.func, set())
+            if not targets:
+                return True
+            classes = [target for target in targets if isinstance(target, ast.ClassDef)]
+            if any(error_operand_repr_from_class(reference, set(seen_classes),
+                ("__iter__", "__next__", "__getitem__", "__aiter__", "__anext__")) for reference in classes):
+                return True
+            for target in targets:
+                if isinstance(target, ast.ClassDef):
+                    continue
+                # Targets are proven before selecting their lexical returns;
+                # a known class sibling must not discard a helper alternative.
+                returned = ([target.body] if isinstance(target, ast.Lambda) else
+                    [part.value for part in ast.walk(target)
+                        if isinstance(part, (ast.Return, ast.Yield, ast.YieldFrom))
+                        and part.value is not None and python_enclosing_scope(part, parents) is target])
+                if not returned or any(returned_async_iterator_sensitive(reference,
+                    implementation, classdef, seen_classes, seen_values) for reference in returned):
+                    return True
+            return False
+        if isinstance(value, ast.ClassDef):
+            return error_operand_repr_from_class(value, set(seen_classes),
+                ("__iter__", "__next__", "__getitem__", "__aiter__", "__anext__"))
+        return True
 
     def display_implementation_sensitive(value, seen):
         if value is None or id(value) in seen:
@@ -22946,18 +23036,27 @@ def python_sensitive_read_violation(tree, parents):
 
     assigned_display_methods = {}
     display_protocol_names = {"__str__", "__repr__", "__format__", "__iter__", "__next__", "__getitem__", "__aiter__", "__anext__"}
+    def mutation_literal_names(value, seen):
+        if id(value) in seen:
+            return set()
+        if isinstance(value, ast.Name):
+            alternatives = [reference for reference in python_value_provenance(value, tree, parents)
+                if reference is not value]
+            values = [mutation_literal_names(reference, seen | {id(value)}) for reference in alternatives]
+            return set().union(*values) if values and all(values) else set()
+        # The existing graph owns aliases and scopes. The body-wide string
+        # helper may only inspect terminal expressions containing no names.
+        if any(isinstance(part, ast.Name) for part in ast.walk(value)):
+            return set()
+        return python_static_string_values(value, tree)
+
     if error_operand_classes:
         for candidate in ast.walk(tree):
             if (isinstance(candidate, ast.Call) and len(candidate.args) >= 3
                 and any(python_unshadowed_builtin_reference(reference, {"setattr"}, tree, parents)
                     for reference in python_value_provenance(candidate.func, tree, parents))):
                 mutation_classes = display_class_targets(candidate.args[0], set())
-                # The string helper's nested name lookup is body-wide. Do
-                # not let a concatenation borrow an unrelated scope's literal.
-                mutation_name_values = [set() if isinstance(reference, ast.BinOp)
-                    and any(isinstance(part, ast.Name) for part in ast.walk(reference))
-                    else python_static_string_values(reference, tree)
-                    for reference in python_value_provenance(candidate.args[1], tree, parents)]
+                mutation_name_values = [mutation_literal_names(candidate.args[1], set())]
                 mutation_names = set().union(*mutation_name_values)
                 if mutation_classes and (not mutation_names or not all(mutation_name_values)):
                     return f"Python class protocol mutation has an unresolved member name on line {candidate.lineno}"
