@@ -620,3 +620,50 @@ go vet -tags=g01_pair_fixture ./livecanary
 
 These inspect the default, tagged command, and paired fixture sources. They
 do not turn the timed-out runtime partitions into passing tests.
+
+### Go 1.26.9 complete G01 offline check — 2026-10-22
+
+The existing checker completed successfully on local head
+`9ec45d128e766326fa6c3faeffd9be51cbcddc9a`: exit 0 and
+`offline experiment checks passed: 1 module(s)`. The G01 source tree was still
+`da98e542ea2a8066a3af664a4b5d3f7bdf655ebb`, and the checker blob was still
+`f3c508365f1044dc36fcc625f593556c907a950a`. This rerun addressed the unresolved
+October 15 failures after observed machine load had fallen substantially.
+No code, test selection, fixture deadline, or checker timeout was changed.
+
+The command ran from the repository root, using the same allowlisted offline
+environment documented above and the verified `go1.26.9 darwin/arm64` toolchain:
+
+```text
+OFFLINE_EXPERIMENT_MODULE=experiments/g01-scaleset bash scripts/check-offline-experiments.sh
+```
+
+All nine race-test partitions used `-count=1` and passed:
+
+| Checker partition | Timeout | Reported package duration(s) |
+| --- | --- | --- |
+| Baseline statistics | 45 s | livecanary 15.391 s |
+| Controller handoff | 45 s | livecanary 3.705 s |
+| Default remainder, including examples and fuzz seeds | 45 s | root 1.206 s; livecanary 33.173 s; liveworker 9.432 s |
+| Tagged command fixtures (`g01_live,g01_worker`) | 45 s | g01-live 4.849 s; g01-worker 1.361 s |
+| Paired non-terminal collection (`g01_pair_fixture`) | 120 s | livecanary 76.259 s |
+| Non-paired complement (`g01_pair_fixture`) | 120 s | livecanary 57.553 s |
+| Paired terminal heavy families | 120 s | livecanary 115.716 s |
+| Paired terminal remainder | 120 s | livecanary 34.238 s |
+| Paired terminal storage failures | 120 s | livecanary 95.893 s |
+
+The baseline and handoff selectors also retained `./...` package discovery;
+the root and liveworker packages reported no matching tests for those two
+selectors. Default, tagged-command, and paired-fixture `go vet` checks all
+completed without diagnostics. The success marker follows all test and vet
+commands in the inspected `set -euo pipefail` checker.
+
+This closes the recorded G01-module offline rerun gap for these source and
+toolchain identities. The earlier failures remain historical observations;
+this result does not prove that resource pressure was their only possible
+cause. It is not the complete root/G02/R1 matrix, an SDK-version comparison
+rerun, a recovery-packet recipe execution, or live server evidence. G01 was
+still OPEN and In progress when checked through `gh`; #79 was In review.
+The live canary, remaining review/merge criteria, and production G01/G02 gates
+remain unresolved. No GitHub write or live operation occurred. This is an
+evidence-only addition; rollback is reverting its local documentation commit.
