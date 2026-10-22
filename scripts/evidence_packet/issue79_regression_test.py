@@ -8448,6 +8448,39 @@ def synthetic_read(_fd, _size):
                     + body + '\n        return self\n    async def __anext__(self):\n'
                     '        return "safe"\n' + consumer))
 
+    def test_pr103_v14_augmented_receiver_escape(self) -> None:
+        consumer = ('async def collect():\n    async for item in K():\n'
+                    '        print(item)\n        break\ncollect().send(None)\n')
+        # Complete finite report and harmless pair; both remain AST text.
+        for value in ('os.environ', '"safe"'):
+            with self.subTest(value=value):
+                self.assertIsNotNone(self.inspect('import os\nholder = []\n'
+                    'def mutate():\n    object.__setattr__(holder[0], "__class__", L)\n'
+                    'class L:\n    async def __anext__(self):\n        return ' + value + '\n'
+                    'class K:\n    def __aiter__(self):\n        global holder\n'
+                    '        holder += [self]\n        mutate()\n        return self\n'
+                    '    async def __anext__(self):\n        return "safe"\n' + consumer))
+
+    def test_pr103_v14_augmented_receiver_policy_controls(self) -> None:
+        consumer = ('async def collect():\n    async for item in K():\n'
+                    '        print(item)\n        break\ncollect().send(None)\n')
+        # A local Name target and receiver-valued Name RHS must not inherit
+        # the supported simple assignment alias exception. These finite
+        # harmless mutations are conservatively unsupported, not leak proofs.
+        for rhs in ('self', 'receiver'):
+            with self.subTest(rhs=rhs):
+                self.assertIsNotNone(self.inspect('class Holder:\n'
+                    '    def __iadd__(self, value):\n        return self\n'
+                    'class K:\n    def __aiter__(self):\n        receiver = self\n'
+                    '        holder = Holder()\n        holder += ' + rhs + '\n'
+                    '        return self\n    async def __anext__(self):\n'
+                    '        return "safe"\n' + consumer))
+        self.assertIsNone(self.inspect('class K:\n    def __aiter__(self):\n'
+            '        receiver = self\n        count = 0\n        count += 1\n'
+            '        labels = []\n        labels += ["safe"]\n'
+            '        receiver.label = count\n        return self\n'
+            '    async def __anext__(self):\n        return "safe"\n' + consumer))
+
     def test_pr103_v13_factory_returned_protocol_classes(self) -> None:
         consumer = ('async def collect():\n    async for item in K():\n'
                     '        print(item)\n        break\ncollect().send(None)\n')

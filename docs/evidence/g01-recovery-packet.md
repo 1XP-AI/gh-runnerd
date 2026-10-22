@@ -22905,6 +22905,8 @@ def python_sensitive_read_violation(tree, parents):
                 and python_enclosing_scope(part, parents) is not implementation
                 and reaches_receiver(part)):
                 return True  # Captured receivers cannot certify unchanged identity.
+            if isinstance(part, ast.AugAssign) and reaches_receiver(part.value):
+                return True  # Augmentation is a mutation, never a simple local alias.
             if isinstance(part, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) and part.value is not None:
                 if reaches_receiver(part.value):
                     targets = part.targets if isinstance(part, ast.Assign) else [part.target]
