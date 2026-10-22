@@ -22898,6 +22898,26 @@ def python_sensitive_read_violation(tree, parents):
                 and python_enclosing_scope(reference, parents) is implementation
                 for expression in ast.walk(value) if isinstance(expression, ast.expr)
                 for reference in python_value_provenance(expression, tree, parents))
+        def augmentation_target_unproven(value):
+            for expression in ast.walk(value):
+                if not isinstance(expression, ast.expr):
+                    continue
+                for reference in python_value_provenance(expression, tree, parents):
+                    if not isinstance(reference, ast.Name):
+                        continue
+                    inventory = getattr(tree, "_issue79_sensitive_imported_alias_bindings", {})
+                    origins = []
+                    for scope in python_sensitive_alias_scope_chain(reference, parents):
+                        bindings = inventory.get((id(scope), reference.id), ())
+                        if not bindings or any(kind in {"global", "nonlocal"} for kind, _ in bindings):
+                            continue
+                        origins = [(kind, binding) for kind, binding in bindings
+                            if not (kind == "unknown" and isinstance(binding, ast.Name)
+                                and isinstance(parents.get(binding), ast.AugAssign))]
+                        break
+                    if not origins or any(kind != "assignment" for kind, _ in origins):
+                        return True  # Unsupported binders cannot prove a nonreceiver target.
+            return False
         for part in ast.walk(implementation):
             if isinstance(part, ast.Attribute) and part.attr == "__class__" and isinstance(part.ctx, (ast.Store, ast.Del)):
                 return True
@@ -22905,8 +22925,9 @@ def python_sensitive_read_violation(tree, parents):
                 and python_enclosing_scope(part, parents) is not implementation
                 and reaches_receiver(part)):
                 return True  # Captured receivers cannot certify unchanged identity.
-            if isinstance(part, ast.AugAssign) and any(
-                reaches_receiver(operand) for operand in (part.target, part.value)):
+            if isinstance(part, ast.AugAssign) and (any(
+                reaches_receiver(operand) for operand in (part.target, part.value))
+                or augmentation_target_unproven(part.target)):
                 return True  # Target operators and RHS escapes can mutate the receiver.
             if isinstance(part, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) and part.value is not None:
                 if reaches_receiver(part.value):
@@ -23355,6 +23376,10 @@ def python_sensitive_read_violation(tree, parents):
         if not python_reviewed_read_path(receiver, tree, parents):
             return f"Python unreviewed Path reader alias {alias!r} is not allowed"
     for node in ast.walk(tree):
+        if (isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load)
+            and error_operand_repr_sensitive(node.value, set(), ("__getitem__",))):
+            return ("Python custom subscription may expose sensitive protocol values "
+                f"on line {node.lineno}")
         if (isinstance(node, (ast.comprehension, ast.For, ast.AsyncFor))
             and error_operand_repr_sensitive(node.iter, set(),
                 ("__iter__", "__next__", "__getitem__", "__aiter__", "__anext__") if isinstance(node, ast.AsyncFor)

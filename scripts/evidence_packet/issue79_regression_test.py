@@ -8513,6 +8513,52 @@ def synthetic_read(_fd, _size):
             '        alias = unknown\n        alias += 1\n        return alias\n'
             '    async def __anext__(self):\n        return "safe"\n' + consumer))
 
+    def test_pr103_v16_with_augmented_receiver(self) -> None:
+        consumer = ('async def collect():\n    async for item in K():\n'
+                    '        print(item)\n        break\ncollect().send(None)\n')
+        for value in ('os.environ', '"safe"'):
+            for body in ('alias += 1', 'other = alias\n            other += 1'):
+                with self.subTest(value=value, body=body):
+                    # Both context-manager methods are present; the sensitive
+                    # source is a complete finite path, never executed here.
+                    self.assertIsNotNone(self.inspect('import os\nclass L:\n'
+                        '    async def __anext__(self):\n        return ' + value + '\n'
+                        'class K:\n    def __enter__(self):\n        return self\n'
+                        '    def __exit__(self, kind, value, traceback):\n        return False\n'
+                        '    def __iadd__(self, other):\n'
+                        '        object.__setattr__(self, "__class__", L)\n        return self\n'
+                        '    def __aiter__(self):\n        with self as alias:\n            '
+                        + body + '\n        return self\n'
+                        '    async def __anext__(self):\n        return "safe"\n' + consumer))
+
+    def test_pr103_v16_augmented_unknown_binding_policy(self) -> None:
+        consumer = ('async def collect():\n    async for item in K():\n'
+                    '        print(item)\n        break\ncollect().send(None)\n')
+        # A harmless local context manager still has an unsupported as binding.
+        # Unknown alternatives and alias hops cannot certify nonreceiver origin.
+        for body in ('alias += 1', 'other = alias\n            other += 1',
+                     'other = 0 if flag else alias\n            other += 1'):
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect('flag = True\nclass Manager:\n'
+                    '    def __enter__(self):\n        return 0\n'
+                    '    def __exit__(self, kind, value, traceback):\n        return False\n'
+                    'class K:\n    def __aiter__(self):\n        with Manager() as alias:\n'
+                    '            ' + body + '\n        return self\n'
+                    '    async def __anext__(self):\n        return "safe"\n' + consumer))
+
+    def test_pr103_v16_direct_getitem_protocol(self) -> None:
+        for value in ('os.environ', '"safe"'):
+            for body in ('print(K()[0])', 'obj = K()\nprint(obj[0])',
+                         'obj = K()\nalias = obj\nprint(alias[0])',
+                         'flag = True\nobj = K() if flag else unknown\nprint(obj[0])'):
+                with self.subTest(value=value, body=body):
+                    self.assertEqual(self.inspect('import os\nclass K:\n'
+                        '    def __getitem__(self, key):\n        return ' + value + '\n'
+                        + body + '\n') is None, value == '"safe"')
+        self.assertIsNone(self.inspect('class K:\n    def __getitem__(self, key):\n'
+            '        return "safe"\nflag = True\nobj = K() if flag else ["literal"]\n'
+            'print(obj[0])\nprint(["safe"][0])\nprint({"key": "safe"}["key"])\n'))
+
     def test_pr103_v13_factory_returned_protocol_classes(self) -> None:
         consumer = ('async def collect():\n    async for item in K():\n'
                     '        print(item)\n        break\ncollect().send(None)\n')
