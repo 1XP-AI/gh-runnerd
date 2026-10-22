@@ -10502,11 +10502,19 @@ def python_sensitive_value_expression(node, sensitive_names, tree, parents, seen
                 )
                 for argument in node.args
             )
-        if isinstance(node.func, ast.Attribute):
-            sensitive_receiver = python_sensitive_value_expression(
+        if isinstance(node.func, ast.expr):
+            sensitive_receiver = isinstance(node.func, ast.Attribute) and python_sensitive_value_expression(
                 node.func.value, sensitive_names, tree, parents, set(seen)
             )
-            return sensitive_receiver
+            # Imported module calls may encode or otherwise preserve arguments.
+            # Ordinary methods retain their receiver-based policy; this does
+            # not turn a lookup in a safe literal map into a copy of its key.
+            propagated_arguments = (list(node.args) + [keyword.value for keyword in node.keywords]
+                if python_module_callable_reference(node.func, tree, parents) else [])
+            return sensitive_receiver or any(
+                python_sensitive_value_expression(argument, sensitive_names, tree, parents, set(seen))
+                for argument in propagated_arguments
+            )
     if isinstance(node, (ast.DictComp, ast.ListComp, ast.SetComp, ast.GeneratorExp)):
         if any(
             isinstance(candidate, ast.Call)
@@ -12978,11 +12986,431 @@ def python_class_namespace_owner(node, parents):
     return None
 
 
+def python_parameter_value_sources(tree, parents):
+    """Index actual local-call arguments using the existing callable binders.
+
+    Publish staged edges before resolving callee values. Each original
+    (call, local callable, descriptor reference) is bound once; a fixed point
+    adds only such finite pairs. Clear value caches between stages so a
+    partial parameter graph cannot certify a later lookup as insensitive.
+    """
+    argument_sources = getattr(tree, "_issue79_parameter_value_sources", None)
+    if argument_sources is not None:
+        return argument_sources
+    argument_sources = {}
+    tree._issue79_parameter_value_sources = argument_sources
+    call_sites = [site for site in ast.walk(tree) if isinstance(site, ast.Call)]
+    initial_callees = {}
+    for site in call_sites:
+        callees = []
+        if isinstance(site.func, ast.Name):
+            callees.extend((function, None) for function in
+                python_local_function_candidates(site.func.id, site, tree, parents)
+                + python_local_lambda_candidates(site.func.id, site, tree, parents))
+            callees.extend((function, site.func) for function in
+                python_local_bound_method_candidates(site.func.id, site, tree, parents))
+        elif isinstance(site.func, ast.Lambda):
+            callees.append((site.func, None))
+        elif isinstance(site.func, ast.Attribute):
+            callees.extend((function, site.func) for function in
+                python_local_method_candidates(site.func, site, tree, parents))
+        initial_callees[site] = callees
+
+    def bind(site, callees):
+        for function, method_reference, is_bound in callees:
+            positional = list(function.args.posonlyargs) + list(function.args.args)
+            if method_reference is not None and positional and is_bound:
+                receiver_parameter, positional = positional[0], positional[1:]
+                receiver_targets, receiver_visited = [method_reference], set()
+                while receiver_targets:
+                    receiver_target = receiver_targets.pop()
+                    if id(receiver_target) in receiver_visited:
+                        continue
+                    receiver_visited.add(id(receiver_target))
+                    if isinstance(receiver_target, ast.Attribute) and receiver_target.attr == function.name:
+                        argument_sources.setdefault(receiver_parameter, []).append((receiver_target.value, None))
+                    elif isinstance(receiver_target, ast.Name):
+                        binding_index = getattr(tree, "_issue79_local_return_index", ({}, {}))[0]
+                        for scope in python_lexical_scope_chain(python_enclosing_scope(site, parents), parents):
+                            bindings = binding_index.get((id(scope), receiver_target.id), ())
+                            if bindings:
+                                receiver_targets.extend(bindings)
+                                break
+                    elif isinstance(receiver_target, ast.Call):
+                        receiver_targets.extend(python_local_call_return_values(receiver_target, tree, parents))
+            expanded_arguments = []
+            for argument in site.args:
+                if (isinstance(argument, ast.Starred) and isinstance(argument.value, (ast.Tuple, ast.List))
+                    and not any(isinstance(item, ast.Starred) for item in argument.value.elts)):
+                    expanded_arguments.extend(argument.value.elts)
+                else:
+                    expanded_arguments.append(argument)
+            cursor, uncertain_position = 0, False
+            for argument in expanded_arguments:
+                if isinstance(argument, ast.Starred):
+                    for position, parameter in enumerate(positional[cursor:]):
+                        argument_sources.setdefault(parameter, []).append((argument.value, ast.Constant(value=position)))
+                    uncertain_position = True
+                elif uncertain_position:
+                    for parameter in positional[cursor:]:
+                        argument_sources.setdefault(parameter, []).append((argument, None))
+                else:
+                    if cursor < len(positional):
+                        argument_sources.setdefault(positional[cursor], []).append((argument, None))
+                    cursor += 1
+            if function.args.vararg is not None:
+                argument_sources.setdefault(function.args.vararg, []).append((
+                    ast.Tuple(elts=expanded_arguments, ctx=ast.Load()), ("tail", len(positional))))
+            named_parameters = {parameter.arg: parameter for parameter in positional + list(function.args.kwonlyargs)}
+            for keyword in site.keywords:
+                if keyword.arg in named_parameters:
+                    argument_sources.setdefault(named_parameters[keyword.arg], []).append((keyword.value, None))
+                elif keyword.arg is None:
+                    for name, parameter in named_parameters.items():
+                        argument_sources.setdefault(parameter, []).append((keyword.value, ast.Constant(value=name)))
+            if function.args.kwarg is not None:
+                extra_keywords = [keyword for keyword in site.keywords if keyword.arg not in named_parameters]
+                argument_sources.setdefault(function.args.kwarg, []).append((ast.Dict(
+                    keys=[ast.Constant(value=keyword.arg) if keyword.arg is not None else None for keyword in extra_keywords],
+                    values=[keyword.value for keyword in extra_keywords]), None))
+    bound_pairs = set()
+    while True:
+        tree._issue79_value_provenance_cache = {}
+        tree._issue79_module_callable_cache = {}
+        changed = False
+        for site in call_sites:
+            callees = list(initial_callees[site])
+            references = python_value_provenance(site.func, tree, parents)
+            for function in references:
+                if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                    continue
+                owner = python_class_namespace_owner(function, parents)
+                descriptors = [reference for reference in references
+                    if isinstance(reference, ast.Attribute) and reference.attr == getattr(function, "name", None)
+                    and owner is not None and owner in python_value_provenance(reference.value, tree, parents)]
+                callees.extend((function, reference) for reference in descriptors or [None])
+            for function, reference in callees:
+                # Resolve aliases before deciding whether a descriptor
+                # consumes self. A parameter may receive either a class or
+                # an instance; never publish a speculative bound offset.
+                alternatives = [reference]
+                if isinstance(reference, ast.Name):
+                    alternatives = [item for item in references if isinstance(item, ast.Attribute)
+                        and item.attr == function.name] or alternatives
+                for method_reference in alternatives:
+                    is_static = any(python_dotted_name(item) == "staticmethod"
+                        or isinstance(item, ast.Name) and python_assigned_callable_alias(item.id, "staticmethod", tree)
+                        for item in getattr(function, "decorator_list", ()))
+                    is_classmethod = any(python_dotted_name(item) == "classmethod"
+                        for item in getattr(function, "decorator_list", ()))
+                    if method_reference is None or is_static:
+                        modes = {False}
+                    elif is_classmethod:
+                        modes = {True}
+                    elif isinstance(method_reference, ast.Attribute):
+                        origins = python_value_provenance(method_reference.value, tree, parents, receiver_origins=True)
+                        modes = {False for item in origins if isinstance(item, ast.ClassDef)}
+                        if any(isinstance(item, ast.Call) and any(isinstance(candidate, ast.ClassDef)
+                            for candidate in python_value_provenance(item.func, tree, parents)) for item in origins):
+                            modes.add(True)
+                    else:
+                        modes = {python_local_method_is_bound(site, function, tree, parents)}
+                    for is_bound in modes:
+                        pair = (site, function, method_reference, is_bound)
+                        if pair in bound_pairs:
+                            continue
+                        bound_pairs.add(pair)
+                        bind(site, [(function, method_reference, is_bound)])
+                        changed = True
+        if not changed:
+            break
+    tree._issue79_value_provenance_cache = {}
+    tree._issue79_module_callable_cache = {}
+    return argument_sources
+
+
+def python_destructured_binding_values(target, value, requested, resolve):
+    """Project literal nested/starred patterns without mixing known positions."""
+    projected_values = []
+    pending_pairs = [(target, value)]
+    visited_pairs = set()
+    while pending_pairs:
+        pattern, projection_source_value = pending_pairs.pop()
+        pair = (id(pattern), id(projection_source_value))
+        if pair in visited_pairs:
+            continue
+        visited_pairs.add(pair)
+        if pattern is requested:
+            projected_values.append(projection_source_value)
+            continue
+        if isinstance(pattern, ast.Starred):
+            pending_pairs.append((pattern.value, projection_source_value))
+            continue
+        if not isinstance(pattern, (ast.Tuple, ast.List)):
+            continue
+        alternatives = resolve(projection_source_value, "expand") or resolve(projection_source_value)
+        for alternative in alternatives:
+            if (isinstance(alternative, (ast.Tuple, ast.List))
+                and not any(isinstance(item, ast.Starred) for item in alternative.elts)):
+                stars = [index for index, item in enumerate(pattern.elts) if isinstance(item, ast.Starred)]
+                for index, item in enumerate(pattern.elts):
+                    if stars and isinstance(item, ast.Starred):
+                        tail = len(pattern.elts) - index - 1
+                        stop = len(alternative.elts) - tail
+                        pending_pairs.append((item.value, ast.List(elts=alternative.elts[index:stop], ctx=ast.Load())))
+                    else:
+                        position = index if not stars or index < stars[0] else index - len(pattern.elts)
+                        if -len(alternative.elts) <= position < len(alternative.elts):
+                            pending_pairs.append((item, alternative.elts[position]))
+            else:
+                # Unresolved expansion keeps alternatives instead of guessing
+                # a slot. Name/call aliases resolve through the caller's guard.
+                candidates = alternative.elts if isinstance(alternative, (ast.Tuple, ast.List)) else [alternative]
+                for candidate in candidates:
+                    elements = resolve(candidate.value, True) if isinstance(candidate, ast.Starred) else [candidate]
+                    pending_pairs.extend((item, element) for item in pattern.elts for element in elements)
+    return projected_values
+
+
+def python_value_provenance(value, tree, parents, seen=None, initial_selection=None, receiver_origins=False):
+    """Bounded value reachability; specimens are AST data, never evaluated.
+
+    Retain every visible alternative, but select known literal container keys.
+    The complete binder inventory owns shadowing and global/nonlocal scopes.
+    Unknown binders stop lookup rather than falling through to an outer name.
+    """
+    cached_values = getattr(tree, "_issue79_value_provenance_cache", None)
+    if cached_values is None:
+        cached_values = {}
+        tree._issue79_value_provenance_cache = cached_values
+    cache_key = (value, initial_selection, receiver_origins)
+    if seen is None and cache_key in cached_values:
+        return cached_values[cache_key]
+    pending = [(value, initial_selection)]
+    visited = set() if seen is None else set(seen)
+    found = []
+    while pending:
+        expression, selection = pending.pop()
+        if expression is None:
+            continue
+        identity = (id(expression), id(selection) if isinstance(selection, ast.AST) else selection)
+        if identity in visited:
+            continue
+        visited.add(identity)
+        if selection is None:
+            found.append(expression)
+        if isinstance(expression, ast.Name):
+            python_sensitive_imported_function_alias(expression, tree, parents)
+            inventory = getattr(tree, "_issue79_sensitive_imported_alias_bindings", {})
+            for scope in python_sensitive_alias_scope_chain(expression, parents):
+                bindings = inventory.get((id(scope), expression.id), ())
+                if not bindings:
+                    continue
+                if any(kind == "global" for kind, _binding in bindings) and not isinstance(scope, ast.Module):
+                    continue
+                if any(kind == "nonlocal" for kind, _binding in bindings):
+                    continue
+                for kind, binding in bindings:
+                    if kind == "assignment":
+                        pending.append((binding.value, selection))
+                    elif kind == "unknown" and isinstance(binding, ast.Name):
+                        owner = parents.get(binding)
+                        while isinstance(owner, (ast.Tuple, ast.List, ast.Starred)):
+                            owner = parents.get(owner)
+                        if isinstance(owner, ast.Assign) and binding in owner.targets:
+                            pending.append((owner.value, selection))
+                        elif isinstance(owner, (ast.For, ast.AsyncFor, ast.comprehension)):
+                            rows = python_value_provenance(owner.iter, tree, parents, visited, "iterate", receiver_origins)
+                            if owner.target is binding:
+                                pending.extend((row, selection) for row in rows)
+                            else:
+                                for row in rows:
+                                    for source in python_destructured_binding_values(owner.target, row, binding,
+                                        lambda item, projection=None: python_value_provenance(item, tree, parents, visited, projection, receiver_origins)):
+                                        pending.append((source, selection))
+                    elif kind == "unknown" and isinstance(binding, ast.arg):
+                        for actual, actual_selection in python_parameter_value_sources(tree, parents).get(binding, ()):
+                            if actual_selection is None:
+                                pending.append((actual, selection))
+                            else:
+                                pending.extend((selected, selection) for selected in
+                                    python_value_provenance(actual, tree, parents, visited, actual_selection, receiver_origins))
+                        arguments = parents.get(binding)
+                        if isinstance(arguments, ast.arguments):
+                            positional = list(arguments.posonlyargs) + list(arguments.args)
+                            defaults = list(zip(positional[-len(arguments.defaults):], arguments.defaults)) if arguments.defaults else []
+                            defaults.extend(zip(arguments.kwonlyargs, arguments.kw_defaults))
+                            pending.extend((default, selection) for parameter, default in defaults
+                                if parameter is binding and default is not None)
+                    elif kind == "unknown" and isinstance(binding, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                        pending.append((binding, selection))
+                break
+        elif isinstance(expression, ast.Call):
+            pending.extend((returned, selection)
+                for returned in python_local_call_return_values(expression, tree, parents))
+            # Descriptor binding needs the constructor expression to remain
+            # distinguishable from a class value, through the same aliases,
+            # selections and supplied-argument edges as ordinary provenance.
+            if not receiver_origins:
+                pending.extend((candidate, selection)
+                    for candidate in python_value_provenance(expression.func, tree, parents, visited)
+                    if isinstance(candidate, ast.ClassDef))
+        elif isinstance(expression, ast.ClassDef):
+            if not receiver_origins:
+                pending.extend((base, selection) for base in expression.bases)
+        elif isinstance(expression, ast.Attribute):
+            class_members = getattr(tree, "_issue79_provenance_class_members", None)
+            if class_members is None:
+                direct_members, stored_members = {}, {}
+                for statement in ast.walk(tree):
+                    if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        method_owner = python_class_namespace_owner(statement, parents)
+                        if method_owner is not None:
+                            direct_members.setdefault((method_owner, statement.name), []).append(statement)
+                        continue
+                    if not isinstance(statement, (ast.Assign, ast.AnnAssign)) or statement.value is None:
+                        continue
+                    member_targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+                    class_owner = python_class_namespace_owner(statement, parents)
+                    for member_target in member_targets:
+                        if isinstance(member_target, ast.Name) and class_owner is not None:
+                            direct_members.setdefault((class_owner, member_target.id), []).append(statement.value)
+                        elif isinstance(member_target, ast.Attribute):
+                            stored_members.setdefault(member_target.attr, []).append((member_target.value, statement.value))
+                class_members = (direct_members, stored_members,
+                    any(isinstance(item, ast.ClassDef) for item in ast.walk(tree)))
+                tree._issue79_provenance_class_members = class_members
+            direct_members, stored_members, has_classes = class_members
+            if has_classes:
+                receiver_classes = {candidate for candidate in python_value_provenance(expression.value, tree, parents, visited)
+                    if isinstance(candidate, ast.ClassDef)}
+                for classdef in receiver_classes:
+                    pending.extend((source, selection) for source in direct_members.get((classdef, expression.attr), ()))
+                for receiver, source in stored_members.get(expression.attr, ()):
+                    owners = python_value_provenance(receiver, tree, parents, visited)
+                    if any(owner in receiver_classes for owner in owners):
+                        pending.append((source, selection))
+        elif isinstance(expression, ast.Subscript):
+            # Nested extraction retains all reachable element alternatives.
+            # A finite flattening mode avoids an ever-growing index stack on
+            # cyclic aliases such as a = a[0]. Single literal keys stay exact.
+            pending.append((expression.value, expression.slice if selection is None else True))
+        elif isinstance(expression, (ast.List, ast.Tuple, ast.Set)) and selection is not None:
+            if selection is True:
+                pending.extend((item.value, True) if isinstance(item, ast.Starred) else (item, None)
+                    for item in expression.elts)
+                pending.extend((item, True) for item in expression.elts if not isinstance(item, ast.Starred))
+                continue
+            spreads = [position for position, item in enumerate(expression.elts) if isinstance(item, ast.Starred)]
+            if len(spreads) == 1:
+                spread_position = spreads[0]
+                spread_alternatives = python_value_provenance(
+                    expression.elts[spread_position].value, tree, parents, visited, "expand", receiver_origins)
+                spread_values = [item for item in spread_alternatives
+                    if isinstance(item, (ast.Tuple, ast.List))
+                    and not any(isinstance(part, ast.Starred) for part in item.elts)]
+                if spread_values:
+                    pending.extend((ast.Tuple(elts=(expression.elts[:spread_position] + item.elts
+                        + expression.elts[spread_position + 1:]), ctx=ast.Load()), selection)
+                        for item in spread_values)
+                    if all(item in spread_values for item in spread_alternatives):
+                        continue
+            if selection == "expand":
+                # An unresolved/cyclic spread stays as a collection
+                # alternative; a precise sibling never discards it.
+                found.append(expression)
+                continue
+            if isinstance(selection, tuple) and selection[0] == "tail":
+                # Known packs have expanded above. For unresolved spreads,
+                # consume only the fixed entries definitely before a spread;
+                # all remaining alternatives may occupy the first vararg.
+                consumed = min(selection[1], spreads[0]) if spreads else selection[1]
+                found.append(ast.Tuple(elts=expression.elts[consumed:], ctx=ast.Load()))
+                continue
+            if any(isinstance(item, ast.Starred) for item in expression.elts):
+                pending.extend((item.value, True) if isinstance(item, ast.Starred) else (item, None)
+                    for item in expression.elts)
+            elif (isinstance(selection, ast.Constant) and isinstance(selection.value, int)
+                and not isinstance(selection.value, bool)
+                and -len(expression.elts) <= selection.value < len(expression.elts)):
+                pending.append((expression.elts[selection.value], None))
+            else:
+                pending.extend((item, None) for item in expression.elts)
+                if selection is True:
+                    pending.extend((item, True) for item in expression.elts)
+        elif isinstance(expression, ast.Dict) and selection is not None:
+            for key, item in zip(expression.keys, expression.values):
+                if key is None:
+                    pending.append((item, selection))
+                elif (selection is True or not isinstance(selection, ast.Constant)
+                    or not isinstance(key, ast.Constant) or key.value == selection.value):
+                    pending.append((key if selection == "iterate" else item, None))
+                    if selection is True:
+                        pending.append((item, True))
+        elif isinstance(expression, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)) and selection is not None:
+            yielded_value = ((expression.key if selection == "iterate" else expression.value)
+                if isinstance(expression, ast.DictComp) else expression.elt)
+            pending.append((yielded_value, None))
+            if selection is True:
+                pending.append((expression.value if isinstance(expression, ast.DictComp) else expression.elt, True))
+        elif isinstance(expression, ast.IfExp):
+            pending.extend(((expression.body, selection), (expression.orelse, selection)))
+        elif isinstance(expression, ast.BoolOp):
+            pending.extend((item, selection) for item in expression.values)
+        elif isinstance(expression, (ast.NamedExpr, ast.Starred)):
+            pending.append((expression.value, selection))
+    if seen is None:
+        cached_values[cache_key] = found
+    return found
+
+
+def python_module_callable_reference(value, tree, parents):
+    """Recognize imported module callables through the same value graph."""
+    module_callable_cache = getattr(tree, "_issue79_module_callable_cache", None)
+    if module_callable_cache is None:
+        module_callable_cache = {}
+        tree._issue79_module_callable_cache = module_callable_cache
+    if value in module_callable_cache:
+        return module_callable_cache[value]
+    imported_callable = False
+    references = list(python_value_provenance(value, tree, parents))
+    visited_references = set()
+    while references:
+        reference = references.pop()
+        if id(reference) in visited_references:
+            continue
+        visited_references.add(id(reference))
+        root_reference = reference
+        while isinstance(root_reference, ast.Attribute):
+            root_reference = root_reference.value
+        if not isinstance(root_reference, ast.Name):
+            continue
+        references.extend(python_value_provenance(root_reference, tree, parents))
+        python_sensitive_imported_function_alias(root_reference, tree, parents)
+        inventory = getattr(tree, "_issue79_sensitive_imported_alias_bindings", {})
+        for scope in python_sensitive_alias_scope_chain(root_reference, parents):
+            bindings = inventory.get((id(scope), root_reference.id), ())
+            if not bindings:
+                continue
+            if any(kind in {"global", "nonlocal"} for kind, _binding in bindings) and not isinstance(scope, ast.Module):
+                continue
+            imported_callable = imported_callable or any(
+                kind == "import" or isinstance(binding, ast.Import)
+                for kind, binding in bindings)
+            break
+    module_callable_cache[value] = imported_callable
+    return imported_callable
+
+
 def python_class_command_attribute_violation(tree, modules, functions):
     """Reject unresolved conditional and instance/class launcher attributes."""
     attributes = {}
     parents = {child: parent for parent in ast.walk(tree)
         for child in ast.iter_child_nodes(parent)}
+
+    def launcher_value(value):
+        return next((resolved for candidate in python_value_provenance(value, tree, parents)
+            if (resolved := python_resolved_name(candidate, modules, functions)) in python_command_functions), None)
 
     def record(target, value):
         if not isinstance(target, ast.Attribute):
@@ -12993,7 +13421,7 @@ def python_class_command_attribute_violation(tree, modules, functions):
             or attribute_name.split(".", 1)[0] in python_command_modules
         ):
             return
-        resolved = python_resolved_name(value, modules, functions)
+        resolved = launcher_value(value)
         if resolved in python_command_functions:
             attributes[attribute_name] = resolved
 
@@ -13056,11 +13484,11 @@ def python_class_command_attribute_violation(tree, modules, functions):
                 elif isinstance(statement, ast.Assign):
                     for target in statement.targets:
                         if isinstance(target, ast.Name):
-                            resolved = python_resolved_name(statement.value, modules, functions)
+                            resolved = launcher_value(statement.value)
                             if resolved in python_command_functions:
                                 attributes[f"{node.name}.{target.id}"] = resolved
                 elif isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name):
-                    resolved = python_resolved_name(statement.value, modules, functions)
+                    resolved = launcher_value(statement.value)
                     if resolved in python_command_functions:
                         attributes[f"{node.name}.{statement.target.id}"] = resolved
 
@@ -13103,15 +13531,16 @@ def python_class_command_attribute_violation(tree, modules, functions):
                 "Python conditional process launcher target is not allowed "
                 f"on line {node.lineno}"
             )
-        dotted = python_dotted_name(node.func)
-        paths = receiver_paths(node.func, set()) if isinstance(node.func, ast.Attribute) else set()
-        matched = next((path for path in paths if path in attributes), None)
-        if dotted in attributes or matched is not None:
-            dotted = matched or dotted
-            return (
-                "Python process launcher stored on a class attribute is not allowed "
-                f"({dotted!r} resolves to {attributes[dotted]!r}) on line {node.lineno}"
-            )
+        for reference in python_value_provenance(node.func, tree, parents):
+            dotted = python_dotted_name(reference)
+            paths = receiver_paths(reference, set()) if isinstance(reference, ast.Attribute) else set()
+            matched = next((path for path in paths if path in attributes), None)
+            if dotted in attributes or matched is not None:
+                dotted = matched or dotted
+                return (
+                    "Python process launcher stored on a class attribute is not allowed "
+                    f"({dotted!r} resolves to {attributes[dotted]!r}) on line {node.lineno}"
+                )
     return None
 
 
@@ -18504,9 +18933,7 @@ def python_filesystem_mutation_violation(tree, parents):
         elif dotted in python_filesystem_mutating_functions:
             mutation = True
             path_arguments = list(node.args[:2])
-        elif dotted == "open" or (
-            isinstance(node.func, ast.Name) and node.func.id in open_aliases
-        ):
+        elif python_open_callable_reference(node.func, tree, parents, open_aliases):
             unpacked_keyword = any(keyword.arg is None for keyword in node.keywords)
             if unpacked_keyword:
                 mutation = True
@@ -19537,9 +19964,9 @@ def python_reviewed_read_path(node, tree, parents, seen=None):
         assignments = []
         scope = python_enclosing_scope(node, parents)
         for candidate in ast.walk(tree):
-            if isinstance(candidate, (ast.Assign, ast.NamedExpr)):
+            if isinstance(candidate, ast.Assign):
                 targets = candidate.targets
-            elif isinstance(candidate, ast.AnnAssign):
+            elif isinstance(candidate, (ast.AnnAssign, ast.NamedExpr)):
                 targets = [candidate.target]
             else:
                 continue
@@ -22520,6 +22947,13 @@ def python_sensitive_read_violation(tree, parents):
     assigned_display_methods = {}
     if error_operand_classes:
         for candidate in ast.walk(tree):
+            if (isinstance(candidate, ast.Call) and len(candidate.args) >= 3
+                and any(python_unshadowed_builtin_reference(reference, {"setattr"}, tree, parents)
+                    for reference in python_value_provenance(candidate.func, tree, parents))
+                and isinstance(candidate.args[1], ast.Constant)
+                and candidate.args[1].value in {"__str__", "__repr__", "__format__", "__iter__", "__next__", "__getitem__"}):
+                for classdef in display_class_targets(candidate.args[0], set()):
+                    assigned_display_methods.setdefault(classdef, []).append((candidate.args[1].value, candidate.args[2]))
             if not isinstance(candidate, (ast.Assign, ast.AnnAssign)) or candidate.value is None:
                 continue
             targets = candidate.targets if isinstance(candidate, ast.Assign) else [candidate.target]
@@ -22670,6 +23104,10 @@ def python_sensitive_read_violation(tree, parents):
         if not python_reviewed_read_path(receiver, tree, parents):
             return f"Python unreviewed Path reader alias {alias!r} is not allowed"
     for node in ast.walk(tree):
+        if (isinstance(node, (ast.comprehension, ast.For, ast.AsyncFor))
+            and error_operand_repr_sensitive(node.iter, set(), ("__iter__", "__next__", "__getitem__"))):
+            return ("Python custom iterator may expose sensitive protocol values "
+                f"on line {node.iter.lineno if isinstance(node, ast.comprehension) else node.lineno}")
         if isinstance(node, ast.Subscript) and python_dotted_name(node.value) == "os.environ":
             key = node.slice.value if isinstance(node.slice, ast.Constant) else None
             if isinstance(key, str) and credential_environment_name(key):
@@ -22733,9 +23171,17 @@ def python_sensitive_read_violation(tree, parents):
                 )
         if isinstance(node, ast.Call):
             dotted = python_dotted_name(node.func)
-            if (isinstance(node.func, ast.Attribute) and node.func.attr == "relative_to"
+            callable_values = python_value_provenance(node.func, tree, parents)
+            if any(isinstance(reference, ast.Attribute) and reference.attr == "format_map"
+                and (error_operand_sensitive(reference.value)
+                    or node.args and any(python_unshadowed_builtin_reference(receiver, {"str"}, tree, parents)
+                        for receiver in python_value_provenance(reference.value, tree, parents))
+                    and error_operand_sensitive(node.args[0])) for reference in callable_values):
+                return ("Python sensitive format field may surface in an implicit formatting exception "
+                    f"on line {node.lineno}")
+            if any(isinstance(reference, ast.Attribute) and reference.attr == "relative_to"
                 and python_resolved_local_path_expression(
-                    node.func.value, tree, parents, assignments_by_name)):
+                    reference.value, tree, parents, assignments_by_name) for reference in callable_values):
                 current = node
                 handled = False
                 while current in parents:
@@ -22786,12 +23232,22 @@ def python_sensitive_read_violation(tree, parents):
                     ("__iter__", "__next__", "__getitem__")) for argument in node.args)):
                 return ("Python custom iterator may expose sensitive protocol values "
                     f"on line {node.lineno}")
+            attribute_name_operands = []
             if len(node.args) >= 2 and (
                 dotted in {"getattr", "delattr", "setattr", "builtins.getattr", "builtins.delattr", "builtins.setattr"}
                 or isinstance(node.func, ast.Name) and any(
                     python_assigned_callable_alias(node.func.id, lookup, tree)
                     for lookup in ("getattr", "delattr", "setattr"))
-            ) and (error_operand_sensitive(node.args[1]) or error_operand_repr_sensitive(node.args[1], set())):
+            ):
+                attribute_name_operands.append(node.args[1])
+            if any(isinstance(reference, ast.Attribute)
+                and reference.attr in {"__getattribute__", "__setattr__", "__delattr__"}
+                for reference in callable_values):
+                # Bound methods take the name first; class access takes an
+                # explicit receiver first. Unknown descriptors retain both.
+                attribute_name_operands.extend(node.args[:2])
+            if any(error_operand_sensitive(operand) or error_operand_repr_sensitive(operand, set())
+                for operand in attribute_name_operands):
                 return ("Python sensitive attribute name may surface in an exception "
                     f"message on line {node.lineno}")
             if error_operand_conversion_callable(node.func, set()) and any(
@@ -23057,9 +23513,9 @@ def python_computed_callable_violation(tree):
             if any(isinstance(target, ast.Attribute) and target.attr == "breakpointhook"
                 for target in hook_targets):
                 return f"Python breakpoint hook rebinding is not reviewed on line {node.lineno}"
-        if isinstance(node, ast.Call) and python_unshadowed_builtin_reference(
-            node.func, {"breakpoint"}, tree, hook_parents
-        ):
+        if isinstance(node, ast.Call) and any(python_unshadowed_builtin_reference(
+            reference, {"breakpoint"}, tree, hook_parents
+        ) for reference in python_value_provenance(node.func, tree, hook_parents)):
             return f"Python indirect breakpoint execution is not reviewed on line {node.lineno}"
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Call):
             return (
@@ -23138,11 +23594,13 @@ def python_callback_command_violation(tree, modules, functions):
 def python_open_aliases(tree):
     """Resolve aliases of builtin/io open/open_code for path classification."""
     # Alias/return/container edges cannot create a reader without a source.
-    if not any((isinstance(node, ast.Name) and node.id == "open")
+    has_open_sources = any((isinstance(node, ast.Name) and node.id == "open")
         or (isinstance(node, ast.Attribute) and node.attr in {"open", "open_code"})
         or (isinstance(node, ast.ImportFrom) and node.module in {"builtins", "io"}
             and any(item.name in {"open", "open_code"} for item in node.names))
-        for node in ast.walk(tree)):
+        for node in ast.walk(tree))
+    tree._issue79_has_open_sources = has_open_sources
+    if not has_open_sources:
         return set()
     aliases = set()
     assignments = []
@@ -23155,6 +23613,9 @@ def python_open_aliases(tree):
             assignments.append((node.target, node.value))
         elif isinstance(node, ast.NamedExpr):
             assignments.append((node.target, node.value))
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+            assignments.extend((target, target) for target in ast.walk(node.target)
+                if isinstance(target, ast.Name) and isinstance(target.ctx, ast.Store))
         elif isinstance(node, ast.ImportFrom) and node.module in {"builtins", "io"}:
             for imported in node.names:
                 if imported.name in {"open", "open_code"}:
@@ -23175,8 +23636,10 @@ def python_open_aliases(tree):
         if isinstance(value, ast.Name):
             if value.id in aliases:
                 return True
-            return any(open_reference(source, seen) for target, source in assignments
+            return (any(open_reference(source, seen) for target, source in assignments
                 if isinstance(target, ast.Name) and target.id == value.id)
+                or any(open_reference(source, seen) for source in python_value_provenance(value, tree, parents)
+                    if source is not value))
         if isinstance(value, ast.Call):
             return any(open_reference(source, seen)
                 for source in python_local_call_return_values(value, tree, parents))
@@ -23193,6 +23656,12 @@ def python_open_aliases(tree):
         if id(container) in seen:
             return []
         seen.add(id(container))
+        if isinstance(container, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+            yielded = container.value if isinstance(container, ast.DictComp) else container.elt
+            return python_value_provenance(yielded, tree, parents)
+        if isinstance(container, ast.Call):
+            return [value for returned in python_local_call_return_values(container, tree, parents)
+                for value in selected_open_values(returned, key, seen)]
         if isinstance(container, ast.Name):
             return [value for target, source in assignments
                 if isinstance(target, ast.Name) and target.id == container.id
@@ -23225,6 +23694,14 @@ def python_open_aliases(tree):
         if not changed:
             break
     return aliases
+
+
+def python_open_callable_reference(value, tree, parents, aliases):
+    if not getattr(tree, "_issue79_has_open_sources", True):
+        return False
+    return any(python_dotted_name(reference) in {"open", "builtins.open", "io.open", "io.open_code"}
+        or isinstance(reference, ast.Name) and reference.id in aliases
+        for reference in python_value_provenance(value, tree, parents))
 
 
 python_path_filesystem_read_methods = {
@@ -23369,10 +23846,7 @@ def python_open_read_violation(tree, parents):
         if not isinstance(node, ast.Call):
             continue
         dotted = python_dotted_name(node.func)
-        if not (
-            dotted in {"open", "io.open_code"}
-            or (isinstance(node.func, ast.Name) and node.func.id in open_aliases)
-        ):
+        if not python_open_callable_reference(node.func, tree, parents, open_aliases):
             continue
         path = node.args[0] if node.args else next(
             (

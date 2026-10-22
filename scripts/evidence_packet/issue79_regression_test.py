@@ -7674,6 +7674,408 @@ def synthetic_read(_fd, _size):
         _modules, functions, _unresolved = self.scanner["python_import_bindings"](module)  # type: ignore[operator]
         self.assertTrue("methods" not in functions, "local methods helper acquired launcher provenance")
 
+    def test_pr103_nine_comprehension_protocols(self) -> None:
+        for expression in ('[item for item in K()]', '{item for item in K()}',
+                           '(item for item in K())', '{item: item for item in K()}'):
+            for source in ('os.environ.items()', '[("safe", "value")]'):
+                with self.subTest(expression=expression, source=source):
+                    result = self.inspect('import os\nclass K:\n    __iter__ = lambda self: iter(' + source + ')\nprint(' + expression + ')\n')
+                    self.assertEqual(result is None, source.startswith('['))
+
+    def test_pr103_nine_setter_display(self) -> None:
+        for setter in ('setattr', 'install'):
+            for method in ('__str__', '__repr__', '__format__', '__iter__'):
+                for value in ('str(os.environ)', '"safe"'):
+                    with self.subTest(setter=setter, method=method, value=value):
+                        sink = 'print(list(K()))' if method == '__iter__' else 'print(K())'
+                        result = self.inspect('import os\ndef leak(self, *args):\n    return ' + value + '\nclass K: pass\ninstall = setattr\n' + setter + '(K, "' + method + '", leak)\n' + sink + '\n')
+                        self.assertEqual(result is None, value == '"safe"')
+
+    def test_pr103_nine_open_comprehensions(self) -> None:
+        for expression, selection in (('[candidate for candidate in [open]]', 'readers[0]'),
+                                      ('{"x": candidate for candidate in [open]}', 'readers["x"]')):
+            for path in ('/tmp/maintainer-private', 'docs/backlog.json'):
+                with self.subTest(expression=expression, path=path):
+                    result = self.inspect('readers = ' + expression + '\nreader = ' + selection + '\nprint(reader("' + path + '").read())\n')
+                    self.assertEqual(result is None, path.startswith('docs/'))
+        self.assertIsNone(self.inspect('readers = [candidate for candidate in [len]]\nprint(readers[0]("safe"))\n'))
+
+    def test_pr103_nine_bound_relative_to(self) -> None:
+        for alias in ('method = Path.cwd().relative_to',
+                      'box = [Path.cwd().relative_to]\nmethod = box[0]',
+                      'def choose():\n    return Path.cwd().relative_to\nmethod = choose()'):
+            with self.subTest(alias=alias):
+                self.assertIsNotNone(self.inspect('from pathlib import Path\n' + alias + '\nmethod("/definitely-no")\n'))
+                self.assertIsNone(self.inspect('from pathlib import Path\n' + alias + '\ntry:\n    method("/definitely-no")\nexcept ValueError:\n    pass\n'))
+        self.assertIsNone(self.inspect('from pathlib import Path\nmethod = Path("relative").relative_to\nmethod("root")\n'))
+
+    def test_pr103_nine_dunder_attribute_names(self) -> None:
+        for method in ('__getattribute__', '__setattr__', '__delattr__'):
+            for alias in (False, True):
+                for name in ('str(os.environ)', '"safe"'):
+                    with self.subTest(method=method, alias=alias, name=name):
+                        extra = ', None' if method == '__setattr__' else ''
+                        target = 'lookup' if alias else 'object.' + method
+                        prefix = 'lookup = object.' + method + '\n' if alias else ''
+                        result = self.inspect('import os\n' + prefix + target + '(object(), ' + name + extra + ')\n')
+                        self.assertEqual(result is None, name == '"safe"')
+
+    def test_pr103_nine_returned_attribute_launchers(self) -> None:
+        for assignment in ('C.go = choose()', 'class D:\n    go = choose()\nC = D',
+                           'box = [choose()]\nC.go = box[0]'):
+            for value in ('os.system', 'len'):
+                with self.subTest(assignment=assignment, value=value):
+                    result = self.inspect('import os\ndef choose():\n    return ' + value + '\nclass C: pass\n' + assignment + '\nC.go("rm -rf /tmp/maintainer-owned")\n')
+                    self.assertEqual(result is None, value == 'len')
+
+    def test_pr103_nine_breakpoint_aliases(self) -> None:
+        for body in ('debug = breakpoint\ndebug()',
+                     'box = [breakpoint]\ndebug = box[0]\ndebug()',
+                     'def f(debug=breakpoint):\n    debug()\nf()',
+                     'for debug in [breakpoint]:\n    debug()'):
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body + '\n'))
+        self.assertIsNone(self.inspect('def breakpoint():\n    return "safe"\ndebug = breakpoint\nprint(debug())\n'))
+
+    def test_pr103_nine_encoder_taint(self) -> None:
+        for expression in ('urllib.parse.quote(str(env))', 'shlex.quote(str(env))',
+                           'urllib.parse.quote_plus(str(env))', 'urllib.parse.quote(str(env)).encode().hex()'):
+            for value in ('os.environ', '"safe"'):
+                with self.subTest(expression=expression, value=value):
+                    result = self.inspect('import os, urllib.parse, shlex\nenv = ' + value + '\nprint(' + expression + ')\n')
+                    self.assertEqual(result is None, value == '"safe"')
+
+    def test_pr103_nine_format_map_fields(self) -> None:
+        for call in ('("{" + key + "}").format_map({})',
+                     'method = ("{" + key + "}").format_map\nmethod({})'):
+            for value in ('str(env).encode().hex()', '"safe"'):
+                with self.subTest(call=call, value=value):
+                    result = self.inspect('import os\nenv = os.environ\nkey = ' + value + '\n' + call + '\n')
+                    self.assertEqual(result is None, value == '"safe"')
+
+    def test_pr103_nine_adjacent_bound_dunders(self) -> None:
+        for method in ('__getattribute__', '__setattr__', '__delattr__'):
+            for alias in (False, True):
+                for value in ('str(os.environ)', '"safe"'):
+                    with self.subTest(method=method, alias=alias, value=value):
+                        prefix = 'lookup = object().' + method + '\n' if alias else ''
+                        target = 'lookup' if alias else 'object().' + method
+                        extra = ', None' if method == '__setattr__' else ''
+                        result = self.inspect('import os\n' + prefix + target + '(' + value + extra + ')\n')
+                        self.assertEqual(result is None, value == '"safe"')
+
+    def test_pr103_nine_adjacent_encoder_aliases(self) -> None:
+        for prefix in ('import urllib.parse\nencode = urllib.parse.quote',
+                       'from urllib.parse import quote as encode',
+                       'import urllib.parse\ntools = urllib.parse\nencode = tools.quote',
+                       'import shlex\nencode = shlex.quote'):
+            for value in ('os.environ', '"safe"'):
+                with self.subTest(prefix=prefix, value=value):
+                    result = self.inspect('import os\n' + prefix + '\nenv = ' + value + '\nprint(encode(str(env)))\n')
+                    self.assertEqual(result is None, value == '"safe"')
+        self.assertIsNone(self.inspect('from urllib.parse import quote as encode\ndef f():\n    def encode(value):\n        return "safe"\n    return encode(str(os.environ))\nimport os\nprint(f())\n'))
+
+    def test_pr103_nine_adjacent_cycles(self) -> None:
+        for source in ('breakpoint', 'len'):
+            code = 'a = b\nb = a\nb = ' + source + '\na("safe")\n'
+            with self.subTest(source=source):
+                self.assertEqual(self.inspect(code) is None, source == 'len')
+        self.assertIsNone(self.inspect('def outer():\n    debug = len\n    return debug("safe")\nprint(outer())\n'))
+
+    def test_pr103_nine_adjacent_nested_and_loop_values(self) -> None:
+        for source in ('breakpoint', 'len'):
+            with self.subTest(source=source):
+                result = self.inspect('box = [[' + source + ']]\ndebug = box[0][0]\ndebug("safe")\n')
+                self.assertEqual(result is None, source == 'len')
+        for source in ('open', 'len'):
+            with self.subTest(reader=source):
+                result = self.inspect('for reader in [' + source + ']:\n    print(reader("/tmp/maintainer-private"))\n')
+                self.assertEqual(result is None, source == 'len')
+
+    def test_pr103_nine_review_chained_assignments(self) -> None:
+        for source in ('breakpoint', 'len'):
+            with self.subTest(source=source):
+                self.assertEqual(self.inspect('debug = other = ' + source + '\ndebug("safe")\n') is None, source == 'len')
+        for value in ('str(os.environ)', '"safe"'):
+            for code in ('import os\ndef leak(self):\n    return ' + value + '\nclass K: pass\ninstall = other = setattr\ninstall(K, "__str__", leak)\nprint(K())\n',
+                         'import os, urllib.parse\nenv = ' + value + '\nencode = other = urllib.parse.quote\nprint(encode(str(env)))\n'):
+                with self.subTest(value=value, code=code):
+                    self.assertEqual(self.inspect(code) is None, value == '"safe"')
+
+    def test_pr103_nine_review_class_members(self) -> None:
+        for receiver in ('C', 'Alias', 'C()', 'instance'):
+            for source in ('breakpoint', 'len'):
+                with self.subTest(receiver=receiver, source=source):
+                    self.assertEqual(self.inspect('class C:\n    debug = ' + source + '\nAlias = C\ninstance = C()\n' + receiver + '.debug("safe")\n') is None, source == 'len')
+            for value in ('os.environ', '"safe"'):
+                with self.subTest(receiver=receiver, encoder=value):
+                    self.assertEqual(self.inspect('import os, urllib.parse\nclass C:\n    encode = urllib.parse.quote\nAlias = C\ninstance = C()\nenv = ' + value + '\nprint(' + receiver + '.encode(str(env)))\n') is None, value == '"safe"')
+            for path in ('Path.cwd()', 'Path("relative")'):
+                with self.subTest(receiver=receiver, path=path):
+                    self.assertEqual(self.inspect('from pathlib import Path\nclass C:\n    method = ' + path + '.relative_to\nAlias = C\ninstance = C()\n' + receiver + '.method("/definitely-no")\n') is None, path == 'Path("relative")')
+        for source in ('os.system', 'len'):
+            with self.subTest(launcher=source):
+                self.assertEqual(self.inspect('import os\ndef choose():\n    return ' + source + '\nclass C: pass\nC.go = choose()\nlaunch = C.go\nlaunch("synthetic-command")\n') is None, source == 'len')
+        for source in ('breakpoint', 'len'):
+            with self.subTest(cycle=source):
+                self.assertEqual(self.inspect('class C: pass\nC.other = ' + source + '\nC.step = C.other\nC.other = C.step\nC.step("safe")\n') is None, source == 'len')
+
+    def test_pr103_nine_review_destructured_iteration(self) -> None:
+        for pattern, row in (('reader, label', '(SOURCE, "x")'),
+                             ('(reader,), label', '((SOURCE,), "x")'),
+                             ('*labels, reader', '("x", SOURCE)')):
+            for source in ('open', 'len'):
+                for code in ('for ' + pattern + ' in [' + row.replace('SOURCE', source) + ']:\n    print(reader("/tmp/synthetic-private").read())\n',
+                             'readers = [reader for ' + pattern + ' in [' + row.replace('SOURCE', source) + ']]\nprint(readers[0]("/tmp/synthetic-private").read())\n'):
+                    with self.subTest(pattern=pattern, source=source, code=code):
+                        self.assertEqual(self.inspect(code) is None, source == 'len')
+        self.assertIsNone(self.inspect('for reader, other in [(len, open)]:\n    print(reader("safe"))\n'))
+        for source in ('open', 'len'):
+            with self.subTest(rows_cycle=source):
+                self.assertEqual(self.inspect('rows = other\nother = rows\nother = [(' + source + ', "x")]\nfor reader, label in rows:\n    print(reader("/tmp/synthetic-private").read())\n') is None, source == 'len')
+        for source in ('breakpoint', 'len'):
+            with self.subTest(debug=source):
+                self.assertEqual(self.inspect('for debug, label in [(' + source + ', "x")]:\n    debug("safe")\n') is None, source == 'len')
+        for target, rows in (('readers', '[[SOURCE]]'), ('*readers, label', '[(SOURCE, "x")]')):
+            for source in ('open', 'len'):
+                with self.subTest(target=target, source=source):
+                    self.assertEqual(self.inspect('for ' + target + ' in ' + rows.replace('SOURCE', source) + ':\n    print(readers[0]("/tmp/synthetic-private").read())\n') is None, source == 'len')
+
+    def test_pr103_nine_review_unbound_format_map(self) -> None:
+        for target in ('str', 'Text'):
+            for call in (target + '.format_map("{" + key + "}", {})',
+                         'formatting = ' + target + '.format_map\nformatting("{" + key + "}", {})'):
+                for value in ('str(env).encode().hex()', '"safe"'):
+                    with self.subTest(call=call, value=value):
+                        result = self.inspect('import os\nText = str\nenv = os.environ\nkey = ' + value + '\n' + call + '\n')
+                        self.assertEqual(result is None, value == '"safe"')
+
+    def test_pr103_nine_v2_extracted_encoder_calls(self) -> None:
+        for container, expression in (('[urllib.parse.quote]', 'box[0]'), ('{"x": urllib.parse.quote}', 'box["x"]')):
+            for value in ('os.environ', '"safe"'):
+                with self.subTest(expression=expression, value=value):
+                    self.assertEqual(self.inspect('import os, urllib.parse\nenv = ' + value + '\nbox = ' + container + '\nprint(' + expression + '(str(env)))\n') is None, value == '"safe"')
+        self.assertIsNone(self.inspect('import os, urllib.parse\nenv = os.environ\nbox = {"safe": len, "encode": urllib.parse.quote}\nprint(box["safe"](str(env)))\n'))
+
+    def test_pr103_nine_v2_supplied_class_parameters(self) -> None:
+        for member, unsafe, safe, operation in (
+            ('step', 'breakpoint', 'len', 'target.step()'),
+            ('encode', 'urllib.parse.quote', 'urllib.parse.quote', 'print(target.encode(str(VALUE)))'),
+            ('method', 'Path.cwd().relative_to', 'Path("relative").relative_to', 'target.method("/definitely-no")'),
+            ('reader', 'open', 'len', 'print(target.reader("/tmp/synthetic-private").read())'),
+        ):
+            for invocation in ('invoke(C)', 'invoke(target=C)', 'invoke(*(C,))',
+                               'invoke(**{"target": C})', 'pack = (C,)\ninvoke(*pack)',
+                               'options = {"target": C}\ninvoke(**options)'):
+                for sensitive in (True, False):
+                    with self.subTest(member=member, invocation=invocation, sensitive=sensitive):
+                        body = operation.replace('VALUE', 'env')
+                        code = ('import os, urllib.parse\nfrom pathlib import Path\nenv = ' + ('os.environ' if sensitive else '"safe"') + '\nclass C:\n    ' + member + ' = ' + (unsafe if sensitive else safe)
+                                + '\ndef invoke(target):\n    ' + body + '\n' + invocation + '\n')
+                        self.assertEqual(self.inspect(code) is None, not sensitive)
+
+    def test_pr103_nine_v2_implicit_and_variadic_receivers(self) -> None:
+        for source in ('breakpoint', 'len'):
+            for body in (
+                'class C:\n    step = SOURCE\n    def run(self):\n        self.step()\nC().run()',
+                'class C:\n    step = SOURCE\n    def invoke(self):\n        self.step()\nfn = C().invoke\nfn()',
+                'class C:\n    step = SOURCE\n    @staticmethod\n    def invoke(target):\n        target.step()\nC.invoke(C)',
+                'class C: step = SOURCE\ndef invoke(*targets):\n    targets[0].step()\ninvoke(C)',
+                'class C: step = SOURCE\ndef invoke(**targets):\n    targets["target"].step()\ninvoke(target=C)',
+                'class C: step = SOURCE\ninvoke = lambda target: target.step()\ninvoke(C)',
+                'class C: step = SOURCE\ndef invoke(target):\n    if False:\n        invoke(target)\n    target.step()\ninvoke(C)',
+            ):
+                with self.subTest(source=source, body=body):
+                    self.assertEqual(self.inspect(body.replace('SOURCE', source) + '\n') is None, source == 'len')
+        self.assertIsNone(self.inspect('class C: step = len\nclass D: step = breakpoint\ndef invoke(target):\n    target.step()\ndef other(target):\n    return None\ninvoke(C)\nother(D)\n'))
+
+    def test_pr103_nine_v2_argument_selection(self) -> None:
+        for pack, sensitive in (('(C, D)', False), ('(D, C)', True)):
+            with self.subTest(pack=pack):
+                code = ('class C: step = len\nclass D: step = breakpoint\ndef invoke(*targets):\n    targets[0].step()\npack = ' + pack + '\ninvoke(*pack)\n')
+                self.assertEqual(self.inspect(code) is None, not sensitive)
+        for body in (
+            'def invoke(target, other):\n    target.step()\npack = (C, D)\ninvoke(*pack)',
+            'def invoke(**targets):\n    targets["target"].step()\noptions = {"target": C, "other": D}\ninvoke(**options)',
+            'def invoke(*, target):\n    target.step()\ninvoke(target=C)',
+            'class E:\n    step = len\n    def invoke(self):\n        self.step()\nE.invoke(E())',
+        ):
+            with self.subTest(body=body):
+                self.assertIsNone(self.inspect('class C: step = len\nclass D: step = breakpoint\n' + body + '\n'))
+
+    def test_pr103_nine_v3_variadic_fixed_prefix(self) -> None:
+        for source in ('breakpoint', 'len'):
+            for invocation in ('pack = (C,)\ninvoke("safe", *pack)',
+                               'pack = ("safe", C)\ninvoke(*pack)',
+                               'pack = (C,)\nother = pack\npack = other\ninvoke("safe", *pack)'):
+                with self.subTest(source=source, invocation=invocation):
+                    code = 'class C: step = ' + source + '\ndef invoke(prefix, *targets):\n    targets[0].step()\n' + invocation + '\n'
+                    self.assertEqual(self.inspect(code) is None, source == 'len')
+
+    def test_pr103_nine_v3_callee_value_provenance(self) -> None:
+        for container, target in (('[invoke]', 'calls[0]'), ('{"x": invoke}', 'calls["x"]')):
+            for source in ('breakpoint', 'len'):
+                for operation, argument in (('target.step()', 'C'), ('target()', source)):
+                    with self.subTest(container=container, source=source, operation=operation):
+                        code = ('class C: step = ' + source + '\ndef invoke(target):\n    ' + operation
+                                + '\ncalls = ' + container + '\n' + target + '(' + argument + ')\n')
+                        self.assertEqual(self.inspect(code) is None, source == 'len')
+            for value in ('os.environ', '"safe"'):
+                with self.subTest(container=container, value=value):
+                    self.assertEqual(self.inspect('import os, urllib.parse\nenv = ' + value + '\nclass C: encode = urllib.parse.quote\ndef invoke(target):\n    print(target.encode(str(env)))\ncalls = ' + container + '\n' + target + '(C)\n') is None, value == '"safe"')
+
+    def test_pr103_nine_v3_staged_call_edges(self) -> None:
+        for source in ('breakpoint', 'len'):
+            for body in (
+                'class C: step = SOURCE\ndef invoke(target):\n    target.step()\ndef apply(fn, target):\n    fn(target)\napply(invoke, C)',
+                'class C: step = SOURCE\ncalls = [lambda target: target.step()]\ncalls[0](C)',
+                'class C:\n    step = SOURCE\n    def invoke(self):\n        self.step()\ndef apply(fn):\n    fn()\napply(C().invoke)',
+                'class C:\n    step = SOURCE\n    def invoke(self):\n        self.step()\ndef apply(fn, target):\n    fn(target)\napply(C.invoke, C())',
+                'class C: step = SOURCE\ndef invoke(target):\n    target.step()\ncalls = [invoke]\nother = calls\ncalls = other\ncalls[0](C)',
+                'class C: step = SOURCE\ndef invoke(prefix, *targets):\n    targets[0].step()\nfirst = ("safe",)\nsecond = (C,)\ninvoke(*first, *second)',
+            ):
+                with self.subTest(source=source, body=body):
+                    self.assertEqual(self.inspect(body.replace('SOURCE', source) + '\n') is None, source == 'len')
+
+    def test_pr103_nine_v4_mixed_starred_alternatives(self) -> None:
+        for source in ('breakpoint', 'len'):
+            for pack in ('(D,) if False else (*other,)', '(*other,) if False else (D,)',
+                         '(*other,)', '(D,) if False else (C,)'):
+                with self.subTest(source=source, pack=pack):
+                    code = ('class C: step = ' + source + '\nclass D: step = len\n'
+                            'def invoke(prefix, *targets):\n    targets[0].step()\n'
+                            'other = (C,)\npack = ' + pack + '\ninvoke("safe", *pack)\n')
+                    self.assertEqual(self.inspect(code) is None, source == 'len')
+        self.assertIsNone(self.inspect('class C: step = len\nclass D: step = breakpoint\ndef invoke(prefix, *targets):\n    targets[0].step()\nother = (C, D)\npack = (C, D) if False else (*other,)\ninvoke("safe", *pack)\n'))
+        for source in ('breakpoint', 'len'):
+            with self.subTest(cyclic_source=source):
+                self.assertEqual(self.inspect('class C: step = ' + source + '\nclass D: step = len\ndef invoke(prefix, *targets):\n    targets[0].step()\nother = (*other, C)\npack = (D,) if False else (*other,)\ninvoke("safe", *pack)\n') is None, source == 'len')
+
+    def test_pr103_nine_v4_supplied_descriptor_receivers(self) -> None:
+        for source in ('breakpoint', 'len'):
+            for body in (
+                'def apply(cls):\n    cls.invoke(None, C)\napply(E)',
+                'def apply(cls):\n    alias = cls.invoke\n    alias(None, C)\napply(E)',
+                'def apply(cls):\n    cls.invoke(None, C)\nalias = E\napply(alias)',
+                'def apply(obj):\n    obj.invoke(C)\napply(E())',
+                'E.invoke(None, C)',
+            ):
+                with self.subTest(source=source, body=body):
+                    code = ('class C: step = ' + source + '\nclass E:\n'
+                            '    def invoke(self, target):\n        target.step()\n' + body + '\n')
+                    self.assertEqual(self.inspect(code) is None, source == 'len')
+
+    def test_pr103_nine_v4_descriptor_precision(self) -> None:
+        prefix = ('class C: step = len\nclass D: step = breakpoint\nclass E:\n'
+                  '    def invoke(self, target, *rest):\n        target.step()\n')
+        for body in (
+            'def apply(cls):\n    cls.invoke(D, C)\napply(E)',
+            'def apply(obj):\n    obj.invoke(C, D)\napply(E())',
+            'def apply(cls):\n    cls.invoke(D, C)\nvalues = [E]\napply(values[0])',
+            'def apply(obj):\n    obj.invoke(C, D)\nvalues = [E()]\napply(values[0])',
+            'def apply(value):\n    value.invoke(C, C)\napply(E if False else E())',
+        ):
+            with self.subTest(safe_body=body):
+                self.assertIsNone(self.inspect(prefix + body + '\n'))
+        for args in ('None, D', 'D, None'):
+            with self.subTest(ambiguous_args=args):
+                self.assertIsNotNone(self.inspect(prefix + 'def apply(value):\n    value.invoke(' + args + ')\napply(E if False else E())\n'))
+
+    def test_pr103_nine_v5_nested_starred_rows(self) -> None:
+        for source in ('breakpoint', 'len'):
+            for row in ('(D,) if False else (*other,)', '(*other,) if False else (D,)',
+                        '(*other,)', '(C,)', '(D,) if False else (C,)'):
+                for operation in ('for (target,) in rows:\n    target.step()',
+                                  'values = [target.step() for (target,) in rows]'):
+                    with self.subTest(source=source, row=row, operation=operation):
+                        code = ('class C: step = ' + source + '\nclass D: step = len\nother = (C,)\n'
+                                'rows = [' + row + ']\n' + operation + '\n')
+                        self.assertEqual(self.inspect(code) is None, source == 'len')
+
+    def test_pr103_nine_v5_row_projection_controls(self) -> None:
+        prefix = 'class C: step = len\nclass D: step = breakpoint\nother = (C, D)\n'
+        for body in (
+            'rows = [(*other,)]\nfor (target, unused) in rows:\n    target.step()',
+            'rows = [(C, D) if False else (*other,)]\nvalues = [target.step() for (target, unused) in rows]',
+            'rows = [(*other,)]\nfor (target, *rest) in rows:\n    target.step()',
+            'rows = [((*other,),)]\nfor ((target, unused),) in rows:\n    target.step()',
+        ):
+            with self.subTest(safe_body=body):
+                self.assertIsNone(self.inspect(prefix + body + '\n'))
+        self.assertIsNotNone(self.inspect(prefix + 'rows = [(*other,)]\nfor (*rest, target) in rows:\n    target.step()\n'))
+        for source in ('breakpoint', 'len'):
+            with self.subTest(cyclic_source=source):
+                self.assertEqual(self.inspect('class C: step = ' + source + '\nother = (*other, C)\nrows = [(*other,)]\nfor (target,) in rows:\n    target.step()\n') is None, source == 'len')
+
+    def test_pr103_named_expression_path_assignment_targets(self) -> None:
+        for path in ('docs/EXECUTION.md', '/private/issue79-fixture'):
+            for binding in ('root = Path(PATH)\n(marker := 0)',
+                            '(root := Path(PATH))',
+                            'root: object = Path(PATH)\n(marker := 0)',
+                            'other = root = Path(PATH)\n(marker := 0)'):
+                with self.subTest(path=path, binding=binding):
+                    body = 'from pathlib import Path\n' + binding.replace('PATH', repr(path)) + '\nroot.read_text()\n'
+                    self.assertEqual(self.inspect(body) is None, path == 'docs/EXECUTION.md')
+
+    def test_pr103_reflective_helper_return_policy_stays_conservative(self) -> None:
+        for returned in ('f"line {getattr(node, \'lineno\', 0)}"',
+                         'f"line {getattr(node, \'lineno\', getattr(node, \'offset\', 0))}"'):
+            with self.subTest(conservative_return=returned):
+                self.assertIsNotNone(self.inspect('def describe(node):\n    return ' + returned + '\ntext = describe(None)\n'))
+        for returned in ('getattr(node, name)',
+                         'f"line {getattr(node, \'lineno\', 0)}" if False else getattr(node, name)',
+                         '(getattr(node, name),)[0]',
+                         '[f"line {getattr(node, \'lineno\', 0)}", getattr(node, name)]'):
+            with self.subTest(unsafe_return=returned):
+                self.assertIsNotNone(self.inspect('def extract(node, name):\n    return ' + returned + '\nmember = extract(None, "move_into")\nmember("fixture")\n'))
+        self.assertIsNotNone(self.inspect('import os\ndef describe(node):\n    return f"{getattr(node, \'value\', os.environ)}"\ntext = describe(None)\nprint(text)\n'))
+
+    def test_pr103_iterator_diagnostic_metadata_is_structural(self) -> None:
+        scanner_tree = ast.parse(_scanner_module_source(PACKET_TEXT))
+        helper = next(node for node in scanner_tree.body if isinstance(node, ast.FunctionDef)
+                      and node.name == 'python_sensitive_read_violation')
+        diagnostic = next(node for node in ast.walk(helper) if isinstance(node, ast.Return)
+                          and isinstance(node.value, ast.JoinedStr)
+                          and any(isinstance(part, ast.Constant) and isinstance(part.value, str)
+                                  and part.value.startswith('Python custom iterator may expose sensitive protocol values ')
+                                  for part in node.value.values))
+        body = 'import ast\ndef describe(node):\n    ' + ast.unparse(diagnostic).replace('\n', '\n    ') + '\ntext = describe(None)\n'
+        self.assertIsNone(self.inspect(body))
+        # All candidates come from ast.parse/ast.walk, never generated or
+        # executed specimen nodes. A comprehension's iter is an expression.
+        for source in ('for value in values:\n    pass\n',
+                       'async def collect():\n    async for value in values:\n        pass\n',
+                       'rows = [value for value in values]\n',
+                       'rows = {value for value in values}\n',
+                       'rows = (value for value in values)\n',
+                       'rows = {value: value for value in values}\n'):
+            for node in ast.walk(ast.parse(source)):
+                if isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+                    location = node.iter if isinstance(node, ast.comprehension) else node
+                    self.assertIsInstance(location.lineno, int)
+                    self.assertGreater(location.lineno, 0)
+        for operation, line in (('for item in K():\n    pass\n', 4),
+                                ('async def collect():\n    async for item in K():\n        pass\n', 5),
+                                ('rows = [item\n    for item in\n    K()]\n', 6)):
+            for source in ('os.environ.items()', '[("safe", "value")]'):
+                with self.subTest(operation=operation, source=source):
+                    result = self.inspect('import os\nclass K:\n    __iter__ = lambda self: iter(' + source + ')\n' + operation)
+                    if source.startswith('['):
+                        self.assertIsNone(result)
+                    else:
+                        self.assertEqual(result, 'Python custom iterator may expose sensitive protocol values on line ' + str(line))
+
+    def test_pr103_projection_bookkeeping_preserves_nested_helper_calls(self) -> None:
+        scanner_tree = ast.parse(_scanner_module_source(PACKET_TEXT))
+        projection = next(node for node in scanner_tree.body if isinstance(node, ast.FunctionDef)
+                          and node.name == 'python_destructured_binding_values')
+        original_helper = ('def check():\n    def source_value(value):\n        return False\n'
+                           '    return source_value(None)\nresult = check()\n')
+        self.assertIsNone(self.inspect('import ast\n' + ast.unparse(projection) + '\n' + original_helper))
+        # The conservative unresolved-destructuring rule remains unchanged;
+        # only the actual scanner's new bookkeeping avoids this collision.
+        self.assertIsNotNone(self.inspect(original_helper + 'def project(items):\n    pattern, source_value = items.pop()\n'))
+
     def test_current_packet_has_no_static_scanner_violations(self) -> None:
         matches: list[str] = []
         shell_command_count = 0
