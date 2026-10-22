@@ -22802,7 +22802,8 @@ def python_sensitive_read_violation(tree, parents):
                 for key, item in zip(value.keys, value.values))
         if isinstance(value, ast.Call):
             targets = protocol_callable_targets(value.func, set())
-            if not targets or any(isinstance(target, ast.ClassDef) for target in targets):
+            if not targets or any(isinstance(target, ast.ClassDef)
+                or subscription_implementation_unproven(target) for target in targets):
                 return False  # Object and unresolved bound-call results refuse, even if harmless.
             alternatives = python_local_call_return_values(value, tree, parents)
         elif isinstance(value, (ast.Name, ast.IfExp, ast.Subscript)):
@@ -22812,6 +22813,67 @@ def python_sensitive_read_violation(tree, parents):
             return False
         return bool(alternatives) and all(subscription_result_proven(reference, seen)
             for reference in alternatives)
+
+    def subscription_implementation_unproven(implementation):
+        if any(isinstance(part, (ast.Yield, ast.YieldFrom))
+            and python_enclosing_scope(part, parents) is implementation for part in ast.walk(implementation)):
+            return True  # A generator's Return is not its exposed result.
+        state_names = {"__defaults__", "__kwdefaults__", "__code__", "__globals__", "__closure__", "__dict__"}
+        for part in ast.walk(tree):
+            if (isinstance(part, ast.Attribute) and part.attr in state_names
+                and implementation in python_value_provenance(part.value, tree, parents)):
+                return True  # Protected callable state access stays unsupported, even if harmless.
+            if (isinstance(part, ast.Call) and len(part.args) >= 2
+                and (receiver_setter_proven(part.func, set())
+                    or python_unshadowed_builtin_reference(part.func, {"getattr", "delattr"}, tree, parents))
+                and implementation in python_value_provenance(part.args[0], tree, parents)):
+                names = mutation_literal_names(part.args[1], set())
+                if not names or names & state_names:
+                    return True
+        return False
+
+    def subscription_wrapper_proven(value, seen):
+        wrappers = {"dict", "list", "tuple", "set", "frozenset", "iter", "next"}
+        if python_unshadowed_builtin_reference(value, wrappers, tree, parents):
+            return True
+        if id(value) in seen or not isinstance(value, (ast.Name, ast.IfExp, ast.Subscript)):
+            return False
+        alternatives = [reference for reference in python_value_provenance(value, tree, parents)
+            if reference is not value]
+        if isinstance(value, ast.Name):
+            inventory = getattr(tree, "_issue79_sensitive_imported_alias_bindings", {})
+            for scope in python_sensitive_alias_scope_chain(value, parents):
+                bindings = inventory.get((id(scope), value.id), ())
+                if not bindings or any(kind in {"global", "nonlocal"} for kind, _ in bindings):
+                    continue
+                if any(kind != "assignment" for kind, _ in bindings):
+                    return False
+                break
+        return bool(alternatives) and all(subscription_wrapper_proven(reference, seen | {id(value)})
+            for reference in alternatives)
+
+    def subscription_receiver_classes(value):
+        pending, visited, classes = [value], set(), set()
+        while pending:
+            expression = pending.pop()
+            if id(expression) in visited:
+                continue
+            visited.add(id(expression))
+            for reference in python_value_provenance(expression, tree, parents, receiver_origins=True):
+                if isinstance(reference, ast.ClassDef):
+                    classes.add(reference)
+                elif isinstance(reference, ast.Subscript):
+                    pending.append(reference.value)
+                elif (isinstance(reference, ast.Call) and any(python_unshadowed_builtin_reference(
+                    target, {"dict", "list", "tuple", "set", "frozenset", "iter", "next"}, tree, parents)
+                    for target in python_value_provenance(reference.func, tree, parents))):
+                    if not subscription_wrapper_proven(reference.func, set()):
+                        return None  # One visible builtin cannot certify unknown competing targets.
+                    pending.extend(reference.args)
+                    for argument in reference.args:
+                        pending.extend(python_value_provenance(argument, tree, parents,
+                            initial_selection="iterate", receiver_origins=True))
+        return classes
 
     def error_operand_repr_from_class(classdef, seen, methods):
         if methods == ("__await__",) and not any(
@@ -22857,10 +22919,16 @@ def python_sensitive_read_violation(tree, parents):
                     classdef, seen, set(), ("__await__",)) for result in returns):
                     return True
         for method in {"__getitem__", "__class_getitem__"}.intersection(methods):
+            if any(isinstance(entry, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and entry.name == method and python_class_namespace_owner(entry, parents) is classdef
+                and parents.get(entry) is not classdef for entry in ast.walk(classdef)):
+                return True  # Nested class-suite protocol installation is unsupported.
             implementations = [entry for entry in classdef.body
                 if isinstance(entry, (ast.FunctionDef, ast.AsyncFunctionDef)) and entry.name == method]
             implementations.extend(assigned_functions.get(method, ()))
             for implementation in implementations:
+                if subscription_implementation_unproven(implementation):
+                    return True
                 returns = ([implementation.body] if isinstance(implementation, ast.Lambda) else
                     [part.value for part in ast.walk(implementation)
                         if isinstance(part, ast.Return) and part.value is not None
@@ -23413,13 +23481,14 @@ def python_sensitive_read_violation(tree, parents):
         if not python_reviewed_read_path(receiver, tree, parents):
             return f"Python unreviewed Path reader alias {alias!r} is not allowed"
     for node in ast.walk(tree):
-        if (isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load)
-            and (error_operand_repr_sensitive(node.value, set(), ("__getitem__",))
-                or any(isinstance(reference, ast.ClassDef)
-                    and error_operand_repr_from_class(reference, set(), ("__class_getitem__",))
-                    for reference in python_value_provenance(node.value, tree, parents, receiver_origins=True)))):
-            return ("Python custom subscription may expose sensitive protocol values "
-                f"on line {node.lineno}")
+        if isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load):
+            receiver_classes = subscription_receiver_classes(node.value)
+            if (receiver_classes is None
+                or error_operand_repr_sensitive(node.value, set(), ("__getitem__",))
+                or any(error_operand_repr_from_class(reference, set(), ("__class_getitem__",))
+                    for reference in receiver_classes)):
+                return ("Python custom subscription may expose sensitive protocol values "
+                    f"on line {node.lineno}")
         if (isinstance(node, (ast.comprehension, ast.For, ast.AsyncFor))
             and error_operand_repr_sensitive(node.iter, set(),
                 ("__iter__", "__next__", "__getitem__", "__aiter__", "__anext__") if isinstance(node, ast.AsyncFor)

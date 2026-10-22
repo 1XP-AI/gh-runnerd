@@ -8596,6 +8596,78 @@ def synthetic_read(_fd, _size):
                     '    def __class_getitem__(cls, key):\n        return ' + result + '\n'
                     'alias = K\nprint(K()[0])\nprint(alias[0])\n'))
 
+    def test_pr103_v18_class_receiver_wrappers(self) -> None:
+        for value in ('os.environ', '"safe"'):
+            for receiver in ('next(x for x in [K])', 'next(iter([K]))', 'tuple([K])[0]'):
+                with self.subTest(value=value, receiver=receiver):
+                    self.assertEqual(self.inspect('import os\nclass K:\n'
+                        '    def __class_getitem__(cls, key):\n        return ' + value
+                        + '\nprint((' + receiver + ')[0])\n') is None, value == '"safe"')
+
+    def test_pr103_v18_generator_subscription_policy(self) -> None:
+        for value in ('str(os.environ)', '"safe"'):
+            for yielded in ('yield L()', 'yield from [L()]'):
+                with self.subTest(value=value, yielded=yielded):
+                    self.assertIsNotNone(self.inspect('import os\nclass L:\n'
+                        '    def __str__(self):\n        return ' + value + '\n'
+                        'class K:\n    def __getitem__(self, key):\n        ' + yielded
+                        + '\n        return "safe"\nprint(next(K()[0]))\n'))
+
+    def test_pr103_v18_nested_subscription_policy(self) -> None:
+        manager = ('class Manager:\n    def __enter__(self):\n        return self\n'
+                   '    def __exit__(self, kind, value, traceback):\n        return False\n')
+        for value in ('os.environ', '"safe"'):
+            for suite, tail in (('if True:', ''), ('try:', '    finally:\n        pass\n'),
+                                ('with Manager():', ''), ('for ignored in [0]:', '')):
+                for method, receiver in (('__getitem__', 'K()'), ('__class_getitem__', 'K')):
+                    with self.subTest(value=value, suite=suite, method=method):
+                        self.assertIsNotNone(self.inspect('import os\n' + manager
+                            + 'class K:\n    ' + suite + '\n        def ' + method
+                            + '(self, key):\n            return ' + value + '\n' + tail
+                            + 'print(' + receiver + '[0])\n'))
+
+    def test_pr103_v18_subscription_callable_state_policy(self) -> None:
+        for value in ('os.environ', '"safe"'):
+            for signature, mutation in (
+                ('self, key, value="safe"', 'K.__getitem__.__defaults__ = (VALUE,)'),
+                ('self, key, *, value="safe"', 'K.__getitem__.__kwdefaults__["value"] = VALUE'),
+                ('self, key, value="safe"', 'alias = K.__getitem__\nalias.__defaults__ = (VALUE,)'),
+                ('self, key, value="safe"', 'setattr(K.__getitem__, "__defaults__", (VALUE,))'),
+                ('self, key, value="safe"', 'K.__getitem__.__code__ = replacement.__code__'),
+            ):
+                with self.subTest(value=value, mutation=mutation):
+                    self.assertIsNotNone(self.inspect('import os\ndef replacement(self, key, value="safe"):\n'
+                        '    return ' + value + '\nclass K:\n    def __getitem__(' + signature
+                        + '):\n        return value\n' + mutation.replace('VALUE', value)
+                        + '\nprint(K()[0])\n'))
+
+    def test_pr103_v18_subscription_helper_state_closure(self) -> None:
+        # A literal result also relies on every proven local helper remaining
+        # unchanged; this uses the same callable-state boundary, not effects.
+        for value in ('os.environ', '"safe"'):
+            with self.subTest(value=value):
+                self.assertIsNotNone(self.inspect('import os\ndef helper(value="safe"):\n'
+                    '    return value\nclass K:\n    def __getitem__(self, key):\n'
+                    '        return helper()\nhelper.__defaults__ = (' + value + ',)\n'
+                    'print(K()[0])\n'))
+
+    def test_pr103_v18_wrapper_alias_proof(self) -> None:
+        for value in ('os.environ', '"safe"'):
+            for body in ('ctor = tuple\nA = K\nprint((ctor([A])[0])[0])',
+                         'ctor = tuple\nother = ctor\nA = K\nprint((other([A])[0])[0])',
+                         'advance = next\nprint(advance(x for x in [K])[0])',
+                         'acquire = iter\nadvance = next\nprint(advance(acquire([K]))[0])'):
+                with self.subTest(value=value, body=body):
+                    self.assertEqual(self.inspect('import os\nclass K:\n'
+                        '    def __class_getitem__(cls, key):\n        return ' + value
+                        + '\n' + body + '\n') is None, value == '"safe"')
+            # Every visible wrapper target must be proven, even with a safe
+            # selected result; an unknown sibling is a policy refusal.
+            with self.subTest(value=value, competing=True):
+                self.assertIsNotNone(self.inspect('import os\nflag = True\nclass K:\n'
+                    '    def __class_getitem__(cls, key):\n        return ' + value + '\n'
+                    'ctor = tuple if flag else unknown\nprint(ctor([K])[0][0])\n'))
+
     def test_pr103_v13_factory_returned_protocol_classes(self) -> None:
         consumer = ('async def collect():\n    async for item in K():\n'
                     '        print(item)\n        break\ncollect().send(None)\n')
