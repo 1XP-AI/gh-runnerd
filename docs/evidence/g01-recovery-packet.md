@@ -22788,9 +22788,15 @@ def python_sensitive_read_violation(tree, parents):
         return [target for targets in resolved for target in targets]
 
     def error_operand_repr_from_class(classdef, seen, methods):
-        if id(classdef) in seen:
+        if methods == ("__await__",) and not any(
+            isinstance(entry, ast.FunctionDef) and entry.name == "__await__"
+            for entry in classdef.body) and not any(method == "__await__"
+                for method, _entry in assigned_display_methods.get(classdef, ())):
+            return True  # Only a proven local await protocol may close this edge.
+        protocol_visit = (id(classdef), tuple(methods))
+        if protocol_visit in seen:
             return False
-        seen.add(id(classdef))
+        seen.add(protocol_visit)
         assigned_functions = {}
         for method, implementation in assigned_display_methods.get(classdef, ()):
             if method not in methods:
@@ -22810,6 +22816,19 @@ def python_sensitive_read_violation(tree, parents):
                         if isinstance(part, ast.Return) and part.value is not None])
                 if any(returned_async_iterator_sensitive(result, implementation, classdef, seen, set())
                     for result in returns):
+                    return True
+        if "__anext__" in methods:
+            implementations = [entry for entry in classdef.body
+                if isinstance(entry, ast.FunctionDef) and entry.name == "__anext__"]
+            implementations.extend(entry for entry in assigned_functions.get("__anext__", ())
+                if not isinstance(entry, ast.AsyncFunctionDef))
+            for implementation in implementations:
+                returns = ([implementation.body] if isinstance(implementation, ast.Lambda) else
+                    [part.value for part in ast.walk(implementation)
+                        if isinstance(part, ast.Return) and part.value is not None
+                        and python_enclosing_scope(part, parents) is implementation])
+                if not returns or any(returned_async_iterator_sensitive(result, implementation,
+                    classdef, seen, set(), ("__await__",)) for result in returns):
                     return True
         for method, implementation in assigned_display_methods.get(classdef, ()):
             if method in methods and display_implementation_sensitive(implementation, set()):
@@ -22833,7 +22852,65 @@ def python_sensitive_read_violation(tree, parents):
                         return True
         return False
 
-    def returned_async_iterator_sensitive(value, implementation, classdef, seen_classes, seen_values):
+    def receiver_setter_proven(value, seen):
+        if id(value) in seen:
+            return False
+        if python_unshadowed_builtin_reference(value, {"setattr"}, tree, parents):
+            return True
+        if (isinstance(value, ast.Attribute) and value.attr == "__setattr__"
+            and python_unshadowed_builtin_reference(value.value, {"object"}, tree, parents)):
+            return True
+        if isinstance(value, ast.IfExp):
+            alternatives = [value.body, value.orelse]
+        elif isinstance(value, ast.Name):
+            python_sensitive_imported_function_alias(value, tree, parents)
+            inventory = getattr(tree, "_issue79_sensitive_imported_alias_bindings", {})
+            for scope in python_sensitive_alias_scope_chain(value, parents):
+                bindings = inventory.get((id(scope), value.id), ())
+                if not bindings:
+                    continue
+                if any(kind == "unknown" and isinstance(binding, ast.arg)
+                    and not mutation_parameter_calls_closed(binding) for kind, binding in bindings):
+                    return False  # A default cannot close an unmodeled callback origin.
+                break
+            alternatives = [reference for reference in python_value_provenance(value, tree, parents)
+                if reference is not value]
+        else:
+            return False
+        return bool(alternatives) and all(receiver_setter_proven(reference, seen | {id(value)})
+            for reference in alternatives)
+
+    def receiver_class_mutated(implementation):
+        # A first formal proves identity, not an unchanged runtime class.
+        # Refuse these mutations at this boundary, including receiver aliases.
+        positional = list(implementation.args.posonlyargs) + list(implementation.args.args)
+        for part in ast.walk(implementation):
+            if isinstance(part, ast.Attribute) and part.attr == "__class__" and isinstance(part.ctx, (ast.Store, ast.Del)):
+                return True
+            if not isinstance(part, ast.Call):
+                continue
+            known_setter = len(part.args) >= 3 and receiver_setter_proven(part.func, set())
+            if known_setter:
+                names = mutation_literal_names(part.args[1], set())
+                if not names or "__class__" in names:
+                    return True
+                continue
+            # No helper-effect interpreter: escaping the original receiver
+            # through a call cannot certify an unchanged runtime class.
+            escaped = list(part.args) + [keyword.value for keyword in part.keywords]
+            if isinstance(part.func, ast.Attribute):
+                escaped.append(part.func.value)
+            if positional and any(isinstance(reference, ast.Name)
+                and reference.id == positional[0].arg
+                and python_enclosing_scope(reference, parents) is implementation
+                for argument in escaped for expression in ast.walk(argument)
+                if isinstance(expression, ast.expr)
+                for reference in python_value_provenance(expression, tree, parents)):
+                return True
+        return False
+
+    def returned_async_iterator_sensitive(value, implementation, classdef, seen_classes, seen_values,
+        protocols=("__iter__", "__next__", "__getitem__", "__aiter__", "__anext__")):
         if id(value) in seen_values:
             return True
         seen_values = seen_values | {id(value)}
@@ -22847,21 +22924,20 @@ def python_sensitive_read_violation(tree, parents):
                 and not getattr(implementation, "decorator_list", ())
                 and bindings and all(kind == "unknown" and binding is positional[0]
                     for kind, binding in bindings)):
-                return False  # This class's protocols are already inspected.
+                return protocols == ("__await__",) or receiver_class_mutated(implementation)
             alternatives = [reference for reference in python_value_provenance(value, tree, parents)
                 if reference is not value]
             return not alternatives or any(returned_async_iterator_sensitive(reference,
-                implementation, classdef, seen_classes, seen_values) for reference in alternatives)
+                implementation, classdef, seen_classes, seen_values, protocols) for reference in alternatives)
         if isinstance(value, ast.IfExp):
             return any(returned_async_iterator_sensitive(reference, implementation, classdef,
-                seen_classes, seen_values) for reference in (value.body, value.orelse))
+                seen_classes, seen_values, protocols) for reference in (value.body, value.orelse))
         if isinstance(value, ast.Call):
             targets = protocol_callable_targets(value.func, set())
             if not targets:
                 return True
             classes = [target for target in targets if isinstance(target, ast.ClassDef)]
-            if any(error_operand_repr_from_class(reference, set(seen_classes),
-                ("__iter__", "__next__", "__getitem__", "__aiter__", "__anext__")) for reference in classes):
+            if any(error_operand_repr_from_class(reference, set(seen_classes), protocols) for reference in classes):
                 return True
             for target in targets:
                 if isinstance(target, ast.ClassDef):
@@ -22873,12 +22949,11 @@ def python_sensitive_read_violation(tree, parents):
                         if isinstance(part, (ast.Return, ast.Yield, ast.YieldFrom))
                         and part.value is not None and python_enclosing_scope(part, parents) is target])
                 if not returned or any(returned_async_iterator_sensitive(reference,
-                    implementation, classdef, seen_classes, seen_values) for reference in returned):
+                    implementation, classdef, seen_classes, seen_values, protocols) for reference in returned):
                     return True
             return False
         if isinstance(value, ast.ClassDef):
-            return error_operand_repr_from_class(value, set(seen_classes),
-                ("__iter__", "__next__", "__getitem__", "__aiter__", "__anext__"))
+            return error_operand_repr_from_class(value, set(seen_classes), protocols)
         return True
 
     def display_implementation_sensitive(value, seen):
@@ -23035,11 +23110,42 @@ def python_sensitive_read_violation(tree, parents):
         return True
 
     assigned_display_methods = {}
-    display_protocol_names = {"__str__", "__repr__", "__format__", "__iter__", "__next__", "__getitem__", "__aiter__", "__anext__"}
+    display_protocol_names = {"__str__", "__repr__", "__format__", "__iter__", "__next__", "__getitem__", "__aiter__", "__anext__", "__await__"}
+    def mutation_parameter_calls_closed(parameter):
+        implementation = parents.get(parents.get(parameter))
+        if not isinstance(implementation, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            return False
+        direct = False
+        for reference in ast.walk(tree):
+            if not isinstance(reference, ast.Name) or not isinstance(reference.ctx, ast.Load):
+                continue
+            if implementation not in python_value_provenance(reference, tree, parents):
+                continue
+            owner = parents.get(reference)
+            if isinstance(owner, ast.Call) and owner.func is reference:
+                direct = True
+            elif (isinstance(owner, (ast.Assign, ast.AnnAssign)) and owner.value is reference
+                and all(isinstance(target, ast.Name) for target in
+                    (owner.targets if isinstance(owner, ast.Assign) else [owner.target]))):
+                continue  # The same scan checks all uses of these local aliases.
+            else:
+                return False  # Callback/container/descriptor escape is not modeled.
+        return direct
+
     def mutation_literal_names(value, seen):
         if id(value) in seen:
             return set()
         if isinstance(value, ast.Name):
+            python_sensitive_imported_function_alias(value, tree, parents)
+            inventory = getattr(tree, "_issue79_sensitive_imported_alias_bindings", {})
+            for scope in python_sensitive_alias_scope_chain(value, parents):
+                bindings = inventory.get((id(scope), value.id), ())
+                if not bindings:
+                    continue
+                if any(kind == "unknown" and isinstance(binding, ast.arg)
+                    and not mutation_parameter_calls_closed(binding) for kind, binding in bindings):
+                    return set()
+                break
             alternatives = [reference for reference in python_value_provenance(value, tree, parents)
                 if reference is not value]
             values = [mutation_literal_names(reference, seen | {id(value)}) for reference in alternatives]

@@ -8250,6 +8250,159 @@ def synthetic_read(_fd, _size):
             + '    async def __anext__(self):\n        return "safe"\n'
             + 'K.__aiter__ = alias\n' + consumer))
 
+    def test_pr103_three_default_callback_protocol_names(self) -> None:
+        for expression in ('name', 'alias'):
+            for value in ('str(os.environ)', '"safe"'):
+                for calls in ('list(map(install, ["__str__"]))',
+                              'install()\nlist(map(install, ["__str__"]))'):
+                    with self.subTest(expression=expression, value=value, calls=calls):
+                        result = self.inspect('import os\nclass K: pass\n'
+                            + 'def leak(self):\n    return ' + value + '\n'
+                            + 'def install(name="label"):\n    alias = name\n'
+                            + '    setattr(K, ' + expression + ', leak)\n'
+                            + calls + '\nprint(K())\n')
+                        self.assertIsNotNone(result)
+                        self.assertIn('unresolved member name', result)
+        for calls in ('install()', 'install("__str__")',
+                      'direct = install\ndirect("__str__")'):
+            for value in ('str(os.environ)', '"safe"'):
+                with self.subTest(calls=calls, value=value):
+                    self.assertEqual(self.inspect('import os\nclass K: pass\n'
+                        + 'def leak(self):\n    return ' + value + '\n'
+                        + 'def install(name="label"):\n    alias = name\n'
+                        + '    setattr(K, alias, leak)\n' + calls + '\nprint(K())\n') is None,
+                        calls == 'install()' or value == '"safe"')
+        self.assertIsNone(self.inspect('class K: pass\nname="label"\nalias=name\n'
+            + 'setattr(K, alias, "safe")\nprint(K())\n'))
+
+    def test_pr103_three_returned_anext_awaitables(self) -> None:
+        consumer = ('async def collect():\n    async for item in K():\n'
+                    + '        print(item)\n        break\ncollect().send(None)\n')
+        for value in ('os.environ', '"safe"'):
+            for returned in ('Awaitable()', 'result', 'alias'):
+                for installation in ('direct', 'L.__anext__ = advance',
+                                     'setattr(L, "__anext__", advance)'):
+                    with self.subTest(value=value, returned=returned, installation=installation):
+                        method = ('class L:\n    def __anext__(self):\n        return ' + returned + '\n'
+                            if installation == 'direct' else
+                            'class L: pass\ndef advance(self):\n    return ' + returned + '\n'
+                            + installation + '\n')
+                        self.assertEqual(self.inspect('import os\nclass Awaitable:\n'
+                            + '    def __await__(self):\n        if False:\n            yield None\n'
+                            + '        return ' + value + '\nresult = Awaitable()\nalias = result\n'
+                            + method + 'class K:\n    def __aiter__(self):\n        return L()\n'
+                            + consumer) is None, value == '"safe"')
+        for returned in ('unknown', 'Awaitable() if flag else unknown'):
+            with self.subTest(returned=returned):
+                self.assertIsNotNone(self.inspect('class Awaitable:\n'
+                    + '    def __await__(self):\n        if False:\n            yield None\n'
+                    + '        return "safe"\nclass L:\n    def __anext__(self):\n'
+                    + '        return ' + returned + '\nclass K:\n'
+                    + '    def __aiter__(self):\n        return L()\n' + consumer))
+        self.assertIsNone(self.inspect('class K:\n    def __aiter__(self):\n'
+            + '        return self\n    async def __anext__(self):\n        return "safe"\n' + consumer))
+
+    def test_pr103_three_async_receiver_class_mutation(self) -> None:
+        consumer = ('async def collect():\n    async for item in K():\n'
+                    + '        print(item)\n        break\ncollect().send(None)\n')
+        for value in ('os.environ', '"safe"'):
+            for mutation in ('object.__setattr__(self, "__class__", L)',
+                             'self.__class__ = L', 'setattr(self, "__class__", L)',
+                             'alias = self\n        object.__setattr__(alias, "__class__", L)',
+                             'alias = self\n        alias.__class__ = L',
+                             'alias = self\n        setattr(alias, "__class__", L)'):
+                with self.subTest(value=value, mutation=mutation):
+                    self.assertIsNotNone(self.inspect('import os\nclass L:\n'
+                        + '    async def __anext__(self):\n        return ' + value + '\n'
+                        + 'class K:\n    def __aiter__(self):\n        ' + mutation
+                        + '\n        return self\n' + consumer))
+        self.assertIsNone(self.inspect('class K:\n    def __aiter__(self):\n'
+            + '        self.label = "safe"\n        return self\n'
+            + '    async def __anext__(self):\n        return "safe"\n' + consumer))
+
+    def test_pr103_three_same_class_await_protocol_cycle(self) -> None:
+        for value in ('os.environ', '"safe"'):
+            with self.subTest(value=value):
+                self.assertEqual(self.inspect('import os\nclass L:\n'
+                    + '    def __anext__(self):\n        return L()\n'
+                    + '    def __await__(self):\n        if False:\n            yield None\n'
+                    + '        return ' + value + '\nclass K:\n'
+                    + '    def __aiter__(self):\n        return L()\n'
+                    + 'async def collect():\n    async for item in K():\n'
+                    + '        print(item)\n        break\ncollect().send(None)\n') is None,
+                    value == '"safe"')
+
+    def test_pr103_three_helper_receiver_class_mutation(self) -> None:
+        consumer = ('async def collect():\n    async for item in K():\n'
+                    + '        print(item)\n        break\ncollect().send(None)\n')
+        for value in ('os.environ', '"safe"'):
+            for call in ('mutate(self)', 'alias(self)', 'mutate(obj=self)',
+                         'receiver = self\n        alias(obj=receiver)'):
+                with self.subTest(value=value, call=call):
+                    self.assertIsNotNone(self.inspect('import os\nclass L:\n'
+                        + '    async def __anext__(self):\n        return ' + value + '\n'
+                        + 'def mutate(obj):\n    object.__setattr__(obj, "__class__", L)\n'
+                        + 'alias = mutate\nclass K:\n    def __aiter__(self):\n        '
+                        + call + '\n        return self\n' + consumer))
+        for helper in ('def helper(obj):\n    return None\n',
+                       'def helper(obj):\n    helper(obj)\n'):
+            with self.subTest(helper=helper):
+                self.assertIsNotNone(self.inspect(helper + 'class K:\n'
+                    + '    def __aiter__(self):\n        helper(self)\n        return self\n'
+                    + '    async def __anext__(self):\n        return "safe"\n' + consumer))
+        self.assertIsNone(self.inspect('class K:\n    def __aiter__(self):\n'
+            + '        setattr(self, "label", "safe")\n        return self\n'
+            + '    async def __anext__(self):\n        return "safe"\n' + consumer))
+
+    def test_pr103_three_receiver_setter_target_exhaustiveness(self) -> None:
+        consumer = ('async def collect():\n    async for item in K():\n'
+                    + '        print(item)\n        break\ncollect().send(None)\n')
+        for value in ('os.environ', '"safe"'):
+            for flag in ('', 'flag = False\n'):
+                for alternative in ('mutate', 'unknown'):
+                    with self.subTest(value=value, flag=flag, alternative=alternative):
+                        self.assertIsNotNone(self.inspect('import os\nclass L:\n'
+                            + '    async def __anext__(self):\n        return ' + value + '\n'
+                            + 'def mutate(obj, name, val):\n'
+                            + '    object.__setattr__(obj, "__class__", L)\n' + flag
+                            + 'setter = setattr if flag else ' + alternative + '\n'
+                            + 'class K:\n    def __aiter__(self):\n'
+                            + '        setter(self, "label", "x")\n        return self\n' + consumer))
+        for setter in ('setattr', 'object.__setattr__',
+                       'setattr if flag else object.__setattr__'):
+            with self.subTest(setter=setter):
+                self.assertIsNone(self.inspect('flag = False\nsetter = ' + setter
+                    + '\nclass K:\n    def __aiter__(self):\n'
+                    + '        setter(self, "label", "safe")\n        return self\n'
+                    + '    async def __anext__(self):\n        return "safe"\n' + consumer))
+        self.assertIsNotNone(self.inspect('import os\nclass L:\n'
+            + '    async def __anext__(self):\n        return os.environ\n'
+            + 'class Replacement:\n    @staticmethod\n'
+            + '    def __setattr__(obj, name, val):\n'
+            + '        obj.__class__ = L\nobject = Replacement\n'
+            + 'class K:\n    def __aiter__(self):\n'
+            + '        object.__setattr__(self, "label", "x")\n        return self\n' + consumer))
+
+    def test_pr103_three_defaulted_setter_formal_origins(self) -> None:
+        consumer = ('async def collect():\n    async for item in K():\n'
+                    + '        print(item)\n        break\ncollect().send(None)\n')
+        for value in ('os.environ', '"safe"'):
+            for setter in ('setter', 'alias'):
+                for calls in ('list(map(install, [mutate]))',
+                              'install()\nlist(map(install, [mutate]))',
+                              'install(mutate)', 'install()', 'install(setattr)'):
+                    with self.subTest(value=value, setter=setter, calls=calls):
+                        result = self.inspect('import os\nclass L:\n'
+                            + '    async def __anext__(self):\n        return ' + value + '\n'
+                            + 'def mutate(obj, name, val):\n'
+                            + '    object.__setattr__(obj, "__class__", L)\nclass K:\n'
+                            + '    async def __anext__(self):\n        return "safe"\n'
+                            + 'def install(setter=setattr):\n    alias = setter\n'
+                            + '    def start(self):\n        ' + setter
+                            + '(self, "label", "x")\n        return self\n'
+                            + '    K.__aiter__ = start\n' + calls + '\n' + consumer)
+                        self.assertEqual(result is None, calls in ('install()', 'install(setattr)'))
+
     def test_pr103_four_classmethod_decorator_aliases(self) -> None:
         for setup, decorator in (('cm = classmethod', 'cm'),
                                  ('first = classmethod\ncm = first', 'cm')):
