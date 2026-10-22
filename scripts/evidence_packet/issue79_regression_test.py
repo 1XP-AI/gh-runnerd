@@ -7267,6 +7267,197 @@ def synthetic_read(_fd, _size):
             'import os\nconverters = {**{"x": len}}\nconverters["x"](str(os.environ))\n'
         ))
 
+    def test_pr103_delta_unbound_method_arguments(self) -> None:
+        for parameters, call in (("self, key", 'C.lookup(None, str(os.environ))'),
+                                 ("self, key", 'C.lookup(C(), str(os.environ))'),
+                                 ("self", 'C.lookup(str(os.environ))')):
+            key = "key" if "," in parameters else "self"
+            with self.subTest(call=call):
+                self.assertIsNotNone(self.inspect('import os\nclass C:\n    def lookup(' + parameters + '):\n        return {}[' + key + ']\n' + call + '\n'))
+        for call in ('C.lookup(None, "safe")', 'C().lookup("safe")'):
+            self.assertIsNone(self.inspect('class C:\n    def lookup(self, key):\n        return {}[key]\n' + call + '\n'))
+        self.assertIsNone(self.inspect('class C:\n    @staticmethod\n    def lookup(key):\n        return {}[key]\nC.lookup("safe")\n'))
+
+    def test_pr103_delta_mapping_identity(self) -> None:
+        for mutation in ('a[str(os.environ)] = 1', 'a.update({str(os.environ): 1})',
+                         'a.setdefault(str(os.environ), 1)', 'a.__setitem__(str(os.environ), 1)',
+                         'a |= {str(os.environ): 1}'):
+            with self.subTest(mutation=mutation):
+                self.assertIsNotNone(self.inspect('import os\nd = {}\ndef mutate(a):\n    ' + mutation + '\nmutate(d)\nfor key in d:\n    {}[key]\n'))
+        for receiver in ('d', 'alias'):
+            with self.subTest(receiver=receiver):
+                alias = '        alias = d\n' if receiver == 'alias' else ''
+                self.assertIsNotNone(self.inspect('import os\ndef outer():\n    d = {}\n    def mutate():\n' + alias + '        ' + receiver + '[str(os.environ)] = 1\n    mutate()\n    for key in d:\n        {}[key]\nouter()\n'))
+        self.assertIsNotNone(self.inspect('import os\nd = {}\ndef mutate(a):\n    alias = a\n    alias[str(os.environ)] = 1\nmutate(d)\nfor key in d:\n    {}[key]\n'))
+        self.assertIsNone(self.inspect('import os\ndef mutate(a):\n    a[str(os.environ)] = 1\nd = {}\nother = {}\nmutate(other)\nfor key in d:\n    {}[key]\n'))
+        self.assertIsNone(self.inspect('import os\ndef other():\n    d = {}\n    d[str(os.environ)] = 1\ndef safe():\n    d = {}\n    for key in d:\n        {}[key]\nsafe()\n'))
+
+    def test_pr103_delta_named_comprehension_defaults(self) -> None:
+        for expression, call in (('[x for x in [os.system]]', 'arg[0]("synthetic-command")'),
+                                 ('{x for x in [os.system]}', 'next(iter(arg))("synthetic-command")'),
+                                 ('(x for x in [os.system])', 'next(arg)("synthetic-command")'),
+                                 ('{"x": x for x in [os.system]}', 'arg["x"]("synthetic-command")')):
+            with self.subTest(expression=expression):
+                self.assertIsNotNone(self.inspect('import os\nbox = ' + expression + '\nalias = box\ndef f(arg=alias):\n    ' + call + '\nf()\n'))
+        self.assertIsNone(self.inspect('box = [x for x in [len]]\nalias = box\ndef f(arg=alias):\n    print(arg[0]("safe"))\nf()\n'))
+
+    def test_pr103_delta_display_subscripts(self) -> None:
+        for expression in ('Alias = (K,)[0]\nprint(Alias())',
+                           'classes = (K,)\nAlias = classes[0]\nprint(Alias())',
+                           'box = [K()]\nprint(box[0])',
+                           'box = {"x": K()}\nalias = box\nprint(alias["x"])'):
+            for sensitive in (True, False):
+                with self.subTest(expression=expression, sensitive=sensitive):
+                    result = 'str(os.environ)' if sensitive else '"safe"'
+                    violation = self.inspect('import os\nclass K:\n    def __str__(self):\n        return ' + result + '\n' + expression + '\n')
+                    if sensitive:
+                        self.assertIsNotNone(violation)
+                    else:
+                        self.assertIsNone(violation)
+
+    def test_pr103_delta_conversion_dictionary_aliases(self) -> None:
+        for conversion in ('int', 'float', 'complex'):
+            for container in ('a', '{**a}'):
+                with self.subTest(conversion=conversion, container=container):
+                    prefix = 'import os\na = {"x": ' + conversion + ', "safe": len}\nb = ' + container + '\nc = b\n'
+                    self.assertIsNotNone(self.inspect(prefix + 'c["x"](str(os.environ))\n'))
+                    self.assertIsNone(self.inspect(prefix + 'c["x"]("1")\n'))
+                    if container == 'a':
+                        self.assertIsNone(self.inspect(prefix + 'c["safe"](str(os.environ))\n'))
+
+    def test_pr103_delta_class_import_receivers(self) -> None:
+        for imported in ('from os import system as go', 'from subprocess import run as go'):
+            for receiver in ('D', 'C()', 'instance'):
+                with self.subTest(imported=imported, receiver=receiver):
+                    self.assertIsNotNone(self.inspect('class C:\n    ' + imported + '\nD = C\ninstance = C()\n' + receiver + '.go("synthetic-command")\n'))
+        for receiver in ('D', 'C()', 'instance'):
+            self.assertIsNone(self.inspect('class C:\n    from re import escape as go\nD = C\ninstance = C()\nprint(' + receiver + '.go("safe"))\n'))
+
+    def test_pr103_delta_subscript_cycles_retain_alternatives(self) -> None:
+        for bindings in ('box = [complex]\nbox = box[0]\n',
+                         'box = other[0]\nother = box\nbox = [complex]\n'):
+            with self.subTest(bindings=bindings):
+                self.assertIsNotNone(self.inspect('import os\n' + bindings + 'box[0](str(os.environ))\n'))
+        self.assertIsNone(self.inspect('box = other[0]\nother = box\nbox = [len]\nprint(box[0]("safe"))\n'))
+
+    def test_pr103_gh_setattr_names(self) -> None:
+        for target in ('setattr', 'setter'):
+            self.assertIsNotNone(self.inspect('import os\nsetter = setattr\n' + target + '(object(), str(os.environ), 1)\n'))
+        self.assertIsNone(self.inspect('class C: pass\nsetattr(C(), "safe", 1)\n'))
+
+    def test_pr103_gh_nested_class_launchers(self) -> None:
+        for suite in ('    if True:\n        ', '    for item in [1]:\n        ',
+                      '    try:\n        ', '    with contextlib.nullcontext():\n        '):
+            ending = '    finally:\n        pass\n' if 'try:' in suite else ''
+            with self.subTest(suite=suite):
+                self.assertIsNotNone(self.inspect('import contextlib\nclass C:\n' + suite + 'from os import system as go\n' + ending + 'C.go("synthetic-command")\n'))
+        self.assertIsNone(self.inspect('class C:\n    if True:\n        from re import escape as go\nprint(C.go("safe"))\n'))
+
+    def test_pr103_gh_destructured_mapping_aliases(self) -> None:
+        for alias in ('a, = (d,)', '[a] = [d]', '(a, [b]) = (d, [d])'):
+            self.assertIsNotNone(self.inspect('import os\nd = {}\n' + alias + '\na[str(os.environ)] = 1\nfor key in d:\n    {}[key]\n'))
+        self.assertIsNone(self.inspect('d = {}\na, = (d,)\na["safe"] = 1\nfor key in d:\n    {}[key]\n'))
+
+    def test_pr103_gh_inserted_conversion_callables(self) -> None:
+        for conversion in ('int', 'float', 'complex'):
+            for store in ('d["x"] = CONVERT', 'd.update({"x": CONVERT})',
+                          'd.setdefault("x", CONVERT)', 'd.__setitem__("x", CONVERT)',
+                          'd |= {"x": CONVERT}'):
+                prefix = 'import os\nd = {}\n' + store.replace('CONVERT', conversion) + '\na = d\n'
+                with self.subTest(conversion=conversion, store=store):
+                    self.assertIsNotNone(self.inspect(prefix + 'a["x"](str(os.environ))\n'))
+                    self.assertIsNone(self.inspect(prefix + 'a["x"]("1")\n'))
+        self.assertIsNone(self.inspect('import os\nd = {}\nd["x"] = complex\nd["safe"] = len\nd["safe"](str(os.environ))\n'))
+
+    def test_pr103_gh_assigned_display_methods(self) -> None:
+        for implementation in ('def leak(self):\n    return RESULT\n', 'leak = lambda self: RESULT\n'):
+            for install in ('class K:\n    __str__ = leak\n', 'class K: pass\nK.__str__ = leak\n'):
+                for sensitive in (True, False):
+                    code = 'import os\n' + implementation.replace('RESULT', 'str(os.environ)' if sensitive else '"safe"') + install + 'print(K())\n'
+                    with self.subTest(implementation=implementation, install=install, sensitive=sensitive):
+                        if sensitive:
+                            self.assertIsNotNone(self.inspect(code))
+                        else:
+                            self.assertIsNone(self.inspect(code))
+
+    def test_pr103_gh_bound_and_percent_display(self) -> None:
+        for protocol, expression in (('__format__', '"{}".format(K())'),
+                                     ('__str__', '"%s" % K()'), ('__repr__', '"%r" % K()')):
+            for sensitive in (True, False):
+                code = 'import os\nclass K:\n    def ' + protocol + '(self, *args):\n        return ' + ('str(os.environ)' if sensitive else '"safe"') + '\nprint(' + expression + ')\n'
+                with self.subTest(protocol=protocol, sensitive=sensitive):
+                    if sensitive:
+                        self.assertIsNotNone(self.inspect(code))
+                    else:
+                        self.assertIsNone(self.inspect(code))
+
+    def test_pr103_gh_implicit_path_errors(self) -> None:
+        for expression in ('Path.cwd().relative_to("/definitely-no")', 'root.relative_to("/definitely-no")'):
+            self.assertIsNotNone(self.inspect('from pathlib import Path\nroot = Path.cwd()\n' + expression + '\n'))
+        self.assertIsNone(self.inspect('from pathlib import Path\nPath("safe/child").relative_to("safe")\n'))
+        self.assertIsNone(self.inspect('from pathlib import Path\ntry:\n    Path.cwd().relative_to("/definitely-no")\nexcept ValueError:\n    pass\n'))
+        self.assertIsNotNone(self.inspect('from pathlib import Path\ntry:\n    Path.cwd().relative_to("/definitely-no")\nexcept ValueError:\n    raise\n'))
+        self.assertIsNotNone(self.inspect('from pathlib import Path\ntry:\n    Path.cwd().relative_to("/definitely-no")\nexcept ValueError as error:\n    print(error)\n'))
+        self.assertIsNotNone(self.inspect('from pathlib import Path\ntry:\n    Path.cwd().relative_to("/definitely-no")\nexcept ValueError:\n    raise RuntimeError("safe")\n'))
+        self.assertIsNone(self.inspect('from pathlib import Path\ntry:\n    Path.cwd().relative_to("/definitely-no")\nexcept ValueError:\n    raise SystemExit("safe")\n'))
+        self.assertIsNone(self.inspect('from pathlib import Path\ntry:\n    Path.cwd().relative_to("/definitely-no")\nexcept ValueError:\n    raise RuntimeError("safe") from None\n'))
+
+    def test_pr103_gh_helper_launcher_defaults(self) -> None:
+        for launcher in ('os.system', 'len'):
+            code = 'import os\ndef choose():\n    return ' + launcher + '\ndef f(launch=choose()):\n    launch("synthetic-command")\nf()\n'
+            if launcher == 'os.system':
+                self.assertIsNotNone(self.inspect(code))
+            else:
+                self.assertIsNone(self.inspect(code))
+
+    def test_pr103_gh_wrapped_open_readers(self) -> None:
+        for expression in ('(open,)[0]', '{"reader": open}["reader"]', 'True and open', 'choose()'):
+            code = 'def choose():\n    return open\nreader = ' + expression + '\nprint(reader("/tmp/synthetic-private").read())\n'
+            with self.subTest(expression=expression):
+                self.assertIsNotNone(self.inspect(code))
+        self.assertIsNone(self.inspect('reader = (len,)[0]\nprint(reader("safe"))\n'))
+        self.assertIsNone(self.inspect('reader = (len, open)[0]\nprint(reader("safe"))\n'))
+        self.assertIsNone(self.inspect('reader = {"safe": len, "reader": open}["safe"]\nprint(reader("safe"))\n'))
+
+    def test_pr103_gh_class_sensitive_imports(self) -> None:
+        for member in ('environ', 'environb'):
+            for receiver in ('C', 'D', 'C()'):
+                with self.subTest(member=member, receiver=receiver):
+                    self.assertIsNotNone(self.inspect('class C:\n    from os import ' + member + ' as inherited\nD = C\nprint(' + receiver + '.inherited)\n'))
+        self.assertIsNone(self.inspect('class C:\n    from re import escape as inherited\nprint(C.inherited("safe"))\n'))
+
+    def test_pr103_gh_adjacent_update_sources(self) -> None:
+        for store in ('d.update(x=complex)', 'updates = {"x": complex}\nd.update(updates)'):
+            prefix = 'import os\nd = {}\n' + store + '\n'
+            with self.subTest(store=store):
+                self.assertIsNotNone(self.inspect(prefix + 'd["x"](str(os.environ))\n'))
+                self.assertIsNone(self.inspect(prefix + 'd["x"]("1")\n'))
+
+    def test_pr103_gh_adjacent_formatter_alias(self) -> None:
+        for sensitive in (True, False):
+            code = 'import os\nclass K:\n    def __format__(self, spec):\n        return ' + ('str(os.environ)' if sensitive else '"safe"') + '\nformatter = "{}".format\nprint(formatter(K()))\n'
+            with self.subTest(sensitive=sensitive):
+                if sensitive:
+                    self.assertIsNotNone(self.inspect(code))
+                else:
+                    self.assertIsNone(self.inspect(code))
+
+    def test_pr103_current_scanner_regex_binding_control(self) -> None:
+        module = ast.parse(_scanner_module_source(PACKET_TEXT))
+        fence = next(node for node in module.body
+                     if isinstance(node, ast.FunctionDef) and node.name == "fence_details")
+        calls = [node for node in ast.walk(fence)
+                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                 and node.func.attr == "group"]
+        self.assertTrue(calls)
+        for call in calls:
+            self.assertTrue(self.scanner["python_known_non_path_reader_call"](call, module))  # type: ignore[operator]
+
+    def test_pr103_current_scanner_method_helper_is_not_launcher_alias(self) -> None:
+        module = ast.parse(_scanner_module_source(PACKET_TEXT))
+        _modules, functions, _unresolved = self.scanner["python_import_bindings"](module)  # type: ignore[operator]
+        self.assertTrue("methods" not in functions, "local methods helper acquired launcher provenance")
+
     def test_current_packet_has_no_static_scanner_violations(self) -> None:
         matches: list[str] = []
         shell_command_count = 0
