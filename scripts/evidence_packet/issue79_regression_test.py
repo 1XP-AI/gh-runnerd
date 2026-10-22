@@ -8065,6 +8065,78 @@ def synthetic_read(_fd, _size):
                     else:
                         self.assertEqual(result, 'Python custom iterator may expose sensitive protocol values on line ' + str(line))
 
+    def test_pr103_four_factory_encoder_provenance(self) -> None:
+        for setup, factory in (
+            ('import functools', 'functools.partial'),
+            ('from functools import partial as bind', 'bind'),
+            ('import functools\nbind = functools.partial', 'bind'),
+        ):
+            for value in ('os.environ', '"safe"'):
+                with self.subTest(factory=factory, setup=setup, value=value):
+                    result = self.inspect(
+                        'import os, urllib.parse\n' + setup
+                        + '\nencode = ' + factory + '(urllib.parse.quote)\nprint(encode(str('
+                        + value + ')))\n')
+                    self.assertIsNotNone(result)
+                    self.assertIn("not in the reviewed non-network allowlist", result)
+
+    def test_pr103_four_setter_protocol_name_aliases(self) -> None:
+        for setup, name in (
+            ('name = "__str__"', 'name'),
+            ('first = "__str__"\nname = first', 'name'),
+            ('name = "__" + "str__"', 'name'),
+            ('', 'unknown_name'),
+        ):
+            for value in ('str(os.environ)', '"safe"'):
+                with self.subTest(setup=setup, name=name, value=value):
+                    result = self.inspect('import os\ndef leak(self):\n    return ' + value
+                        + '\nclass K: pass\n' + setup + '\nsetattr(K, ' + name + ', leak)\nprint(K())\n')
+                    self.assertEqual(result is None, value == '"safe"' and name != 'unknown_name')
+        self.assertIsNone(self.inspect('class K: pass\nname = "label"\nsetattr(K, name, "safe")\nprint(K())\n'))
+        for value in ('str(os.environ)', '"safe"'):
+            with self.subTest(shadowed_name=True, value=value):
+                self.assertEqual(self.inspect('import os\nname = "label"\ndef leak(self):\n    return '
+                    + value + '\nclass K: pass\ndef install(name):\n    setattr(K, name, leak)\n'
+                    + 'install("__str__")\nprint(K())\n') is None, value == '"safe"')
+                self.assertIsNotNone(self.inspect('import os\nname = "label"\ndef leak(self):\n    return '
+                    + value + '\nclass K: pass\ndef install(name):\n    setattr(K, name + "", leak)\n'
+                    + 'install("__str__")\nprint(K())\n'))
+
+    def test_pr103_four_async_iterator_protocols(self) -> None:
+        for protocol, statement in (('__aiter__', 'yield'), ('__anext__', 'return')):
+            for sink in ('async for item in K():\n        print(item)',
+                         'print([item async for item in K()])',
+                         'print({item async for item in K()})',
+                         'print({"key": item async for item in K()})',
+                         'print((item async for item in K()))'):
+                for value in ('os.environ', '"safe"'):
+                    with self.subTest(protocol=protocol, sink=sink, value=value):
+                        other = '    def __aiter__(self):\n        return self\n' if protocol == '__anext__' else ''
+                        self.assertEqual(self.inspect('import os\nclass K:\n' + other
+                            + '    async def ' + protocol + '(self):\n        ' + statement + ' ' + value
+                            + '\nasync def collect():\n    ' + sink + '\n') is None, value == '"safe"')
+        self.assertIsNone(self.inspect('import os\nclass K:\n    async def __anext__(self):\n        return os.environ\n    def __iter__(self):\n        return iter(["safe"])\nprint([item for item in K()])\n'))
+        for installation in ('K.__aiter__ = stream', 'setattr(K, "__aiter__", stream)',
+                             'name = "__aiter__"\nsetattr(K, name, stream)'):
+            for value in ('os.environ', '"safe"'):
+                with self.subTest(installation=installation, value=value):
+                    self.assertEqual(self.inspect('import os\nasync def stream(self):\n    yield ' + value
+                        + '\nclass K: pass\n' + installation
+                        + '\nasync def collect():\n    print([item async for item in K()])\n') is None, value == '"safe"')
+
+    def test_pr103_four_classmethod_decorator_aliases(self) -> None:
+        for setup, decorator in (('cm = classmethod', 'cm'),
+                                 ('first = classmethod\ncm = first', 'cm')):
+            for invocation in ('E.invoke(C)', 'E().invoke(C)', 'fn = E.invoke\nfn(C)', 'E.invoke(target=C)'):
+                for source in ('os.system', 'len'):
+                    with self.subTest(setup=setup, invocation=invocation, source=source):
+                        result = self.inspect('import os\n' + setup + '\nclass C:\n    step = ' + source
+                            + '\nclass E:\n    @' + decorator
+                            + '\n    def invoke(cls, target):\n        target.step("safe")\n'
+                            + invocation + '\n')
+                        self.assertIsNotNone(result)
+                        self.assertIn("unreviewed decorator", result)
+
     def test_pr103_projection_bookkeeping_preserves_nested_helper_calls(self) -> None:
         scanner_tree = ast.parse(_scanner_module_source(PACKET_TEXT))
         projection = next(node for node in scanner_tree.body if isinstance(node, ast.FunctionDef)

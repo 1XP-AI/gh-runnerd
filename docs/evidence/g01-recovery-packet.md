@@ -22945,15 +22945,25 @@ def python_sensitive_read_violation(tree, parents):
         return True
 
     assigned_display_methods = {}
+    display_protocol_names = {"__str__", "__repr__", "__format__", "__iter__", "__next__", "__getitem__", "__aiter__", "__anext__"}
     if error_operand_classes:
         for candidate in ast.walk(tree):
             if (isinstance(candidate, ast.Call) and len(candidate.args) >= 3
                 and any(python_unshadowed_builtin_reference(reference, {"setattr"}, tree, parents)
-                    for reference in python_value_provenance(candidate.func, tree, parents))
-                and isinstance(candidate.args[1], ast.Constant)
-                and candidate.args[1].value in {"__str__", "__repr__", "__format__", "__iter__", "__next__", "__getitem__"}):
-                for classdef in display_class_targets(candidate.args[0], set()):
-                    assigned_display_methods.setdefault(classdef, []).append((candidate.args[1].value, candidate.args[2]))
+                    for reference in python_value_provenance(candidate.func, tree, parents))):
+                mutation_classes = display_class_targets(candidate.args[0], set())
+                # The string helper's nested name lookup is body-wide. Do
+                # not let a concatenation borrow an unrelated scope's literal.
+                mutation_name_values = [set() if isinstance(reference, ast.BinOp)
+                    and any(isinstance(part, ast.Name) for part in ast.walk(reference))
+                    else python_static_string_values(reference, tree)
+                    for reference in python_value_provenance(candidate.args[1], tree, parents)]
+                mutation_names = set().union(*mutation_name_values)
+                if mutation_classes and (not mutation_names or not all(mutation_name_values)):
+                    return f"Python class protocol mutation has an unresolved member name on line {candidate.lineno}"
+                for classdef in mutation_classes:
+                    for mutation_name in mutation_names & display_protocol_names:
+                        assigned_display_methods.setdefault(classdef, []).append((mutation_name, candidate.args[2]))
             if not isinstance(candidate, (ast.Assign, ast.AnnAssign)) or candidate.value is None:
                 continue
             targets = candidate.targets if isinstance(candidate, ast.Assign) else [candidate.target]
@@ -22965,7 +22975,7 @@ def python_sensitive_read_violation(tree, parents):
                     classes, method = display_class_targets(target.value, set()), target.attr
                 else:
                     continue
-                if method in {"__str__", "__repr__", "__format__", "__iter__", "__next__", "__getitem__"}:
+                if method in display_protocol_names:
                     for classdef in classes:
                         assigned_display_methods.setdefault(classdef, []).append((method, candidate.value))
 
@@ -23105,7 +23115,10 @@ def python_sensitive_read_violation(tree, parents):
             return f"Python unreviewed Path reader alias {alias!r} is not allowed"
     for node in ast.walk(tree):
         if (isinstance(node, (ast.comprehension, ast.For, ast.AsyncFor))
-            and error_operand_repr_sensitive(node.iter, set(), ("__iter__", "__next__", "__getitem__"))):
+            and error_operand_repr_sensitive(node.iter, set(),
+                ("__iter__", "__next__", "__getitem__", "__aiter__", "__anext__") if isinstance(node, ast.AsyncFor)
+                or isinstance(node, ast.comprehension) and node.is_async
+                else ("__iter__", "__next__", "__getitem__"))):
             return ("Python custom iterator may expose sensitive protocol values "
                 f"on line {node.iter.lineno if isinstance(node, ast.comprehension) else node.lineno}")
         if isinstance(node, ast.Subscript) and python_dotted_name(node.value) == "os.environ":
