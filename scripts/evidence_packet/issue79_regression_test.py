@@ -8481,6 +8481,38 @@ def synthetic_read(_fd, _size):
             '        receiver.label = count\n        return self\n'
             '    async def __anext__(self):\n        return "safe"\n' + consumer))
 
+    def test_pr103_v15_augmented_receiver_target(self) -> None:
+        consumer = ('async def collect():\n    async for item in K():\n'
+                    '        print(item)\n        break\ncollect().send(None)\n')
+        for value in ('os.environ', '"safe"'):
+            for body in ('self += 1', 'alias = self\n        alias += 1',
+                         'alias = self\n        other = alias\n        other += 1'):
+                with self.subTest(value=value, body=body):
+                    # Finite sensitive class replacement and harmless policy pair.
+                    self.assertIsNotNone(self.inspect('import os\nclass L:\n'
+                        '    async def __anext__(self):\n        return ' + value + '\n'
+                        'class K:\n    def __iadd__(self, other):\n'
+                        '        object.__setattr__(self, "__class__", L)\n        return self\n'
+                        '    def __aiter__(self):\n        ' + body + '\n        return self\n'
+                        '    async def __anext__(self):\n        return "safe"\n' + consumer))
+
+    def test_pr103_v15_augmented_target_provenance_controls(self) -> None:
+        consumer = ('async def collect():\n    async for item in K():\n'
+                    '        print(item)\n        break\ncollect().send(None)\n')
+        # Unknown alternatives do not erase the visible receiver origin. These
+        # are conservative policy controls, not claimed finite runtime leaks.
+        for body in ('alias = self if flag else unknown\n        alias += 1',
+                     'alias = unknown if flag else self\n        other = alias\n        other += 1'):
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect('flag = True\nclass K:\n'
+                    '    def __iadd__(self, other):\n        return self\n'
+                    '    def __aiter__(self):\n        ' + body + '\n        return self\n'
+                    '    async def __anext__(self):\n        return "safe"\n' + consumer))
+        # An unresolved returned iterator must not acquire receiver identity.
+        self.assertIsNotNone(self.inspect('class K:\n    def __aiter__(self):\n'
+            '        alias = unknown\n        alias += 1\n        return alias\n'
+            '    async def __anext__(self):\n        return "safe"\n' + consumer))
+
     def test_pr103_v13_factory_returned_protocol_classes(self) -> None:
         consumer = ('async def collect():\n    async for item in K():\n'
                     '        print(item)\n        break\ncollect().send(None)\n')
