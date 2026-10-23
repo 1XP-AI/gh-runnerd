@@ -22721,6 +22721,78 @@ def python_sensitive_read_violation(tree, parents):
             finally:
                 v22_active.remove(token)
 
+        def v22_local_class_value(node, point):
+            # Applicability only, never a nonsensitive-value certificate. The
+            # existing class/protocol/state graph still owns these values.
+            token = v22_guard("class-domain", node, point)
+            if token is None:
+                return False
+            try:
+                if isinstance(node, ast.Call):
+                    return not node.args and not node.keywords and v22_local_class_value(node.func, point)
+                if not isinstance(node, ast.Name) or v22_declared_value_writer(node.id):
+                    return False
+                binding = v22_bind(node.id, point)
+                if binding is not None:
+                    return v22_local_class_value(binding.value, binding)
+                definitions = [entry for entry in v22_binder_index.get((v22_scope, node.id), ())
+                    if v22_position(entry) < v22_position(point)]
+                return (len(definitions) == 1 and isinstance(definitions[0], ast.ClassDef)
+                    and v22_definite(definitions[0]))
+            finally:
+                v22_active.remove(token)
+
+        def v22_initial_value(node, point):
+            state = v22_scalar(node, point)
+            if state != "UNKNOWN":
+                return state
+            if v22_local_class_value(node, point):
+                return "CLASS_DOMAIN"
+            if python_unshadowed_builtin_reference(node, {"len"}, tree, parents):
+                return "CALLABLE_DOMAIN"
+            if isinstance(node, ast.Attribute) and node.attr in {"quote", "quote_plus"}:
+                receiver = node.value
+                imported = (isinstance(receiver, ast.Name)
+                    and python_imported_module_alias_is_stable(receiver.id, "urllib.parse", tree))
+                if isinstance(receiver, ast.Attribute) and receiver.attr == "parse" and isinstance(receiver.value, ast.Name):
+                    imported = (python_imported_module_alias_is_stable(receiver.value.id, "urllib.parse", tree)
+                        or python_imported_module_alias_is_stable(receiver.value.id, "urllib", tree))
+                if imported and v22_primitive_baseline(encoder_data=True):
+                    return "CALLABLE_DOMAIN"  # Existing encoder argument-taint proof remains required.
+            return "UNKNOWN"
+
+        def v22_nonmapping_receiver(node, point):
+            token = v22_guard("nonmapping-domain", node, point)
+            if token is None:
+                return False
+            try:
+                if isinstance(node, (ast.List, ast.Tuple)) or v22_local_class_value(node, point):
+                    return True
+                if isinstance(node, ast.IfExp):
+                    return all(v22_nonmapping_receiver(part, point) for part in (node.body, node.orelse))
+                if isinstance(node, ast.Name):
+                    binding = v22_bind(node.id, point)
+                    if binding is not None:
+                        return v22_nonmapping_receiver(binding.value, binding)
+                    ancestor = parents.get(node)
+                    while ancestor is not None and ancestor is not v22_scope:
+                        if (isinstance(ancestor, ast.For) and isinstance(ancestor.target, ast.Name)
+                            and ancestor.target.id == node.id and isinstance(ancestor.iter, (ast.List, ast.Tuple))):
+                            if any(target is not ancestor.target and v22_position(ancestor.target) < v22_position(target) < v22_position(node)
+                                for target in v22_binder_index.get((v22_scope, node.id), ())):
+                                return False
+                            return bool(ancestor.iter.elts) and all(v22_nonmapping_receiver(row, row) for row in ancestor.iter.elts)
+                        ancestor = parents.get(ancestor)
+                    return False
+                if isinstance(node, ast.Subscript):
+                    source = v22_object(node.value, node.value)
+                    domain = v22_literal(node.slice, node)
+                    return (source is not None and domain is not None and len(domain) == 1
+                        and v22_selected(source, next(iter(domain)), node) == "CLASS_DOMAIN")
+                return False
+            finally:
+                v22_active.remove(token)
+
         def v22_literal(node, point):
             token = v22_guard("literal", node, point)
             if token is None:
@@ -22818,6 +22890,20 @@ def python_sensitive_read_violation(tree, parents):
             finally:
                 v22_active.remove(token)
 
+        def v22_dict_reference(node, point):
+            token = v22_guard("dict-reference", node, point)
+            if token is None:
+                return False
+            try:
+                if python_unshadowed_builtin_reference(node, {"dict"}, tree, parents):
+                    return True
+                if not isinstance(node, ast.Name) or v22_declared_value_writer(node.id):
+                    return False
+                binding = v22_bind(node.id, point)
+                return binding is not None and v22_dict_reference(binding.value, binding)
+            finally:
+                v22_active.remove(token)
+
         def v22_object(node, point):
             token = v22_guard("object", node, point)
             if token is None:
@@ -22831,7 +22917,7 @@ def python_sensitive_read_violation(tree, parents):
                     binding = v22_bind(node.id, point, mapping_identity=True)
                     return v22_object(binding.value, binding) if binding is not None else None
                 if (isinstance(node, ast.Call)
-                    and python_unshadowed_builtin_reference(node.func, {"dict"}, tree, parents)
+                    and v22_dict_reference(node.func, node)
                     and len(node.args) <= 1):
                     return node
                 return None
@@ -23068,13 +23154,14 @@ def python_sensitive_read_violation(tree, parents):
                     return False
             return True
 
-        def v22_primitive_baseline(nominal_only=False):
+        def v22_primitive_baseline(nominal_only=False, encoder_data=False):
             # This is the declared trusted-stdlib baseline, plus conservative
             # source closure. Hooks are capabilities even without capture.
-            if nominal_only in v22_baseline_cache:
-                return v22_baseline_cache[nominal_only]
+            baseline_key = (nominal_only, encoder_data)
+            if baseline_key in v22_baseline_cache:
+                return v22_baseline_cache[baseline_key]
             # In-progress/failed baseline proofs never become positive facts.
-            v22_baseline_cache[nominal_only] = False
+            v22_baseline_cache[baseline_key] = False
             forbidden = {"addaudithook", "audit", "register_at_fork", "settrace", "setprofile",
                 "settrace_all_threads", "setprofile_all_threads", "_getframe", "_current_frames",
                 "currentframe", "f_globals", "f_locals", "f_back", "gi_frame", "cr_frame",
@@ -23095,6 +23182,8 @@ def python_sensitive_read_violation(tree, parents):
                 return False
             supported_roots = {"hashlib", "json", "os", "re", "selectors", "signal", "shutil", "stat",
                 "subprocess", "sys", "tempfile", "time", "decimal", "pathlib", "io", "builtins", "unicodedata"}
+            if encoder_data:
+                supported_roots.add("urllib")
             builtin_calls = {"all", "any", "ascii", "bool", "bytearray", "bytes", "dict", "enumerate", "filter",
                 "float", "format", "frozenset", "getattr", "int", "isinstance", "issubclass", "iter", "len", "list",
                 "map", "max", "memoryview", "min", "next", "ord", "print", "range", "repr", "reversed", "round",
@@ -23105,11 +23194,18 @@ def python_sensitive_read_violation(tree, parents):
             callable_names.update(entry.name for entry in v22_nodes if isinstance(entry, ast.FunctionDef))
             for import_node in v22_nodes:
                 if isinstance(import_node, ast.Import):
+                    if encoder_data and any(alias.name.startswith("urllib")
+                        and alias.name not in {"urllib", "urllib.parse"} for alias in import_node.names):
+                        return False
                     if any(alias.name.split(".")[0] not in supported_roots or not python_imported_module_alias_is_stable(
                         alias.asname or alias.name.split(".")[0], alias.name, tree) for alias in import_node.names):
                         return False
                     capabilities.update(alias.asname or alias.name.split(".")[0] for alias in import_node.names)
                 elif isinstance(import_node, ast.ImportFrom):
+                    if encoder_data and import_node.module and import_node.module.startswith("urllib") and (
+                        import_node.module != "urllib.parse" or any(alias.name not in {"quote", "quote_plus"}
+                            for alias in import_node.names)):
+                        return False
                     if import_node.module == "sys" and any(alias.name in import_state_members for alias in import_node.names):
                         return False
                     if (import_node.level or not import_node.module or import_node.module.split(".")[0] not in supported_roots
@@ -23203,6 +23299,8 @@ def python_sensitive_read_violation(tree, parents):
                             and isinstance(entry.value, ast.Name)
                             and python_imported_module_alias_is_stable(entry.value.id, "os", tree)
                             and isinstance(holder, ast.Dict) and entry in holder.values)
+                        source_read = source_read or (encoder_data and entry.attr in {"quote", "quote_plus"}
+                            and isinstance(holder, ast.Dict) and entry in holder.values)
                         if not (safe_position or constant_member or source_read):
                             return False
                 if isinstance(entry, ast.ImportFrom) and any(alias.name in forbidden for alias in entry.names):
@@ -23236,7 +23334,7 @@ def python_sensitive_read_violation(tree, parents):
                         # shape and constructor effects. Discharge this exact
                         # use separately before selected safety is returned.
                         v22_field_reads.add(entry)
-            v22_baseline_cache[nominal_only] = True
+            v22_baseline_cache[baseline_key] = True
             return True
 
         def v22_field_domain(node, point):
@@ -23355,6 +23453,18 @@ def python_sensitive_read_violation(tree, parents):
                 return None
             return definition
 
+        def v22_unrelated_parameter_reference(reference, function):
+            for scope in python_lexical_scope_chain(python_enclosing_scope(reference, parents), parents):
+                if ast.Global in v22_declarations.get((scope, function.name), ()):
+                    return False
+                if not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                    continue
+                parameters = list(scope.args.posonlyargs) + list(scope.args.args) + list(scope.args.kwonlyargs)
+                parameters += [parameter for parameter in (scope.args.vararg, scope.args.kwarg) if parameter is not None]
+                if any(parameter.arg == function.name for parameter in parameters):
+                    return True  # A formal's object is not this module-level function.
+            return False
+
         def v22_actual_frames(function, visiting=()):
             if function in visiting or len(visiting) >= 32:
                 return None
@@ -23364,6 +23474,8 @@ def python_sensitive_read_violation(tree, parents):
             for reference in v22_nodes:
                 if not (isinstance(reference, ast.Name) and isinstance(reference.ctx, ast.Load)
                     and reference.id == function.name):
+                    continue
+                if v22_unrelated_parameter_reference(reference, function):
                     continue
                 call = parents.get(reference)
                 if not isinstance(call, ast.Call) or call.func is not reference or v22_local_definition(call) is not function:
@@ -23761,6 +23873,7 @@ def python_sensitive_read_violation(tree, parents):
             if key in v22_constructor_states:
                 return v22_constructor_states[key] is True
             v22_constructor_states[key] = "IN_PROGRESS"
+            native_run = (isinstance(constructor.func, ast.Attribute) and constructor.func.attr == "run")
             keywords = v22_constructor_keywords(constructor, frames)
             if keywords is None or "env" not in keywords or len(constructor.args) != 1:
                 v22_constructor_states[key] = False
@@ -23781,6 +23894,8 @@ def python_sensitive_read_violation(tree, parents):
                     valid = v22_stream_option(value, value)
                 elif name in {"start_new_session", "close_fds", "text", "encoding", "errors"}:
                     valid = v22_scalar(value, value) == "SAFE" or v22_data_fact(value, value, "scalar")
+                elif native_run and name in {"input", "capture_output", "check", "timeout"}:
+                    valid = v22_data_fact(value, value, "scalar")
                 else:
                     valid = False
                 if not valid:
@@ -24479,6 +24594,11 @@ def python_sensitive_read_violation(tree, parents):
                         v22_data_fact(item.value, point, "sequence") if isinstance(item, ast.Starred)
                         else v22_data_fact(item, point, "scalar") or v22_data_fact(item, point, "path")
                         for item in node.elts)
+                if isinstance(node, ast.ListComp):
+                    return (kind == "sequence" and projection is None and len(node.generators) == 1
+                        and not node.generators[0].is_async and isinstance(node.generators[0].target, ast.Name)
+                        and v22_data_fact(node.generators[0].iter, node.generators[0].iter, "sequence")
+                        and (v22_data_fact(node.elt, node.elt, "scalar") or v22_data_fact(node.elt, node.elt, "path")))
                 if isinstance(node, ast.IfExp):
                     return all(v22_data_fact(part, point, kind, projection) for part in (node.body, node.orelse))
                 if isinstance(node, ast.JoinedStr):
@@ -24518,6 +24638,8 @@ def python_sensitive_read_violation(tree, parents):
                                 source = matched[0].iter
                                 if v22_string_fact(source, source, True):
                                     return True
+                                if isinstance(ancestor, ast.ListComp) and v22_data_fact(source, source, "sequence"):
+                                    return True
                                 mapping = v22_object(source, source)
                                 return mapping is not None and v22_plain_mapping(mapping, source)
                         if isinstance(ancestor, (ast.For, ast.comprehension)):
@@ -24531,6 +24653,17 @@ def python_sensitive_read_violation(tree, parents):
                                         and v22_sequence_binding_closed(node, ancestor.target))
                                 if kind != "scalar":
                                     return False
+                                if (isinstance(ancestor, ast.For) and isinstance(ancestor.iter, ast.Attribute)
+                                    and ancestor.iter.attr in {"environ", "environb"}
+                                    and isinstance(ancestor.iter.value, ast.Name)
+                                    and python_imported_module_alias_is_stable(ancestor.iter.value.id, "os", tree)):
+                                    if (v22_declared_value_writer(node.id, scope)
+                                        or any(target is not ancestor.target
+                                            and v22_position(ancestor.target) < v22_position(target) < v22_position(node)
+                                            for target in v22_binder_index.get((scope, node.id), ()))):
+                                        return False
+                                    v22_lower_type_used[0] = True
+                                    return v22_primitive_baseline(nominal_only=True)
                                 buffer_mapping = v22_buffer_mapping(ancestor.iter)
                                 if buffer_mapping is not None and v22_buffer_mapping_closed(buffer_mapping):
                                     return True
@@ -24594,6 +24727,11 @@ def python_sensitive_read_violation(tree, parents):
                                 if (python_enclosing_scope(mutation, parents) is not scope
                                     or not (v22_position(entries[0][0]) < v22_position(mutation) < v22_position(point))):
                                     continue
+                                if (isinstance(mutation, ast.Subscript) and isinstance(mutation.ctx, (ast.Store, ast.Del))
+                                    and isinstance(mutation.value, ast.Name) and mutation.value.id in aliases
+                                    or isinstance(mutation, ast.AugAssign) and isinstance(mutation.target, ast.Name)
+                                        and mutation.target.id in aliases):
+                                    return False
                                 if (isinstance(mutation, ast.Call) and isinstance(mutation.func, ast.Attribute)
                                     and isinstance(mutation.func.value, ast.Name) and mutation.func.value.id in aliases):
                                     if mutation.func.attr in {"append", "insert"}:
@@ -24702,11 +24840,26 @@ def python_sensitive_read_violation(tree, parents):
                         receiver, member = node.func.value, node.func.attr
                         if isinstance(receiver, ast.Name):
                             if python_imported_module_alias_is_stable(receiver.id, "os", tree):
+                                if member in {"fsdecode", "fsencode"}:
+                                    return (kind == "scalar" and len(node.args) == 1 and not node.keywords
+                                        and any(v22_data_fact(node.args[0], point, source_kind)
+                                            for source_kind in ("scalar", "buffer", "path")))
                                 return (member == "read" and kind in {"scalar", "buffer"}
                                     or member in {"write", "set_blocking"} and kind == "scalar") and v22_native_operation(node)
                             if python_imported_module_alias_is_stable(receiver.id, "subprocess", tree):
                                 if member == "check_output":
                                     return kind == "scalar"
+                                if member == "run" and kind in {"result:stdout", "result:stderr"}:
+                                    # Nominal field TYPE (B), not completed
+                                    # effects or a nonsensitive output VALUE.
+                                    # Every actual native-run call is queued
+                                    # for independent argv/env/options proof C.
+                                    contexts = {()} if scope is tree else v22_actual_frames(scope) if isinstance(scope, ast.FunctionDef) else None
+                                    if not contexts or not v22_primitive_baseline(nominal_only=True):
+                                        return False
+                                    v22_requires_full_baseline[0] = True
+                                    v22_pending_constructors.update((node, context) for context in contexts)
+                                    return True
                                 if member == "CompletedProcess" and kind in {"result:stdout", "result:stderr"}:
                                     field = kind.split(":", 1)[1]
                                     index = 2 if field == "stdout" else 3
@@ -25000,6 +25153,8 @@ def python_sensitive_read_violation(tree, parents):
                 if not (isinstance(reference, ast.Name) and isinstance(reference.ctx, ast.Load)
                     and reference.id == function.name):
                     continue
+                if v22_unrelated_parameter_reference(reference, function):
+                    continue
                 use = parents.get(reference)
                 if not isinstance(use, ast.Call) or use.func is not reference:
                     return None  # Callback/default/container/alias escape.
@@ -25039,14 +25194,14 @@ def python_sensitive_read_violation(tree, parents):
                         if domain is None:
                             result = "UNKNOWN"
                         elif key in domain:
-                            result = v22_scalar(item, item)
+                            result = v22_initial_value(item, item)
                 elif isinstance(allocation, ast.Call):
                     for source in allocation.args + [kw.value for kw in allocation.keywords if kw.arg is None]:
                         original = v22_object(source, source)
                         result = v22_selected(original, key, allocation) if original is not None else "UNKNOWN"
                     for keyword in allocation.keywords:
                         if keyword.arg == key:
-                            result = v22_scalar(keyword.value, keyword.value)
+                            result = v22_initial_value(keyword.value, keyword.value)
                 for entry in sorted(v22_nodes, key=v22_position):
                     if (python_enclosing_scope(entry, parents) is not v22_scope
                         or not (v22_position(allocation) < v22_position(entry) < v22_position(point))):
@@ -25089,15 +25244,13 @@ def python_sensitive_read_violation(tree, parents):
                     if isinstance(owner, ast.Assign) and owner.value is entry and all(
                         isinstance(target, ast.Name) for target in owner.targets):
                         continue
-                    if isinstance(owner, ast.Call) and python_unshadowed_builtin_reference(
-                        owner.func, {"dict"}, tree, parents):
+                    if isinstance(owner, ast.Call) and v22_dict_reference(owner.func, owner):
                         continue
                     if isinstance(owner, ast.Call) and entry in owner.args and v22_closed_call(owner, allocation):
                         continue
                     if isinstance(owner, ast.keyword):
                         call = parents.get(owner)
-                        if owner.arg is None and isinstance(call, ast.Call) and python_unshadowed_builtin_reference(
-                            call.func, {"dict"}, tree, parents):
+                        if owner.arg is None and isinstance(call, ast.Call) and v22_dict_reference(call.func, call):
                             continue
                         if isinstance(call, ast.Call) and v22_closed_call(call, allocation):
                             continue
@@ -25175,6 +25328,8 @@ def python_sensitive_read_violation(tree, parents):
 
         allocation = v22_object(expression.value, expression.value)
         if allocation is None:
+            if v22_nonmapping_receiver(expression.value, expression.value):
+                return None  # Existing protocol proof, not an UNKNOWN mapping alternative.
             sequence_container = expression.value
             sequence_point = expression
             sequence_seen = set()
@@ -25187,6 +25342,34 @@ def python_sensitive_read_violation(tree, parents):
             if isinstance(sequence_container, (ast.Tuple, ast.List)):
                 return None  # This mapping proof has no applicability here.
         domain = v22_literal(expression.slice, expression)
+        if allocation is not None and domain is None and isinstance(allocation, ast.Dict):
+            # Dynamic native keys may choose any *reaching* entry, not just
+            # an initial literal key. A missing key raises with a native key;
+            # unknown added keys, stores, escapes and values never disappear.
+            if not (v22_data_fact(expression.slice, expression.slice, "scalar") and v22_primitive_baseline()):
+                return "UNKNOWN"
+            complete_domain = set()
+            for entry_key in allocation.keys:
+                reaching = v22_literal(entry_key, allocation)
+                if reaching is None:
+                    return "UNKNOWN"
+                complete_domain.update(reaching)
+            for entry in v22_nodes:
+                if (python_enclosing_scope(entry, parents) is not v22_scope
+                    or not (v22_position(allocation) < v22_position(entry) < v22_position(expression))):
+                    continue
+                for receiver, entry_key, _item, _strong in v22_stores(entry):
+                    if v22_object(receiver, entry) is not allocation:
+                        continue
+                    reaching = v22_literal(entry_key, entry)
+                    if reaching is None:
+                        return "UNKNOWN"
+                    complete_domain.update(reaching)
+            if not complete_domain or len(complete_domain) > 256:
+                return "UNKNOWN"
+            if not all(v22_selected(allocation, key, expression) == "SAFE" for key in complete_domain):
+                return "UNKNOWN"
+            return "SAFE" if v22_process_obligations_closed(allocation) else "UNKNOWN"
         if allocation is None or domain is None or len(domain) != 1:
             return "UNKNOWN"
         final_state = v22_selected(allocation, next(iter(domain)), expression)
@@ -25194,6 +25377,10 @@ def python_sensitive_read_violation(tree, parents):
             return "UNKNOWN"
         if final_state == "SAFE" and not v22_process_obligations_closed(allocation):
             return "UNKNOWN"
+        if final_state in {"CLASS_DOMAIN", "CALLABLE_DOMAIN"}:
+            # Every store/escape must have preserved the original class value.
+            # Never discharge the primary sensitive/repr arms with this state.
+            return None if v22_process_obligations_closed(allocation) else "UNKNOWN"
         return final_state
 
     def stored_mapping_output_sensitive(value):

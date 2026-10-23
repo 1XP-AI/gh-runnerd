@@ -9344,6 +9344,107 @@ def synthetic_read(_fd, _size):
                 parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
                 self.assertEqual(self.scanner['python_sensitive_read_violation'](tree, parents) is None, safe)
 
+    def test_pr103_v22_mapping_applicability_keeps_unknowns(self) -> None:
+        for effect, safe in (
+            ('', True), ('alias = values\n', True),
+            ('unknown(values)\n', False), ('values["x"] = unknown\n', False),
+            ('values["x"] = os.environ\n', False),
+        ):
+            with self.subTest(effect=effect):
+                self.assertEqual(self.inspect('import os\nclass K:\n'
+                    '    def __class_getitem__(cls, key):\n        return "safe"\n'
+                    'values = {"x": K}\n' + effect
+                    + 'ctor = dict\nprint(ctor(**values)["x"][0])\n') is None, safe)
+        self.assertIsNotNone(self.inspect('values = {"x": unknown}\nprint(values["x"])\n'))
+        for source in ('lambda: os.environ', 'lambda: str(os.environ)'):
+            with self.subTest(callee=source):
+                self.assertIsNotNone(self.inspect('import os\nfunctions = {"f": ' + source
+                    + '}\nprint(functions["f"]())\n'))
+        self.assertIsNotNone(self.inspect('import os\nm = {"x": "safe"}\n'
+            'def mutate():\n    m["x"] = os.environ\n    return "safe"\n'
+            'functions = {"f": mutate}\nfunctions["f"]()\nprint(dict(m)["x"])\n'))
+        for effect in ('functions["f"] = unknown\n', 'unknown(functions)\n',
+                       'urllib.parse.quote = unknown\n', 'unknown()\n'):
+            with self.subTest(encoder_effect=effect):
+                self.assertIsNotNone(self.inspect('import urllib.parse\nfunctions = {"f": urllib.parse.quote}\n'
+                    + effect + 'print(functions["f"]("safe"))\n'))
+        self.assertIsNotNone(self.inspect('import os, builtins\n'
+            'builtins.len = lambda value: os.environ\nfunctions = {"f": len}\n'
+            'print(functions["f"]("safe"))\n'))
+
+    def test_pr103_v22_dynamic_lookup_complete_key_domain(self) -> None:
+        for effect, safe in (
+            ('', True), ('defaults["OTHER"] = "safe"\n', True),
+            ('defaults["OTHER"] = os.environ\n', False),
+            ('defaults.update(os.environ)\n', False),
+            ('unknown(defaults)\n', False),
+        ):
+            with self.subTest(effect=effect):
+                self.assertEqual(self.inspect('import os\ndefaults = {"PATH": "/x"}\n'
+                    + effect + 'for key in os.environ:\n'
+                    '    print(defaults[key] if key in defaults else "none")\n') is None, safe)
+        self.assertIsNotNone(self.inspect('import os\ndefaults = {"PATH": "/x"}\n'
+            'for key in os.environ:\n    key = unknown\n'
+            '    print(defaults[key] if key in defaults else "none")\n'))
+        self.assertIsNotNone(self.inspect('defaults = {"PATH": "/x"}\nprint(defaults[unknown])\n'))
+
+    def test_pr103_v22_actual_frames_ignore_unrelated_parameters(self) -> None:
+        for use, safe in (
+            ('def unrelated(command):\n    return command\nunrelated("safe")\n', True),
+            ('alias = command\n', False),
+            ('holder = [command]\n', False),
+        ):
+            with self.subTest(use=use):
+                body = ('import subprocess\nm = {"x": "safe"}\n'
+                    'def command(arguments):\n    return ["printf", *arguments]\n' + use
+                    + 'subprocess.Popen(command(["ok"]), env=m)\nprint(dict(m)["x"])\n')
+                tree = ast.parse(body)
+                parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+                self.assertEqual(self.scanner['python_sensitive_read_violation'](tree, parents) is None, safe)
+
+    def test_pr103_v22_native_filesystem_string_types(self) -> None:
+        for argument, safe in (('b"reviewed"', True), ('"reviewed"', True), ('unknown', False), ('os.environ', False)):
+            with self.subTest(argument=argument):
+                body = ('import os\nimport subprocess\nm = {"x": "safe"}\n'
+                    'subprocess.Popen(["printf", os.fsdecode(' + argument + ')], env=m)\nprint(dict(m)["x"])\n')
+                tree = ast.parse(body)
+                parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+                self.assertEqual(self.scanner['python_sensitive_read_violation'](tree, parents) is None, safe)
+
+    def test_pr103_v22_native_filtered_sequence_types(self) -> None:
+        for source, value, effect, safe in (
+            ('b"one\\ttwo".split(b"\\t")', 'part', '', True),
+            ('unknown', 'part', '', False),
+            ('["safe"]', 'unknown', '', False),
+            ('["safe"]', 'part', 'parts[0] = unknown\n', False),
+        ):
+            with self.subTest(sequence=(source, value, effect)):
+                body = ('import os\nimport subprocess\nm = {"x": "safe"}\n'
+                    'parts = [' + value + ' for part in ' + source + ' if part]\n' + effect
+                    + 'for record in parts:\n    subprocess.Popen(["printf", os.fsdecode(record)], env=m)\n'
+                    'print(dict(m)["x"])\n')
+                tree = ast.parse(body)
+                parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+                self.assertEqual(self.scanner['python_sensitive_read_violation'](tree, parents) is None, safe)
+
+    def test_pr103_v22_native_run_result_requires_effects(self) -> None:
+        for arguments, environment, options, safe in (
+            ('["printf", "ok"]', '{"K": "V"}', ', capture_output=True, text=True', True),
+            ('unknown', '{"K": "V"}', ', capture_output=True', False),
+            ('["printf", "ok"]', 'unknown', ', capture_output=True', False),
+            ('["printf", "ok"]', '{"K": "V"}', ', preexec_fn=unknown, capture_output=True', False),
+            ('["printf", "ok"]', '{"K": "V"}', ', input=unknown, capture_output=True', False),
+        ):
+            with self.subTest(result=(arguments, environment, options)):
+                body = ('import subprocess\nm = {"x": "safe"}\n'
+                    'result = subprocess.run(' + arguments + ', env=' + environment + options + ')\n'
+                    'parts = [part for part in result.stdout.split(":") if part]\n'
+                    'for part in parts:\n    subprocess.Popen(["printf", part], env=m)\n'
+                    'print(dict(m)["x"])\n')
+                tree = ast.parse(body)
+                parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+                self.assertEqual(self.scanner['python_sensitive_read_violation'](tree, parents) is None, safe)
+
     def test_pr103_v22_update_provider_state_snapshot(self) -> None:
         for mutation, safe in (('', True), ('alias = patches\n', True),
                               ('seen = patches.get("other")\n', True),
