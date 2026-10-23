@@ -8772,6 +8772,800 @@ def synthetic_read(_fd, _size):
                         'class Descriptor: pass\nalias = tuple([Descriptor])[0]\n'
                         + mutation + '\nclass K:\n    field = Descriptor()\nprint(K[0])\n'))
 
+    def test_pr103_v21_mutated_wrapper_mapping_policy(self) -> None:
+        for value in ('os.environ', '"safe"'):
+            for mutation in ('values["x"] = K', 'alias = values\nalias["x"] = K',
+                             'values.update(x=K)', 'values |= {"x": K}'):
+                with self.subTest(value=value, mutation=mutation):
+                    self.assertIsNotNone(self.inspect('import os\nclass K:\n'
+                        '    def __class_getitem__(cls, key):\n        return ' + value + '\n'
+                        'values = {"x": "safe"}\n' + mutation
+                        + '\nprint(dict(**values)["x"][0])\n'))
+
+    def test_pr103_v21_projected_callback_parameter_policy(self) -> None:
+        for value in ('os.environ', '"safe"'):
+            for body in ('box[0].__code__ = replacement.__code__',
+                         'target = box[0]\n    target.__code__ = replacement.__code__',
+                         'chosen = (box[0],)\n    chosen[0].__code__ = replacement.__code__'):
+                with self.subTest(value=value, body=body):
+                    self.assertIsNotNone(self.inspect('import os\n'
+                        'def replacement(self, key):\n    return ' + value + '\n'
+                        'def safe(self, key):\n    return "safe"\n'
+                        'def mutate(box=(safe,)):\n    ' + body + '\nclass K:\n'
+                        '    def __getitem__(self, key):\n        return "safe"\n'
+                        'list(map(mutate, [(K.__getitem__,)]))\nprint(K()[0])\n'))
+        self.assertIsNone(self.inspect('def safe(self, key):\n    return "safe"\n'
+            'def replacement(self, key):\n    return "safe"\n'
+            'def mutate(box=(safe,)):\n    box[0].__code__ = replacement.__code__\n'
+            'class K:\n    def __getitem__(self, key):\n        return "safe"\n'
+            'mutate()\nprint(K()[0])\n'))
+
+    def test_pr103_v21_comprehension_member_policy(self) -> None:
+        for value in ('os.environ', '"safe"'):
+            for initial, returned, mutation in (
+                ('[x for x in ["safe"]]', 'Holder.state[0]', 'Holder.state[0] = VALUE'),
+                ('{x: "safe" for x in ["x"]}', 'Holder.state["x"]', 'Holder.state["x"] = VALUE'),
+                ('{x for x in ["safe"]}', 'next(iter(Holder.state))',
+                 'Holder.state.clear()\nHolder.state.add(str(VALUE))'),
+            ):
+                with self.subTest(value=value, initial=initial):
+                    self.assertIsNotNone(self.inspect('import os\nclass Holder:\n    state = '
+                        + initial + '\nclass K:\n    def __getitem__(self, key):\n        return '
+                        + returned + '\n' + mutation.replace('VALUE', value) + '\nprint(K()[0])\n'))
+
+    def test_pr103_v21_local_class_scope_coherence(self) -> None:
+        self.assertIsNone(self.inspect('values = {"x": "safe"}\n'
+            'values["x"] = "reviewed"\nprint(dict(**values)["x"])\n'))
+        for value in ('os.environ', '"safe"'):
+            with self.subTest(local_class_result=value):
+                self.assertIsNotNone(self.inspect('import os\nclass K:\n'
+                    '    def __class_getitem__(cls, key):\n        return ' + value + '\n'
+                    'values = {"x": "safe"}\nvalues["x"] = K\n'
+                    'print(dict(**values)["x"][0])\n'))
+
+    def test_pr103_v21_inherited_mutated_mapping_value_output(self) -> None:
+        for mutation in ('values["x"] = os.environ',
+                         'alias = values\nalias["x"] = os.environ',
+                         'values.update(x=os.environ)', 'values |= {"x": os.environ}'):
+            for output in ('print(dict(**values)["x"])',
+                           'copied = dict(**values)\nprint(copied["x"])',
+                           'print(dict(values)["x"])'):
+                with self.subTest(mutation=mutation, output=output):
+                    self.assertIsNotNone(self.inspect('import os\nvalues = {"x": "safe"}\n'
+                        + mutation + '\n' + output + '\n'))
+
+    def test_pr103_v21_mutated_mapping_value_output_controls(self) -> None:
+        for body in (
+            'values = {"x": "safe"}\nprint(dict(**values)["x"])\n',
+            'values = {"x": "safe"}\nvalues["x"] = "reviewed"\nprint(dict(**values)["x"])\n',
+            'import os\nvalues = {"x": "safe"}\nvalues["other"] = os.environ\n'
+            'print(dict(**values)["x"])\n',
+            'import os\nvalues = {"x": "safe"}\nvalues["x"] = os.environ\n'
+            'for key in values:\n    {}[key]\n',
+        ):
+            with self.subTest(body=body):
+                self.assertIsNone(self.inspect(body))
+
+    def test_pr103_v21_selected_store_scope_collision(self) -> None:
+        self.assertIsNone(self.inspect('import os\ndef unrelated():\n'
+            '    value = os.environ\n    return value\n'
+            'value = "safe"\nvalues = {"x": "safe"}\nvalues["x"] = value\n'
+            'print(dict(**values)["x"])\n'))
+        for binding in ('value = os.environ',
+                        'value = "safe" if flag else os.environ',
+                        'secret = os.environ\nvalue = secret'):
+            with self.subTest(binding=binding):
+                self.assertIsNotNone(self.inspect('import os\n' + binding
+                    + '\nvalues = {"x": "safe"}\nvalues["x"] = value\n'
+                    'print(dict(**values)["x"])\n'))
+
+    def test_pr103_v22_ordered_mapping_snapshots(self) -> None:
+        prefix = 'import os\nm = {"x": "old"}\nm["x"] = os.environ\n'
+        for middle in ('m["x"] = "safe"\nc = dict(m)',
+                       'alias = m\nalias["x"] = "safe"\nc = dict(**m)',
+                       'm.update(x="safe")\nc = dict(m)',
+                       'm |= {"x": "safe"}\nc = dict(m)'):
+            with self.subTest(middle=middle):
+                self.assertIsNone(self.inspect(prefix + middle + '\nprint(c["x"])\n'))
+        for middle in ('c = dict(m)\nm["x"] = "safe"',
+                       'c = dict(m)\nalias = c\nalias["x"] = os.environ',
+                       'alias = m\nm = {"x": "safe"}\nc = dict(alias)',
+                       'if flag:\n    m["x"] = "safe"\nc = dict(m)',
+                       'for _ in unknown:\n    m["x"] = "safe"\nc = dict(m)',
+                       'try:\n    m["x"] = "safe"\nexcept Exception:\n    pass\nc = dict(m)'):
+            with self.subTest(middle=middle):
+                self.assertIsNotNone(self.inspect(prefix + middle + '\nprint(c["x"])\n'))
+        for suffix in (
+            'print(dict(m, extra=(m := {"x": "safe"}))["x"])',
+            'print(m["x" if (m := {"x": "safe"}) else "x"])',
+            'alias = m\nm["x"] = "safe" if (m := {"x": "safe"}) else "safe"\n'
+            'print(dict(alias)["x"])',
+        ):
+            with self.subTest(evaluation_order=suffix):
+                self.assertIsNotNone(self.inspect(prefix + suffix + '\n'))
+
+    def test_pr103_v22_finite_mapping_store_domains(self) -> None:
+        for domain, safe in (('{"other": os.environ}', True),
+                             ('{"x": os.environ}', False),
+                             ('{name: os.environ}', False),
+                             ('{"other": os.environ, **unknown}', False),
+                             ('{"other": os.environ} if flag else unknown', False)):
+            body = ('import os\nm = {"x": "safe"}\ndomain = ' + domain
+                    + '\nfor key, value in domain.items():\n    m[key] = value\n'
+                    + 'print(dict(m)["x"])\n')
+            with self.subTest(domain=domain):
+                self.assertEqual(self.inspect(body) is None, safe)
+
+    def test_pr103_v22_escape_and_callback_refusals(self) -> None:
+        prefix = 'import os\nimport subprocess\nimport sys\nm = {"x": "safe"}\n'
+        for middle in (
+            'unknown(m)',
+            'alias = m\nunknown(alias)\nm["x"] = "safe"',
+            'def touch(arg):\n    arg["x"] = os.environ\ntouch(m)',
+            'def touch(arg, callback=unknown):\n    callback(arg)\ntouch(m)',
+            'def touch(arg):\n    global m\n    m["x"] = os.environ\ntouch(m)',
+            'def hook(event, args):\n    unknown(args)\nsys.addaudithook(hook)\n'
+            'subprocess.Popen(["printf", "safe"], env=m)',
+            'audit = sys.addaudithook\naudit(unknown)\n'
+            'subprocess.Popen(["printf", "safe"], env=m)',
+            'sp = subprocess\ndef patch():\n    sp.Popen = unknown\npatch()\n'
+            'subprocess.Popen(["printf", "safe"], env=m)',
+            'sys.settrace(unknown)\nsubprocess.Popen(["printf", "safe"], env=m)',
+        ):
+            with self.subTest(middle=middle):
+                self.assertIsNotNone(self.inspect(prefix + middle + '\nprint(dict(m)["x"])\n'))
+
+    def test_pr103_v22_closed_call_positive_pairs(self) -> None:
+        prefix = 'import subprocess\nfrom pathlib import Path\nm = {"x": "safe"}\n'
+        for use in (
+            'def read(arg):\n    return arg.get("x")\nread(m)',
+            'subprocess.Popen(["printf", "safe"], env=m)',
+            'subprocess.Popen(["printf", "safe"], cwd=Path(".").resolve(), env=m)',
+            'def launch(**kwargs):\n    return subprocess.Popen(["printf", "safe"], **kwargs)\nlaunch(env=m)',
+        ):
+            with self.subTest(use=use):
+                self.assertIsNone(self.inspect(prefix + use + '\nprint(dict(m)["x"])\n'))
+        for pin in ('if flag:\n        kwargs["cwd"] = "."',
+                    'for _ in unknown:\n        kwargs["cwd"] = "."'):
+            with self.subTest(weak_kwargs_pin=pin):
+                self.assertIsNotNone(self.inspect(prefix
+                    + 'def launch(**kwargs):\n    kwargs["cwd"] = unknown\n    ' + pin
+                    + '\n    return subprocess.Popen(["printf", "ok"], **kwargs)\n'
+                    'launch(env=m)\nprint(dict(m)["x"])\n'))
+    def test_pr103_v22_sensitive_slice_and_dependency_bounds(self) -> None:
+        prefix = 'import subprocess\nm = {"x": "safe"}\n'
+        for bound, safe in (('len("-")', True), ('unknown', False)):
+            with self.subTest(slice_bound=bound):
+                body = (prefix
+                    + 'def flags(args):\n    values = []\n    for value in args:\n'
+                    '        values.append(value[' + bound + ':])\n    return values\n'
+                    'argv = flags(["-ok"])\nsubprocess.Popen(argv, env=m)\n'
+                    'print(dict(m)["x"])\n')
+                # This standalone helper-return argv is outside the earlier
+                # command-policy subset. Keep its full refusal explicit while
+                # testing the separate selected-map/type proof used by the
+                # already recognized canonical dynamic command recipe.
+                self.assertIsNotNone(self.inspect(body))
+                tree = ast.parse(body)
+                parents = {child: parent for parent in ast.walk(tree)
+                    for child in ast.iter_child_nodes(parent)}
+                self.assertEqual(self.scanner['python_sensitive_read_violation'](
+                    tree, parents) is None, safe)
+        aliases = 'p0 = "."\n' + ''.join(f'p{i} = p{i-1}\n' for i in range(1, 41))
+        body = prefix + aliases + 'subprocess.Popen(["printf", "ok"], cwd=p40, env=m)\nprint(dict(m)["x"])\n'
+        tree = ast.parse(body)
+        parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+        self.assertIsNone(self.scanner['python_sensitive_read_violation'](tree, parents))
+        for count, safe in ((20, True), (40, False)):
+            with self.subTest(local_call_budget=count):
+                definitions = 'def f0():\n    value = "."\n    return value\n' + ''.join(
+                    f'def f{i}():\n    value = f{i-1}()\n    return value\n' for i in range(1, count))
+                body = (prefix + definitions + f'subprocess.Popen(["printf", "ok"], cwd=f{count-1}(), env=m)\n'
+                    'print(dict(m)["x"])\n')
+                tree = ast.parse(body)
+                parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+                self.assertEqual(self.scanner['python_sensitive_read_violation'](tree, parents) is None, safe)
+        for setup, later, safe in (
+            ('parts = "ok+more".split("+")\ntag, other = parts\n', '', True),
+            ('tag = unknown\n', 'tag = "safe"\n', False),
+            ('tag = "safe"\ndef inject():\n    global tag\n    tag = unknown\ninject()\n', '', False),
+        ):
+            with self.subTest(free_global=setup, later=later):
+                body = (prefix + setup + 'def argv():\n    return ["printf", tag]\n'
+                    'subprocess.Popen(argv(), env=m)\n' + later + 'print(dict(m)["x"])\n')
+                tree = ast.parse(body)
+                parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+                self.assertEqual(self.scanner['python_sensitive_read_violation'](tree, parents) is None, safe)
+        for program in (
+            'tag = unknown\ndef argv():\n    return ["printf", tag]\n'
+            'old = argv()\ntag = "safe"\nsubprocess.Popen(old, env=m)',
+            'tag = unknown\ndef argv():\n    return ["printf", tag]\n'
+            'old = argv()\ntag = "safe"\nnew = argv()\nsubprocess.Popen(old, env=m)',
+            'tag = unknown\ndef argv():\n    return ["printf", tag]\n'
+            'old = argv()\ntag = "safe"\nnew = argv()\nsubprocess.Popen(new, env=m)',
+            'tag = unknown\ndef argv(value=tag):\n    return ["printf", value]\n'
+            'tag = "safe"\nsubprocess.Popen(argv(), env=m)',
+            'def outer():\n    tag = "safe"\n    def change():\n'
+            '        nonlocal tag\n        tag = unknown\n'
+            '    change()\n    return ["printf", tag]\nsubprocess.Popen(outer(), env=m)',
+        ):
+            with self.subTest(invocation_version=program):
+                body = prefix + program + '\nprint(dict(m)["x"])\n'
+                tree = ast.parse(body)
+                parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+                self.assertIsNotNone(self.scanner['python_sensitive_read_violation'](tree, parents))
+
+    def test_pr103_v22_domain_and_capture_closure(self) -> None:
+        for middle in (
+            'domain = {"other": os.environ}\ndomain["x"] = os.environ\n'
+            'for key, value in domain.items():\n    m[key] = value',
+            'domain = {"other": os.environ}\nalias = domain\nalias["x"] = os.environ\n'
+            'for key, value in domain.items():\n    m[key] = value',
+            'key = "other"\ndomain = {"x": os.environ}\n'
+            'for key, value in domain.items():\n    m[key] = value',
+            'def touch():\n    m["x"] = os.environ\ntouch()',
+            'holder = m\ndef touch(arg=holder):\n    arg["x"] = os.environ\ntouch()',
+        ):
+            with self.subTest(middle=middle):
+                self.assertIsNotNone(self.inspect('import os\nm = {"x": "safe"}\n'
+                    + middle + '\nprint(dict(m)["x"])\n'))
+        for source in ('factory()', 'unknown(m)'):
+            with self.subTest(source=source):
+                self.assertIsNotNone(self.inspect('import os\nm = {"x": "safe"}\n'
+                    'm["x"] = os.environ\ndef factory():\n    return m\n'
+                    'print(dict(' + source + ')["x"])\n'))
+
+    def test_pr103_v22_primitive_dynamic_key_pins(self) -> None:
+        for source, safe in (('list(sys.argv)', True), ('unknown', False),
+                             ('list(sys.argv) if flag else unknown', False)):
+            with self.subTest(source=source):
+                self.assertEqual(self.inspect('import sys\ncommand = ' + source
+                    + '\nm = {}\nwhile command:\n'
+                    + '    key, value = command.pop(0).split("=", 1)\n'
+                    + '    m[key] = value\nm["x"] = "safe"\n'
+                    + 'print(dict(m)["x"])\n') is None, safe)
+        dynamic_child = ('import sys\nimport subprocess\ncommand = list(sys.argv)\n'
+            'm = {}\nwhile command:\n    key, value = command.pop(0).split("=", 1)\n'
+            '    m[key] = value\nm["x"] = "safe"\nc = dict(m)\n')
+        # Existing child-environment policy rejects an arbitrary copy binding;
+        # the new selected-store proof cannot discharge that independent gate.
+        self.assertIsNotNone(self.inspect(dynamic_child
+            + 'subprocess.Popen(["printf", "safe"], env=c)\nprint(dict(c)["x"])\n'))
+        self.assertIsNone(self.inspect(dynamic_child
+            + 'subprocess.Popen(["printf", "safe"], env=m)\nprint(dict(m)["x"])\n'))
+
+    def test_pr103_v22_unrelated_sequence_selections(self) -> None:
+        for body in ('print(("safe",)[0])\n', 'print(["safe"][0])\n',
+                     'values = ["safe"]\nprint(values[0])\n'):
+            with self.subTest(body=body):
+                self.assertIsNone(self.inspect(body))
+
+    def test_pr103_v22_process_field_reflection(self) -> None:
+        prefix = ('import subprocess\nm = {"x": "safe"}\n'
+                  'p = subprocess.Popen(["printf", "safe"], env=m)\n')
+        for field, safe in (('"stdout"', True),
+                            ('"stdout" if flag else "stderr"', True),
+                            ('"stdout" if flag else unknown', False),
+                            ('unknown', False)):
+            for getter in ('getattr', 'reader'):
+                with self.subTest(field=field, getter=getter):
+                    self.assertEqual(self.inspect(prefix + 'field = ' + field
+                        + '\nreader = getattr\nstream = ' + getter
+                        + '(p, field, None)\nprint(dict(m)["x"])\n') is None, safe)
+        for setup in ('p = unknown\n', 'p = p if flag else unknown\n',
+                      'p.stdout = unknown\n'):
+            with self.subTest(setup=setup):
+                self.assertIsNotNone(self.inspect(prefix + setup
+                    + 'stream = getattr(p, "stdout", None)\nprint(dict(m)["x"])\n'))
+        self.assertIsNotNone(self.inspect(prefix
+            + 'stream = getattr(p, "stdout", None)\nunknown(stream)\nprint(dict(m)["x"])\n'))
+        for setup in ('field = unknown\nif flag:\n    field = "stdout"\n',
+                      'field = unknown\nfor _ in unknown:\n    field = "stdout"\n'):
+            with self.subTest(weak_field_pin=setup):
+                self.assertIsNotNone(self.inspect(prefix + setup
+                    + 'stream = getattr(p, field, None)\nprint(dict(m)["x"])\n'))
+        for fields, before_read, safe in (
+            ('("stdin", "stdout", "stderr")', '', True),
+            ('("stdout", unknown)', '', False),
+            ('("stdout",)', '    name = unknown\n', False),
+            ('("stdout",)', '    if flag:\n        name = unknown\n', False),
+        ):
+            with self.subTest(fields=fields, before_read=before_read):
+                self.assertEqual(self.inspect(prefix + 'for name in ' + fields + ':\n'
+                    + before_read + '    stream = getattr(p, name, None)\n'
+                    'print(dict(m)["x"])\n') is None, safe)
+
+    def test_pr103_v22_concrete_primitive_callback_leaks(self) -> None:
+        prefix = 'import os\nimport sys\nimport subprocess\nm = {"x": "safe"}\n'
+        for setup, arguments in (
+            ('def hook(event, args):\n    if event == "subprocess.Popen":\n'
+             '        args[3]["x"] = os.environ\nsys.addaudithook(hook)\n', ''),
+            ('def hook(event, args):\n    if event == "subprocess.Popen":\n'
+             '        args[3]["x"] = os.environ\n'
+             'register = getattr(sys, "addaudithook")\nregister(hook)\n', ''),
+            ('class Cwd:\n    def __fspath__(self):\n        m["x"] = os.environ\n'
+             '        return "."\n', ', cwd=Cwd()'),
+            ('sp = subprocess\ndef leak(*args, **kwargs):\n'
+             '    kwargs["env"]["x"] = os.environ\ndef patch():\n'
+             '    sp.Popen = leak\npatch()\n', ''),
+        ):
+            with self.subTest(setup=setup):
+                self.assertIsNotNone(self.inspect(prefix + setup
+                    + 'subprocess.Popen(["printf", "safe"], env=m' + arguments
+                    + ')\nprint(dict(m)["x"])\n'))
+
+    def test_pr103_v22_process_io_dependency_frames(self) -> None:
+        prefix = 'import os\nimport subprocess\nimport selectors\nm = {"x": "safe"}\n'
+        suffix = '\nprint(dict(m)["x"])\n'
+        for use in (
+            'def close(process):\n    for name in ("stdin", "stdout", "stderr"):\n'
+            '        stream = getattr(process, name, None)\n'
+            '        if stream is not None:\n            stream.close()\n'
+            'p = subprocess.Popen(["printf", "ok"], env=m, stdout=subprocess.PIPE)\nclose(p)',
+            'p = None\nif flag:\n    p = subprocess.Popen(["printf", "ok"], env=m, stdout=subprocess.PIPE)\n'
+            'stream = getattr(p, "stdout", None)',
+            'p = subprocess.Popen(["printf", "one"], env=m, stdout=subprocess.PIPE)\n'
+            'if flag:\n    p = subprocess.Popen(["printf", "two"], env=m, stdout=subprocess.PIPE)\n'
+            'stream = getattr(p, "stdout", None)\nif stream is not None:\n    stream.close()',
+            'def launch(**kwargs):\n    return subprocess.Popen(["printf", "ok"], stdout=subprocess.PIPE, **kwargs)\n'
+            'p = launch(env=m)\nstream = getattr(p, "stdout", None)\n'
+            'if stream is not None:\n    stream.close()',
+        ):
+            with self.subTest(supported=use):
+                self.assertIsNone(self.inspect(prefix + use + suffix))
+        for use in (
+            'def callback():\n    pass\ndef close(process, callback):\n'
+            '    callback()\n    stream = getattr(process, "stdout", None)\n'
+            'p = subprocess.Popen(["printf", "ok"], env=m, stdout=subprocess.PIPE)\nclose(p, unknown)',
+            'def launch(**kwargs):\n    return subprocess.Popen(["printf", "ok"], **kwargs)\n'
+            'one = launch(env=m)\ntwo = launch(env=unknown)\nstream = getattr(one, "stdout", None)',
+            'p = subprocess.Popen(["printf", "ok"], env=m, stdout=subprocess.PIPE)\n'
+            'stream = getattr(p, "stdout", None)\nholder = (stream, m)',
+            'p = subprocess.Popen(["printf", "ok"], env=m, stdout=subprocess.PIPE)\n'
+            'stream = getattr(p, "stdout", None)\ndef capture(value):\n    m["x"] = os.environ\ncapture(stream)',
+            'p = subprocess.Popen(["printf", "ok"], env=m, stdout=subprocess.PIPE)\n'
+            'stream = getattr(p, "stdout", None)\nstream.close = unknown',
+            'selectors.DefaultSelector.register = unknown\np = subprocess.Popen(["printf", "ok"], env=m)\n'
+            'stream = getattr(p, "stdout", None)',
+            'p = subprocess.Popen([getattr(p, "stdout", None)], env=m)\n'
+            'stream = getattr(p, "stdout", None)',
+        ):
+            with self.subTest(unsupported=use):
+                self.assertIsNotNone(self.inspect(prefix + use + suffix))
+
+    def test_pr103_v22_completed_result_field_values(self) -> None:
+        prefix = 'import os\nimport subprocess\nm = {"x": "safe"}\n'
+        for field in ('stdout', 'stderr'):
+            for value, safe in (('"safe"', True), ('unknown', False), ('os.environ', False), ('[]', False)):
+                with self.subTest(field=field, value=value):
+                    body = (prefix + 'result = subprocess.CompletedProcess([], 0, ' + field + '=' + value + ')\n'
+                        'alias = result\nargv = ["printf", alias.' + field + ']\n'
+                        'subprocess.Popen(argv, env=m)\nprint(dict(m)["x"])\n')
+                    tree = ast.parse(body)
+                    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+                    self.assertEqual(self.scanner['python_sensitive_read_violation'](tree, parents) is None, safe)
+        for mutation in ('alias.stdout = unknown', 'alias.stderr = unknown'):
+            body = (prefix + 'result = subprocess.CompletedProcess([], 0, stdout="safe", stderr="safe")\n'
+                'alias = result\n' + mutation + '\nsubprocess.Popen(["printf", result.stdout], env=m)\n'
+                'print(dict(m)["x"])\n')
+            tree = ast.parse(body)
+            parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+            self.assertIsNotNone(self.scanner['python_sensitive_read_violation'](tree, parents))
+        for retained in ('result = subprocess.CompletedProcess([m], 0, stdout="safe")',
+                         'def make(value):\n    return subprocess.CompletedProcess([], 0, stdout=value)\n'
+                         'result = make("safe")\nother = make(unknown)'):
+            body = (prefix + retained + '\nsubprocess.Popen(["printf", result.stdout], env=m)\n'
+                'print(dict(m)["x"])\n')
+            tree = ast.parse(body)
+            parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+            self.assertIsNotNone(self.scanner['python_sensitive_read_violation'](tree, parents))
+
+    def test_pr103_v22_unknown_call_after_mapping_pin(self) -> None:
+        prefix = 'import os\nimport builtins\nm = {"x": os.environ}\nm["x"] = "safe"\n'
+        for effect in ('unknown()', 'getattr(unknown, "touch")', 'unknown.touch()',
+                       'builtins.eval("unknown")'):
+            with self.subTest(effect=effect):
+                self.assertIsNotNone(self.inspect(prefix + effect + '\nprint(dict(m)["x"])\n'))
+        self.assertIsNotNone(self.inspect('import os\nm = {"x": "safe"}\n'
+            'def rebind():\n    global m\n    m = {"x": os.environ.get("HOME")}\n'
+            'rebind()\nprint(dict(m)["x"])\n'))
+
+    def test_pr103_v22_native_global_writer_types(self) -> None:
+        self.assertIsNotNone(self.inspect('import os\nvalue = "safe"\n'
+            'def mutate():\n    global value\n    value = os.environ.get("HOME")\n'
+            'mutate()\nm = {"x": "old"}\nm["x"] = value\nprint(dict(m)["x"])\n'))
+        for value, safe in (('Path("next")', True), ('unknown', False)):
+            with self.subTest(global_value=value):
+                body = ('import subprocess\nfrom pathlib import Path\nm = {"x": "safe"}\n'
+                    'directory = Path(".")\ndef pin():\n    global directory\n    directory = '
+                    + value + '\npin()\ndef launch():\n'
+                    '    return subprocess.Popen(["printf", "ok"], cwd=directory, env=m)\n'
+                    'launch()\nprint(dict(m)["x"])\n')
+                tree = ast.parse(body)
+                parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+                self.assertEqual(self.scanner['python_sensitive_read_violation'](tree, parents) is None, safe)
+
+    def test_pr103_v22_declared_writer_binding_ownership(self) -> None:
+        self.assertIsNone(self.inspect('import os\nvalue = os.environ\n'
+            'def unrelated():\n    global value\n    value = os.environ\n'
+            'def sample():\n    value = "safe"\n    m = {"x": "old"}\n'
+            '    m["x"] = value\n    print(dict(m)["x"])\nsample()\n'))
+        self.assertIsNone(self.inspect('import os\nvalue = "safe"\n'
+            'def outer():\n    value = os.environ\n    def mutate():\n'
+            '        nonlocal value\n        value = os.environ\n    mutate()\nouter()\n'
+            'm = {"x": "old"}\nm["x"] = value\nprint(dict(m)["x"])\n'))
+        self.assertIsNotNone(self.inspect('import os\ndef sample():\n    value = "safe"\n'
+            '    def mutate():\n        nonlocal value\n        value = os.environ.get("HOME")\n'
+            '    mutate()\n    m = {"x": "old"}\n    m["x"] = value\n'
+            '    print(dict(m)["x"])\nsample()\n'))
+        for binding, effect, loop in (
+            ('key = "other"', 'global key\n    key = "x"', 'm[key] = os.environ'),
+            ('domain = {"other": os.environ}', 'global domain\n    domain = {"x": os.environ}',
+             'for key, value in domain.items():\n    m[key] = value'),
+        ):
+            with self.subTest(declared_domain=binding):
+                self.assertIsNotNone(self.inspect('import os\n' + binding
+                    + '\ndef mutate():\n    ' + effect + '\nmutate()\nm = {"x": "safe"}\n'
+                    + loop + '\nprint(dict(m)["x"])\n'))
+
+    def test_pr103_v22_frame_owned_literal_environment(self) -> None:
+        for mutation, safe in (('', True), ('    alias = local\n', True),
+                              ('    local["K"] = unknown\n', False),
+                              ('    alias = local\n    alias["K"] = unknown\n', False),
+                              ('    if flag:\n        local["K"] = unknown\n', False),
+                              ('    alias = local\n    if flag:\n        alias = unknown\n', False),
+                              ('    def retained(value=local):\n        pass\n', False),
+                              ('    def retained():\n        return local\n', False),
+                              ('    unknown(local)\n', False)):
+            with self.subTest(local_environment=mutation):
+                body = ('import subprocess\nm = {"x": "safe"}\n'
+                    'def launch():\n    local = {"K": "V"}\n' + mutation
+                    + '    process = subprocess.Popen(["printf", "ok"], env=local, stdout=subprocess.PIPE)\n'
+                    '    stream = getattr(process, "stdout", None)\n    stream.close()\nlaunch()\n'
+                    'subprocess.Popen(["printf", "ok"], env=m)\nprint(dict(m)["x"])\n')
+                tree = ast.parse(body)
+                parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+                self.assertEqual(self.scanner['python_sensitive_read_violation'](tree, parents) is None, safe)
+
+    def test_pr103_v22_frame_owned_environment_forwarding(self) -> None:
+        for effect, safe in (
+            ('', True), ('    alias = environment\n', True),
+            ('    environment["K"] = unknown\n', False),
+            ('    alias = environment\n    alias["K"] = unknown\n', False),
+            ('    environment = unknown\n', False),
+            ('    unknown(environment)\n', False),
+            ('    def retain(value=environment):\n        pass\n', False),
+            ('    def retain():\n        return environment\n', False),
+        ):
+            with self.subTest(forwarded_environment=effect):
+                body = ('import subprocess\nm = {"x": "safe"}\n'
+                    'def forward(environment):\n' + effect
+                    + '    process = subprocess.Popen(["printf", "ok"], env=environment, stdout=subprocess.PIPE)\n'
+                    '    stream = getattr(process, "stdout", None)\n    stream.close()\n'
+                    'def launch():\n    local = {"K": "V"}\n    forward(local)\n    forward(local)\n'
+                    'launch()\nsubprocess.Popen(["printf", "ok"], env=m)\nprint(dict(m)["x"])\n')
+                tree = ast.parse(body)
+                parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+                self.assertEqual(self.scanner['python_sensitive_read_violation'](tree, parents) is None, safe)
+
+    def test_pr103_v22_finite_native_argv_spreads(self) -> None:
+        for provider, mutation, helper_mutation, safe in (
+            ('(["ok"], ["reviewed"])', '', '', True),
+            ('(["ok"], unknown)', '', '', False), ('unknown', '', '', False),
+            ('(["ok"],)', '    arguments = unknown\n', '', False),
+            ('(["ok"],)', '    alias = arguments\n    alias.append(unknown)\n', '', False),
+            ('(["ok"],)', '', '    arguments.append(unknown)\n', False),
+            ('(["ok"],)', '', '    alias = arguments\n    alias.append(unknown)\n', False),
+            ('(["ok"],)', '', '    unknown(arguments)\n', False),
+        ):
+            with self.subTest(argv_iteration_provider=(provider, mutation, helper_mutation)):
+                body = ('import subprocess\nm = {"x": "safe"}\n'
+                    'def command(arguments):\n' + helper_mutation + '    return ["printf", *arguments]\n'
+                    'for arguments in ' + provider + ':\n' + mutation
+                    + '    subprocess.Popen(command(arguments), env=m)\nprint(dict(m)["x"])\n')
+                tree = ast.parse(body)
+                parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+                self.assertEqual(self.scanner['python_sensitive_read_violation'](tree, parents) is None, safe)
+
+    def test_pr103_v22_constant_environment_native_run(self) -> None:
+        for arguments, options, patch, safe in (
+            ('["printf", "ok"]', ', text=True, capture_output=True, check=False', '', True),
+            ('["printf", "ok"]', ', input=b"ok", timeout=1, stdout=subprocess.PIPE', '', True),
+            ('unknown', '', '', False),
+            ('["printf", "ok"]', ', preexec_fn=unknown', '', False),
+            ('["printf", "ok"]', ', cwd=unknown', '', False),
+            ('["printf", "ok"]', ', stdout=unknown', '', False),
+            ('["printf", "ok"]', ', input=unknown', '', False),
+            ('["printf", "ok"]', ', **unknown', '', False),
+            ('["printf", "ok"]', '', 'subprocess.run = unknown\n', False),
+            ('["printf", "ok"]', '', 'subprocess.Popen = unknown\n', False),
+        ):
+            with self.subTest(options=(arguments, options, patch)):
+                body = ('import subprocess\n' + patch + 'm = {"x": "safe"}\n'
+                    'def launch():\n    local = {"K": "V"}\n'
+                    '    subprocess.run(' + arguments + ', env=local' + options + ')\n'
+                    '    process = subprocess.Popen(["printf", "ok"], env=local, stdout=subprocess.PIPE)\n'
+                    '    stream = getattr(process, "stdout", None)\n    stream.close()\n'
+                    'launch()\nsubprocess.Popen(["printf", "ok"], env=m)\nprint(dict(m)["x"])\n')
+                tree = ast.parse(body)
+                parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+                self.assertEqual(self.scanner['python_sensitive_read_violation'](tree, parents) is None, safe)
+
+    def test_pr103_v22_guarded_native_argv(self) -> None:
+        for guard, safe in (
+            ('    if not arguments or arguments[0] != "printf":\n        return\n', True),
+            ('    if arguments[0] == "printf":\n        pass\n', True),
+            ('    if arguments[unknown()] == "printf":\n        pass\n', False),
+            ('    if arguments[0] == unknown():\n        pass\n', False),
+            ('    unknown(arguments)\n', False),
+            ('    alias = arguments\n    alias.append(unknown)\n', False),
+            ('    arguments[0] = unknown\n', False),
+        ):
+            with self.subTest(guard=guard):
+                body = ('import subprocess\nm = {"x": "safe"}\n'
+                    'def launch(arguments, **kwargs):\n' + guard
+                    + '    return subprocess.Popen(arguments, **kwargs)\n'
+                    'launch(["printf", "ok"], env=m)\nprint(dict(m)["x"])\n')
+                tree = ast.parse(body)
+                parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+                self.assertEqual(self.scanner['python_sensitive_read_violation'](tree, parents) is None, safe)
+
+    def test_pr103_v22_formatted_native_argument_types(self) -> None:
+        for value, formatted, safe in (
+            ('"reviewed"', 'f"HEAD:{value}"', True),
+            ('"reviewed"', 'f"{value!r}"', True),
+            ('3', 'f"{value:04}"', True),
+            ('unknown', 'f"HEAD:{value}"', False),
+            ('"reviewed"', 'f"{value:{unknown}}"', False),
+        ):
+            with self.subTest(formatted=(value, formatted)):
+                body = ('import subprocess\nm = {"x": "safe"}\nvalue = ' + value
+                    + '\nsubprocess.Popen(["printf", ' + formatted + '], env=m)\nprint(dict(m)["x"])\n')
+                tree = ast.parse(body)
+                parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+                self.assertEqual(self.scanner['python_sensitive_read_violation'](tree, parents) is None, safe)
+
+    def test_pr103_v22_nonretaining_sequence_reads(self) -> None:
+        for read, safe in (
+            ('    size = len(arguments)\n', True),
+            ('    index = 0\n    value = arguments[index]\n', True),
+            ('    flag = "-C"\n    value = arguments[len(flag) + 1:]\n', True),
+            ('    value = arguments[unknown()]\n', False),
+            ('    value = arguments[unknown]\n', False),
+            ('    value = unknown(arguments)\n', False),
+            ('    value = arguments.pop()\n', False),
+        ):
+            with self.subTest(read=read):
+                body = ('import subprocess\nm = {"x": "safe"}\n'
+                    'def launch(arguments):\n' + read
+                    + '    return subprocess.Popen(arguments, env=m)\n'
+                    'launch(["printf", "ok"])\nprint(dict(m)["x"])\n')
+                tree = ast.parse(body)
+                parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+                self.assertEqual(self.scanner['python_sensitive_read_violation'](tree, parents) is None, safe)
+
+    def test_pr103_v22_update_provider_state_snapshot(self) -> None:
+        for mutation, safe in (('', True), ('alias = patches\n', True),
+                              ('seen = patches.get("other")\n', True),
+                              ('checked = "other" in patches\n', True),
+                              ('patches["x"] = os.environ\n', False),
+                              ('alias = patches\nalias["x"] = os.environ\n', False),
+                              ('unknown(patches)\n', False)):
+            with self.subTest(update_provider=mutation):
+                self.assertEqual(self.inspect('import os\nm = {"x": "safe"}\n'
+                    'patches = {"other": os.environ}\n' + mutation
+                    + 'm.update(patches)\nprint(dict(m)["x"])\n') is None, safe)
+        self.assertIsNotNone(self.inspect('import os\nm = {"x": "safe"}\nkey = "x"\n'
+            'patches = {key: os.environ}\nkey = "other"\nm.update(patches)\nprint(dict(m)["x"])\n'))
+        self.assertIsNone(self.inspect('import os\nm = {"x": os.environ}\nkey = "x"\n'
+            'patches = {key: "safe"}\nkey = "other"\nm.update(patches)\nprint(dict(m)["x"])\n'))
+
+    def test_pr103_v22_unsupported_subscript_mutations(self) -> None:
+        for mutation in ('m["x"] += os.environ.get("HOME", "")',
+                         'm["x"] += "harmless"', 'del m["x"]',
+                         'm["x"], other = (os.environ.get("HOME"), None)'):
+            with self.subTest(unsupported_subscript_mutation=mutation):
+                self.assertIsNotNone(self.inspect('import os\nm = {"x": "safe"}\n'
+                    + mutation + '\nprint(dict(m)["x"])\n'))
+        self.assertIsNone(self.inspect('m = {"x": "old"}\nm["x"] = "safe"\nprint(dict(m)["x"])\n'))
+
+    def test_pr103_v22_native_capture_buffer_result_types(self) -> None:
+        for mutation, safe in (('data.extend(os.read(stream.fileno(), 64))', True),
+                               ('data.extend(os.read(stream.fileno(), chunk_size))', True),
+                               ('chunk = os.read(stream.fileno(), 64)\n        data.extend(chunk)', True),
+                               ('data.extend(os.read(stream.fileno(), 64 * unknown))', False),
+                               ('data.extend(unknown)', False), ('data.append(unknown)', False)):
+            with self.subTest(buffer_mutation=mutation):
+                body = ('import os\nimport subprocess\nchunk_size = 64 * 1024\nm = {"x": "safe"}\n'
+                    'def capture(process):\n    stream = getattr(process, "stdout", None)\n'
+                    '    data = bytearray()\n    if stream is not None:\n        ' + mutation
+                    + '\n    return bytes(data)\n'
+                    'p = subprocess.Popen(["printf", "ok"], env=m, stdout=subprocess.PIPE)\n'
+                    'result = subprocess.CompletedProcess([], 0, stdout=capture(p))\n'
+                    'subprocess.Popen(["printf", result.stdout], env=m)\nprint(dict(m)["x"])\n')
+                tree = ast.parse(body)
+                parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+                self.assertEqual(self.scanner['python_sensitive_read_violation'](tree, parents) is None, safe)
+
+    def test_pr103_v22_nearer_loop_value_binders(self) -> None:
+        for source, safe in (('[os.environ.get("HOME")]', False), ('["reviewed"]', True),
+                             ('unknown', False)):
+            with self.subTest(loop_value=source):
+                self.assertEqual(self.inspect('import os\nvalue = "safe"\nm = {"x": "safe"}\n'
+                    'for value in ' + source + ':\n    m["x"] = value\nprint(dict(m)["x"])\n') is None, safe)
+        for binding in (
+            'with unknown as value:\n    m["x"] = value',
+            'match os.environ.get("HOME"):\n    case value:\n        m["x"] = value',
+            '[m.__setitem__("x", value) for value in [os.environ.get("HOME")]]',
+            'for value in ["reviewed"]:\n    value = os.environ.get("HOME")\n    m["x"] = value',
+            'value, other = (os.environ.get("HOME"), None)\nm["x"] = value',
+            'del value\nm["x"] = value',
+        ):
+            with self.subTest(nearer_binder=binding):
+                self.assertIsNotNone(self.inspect('import os\nvalue = "safe"\nm = {"x": "safe"}\n'
+                    + binding + '\nprint(dict(m)["x"])\n'))
+
+    def test_pr103_v22_comprehension_iteration_source_points(self) -> None:
+        for source, safe in (('{"x"}', True), ('unknown', False)):
+            with self.subTest(iteration_source=source):
+                self.assertEqual(self.inspect('m = {"x": "safe"}\nfixture = ' + source
+                    + '\nchecked = any(key in m for key in fixture)\nprint(dict(m)["x"])\n') is None, safe)
+        for mutation in ('alias = fixture\nalias.add(unknown)', 'unknown(fixture)',
+                         'fixture.add(unknown)'):
+            with self.subTest(iteration_provider_mutation=mutation):
+                self.assertIsNotNone(self.inspect('m = {"x": "safe"}\nfixture = {"x"}\n'
+                    + mutation + '\nchecked = any(key in m for key in fixture)\nprint(dict(m)["x"])\n'))
+
+    def test_pr103_v22_codec_and_import_hook_refusals(self) -> None:
+        for hook in (
+            'import codecs\ncodecs.register(unknown)',
+            'import codecs\ncodecs.register_error("custom", unknown)',
+            'import sys\nsys.path.insert(0, "custom")',
+            'import sys\nsystem = sys\nsearch = system.path\nsearch.append("custom")',
+            'import sys\nsys.meta_path.append(unknown)',
+            'import sys\nsys.path_hooks.append(unknown)',
+            'import sys\nsys.path_importer_cache.clear()',
+            'import encodings\nencodings.search_function = unknown',
+        ):
+            with self.subTest(codec_hook=hook):
+                body = ('import subprocess\n' + hook + '\nm = {"x": "safe"}\n'
+                    'command = ["printf", b"ok".decode("utf-8")]\n'
+                    'subprocess.Popen(command, env=m)\nprint(dict(m)["x"])\n')
+                tree = ast.parse(body)
+                parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+                self.assertIsNotNone(self.scanner['python_sensitive_read_violation'](tree, parents))
+
+    def test_pr103_v22_native_parameter_all_callers(self) -> None:
+        for signature, invocation, safe in (
+            ('value=unknown', 'selected()', False),
+            ('*, value=unknown', 'selected()', False),
+            ('value="literal"', 'selected()', True),
+        ):
+            with self.subTest(default_parameter=signature):
+                body = ('import subprocess\nm = {"x": "safe"}\n'
+                    'def selected(' + signature + '):\n    return value\n'
+                    'command = ["printf", selected(value="provided"), ' + invocation + ']\n'
+                    'subprocess.Popen(command, env=m)\nprint(dict(m)["x"])\n')
+                tree = ast.parse(body)
+                parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+                self.assertEqual(self.scanner['python_sensitive_read_violation'](tree, parents) is None, safe)
+
+    def test_pr103_v22_fresh_keyword_pop_native_types(self) -> None:
+        for arguments, mutation, safe in (
+            ('', '', True), (', encoding="ascii"', '', True),
+            ('', '    kwargs["stdout"] = subprocess.PIPE\n', True),
+            (', encoding=unknown', '', False), ('', '    kwargs["encoding"] = unknown\n', False),
+            ('', '    alias = kwargs\n    unknown(alias)\n', False),
+        ):
+            with self.subTest(keyword_pop=(arguments, mutation)):
+                body = ('import subprocess\nm = {"x": "safe"}\n'
+                    'def decoded(value, **kwargs):\n' + mutation
+                    + '    encoding = kwargs.pop("encoding", None) or "utf-8"\n'
+                    '    return value.decode(encoding)\n'
+                    'command = ["printf", decoded(b"ok"' + arguments + ')]\n'
+                    'subprocess.Popen(command, env=m)\nprint(dict(m)["x"])\n')
+                tree = ast.parse(body)
+                parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+                self.assertEqual(self.scanner['python_sensitive_read_violation'](tree, parents) is None, safe)
+
+    def test_pr103_v22_native_capture_mapping_projection(self) -> None:
+        for mutation, safe in (('', True), ('    captures["stdout"] = unknown\n', False),
+                               ('    alias = captures\n    alias["stdout"] = unknown\n', False),
+                               ('    unknown(captures)\n', False)):
+            with self.subTest(capture_mapping=mutation):
+                body = ('import os\nimport subprocess\nm = {"x": "safe"}\n'
+                    'def capture(process):\n    stream = getattr(process, "stdout", None)\n'
+                    '    captures = {"stdout": bytearray(), "stderr": bytearray()}\n' + mutation
+                    + '    data = captures["stdout"]\n    if stream is not None:\n'
+                    '        data.extend(os.read(stream.fileno(), 64))\n'
+                    '    return bytes(captures["stdout"])\n'
+                    'p = subprocess.Popen(["printf", "ok"], env=m, stdout=subprocess.PIPE)\n'
+                    'result = subprocess.CompletedProcess([], 0, stdout=capture(p))\n'
+                    'subprocess.Popen(["printf", result.stdout], env=m)\nprint(dict(m)["x"])\n')
+                tree = ast.parse(body)
+                parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+                self.assertEqual(self.scanner['python_sensitive_read_violation'](tree, parents) is None, safe)
+
+    def test_pr103_v22_standard_pipe_selector_dependencies(self) -> None:
+        prefix = ('import os\nimport subprocess\nimport selectors\nm = {"x": "safe"}\n'
+            'p = subprocess.Popen(["printf", "ok"], env=m, stdout=subprocess.PIPE)\n'
+            'stream = getattr(p, "stdout", None)\n')
+        for factory, data, safe in (('selectors.DefaultSelector()', '"stdout"', True),
+                                     ('unknown', '"stdout"', False),
+                                     ('selectors.DefaultSelector()', 'unknown', False)):
+            with self.subTest(factory=factory, data=data):
+                self.assertEqual(self.inspect(prefix + 'selector = ' + factory + '\n'
+                    'if stream is not None:\n    os.set_blocking(stream.fileno(), False)\n'
+                    '    selector.register(stream, selectors.EVENT_READ, ' + data + ')\n'
+                    '    selector.unregister(stream)\n    stream.close()\nselector.close()\n'
+                    'print(dict(m)["x"])\n') is None, safe)
+        for ready, safe in (('selector.select(1)', True), ('unknown', False)):
+            with self.subTest(selector_keys=ready):
+                self.assertEqual(self.inspect(prefix
+                    + 'selector = selectors.DefaultSelector()\n'
+                    'selector.register(stream, selectors.EVENT_READ, "stdout")\n'
+                    'ready = ' + ready + '\nfor key, _ in ready:\n'
+                    '    stream = key.fileobj\n    chunk = os.read(stream.fileno(), 64)\n'
+                    '    selector.unregister(stream)\n    stream.close()\nselector.close()\n'
+                    'print(dict(m)["x"])\n') is None, safe)
+        for timeout, safe in (('1', True), ('max(0, 1 - 0.5)', True),
+                              ('min(0.5, 1)', True), ('max(0, unknown)', False), ('unknown', False)):
+            with self.subTest(process_timeout=timeout):
+                self.assertEqual(self.inspect(prefix + 'p.wait(timeout=' + timeout
+                    + ')\nprint(dict(m)["x"])\n') is None, safe)
+
+    def test_pr103_v22_callable_namespace_capabilities(self) -> None:
+        for setup in (
+            'argv = ["printf", "ok"]\nalias = argv\nalias.append(unknown)',
+            '@unknown\ndef helper():\n    pass\nargv = ["printf", "ok"]',
+            'unknown.touch()\nargv = ["printf", "ok"]',
+            'os.environ.update(unknown)\nargv = ["printf", "ok"]',
+        ):
+            with self.subTest(setup=setup):
+                self.assertIsNotNone(self.inspect('import os\nimport subprocess\n' + setup
+                    + '\nm = {"x": "safe"}\nsubprocess.Popen(argv, env=m)\n'
+                    'print(dict(m)["x"])\n'))
+        for module, safe in (('unicodedata', True), ('unknown_extension', False)):
+            with self.subTest(module=module):
+                self.assertEqual(self.inspect('import subprocess\nimport ' + module
+                    + '\nvalue = ' + module + '.normalize("NFC", "safe")\n'
+                    'm = {"x": "safe"}\nsubprocess.Popen(["printf", "ok"], env=m)\n'
+                    'print(dict(m)["x"])\n') is None, safe)
+        for replacement in ('os.environ.get("HOME")', '"harmless"'):
+            for mutation in (
+                'subprocess.Popen.__init__.__globals__.update({"Popen": fake})',
+                'constructor = subprocess.Popen\ninitializer = constructor.__init__\n'
+                'namespace = initializer.__globals__\nnamespace.update({"Popen": fake})',
+                'initializer = subprocess.Popen.__init__\n'
+                'namespace = getattr(initializer, "__globals__")\n'
+                'namespace["Popen"] = fake',
+            ):
+                with self.subTest(replacement=replacement, mutation=mutation):
+                    self.assertIsNotNone(self.inspect('import os\nimport subprocess\n'
+                        'def fake(*args, **kwargs):\n    kwargs["env"]["x"] = '
+                        + replacement + '\n' + mutation
+                        + '\nm = {"x": "old"}\nm["x"] = "safe"\n'
+                        'subprocess.Popen(["printf", "ok"], env=m)\n'
+                        'print(dict(m)["x"])\n'))
+        for member in ('__defaults__', '__kwdefaults__', '__closure__', '__code__', '__dict__'):
+            with self.subTest(member=member):
+                self.assertIsNotNone(self.inspect('import subprocess\n'
+                    'state = subprocess.Popen.__init__.' + member + '\n'
+                    'm = {"x": "safe"}\nsubprocess.Popen(["printf", "ok"], env=m)\n'
+                    'print(dict(m)["x"])\n'))
+
+    def test_pr103_v22_mutable_values_and_unknown_constructors(self) -> None:
+        for body in (
+            'import os\nvalue = []\nm = {"x": "safe"}\nm["x"] = value\n'
+            'c = dict(m)\nvalue.append(os.environ)\nprint(c["x"])\n',
+            'import os\nm = {"x": "safe"}\nm["x"] = os.environ\n'
+            'constructor = dict if flag else unknown\nprint(constructor(m)["x"])\n',
+            'import os\nm = {"x": "safe"}\nm["x"] = os.environ\n'
+            'def read():\n    return dict(m)["x"]\nm = unknown\nprint(read())\n',
+        ):
+            with self.subTest(body=body):
+                self.assertIsNotNone(self.inspect(body))
+
     def test_pr103_v13_factory_returned_protocol_classes(self) -> None:
         consumer = ('async def collect():\n    async for item in K():\n'
                     '        print(item)\n        break\ncollect().send(None)\n')

@@ -22511,7 +22511,2715 @@ def python_sensitive_read_violation(tree, parents):
                 pending.extend((operand_container.body, operand_container.orelse))
             elif isinstance(operand_container, ast.Subscript):
                 pending.extend(error_operand_subscript_values(operand_container, seen_expressions))
+            elif isinstance(operand_container, ast.Call) and any(
+                python_unshadowed_builtin_reference(target, {"dict"}, tree, parents)
+                for target in python_value_provenance(operand_container.func, tree, parents)):
+                pending.extend(operand_container.args[:1])
+                for keyword in operand_container.keywords:
+                    if keyword.arg is None:
+                        pending.append(keyword.value)
+                    elif (not isinstance(expression.slice, ast.Constant)
+                        or keyword.arg == expression.slice.value):
+                        values.append(keyword.value)
         return values
+
+    def ordered_mapping_selection(expression, require_baseline=False):
+        """Prove only selected explicit-store values; uncertainty never proves safe.
+
+        This query uses allocation identities and store-point scalar bindings.
+        It is deliberately separate from general value/protocol provenance.
+        """
+        v22_nodes = getattr(tree, "_issue79_v22_nodes", None)
+        if v22_nodes is None:
+            v22_nodes = list(ast.walk(tree))
+            tree._issue79_v22_nodes = v22_nodes
+        v22_scope = python_enclosing_scope(expression, parents)
+        v22_visits = [0]
+        v22_active = set()
+        v22_memo = {}
+        v22_lower_type_used = [False]
+        v22_requires_full_baseline = [False]
+        v22_baseline_cache = {}
+        v22_data_cache = {}
+        v22_sequence_use_cache = {}
+        v22_root_cache = {}
+        v22_binding_index = {}
+        v22_update_provider_cache = {}
+        v22_function_names = {entry.name for entry in v22_nodes if isinstance(entry, ast.FunctionDef)}
+        v22_frame_cache = {}
+        v22_pending_constructors = set()
+        v22_constructor_states = {}
+        v22_environment_flow_cache = {}
+        v22_field_reads = set()
+        v22_pending_selectors = set()
+        v22_pending_buffer_scopes = set()
+        v22_selector_cache = {}
+        v22_io_cache = {}
+        v22_process_cache = {}
+        v22_lexical_bindings = {}
+        v22_declarations = {}
+        v22_local_names = {}
+        v22_binder_index = {}
+        for v22_entry in v22_nodes:
+            v22_owner = python_enclosing_scope(v22_entry, parents)
+            v22_names = []
+            if isinstance(v22_entry, ast.Name) and isinstance(v22_entry.ctx, (ast.Store, ast.Del)):
+                v22_names = [v22_entry.id]
+            elif isinstance(v22_entry, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)):
+                v22_names = [v22_entry.name] if v22_entry.name else []
+            elif isinstance(v22_entry, (ast.Import, ast.ImportFrom)):
+                v22_names = [alias.asname or alias.name.split(".")[0] for alias in v22_entry.names]
+            elif isinstance(v22_entry, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                v22_owner = python_enclosing_scope(parents.get(v22_entry), parents)
+                v22_names = [v22_entry.name]
+            for v22_name in v22_names:
+                v22_binder_index.setdefault((v22_owner, v22_name), []).append(v22_entry)
+            v22_owner = python_enclosing_scope(v22_entry, parents)
+            if isinstance(v22_entry, (ast.Global, ast.Nonlocal)):
+                for v22_name in v22_entry.names:
+                    v22_declarations.setdefault((v22_owner, v22_name), set()).add(type(v22_entry))
+            if isinstance(v22_entry, ast.Name) and isinstance(v22_entry.ctx, ast.Store):
+                v22_local_names.setdefault(v22_owner, set()).add(v22_entry.id)
+            elif isinstance(v22_entry, ast.arg):
+                v22_local_names.setdefault(v22_owner, set()).add(v22_entry.arg)
+            elif isinstance(v22_entry, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                v22_parent_scope = python_enclosing_scope(parents.get(v22_entry), parents)
+                v22_local_names.setdefault(v22_parent_scope, set()).add(v22_entry.name)
+            elif isinstance(v22_entry, (ast.Import, ast.ImportFrom)):
+                v22_local_names.setdefault(v22_owner, set()).update(alias.asname or alias.name.split(".")[0]
+                    for alias in v22_entry.names)
+        for v22_entry in v22_nodes:
+            v22_entry_scope = python_enclosing_scope(v22_entry, parents)
+            if isinstance(v22_entry, ast.Assign):
+                v22_targets = v22_entry.targets
+            elif isinstance(v22_entry, (ast.AnnAssign, ast.NamedExpr)):
+                v22_targets = [v22_entry.target]
+            else:
+                continue
+            for v22_target in v22_targets:
+                if isinstance(v22_target, ast.Name):
+                    v22_lexical_bindings.setdefault((v22_entry_scope, v22_target.id), []).append(v22_entry)
+                    if v22_entry_scope is v22_scope:
+                        v22_binding_index.setdefault(v22_target.id, []).append(v22_entry)
+
+        def v22_position(node):
+            return (getattr(node, "end_lineno", getattr(node, "lineno", -1)),
+                getattr(node, "end_col_offset", getattr(node, "col_offset", -1)))
+
+        def v22_reference_point(node, context):
+            return node if python_enclosing_scope(node, parents) is python_enclosing_scope(context, parents) else context
+
+        def v22_definite(node, scope=None):
+            scope = v22_scope if scope is None else scope
+            current = parents.get(node)
+            while current is not None and current is not scope:
+                if isinstance(current, (ast.If, ast.For, ast.AsyncFor, ast.While,
+                    ast.Try, ast.TryStar, ast.ExceptHandler, ast.Match, ast.match_case,
+                    ast.IfExp, ast.BoolOp, ast.comprehension, ast.With, ast.AsyncWith)):
+                    return False
+                current = parents.get(current)
+            return current is scope
+
+        def v22_bind(name, point, mapping_identity=False):
+            ancestor = point
+            while ancestor is not None and ancestor is not v22_scope:
+                if (isinstance(ancestor, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp))
+                    and any(isinstance(target, ast.Name) and target.id == name
+                        for generator in ancestor.generators for target in ast.walk(generator.target))):
+                    return None
+                ancestor = parents.get(ancestor)
+            entries = []
+            for entry in v22_binding_index.get(name, ()):
+                if v22_position(entry) >= v22_position(point):
+                    continue
+                entries.append(entry)
+            if not entries:
+                return None
+            entries.sort(key=v22_position)
+            last = entries[-1]
+            # A nearer unsupported binder must not expose an older literal.
+            # Store names have their own position (a For statement ends after
+            # its body); declaration-only ownership is insufficient here.
+            for target in v22_binder_index.get((v22_scope, name), ()):
+                if (isinstance(target, ast.Name) and target.id == name
+                    and isinstance(target.ctx, (ast.Store, ast.Del))
+                    and python_enclosing_scope(target, parents) is v22_scope
+                    and v22_position(last) < v22_position(target) < v22_position(point)):
+                    owner = parents.get(target)
+                    if mapping_identity and isinstance(owner, ast.AugAssign) and isinstance(owner.op, ast.BitOr):
+                        continue
+                    if owner not in entries:
+                        return None
+                if (isinstance(target, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar))
+                    and getattr(target, "name", None) == name
+                    and python_enclosing_scope(target, parents) is v22_scope
+                    and getattr(last, "lineno", -1) < getattr(target, "lineno", -1) <= getattr(point, "lineno", -1)):
+                    return None
+                if (isinstance(target, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                    and python_enclosing_scope(target, parents) is v22_scope
+                    and v22_position(last) < v22_position(target) < v22_position(point)
+                    and (getattr(target, "name", None) == name or isinstance(target, (ast.Import, ast.ImportFrom))
+                        and any((alias.asname or alias.name.split(".")[0]) == name for alias in target.names))):
+                    return None
+            return last if v22_definite(last) else None
+
+        def v22_nonlocal_owner(scope, name):
+            outer = python_enclosing_scope(parents.get(scope), parents)
+            for candidate in python_lexical_scope_chain(outer, parents):
+                if (isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
+                    and name in v22_local_names.get(candidate, ())
+                    and not v22_declarations.get((candidate, name))):
+                    return candidate
+            return None
+
+        def v22_declared_value_writer(name, scope=None):
+            # Value/domain/allocation proofs use binding ownership, never a
+            # same-spelling variable in an unrelated function. Native TYPE
+            # invariants deliberately use their separate all-writer rule.
+            scope = v22_scope if scope is None else scope
+            own = v22_declarations.get((scope, name), ())
+            owner = tree if ast.Global in own else v22_nonlocal_owner(scope, name) if ast.Nonlocal in own else scope
+            for (writer, declared_name), declarations in v22_declarations.items():
+                if declared_name != name:
+                    continue
+                if ast.Global in declarations and owner is tree:
+                    return True
+                if ast.Nonlocal in declarations:
+                    target = v22_nonlocal_owner(writer, name)
+                    if target is None or target is owner:
+                        return True
+            return False
+
+        def v22_guard(kind, node, point):
+            v22_visits[0] += 1
+            token = (kind, id(node), id(point))
+            local_edge = kind.startswith("local-")
+            if (v22_visits[0] > 65536 or len(v22_active) >= 256 or token in v22_active
+                or local_edge and sum(active[0].startswith("local-") for active in v22_active) >= 32):
+                return None
+            v22_active.add(token)
+            return token
+
+        def v22_scalar(node, point):
+            token = v22_guard("scalar", node, point)
+            if token is None:
+                return "UNKNOWN"
+            try:
+                if isinstance(node, ast.Constant) and type(node.value) in (str, bytes, int, float, bool, type(None)):
+                    return "SAFE"
+                if isinstance(node, ast.Name):
+                    if v22_declared_value_writer(node.id):
+                        return "UNKNOWN"
+                    if v22_literal(node, point) is not None:
+                        return "SAFE"
+                    binding = v22_bind(node.id, point)
+                    return v22_scalar(binding.value, binding) if binding is not None else "UNKNOWN"
+                if isinstance(node, ast.IfExp):
+                    return "SAFE" if all(v22_scalar(part, point) == "SAFE"
+                        for part in (node.body, node.orelse)) else "UNKNOWN"
+                return "UNKNOWN"
+            finally:
+                v22_active.remove(token)
+
+        def v22_literal(node, point):
+            token = v22_guard("literal", node, point)
+            if token is None:
+                return None
+            try:
+                if isinstance(node, ast.Constant) and type(node.value) is str:
+                    return {node.value}
+                if isinstance(node, ast.Name):
+                    point = v22_reference_point(node, point)
+                    if v22_declared_value_writer(node.id):
+                        return None
+                    current = parents.get(node)
+                    while current is not None and current is not v22_scope:
+                        if (isinstance(current, ast.For) and isinstance(current.target, ast.Name)
+                            and current.target.id == node.id):
+                            if any(isinstance(target, ast.Name) and target.id == node.id
+                                and isinstance(target.ctx, (ast.Store, ast.Del)) and target is not current.target
+                                and python_enclosing_scope(target, parents) is v22_scope
+                                and v22_position(current.target) < v22_position(target) < v22_position(node)
+                                for target in v22_nodes):
+                                return None
+                            provider, provider_point, provider_seen = current.iter, current, set()
+                            while isinstance(provider, ast.Name) and provider.id not in provider_seen:
+                                provider_seen.add(provider.id)
+                                binding = v22_bind(provider.id, provider_point)
+                                if binding is None:
+                                    return None
+                                provider, provider_point = binding.value, binding
+                            if isinstance(provider, (ast.Set, ast.List, ast.Tuple)):
+                                domain = set()
+                                for item in provider.elts:
+                                    part = v22_literal(item, provider)
+                                    if part is None:
+                                        return None
+                                    domain.update(part)
+                                for use in v22_nodes:
+                                    if (not isinstance(use, ast.Name) or use.id not in provider_seen
+                                        or not isinstance(use.ctx, ast.Load)
+                                        or not (v22_position(provider) < v22_position(use) < v22_position(current))):
+                                        continue
+                                    holder = parents.get(use)
+                                    if isinstance(holder, (ast.For, ast.comprehension)) and holder.iter is use:
+                                        continue
+                                    if (isinstance(holder, ast.Compare) and use in holder.comparators
+                                        and v22_data_fact(holder.left, holder, "scalar")):
+                                        continue
+                                    return None
+                                return domain if len(domain) <= 256 else None
+                        if (isinstance(current, ast.For)
+                            and isinstance(current.target, (ast.Tuple, ast.List))
+                            and len(current.target.elts) == 2
+                            and isinstance(current.target.elts[0], ast.Name)
+                            and current.target.elts[0].id == node.id
+                            and isinstance(current.iter, ast.Call)
+                            and isinstance(current.iter.func, ast.Attribute)
+                            and current.iter.func.attr == "items"
+                            and not current.iter.args and not current.iter.keywords):
+                            source = v22_object(current.iter.func.value, current)
+                            if source is None or not isinstance(source, ast.Dict):
+                                return None
+                            # A literal provider is closed only while its actual
+                            # allocation has no intervening stores/escapes.
+                            for dependency in v22_nodes:
+                                if (python_enclosing_scope(dependency, parents) is not v22_scope
+                                    or not (v22_position(source) < v22_position(dependency) < v22_position(current))):
+                                    continue
+                                if any(v22_object(receiver, dependency) is source
+                                    for receiver, _key, _item, _strong in v22_stores(dependency)):
+                                    return None
+                                if (isinstance(dependency, ast.Name) and isinstance(dependency.ctx, ast.Load)
+                                    and v22_object(dependency, dependency) is source):
+                                    if dependency is current.iter.func.value:
+                                        continue
+                                    holder = parents.get(dependency)
+                                    if not (isinstance(holder, ast.Assign) and holder.value is dependency
+                                        and all(isinstance(target, ast.Name) for target in holder.targets)):
+                                        return None
+                            domain = set()
+                            for key in source.keys:
+                                part = v22_literal(key, source)
+                                if part is None:
+                                    return None
+                                domain.update(part)
+                            return domain if len(domain) <= 256 else None
+                        current = parents.get(current)
+                    binding = v22_bind(node.id, point)
+                    if binding is not None:
+                        return v22_literal(binding.value, binding)
+                if isinstance(node, ast.IfExp):
+                    left = v22_literal(node.body, point)
+                    right = v22_literal(node.orelse, point)
+                    if left is not None and right is not None and len(left | right) <= 256:
+                        return left | right
+                return None
+            finally:
+                v22_active.remove(token)
+
+        def v22_object(node, point):
+            token = v22_guard("object", node, point)
+            if token is None:
+                return None
+            try:
+                if isinstance(node, (ast.Dict, ast.DictComp)):
+                    return node
+                if isinstance(node, ast.Name):
+                    if v22_declared_value_writer(node.id):
+                        return None
+                    binding = v22_bind(node.id, point, mapping_identity=True)
+                    return v22_object(binding.value, binding) if binding is not None else None
+                if (isinstance(node, ast.Call)
+                    and python_unshadowed_builtin_reference(node.func, {"dict"}, tree, parents)
+                    and len(node.args) <= 1):
+                    return node
+                return None
+            finally:
+                v22_active.remove(token)
+
+        def v22_update_provider_closed(mapping, call, argument):
+            cache_key = (mapping, call, argument)
+            if cache_key in v22_update_provider_cache:
+                return v22_update_provider_cache[cache_key]
+            v22_update_provider_cache[cache_key] = False
+            for reference in v22_nodes:
+                if not isinstance(reference, ast.Name) or not isinstance(reference.ctx, ast.Load):
+                    continue
+                scope = python_enclosing_scope(reference, parents)
+                if scope is not v22_scope:
+                    defaults = (list(scope.args.defaults) + [default for default in scope.args.kw_defaults
+                        if default is not None]) if isinstance(scope, ast.FunctionDef) else []
+                    default_capture = any(reference in set(ast.walk(default)) for default in defaults)
+                    if (reference.id in v22_local_names.get(scope, ())
+                        and not v22_declarations.get((scope, reference.id)) and not default_capture):
+                        continue
+                    if v22_object(reference, call) is not mapping:
+                        continue
+                    if default_capture:
+                        if v22_position(scope) < v22_position(call):
+                            return False
+                        continue
+                    if not isinstance(scope, ast.FunctionDef):
+                        return False
+                    roots = v22_invocation_roots(scope, call)
+                    if roots is None or any(v22_object(reference, root) is mapping for root in roots):
+                        return False
+                    continue
+                if (not v22_position(mapping) < v22_position(reference) < v22_position(call)
+                    or reference is argument or v22_object(reference, reference) is not mapping):
+                    continue
+                holder = parents.get(reference)
+                if (isinstance(holder, ast.Assign) and holder.value is reference
+                    and all(isinstance(target, ast.Name) for target in holder.targets)):
+                    continue
+                if isinstance(holder, ast.Attribute) and holder.value is reference and holder.attr == "get":
+                    use = parents.get(holder)
+                    if (isinstance(use, ast.Call) and use.func is holder and 1 <= len(use.args) <= 2
+                        and not use.keywords and all(v22_scalar(arg, arg) == "SAFE"
+                            or v22_string_fact(arg, arg) for arg in use.args)):
+                        continue
+                if (isinstance(holder, ast.Compare) and holder.comparators == [reference]
+                    and len(holder.ops) == 1 and isinstance(holder.ops[0], (ast.In, ast.NotIn))):
+                    if v22_scalar(holder.left, holder.left) == "SAFE" or v22_string_fact(holder.left, holder.left):
+                        continue
+                    if v22_data_fact(holder.left, holder.left, "scalar"):
+                        v22_requires_full_baseline[0] = True
+                        continue
+                return False  # Includes alias mutation, retention and callbacks.
+            v22_update_provider_cache[cache_key] = True
+            return True
+
+        def v22_stores(entry):
+            if isinstance(entry, (ast.Assign, ast.AnnAssign)) and entry.value is not None:
+                targets = entry.targets if isinstance(entry, ast.Assign) else [entry.target]
+                return [(target.value, target.slice, entry.value, True) for target in targets
+                    if isinstance(target, ast.Subscript)]
+            if isinstance(entry, ast.AugAssign) and isinstance(entry.op, ast.BitOr):
+                if isinstance(entry.value, ast.Dict):
+                    return [(entry.target, key, item, True)
+                        for key, item in zip(entry.value.keys, entry.value.values)]
+                return [(entry.target, None, entry.value, False)]
+            if isinstance(entry, ast.Call) and isinstance(entry.func, ast.Attribute):
+                receiver = entry.func.value
+                if entry.func.attr == "update":
+                    pairs = [(receiver, ast.Constant(value=keyword.arg) if keyword.arg else None,
+                        keyword.value, True) for keyword in entry.keywords]
+                    for argument in entry.args:
+                        mapping = v22_object(argument, entry)
+                        if isinstance(mapping, ast.Dict) and v22_update_provider_closed(mapping, entry, argument):
+                            pairs.extend((receiver, key, item, True)
+                                for key, item in zip(mapping.keys, mapping.values))
+                        else:
+                            pairs.append((receiver, None, argument, False))
+                    return pairs
+                if entry.func.attr == "pop" and entry.args:
+                    return [(receiver, entry.args[0], None, False)]
+                if entry.func.attr in {"setdefault", "__setitem__"} and len(entry.args) >= 2:
+                    return [(receiver, entry.args[0], entry.args[1], entry.func.attr == "__setitem__")]
+            return []
+
+        def v22_string_fact(node, point, sequence=False):
+            """Types only: argv strings stay sensitive/unknown in value space."""
+            token = v22_guard("strings:" + str(sequence), node, point)
+            if token is None:
+                return False
+            try:
+                if isinstance(node, ast.Constant):
+                    return not sequence and type(node.value) in (str, bytes)
+                if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+                    return sequence and all(v22_string_fact(item, point) for item in node.elts)
+                if (isinstance(node, ast.Attribute) and node.attr == "argv" and sequence
+                    and isinstance(node.value, ast.Name)
+                    and python_imported_module_alias_is_stable(node.value.id, "sys", tree)):
+                    # Reject source aliases/escapes/mutations of the baseline
+                    # argv list; list/slice reads create separate allocations.
+                    for source in v22_nodes:
+                        if isinstance(source, ast.Attribute) and source.attr == "argv":
+                            holder = parents.get(source)
+                            if isinstance(holder, ast.Subscript) and isinstance(holder.ctx, ast.Load):
+                                continue
+                            if (isinstance(holder, ast.Call) and python_unshadowed_builtin_reference(
+                                holder.func, {"list", "tuple", "len"}, tree, parents)):
+                                continue
+                            return False
+                    v22_lower_type_used[0] = True
+                    return v22_primitive_baseline(nominal_only=True)
+                if isinstance(node, ast.Subscript):
+                    return v22_string_fact(node.value, point, True) and (
+                        sequence == isinstance(node.slice, ast.Slice))
+                if isinstance(node, ast.Name):
+                    if v22_declared_value_writer(node.id):
+                        return False
+                    binding = v22_bind(node.id, point)
+                    if binding is not None:
+                        if not v22_string_fact(binding.value, binding, sequence):
+                            return False
+                        if not sequence:
+                            return True
+                        for reference in v22_nodes:
+                            if (not isinstance(reference, ast.Name) or reference.id != node.id
+                                or not isinstance(reference.ctx, ast.Load)
+                                or python_enclosing_scope(reference, parents) is not v22_scope
+                                or not (v22_position(binding) < v22_position(reference) < v22_position(point))):
+                                continue
+                            holder = parents.get(reference)
+                            if isinstance(holder, (ast.While, ast.If, ast.BoolOp, ast.UnaryOp, ast.Subscript)):
+                                if isinstance(holder, ast.Subscript) and not isinstance(holder.ctx, ast.Load):
+                                    return False
+                                continue
+                            if isinstance(holder, ast.Attribute):
+                                use = parents.get(holder)
+                                if isinstance(use, ast.Call) and use.func is holder and holder.attr == "pop":
+                                    if not use.keywords and all(v22_scalar(arg, use) == "SAFE" for arg in use.args):
+                                        continue
+                            return False
+                        return True
+                    unpackings = []
+                    for assignment in v22_nodes:
+                        if (isinstance(assignment, ast.Assign)
+                            and python_enclosing_scope(assignment, parents) is v22_scope
+                            and v22_position(assignment) < v22_position(point)
+                            and any(isinstance(target, (ast.Tuple, ast.List))
+                                and any(isinstance(item, ast.Name) and item.id == node.id for item in target.elts)
+                                for target in assignment.targets)):
+                            unpackings.append(assignment)
+                    if unpackings:
+                        latest = max(unpackings, key=v22_position)
+                        return not sequence and v22_string_fact(latest.value, latest, True)
+                    return False
+                if isinstance(node, ast.Call):
+                    if (sequence and python_unshadowed_builtin_reference(node.func, {"list", "tuple"}, tree, parents)
+                        and len(node.args) == 1 and not node.keywords):
+                        return v22_string_fact(node.args[0], point, True)
+                    if isinstance(node.func, ast.Attribute):
+                        if (sequence and node.func.attr == "split" and not node.keywords
+                            and all(v22_scalar(arg, point) == "SAFE" for arg in node.args)):
+                            return v22_string_fact(node.func.value, point)
+                        if (not sequence and node.func.attr == "pop" and not node.keywords
+                            and all(v22_scalar(arg, point) == "SAFE" for arg in node.args)):
+                            return v22_string_fact(node.func.value, point, True)
+                return False
+            finally:
+                v22_active.remove(token)
+
+        def v22_read_only_call(call, allocation, depth=0):
+            """Close direct local read-only parameter uses, otherwise UNKNOWN.
+
+            No subprocess or kwargs effect summary is assumed here. That
+            boundary must remain refused until all canonical facts close.
+            """
+            if depth >= 32 or not isinstance(call.func, ast.Name):
+                return False
+            definitions = [entry for entry in v22_nodes if isinstance(entry, ast.FunctionDef)
+                and entry.name == call.func.id
+                and python_enclosing_scope(parents.get(entry), parents) is v22_scope
+                and v22_position(entry) < v22_position(call)]
+            if len(definitions) != 1:
+                return False
+            definition = definitions[0]
+            # A reassigned/imported/conditional callable is never one stable
+            # definition merely because it has a matching spelling.
+            if not v22_definite(definition) or v22_bind(call.func.id, call) is not None:
+                return False
+            positional = list(definition.args.posonlyargs) + list(definition.args.args)
+            if definition.args.vararg is not None or definition.args.kwarg is not None:
+                return False
+            if len(call.args) > len(positional) or any(isinstance(arg, ast.Starred) for arg in call.args):
+                return False
+            arguments = {param.arg: arg for param, arg in zip(positional, call.args)}
+            for keyword in call.keywords:
+                if keyword.arg is None or keyword.arg in arguments:
+                    return False
+                arguments[keyword.arg] = keyword.value
+            subjects = {name for name, arg in arguments.items()
+                if v22_object(arg, call) is allocation}
+            if not subjects:
+                return False
+            local_nodes = list(ast.walk(definition))
+            # Keep the first supported summary intentionally narrow. Local
+            # aliases, defaults, global/nonlocal capture and callbacks refuse.
+            for entry in local_nodes:
+                if isinstance(entry, ast.Call) and not (isinstance(entry.func, ast.Attribute)
+                    and isinstance(entry.func.value, ast.Name) and entry.func.value.id in subjects
+                    and entry.func.attr == "get"):
+                    return False
+                if isinstance(entry, (ast.Global, ast.Nonlocal, ast.Lambda)):
+                    return False
+                if isinstance(entry, (ast.FunctionDef, ast.AsyncFunctionDef)) and entry is not definition:
+                    return False
+                if not isinstance(entry, ast.Name) or not isinstance(entry.ctx, ast.Load):
+                    continue
+                if entry.id not in subjects:
+                    if v22_object(entry, call) is allocation:
+                        return False
+                    continue
+                attribute = parents.get(entry)
+                use = parents.get(attribute)
+                if not (isinstance(attribute, ast.Attribute) and attribute.value is entry
+                    and attribute.attr in {"get", "items", "keys", "values"}
+                    and isinstance(use, ast.Call) and use.func is attribute
+                    and not use.keywords
+                    and all(v22_scalar(arg, call) == "SAFE" for arg in use.args)):
+                    return False
+                # Only get with a primitive default returns scalar provenance;
+                # a view or a mutable default may retain the allocation/value.
+                if attribute.attr != "get":
+                    return False
+            return True
+
+        def v22_primitive_baseline(nominal_only=False):
+            # This is the declared trusted-stdlib baseline, plus conservative
+            # source closure. Hooks are capabilities even without capture.
+            if nominal_only in v22_baseline_cache:
+                return v22_baseline_cache[nominal_only]
+            # In-progress/failed baseline proofs never become positive facts.
+            v22_baseline_cache[nominal_only] = False
+            forbidden = {"addaudithook", "audit", "register_at_fork", "settrace", "setprofile",
+                "settrace_all_threads", "setprofile_all_threads", "_getframe", "_current_frames",
+                "currentframe", "f_globals", "f_locals", "f_back", "gi_frame", "cr_frame",
+                "ag_frame", "monitoring", "register_callback", "__dict__", "__getattribute__",
+                "__setattr__", "__delattr__", "meta_path", "path_hooks", "modules", "signal"}
+            capabilities = set()
+            import_state_members = {"path", "path_importer_cache", "meta_path", "path_hooks", "modules"}
+            sys_aliases = {alias.asname or alias.name for entry in v22_nodes if isinstance(entry, ast.Import)
+                for alias in entry.names if alias.name == "sys"}
+            for _round in range(256):
+                expanded = sys_aliases | {target.id for entry in v22_nodes if isinstance(entry, ast.Assign)
+                    and isinstance(entry.value, ast.Name) and entry.value.id in sys_aliases
+                    for target in entry.targets if isinstance(target, ast.Name)}
+                if expanded == sys_aliases:
+                    break
+                sys_aliases = expanded
+            else:
+                return False
+            supported_roots = {"hashlib", "json", "os", "re", "selectors", "signal", "shutil", "stat",
+                "subprocess", "sys", "tempfile", "time", "decimal", "pathlib", "io", "builtins", "unicodedata"}
+            builtin_calls = {"all", "any", "ascii", "bool", "bytearray", "bytes", "dict", "enumerate", "filter",
+                "float", "format", "frozenset", "getattr", "int", "isinstance", "issubclass", "iter", "len", "list",
+                "map", "max", "memoryview", "min", "next", "ord", "print", "range", "repr", "reversed", "round",
+                "set", "sorted", "str", "sum", "tuple", "zip", "SystemExit", "ValueError", "TypeError", "OSError",
+                "RuntimeError", "UnicodeDecodeError", "UnicodeEncodeError", "FileNotFoundError", "TimeoutError",
+                "KeyError", "IndexError", "InterruptedError", "BrokenPipeError", "BaseException", "Exception"}
+            callable_names = set(builtin_calls)
+            callable_names.update(entry.name for entry in v22_nodes if isinstance(entry, ast.FunctionDef))
+            for import_node in v22_nodes:
+                if isinstance(import_node, ast.Import):
+                    if any(alias.name.split(".")[0] not in supported_roots or not python_imported_module_alias_is_stable(
+                        alias.asname or alias.name.split(".")[0], alias.name, tree) for alias in import_node.names):
+                        return False
+                    capabilities.update(alias.asname or alias.name.split(".")[0] for alias in import_node.names)
+                elif isinstance(import_node, ast.ImportFrom):
+                    if import_node.module == "sys" and any(alias.name in import_state_members for alias in import_node.names):
+                        return False
+                    if (import_node.level or not import_node.module or import_node.module.split(".")[0] not in supported_roots
+                        or any(not python_imported_function_alias_is_stable(alias.asname or alias.name,
+                            import_node.module, alias.name, tree) for alias in import_node.names)):
+                        return False
+                    capabilities.update(alias.asname or alias.name for alias in import_node.names)
+                    callable_names.update(alias.asname or alias.name for alias in import_node.names)
+            for _round in range(256):
+                expanded = set(capabilities)
+                expanded_callables = set(callable_names)
+                for assignment in v22_nodes:
+                    if not isinstance(assignment, ast.Assign):
+                        continue
+                    root = assignment.value
+                    while isinstance(root, ast.Attribute):
+                        root = root.value
+                    if isinstance(root, ast.Name) and root.id in capabilities:
+                        expanded.update(target.id for target in assignment.targets if isinstance(target, ast.Name))
+                    if isinstance(assignment.value, ast.Name) and assignment.value.id in callable_names:
+                        expanded_callables.update(target.id for target in assignment.targets if isinstance(target, ast.Name))
+                if expanded == capabilities and expanded_callables == callable_names:
+                    break
+                capabilities = expanded
+                callable_names = expanded_callables
+                if len(capabilities) > 256:
+                    return False
+            else:
+                return False
+            for entry in v22_nodes:
+                if (isinstance(entry, ast.Attribute) and entry.attr in import_state_members
+                    and isinstance(entry.value, ast.Name) and entry.value.id in sys_aliases):
+                    return False
+                if isinstance(entry, ast.Assign):
+                    assigned_names = {target.id for target in entry.targets if isinstance(target, ast.Name)}
+                    if assigned_names & capabilities:
+                        root = entry.value
+                        while isinstance(root, ast.Attribute):
+                            root = root.value
+                        if not isinstance(root, ast.Name) or root.id not in capabilities:
+                            return False
+                    if assigned_names & callable_names:
+                        if not isinstance(entry.value, ast.Name) or entry.value.id not in callable_names:
+                            return False
+                if isinstance(entry, ast.ClassDef):
+                    return False
+                # The primitive boundary supports ordinary declared operations,
+                # not Python's object/descriptor namespace protocol. Reject the
+                # entire special-member family at its first extraction, before
+                # aliases, containers or namespace mutation can conceal it.
+                # Reflective extraction is independently closed below by the
+                # exact finite Popen-field getter rule.
+                if isinstance(entry, ast.Attribute) and (isinstance(entry.ctx, (ast.Store, ast.Del))
+                    or entry.attr in forbidden
+                    or entry.attr.startswith("_")):
+                    return False
+                if isinstance(entry, ast.Attribute) and entry.attr in {
+                    "update", "setdefault", "pop", "popitem", "clear"}:
+                    for origin in python_value_provenance(entry.value, tree, parents):
+                        if (isinstance(origin, ast.Attribute) and origin.attr in {"environ", "environb"}
+                            and isinstance(origin.value, ast.Name)
+                            and python_imported_module_alias_is_stable(origin.value.id, "os", tree)
+                            or isinstance(origin, ast.Name) and any(python_imported_function_alias_is_stable(
+                                origin.id, "os", member, tree) for member in ("environ", "environb"))):
+                            return False  # Original environment is a read-only source.
+                if isinstance(entry, ast.Attribute):
+                    root = entry.value
+                    while isinstance(root, ast.Attribute):
+                        root = root.value
+                    if isinstance(root, ast.Name) and root.id in capabilities:
+                        holder = parents.get(entry)
+                        safe_position = (isinstance(holder, ast.Attribute) and holder.value is entry
+                            or isinstance(holder, ast.Call) and holder.func is entry
+                            or isinstance(holder, ast.Assign) and holder.value is entry
+                                and all(isinstance(target, ast.Name) for target in holder.targets)
+                            or isinstance(holder, ast.ExceptHandler) and holder.type is entry)
+                        constant_member = entry.attr in {"PIPE", "STDOUT", "DEVNULL", "SIGTERM", "SIGKILL",
+                            "EVENT_READ", "EVENT_WRITE", "sep", "pathsep"}
+                        source_read = entry.attr == "argv" and (
+                            isinstance(holder, ast.Subscript) and isinstance(holder.ctx, ast.Load)
+                            or isinstance(holder, ast.Call) and python_unshadowed_builtin_reference(
+                                holder.func, {"list", "tuple", "len"}, tree, parents))
+                        source_read = source_read or entry.attr in {"environ", "environb"} and (
+                            isinstance(holder, (ast.For, ast.comprehension)) and holder.iter is entry
+                            or isinstance(holder, ast.Compare) and entry in holder.comparators)
+                        # Environment mappings are sensitive data, not module
+                        # namespaces. A literal value retains that taint until
+                        # the ordered selection proves an actual overwrite.
+                        source_read = source_read or (
+                            entry.attr in {"environ", "environb"}
+                            and isinstance(entry.value, ast.Name)
+                            and python_imported_module_alias_is_stable(entry.value.id, "os", tree)
+                            and isinstance(holder, ast.Dict) and entry in holder.values)
+                        if not (safe_position or constant_member or source_read):
+                            return False
+                if isinstance(entry, ast.ImportFrom) and any(alias.name in forbidden for alias in entry.names):
+                    return False
+                if isinstance(entry, ast.Name) and isinstance(entry.ctx, ast.Load) and entry.id in capabilities:
+                    holder = parents.get(entry)
+                    if isinstance(holder, ast.Attribute) and holder.value is entry:
+                        continue
+                    if isinstance(holder, ast.Call) and holder.func is entry:
+                        continue
+                    if isinstance(holder, ast.Assign) and holder.value is entry and all(
+                        isinstance(target, ast.Name) for target in holder.targets):
+                        continue
+                    return False  # Namespace/type/callable capability escaped.
+                if isinstance(entry, ast.Call):
+                    if isinstance(entry.func, ast.Name) and entry.func.id not in callable_names:
+                        return False
+                    call_scope = python_enclosing_scope(entry, parents)
+                    if isinstance(entry.func, ast.Name) and isinstance(call_scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                        arguments = call_scope.args
+                        parameters = list(arguments.posonlyargs) + list(arguments.args) + list(arguments.kwonlyargs)
+                        parameters += [argument for argument in (arguments.vararg, arguments.kwarg) if argument is not None]
+                        if any(parameter.arg == entry.func.id for parameter in parameters):
+                            return False  # A same-spelling global is not this callback parameter.
+                    callable_origins = python_value_provenance(entry.func, tree, parents)
+                    if any(python_dotted_name(origin) in {"setattr", "delattr", "vars", "globals",
+                        "locals", "eval", "exec", "compile", "__import__"} for origin in callable_origins):
+                        return False
+                    if any(python_dotted_name(origin) == "getattr" for origin in callable_origins):
+                        # Stability is stratum A, independent of nominal field
+                        # shape and constructor effects. Discharge this exact
+                        # use separately before selected safety is returned.
+                        v22_field_reads.add(entry)
+            v22_baseline_cache[nominal_only] = True
+            return True
+
+        def v22_field_domain(node, point):
+            token = v22_guard("field-domain", node, point)
+            if token is None:
+                return None
+            try:
+                if isinstance(node, ast.Constant) and type(node.value) is str:
+                    return {node.value}
+                if isinstance(node, ast.IfExp):
+                    left, right = v22_field_domain(node.body, point), v22_field_domain(node.orelse, point)
+                    return left | right if left is not None and right is not None and len(left | right) <= 256 else None
+                if not isinstance(node, ast.Name):
+                    return None
+                scope = python_enclosing_scope(node, parents)
+                if v22_declared_value_writer(node.id, scope):
+                    return None
+                ancestor = parents.get(node)
+                while ancestor is not None and ancestor is not scope:
+                    if (isinstance(ancestor, ast.For) and isinstance(ancestor.target, ast.Name)
+                        and ancestor.target.id == node.id):
+                        # A finite iteration target is valid only until any
+                        # other assignment/deletion could replace its value.
+                        if any(isinstance(reference, ast.Name) and reference.id == node.id
+                            and isinstance(reference.ctx, (ast.Store, ast.Del))
+                            and reference is not ancestor.target
+                            and python_enclosing_scope(reference, parents) is scope
+                            and getattr(ancestor, "lineno", -1) <= getattr(reference, "lineno", -1)
+                                <= getattr(node, "lineno", -1)
+                            for reference in v22_nodes):
+                            return None
+                        if isinstance(ancestor.iter, (ast.Tuple, ast.List)):
+                            domain = set()
+                            for item in ancestor.iter.elts:
+                                part = v22_field_domain(item, ancestor)
+                                if part is None:
+                                    return None
+                                domain.update(part)
+                            return domain if domain and len(domain) <= 256 else None
+                    if (isinstance(ancestor, ast.For) and isinstance(ancestor.target, ast.Name)
+                        and ancestor.target.id == node.id and isinstance(ancestor.iter, ast.Name)):
+                        providers = [entry for entry in v22_nodes if isinstance(entry, ast.Assign)
+                            and python_enclosing_scope(entry, parents) is scope
+                            and v22_position(entry) < v22_position(ancestor)
+                            and any(isinstance(target, ast.Name) and target.id == ancestor.iter.id for target in entry.targets)]
+                        if len(providers) != 1 or not isinstance(providers[0].value, ast.Dict):
+                            return None
+                        provider = providers[0]
+                        for reference in v22_nodes:
+                            if (isinstance(reference, ast.Name) and reference.id == ancestor.iter.id
+                                and isinstance(reference.ctx, ast.Load)
+                                and python_enclosing_scope(reference, parents) is scope
+                                and v22_position(provider) < v22_position(reference) < v22_position(node)
+                                and reference is not ancestor.iter):
+                                return None
+                        domain = set()
+                        for key in provider.value.keys:
+                            part = v22_field_domain(key, provider)
+                            if part is None:
+                                return None
+                            domain.update(part)
+                        return domain if len(domain) <= 256 else None
+                    ancestor = parents.get(ancestor)
+                providers = [entry for entry in v22_nodes if isinstance(entry, (ast.Assign, ast.AnnAssign, ast.NamedExpr))
+                    and python_enclosing_scope(entry, parents) is scope
+                    and v22_position(entry) < v22_position(point)
+                    and any(isinstance(target, ast.Name) and target.id == node.id
+                        for target in (entry.targets if isinstance(entry, ast.Assign) else [entry.target]))]
+                if not providers:
+                    return None
+                providers.sort(key=v22_position)
+                strong = [index for index, provider in enumerate(providers) if v22_definite(provider, scope)]
+                providers = providers[strong[-1]:] if strong else providers
+                if any(isinstance(reference, ast.Name) and reference.id == node.id
+                    and isinstance(reference.ctx, ast.Del)
+                    and python_enclosing_scope(reference, parents) is scope
+                    and v22_position(providers[0]) < v22_position(reference) < v22_position(point)
+                    for reference in v22_nodes):
+                    return None
+                domain = set()
+                for provider in providers:
+                    part = v22_field_domain(provider.value, provider)
+                    if part is None:
+                        return None
+                    domain.update(part)
+                return domain if domain and len(domain) <= 256 else None
+            finally:
+                v22_active.remove(token)
+
+        def v22_getter_reference(node, point):
+            token = v22_guard("getter", node, point)
+            if token is None:
+                return False
+            try:
+                if python_unshadowed_builtin_reference(node, {"getattr"}, tree, parents):
+                    return True
+                if isinstance(node, ast.Name):
+                    binding = v22_bind(node.id, point)
+                    return binding is not None and v22_getter_reference(binding.value, binding)
+                return False
+            finally:
+                v22_active.remove(token)
+
+        def v22_local_definition(call):
+            if not isinstance(call.func, ast.Name):
+                return None
+            definitions = [entry for entry in v22_nodes if isinstance(entry, ast.FunctionDef)
+                and entry.name == call.func.id and parents.get(entry) is tree and not entry.decorator_list]
+            if len(definitions) != 1 or v22_bind(call.func.id, expression) is not None:
+                return None
+            definition = definitions[0]
+            caller = python_enclosing_scope(call, parents)
+            if isinstance(caller, ast.FunctionDef) and any(argument.arg == call.func.id
+                for argument in list(caller.args.posonlyargs) + list(caller.args.args)
+                    + list(caller.args.kwonlyargs)):
+                return None
+            return definition
+
+        def v22_actual_frames(function, visiting=()):
+            if function in visiting or len(visiting) >= 32:
+                return None
+            if function in v22_frame_cache:
+                return v22_frame_cache[function]
+            frames = set()
+            for reference in v22_nodes:
+                if not (isinstance(reference, ast.Name) and isinstance(reference.ctx, ast.Load)
+                    and reference.id == function.name):
+                    continue
+                call = parents.get(reference)
+                if not isinstance(call, ast.Call) or call.func is not reference or v22_local_definition(call) is not function:
+                    return None
+                if any(isinstance(arg, ast.Starred) for arg in call.args) or any(keyword.arg is None for keyword in call.keywords):
+                    return None
+                caller = python_enclosing_scope(call, parents)
+                if caller is v22_scope:
+                    if v22_position(call) < v22_position(expression):
+                        frames.add((call,))
+                elif isinstance(caller, ast.FunctionDef):
+                    prefixes = v22_actual_frames(caller, visiting + (function,))
+                    if prefixes is None:
+                        return None
+                    frames.update(prefix + (call,) for prefix in prefixes)
+                else:
+                    return None
+                if len(frames) > 256:
+                    return None
+            result = frozenset(frames)
+            v22_frame_cache[function] = result
+            return result
+
+        def v22_frame_parameter(name, function, frames):
+            if not frames or v22_local_definition(frames[-1]) is not function:
+                return None
+            call = frames[-1]
+            positional = list(function.args.posonlyargs) + list(function.args.args)
+            if function.args.vararg is not None or len(call.args) > len(positional):
+                return None
+            actual = [(argument, frames[:-1]) for parameter, argument in zip(positional, call.args)
+                if parameter.arg == name]
+            actual.extend((keyword.value, frames[:-1]) for keyword in call.keywords if keyword.arg == name)
+            return actual[0] if len(actual) == 1 else None  # Captured defaults remain unsupported.
+
+        def v22_process_origin(node, point, frames=None):
+            cache_key = (node, point, frames)
+            if cache_key not in v22_process_cache:
+                v22_process_cache[cache_key] = None
+                v22_process_cache[cache_key] = v22_compute_process_origin(node, point, frames)
+            return v22_process_cache[cache_key]
+
+        def v22_compute_process_origin(node, point, frames=None):
+            scope = python_enclosing_scope(node, parents)
+            if frames is None:
+                contexts = [()] if scope is v22_scope else v22_actual_frames(scope) if isinstance(scope, ast.FunctionDef) else None
+                if not contexts:
+                    return None
+                combined = set()
+                for context in contexts:
+                    sources = v22_process_origin(node, point, context)
+                    if sources is None:
+                        return None
+                    combined.update(sources)
+                return frozenset(combined) if len(combined) <= 256 else None
+            token = v22_guard("process:" + str(tuple(id(call) for call in frames)), node, point)
+            if token is None:
+                return None
+            try:
+                if isinstance(node, ast.Constant) and node.value is None:
+                    return frozenset({(None, frames)})
+                if isinstance(node, ast.IfExp):
+                    alternatives = [v22_process_origin(part, part, frames) for part in (node.body, node.orelse)]
+                    return frozenset().union(*alternatives) if all(part is not None for part in alternatives) else None
+                if isinstance(node, ast.Name):
+                    if any(isinstance(entry, (ast.Global, ast.Nonlocal)) and node.id in entry.names for entry in v22_nodes):
+                        return None
+                    values = []
+                    read_point = node if python_enclosing_scope(point, parents) is scope else point
+                    for binding in v22_lexical_bindings.get((scope, node.id), ()):
+                        if v22_position(binding) >= v22_position(read_point):
+                            continue
+                        targets = (binding.targets if isinstance(binding, ast.Assign)
+                            else [binding.target] if isinstance(binding, (ast.AnnAssign, ast.NamedExpr)) else [])
+                        if any(isinstance(target, ast.Name) and target.id == node.id for target in targets):
+                            values.append(binding)
+                    if values:
+                        values.sort(key=v22_position)
+                        strong = [index for index, binding in enumerate(values) if v22_definite(binding, scope)]
+                        values = values[strong[-1]:] if strong else values
+                        alternatives = [v22_process_origin(binding.value, binding.value, frames) for binding in values]
+                        return frozenset().union(*alternatives) if all(part is not None for part in alternatives) else None
+                    if isinstance(scope, ast.FunctionDef):
+                        actual = v22_frame_parameter(node.id, scope, frames)
+                        if actual is not None:
+                            return v22_process_origin(actual[0], actual[0], actual[1])
+                        parameters = list(scope.args.posonlyargs) + list(scope.args.args) + list(scope.args.kwonlyargs)
+                        if any(parameter.arg == node.id for parameter in parameters) or not frames:
+                            return None
+                        binding = v22_bind(node.id, frames[0])
+                        return v22_process_origin(binding.value, binding.value, ()) if binding is not None else None
+                    return None
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "Popen" and isinstance(node.func.value, ast.Name)
+                    and python_imported_module_alias_is_stable(node.func.value.id, "subprocess", tree)):
+                    return frozenset({(node, frames)})
+                if isinstance(node, ast.Call):
+                    definition = v22_local_definition(node)
+                    if definition is None or len(frames) >= 32 or any(keyword.arg is None for keyword in node.keywords):
+                        return None
+                    returns = [entry.value for entry in ast.walk(definition) if isinstance(entry, ast.Return)
+                        and entry.value is not None and python_enclosing_scope(entry, parents) is definition]
+                    if not returns or len(returns) > 256:
+                        return None
+                    alternatives = [v22_process_origin(value, value, frames + (node,)) for value in returns]
+                    return frozenset().union(*alternatives) if all(part is not None for part in alternatives) else None
+                return None
+            finally:
+                v22_active.remove(token)
+
+        def v22_frame_object(node, frames):
+            token = v22_guard("frame-object:" + str(tuple(id(call) for call in frames)), node, node)
+            if token is None:
+                return None
+            try:
+                scope = python_enclosing_scope(node, parents)
+                if scope is v22_scope:
+                    return v22_object(node, node)
+                if not isinstance(scope, ast.FunctionDef) or not frames:
+                    return None
+                if (isinstance(node, ast.Dict) and v22_definite(node, scope)
+                    and v22_local_definition(frames[-1]) is scope):
+                    # This certificate is consumed only by constructor TYPE
+                    # checks. Never reuse it as a selected VALUE proof.
+                    return (node, frames)
+                if isinstance(node, ast.Name):
+                    actual = v22_frame_parameter(node.id, scope, frames)
+                    if actual is not None:
+                        return v22_frame_object(actual[0], actual[1])
+                    parameters = list(scope.args.posonlyargs) + list(scope.args.args) + list(scope.args.kwonlyargs)
+                    if any(parameter.arg == node.id for parameter in parameters):
+                        return None
+                    bindings = [entry for entry in v22_nodes if isinstance(entry, ast.Assign)
+                        and python_enclosing_scope(entry, parents) is scope
+                        and v22_position(entry) < v22_position(node)
+                        and any(isinstance(target, ast.Name) and target.id == node.id for target in entry.targets)]
+                    if bindings:
+                        last = max(bindings, key=v22_position)
+                        return v22_frame_object(last.value, frames) if v22_definite(last, scope) else None
+                    if v22_declared_value_writer(node.id, tree):
+                        return None
+                    binding = v22_bind(node.id, frames[0])
+                    return v22_object(binding.value, binding) if binding is not None else None
+                return None
+            finally:
+                v22_active.remove(token)
+
+        def v22_environment_forward(call, aliases, frames):
+            definition = v22_local_definition(call)
+            if (definition is None or len(frames) >= 32
+                or definition.args.vararg is not None or definition.args.kwarg is not None
+                or any(isinstance(arg, ast.Starred) for arg in call.args)
+                or any(keyword.arg is None for keyword in call.keywords)):
+                return False
+            positional = list(definition.args.posonlyargs) + list(definition.args.args)
+            if len(call.args) > len(positional):
+                return False
+            bindings = {parameter.arg: argument for parameter, argument in zip(positional, call.args)}
+            parameters = {parameter.arg for parameter in positional + list(definition.args.kwonlyargs)}
+            for keyword in call.keywords:
+                if keyword.arg not in parameters or keyword.arg in bindings:
+                    return False
+                bindings[keyword.arg] = keyword.value
+            subjects = {name for name, value in bindings.items()
+                if isinstance(value, ast.Name) and value.id in aliases}
+            return bool(subjects) and v22_environment_flow_closed(definition, subjects, frames + (call,))
+
+        def v22_constant_environment_run_use(call):
+            # The pinned native run helper synchronously forwards kwargs to
+            # Popen and returns args/status/output, not its env mapping. This
+            # is a closed stdlib contract, not general call/return purity.
+            if not (isinstance(call.func, ast.Attribute) and call.func.attr == "run"
+                and isinstance(call.func.value, ast.Name)
+                and python_imported_module_alias_is_stable(call.func.value.id, "subprocess", tree)
+                and len(call.args) == 1 and v22_data_fact(call.args[0], call.args[0], "sequence")):
+                return False
+            names = [keyword.arg for keyword in call.keywords]
+            if None in names or len(set(names)) != len(names) or names.count("env") != 1:
+                return False
+            for keyword in call.keywords:
+                if keyword.arg == "env":
+                    continue  # The caller separately proves the literal env and every use.
+                if keyword.arg == "cwd":
+                    valid = v22_plain_path(keyword.value, keyword.value)
+                elif keyword.arg in {"stdin", "stdout", "stderr"}:
+                    valid = v22_stream_option(keyword.value, keyword.value)
+                elif keyword.arg in {"start_new_session", "close_fds", "text", "encoding", "errors",
+                    "input", "capture_output", "check", "timeout"}:
+                    valid = v22_data_fact(keyword.value, keyword.value, "scalar")
+                else:
+                    valid = False
+                if not valid:
+                    return False
+            return True
+
+        def v22_environment_flow_closed(scope, subjects, frames, initial=None):
+            # A narrow constant-environment invariant: reject *all* mutations
+            # and retention, rather than using the module query's store scan
+            # on a function-local allocation. Each actual invocation has its
+            # own certificate; an in-progress/cyclic summary stays False.
+            cache_key = (scope, frozenset(subjects), frames, initial)
+            if cache_key in v22_environment_flow_cache:
+                return v22_environment_flow_cache[cache_key]
+            v22_environment_flow_cache[cache_key] = False
+            if not frames or len(frames) > 32 or v22_local_definition(frames[-1]) is not scope:
+                return False
+            aliases = set(subjects)
+            assignments = {initial} if initial is not None else set()
+            local_nodes = [entry for entry in v22_nodes if python_enclosing_scope(entry, parents) is scope]
+            for _round in range(256):
+                expanded = set(aliases)
+                for entry in local_nodes:
+                    if (not isinstance(entry, ast.Assign) or not isinstance(entry.value, ast.Name)
+                        or entry.value.id not in aliases
+                        or initial is not None and v22_position(entry) <= v22_position(initial)):
+                        continue
+                    if not v22_definite(entry, scope) or not all(isinstance(target, ast.Name) for target in entry.targets):
+                        return False
+                    expanded.update(target.id for target in entry.targets)
+                    assignments.add(entry)
+                if expanded == aliases:
+                    break
+                aliases = expanded
+                if len(aliases) > 256:
+                    return False
+            else:
+                return False
+            if any(v22_declarations.get((scope, name)) for name in aliases):
+                return False
+            for entry in v22_nodes:
+                if not isinstance(entry, ast.Name) or entry.id not in aliases:
+                    continue
+                owner = python_enclosing_scope(entry, parents)
+                if owner is not scope:
+                    if scope not in python_lexical_scope_chain(owner, parents):
+                        continue
+                    defaults = (list(owner.args.defaults) + [value for value in owner.args.kw_defaults
+                        if value is not None]) if isinstance(owner, ast.FunctionDef) else []
+                    captured_default = any(entry in set(ast.walk(value)) for value in defaults)
+                    if (entry.id in v22_local_names.get(owner, ())
+                        and not v22_declarations.get((owner, entry.id)) and not captured_default):
+                        continue
+                    return False
+                holder = parents.get(entry)
+                if isinstance(entry.ctx, (ast.Store, ast.Del)):
+                    if holder not in assignments:
+                        return False
+                    continue
+                if not isinstance(entry.ctx, ast.Load):
+                    continue
+                if initial is not None and v22_position(entry) < v22_position(initial):
+                    return False
+                if holder in assignments and isinstance(holder, ast.Assign) and holder.value is entry:
+                    continue
+                if isinstance(holder, ast.keyword):
+                    use = parents.get(holder)
+                    if (holder.arg == "env" and isinstance(use, ast.Call)
+                        and isinstance(use.func, ast.Attribute) and use.func.attr == "Popen"
+                        and isinstance(use.func.value, ast.Name)
+                        and python_imported_module_alias_is_stable(use.func.value.id, "subprocess", tree)):
+                        v22_pending_constructors.add((use, frames))
+                        continue
+                    if holder.arg == "env" and isinstance(use, ast.Call) and v22_constant_environment_run_use(use):
+                        continue
+                    if isinstance(use, ast.Call) and v22_environment_forward(use, aliases, frames):
+                        continue
+                if isinstance(holder, ast.Call) and entry in holder.args and v22_environment_forward(holder, aliases, frames):
+                    continue
+                if (isinstance(holder, ast.Subscript) and holder.value is entry and isinstance(holder.ctx, ast.Load)
+                    and isinstance(holder.slice, ast.Constant) and type(holder.slice.value) in (str, bytes)):
+                    continue
+                if isinstance(holder, ast.Attribute) and holder.value is entry and holder.attr == "get":
+                    use = parents.get(holder)
+                    if (isinstance(use, ast.Call) and use.func is holder and 1 <= len(use.args) <= 2
+                        and not use.keywords and all(isinstance(arg, ast.Constant)
+                            and type(arg.value) in (str, bytes, int, float, bool, type(None)) for arg in use.args)):
+                        continue
+                return False
+            v22_environment_flow_cache[cache_key] = True
+            return True
+
+        def v22_constant_environment_closed(environment):
+            literal, frames = environment
+            scope = python_enclosing_scope(literal, parents)
+            binding = parents.get(literal)
+            if (not isinstance(scope, ast.FunctionDef) or not isinstance(literal, ast.Dict)
+                or not isinstance(binding, ast.Assign) or binding.value is not literal
+                or not all(isinstance(target, ast.Name) for target in binding.targets)
+                or not v22_definite(binding, scope)
+                or not all(isinstance(part, ast.Constant) and type(part.value) in (str, bytes)
+                    for part in list(literal.keys) + list(literal.values))
+                or not v22_primitive_baseline()):
+                return False
+            # Because every use is non-retaining and no entry/binding can be
+            # mutated, this TYPE invariant also closes repeated executions of
+            # the literal. No cross-iteration object identity is inferred.
+            return v22_environment_flow_closed(scope, {target.id for target in binding.targets}, frames, binding)
+
+        def v22_constructor_keywords(call, frames):
+            state = {}
+            expansions = [keyword.value for keyword in call.keywords if keyword.arg is None]
+            if expansions:
+                scope = python_enclosing_scope(call, parents)
+                if (len(expansions) != 1 or not isinstance(scope, ast.FunctionDef)
+                    or scope.args.kwarg is None or not isinstance(expansions[0], ast.Name)
+                    or expansions[0].id != scope.args.kwarg.arg or not frames
+                    or v22_local_definition(frames[-1]) is not scope):
+                    return None
+                actual = frames[-1]
+                named = {parameter.arg for parameter in list(scope.args.posonlyargs)
+                    + list(scope.args.args) + list(scope.args.kwonlyargs)}
+                if any(keyword.arg is None for keyword in actual.keywords):
+                    return None
+                state = {keyword.arg: (keyword.value, frames[:-1]) for keyword in actual.keywords if keyword.arg not in named}
+                if len(state) != sum(keyword.arg not in named for keyword in actual.keywords):
+                    return None
+                for reference in sorted(ast.walk(scope), key=v22_position):
+                    if (not isinstance(reference, ast.Name) or reference.id != scope.args.kwarg.arg
+                        or python_enclosing_scope(reference, parents) is not scope
+                        or v22_position(reference) >= v22_position(call)):
+                        continue
+                    holder = parents.get(reference)
+                    if reference is expansions[0]:
+                        continue
+                    if isinstance(holder, ast.Attribute) and holder.value is reference:
+                        use = parents.get(holder)
+                        if (holder.attr != "pop" or not isinstance(use, ast.Call) or not use.args
+                            or use.keywords or not isinstance(use.args[0], ast.Constant)
+                            or type(use.args[0].value) is not str or use.args[0].value == "env"
+                            or not all(v22_data_fact(arg, use, "scalar") for arg in use.args)):
+                            return None
+                        v22_pop_container = parents.get(use)
+                        if v22_definite(use, scope) or isinstance(v22_pop_container, ast.If) and v22_pop_container.test is use and v22_definite(v22_pop_container, scope):
+                            state.pop(use.args[0].value, None)
+                    elif isinstance(holder, ast.Subscript) and holder.value is reference and isinstance(holder.ctx, ast.Store):
+                        store = parents.get(holder)
+                        if (not isinstance(holder.slice, ast.Constant) or type(holder.slice.value) is not str
+                            or holder.slice.value == "env" or not isinstance(store, ast.Assign)):
+                            return None
+                        key = holder.slice.value
+                        if not v22_definite(store, scope):
+                            # Keep source contexts on both alternatives. The
+                            # existing finite stream/path facts inspect the
+                            # local RHS; unknown prior caller data refuses.
+                            prior = state.get(key)
+                            if prior is not None and not (v22_data_fact(prior[0], prior[0], "scalar")
+                                or v22_stream_option(prior[0], prior[0]) or v22_plain_path(prior[0], prior[0])):
+                                return None
+                            value = ast.IfExp(test=ast.Constant(value=True),
+                                body=prior[0] if prior is not None else ast.Constant(value=None), orelse=store.value)
+                            state[key] = (value, frames)
+                        else:
+                            state[key] = (store.value, frames)
+                    elif isinstance(holder, (ast.For, ast.comprehension)) and holder.iter is reference:
+                        continue
+                    elif isinstance(holder, ast.Compare) and reference in holder.comparators:
+                        continue
+                    else:
+                        return None
+            for keyword in call.keywords:
+                if keyword.arg is None:
+                    continue
+                if keyword.arg in state:
+                    return None
+                state[keyword.arg] = (keyword.value, frames)
+            return state
+
+        def v22_process_field_read(call, nominal_only=False):
+            if (not v22_getter_reference(call.func, call) or call.keywords or len(call.args) != 3
+                or not isinstance(call.args[2], ast.Constant) or call.args[2].value is not None):
+                return False
+            domain = v22_field_domain(call.args[1], call)
+            if not domain or not domain <= {"stdin", "stdout", "stderr"}:
+                return False
+            sources = v22_process_origin(call.args[0], call)
+            if not sources:
+                return False
+            for constructor, frames in sources:
+                if constructor is None:
+                    continue
+                scope = python_enclosing_scope(constructor, parents)
+                contexts = v22_actual_frames(scope) if isinstance(scope, ast.FunctionDef) else {frames}
+                if not contexts:
+                    return False
+                for context in contexts:
+                    keywords = v22_constructor_keywords(constructor, context)
+                    if keywords is None or any(not v22_stream_option(value, value)
+                        for key, (value, _context) in keywords.items() if key in {"stdin", "stdout", "stderr"}):
+                        return False
+                    v22_pending_constructors.add((constructor, context))
+            return True
+
+        def v22_constructor_effects(constructor, frames, allocation):
+            key = (constructor, frames, allocation)
+            if key in v22_constructor_states:
+                return v22_constructor_states[key] is True
+            v22_constructor_states[key] = "IN_PROGRESS"
+            keywords = v22_constructor_keywords(constructor, frames)
+            if keywords is None or "env" not in keywords or len(constructor.args) != 1:
+                v22_constructor_states[key] = False
+                return False
+            env_value, env_frames = keywords["env"]
+            environment = v22_frame_object(env_value, env_frames)
+            point = frames[0] if frames else constructor
+            if (environment is None or not v22_plain_mapping(environment, point)
+                or not v22_data_fact(constructor.args[0], constructor.args[0], "sequence")):
+                v22_constructor_states[key] = False
+                return False
+            for name, (value, _context) in keywords.items():
+                if name == "env":
+                    continue
+                if name == "cwd":
+                    valid = v22_plain_path(value, value)
+                elif name in {"stdin", "stdout", "stderr"}:
+                    valid = v22_stream_option(value, value)
+                elif name in {"start_new_session", "close_fds", "text", "encoding", "errors"}:
+                    valid = v22_scalar(value, value) == "SAFE" or v22_data_fact(value, value, "scalar")
+                else:
+                    valid = False
+                if not valid:
+                    v22_constructor_states[key] = False
+                    return False
+            v22_constructor_states[key] = True
+            return True
+
+        def v22_prior_values(node):
+            scope = python_enclosing_scope(node, parents)
+            if not isinstance(node, ast.Name) or any(isinstance(entry, (ast.Global, ast.Nonlocal))
+                and node.id in entry.names for entry in v22_nodes):
+                return None
+            bindings = []
+            for entry in v22_lexical_bindings.get((scope, node.id), ()):
+                if v22_position(entry) >= v22_position(node):
+                    continue
+                targets = entry.targets if isinstance(entry, ast.Assign) else [entry.target] if isinstance(entry, (ast.AnnAssign, ast.NamedExpr)) else []
+                if any(isinstance(target, ast.Name) and target.id == node.id for target in targets):
+                    bindings.append(entry)
+            if not bindings:
+                return None
+            bindings.sort(key=v22_position)
+            strong = [index for index, binding in enumerate(bindings) if v22_definite(binding, scope)]
+            bindings = bindings[strong[-1]:] if strong else bindings
+            if any(isinstance(reference, ast.Name) and reference.id == node.id and isinstance(reference.ctx, ast.Del)
+                and python_enclosing_scope(reference, parents) is scope
+                and v22_position(bindings[0]) < v22_position(reference) < v22_position(node) for reference in v22_nodes):
+                return None
+            return [binding.value for binding in bindings]
+
+        def v22_selector_origin(node):
+            if node not in v22_selector_cache:
+                v22_selector_cache[node] = None
+                v22_selector_cache[node] = v22_compute_selector_origin(node)
+            return v22_selector_cache[node]
+
+        def v22_compute_selector_origin(node):
+            token = v22_guard("selector-origin", node, node)
+            if token is None:
+                return None
+            try:
+                if (isinstance(node, ast.Call) and not node.args and not node.keywords
+                    and isinstance(node.func, ast.Attribute) and node.func.attr == "DefaultSelector"
+                    and isinstance(node.func.value, ast.Name)
+                    and python_imported_module_alias_is_stable(node.func.value.id, "selectors", tree)):
+                    return node
+                if isinstance(node, ast.Name):
+                    values = v22_prior_values(node)
+                    if not values:
+                        return None
+                    origins = [v22_selector_origin(value) for value in values]
+                    return origins[0] if origins[0] is not None and all(origin is origins[0] for origin in origins) else None
+                return None
+            finally:
+                v22_active.remove(token)
+
+        def v22_io_nominal(node):
+            if node not in v22_io_cache:
+                v22_io_cache[node] = False
+                v22_io_cache[node] = v22_compute_io_nominal(node)
+            return v22_io_cache[node]
+
+        def v22_compute_io_nominal(node):
+            token = v22_guard("io-nominal", node, node)
+            if token is None:
+                return False
+            try:
+                if isinstance(node, ast.Call):
+                    return v22_getter_reference(node.func, node) and v22_process_field_read(node, True)
+                if isinstance(node, ast.Constant) and node.value is None:
+                    return True
+                if isinstance(node, ast.Name):
+                    values = v22_prior_values(node)
+                    return bool(values) and all(v22_io_nominal(value) for value in values)
+                if isinstance(node, ast.Attribute) and node.attr == "fileobj":
+                    return v22_selector_key_nominal(node.value)
+                return False
+            finally:
+                v22_active.remove(token)
+
+        def v22_selector_result(node):
+            token = v22_guard("selector-result", node, node)
+            if token is None:
+                return False
+            try:
+                if isinstance(node, ast.Name):
+                    values = v22_prior_values(node)
+                    return bool(values) and all(v22_selector_result(value) for value in values)
+                return (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "select" and v22_native_operation(node))
+            finally:
+                v22_active.remove(token)
+
+        def v22_selector_key_nominal(node):
+            if not isinstance(node, ast.Name):
+                return False
+            scope = python_enclosing_scope(node, parents)
+            ancestor = parents.get(node)
+            while ancestor is not None and ancestor is not scope:
+                if (isinstance(ancestor, ast.For) and isinstance(ancestor.target, (ast.Tuple, ast.List))
+                    and len(ancestor.target.elts) == 2 and isinstance(ancestor.target.elts[0], ast.Name)
+                    and ancestor.target.elts[0].id == node.id):
+                    if any(isinstance(reference, ast.Name) and reference.id == node.id
+                        and isinstance(reference.ctx, (ast.Store, ast.Del)) and reference is not ancestor.target.elts[0]
+                        and python_enclosing_scope(reference, parents) is scope
+                        and getattr(ancestor, "lineno", -1) <= getattr(reference, "lineno", -1) <= getattr(node, "lineno", -1)
+                        for reference in v22_nodes):
+                        return False
+                    return v22_selector_result(ancestor.iter)
+                ancestor = parents.get(ancestor)
+            return False
+
+        def v22_native_primitive(node):
+            token = v22_guard("native-primitive", node, node)
+            if token is None:
+                return False
+            try:
+                return v22_compute_native_primitive(node)
+            finally:
+                v22_active.remove(token)
+
+        def v22_compute_native_primitive(node):
+            if isinstance(node, ast.Attribute) and node.attr == "data" and v22_selector_key_nominal(node.value):
+                return True  # Every register's data premise is closed separately in D.
+            if (isinstance(node, ast.Call) and 2 <= len(node.args) <= 256 and not node.keywords
+                and python_unshadowed_builtin_reference(node.func, {"min", "max"}, tree, parents)):
+                return all(v22_native_primitive(argument) for argument in node.args)
+            if v22_data_fact(node, node, "scalar") or v22_field_domain(node, node):
+                return True
+            if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                and node.attr in {"EVENT_READ", "EVENT_WRITE"}
+                and python_imported_module_alias_is_stable(node.value.id, "selectors", tree)):
+                return True
+            if isinstance(node, ast.Name):
+                values = v22_prior_values(node)
+                return bool(values) and all(v22_native_primitive(value) for value in values)
+            if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Mod)):
+                return v22_native_primitive(node.left) and v22_native_primitive(node.right)
+            if (isinstance(node, ast.Call) and not node.args and not node.keywords
+                and isinstance(node.func, ast.Attribute) and node.func.attr == "monotonic"
+                and isinstance(node.func.value, ast.Name)
+                and python_imported_module_alias_is_stable(node.func.value.id, "time", tree)):
+                return True
+            return (isinstance(node, ast.Call) and not node.args and not node.keywords
+                and isinstance(node.func, ast.Attribute) and node.func.attr == "fileno"
+                and v22_io_nominal(node.func.value))
+
+        def v22_native_operation(call):
+            if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Attribute) or call.keywords:
+                return False
+            receiver, member = call.func.value, call.func.attr
+            if (isinstance(receiver, ast.Name) and member in {"read", "write", "set_blocking"}
+                and python_imported_module_alias_is_stable(receiver.id, "os", tree)):
+                if member == "write":
+                    return len(call.args) == 2 and v22_native_primitive(call.args[0]) and v22_data_fact(call.args[1], call.args[1], "buffer")
+                return len(call.args) == 2 and all(v22_native_primitive(argument) for argument in call.args)
+            selector = v22_selector_origin(receiver)
+            if selector is None:
+                return False
+            v22_pending_selectors.add(selector)
+            if member == "register":
+                return len(call.args) == 3 and v22_io_nominal(call.args[0]) and all(
+                    v22_native_primitive(argument) for argument in call.args[1:])
+            if member == "unregister":
+                return len(call.args) == 1 and v22_io_nominal(call.args[0])
+            if member == "select":
+                return len(call.args) <= 1 and all(v22_native_primitive(argument) for argument in call.args)
+            return member in {"get_map", "close"} and not call.args
+
+        def v22_selector_dependencies_closed(selector):
+            scope = python_enclosing_scope(selector, parents)
+            for reference in v22_nodes:
+                if (not isinstance(reference, ast.Name) or not isinstance(reference.ctx, ast.Load)
+                    or python_enclosing_scope(reference, parents) is not scope
+                    or v22_position(reference) >= v22_position(expression)
+                    or v22_selector_origin(reference) is not selector):
+                    continue
+                holder = parents.get(reference)
+                if isinstance(holder, ast.Assign) and holder.value is reference and all(
+                    isinstance(target, ast.Name) for target in holder.targets):
+                    continue
+                if isinstance(holder, ast.Attribute) and holder.value is reference:
+                    use = parents.get(holder)
+                    if isinstance(use, ast.Call) and use.func is holder and v22_native_operation(use):
+                        continue
+                return False
+            return True
+
+        def v22_field_dependencies_closed(call):
+            holder = parents.get(call)
+            if isinstance(holder, ast.Expr):
+                return True
+            if not (isinstance(holder, ast.Assign) and holder.value is call
+                and all(isinstance(target, ast.Name) for target in holder.targets)):
+                return False
+            scope = python_enclosing_scope(call, parents)
+            aliases = {target.id for target in holder.targets}
+            for _round in range(256):
+                expanded = set(aliases)
+                for assignment in v22_nodes:
+                    if (isinstance(assignment, ast.Assign) and python_enclosing_scope(assignment, parents) is scope
+                        and v22_position(holder) < v22_position(assignment) < v22_position(expression)
+                        and isinstance(assignment.value, ast.Name) and assignment.value.id in aliases):
+                        if not all(isinstance(target, ast.Name) for target in assignment.targets):
+                            return False
+                        expanded.update(target.id for target in assignment.targets)
+                if expanded == aliases:
+                    break
+                aliases = expanded
+                if len(aliases) > 256:
+                    return False
+            else:
+                return False
+            for reference in v22_nodes:
+                if (not isinstance(reference, ast.Name) or reference.id not in aliases
+                    or python_enclosing_scope(reference, parents) is not scope
+                    or not (v22_position(holder) < v22_position(reference) < v22_position(expression))):
+                    continue
+                parent = parents.get(reference)
+                if isinstance(reference.ctx, (ast.Store, ast.Del)):
+                    if (isinstance(parent, ast.Assign) and isinstance(parent.value, ast.Name)
+                        and parent.value.id in aliases):
+                        continue
+                    if isinstance(parent, ast.Assign) and v22_io_nominal(parent.value):
+                        continue
+                    return False
+                if isinstance(parent, ast.Compare) and any(isinstance(operand, ast.Constant)
+                    and operand.value is None for operand in [parent.left] + parent.comparators):
+                    continue
+                if isinstance(parent, ast.Assign) and parent.value is reference and all(
+                    isinstance(target, ast.Name) for target in parent.targets):
+                    continue
+                if isinstance(parent, ast.Attribute) and parent.value is reference:
+                    use = parents.get(parent)
+                    if parent.attr == "close" and isinstance(use, ast.Call) and use.func is parent and not use.args and not use.keywords:
+                        continue
+                    if parent.attr == "fileno" and isinstance(use, ast.Call) and use.func is parent and not use.args and not use.keywords:
+                        consumer = parents.get(use)
+                        if isinstance(consumer, ast.Call) and use in consumer.args and v22_native_operation(consumer):
+                            continue
+                if isinstance(parent, ast.Call) and reference in parent.args and v22_native_operation(parent):
+                    continue
+                return False
+            return True
+
+        def v22_process_dependencies_closed():
+            for reference in v22_nodes:
+                if (not isinstance(reference, ast.Name) or not isinstance(reference.ctx, ast.Load)
+                    or v22_position(reference) >= v22_position(expression)):
+                    continue
+                sources = v22_process_origin(reference, reference)
+                if not sources or not any(constructor is not None for constructor, _frames in sources):
+                    continue
+                v22_pending_constructors.update((constructor, frames) for constructor, frames in sources if constructor is not None)
+                holder = parents.get(reference)
+                if isinstance(holder, ast.Assign) and holder.value is reference and all(
+                    isinstance(target, ast.Name) for target in holder.targets):
+                    continue
+                if isinstance(holder, ast.Return) and holder.value is reference:
+                    function = python_enclosing_scope(holder, parents)
+                    if isinstance(function, ast.FunctionDef) and v22_actual_frames(function):
+                        continue
+                if (isinstance(holder, ast.Compare) and all(isinstance(operator, (ast.Is, ast.IsNot)) for operator in holder.ops)
+                    and any(isinstance(operand, ast.Constant) and operand.value is None
+                        for operand in [holder.left] + holder.comparators)):
+                    continue
+                if isinstance(holder, ast.Attribute) and holder.value is reference:
+                    if holder.attr in {"pid", "returncode"} and isinstance(holder.ctx, ast.Load):
+                        continue
+                    use = parents.get(holder)
+                    if isinstance(use, ast.Call) and use.func is holder:
+                        if holder.attr == "poll" and not use.args and not use.keywords:
+                            continue
+                        if (holder.attr == "wait" and len(use.args) <= 1
+                            and all(keyword.arg == "timeout" for keyword in use.keywords)
+                            and len(use.args) + len(use.keywords) <= 1
+                            and all(v22_native_primitive(argument) for argument in use.args)
+                            and all(v22_native_primitive(keyword.value) for keyword in use.keywords)):
+                            continue
+                if isinstance(holder, ast.Call) and reference in holder.args:
+                    if holder.args[0] is reference and v22_getter_reference(holder.func, holder) and v22_process_field_read(holder, True):
+                        continue
+                    definition = v22_local_definition(holder)
+                    if definition is not None and v22_actual_frames(definition):
+                        # Parameter uses are independently visited with every
+                        # actual frame. A helper cannot turn this reference
+                        # into an arbitrary-method or callback exemption.
+                        continue
+                return False
+            return True
+
+        def v22_buffer_mapping(node):
+            token = v22_guard("buffer-mapping", node, node)
+            if token is None:
+                return None
+            try:
+                if isinstance(node, ast.Dict):
+                    return node if node.keys and all(isinstance(key, ast.Constant)
+                        and type(key.value) is str for key in node.keys) else None
+                if isinstance(node, ast.Name):
+                    scope = python_enclosing_scope(node, parents)
+                    if v22_declared_value_writer(node.id, scope):
+                        return None
+                    values = v22_prior_values(node)
+                    origins = [v22_buffer_mapping(value) for value in values or ()]
+                    if origins and origins[0] is not None and all(origin is origins[0] for origin in origins):
+                        return origins[0]
+                return None
+            finally:
+                v22_active.remove(token)
+
+        def v22_buffer_mapping_closed(mapping):
+            if not all(v22_data_fact(value, value, "buffer") for value in mapping.values):
+                return False
+            scope = python_enclosing_scope(mapping, parents)
+            for reference in v22_nodes:
+                if (not isinstance(reference, ast.Name) or not isinstance(reference.ctx, ast.Load)
+                    or python_enclosing_scope(reference, parents) is not scope
+                    or v22_position(reference) >= v22_position(expression)
+                    or v22_buffer_mapping(reference) is not mapping):
+                    continue
+                holder = parents.get(reference)
+                if (isinstance(holder, ast.Subscript) and holder.value is reference
+                    and isinstance(holder.ctx, ast.Load) and v22_native_primitive(holder.slice)):
+                    continue
+                if isinstance(holder, (ast.For, ast.comprehension)) and holder.iter is reference:
+                    continue
+                if (isinstance(holder, ast.Assign) and holder.value is reference
+                    and all(isinstance(target, ast.Name) and not v22_declared_value_writer(target.id, scope)
+                        for target in holder.targets)):
+                    continue
+                return False
+            return True
+
+        def v22_buffer_dependencies_closed(scope):
+            for reference in v22_nodes:
+                if (not isinstance(reference, ast.Name) or not isinstance(reference.ctx, ast.Load)
+                    or python_enclosing_scope(reference, parents) is not scope
+                    or v22_position(reference) >= v22_position(expression)
+                    or not v22_data_fact(reference, reference, "buffer")):
+                    continue
+                holder = parents.get(reference)
+                if isinstance(holder, (ast.Compare, ast.If, ast.While, ast.BoolOp, ast.UnaryOp)):
+                    continue
+                if isinstance(holder, ast.Assign) and holder.value is reference and all(
+                    isinstance(target, ast.Name) and not v22_declared_value_writer(target.id, scope)
+                    for target in holder.targets):
+                    continue
+                if isinstance(holder, ast.Subscript) and holder.value is reference and isinstance(holder.ctx, ast.Load):
+                    bounds = (holder.slice.lower, holder.slice.upper, holder.slice.step) if isinstance(holder.slice, ast.Slice) else [holder.slice]
+                    if all(bound is None or v22_native_primitive(bound) for bound in bounds):
+                        continue
+                if isinstance(holder, ast.Call) and reference in holder.args:
+                    if (len(holder.args) == 1 and not holder.keywords and python_unshadowed_builtin_reference(
+                        holder.func, {"bytes", "memoryview", "len"}, tree, parents)):
+                        continue
+                    if (len(holder.args) == 1 and not holder.keywords
+                        and isinstance(holder.func, ast.Attribute) and holder.func.attr == "extend"
+                        and v22_data_fact(holder.func.value, holder.func.value, "buffer")):
+                        continue
+                    if v22_native_operation(holder):
+                        continue
+                if isinstance(holder, ast.Attribute) and holder.value is reference:
+                    use = parents.get(holder)
+                    if isinstance(use, ast.Call) and use.func is holder and not use.keywords:
+                        if holder.attr == "extend" and len(use.args) == 1 and v22_data_fact(use.args[0], use.args[0], "buffer"):
+                            continue
+                        if holder.attr == "append" and len(use.args) == 1 and v22_native_primitive(use.args[0]):
+                            continue
+                        if holder.attr in {"clear", "reverse"} and not use.args:
+                            continue
+                return False
+            return True
+
+        def v22_process_obligations_closed(allocation):
+            # A completed query may rely on B only after each C and D premise
+            # has independently finished. No baseline/getter implication calls
+            # this conjunction while it is being established.
+            for call in tuple(v22_field_reads):
+                if not v22_process_field_read(call, True) or not v22_field_dependencies_closed(call):
+                    return False
+            if not v22_process_dependencies_closed():
+                return False
+            completed_selectors = set()
+            while v22_pending_selectors - completed_selectors:
+                if len(v22_pending_selectors) > 256:
+                    return False
+                selector = next(iter(v22_pending_selectors - completed_selectors))
+                if not v22_selector_dependencies_closed(selector):
+                    return False
+                completed_selectors.add(selector)
+            completed_constructors = set()
+            completed_buffers = set()
+            while (v22_pending_constructors - completed_constructors
+                or v22_pending_buffer_scopes - completed_buffers
+                or v22_pending_selectors - completed_selectors):
+                if len(v22_pending_constructors) + len(v22_pending_buffer_scopes) + len(v22_pending_selectors) > 256:
+                    return False
+                for constructor, frames in tuple(v22_pending_constructors - completed_constructors):
+                    if not v22_constructor_effects(constructor, frames, allocation):
+                        return False
+                    completed_constructors.add((constructor, frames))
+                for scope in tuple(v22_pending_buffer_scopes - completed_buffers):
+                    if not v22_buffer_dependencies_closed(scope):
+                        return False
+                    completed_buffers.add(scope)
+                for selector in tuple(v22_pending_selectors - completed_selectors):
+                    if not v22_selector_dependencies_closed(selector):
+                        return False
+                    completed_selectors.add(selector)
+            return True
+
+        def v22_plain_path(node, point):
+            return v22_data_fact(node, point, "path")
+
+        def v22_sequence_readonly_guard(reference):
+            # A native argv's truth test and literal element comparison do not
+            # expose its allocation. Refuse calls, aliases, dynamic indices and
+            # arbitrary comparisons rather than certifying a general expression.
+            guard = reference
+            while guard in parents and not isinstance(parents[guard], ast.If):
+                guard = parents[guard]
+            owner = parents.get(guard)
+            if not isinstance(owner, ast.If) or owner.test is not guard or len(list(ast.walk(guard))) > 256:
+                return False
+
+            def pure(part):
+                if isinstance(part, ast.Name):
+                    return part.id == reference.id and isinstance(part.ctx, ast.Load)
+                if isinstance(part, ast.Constant):
+                    return type(part.value) in (str, bytes, int, float, bool, type(None))
+                if isinstance(part, ast.Subscript):
+                    return (isinstance(part.ctx, ast.Load) and isinstance(part.value, ast.Name)
+                        and part.value.id == reference.id and isinstance(part.slice, ast.Constant)
+                        and type(part.slice.value) is int)
+                if isinstance(part, ast.UnaryOp) and isinstance(part.op, ast.Not):
+                    return pure(part.operand)
+                if isinstance(part, ast.BoolOp):
+                    return all(pure(value) for value in part.values)
+                if isinstance(part, ast.Compare):
+                    return (all(isinstance(operator, (ast.Eq, ast.NotEq)) for operator in part.ops)
+                        and pure(part.left) and all(pure(value) for value in part.comparators))
+                return False
+
+            return pure(guard)
+
+        def v22_sequence_nonretaining_read(reference):
+            holder = parents.get(reference)
+            if isinstance(holder, ast.Call):
+                return (holder.args == [reference] and not holder.keywords
+                    and python_unshadowed_builtin_reference(holder.func, {"len"}, tree, parents))
+            if not (isinstance(holder, ast.Subscript) and holder.value is reference
+                and isinstance(holder.ctx, ast.Load)):
+                return False
+
+            def index(part):
+                if isinstance(part, ast.Constant):
+                    return type(part.value) is int or part.value is None
+                if isinstance(part, ast.Name):
+                    return part.id != reference.id and v22_data_fact(part, part, "scalar")
+                if isinstance(part, ast.BinOp) and isinstance(part.op, (ast.Add, ast.Sub)):
+                    return index(part.left) and index(part.right)
+                if isinstance(part, ast.Call):
+                    return (len(part.args) == 1 and not part.keywords
+                        and python_unshadowed_builtin_reference(part.func, {"len"}, tree, parents)
+                        and isinstance(part.args[0], (ast.Name, ast.Constant))
+                        and not (isinstance(part.args[0], ast.Name) and part.args[0].id == reference.id)
+                        and v22_data_fact(part.args[0], part.args[0], "scalar"))
+                return False
+
+            if len(list(ast.walk(holder.slice))) > 256:
+                return False
+            if isinstance(holder.slice, ast.Slice):
+                return all(bound is None or index(bound)
+                    for bound in (holder.slice.lower, holder.slice.upper, holder.slice.step))
+            return index(holder.slice)
+
+        def v22_sequence_binding_closed(node, initial=None):
+            cache_key = (node, initial)
+            if cache_key in v22_sequence_use_cache:
+                return v22_sequence_use_cache[cache_key]
+            v22_sequence_use_cache[cache_key] = False
+            scope = python_enclosing_scope(node, parents)
+            if v22_declarations.get((scope, node.id)):
+                return False
+            for target in v22_binder_index.get((scope, node.id), ()):
+                if (target is not initial and (initial is None or v22_position(initial) < v22_position(target))
+                    and v22_position(target) < v22_position(node)):
+                    return False
+            for reference in v22_nodes:
+                if not (isinstance(reference, ast.Name) and reference.id == node.id
+                    and isinstance(reference.ctx, ast.Load) and reference is not node):
+                    continue
+                owner = python_enclosing_scope(reference, parents)
+                if owner is scope:
+                    if ((initial is None or v22_position(initial) < v22_position(reference))
+                        and v22_position(reference) < v22_position(node)):
+                        if not (v22_sequence_readonly_guard(reference) or v22_sequence_nonretaining_read(reference)):
+                            return False  # Earlier aliases, mutation or calls are unsupported.
+                elif scope in python_lexical_scope_chain(owner, parents):
+                    if (node.id not in v22_local_names.get(owner, ())
+                        or v22_declarations.get((owner, node.id))):
+                        return False
+                    if isinstance(owner, ast.FunctionDef) and any(reference in set(ast.walk(default))
+                        for default in list(owner.args.defaults) + [value for value in owner.args.kw_defaults if value is not None]):
+                        return False
+            v22_sequence_use_cache[cache_key] = True
+            return True
+
+        def v22_keyword_pop_fact(call, kind):
+            scope = python_enclosing_scope(call, parents)
+            if (not isinstance(scope, ast.FunctionDef) or scope.args.kwarg is None
+                or not isinstance(call.func, ast.Attribute) or call.func.attr != "pop"
+                or not isinstance(call.func.value, ast.Name) or call.func.value.id != scope.args.kwarg.arg
+                or call.keywords or not 1 <= len(call.args) <= 2
+                or not isinstance(call.args[0], ast.Constant) or type(call.args[0].value) is not str):
+                return False
+            frames = v22_actual_frames(scope)
+            if not frames:
+                return False
+            key = call.args[0].value
+            named = {parameter.arg for parameter in list(scope.args.posonlyargs)
+                + list(scope.args.args) + list(scope.args.kwonlyargs)}
+            alternatives = []
+            for frame in frames:
+                actual = frame[-1]
+                supplied = [keyword.value for keyword in actual.keywords if keyword.arg == key and key not in named]
+                if len(supplied) > 1:
+                    return False
+                values = supplied or list(call.args[1:])
+                # An absent required pop raises before a result exists; keep
+                # the unsupported no-default case closed rather than vacuous.
+                if not values:
+                    return False
+                for reference in sorted(v22_nodes, key=v22_position):
+                    if (not isinstance(reference, ast.Name) or reference.id != scope.args.kwarg.arg
+                        or python_enclosing_scope(reference, parents) is not scope
+                        or v22_position(reference) >= v22_position(call) or reference is call.func.value):
+                        continue
+                    if not isinstance(reference.ctx, ast.Load):
+                        return False
+                    holder = parents.get(reference)
+                    if isinstance(holder, ast.Attribute) and holder.value is reference:
+                        use = parents.get(holder)
+                        if (holder.attr != "pop" or not isinstance(use, ast.Call) or use.keywords
+                            or not 1 <= len(use.args) <= 2 or not isinstance(use.args[0], ast.Constant)
+                            or type(use.args[0].value) is not str
+                            or not all(v22_data_fact(argument, argument, "scalar") for argument in use.args)):
+                            return False
+                        if use.args[0].value == key:
+                            fallback = list(call.args[1:])
+                            if not fallback:
+                                return False
+                            values = fallback if v22_definite(use, scope) else values + fallback
+                    elif isinstance(holder, ast.Subscript) and holder.value is reference and isinstance(holder.ctx, ast.Store):
+                        store = parents.get(holder)
+                        if (not isinstance(store, ast.Assign) or not isinstance(holder.slice, ast.Constant)
+                            or type(holder.slice.value) is not str
+                            or not (v22_data_fact(store.value, store.value, "scalar")
+                                or holder.slice.value != key and v22_stream_option(store.value, store.value))):
+                            return False
+                        if holder.slice.value == key:
+                            values = [store.value] if v22_definite(store, scope) else values + [store.value]
+                    elif isinstance(holder, (ast.For, ast.comprehension)) and holder.iter is reference:
+                        continue
+                    elif isinstance(holder, ast.Compare) and reference in holder.comparators:
+                        continue
+                    else:
+                        return False
+                alternatives.extend(values)
+            return bool(alternatives) and len(alternatives) <= 256 and all(
+                v22_data_fact(value, value, kind) for value in alternatives)
+
+        def v22_data_fact(node, point, kind, projection=None):
+            cache_key = (id(node), id(point), kind, projection)
+            if cache_key not in v22_data_cache:
+                # A dependency cycle observes False; only a completed proof
+                # can replace it. All inputs belong to this immutable query.
+                v22_data_cache[cache_key] = False
+                v22_data_cache[cache_key] = v22_compute_data_fact(node, point, kind, projection)
+            result = v22_data_cache[cache_key]
+            if result and kind == "buffer":
+                scope = python_enclosing_scope(node, parents)
+                if scope is not None:
+                    v22_pending_buffer_scopes.add(scope)
+            return result
+
+        def v22_global_writer_facts(name, kind, projection):
+            writers = {python_enclosing_scope(entry, parents) for entry in v22_nodes
+                if isinstance(entry, ast.Global) and name in entry.names}
+            for writer in writers:
+                if (not isinstance(writer, ast.FunctionDef) or parents.get(writer) is not tree
+                    or writer.args.defaults or any(default is not None for default in writer.args.kw_defaults)):
+                    return False
+                frames = v22_actual_frames(writer)
+                if frames is None:
+                    return False
+                if not frames:
+                    continue
+                providers = set()
+                for reference in ast.walk(writer):
+                    if (not isinstance(reference, ast.Name) or reference.id != name
+                        or not isinstance(reference.ctx, (ast.Store, ast.Del))
+                        or python_enclosing_scope(reference, parents) is not writer):
+                        continue
+                    parent = parents.get(reference)
+                    selection = projection
+                    if isinstance(parent, (ast.Tuple, ast.List)):
+                        if reference not in parent.elts:
+                            return False
+                        selection = parent.elts.index(reference)
+                        parent = parents.get(parent)
+                    if not isinstance(parent, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) or isinstance(reference.ctx, ast.Del):
+                        return False
+                    providers.add((parent, selection))
+                if not all(v22_data_fact(provider.value, provider.value, kind, selection)
+                    for provider, selection in providers):
+                    return False
+            return True
+
+        def v22_global_type_fact(name, function, kind, projection):
+            # Free names require every real module invocation, including calls
+            # before a later rebind. Nested closure cells/global writers are
+            # outside this finite immutable-global subset.
+            if parents.get(function) is not tree or any(isinstance(entry, ast.Nonlocal)
+                and name in entry.names for entry in v22_nodes):
+                return False
+            roots = v22_invocation_roots(function, expression)
+            if not roots:
+                return False
+            for root in roots:
+                providers = []
+                target_nodes = set()
+                for binding in v22_nodes:
+                    if (python_enclosing_scope(binding, parents) is not v22_scope
+                        or v22_position(binding) >= v22_position(root)):
+                        continue
+                    targets = (binding.targets if isinstance(binding, ast.Assign)
+                        else [binding.target] if isinstance(binding, (ast.AnnAssign, ast.NamedExpr)) else [])
+                    for target in targets:
+                        if isinstance(target, ast.Name) and target.id == name:
+                            providers.append((binding, projection))
+                            target_nodes.add(target)
+                        elif isinstance(target, (ast.Tuple, ast.List)):
+                            for index, part in enumerate(target.elts):
+                                if isinstance(part, ast.Name) and part.id == name:
+                                    providers.append((binding, index))
+                                    target_nodes.add(part)
+                if not providers:
+                    return False
+                providers.sort(key=lambda pair: v22_position(pair[0]))
+                strong = [index for index, (binding, _selection) in enumerate(providers)
+                    if v22_definite(binding)]
+                providers = providers[strong[-1]:] if strong else providers
+                for reference in v22_nodes:
+                    if (isinstance(reference, ast.Name) and reference.id == name
+                        and isinstance(reference.ctx, (ast.Store, ast.Del))
+                        and python_enclosing_scope(reference, parents) is v22_scope
+                        and reference not in target_nodes
+                        and v22_position(providers[0][0]) < v22_position(reference) < v22_position(root)):
+                        return False
+                if not all(v22_data_fact(binding.value, binding, kind, selection)
+                    for binding, selection in providers):
+                    return False
+            return v22_global_writer_facts(name, kind, projection)
+
+        def v22_compute_data_fact(node, point, kind, projection=None):
+            """Finite, type-only local return/parameter and stdlib source facts.
+
+            Every alternative must close. No specimen operation is evaluated.
+            Mutation/escape and constructor effects remain separate obligations.
+            """
+            scope = python_enclosing_scope(node, parents)
+            local_edge = (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id in v22_function_names
+                or isinstance(node, ast.Name) and isinstance(scope, ast.FunctionDef)
+                and any(argument.arg == node.id for argument in list(scope.args.posonlyargs)
+                    + list(scope.args.args) + list(scope.args.kwonlyargs)))
+            token = v22_guard(("local-data:" if local_edge else "data:") + kind + ":" + str(projection), node, point)
+            if token is None:
+                return False
+            try:
+                if kind == "path" and projection is None and v22_data_fact(node, point, "scalar"):
+                    return True
+                if isinstance(node, ast.Constant):
+                    if kind == "buffer":
+                        return projection is None and (type(node.value) is bytes or node.value is None)
+                    return projection is None and (kind in {"scalar", "path"}
+                        and type(node.value) in (str, bytes, int, float, bool, type(None)))
+                if isinstance(node, (ast.Tuple, ast.List)):
+                    if projection is not None:
+                        return (-len(node.elts) <= projection < len(node.elts)
+                            and v22_data_fact(node.elts[projection], point, kind))
+                    return kind == "sequence" and all(
+                        v22_data_fact(item.value, point, "sequence") if isinstance(item, ast.Starred)
+                        else v22_data_fact(item, point, "scalar") or v22_data_fact(item, point, "path")
+                        for item in node.elts)
+                if isinstance(node, ast.IfExp):
+                    return all(v22_data_fact(part, point, kind, projection) for part in (node.body, node.orelse))
+                if isinstance(node, ast.JoinedStr):
+                    # TYPE only: a formatted credential remains a sensitive
+                    # VALUE. No user object's formatting hook is certified.
+                    return kind == "scalar" and projection is None and all(
+                        isinstance(part, ast.Constant) and type(part.value) is str
+                        or isinstance(part, ast.FormattedValue) and part.conversion in {-1, 97, 114, 115}
+                            and (v22_data_fact(part.value, point, "scalar") or v22_data_fact(part.value, point, "path"))
+                            and (part.format_spec is None or v22_data_fact(part.format_spec, point, "scalar"))
+                        for part in node.values)
+                if isinstance(node, ast.BoolOp):
+                    return kind == "scalar" and projection is None and all(
+                        v22_data_fact(part, point, kind) for part in node.values)
+                if isinstance(node, ast.Name):
+                    point = v22_reference_point(node, point)
+                    scope = python_enclosing_scope(node, parents)
+                    if any(isinstance(entry, ast.Nonlocal)
+                        and node.id in entry.names for entry in v22_nodes):
+                        return False
+                    if isinstance(scope, ast.FunctionDef) and any(isinstance(entry, ast.Global)
+                        and node.id in entry.names and python_enclosing_scope(entry, parents) is scope
+                        for entry in v22_nodes):
+                        return v22_global_type_fact(node.id, scope, kind, projection)
+                    # Iteration bindings are nearer than earlier scalar names.
+                    ancestor = parents.get(node)
+                    while ancestor is not None and ancestor is not scope:
+                        if isinstance(ancestor, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+                            matched = [generator for generator in ancestor.generators
+                                if any(isinstance(target, ast.Name) and target.id == node.id
+                                    for target in ast.walk(generator.target))]
+                            if matched:
+                                if (len(ancestor.generators) != 1 or len(matched) != 1 or matched[0].is_async
+                                    or not isinstance(matched[0].target, ast.Name) or kind != "scalar"
+                                    or node in set(ast.walk(matched[0].iter))):
+                                    return False
+                                source = matched[0].iter
+                                if v22_string_fact(source, source, True):
+                                    return True
+                                mapping = v22_object(source, source)
+                                return mapping is not None and v22_plain_mapping(mapping, source)
+                        if isinstance(ancestor, (ast.For, ast.comprehension)):
+                            if isinstance(ancestor.target, ast.Name) and ancestor.target.id == node.id:
+                                if kind == "sequence":
+                                    return (isinstance(ancestor, ast.For) and not ancestor.orelse
+                                        and isinstance(ancestor.iter, (ast.Tuple, ast.List)) and bool(ancestor.iter.elts)
+                                        and len(ancestor.iter.elts) <= 256
+                                        and all(isinstance(row, (ast.Tuple, ast.List)) and v22_data_fact(row, row, "sequence")
+                                            for row in ancestor.iter.elts)
+                                        and v22_sequence_binding_closed(node, ancestor.target))
+                                if kind != "scalar":
+                                    return False
+                                buffer_mapping = v22_buffer_mapping(ancestor.iter)
+                                if buffer_mapping is not None and v22_buffer_mapping_closed(buffer_mapping):
+                                    return True
+                                iterated_mapping = v22_object(ancestor.iter, ancestor.iter)
+                                if iterated_mapping is not None and v22_plain_mapping(iterated_mapping, ancestor.iter):
+                                    return True
+                                iterable = ancestor.iter
+                                if isinstance(iterable, ast.Name):
+                                    iterable_binding = v22_bind(iterable.id, ancestor.iter)
+                                    iterable = iterable_binding.value if iterable_binding is not None else iterable
+                                return (isinstance(iterable, ast.Set) and all(v22_data_fact(item, ancestor.iter, "scalar")
+                                    for item in iterable.elts) or v22_data_fact(ancestor.iter, ancestor.iter, "sequence"))
+                            if (isinstance(ancestor.target, (ast.Tuple, ast.List))
+                                and any(isinstance(part, ast.Name) and part.id == node.id for part in ancestor.target.elts)
+                                and isinstance(ancestor.iter, ast.Call) and isinstance(ancestor.iter.func, ast.Attribute)
+                                and ancestor.iter.func.attr == "items"):
+                                mapping = v22_object(ancestor.iter.func.value, ancestor)
+                                return (kind == "scalar" and isinstance(mapping, ast.Dict)
+                                    and all(v22_data_fact(item, mapping, "scalar")
+                                        for item in list(mapping.keys) + list(mapping.values)))
+                        ancestor = parents.get(ancestor)
+                    entries = []
+                    for binding in v22_nodes:
+                        if python_enclosing_scope(binding, parents) is not scope or v22_position(binding) >= v22_position(point):
+                            continue
+                        targets = (binding.targets if isinstance(binding, ast.Assign)
+                            else [binding.target] if isinstance(binding, (ast.AnnAssign, ast.NamedExpr)) else [])
+                        for target in targets:
+                            if isinstance(target, ast.Name) and target.id == node.id:
+                                entries.append((binding, projection))
+                            elif isinstance(target, (ast.Tuple, ast.List)):
+                                for index, part in enumerate(target.elts):
+                                    if isinstance(part, ast.Name) and part.id == node.id:
+                                        entries.append((binding, index))
+                    if entries:
+                        entries.sort(key=lambda pair: v22_position(pair[0]))
+                        strong = [index for index, (binding, _selection) in enumerate(entries) if v22_definite(binding)]
+                        entries = entries[strong[-1]:] if strong else entries
+                        if not all(v22_data_fact(binding.value, binding, kind, selection) for binding, selection in entries):
+                            return False
+                        if kind == "sequence":
+                            aliases = {node.id}
+                            for _round in range(256):
+                                expanded = set(aliases)
+                                for assignment in v22_nodes:
+                                    if (isinstance(assignment, ast.Assign)
+                                        and python_enclosing_scope(assignment, parents) is scope
+                                        and v22_position(entries[0][0]) < v22_position(assignment) < v22_position(point)
+                                        and isinstance(assignment.value, ast.Name) and assignment.value.id in aliases):
+                                        if not all(isinstance(target, ast.Name) for target in assignment.targets):
+                                            return False
+                                        expanded.update(target.id for target in assignment.targets)
+                                if expanded == aliases:
+                                    break
+                                aliases = expanded
+                                if len(aliases) > 256:
+                                    return False
+                            else:
+                                return False
+                            for mutation in v22_nodes:
+                                if (python_enclosing_scope(mutation, parents) is not scope
+                                    or not (v22_position(entries[0][0]) < v22_position(mutation) < v22_position(point))):
+                                    continue
+                                if (isinstance(mutation, ast.Call) and isinstance(mutation.func, ast.Attribute)
+                                    and isinstance(mutation.func.value, ast.Name) and mutation.func.value.id in aliases):
+                                    if mutation.func.attr in {"append", "insert"}:
+                                        if not mutation.args or not v22_data_fact(mutation.args[-1], mutation, "scalar"):
+                                            return False
+                                    elif mutation.func.attr == "extend":
+                                        if len(mutation.args) != 1 or not v22_data_fact(mutation.args[0], mutation, "sequence"):
+                                            return False
+                                    elif mutation.func.attr not in {"pop", "remove", "clear", "reverse", "index", "count"}:
+                                        return False
+                        return scope is not v22_scope or v22_global_writer_facts(node.id, kind, projection)
+                    if isinstance(scope, ast.FunctionDef):
+                        parameters = list(scope.args.posonlyargs) + list(scope.args.args)
+                        if any(parameter.arg == node.id for parameter in parameters + list(scope.args.kwonlyargs)):
+                            if kind == "sequence" and not v22_sequence_binding_closed(node):
+                                return False
+                            sources = []
+                            frames = v22_actual_frames(scope)
+                            if not frames:
+                                return False
+                            defaults = dict((parameter.arg, default) for parameter, default in
+                                zip(parameters[-len(scope.args.defaults):], scope.args.defaults)) if scope.args.defaults else {}
+                            defaults.update((parameter.arg, default) for parameter, default in
+                                zip(scope.args.kwonlyargs, scope.args.kw_defaults) if default is not None)
+                            for frame in frames:
+                                source = v22_frame_parameter(node.id, scope, frame)
+                                if source is not None:
+                                    sources.append((source[0], frame[-1]))
+                                else:
+                                    # Definition-time captured objects/aliases
+                                    # are unsupported. Literal immutable defaults
+                                    # do not depend on a later invocation binding.
+                                    default = defaults.get(node.id)
+                                    if (not isinstance(default, ast.Constant)
+                                        or type(default.value) not in (str, bytes, int, float, bool, type(None))):
+                                        return False
+                                    sources.append((default, default))
+                            return bool(sources) and len(sources) <= 256 and all(
+                                v22_data_fact(source, use, kind, projection) for source, use in sources)
+                        # Free names resolve at the querying invocation boundary;
+                        # a local unknown binder cannot fall through to globals.
+                        local_binders = {argument.arg for argument in parameters + list(scope.args.kwonlyargs)}
+                        local_binders.update(entry.id for entry in ast.walk(scope)
+                            if isinstance(entry, ast.Name) and isinstance(entry.ctx, ast.Store))
+                        if node.id not in local_binders:
+                            return v22_global_type_fact(node.id, scope, kind, projection)
+                    return False
+                if isinstance(node, ast.Subscript):
+                    if kind == "buffer" and not isinstance(node.slice, ast.Slice):
+                        mapping = v22_buffer_mapping(node.value)
+                        return (mapping is not None and v22_native_primitive(node.slice)
+                            and v22_buffer_mapping_closed(mapping))
+                    if isinstance(node.slice, ast.Slice):
+                        if not all(bound is None or v22_data_fact(bound, point, "scalar")
+                            for bound in (node.slice.lower, node.slice.upper, node.slice.step)):
+                            return False
+                        return (kind == "buffer" and v22_data_fact(node.value, point, "buffer")
+                            or kind == "sequence" and v22_data_fact(node.value, point, "sequence")
+                            or kind == "scalar" and v22_data_fact(node.value, point, "scalar"))
+                    return (kind == "scalar" and v22_data_fact(node.value, point, "sequence")
+                        and v22_data_fact(node.slice, point, "scalar"))
+                if isinstance(node, ast.BinOp):
+                    if kind == "path" and isinstance(node.op, ast.Div):
+                        return v22_data_fact(node.left, point, "path") and v22_data_fact(node.right, point, "path")
+                    return (isinstance(node.op, ast.Add) and kind == "sequence" and all(
+                        v22_data_fact(part, point, "sequence") for part in (node.left, node.right))
+                        or isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Mod))
+                        and kind == "scalar" and all(v22_data_fact(part, point, "scalar")
+                            for part in (node.left, node.right)))
+                if isinstance(node, ast.Attribute):
+                    if kind == "path" and node.attr == "parent":
+                        return v22_data_fact(node.value, point, "path")
+                    if kind == "scalar" and node.attr == "name":
+                        return v22_data_fact(node.value, point, "temporary") or v22_data_fact(node.value, point, "path")
+                    if kind == "scalar" and node.attr in {"stdout", "stderr"}:
+                        return v22_data_fact(node.value, point, "result:" + node.attr)
+                    return kind == "sequence" and node.attr == "argv" and isinstance(node.value, ast.Name) and (
+                        python_imported_module_alias_is_stable(node.value.id, "sys", tree)
+                        and v22_string_fact(node, point, True))
+                if isinstance(node, ast.Call):
+                    if isinstance(node.func, ast.Name):
+                        if python_unshadowed_builtin_reference(node.func, {"bytearray"}, tree, parents):
+                            return kind == "buffer" and not node.args and not node.keywords
+                        if python_unshadowed_builtin_reference(node.func, {"bytes", "memoryview"}, tree, parents):
+                            if node.keywords or len(node.args) > 1:
+                                return False
+                            snapshot = python_unshadowed_builtin_reference(node.func, {"bytes"}, tree, parents)
+                            return (kind == "buffer" or kind == "scalar" and snapshot) and (
+                                bool(node.args) and v22_data_fact(node.args[0], node.args[0], "buffer") or not node.args and snapshot)
+                        if python_unshadowed_builtin_reference(node.func, {"len"}, tree, parents):
+                            return kind == "scalar" and len(node.args) == 1 and not node.keywords and (
+                                v22_data_fact(node.args[0], point, "scalar")
+                                or v22_data_fact(node.args[0], point, "sequence"))
+                        if python_unshadowed_builtin_reference(node.func, {"list", "tuple"}, tree, parents):
+                            return kind == "sequence" and len(node.args) == 1 and not node.keywords and v22_data_fact(node.args[0], point, kind)
+                        if python_imported_function_alias_is_stable(node.func.id, "pathlib", "Path", tree):
+                            return kind == "path" and not node.keywords and all(v22_data_fact(arg, point, "path") for arg in node.args)
+                        definitions = [entry for entry in v22_nodes if isinstance(entry, ast.FunctionDef)
+                            and entry.name == node.func.id and v22_definite(entry)]
+                        if len(definitions) == 1 and v22_bind(node.func.id, node) is None:
+                            returns = [entry.value for entry in ast.walk(definitions[0]) if isinstance(entry, ast.Return)
+                                and python_enclosing_scope(entry, parents) is definitions[0]]
+                            return bool(returns) and len(returns) <= 256 and all(
+                                v22_data_fact(value, value, kind, projection) for value in returns)
+                    if isinstance(node.func, ast.Attribute):
+                        receiver, member = node.func.value, node.func.attr
+                        if isinstance(receiver, ast.Name):
+                            if python_imported_module_alias_is_stable(receiver.id, "os", tree):
+                                return (member == "read" and kind in {"scalar", "buffer"}
+                                    or member in {"write", "set_blocking"} and kind == "scalar") and v22_native_operation(node)
+                            if python_imported_module_alias_is_stable(receiver.id, "subprocess", tree):
+                                if member == "check_output":
+                                    return kind == "scalar"
+                                if member == "CompletedProcess" and kind in {"result:stdout", "result:stderr"}:
+                                    field = kind.split(":", 1)[1]
+                                    index = 2 if field == "stdout" else 3
+                                    if (len(node.args) > 4 or any(isinstance(argument, ast.Starred) for argument in node.args)
+                                        or any(keyword.arg is None for keyword in node.keywords)):
+                                        return False
+                                    supplied = [node.args[index]] if len(node.args) > index else []
+                                    supplied.extend(keyword.value for keyword in node.keywords if keyword.arg == field)
+                                    return not supplied or len(supplied) == 1 and v22_data_fact(supplied[0], supplied[0], "scalar")
+                                return False
+                            if python_imported_module_alias_is_stable(receiver.id, "shutil", tree):
+                                return kind == "scalar" and member == "which" and all(v22_data_fact(arg, point, "path") for arg in node.args)
+                            if python_imported_module_alias_is_stable(receiver.id, "tempfile", tree):
+                                return kind == "temporary" and member == "TemporaryDirectory" and not node.args and not node.keywords
+                            if (python_imported_function_alias_is_stable(receiver.id, "pathlib", "Path", tree)
+                                and member == "cwd" and not node.args and not node.keywords):
+                                return kind == "path"
+                        if member in {"resolve", "absolute"} and not node.args and not node.keywords:
+                            return kind == "path" and v22_data_fact(receiver, point, "path")
+                        if member in {"strip", "lstrip", "rstrip", "decode", "encode", "upper", "lower"}:
+                            return kind == "scalar" and v22_data_fact(receiver, point, "scalar") and all(
+                                v22_data_fact(arg, point, "scalar") for arg in node.args)
+                        if member in {"split", "splitlines"}:
+                            return (kind == "sequence" or kind == "scalar" and projection is not None) and v22_data_fact(receiver, point, "scalar") and all(
+                                v22_data_fact(arg, point, "scalar") for arg in node.args)
+                        if member == "pop":
+                            return kind == "scalar" and (v22_keyword_pop_fact(node, kind)
+                                or v22_data_fact(receiver, point, "sequence"))
+                    return False
+                return False
+            finally:
+                v22_active.remove(token)
+
+        def v22_plain_mapping(allocation, point):
+            if isinstance(allocation, tuple) and len(allocation) == 2:
+                return v22_constant_environment_closed(allocation)
+            token = v22_guard("mapping-types", allocation, point)
+            if token is None:
+                return False
+            try:
+                if isinstance(allocation, ast.Dict):
+                    initial = all((v22_literal(key, allocation) is not None or v22_string_fact(key, allocation))
+                        and (v22_scalar(item, allocation) == "SAFE" or v22_string_fact(item, allocation))
+                        for key, item in zip(allocation.keys, allocation.values))
+                elif isinstance(allocation, ast.Call):
+                    sources = allocation.args + [keyword.value for keyword in allocation.keywords if keyword.arg is None]
+                    initial = all(v22_plain_mapping(v22_object(source, allocation), allocation) for source in sources)
+                    initial = initial and all(v22_scalar(keyword.value, allocation) == "SAFE"
+                        or v22_string_fact(keyword.value, allocation) for keyword in allocation.keywords if keyword.arg is not None)
+                elif isinstance(allocation, ast.DictComp) and len(allocation.generators) == 1:
+                    generator = allocation.generators[0]
+                    initial = (not generator.is_async and isinstance(generator.target, (ast.Tuple, ast.List))
+                        and len(generator.target.elts) == 2
+                        and all(isinstance(part, ast.Name) for part in generator.target.elts)
+                        and isinstance(allocation.key, ast.Name) and allocation.key.id == generator.target.elts[0].id
+                        and isinstance(allocation.value, ast.Name) and allocation.value.id == generator.target.elts[1].id
+                        and isinstance(generator.iter, ast.Call) and not generator.iter.args and not generator.iter.keywords
+                        and isinstance(generator.iter.func, ast.Attribute) and generator.iter.func.attr == "items"
+                        and isinstance(generator.iter.func.value, ast.Attribute)
+                        and generator.iter.func.value.attr in {"environ", "environb"}
+                        and isinstance(generator.iter.func.value.value, ast.Name)
+                        and python_imported_module_alias_is_stable(generator.iter.func.value.value.id, "os", tree))
+                    if initial:
+                        v22_lower_type_used[0] = True
+                        initial = v22_primitive_baseline(nominal_only=True)
+                else:
+                    initial = False
+                if not initial:
+                    return False
+                for entry in v22_nodes:
+                    if (python_enclosing_scope(entry, parents) is v22_scope
+                        and v22_position(allocation) < v22_position(entry) < v22_position(point)):
+                        for receiver, key, item, _strong in v22_stores(entry):
+                            if v22_object(receiver, entry) is allocation:
+                                if v22_literal(key, entry) is None and not v22_string_fact(key, entry) and not v22_data_fact(key, entry, "scalar"):
+                                    return False
+                                if isinstance(entry, ast.Call) and isinstance(entry.func, ast.Attribute) and entry.func.attr == "pop":
+                                    continue
+                                if v22_scalar(item, entry) != "SAFE" and not v22_string_fact(item, entry) and not v22_data_fact(item, entry, "scalar"):
+                                    return False
+                return True
+            finally:
+                v22_active.remove(token)
+
+        def v22_primitive_call(call, allocation, actual_point=None, forwarded=None, check_baseline=True, mapping_names=()):
+            actual_point = call if actual_point is None else actual_point
+            if not (isinstance(call.func, ast.Attribute) and call.func.attr == "Popen"
+                and isinstance(call.func.value, ast.Name)
+                and python_imported_module_alias_is_stable(call.func.value.id, "subprocess", tree)):
+                return False
+            v22_requires_full_baseline[0] = True
+            if not ((not check_baseline or v22_primitive_baseline()) and v22_plain_mapping(allocation, actual_point)):
+                return False
+            if len(call.args) != 1:
+                return False
+            if not v22_data_fact(call.args[0], actual_point, "sequence"):
+                return False
+            keywords = list(call.keywords)
+            if forwarded is not None:
+                if sum(keyword.arg is None for keyword in keywords) != 1:
+                    return False
+                keywords = [keyword for keyword in keywords if keyword.arg is not None] + list(forwarded)
+            found_env = False
+            for keyword in keywords:
+                if keyword.arg == "env":
+                    if found_env or not (v22_object(keyword.value, v22_reference_point(keyword.value, actual_point)) is allocation
+                        or isinstance(keyword.value, ast.Name) and keyword.value.id in mapping_names):
+                        return False
+                    found_env = True
+                elif keyword.arg == "cwd":
+                    if not v22_plain_path(keyword.value, actual_point):
+                        return False
+                elif keyword.arg in {"start_new_session", "close_fds", "text", "encoding", "errors"}:
+                    if v22_scalar(keyword.value, actual_point) != "SAFE" and not v22_data_fact(keyword.value, actual_point, "scalar"):
+                        return False
+                elif keyword.arg in {"stdin", "stdout", "stderr"}:
+                    if not v22_stream_option(keyword.value, actual_point):
+                        return False
+                else:
+                    return False
+            return found_env
+
+        def v22_stream_option(node, point):
+            if isinstance(node, ast.IfExp):
+                return all(v22_stream_option(part, point) for part in (node.body, node.orelse))
+            return (v22_scalar(node, point) == "SAFE"
+                or isinstance(node, ast.Attribute) and node.attr in {"PIPE", "DEVNULL", "STDOUT"}
+                    and isinstance(node.value, ast.Name)
+                    and python_imported_module_alias_is_stable(node.value.id, "subprocess", tree))
+
+        def v22_closed_call(call, allocation, root_point=None, check_baseline=True):
+            root_point = call if root_point is None else root_point
+            token = v22_guard("local-effects", call, root_point)
+            if token is None:
+                return False
+            try:
+                return v22_local_effect_body(call, allocation, root_point, check_baseline)
+            finally:
+                v22_active.remove(token)
+
+        def v22_local_effect_body(call, allocation, root_point, check_baseline):
+            if v22_read_only_call(call, allocation) or v22_primitive_call(call, allocation, root_point, check_baseline=check_baseline):
+                return True
+            if not isinstance(call.func, ast.Name):
+                return False
+            definitions = [entry for entry in v22_nodes if isinstance(entry, ast.FunctionDef)
+                and entry.name == call.func.id and v22_definite(entry)
+                and v22_position(entry) < v22_position(call)]
+            if len(definitions) != 1 or v22_bind(call.func.id, call) is not None:
+                return False
+            definition = definitions[0]
+            arguments = definition.args
+            positional = list(arguments.posonlyargs) + list(arguments.args)
+            if arguments.vararg is not None or len(call.args) > len(positional) or any(isinstance(arg, ast.Starred) for arg in call.args):
+                return False
+            bindings = {parameter.arg: argument for parameter, argument in zip(positional, call.args)}
+            parameter_names = {parameter.arg for parameter in positional + list(arguments.kwonlyargs)}
+            outer = {}
+            for keyword in call.keywords:
+                if keyword.arg is None:
+                    return False
+                if keyword.arg in parameter_names:
+                    if keyword.arg in bindings:
+                        return False
+                    bindings[keyword.arg] = keyword.value
+                elif arguments.kwarg is not None:
+                    outer[keyword.arg] = keyword
+                else:
+                    return False
+            subjects = {name for name, source in bindings.items()
+                if v22_object(source, v22_reference_point(source, root_point)) is allocation}
+            local_nodes = list(ast.walk(definition))
+            local_names = set(parameter_names)
+            local_names.update(entry.id for entry in local_nodes if isinstance(entry, ast.Name) and isinstance(entry.ctx, ast.Store))
+            global_names = {name for entry in local_nodes if isinstance(entry, ast.Global) for name in entry.names}
+            # Free global bindings are queried at invocation, never definition.
+            subjects.update(entry.id for entry in local_nodes if isinstance(entry, ast.Name)
+                and isinstance(entry.ctx, ast.Load) and (entry.id not in local_names or entry.id in global_names)
+                and v22_object(entry, root_point) is allocation)
+            for default in list(arguments.defaults) + [item for item in arguments.kw_defaults if item is not None]:
+                if any(isinstance(entry, ast.Name) and v22_object(entry, definition) is allocation for entry in ast.walk(default)):
+                    return False
+            kwarg_name = arguments.kwarg.arg if arguments.kwarg is not None else None
+            carries_env = any(keyword.arg == "env" and v22_object(keyword.value,
+                v22_reference_point(keyword.value, root_point)) is allocation
+                for keyword in outer.values())
+            if not subjects and not carries_env:
+                return False
+            for keyword in outer.values():
+                if keyword.arg == "env":
+                    if v22_object(keyword.value, v22_reference_point(keyword.value, root_point)) is not allocation:
+                        return False
+                elif keyword.arg == "cwd":
+                    if not v22_plain_path(keyword.value, root_point):
+                        return False
+                elif not (v22_data_fact(keyword.value, root_point, "scalar")
+                    or isinstance(keyword.value, ast.Attribute) and keyword.value.attr in {"PIPE", "STDOUT", "DEVNULL"}
+                        and isinstance(keyword.value.value, ast.Name)
+                        and python_imported_module_alias_is_stable(keyword.value.value.id, "subprocess", tree)):
+                    return False
+            # The fresh outer kwargs mapping is distinct from its env entry.
+            # Only closed-key pop/store and exact Popen forwarding are supported.
+            forwarded = False
+            for entry in sorted(local_nodes, key=v22_position):
+                if not (isinstance(entry, ast.Name) and entry.id == kwarg_name):
+                    continue
+                if isinstance(entry.ctx, (ast.Store, ast.Del)):
+                    return False
+                holder = parents.get(entry)
+                if isinstance(holder, ast.Attribute) and holder.value is entry:
+                    use = parents.get(holder)
+                    if (holder.attr != "pop" or not isinstance(use, ast.Call) or not use.args
+                        or use.keywords or not isinstance(use.args[0], ast.Constant)
+                        or type(use.args[0].value) is not str or use.args[0].value == "env"):
+                        return False
+                    if not all(v22_data_fact(arg, use, "scalar") for arg in use.args):
+                        return False
+                    v22_pop_container = parents.get(use)
+                    unconditional_pop = v22_definite(use, definition) or (
+                        isinstance(v22_pop_container, ast.If) and v22_pop_container.test is use
+                        and v22_definite(v22_pop_container, definition))
+                    if unconditional_pop:
+                        outer.pop(use.args[0].value, None)
+                    continue
+                if isinstance(holder, ast.Subscript) and holder.value is entry and isinstance(holder.ctx, ast.Store):
+                    store = parents.get(holder)
+                    if (not isinstance(holder.slice, ast.Constant) or type(holder.slice.value) is not str
+                        or holder.slice.value == "env" or not isinstance(store, (ast.Assign, ast.AnnAssign))):
+                        return False
+                    value = store.value
+                    if not v22_definite(store, definition):
+                        prior = outer.get(holder.slice.value)
+                        value = ast.IfExp(test=ast.Constant(value=True),
+                            body=prior.value if prior is not None else ast.Constant(value=None),
+                            orelse=value)
+                    outer[holder.slice.value] = ast.keyword(arg=holder.slice.value, value=value)
+                    continue
+                if isinstance(holder, (ast.For, ast.comprehension)) and holder.iter is entry:
+                    continue
+                if isinstance(holder, ast.Compare) and entry in holder.comparators and v22_data_fact(holder.left, holder, "scalar"):
+                    continue
+                if isinstance(holder, ast.keyword) and holder.arg is None:
+                    forwarded_call = parents.get(holder)
+                    if not isinstance(forwarded_call, ast.Call) or not v22_primitive_call(forwarded_call,
+                        allocation, root_point, outer.values(), False, subjects):
+                        return False
+                    forwarded = True
+                    continue
+                return False
+            for entry in local_nodes:
+                if not isinstance(entry, ast.Name) or entry.id not in subjects:
+                    continue
+                if isinstance(entry.ctx, (ast.Store, ast.Del)):
+                    return False
+                if not isinstance(entry.ctx, ast.Load):
+                    continue
+                if python_enclosing_scope(entry, parents) is not definition:
+                    return False
+                holder = parents.get(entry)
+                use = parents.get(holder)
+                if isinstance(holder, ast.keyword) and holder.arg == "env" and isinstance(use, ast.Call):
+                    if v22_primitive_call(use, allocation, root_point, check_baseline=False, mapping_names=subjects):
+                        forwarded = True
+                        continue
+                    if v22_closed_call(use, allocation, root_point, False):
+                        forwarded = True
+                        continue
+                if isinstance(holder, ast.Subscript) and holder.value is entry and isinstance(holder.ctx, ast.Load):
+                    if v22_plain_mapping(allocation, root_point) and v22_data_fact(holder.slice, holder, "scalar"):
+                        continue
+                if (isinstance(holder, ast.Attribute) and holder.value is entry and holder.attr == "get"
+                    and isinstance(use, ast.Call) and use.func is holder and not use.keywords
+                    and all(v22_data_fact(arg, use, "scalar") for arg in use.args)
+                    and v22_plain_mapping(allocation, root_point)):
+                    continue
+                return False
+            return forwarded
+
+        def v22_invocation_roots(function, cutoff, visiting=None):
+            visiting = set() if visiting is None else set(visiting)
+            if function in visiting or len(visiting) >= 32:
+                return None
+            cache_key = (function, cutoff)
+            if cache_key in v22_root_cache:
+                return v22_root_cache[cache_key]
+            visiting.add(function)
+            roots = set()
+            if any(isinstance(parent, ast.ClassDef) for parent in _python_parent_chain(function, parents)):
+                return None
+            for reference in v22_nodes:
+                if not (isinstance(reference, ast.Name) and isinstance(reference.ctx, ast.Load)
+                    and reference.id == function.name):
+                    continue
+                use = parents.get(reference)
+                if not isinstance(use, ast.Call) or use.func is not reference:
+                    return None  # Callback/default/container/alias escape.
+                caller = python_enclosing_scope(use, parents)
+                if caller is v22_scope:
+                    if v22_position(use) < v22_position(cutoff):
+                        if v22_bind(reference.id, use) is not None:
+                            return None
+                        roots.add(use)
+                elif isinstance(caller, ast.FunctionDef):
+                    if any(argument.arg == reference.id for argument in list(caller.args.posonlyargs)
+                        + list(caller.args.args) + list(caller.args.kwonlyargs)):
+                        return None
+                    callers = v22_invocation_roots(caller, cutoff, visiting)
+                    if callers is None:
+                        return None
+                    roots.update(callers)
+                else:
+                    return None
+            result = frozenset(roots) if len(roots) <= 256 else None
+            v22_root_cache[cache_key] = result
+            return result
+
+        def v22_selected(allocation, key, point):
+            token = v22_guard("selected:" + key, allocation, point)
+            if token is None:
+                return "UNKNOWN"
+            cache_key = (id(allocation), key, id(point))
+            try:
+                if cache_key in v22_memo:
+                    return v22_memo[cache_key]
+                result = "UNKNOWN"
+                uncertain_protocol = False
+                if isinstance(allocation, ast.Dict):
+                    for entry_key, item in zip(allocation.keys, allocation.values):
+                        domain = v22_literal(entry_key, allocation)
+                        if domain is None:
+                            result = "UNKNOWN"
+                        elif key in domain:
+                            result = v22_scalar(item, item)
+                elif isinstance(allocation, ast.Call):
+                    for source in allocation.args + [kw.value for kw in allocation.keywords if kw.arg is None]:
+                        original = v22_object(source, source)
+                        result = v22_selected(original, key, allocation) if original is not None else "UNKNOWN"
+                    for keyword in allocation.keywords:
+                        if keyword.arg == key:
+                            result = v22_scalar(keyword.value, keyword.value)
+                for entry in sorted(v22_nodes, key=v22_position):
+                    if (python_enclosing_scope(entry, parents) is not v22_scope
+                        or not (v22_position(allocation) < v22_position(entry) < v22_position(point))):
+                        continue
+                    for receiver, entry_key, item, strong in v22_stores(entry):
+                        if v22_object(receiver, entry) is not allocation:
+                            continue
+                        domain = v22_literal(entry_key, entry)
+                        if domain is None and not v22_string_fact(entry_key, entry):
+                            uncertain_protocol = True
+                        if domain is not None and key not in domain:
+                            continue
+                        item_state = v22_scalar(item, item)
+                        if strong and domain == {key} and v22_definite(entry):
+                            result = item_state
+                        elif item_state != "SAFE":
+                            result = "UNKNOWN"
+                # No mapping may escape or have an unsupported use between its
+                # allocation and the query, even when a later pin looks safe.
+                for entry in v22_nodes:
+                    if (not isinstance(entry, ast.Name) or not isinstance(entry.ctx, ast.Load)
+                        or python_enclosing_scope(entry, parents) is not v22_scope
+                        or not (v22_position(allocation) < v22_position(entry) < v22_position(point))
+                        or v22_object(entry, entry) is not allocation):
+                        continue
+                    owner = parents.get(entry)
+                    if isinstance(owner, ast.Subscript) and owner.value is entry:
+                        mutation = parents.get(owner)
+                        if not isinstance(owner.ctx, ast.Load) and not (
+                            isinstance(owner.ctx, ast.Store) and isinstance(mutation, (ast.Assign, ast.AnnAssign))
+                            and owner in (mutation.targets if isinstance(mutation, ast.Assign) else [mutation.target])):
+                            result = "UNKNOWN"
+                        continue
+                    if isinstance(owner, (ast.For, ast.comprehension)) and owner.iter is entry:
+                        if v22_plain_mapping(allocation, entry):
+                            continue
+                    if isinstance(owner, ast.Compare) and entry in owner.comparators:
+                        if v22_data_fact(owner.left, owner, "scalar") and v22_plain_mapping(allocation, entry):
+                            continue
+                    if isinstance(owner, ast.Assign) and owner.value is entry and all(
+                        isinstance(target, ast.Name) for target in owner.targets):
+                        continue
+                    if isinstance(owner, ast.Call) and python_unshadowed_builtin_reference(
+                        owner.func, {"dict"}, tree, parents):
+                        continue
+                    if isinstance(owner, ast.Call) and entry in owner.args and v22_closed_call(owner, allocation):
+                        continue
+                    if isinstance(owner, ast.keyword):
+                        call = parents.get(owner)
+                        if owner.arg is None and isinstance(call, ast.Call) and python_unshadowed_builtin_reference(
+                            call.func, {"dict"}, tree, parents):
+                            continue
+                        if isinstance(call, ast.Call) and v22_closed_call(call, allocation):
+                            continue
+                    if isinstance(owner, ast.Attribute) and owner.value is entry:
+                        call = parents.get(owner)
+                        if isinstance(call, ast.Call) and call.func is owner and owner.attr in {
+                            "update", "setdefault", "__setitem__", "pop", "get", "items", "keys", "values"}:
+                            # The stores above classify mutation values. Closed
+                            # read operands are required before allowing calls.
+                            if owner.attr in {"update", "setdefault", "__setitem__"}:
+                                continue
+                            if not all(v22_scalar(arg, call) == "SAFE" or v22_data_fact(arg, call, "scalar")
+                                for arg in call.args):
+                                result = "UNKNOWN"
+                                continue
+                            if owner.attr in {"items", "keys", "values"}:
+                                consumer = parents.get(call)
+                                if not isinstance(consumer, (ast.For, ast.comprehension)) or consumer.iter is not call:
+                                    result = "UNKNOWN"
+                                    continue
+                            if v22_plain_mapping(allocation, call):
+                                continue
+                    if isinstance(owner, ast.AugAssign) and owner.target is entry and isinstance(owner.op, ast.BitOr):
+                        continue
+                    result = "UNKNOWN"
+                # Captured globals resolve at invocation. Examine every earlier
+                # module call point, including a binding later rebound away
+                # from this object; old aliases still reference that allocation.
+                for capture in v22_nodes:
+                    if not (isinstance(capture, ast.Name) and isinstance(capture.ctx, ast.Load)
+                        and python_enclosing_scope(capture, parents) is not v22_scope
+                        and v22_position(capture) < v22_position(point)):
+                        continue
+                    function = python_enclosing_scope(capture, parents)
+                    if not isinstance(function, ast.FunctionDef):
+                        if v22_object(capture, capture) is allocation:
+                            result = "UNKNOWN"
+                        continue
+                    parameters = list(function.args.posonlyargs) + list(function.args.args) + list(function.args.kwonlyargs)
+                    declared_global = any(isinstance(declaration, ast.Global) and capture.id in declaration.names
+                        for declaration in ast.walk(function))
+                    local_binding = any(parameter.arg == capture.id for parameter in parameters) or any(
+                        isinstance(binding, ast.Name) and isinstance(binding.ctx, ast.Store) and binding.id == capture.id
+                        and python_enclosing_scope(binding, parents) is function for binding in ast.walk(function))
+                    if local_binding and not declared_global:
+                        continue
+                    defaults = list(function.args.defaults) + [default for default in function.args.kw_defaults if default is not None]
+                    if any(capture in set(ast.walk(default)) for default in defaults):
+                        if v22_object(capture, function) is allocation:
+                            result = "UNKNOWN"
+                        continue
+                    invocation_points = v22_invocation_roots(function, point)
+                    if invocation_points is None:
+                        result = "UNKNOWN"
+                        continue
+                    possible = [invocation for invocation in invocation_points if v22_object(capture, invocation) is allocation]
+                    if not possible:
+                        continue
+                    owner = parents.get(capture)
+                    use = parents.get(owner)
+                    if not (isinstance(owner, ast.keyword) and owner.arg == "env" and isinstance(use, ast.Call)):
+                        result = "UNKNOWN"
+                        continue
+                    # Only no-retain environment forwarding discharges this
+                    # global capture; unknown callback/return/store never does.
+                    if not all(v22_primitive_call(use, allocation, invocation, check_baseline=False)
+                        or v22_closed_call(use, allocation, invocation, False) for invocation in possible):
+                        result = "UNKNOWN"
+                if uncertain_protocol:
+                    result = "UNKNOWN"
+                v22_memo[cache_key] = result
+                return result
+            finally:
+                v22_active.remove(token)
+
+        allocation = v22_object(expression.value, expression.value)
+        if allocation is None:
+            sequence_container = expression.value
+            sequence_point = expression
+            sequence_seen = set()
+            while isinstance(sequence_container, ast.Name) and sequence_container not in sequence_seen:
+                sequence_seen.add(sequence_container)
+                sequence_binding = v22_bind(sequence_container.id, sequence_point)
+                if sequence_binding is None:
+                    break
+                sequence_container, sequence_point = sequence_binding.value, sequence_binding
+            if isinstance(sequence_container, (ast.Tuple, ast.List)):
+                return None  # This mapping proof has no applicability here.
+        domain = v22_literal(expression.slice, expression)
+        if allocation is None or domain is None or len(domain) != 1:
+            return "UNKNOWN"
+        final_state = v22_selected(allocation, next(iter(domain)), expression)
+        if final_state == "SAFE" and (require_baseline or v22_lower_type_used[0] or v22_requires_full_baseline[0]) and not v22_primitive_baseline():
+            return "UNKNOWN"
+        if final_state == "SAFE" and not v22_process_obligations_closed(allocation):
+            return "UNKNOWN"
+        return final_state
+
+    def stored_mapping_output_sensitive(value):
+        # Value sinks retain explicit stores through proven dict-copy selections;
+        # this does not taint mapping names or their keys-only iteration domain.
+        for origin in python_value_provenance(value, tree, parents):
+            if not isinstance(origin, ast.expr):
+                continue
+            if id(origin) in getattr(tree, "_issue79_safe_local_format_calls", set()):
+                continue
+            for expression in ast.walk(origin):
+                if isinstance(expression, ast.Subscript):
+                    selected = error_operand_subscript_values(expression)
+                    mapping_evidence = bool(selected) or any(
+                        isinstance(source, (ast.Dict, ast.DictComp))
+                        for component in ast.walk(expression.value) if isinstance(component, ast.expr)
+                        for source in python_value_provenance(component, tree, parents))
+                    if mapping_evidence:
+                        classification = ordered_mapping_selection(expression)
+                        if classification is None:
+                            if any(python_sensitive_value_expression(item, sensitive_names, tree, parents)
+                                for item in selected):
+                                return True
+                        elif classification != "SAFE":
+                            return True
+        return False
 
     def error_operand_conversion_callable(func, seen):
         if func is None or id(func) in seen:
@@ -22791,8 +25499,10 @@ def python_sensitive_read_violation(tree, parents):
         # Bounded literal-result proof, not a bound-method/effects interpreter.
         if value is None or id(value) in seen or error_operand_sensitive(value):
             return False
-        if any(isinstance(part, (ast.Name, ast.Attribute)) and any(isinstance(reference, (ast.List, ast.Tuple, ast.Dict, ast.Set))
-            and any(isinstance(item, (ast.List, ast.Dict, ast.Set)) for item in ast.walk(reference))
+        if any(isinstance(part, (ast.Name, ast.Attribute)) and any(isinstance(reference,
+            (ast.List, ast.Tuple, ast.Dict, ast.Set, ast.ListComp, ast.DictComp, ast.SetComp))
+            and any(isinstance(item, (ast.List, ast.Dict, ast.Set, ast.ListComp, ast.DictComp, ast.SetComp))
+                for item in ast.walk(reference))
             for reference in python_value_provenance(part, tree, parents)) for part in ast.walk(value)):
             return False  # Named mutable dependencies/defaults cannot certify original literal contents.
         seen = seen | {id(value)}
@@ -22819,19 +25529,40 @@ def python_sensitive_read_violation(tree, parents):
             for reference in alternatives)
 
     def subscription_state_targets(value):
-        for reference in python_value_provenance(value, tree, parents):
-            if not isinstance(reference, ast.Name):
-                continue
-            inventory = getattr(tree, "_issue79_sensitive_imported_alias_bindings", {})
-            for scope in python_sensitive_alias_scope_chain(reference, parents):
-                bindings = inventory.get((id(scope), reference.id), ())
-                if not bindings or any(kind in {"global", "nonlocal"} for kind, _ in bindings):
+        for origin in python_value_provenance(value, tree, parents):
+            if not isinstance(origin, ast.expr):
+                continue  # Do not inspect the target callable's own body/parameters.
+            for expression in ast.walk(origin):
+                if not isinstance(expression, ast.Name):
                     continue
-                if any(kind == "unknown" and isinstance(binding, ast.arg)
-                    and not mutation_parameter_calls_closed(binding) for kind, binding in bindings):
-                    return None  # Callback-supplied parameters cannot close from defaults alone.
-                break
+                for reference in python_value_provenance(expression, tree, parents):
+                    if not isinstance(reference, ast.Name):
+                        continue
+                    inventory = getattr(tree, "_issue79_sensitive_imported_alias_bindings", {})
+                    for scope in python_sensitive_alias_scope_chain(reference, parents):
+                        bindings = inventory.get((id(scope), reference.id), ())
+                        if not bindings or any(kind in {"global", "nonlocal"} for kind, _ in bindings):
+                            continue
+                        if any(kind == "unknown" and isinstance(binding, ast.arg)
+                            and not mutation_parameter_calls_closed(binding) for kind, binding in bindings):
+                            return None  # Inspect parameter ancestry before projecting defaults.
+                        break
         return protocol_callable_targets(value, set())
+
+    def subscription_wrapper_input_mutated(value):
+        for origin in python_value_provenance(value, tree, parents):
+            if not isinstance(origin, ast.expr):
+                continue
+            for reference in ast.walk(origin):
+                if isinstance(reference, ast.Name):
+                    scope = mutation_binding_scope(python_enclosing_scope(reference, parents), reference.id)
+                    if scoped_mutations.get((scope, reference.id)) or stored_mapping_values.get((scope, reference.id)):
+                        return True  # Existing scoped alias/mutation inventory owns observed stores.
+                elif isinstance(reference, ast.Attribute) and any(isinstance(source,
+                    (ast.List, ast.Dict, ast.Set, ast.ListComp, ast.DictComp, ast.SetComp))
+                    for source in python_value_provenance(reference, tree, parents)):
+                    return True  # Mutable member inputs cannot prove unchanged contents.
+        return False
 
     def subscription_implementation_unproven(implementation):
         if any(isinstance(part, (ast.Yield, ast.YieldFrom))
@@ -22874,6 +25605,8 @@ def python_sensitive_read_violation(tree, parents):
             for reference in alternatives)
 
     def subscription_receiver_classes(value):
+        if not error_operand_classes:
+            return set()  # Match the existing protocol graph's local-ClassDef scope.
         pending, visited, classes = [value], set(), set()
         while pending:
             expression = pending.pop()
@@ -22893,6 +25626,8 @@ def python_sensitive_read_violation(tree, parents):
                     arguments = list(reference.args) + [keyword.value for keyword in reference.keywords]
                     pending.extend(arguments)
                     for argument in arguments:
+                        if subscription_wrapper_input_mutated(argument):
+                            return None  # Refuse before projection erases a mutable input's stores.
                         pending.extend(python_value_provenance(argument, tree, parents,
                             initial_selection="iterate", receiver_origins=True))
                         if any(python_unshadowed_builtin_reference(target, {"dict"}, tree, parents)
@@ -23749,10 +26484,17 @@ def python_sensitive_read_violation(tree, parents):
                     f"{dotted or '<call>'!r} on line {node.lineno}"
                 )
             if python_sensitive_output_sink(node, tree) and any(
-                error_operand_repr_sensitive(argument, set(), ("__str__", "__repr__", "__format__"))
-                or python_sensitive_value_expression(
-                    argument, sensitive_names, tree, parents
+                (
+                    (
+                        error_operand_repr_sensitive(argument, set(), ("__str__", "__repr__", "__format__"))
+                        or python_sensitive_value_expression(argument, sensitive_names, tree, parents)
+                    )
+                    and not (
+                        isinstance(argument, ast.Subscript)
+                        and ordered_mapping_selection(argument, require_baseline=True) == "SAFE"
+                    )
                 )
+                or stored_mapping_output_sensitive(argument)
                 or (
                     any(
                         isinstance(candidate, ast.Attribute)
