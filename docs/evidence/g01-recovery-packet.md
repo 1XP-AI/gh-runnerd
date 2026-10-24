@@ -25264,8 +25264,14 @@ def python_sensitive_read_violation(tree, parents):
                         domain = v22_literal(entry_key, allocation)
                         if domain is None:
                             result = "UNKNOWN"
-                        elif key in domain:
+                        elif domain == {key}:
                             result = v22_initial_value(item, item)
+                        elif key in domain and (
+                            result != "SAFE" or v22_initial_value(item, item) != "SAFE"
+                        ):
+                            # A possible write is not a definite overwrite. In
+                            # particular it cannot erase an earlier UNKNOWN.
+                            result = "UNKNOWN"
                 elif isinstance(allocation, ast.Call):
                     for source in allocation.args + [kw.value for kw in allocation.keywords if kw.arg is None]:
                         original = v22_object(source, source)
@@ -27314,7 +27320,42 @@ def python_open_read_violation(tree, parents):
 def python_unreviewed_decorator_violation(tree, parents):
     """Keep decorators limited to inert reviewed builtin forms."""
     sys_names = python_assigned_module_names(tree, "sys")
+    namespace_members = {
+        "__globals__", "__builtins__", "f_globals", "f_locals", "f_builtins",
+        "gi_frame", "cr_frame", "ag_frame", "tb_frame", "_getframe", "_current_frames",
+    }
     for candidate in ast.walk(tree):
+        if isinstance(candidate, ast.Attribute) and candidate.attr in namespace_members:
+            return "Python heredoc accesses a mutable execution namespace handle"
+        if isinstance(candidate, ast.Attribute) and candidate.attr in {"__getattribute__", "__getattr__"}:
+            if any(isinstance(source, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
+                for source in python_value_provenance(candidate.value, tree, parents)):
+                return "Python heredoc reflects a callable execution namespace"
+        if isinstance(candidate, ast.Call):
+            for reference in python_value_provenance(candidate.func, tree, parents):
+                builtin_getter = isinstance(reference, ast.Name) and reference.id == "getattr"
+                protocol_getter = (isinstance(reference, ast.Attribute)
+                    and reference.attr in {"__getattribute__", "__getattr__"})
+                if not (builtin_getter or protocol_getter):
+                    continue
+                operands = candidate.args[1:2] if builtin_getter else candidate.args[:2]
+                if any(namespace_members & python_static_string_values_from_local_calls(
+                    operand, tree, parents) for operand in operands):
+                    return "Python heredoc reflects a mutable execution namespace handle"
+                lookups = []
+                if len(candidate.args) >= 2:
+                    lookups.append((candidate.args[0], candidate.args[1]))
+                if protocol_getter and candidate.args:
+                    lookups.append((reference.value, candidate.args[0]))
+                for receiver, member in lookups:
+                    if any(isinstance(source, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
+                        for source in python_value_provenance(receiver, tree, parents)) and (
+                        not (isinstance(member, ast.Constant) and isinstance(member.value, str))
+                        or member.value in {"__getattribute__", "__getattr__"}
+                    ):
+                        # Partial string sets are not closed proofs: a discarded
+                        # unknown alternative could select __globals__ instead.
+                        return "Python heredoc has unresolved callable namespace reflection"
         if isinstance(candidate, ast.ImportFrom) and candidate.module == "sys" and any(
             alias.name in {"modules", "_getframe", "_current_frames", "*"} for alias in candidate.names
         ):

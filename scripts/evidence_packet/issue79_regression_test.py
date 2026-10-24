@@ -9372,6 +9372,46 @@ def synthetic_read(_fd, _size):
             'builtins.len = lambda value: os.environ\nfunctions = {"f": len}\n'
             'print(functions["f"]("safe"))\n'))
 
+    def test_pr103_v23_conditional_key_requires_definite_overwrite(self) -> None:
+        for initial, later, key, safe in (
+            ('os.environ', '"safe"', '"x" if flag else "other"', False),
+            ('"safe"', 'os.environ', '"x" if flag else "other"', False),
+            ('"safe"', '"safe"', '"x" if flag else "other"', True),
+            ('os.environ', '"safe"', '"x" if flag else "x"', True),
+            ('os.environ', '"safe"', '"other"', False),
+            ('os.environ', '"safe"', 'unknown', False),
+        ):
+            for selected in ('values', 'dict(values)', 'dict(**values)', 'dict(dict(values))'):
+                with self.subTest(initial=initial, later=later, key=key, selected=selected):
+                    body = ('import os\nflag = False\nvalues = {"x": ' + initial
+                        + ', (' + key + '): ' + later + '}\nprint(' + selected + '["x"])\n')
+                    self.assertEqual(self.inspect(body) is None, safe)
+
+    def test_pr103_v23_function_namespace_handles_are_not_mapping_aliases(self) -> None:
+        for setup, access in (
+            ('', 'f.__globals__'),
+            ('', 'getattr(f, "__globals__")'),
+            ('', 'getattr(f, "__" + "globals__")'),
+            ('lookup = getattr\n', 'lookup(f, "__globals__")'),
+            ('member = "__globals__"\n', 'getattr(f, member)'),
+            ('def member():\n    return "__globals__"\n', 'getattr(f, member())'),
+            ('def lookup(fn, reader=getattr):\n    return reader(fn, "__globals__")\n', 'lookup(f)'),
+            ('functions = {"f": f}\n', 'getattr(functions["f"], "__globals__")'),
+            ('member = unknown\n', 'getattr(f, member)'),
+            ('member = "safe" if flag else unknown\n', 'getattr(f, member)'),
+            ('lookup = f.__getattribute__\n', 'lookup("__globals__")'),
+            ('', 'object.__getattribute__(f, "__globals__")'),
+            ('member = unknown\n', 'object.__getattribute__(f, member)'),
+            ('member = unknown\n', 'getattr(f, "__getattribute__")(member)'),
+        ):
+            with self.subTest(setup=setup, access=access):
+                self.assertIsNotNone(self.inspect('import os\nm = {"x": "safe"}\n'
+                    'def f():\n    pass\n' + setup + 'namespace = ' + access
+                    + '\nnamespace["m"]["x"] = {"value": os.environ}\nprint(dict(m)["x"])\n'))
+        self.assertIsNone(self.inspect('import ast\nnode = ast.parse("x")\n'
+            'member = "body"\nvalue = getattr(node, member, None)\n'))
+        self.assertIsNone(self.inspect('def f():\n    pass\nvalue = getattr(f, "__name__")\n'))
+
     def test_pr103_v22_dynamic_lookup_complete_key_domain(self) -> None:
         for effect, safe in (
             ('', True), ('defaults["OTHER"] = "safe"\n', True),
