@@ -22577,7 +22577,8 @@ def python_sensitive_read_violation(tree, parents):
             v22_owner = python_enclosing_scope(v22_entry, parents)
             if isinstance(v22_entry, (ast.Global, ast.Nonlocal)):
                 for v22_name in v22_entry.names:
-                    v22_declarations.setdefault((v22_owner, v22_name), set()).add(type(v22_entry))
+                    v22_declarations.setdefault((v22_owner, v22_name), set()).add(
+                        "global" if isinstance(v22_entry, ast.Global) else "nonlocal")
             if isinstance(v22_entry, ast.Name) and isinstance(v22_entry.ctx, ast.Store):
                 v22_local_names.setdefault(v22_owner, set()).add(v22_entry.id)
             elif isinstance(v22_entry, ast.arg):
@@ -22678,13 +22679,13 @@ def python_sensitive_read_violation(tree, parents):
             # invariants deliberately use their separate all-writer rule.
             scope = v22_scope if scope is None else scope
             own = v22_declarations.get((scope, name), ())
-            owner = tree if ast.Global in own else v22_nonlocal_owner(scope, name) if ast.Nonlocal in own else scope
+            owner = tree if "global" in own else v22_nonlocal_owner(scope, name) if "nonlocal" in own else scope
             for (writer, declared_name), declarations in v22_declarations.items():
                 if declared_name != name:
                     continue
-                if ast.Global in declarations and owner is tree:
+                if "global" in declarations and owner is tree:
                     return True
-                if ast.Nonlocal in declarations:
+                if "nonlocal" in declarations:
                     target = v22_nonlocal_owner(writer, name)
                     if target is None or target is owner:
                         return True
@@ -22705,7 +22706,7 @@ def python_sensitive_read_violation(tree, parents):
             if token is None:
                 return "UNKNOWN"
             try:
-                if isinstance(node, ast.Constant) and type(node.value) in (str, bytes, int, float, bool, type(None)):
+                if isinstance(node, ast.Constant) and (node.value is None or isinstance(node.value, (str, bytes, int, float, bool))):
                     return "SAFE"
                 if isinstance(node, ast.Name):
                     if v22_declared_value_writer(node.id):
@@ -22798,7 +22799,7 @@ def python_sensitive_read_violation(tree, parents):
             if token is None:
                 return None
             try:
-                if isinstance(node, ast.Constant) and type(node.value) is str:
+                if isinstance(node, ast.Constant) and isinstance(node.value, str):
                     return {node.value}
                 if isinstance(node, ast.Name):
                     point = v22_reference_point(node, point)
@@ -23012,7 +23013,7 @@ def python_sensitive_read_violation(tree, parents):
                 return False
             try:
                 if isinstance(node, ast.Constant):
-                    return not sequence and type(node.value) in (str, bytes)
+                    return not sequence and isinstance(node.value, (str, bytes))
                 if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
                     return sequence and all(v22_string_fact(item, point) for item in node.elts)
                 if (isinstance(node, ast.Attribute) and node.attr == "argv" and sequence
@@ -23347,7 +23348,7 @@ def python_sensitive_read_violation(tree, parents):
             if token is None:
                 return None
             try:
-                if isinstance(node, ast.Constant) and type(node.value) is str:
+                if isinstance(node, ast.Constant) and isinstance(node.value, str):
                     return {node.value}
                 if isinstance(node, ast.IfExp):
                     left, right = v22_field_domain(node.body, point), v22_field_domain(node.orelse, point)
@@ -23460,7 +23461,7 @@ def python_sensitive_read_violation(tree, parents):
 
         def v22_unrelated_parameter_reference(reference, function):
             for scope in python_lexical_scope_chain(python_enclosing_scope(reference, parents), parents):
-                if ast.Global in v22_declarations.get((scope, function.name), ()):
+                if "global" in v22_declarations.get((scope, function.name), ()):
                     return False
                 if not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
                     continue
@@ -23758,13 +23759,13 @@ def python_sensitive_read_violation(tree, parents):
                 if isinstance(holder, ast.Call) and entry in holder.args and v22_environment_forward(holder, aliases, frames):
                     continue
                 if (isinstance(holder, ast.Subscript) and holder.value is entry and isinstance(holder.ctx, ast.Load)
-                    and isinstance(holder.slice, ast.Constant) and type(holder.slice.value) in (str, bytes)):
+                    and isinstance(holder.slice, ast.Constant) and isinstance(holder.slice.value, (str, bytes))):
                     continue
                 if isinstance(holder, ast.Attribute) and holder.value is entry and holder.attr == "get":
                     use = parents.get(holder)
                     if (isinstance(use, ast.Call) and use.func is holder and 1 <= len(use.args) <= 2
                         and not use.keywords and all(isinstance(arg, ast.Constant)
-                            and type(arg.value) in (str, bytes, int, float, bool, type(None)) for arg in use.args)):
+                            and (arg.value is None or isinstance(arg.value, (str, bytes, int, float, bool))) for arg in use.args)):
                         continue
                 return False
             v22_environment_flow_cache[cache_key] = True
@@ -23778,7 +23779,7 @@ def python_sensitive_read_violation(tree, parents):
                 or not isinstance(binding, ast.Assign) or binding.value is not literal
                 or not all(isinstance(target, ast.Name) for target in binding.targets)
                 or not v22_definite(binding, scope)
-                or not all(isinstance(part, ast.Constant) and type(part.value) in (str, bytes)
+                or not all(isinstance(part, ast.Constant) and isinstance(part.value, (str, bytes))
                     for part in list(literal.keys) + list(literal.values))
                 or not v22_primitive_baseline()):
                 return False
@@ -23817,7 +23818,7 @@ def python_sensitive_read_violation(tree, parents):
                         use = parents.get(holder)
                         if (holder.attr != "pop" or not isinstance(use, ast.Call) or not use.args
                             or use.keywords or not isinstance(use.args[0], ast.Constant)
-                            or type(use.args[0].value) is not str or use.args[0].value == "env"
+                            or not isinstance(use.args[0].value, str) or use.args[0].value == "env"
                             or not all(v22_data_fact(arg, use, "scalar") for arg in use.args)):
                             return None
                         v22_pop_container = parents.get(use)
@@ -23825,7 +23826,7 @@ def python_sensitive_read_violation(tree, parents):
                             state.pop(use.args[0].value, None)
                     elif isinstance(holder, ast.Subscript) and holder.value is reference and isinstance(holder.ctx, ast.Store):
                         store = parents.get(holder)
-                        if (not isinstance(holder.slice, ast.Constant) or type(holder.slice.value) is not str
+                        if (not isinstance(holder.slice, ast.Constant) or not isinstance(holder.slice.value, str)
                             or holder.slice.value == "env" or not isinstance(store, ast.Assign)):
                             return None
                         key = holder.slice.value
@@ -24208,7 +24209,7 @@ def python_sensitive_read_violation(tree, parents):
             try:
                 if isinstance(node, ast.Dict):
                     return node if node.keys and all(isinstance(key, ast.Constant)
-                        and type(key.value) is str for key in node.keys) else None
+                        and isinstance(key.value, str) for key in node.keys) else None
                 if isinstance(node, ast.Name):
                     scope = python_enclosing_scope(node, parents)
                     if v22_declared_value_writer(node.id, scope):
@@ -24386,11 +24387,11 @@ def python_sensitive_read_violation(tree, parents):
                 if isinstance(part, ast.Name):
                     return part.id == reference.id and isinstance(part.ctx, ast.Load)
                 if isinstance(part, ast.Constant):
-                    return type(part.value) in (str, bytes, int, float, bool, type(None))
+                    return part.value is None or isinstance(part.value, (str, bytes, int, float, bool))
                 if isinstance(part, ast.Subscript):
                     return (isinstance(part.ctx, ast.Load) and isinstance(part.value, ast.Name)
                         and part.value.id == reference.id and isinstance(part.slice, ast.Constant)
-                        and type(part.slice.value) is int)
+                        and isinstance(part.slice.value, int) and not isinstance(part.slice.value, bool))
                 if isinstance(part, ast.UnaryOp) and isinstance(part.op, ast.Not):
                     return pure(part.operand)
                 if isinstance(part, ast.BoolOp):
@@ -24413,7 +24414,7 @@ def python_sensitive_read_violation(tree, parents):
 
             def index(part):
                 if isinstance(part, ast.Constant):
-                    return type(part.value) is int or part.value is None
+                    return (isinstance(part.value, int) and not isinstance(part.value, bool)) or part.value is None
                 if isinstance(part, ast.Name):
                     return part.id != reference.id and v22_data_fact(part, part, "scalar")
                 if isinstance(part, ast.BinOp) and isinstance(part.op, (ast.Add, ast.Sub)):
@@ -24471,7 +24472,7 @@ def python_sensitive_read_violation(tree, parents):
                 or not isinstance(call.func, ast.Attribute) or call.func.attr != "pop"
                 or not isinstance(call.func.value, ast.Name) or call.func.value.id != scope.args.kwarg.arg
                 or call.keywords or not 1 <= len(call.args) <= 2
-                or not isinstance(call.args[0], ast.Constant) or type(call.args[0].value) is not str):
+                or not isinstance(call.args[0], ast.Constant) or not isinstance(call.args[0].value, str)):
                 return False
             frames = v22_actual_frames(scope)
             if not frames:
@@ -24502,7 +24503,7 @@ def python_sensitive_read_violation(tree, parents):
                         use = parents.get(holder)
                         if (holder.attr != "pop" or not isinstance(use, ast.Call) or use.keywords
                             or not 1 <= len(use.args) <= 2 or not isinstance(use.args[0], ast.Constant)
-                            or type(use.args[0].value) is not str
+                            or not isinstance(use.args[0].value, str)
                             or not all(v22_data_fact(argument, argument, "scalar") for argument in use.args)):
                             return False
                         if use.args[0].value == key:
@@ -24513,7 +24514,7 @@ def python_sensitive_read_violation(tree, parents):
                     elif isinstance(holder, ast.Subscript) and holder.value is reference and isinstance(holder.ctx, ast.Store):
                         store = parents.get(holder)
                         if (not isinstance(store, ast.Assign) or not isinstance(holder.slice, ast.Constant)
-                            or type(holder.slice.value) is not str
+                            or not isinstance(holder.slice.value, str)
                             or not (v22_data_fact(store.value, store.value, "scalar")
                                 or holder.slice.value != key and v22_stream_option(store.value, store.value))):
                             return False
@@ -24642,9 +24643,9 @@ def python_sensitive_read_violation(tree, parents):
                     return True
                 if isinstance(node, ast.Constant):
                     if kind == "buffer":
-                        return projection is None and (type(node.value) is bytes or node.value is None)
+                        return projection is None and (isinstance(node.value, bytes) or node.value is None)
                     return projection is None and (kind in {"scalar", "path"}
-                        and type(node.value) in (str, bytes, int, float, bool, type(None)))
+                        and (node.value is None or isinstance(node.value, (str, bytes, int, float, bool))))
                 if isinstance(node, (ast.Tuple, ast.List)):
                     if projection is not None:
                         return (-len(node.elts) <= projection < len(node.elts)
@@ -24664,7 +24665,7 @@ def python_sensitive_read_violation(tree, parents):
                     # TYPE only: a formatted credential remains a sensitive
                     # VALUE. No user object's formatting hook is certified.
                     return kind == "scalar" and projection is None and all(
-                        isinstance(part, ast.Constant) and type(part.value) is str
+                        isinstance(part, ast.Constant) and isinstance(part.value, str)
                         or isinstance(part, ast.FormattedValue) and part.conversion in {-1, 97, 114, 115}
                             and (v22_data_fact(part.value, point, "scalar") or v22_data_fact(part.value, point, "path"))
                             and (part.format_spec is None or v22_data_fact(part.format_spec, point, "scalar"))
@@ -24825,7 +24826,7 @@ def python_sensitive_read_violation(tree, parents):
                                     # do not depend on a later invocation binding.
                                     default = defaults.get(node.id)
                                     if (not isinstance(default, ast.Constant)
-                                        or type(default.value) not in (str, bytes, int, float, bool, type(None))):
+                                        or not (default.value is None or isinstance(default.value, (str, bytes, int, float, bool)))):
                                         return False
                                     sources.append((default, default))
                             return bool(sources) and len(sources) <= 256 and all(
@@ -25144,7 +25145,7 @@ def python_sensitive_read_violation(tree, parents):
                     use = parents.get(holder)
                     if (holder.attr != "pop" or not isinstance(use, ast.Call) or not use.args
                         or use.keywords or not isinstance(use.args[0], ast.Constant)
-                        or type(use.args[0].value) is not str or use.args[0].value == "env"):
+                        or not isinstance(use.args[0].value, str) or use.args[0].value == "env"):
                         return False
                     if not all(v22_data_fact(arg, use, "scalar") for arg in use.args):
                         return False
@@ -25157,7 +25158,7 @@ def python_sensitive_read_violation(tree, parents):
                     continue
                 if isinstance(holder, ast.Subscript) and holder.value is entry and isinstance(holder.ctx, ast.Store):
                     store = parents.get(holder)
-                    if (not isinstance(holder.slice, ast.Constant) or type(holder.slice.value) is not str
+                    if (not isinstance(holder.slice, ast.Constant) or not isinstance(holder.slice.value, str)
                         or holder.slice.value == "env" or not isinstance(store, (ast.Assign, ast.AnnAssign))):
                         return False
                     value = store.value
@@ -27325,6 +27326,45 @@ def python_unreviewed_decorator_violation(tree, parents):
         "gi_frame", "cr_frame", "ag_frame", "tb_frame", "_getframe", "_current_frames",
     }
 
+    def namespace_reference_in_class_suite(reference):
+        child = reference
+        while child in parents:
+            owner = parents[child]
+            if (isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef)) and child in owner.body
+                or isinstance(owner, ast.Lambda) and child is owner.body):
+                return False
+            if isinstance(owner, ast.ClassDef) and child in owner.body:
+                return True
+            child = owner
+        return False
+
+    def namespace_reference_scope_chain(reference):
+        """Definition headers do not execute in the new function's scope."""
+        for scope in python_sensitive_alias_scope_chain(reference, parents):
+            child = reference
+            while child in parents and parents[child] is not scope:
+                child = parents[child]
+            if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)) and (
+                child is scope.args or child is getattr(scope, "returns", None)
+                or child in getattr(scope, "decorator_list", ())
+                or child in getattr(scope, "type_params", ())
+            ):
+                continue
+            if isinstance(scope, ast.ClassDef) and child not in scope.body:
+                continue
+            yield scope
+
+    header_rebindings = set()
+    for binding in ast.walk(tree):
+        if not isinstance(binding, ast.NamedExpr) or not isinstance(binding.target, ast.Name):
+            continue
+        actual_owner = next((scope for scope in namespace_reference_scope_chain(binding.target)
+            if not isinstance(scope, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp))), None)
+        if actual_owner is not python_sensitive_alias_binding_scope(binding.target, parents):
+            # The shared inventory intentionally has no header-walrus proof.
+            # Do not let its missing outer binder expose an earlier literal.
+            header_rebindings.add((id(actual_owner), binding.target.id))
+
     def closed_member_domain(expression, seen=None, budget=None):
         """A complete bounded string domain, never a known-only approximation."""
         seen = set() if seen is None else set(seen)
@@ -27333,7 +27373,7 @@ def python_unreviewed_decorator_violation(tree, parents):
         if expression is None or id(expression) in seen or len(seen) >= 64 or budget[0] > 2048:
             return None
         seen.add(id(expression))
-        if isinstance(expression, ast.Constant) and type(expression.value) is str:
+        if isinstance(expression, ast.Constant) and isinstance(expression.value, str):
             return {expression.value} if len(expression.value) <= 256 else None
         if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Add):
             left = closed_member_domain(expression.left, seen, budget)
@@ -27346,16 +27386,19 @@ def python_unreviewed_decorator_violation(tree, parents):
             parts = [expression.body, expression.orelse]
         elif (isinstance(expression, ast.Call) and isinstance(expression.func, ast.Name)
             and not expression.args and not expression.keywords):
+            if namespace_reference_in_class_suite(expression):
+                return None
             callee = expression.func
             python_sensitive_imported_function_alias(callee, tree, parents)
             inventory = getattr(tree, "_issue79_sensitive_imported_alias_bindings", {})
-            for scope in python_sensitive_alias_scope_chain(callee, parents):
+            for scope in namespace_reference_scope_chain(callee):
                 bindings = inventory.get((id(scope), callee.id), ())
                 if bindings:
                     break
             else:
                 return None
-            if len(bindings) != 1 or bindings[0][0] != "unknown":
+            if (isinstance(scope, ast.ClassDef) or (id(scope), callee.id) in header_rebindings
+                or len(bindings) != 1 or bindings[0][0] != "unknown"):
                 return None
             function = bindings[0][1]
             if (not isinstance(function, ast.FunctionDef) or function.decorator_list
@@ -27366,8 +27409,10 @@ def python_unreviewed_decorator_violation(tree, parents):
             for use in ast.walk(tree):
                 if not isinstance(use, ast.Name) or not isinstance(use.ctx, ast.Load) or use.id != callee.id:
                     continue
+                if namespace_reference_in_class_suite(use):
+                    return None  # Class LOAD_NAME can export an outer helper before binding a namesake.
                 binding_scope = next((candidate_scope
-                    for candidate_scope in python_sensitive_alias_scope_chain(use, parents)
+                    for candidate_scope in namespace_reference_scope_chain(use)
                     if inventory.get((id(candidate_scope), use.id))), None)
                 if binding_scope is scope:
                     holder = parents.get(use)
@@ -27375,13 +27420,17 @@ def python_unreviewed_decorator_violation(tree, parents):
                         return None  # No metadata mutation, callback/alias escape or default capture.
             parts = [function.body[0].value]
         elif isinstance(expression, ast.Name):
+            if namespace_reference_in_class_suite(expression):
+                return None
             python_sensitive_imported_function_alias(expression, tree, parents)
             inventory = getattr(tree, "_issue79_sensitive_imported_alias_bindings", {})
             parts = []
-            for scope in python_sensitive_alias_scope_chain(expression, parents):
+            for scope in namespace_reference_scope_chain(expression):
                 bindings = inventory.get((id(scope), expression.id), ())
                 if not bindings:
                     continue
+                if (id(scope), expression.id) in header_rebindings:
+                    return None
                 for kind, binding in bindings:
                     if kind == "assignment":
                         parts.append(binding.value)
@@ -27392,6 +27441,9 @@ def python_unreviewed_decorator_violation(tree, parents):
                             or function.type_params or function.args.vararg or function.args.kwarg):
                             return None
                         function_scope = python_sensitive_alias_scope(parents.get(function), parents)
+                        if (isinstance(function_scope, ast.ClassDef)
+                            or (id(function_scope), function.name) in header_rebindings):
+                            return None  # Class attributes expose callers without a Name reference.
                         owners = inventory.get((id(function_scope), function.name), ())
                         if len(owners) != 1 or owners[0] != ("unknown", function):
                             return None
@@ -27403,8 +27455,10 @@ def python_unreviewed_decorator_violation(tree, parents):
                             if (not isinstance(use, ast.Name) or not isinstance(use.ctx, ast.Load)
                                 or use.id != function.name):
                                 continue
+                            if namespace_reference_in_class_suite(use):
+                                return None
                             binding_scope = next((candidate_scope
-                                for candidate_scope in python_sensitive_alias_scope_chain(use, parents)
+                                for candidate_scope in namespace_reference_scope_chain(use)
                                 if inventory.get((id(candidate_scope), use.id))), None)
                             if binding_scope is not function_scope:
                                 continue
@@ -27448,7 +27502,7 @@ def python_unreviewed_decorator_violation(tree, parents):
                                     or use.id != iterator.id or use is iterator):
                                     continue
                                 binding_scope = next((candidate_scope
-                                    for candidate_scope in python_sensitive_alias_scope_chain(use, parents)
+                                    for candidate_scope in namespace_reference_scope_chain(use)
                                     if inventory.get((id(candidate_scope), use.id))), None)
                                 if binding_scope is not scope:
                                     continue
@@ -27509,7 +27563,7 @@ def python_unreviewed_decorator_violation(tree, parents):
                 else:
                     member = candidate.args[0] if candidate.args else None
                 domain = closed_member_domain(member)
-                if domain is None or namespace_members & domain:
+                if domain is None or (namespace_members | {"__getattribute__", "__getattr__"}) & domain:
                     # Receiver provenance can disappear through opaque or
                     # constructor wrappers. Unknown must not imply noncallable.
                     return "Python heredoc has unresolved execution namespace reflection"

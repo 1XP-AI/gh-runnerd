@@ -9495,6 +9495,42 @@ def synthetic_read(_fd, _size):
             'namespace = read(tuple([f])[0], "".join(["__", "globals__"]))\n'
             'namespace["m"]["x"] = {"value": os.environ}\nprint(dict(m)["x"])\n'))
 
+    def test_pr103_v27_class_owned_member_helpers_refuse_unknown_callers(self) -> None:
+        for output in ('print(m)\n', 'print(dict(m)["x"])\n'):
+            with self.subTest(output=output):
+                self.assertIsNotNone(self.inspect('import os\nm = {"x": "safe"}\n'
+                    'def f():\n    pass\nclass C:\n'
+                    '    def read(receiver, member="body"):\n        return getattr(receiver, member, None)\n'
+                    '    read(None)\nnamespace = C.read(tuple([f])[0], "".join(["__", "globals__"]))\n'
+                    'namespace["m"]["x"] = {"value": os.environ}\n' + output))
+
+    def test_pr103_v27_definition_time_member_helper_ownership(self) -> None:
+        for mutation in (
+            'def mutate(name=name):\n    name.__code__ = evil.__code__\nmutate()\n',
+            'def capture(ignored=(name := evil)):\n    pass\n',
+            'class Holder:\n    name = name\nHolder.name.__code__ = evil.__code__\n',
+        ):
+            for output in ('print(m)\n', 'print(dict(m)["x"])\n'):
+                with self.subTest(mutation=mutation, output=output):
+                    self.assertIsNotNone(self.inspect('import os\nm = {"x": "safe"}\n'
+                        'def f():\n    pass\ndef name():\n    return "body"\n'
+                        'def evil():\n    return "".join(["__", "globals__"])\n'
+                        + mutation + 'namespace = getattr(tuple([f])[0], name())\n'
+                        'namespace["m"]["x"] = {"value": os.environ}\n' + output))
+
+    def test_pr103_v27_reflected_accessor_handles_cannot_lose_identity(self) -> None:
+        for lookup in ('getattr(tuple([f])[0], "__getattribute__")',
+                       'object.__getattribute__(tuple([f])[0], "__getattribute__")'):
+            with self.subTest(lookup=lookup):
+                self.assertIsNotNone(self.inspect('import os\nm = {"x": "safe"}\n'
+                    'def f():\n    pass\nlookup = ' + lookup
+                    + '\nnamespace = lookup("".join(["__", "globals__"]))\n'
+                    'namespace["m"]["x"] = {"value": os.environ}\nprint(m)\n'))
+
+    def test_pr103_v26_scanner_runtime_type_admission(self) -> None:
+        tree = ast.parse(_scanner_module_source(PACKET_TEXT))
+        self.assertIsNone(self.scanner['python_subprocess_os_reexport_violation'](tree))
+
     def test_pr103_v22_dynamic_lookup_complete_key_domain(self) -> None:
         for effect, safe in (
             ('', True), ('defaults["OTHER"] = "safe"\n', True),
