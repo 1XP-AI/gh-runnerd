@@ -27324,7 +27324,102 @@ def python_unreviewed_decorator_violation(tree, parents):
         "__globals__", "__builtins__", "f_globals", "f_locals", "f_builtins",
         "gi_frame", "cr_frame", "ag_frame", "tb_frame", "_getframe", "_current_frames",
     }
+
+    def closed_member_domain(expression, seen=None, budget=None):
+        """A complete bounded string domain, never a known-only approximation."""
+        seen = set() if seen is None else set(seen)
+        budget = [0] if budget is None else budget
+        budget[0] += 1
+        if expression is None or id(expression) in seen or len(seen) >= 64 or budget[0] > 2048:
+            return None
+        seen.add(id(expression))
+        if isinstance(expression, ast.Constant) and type(expression.value) is str:
+            return {expression.value} if len(expression.value) <= 256 else None
+        if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Add):
+            left = closed_member_domain(expression.left, seen, budget)
+            right = closed_member_domain(expression.right, seen, budget)
+            if left is None or right is None or len(left) * len(right) > 256:
+                return None
+            result = {a + b for a in left for b in right}
+            return result if all(len(value) <= 256 for value in result) else None
+        if isinstance(expression, ast.IfExp):
+            parts = [expression.body, expression.orelse]
+        elif isinstance(expression, ast.Name):
+            python_sensitive_imported_function_alias(expression, tree, parents)
+            inventory = getattr(tree, "_issue79_sensitive_imported_alias_bindings", {})
+            parts = []
+            for scope in python_sensitive_alias_scope_chain(expression, parents):
+                bindings = inventory.get((id(scope), expression.id), ())
+                if not bindings:
+                    continue
+                for kind, binding in bindings:
+                    if kind == "assignment":
+                        parts.append(binding.value)
+                    elif kind == "unknown" and isinstance(binding, ast.Name):
+                        owner = parents.get(binding)
+                        if (not isinstance(owner, (ast.For, ast.comprehension))
+                            or owner.target is not binding):
+                            return None
+                        if isinstance(owner.iter, ast.Tuple):
+                            parts.extend(owner.iter.elts)
+                        elif isinstance(owner, ast.For) and isinstance(owner.iter, ast.Name):
+                            iterator = owner.iter
+                            providers = inventory.get((id(scope), iterator.id), ())
+                            if (len(providers) != 1 or providers[0][0] != "assignment"
+                                or not isinstance(providers[0][1].value, ast.Dict)):
+                                return None
+                            allocation = providers[0][1].value
+                            ancestor = parents.get(owner)
+                            while ancestor is not None and ancestor is not scope:
+                                if isinstance(ancestor, (ast.For, ast.AsyncFor, ast.While, ast.comprehension)):
+                                    return None
+                                ancestor = parents.get(ancestor)
+                            for use in ast.walk(tree):
+                                if (not isinstance(use, ast.Name) or not isinstance(use.ctx, ast.Load)
+                                    or use.id != iterator.id or use is iterator):
+                                    continue
+                                binding_scope = next((candidate_scope
+                                    for candidate_scope in python_sensitive_alias_scope_chain(use, parents)
+                                    if inventory.get((id(candidate_scope), use.id))), None)
+                                if binding_scope is not scope:
+                                    continue
+                                if (python_sensitive_alias_scope(use, parents) is not scope
+                                    or use.lineno <= owner.end_lineno):
+                                    return None  # Prior escape/store or closure can change keys.
+                            parts.extend(allocation.keys)
+                        else:
+                            return None
+                    else:
+                        return None
+                break
+        else:
+            return None
+        if not parts:
+            return None
+        result = set()
+        for part in parts:
+            domain = closed_member_domain(part, seen, budget)
+            if domain is None:
+                return None
+            result.update(domain)
+            if len(result) > 256:
+                return None
+        return result
+
     for candidate in ast.walk(tree):
+        if isinstance(candidate, (ast.Name, ast.Attribute)) and isinstance(candidate.ctx, ast.Load):
+            references = (python_value_provenance(candidate, tree, parents)
+                if isinstance(candidate, ast.Name) else [candidate])
+            if any(isinstance(reference, ast.Name) and reference.id == "getattr"
+                or isinstance(reference, ast.Attribute) and reference.attr in {"__getattribute__", "__getattr__"}
+                for reference in references):
+                holder = parents.get(candidate)
+                assignment = isinstance(holder, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) and holder.value is candidate
+                targets = (holder.targets if isinstance(holder, ast.Assign) else [holder.target]) if assignment else []
+                if not (isinstance(holder, ast.Call) and holder.func is candidate
+                    or assignment and all(isinstance(target, ast.Name) for target in targets)
+                    or isinstance(holder, ast.arguments) and candidate in holder.defaults + holder.kw_defaults):
+                    return "Python reflective accessor escapes a reviewed direct or named use"
         if isinstance(candidate, ast.Attribute) and candidate.attr in namespace_members:
             return "Python heredoc accesses a mutable execution namespace handle"
         if isinstance(candidate, ast.Attribute) and candidate.attr in {"__getattribute__", "__getattr__"}:
@@ -27338,6 +27433,17 @@ def python_unreviewed_decorator_violation(tree, parents):
                     and reference.attr in {"__getattribute__", "__getattr__"})
                 if not (builtin_getter or protocol_getter):
                     continue
+                if builtin_getter:
+                    member = candidate.args[1] if len(candidate.args) >= 2 else None
+                elif isinstance(reference.value, ast.Name) and reference.value.id in {"object", "type"}:
+                    member = candidate.args[1] if len(candidate.args) >= 2 else None
+                else:
+                    member = candidate.args[0] if candidate.args else None
+                domain = closed_member_domain(member)
+                if domain is None or namespace_members & domain:
+                    # Receiver provenance can disappear through opaque or
+                    # constructor wrappers. Unknown must not imply noncallable.
+                    return "Python heredoc has unresolved execution namespace reflection"
                 operands = candidate.args[1:2] if builtin_getter else candidate.args[:2]
                 if any(namespace_members & python_static_string_values_from_local_calls(
                     operand, tree, parents) for operand in operands):

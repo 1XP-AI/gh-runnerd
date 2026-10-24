@@ -9412,6 +9412,45 @@ def synthetic_read(_fd, _size):
             'member = "body"\nvalue = getattr(node, member, None)\n'))
         self.assertIsNone(self.inspect('def f():\n    pass\nvalue = getattr(f, "__name__")\n'))
 
+    def test_pr103_v24_wrapped_namespace_reflection_requires_closed_members(self) -> None:
+        for setup, lookup in (
+            ('', 'getattr(tuple([f])[0], "".join(["__", "globals__"]))'),
+            ('member = "safe" if flag else unknown\n', 'getattr(tuple([f])[0], member)'),
+            ('member = unknown\n', 'getattr(opaque(), member)'),
+            ('lookup = tuple([getattr])[0]\n', 'lookup(f, "__globals__")'),
+            ('lookup = getattr\nread = [lookup][0]\n', 'read(f, "__globals__")'),
+            ('lookup = getattr(getattr, "__call__")\n', 'lookup(f, "__globals__")'),
+            ('lookup = tuple([tuple([f])[0].__getattribute__])[0]\n',
+                'lookup("".join(["__", "globals__"]))'),
+        ):
+            with self.subTest(setup=setup, lookup=lookup):
+                self.assertIsNotNone(self.inspect('import os\nm = {"x": "safe"}\n'
+                    'def f():\n    pass\n' + setup + 'namespace = ' + lookup
+                    + '\nnamespace["m"]["x"] = {"value": os.environ}\nprint(dict(m)["x"])\n'))
+        for setup, member in (
+            ('field = "body"\n', 'field'),
+            ('field = "body" if flag else "orelse"\n', 'field'),
+            ('field = "bo" + "dy"\n', 'field'),
+        ):
+            with self.subTest(safe_member=member, setup=setup):
+                self.assertIsNone(self.inspect('import ast\nnode = ast.parse("x")\n'
+                    + setup + 'value = getattr(node, ' + member + ', None)\n'))
+        self.assertIsNone(self.inspect('import ast\nnode = ast.parse("x")\n'
+            'for field in ("body", "orelse", "finalbody"):\n    value = getattr(node, field, None)\n'))
+        for effect, body, safe in (
+            ('', '    value = getattr(node, field, None)\n', True),
+            ('fields[unknown] = None\n', '    value = getattr(node, field, None)\n', False),
+            ('alias = fields\n', '    value = getattr(node, field, None)\n', False),
+            ('opaque(fields)\n', '    value = getattr(node, field, None)\n', False),
+            ('def mutate():\n    fields[unknown] = None\nmutate()\n',
+                '    value = getattr(node, field, None)\n', False),
+            ('', '    value = getattr(node, field, None)\n    fields[unknown] = None\n', False),
+        ):
+            with self.subTest(mapping_effect=effect, body=body):
+                self.assertEqual(self.inspect('import ast\nnode = ast.parse("x")\n'
+                    'fields = {"body": None, "orelse": None}\n' + effect
+                    + 'for field in fields:\n' + body) is None, safe)
+
     def test_pr103_v22_dynamic_lookup_complete_key_domain(self) -> None:
         for effect, safe in (
             ('', True), ('defaults["OTHER"] = "safe"\n', True),
