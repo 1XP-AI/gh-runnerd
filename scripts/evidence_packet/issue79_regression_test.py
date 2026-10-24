@@ -9621,6 +9621,19 @@ def synthetic_read(_fd, _size):
         modules, functions, _unresolved = self.scanner['python_import_bindings'](tree)
         self.assertIsNone(self.scanner['python_class_command_attribute_violation'](tree, modules, functions))
 
+    def test_pr103_v31_all_scanner_conditional_assignments_pass_launcher_gate(self) -> None:
+        source_tree = ast.parse(_scanner_module_source(PACKET_TEXT))
+        assignments = [node for node in ast.walk(source_tree)
+                       if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr))
+                       and isinstance(node.value, ast.IfExp)]
+        self.assertTrue(assignments)
+        # Exercise every actual conditional assignment, not just the first helper
+        # reached by the full scan. This focused projection does not replace the
+        # full compiler/body admission and does not execute any packet statement.
+        tree = ast.Module(body=assignments, type_ignores=[])
+        modules, functions, _unresolved = self.scanner['python_import_bindings'](tree)
+        self.assertIsNone(self.scanner['python_class_command_attribute_violation'](tree, modules, functions))
+
     def test_pr103_v22_dynamic_lookup_complete_key_domain(self) -> None:
         for effect, safe in (
             ('', True), ('defaults["OTHER"] = "safe"\n', True),

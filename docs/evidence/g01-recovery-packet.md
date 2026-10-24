@@ -25064,7 +25064,8 @@ def python_sensitive_read_violation(tree, parents):
                     and python_imported_module_alias_is_stable(node.value.id, "subprocess", tree))
 
         def v22_closed_call(call, allocation, root_point=None, check_baseline=True):
-            root_point = call if root_point is None else root_point
+            if root_point is None:
+                root_point = call
             token = v22_guard("local-effects", call, root_point)
             if token is None:
                 return False
