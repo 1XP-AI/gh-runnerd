@@ -9391,6 +9391,8 @@ def synthetic_read(_fd, _size):
     def test_pr103_v22_actual_frames_ignore_unrelated_parameters(self) -> None:
         for use, safe in (
             ('def unrelated(command):\n    return command\nunrelated("safe")\n', True),
+            ('def unrelated(command=command):\n    return command\n', False),
+            ('def unrelated(*, command=command):\n    return command\n', False),
             ('alias = command\n', False),
             ('holder = [command]\n', False),
         ):
@@ -9444,6 +9446,82 @@ def synthetic_read(_fd, _size):
                 tree = ast.parse(body)
                 parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
                 self.assertEqual(self.scanner['python_sensitive_read_violation'](tree, parents) is None, safe)
+
+    def test_pr103_v22_buffer_completed_result_boundary(self) -> None:
+        for argv, status, safe in (('["printf", "ok"]', '0', True), ('[m]', '0', False), ('["printf", "ok"]', 'unknown', False)):
+            with self.subTest(completed=(argv, status)):
+                body = ('import os\nimport subprocess\nm = {"x": "safe"}\n'
+                    'def capture(process):\n    stream = getattr(process, "stdout", None)\n'
+                    '    data = bytearray()\n    if stream is not None:\n        data.extend(os.read(stream.fileno(), 64))\n'
+                    '    stdout = bytes(data)\n    return subprocess.CompletedProcess(' + argv + ', ' + status + ', stdout, b"")\n'
+                    'p = subprocess.Popen(["printf", "ok"], env=m, stdout=subprocess.PIPE)\nresult = capture(p)\n'
+                    'subprocess.Popen(["printf", result.stdout], env=m)\n'
+                    'print(dict(m)["x"])\n')
+                tree = ast.parse(body)
+                parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+                self.assertEqual(self.scanner['python_sensitive_read_violation'](tree, parents) is None, safe)
+
+    def test_pr103_v22_completed_result_buffer_fields(self) -> None:
+        for value, safe in (('b"safe"', True), ('"text"', False), ('unknown', False), ('os.environ', False)):
+            with self.subTest(value=value):
+                body = ('import os\nimport subprocess\nm = {"x": "safe"}\n'
+                    'result = subprocess.CompletedProcess([], 0, stdout=' + value + ')\n'
+                    'data = bytearray()\ndata.extend(result.stdout)\n'
+                    'subprocess.Popen(["printf", os.fsdecode(bytes(data))], env=m)\nprint(dict(m)["x"])\n')
+                tree = ast.parse(body)
+                parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+                self.assertEqual(self.scanner['python_sensitive_read_violation'](tree, parents) is None, safe)
+
+    def test_pr103_v22_borrowed_native_buffers(self) -> None:
+        for body, other, safe in (
+            ('    data.clear()\n', '', True),
+            ('    retained.append(data)\n', '', False),
+            ('    return data\n', '', False),
+            ('    def keep(value=data):\n        pass\n', '', False),
+            ('    data.clear()\n', 'consume(unknown)\n', False),
+        ):
+            with self.subTest(borrow=(body, other)):
+                source = ('import os\nimport subprocess\nm = {"x": "safe"}\nretained = []\n'
+                    'def consume(data):\n' + body
+                    + 'def capture(process):\n    stream = getattr(process, "stdout", None)\n'
+                    '    data = bytearray()\n    if stream is not None:\n        data.extend(os.read(stream.fileno(), 64))\n'
+                    '    consume(data)\n    return bytes(data)\n'
+                    'p = subprocess.Popen(["printf", "ok"], env=m, stdout=subprocess.PIPE)\n'
+                    'result = subprocess.CompletedProcess([], 0, stdout=capture(p))\n' + other
+                    + 'subprocess.Popen(["printf", result.stdout], env=m)\nprint(dict(m)["x"])\n')
+                tree = ast.parse(source)
+                parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+                self.assertEqual(self.scanner['python_sensitive_read_violation'](tree, parents) is None, safe)
+
+    def test_pr103_v22_native_buffer_decode_boundary(self) -> None:
+        for encoding, safe in (('"utf-8"', True), ('unknown', False)):
+            with self.subTest(encoding=encoding):
+                body = ('import os\nimport subprocess\nm = {"x": "safe"}\n'
+                    'def capture(process):\n    stream = getattr(process, "stdout", None)\n'
+                    '    data = bytearray()\n    if stream is not None:\n        data.extend(os.read(stream.fileno(), 64))\n'
+                    '    stdout = bytes(data)\n    stdout = stdout.decode(' + encoding + ')\n'
+                    '    return subprocess.CompletedProcess([], 0, stdout, "")\n'
+                    'p = subprocess.Popen(["printf", "ok"], env=m, stdout=subprocess.PIPE)\nresult = capture(p)\n'
+                    'subprocess.Popen(["printf", result.stdout], env=m)\nprint(dict(m)["x"])\n')
+                tree = ast.parse(body)
+                parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+                self.assertEqual(self.scanner['python_sensitive_read_violation'](tree, parents) is None, safe)
+
+    def test_pr103_v22_nonstandard_class_domain_refuses(self) -> None:
+        for definition, value in (
+            ('class K:\n    def __new__(cls):\n        return os.environ\n', 'K()'),
+            ('def replace(cls):\n    return os.environ\n@replace\nclass K:\n    pass\n', 'K'),
+            ('def replace(*args, **kwargs):\n    return os.environ\nclass K(metaclass=replace):\n    pass\n', 'K'),
+            ('class K:\n    pass\nK.__new__ = staticmethod(lambda cls: os.environ)\n', 'K()'),
+            ('class K:\n    pass\nsetattr(K, "__new__", staticmethod(lambda cls: os.environ))\n', 'K()'),
+            ('def factory(cls):\n    return {"HOME": os.environ.get("HOME")}\nclass K:\n    __new__ = factory\n', 'K()'),
+            ('def factory(cls):\n    return {"HOME": os.environ.get("HOME")}\nclass K:\n    for __new__ in [factory]:\n        pass\n', 'K()'),
+            ('import builtins\nclass K:\n    pass\nbuiltins.setattr(K, "__new__", staticmethod(lambda cls: os.environ))\n', 'K()'),
+            ('from builtins import setattr as install\nclass K:\n    pass\ninstall(K, "__new__", staticmethod(lambda cls: os.environ))\n', 'K()'),
+        ):
+            with self.subTest(definition=definition):
+                self.assertIsNotNone(self.inspect('import os\n' + definition
+                    + 'values = {"x": ' + value + '}\nprint(values["x"]["HOME"])\n'))
 
     def test_pr103_v22_update_provider_state_snapshot(self) -> None:
         for mutation, safe in (('', True), ('alias = patches\n', True),

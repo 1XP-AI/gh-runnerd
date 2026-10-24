@@ -22738,7 +22738,7 @@ def python_sensitive_read_violation(tree, parents):
                 definitions = [entry for entry in v22_binder_index.get((v22_scope, node.id), ())
                     if v22_position(entry) < v22_position(point)]
                 return (len(definitions) == 1 and isinstance(definitions[0], ast.ClassDef)
-                    and v22_definite(definitions[0]))
+                    and v22_definite(definitions[0]) and v22_primitive_baseline(class_domain=True))
             finally:
                 v22_active.remove(token)
 
@@ -23154,10 +23154,10 @@ def python_sensitive_read_violation(tree, parents):
                     return False
             return True
 
-        def v22_primitive_baseline(nominal_only=False, encoder_data=False):
+        def v22_primitive_baseline(nominal_only=False, encoder_data=False, class_domain=False):
             # This is the declared trusted-stdlib baseline, plus conservative
             # source closure. Hooks are capabilities even without capture.
-            baseline_key = (nominal_only, encoder_data)
+            baseline_key = (nominal_only, encoder_data, class_domain)
             if baseline_key in v22_baseline_cache:
                 return v22_baseline_cache[baseline_key]
             # In-progress/failed baseline proofs never become positive facts.
@@ -23192,6 +23192,8 @@ def python_sensitive_read_violation(tree, parents):
                 "KeyError", "IndexError", "InterruptedError", "BrokenPipeError", "BaseException", "Exception"}
             callable_names = set(builtin_calls)
             callable_names.update(entry.name for entry in v22_nodes if isinstance(entry, ast.FunctionDef))
+            if class_domain:
+                callable_names.update(entry.name for entry in v22_nodes if isinstance(entry, ast.ClassDef))
             for import_node in v22_nodes:
                 if isinstance(import_node, ast.Import):
                     if encoder_data and any(alias.name.startswith("urllib")
@@ -23251,7 +23253,10 @@ def python_sensitive_read_violation(tree, parents):
                         if not isinstance(entry.value, ast.Name) or entry.value.id not in callable_names:
                             return False
                 if isinstance(entry, ast.ClassDef):
-                    return False
+                    if (not class_domain or entry.decorator_list or entry.keywords or entry.bases
+                        or any(isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)) and member.name == "__new__"
+                            for member in entry.body)):
+                        return False
                 # The primitive boundary supports ordinary declared operations,
                 # not Python's object/descriptor namespace protocol. Reject the
                 # entire special-member family at its first extraction, before
@@ -23461,6 +23466,14 @@ def python_sensitive_read_violation(tree, parents):
                     continue
                 parameters = list(scope.args.posonlyargs) + list(scope.args.args) + list(scope.args.kwonlyargs)
                 parameters += [parameter for parameter in (scope.args.vararg, scope.args.kwarg) if parameter is not None]
+                header_values = list(scope.args.defaults) + [value for value in scope.args.kw_defaults if value is not None]
+                header_values.extend(parameter.annotation for parameter in parameters if parameter.annotation is not None)
+                if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    header_values.extend(scope.decorator_list)
+                    if scope.returns is not None:
+                        header_values.append(scope.returns)
+                if any(reference in set(ast.walk(value)) for value in header_values):
+                    continue  # Defaults/decorators/annotations bind outside this parameter scope.
                 if any(parameter.arg == function.name for parameter in parameters):
                     return True  # A formal's object is not this module-level function.
             return False
@@ -24231,6 +24244,45 @@ def python_sensitive_read_violation(tree, parents):
                 return False
             return True
 
+        def v22_completed_buffer_result(call):
+            if not (isinstance(call.func, ast.Attribute) and call.func.attr == "CompletedProcess"
+                and isinstance(call.func.value, ast.Name)
+                and python_imported_module_alias_is_stable(call.func.value.id, "subprocess", tree)
+                and len(call.args) <= 4 and not any(isinstance(arg, ast.Starred) for arg in call.args)):
+                return False
+            parameters = ("args", "returncode", "stdout", "stderr")
+            fields = dict(zip(parameters, call.args))
+            for keyword in call.keywords:
+                if keyword.arg not in parameters or keyword.arg in fields:
+                    return False
+                fields[keyword.arg] = keyword.value
+            return ("args" in fields and "returncode" in fields
+                and v22_data_fact(fields["args"], fields["args"], "sequence")
+                and v22_data_fact(fields["returncode"], fields["returncode"], "scalar")
+                and all(v22_data_fact(value, value, "buffer") or v22_data_fact(value, value, "scalar")
+                    for name, value in fields.items() if name in {"stdout", "stderr"}))
+
+        def v22_borrowed_buffer_call(call, reference):
+            definition = v22_local_definition(call)
+            if (definition is None or definition.args.vararg is not None or definition.args.kwarg is not None
+                or any(isinstance(arg, ast.Starred) for arg in call.args)
+                or any(keyword.arg is None for keyword in call.keywords)
+                or not v22_actual_frames(definition)):
+                return False
+            positional = list(definition.args.posonlyargs) + list(definition.args.args)
+            if len(call.args) > len(positional):
+                return False
+            subjects = {parameter.arg for parameter, argument in zip(positional, call.args) if argument is reference}
+            if not subjects:
+                return False
+            for use in ast.walk(definition):
+                if not (isinstance(use, ast.Name) and isinstance(use.ctx, ast.Load) and use.id in subjects):
+                    continue
+                if python_enclosing_scope(use, parents) is not definition or not v22_data_fact(use, use, "buffer"):
+                    return False
+            v22_pending_buffer_scopes.add(definition)
+            return True  # Every recipient use is separately checked by D, including nested forwarding.
+
         def v22_buffer_dependencies_closed(scope):
             for reference in v22_nodes:
                 if (not isinstance(reference, ast.Name) or not isinstance(reference.ctx, ast.Load)
@@ -24250,6 +24302,10 @@ def python_sensitive_read_violation(tree, parents):
                     if all(bound is None or v22_native_primitive(bound) for bound in bounds):
                         continue
                 if isinstance(holder, ast.Call) and reference in holder.args:
+                    if v22_completed_buffer_result(holder):
+                        continue  # Native result retains only closed data, not env/process/callback objects.
+                    if v22_borrowed_buffer_call(holder, reference):
+                        continue
                     if (len(holder.args) == 1 and not holder.keywords and python_unshadowed_builtin_reference(
                         holder.func, {"bytes", "memoryview", "len"}, tree, parents)):
                         continue
@@ -24262,6 +24318,9 @@ def python_sensitive_read_violation(tree, parents):
                 if isinstance(holder, ast.Attribute) and holder.value is reference:
                     use = parents.get(holder)
                     if isinstance(use, ast.Call) and use.func is holder and not use.keywords:
+                        if holder.attr == "decode" and len(use.args) <= 2 and all(
+                            v22_data_fact(argument, argument, "scalar") for argument in use.args):
+                            continue  # Native read-only conversion; source codec/hook baseline remains mandatory.
                         if holder.attr == "extend" and len(use.args) == 1 and v22_data_fact(use.args[0], use.args[0], "buffer"):
                             continue
                         if holder.attr == "append" and len(use.args) == 1 and v22_native_primitive(use.args[0]):
@@ -24802,12 +24861,23 @@ def python_sensitive_read_violation(tree, parents):
                         and kind == "scalar" and all(v22_data_fact(part, point, "scalar")
                             for part in (node.left, node.right)))
                 if isinstance(node, ast.Attribute):
+                    if kind == "scalar" and node.attr in {"pid", "returncode"}:
+                        origins = v22_process_origin(node.value, point)
+                        if not origins or not any(constructor is not None for constructor, _frames in origins):
+                            return False
+                        if not v22_primitive_baseline(nominal_only=True):
+                            return False
+                        v22_requires_full_baseline[0] = True
+                        v22_pending_constructors.update((constructor, frames)
+                            for constructor, frames in origins if constructor is not None)
+                        return True  # Nominal native field; C and process-mutation D still must close.
                     if kind == "path" and node.attr == "parent":
                         return v22_data_fact(node.value, point, "path")
                     if kind == "scalar" and node.attr == "name":
                         return v22_data_fact(node.value, point, "temporary") or v22_data_fact(node.value, point, "path")
-                    if kind == "scalar" and node.attr in {"stdout", "stderr"}:
-                        return v22_data_fact(node.value, point, "result:" + node.attr)
+                    if kind in {"scalar", "buffer"} and node.attr in {"stdout", "stderr"}:
+                        prefix = "buffer-result:" if kind == "buffer" else "result:"
+                        return v22_data_fact(node.value, point, prefix + node.attr)
                     return kind == "sequence" and node.attr == "argv" and isinstance(node.value, ast.Name) and (
                         python_imported_module_alias_is_stable(node.value.id, "sys", tree)
                         and v22_string_fact(node, point, True))
@@ -24860,7 +24930,7 @@ def python_sensitive_read_violation(tree, parents):
                                     v22_requires_full_baseline[0] = True
                                     v22_pending_constructors.update((node, context) for context in contexts)
                                     return True
-                                if member == "CompletedProcess" and kind in {"result:stdout", "result:stderr"}:
+                                if member == "CompletedProcess" and kind in {"result:stdout", "result:stderr", "buffer-result:stdout", "buffer-result:stderr"}:
                                     field = kind.split(":", 1)[1]
                                     index = 2 if field == "stdout" else 3
                                     if (len(node.args) > 4 or any(isinstance(argument, ast.Starred) for argument in node.args)
@@ -24868,7 +24938,8 @@ def python_sensitive_read_violation(tree, parents):
                                         return False
                                     supplied = [node.args[index]] if len(node.args) > index else []
                                     supplied.extend(keyword.value for keyword in node.keywords if keyword.arg == field)
-                                    return not supplied or len(supplied) == 1 and v22_data_fact(supplied[0], supplied[0], "scalar")
+                                    output_kind = "buffer" if kind.startswith("buffer-result:") else "scalar"
+                                    return not supplied or len(supplied) == 1 and v22_data_fact(supplied[0], supplied[0], output_kind)
                                 return False
                             if python_imported_module_alias_is_stable(receiver.id, "shutil", tree):
                                 return kind == "scalar" and member == "which" and all(v22_data_fact(arg, point, "path") for arg in node.args)
