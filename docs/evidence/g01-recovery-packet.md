@@ -27344,6 +27344,36 @@ def python_unreviewed_decorator_violation(tree, parents):
             return result if all(len(value) <= 256 for value in result) else None
         if isinstance(expression, ast.IfExp):
             parts = [expression.body, expression.orelse]
+        elif (isinstance(expression, ast.Call) and isinstance(expression.func, ast.Name)
+            and not expression.args and not expression.keywords):
+            callee = expression.func
+            python_sensitive_imported_function_alias(callee, tree, parents)
+            inventory = getattr(tree, "_issue79_sensitive_imported_alias_bindings", {})
+            for scope in python_sensitive_alias_scope_chain(callee, parents):
+                bindings = inventory.get((id(scope), callee.id), ())
+                if bindings:
+                    break
+            else:
+                return None
+            if len(bindings) != 1 or bindings[0][0] != "unknown":
+                return None
+            function = bindings[0][1]
+            if (not isinstance(function, ast.FunctionDef) or function.decorator_list
+                or function.type_params or function.args.posonlyargs or function.args.args
+                or function.args.kwonlyargs or function.args.vararg or function.args.kwarg
+                or len(function.body) != 1 or not isinstance(function.body[0], ast.Return)):
+                return None
+            for use in ast.walk(tree):
+                if not isinstance(use, ast.Name) or not isinstance(use.ctx, ast.Load) or use.id != callee.id:
+                    continue
+                binding_scope = next((candidate_scope
+                    for candidate_scope in python_sensitive_alias_scope_chain(use, parents)
+                    if inventory.get((id(candidate_scope), use.id))), None)
+                if binding_scope is scope:
+                    holder = parents.get(use)
+                    if not (isinstance(holder, ast.Call) and holder.func is use):
+                        return None  # No metadata mutation, callback/alias escape or default capture.
+            parts = [function.body[0].value]
         elif isinstance(expression, ast.Name):
             python_sensitive_imported_function_alias(expression, tree, parents)
             inventory = getattr(tree, "_issue79_sensitive_imported_alias_bindings", {})
@@ -27355,6 +27385,45 @@ def python_unreviewed_decorator_violation(tree, parents):
                 for kind, binding in bindings:
                     if kind == "assignment":
                         parts.append(binding.value)
+                    elif kind == "unknown" and isinstance(binding, ast.arg):
+                        arguments = parents.get(binding)
+                        function = parents.get(arguments)
+                        if (not isinstance(function, ast.FunctionDef) or function.decorator_list
+                            or function.type_params or function.args.vararg or function.args.kwarg):
+                            return None
+                        function_scope = python_sensitive_alias_scope(parents.get(function), parents)
+                        owners = inventory.get((id(function_scope), function.name), ())
+                        if len(owners) != 1 or owners[0] != ("unknown", function):
+                            return None
+                        positional = list(arguments.posonlyargs) + list(arguments.args)
+                        defaults = dict(zip(positional[-len(arguments.defaults):], arguments.defaults)) if arguments.defaults else {}
+                        defaults.update(zip(arguments.kwonlyargs, arguments.kw_defaults))
+                        actuals = []
+                        for use in ast.walk(tree):
+                            if (not isinstance(use, ast.Name) or not isinstance(use.ctx, ast.Load)
+                                or use.id != function.name):
+                                continue
+                            binding_scope = next((candidate_scope
+                                for candidate_scope in python_sensitive_alias_scope_chain(use, parents)
+                                if inventory.get((id(candidate_scope), use.id))), None)
+                            if binding_scope is not function_scope:
+                                continue
+                            call = parents.get(use)
+                            if (not isinstance(call, ast.Call) or call.func is not use
+                                or any(isinstance(argument, ast.Starred) for argument in call.args)
+                                or any(keyword.arg is None for keyword in call.keywords)):
+                                return None  # An escaping function has unknown callers or metadata writes.
+                            supplied = [keyword.value for keyword in call.keywords if keyword.arg == binding.arg]
+                            if binding in positional and positional.index(binding) < len(call.args):
+                                supplied.append(call.args[positional.index(binding)])
+                            if not supplied:
+                                supplied = [defaults.get(binding)]
+                            if len(supplied) != 1 or supplied[0] is None:
+                                return None
+                            actuals.extend(supplied)
+                        if not actuals:
+                            return None
+                        parts.extend(actuals)
                     elif kind == "unknown" and isinstance(binding, ast.Name):
                         owner = parents.get(binding)
                         if (not isinstance(owner, (ast.For, ast.comprehension))

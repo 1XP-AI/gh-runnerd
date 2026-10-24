@@ -9451,6 +9451,50 @@ def synthetic_read(_fd, _size):
                     'fields = {"body": None, "orelse": None}\n' + effect
                     + 'for field in fields:\n' + body) is None, safe)
 
+    def test_pr103_v25_member_returns_require_closed_unescaped_helpers(self) -> None:
+        for effect, safe in (
+            ('', True),
+            ('reader_name = unknown\n', False),
+            ('alias = reader_name\n', False),
+            ('opaque(reader_name)\n', False),
+            ('reader_name.__code__ = other.__code__\n', False),
+            ('def capture(callback=reader_name):\n    pass\n', False),
+        ):
+            with self.subTest(effect=effect):
+                self.assertEqual(self.inspect('import ast\nnode = ast.parse("x")\n'
+                    'def reader_name():\n    return "body"\n' + effect
+                    + 'value = getattr(node, reader_name(), None)\n') is None, safe)
+        for value in ('"__globals__"', '"safe" if flag else unknown', 'unknown()'):
+            with self.subTest(returned=value):
+                self.assertIsNotNone(self.inspect('import os\nm = {"x": "safe"}\n'
+                    'def f():\n    pass\ndef reader_name():\n    return ' + value
+                    + '\nnamespace = getattr(tuple([f])[0], reader_name())\n'
+                    'namespace["m"]["x"] = {"value": os.environ}\nprint(dict(m)["x"])\n'))
+        self.assertIsNone(self.inspect('import ast\nnode = ast.parse("x")\n'
+            'def name():\n    return "body"\ndef forward():\n    return name()\n'
+            'value = getattr(node, forward(), None)\n'))
+
+    def test_pr103_v25_member_parameters_require_all_closed_callers(self) -> None:
+        prefix = ('import ast\nnode = ast.parse("x")\n'
+            'def read(receiver, member="body"):\n    return getattr(receiver, member, None)\n')
+        for effect, safe in (
+            ('read(node)\n', True),
+            ('read(node, "body")\nread(node, member="orelse")\n', True),
+            ('read(node, "body")\nread(node, unknown)\n', False),
+            ('read(node, "body")\nread(*unknown)\n', False),
+            ('read(node, "body")\nread(**unknown)\n', False),
+            ('alias = read\nread(node)\n', False),
+            ('opaque(read)\nread(node)\n', False),
+            ('read.__code__ = other.__code__\nread(node)\n', False),
+            ('def capture(callback=read):\n    pass\nread(node)\n', False),
+        ):
+            with self.subTest(effect=effect):
+                self.assertEqual(self.inspect(prefix + effect) is None, safe)
+        self.assertIsNotNone(self.inspect('import os\nm = {"x": "safe"}\n'
+            'def f():\n    pass\ndef read(receiver, member):\n    return getattr(receiver, member)\n'
+            'namespace = read(tuple([f])[0], "".join(["__", "globals__"]))\n'
+            'namespace["m"]["x"] = {"value": os.environ}\nprint(dict(m)["x"])\n'))
+
     def test_pr103_v22_dynamic_lookup_complete_key_domain(self) -> None:
         for effect, safe in (
             ('', True), ('defaults["OTHER"] = "safe"\n', True),
