@@ -25017,7 +25017,8 @@ def python_sensitive_read_violation(tree, parents):
                 v22_active.remove(token)
 
         def v22_primitive_call(call, allocation, actual_point=None, forwarded=None, check_baseline=True, mapping_names=()):
-            actual_point = call if actual_point is None else actual_point
+            if actual_point is None:
+                actual_point = call
             if not (isinstance(call.func, ast.Attribute) and call.func.attr == "Popen"
                 and isinstance(call.func.value, ast.Name)
                 and python_imported_module_alias_is_stable(call.func.value.id, "subprocess", tree)):
@@ -27324,6 +27325,7 @@ def python_unreviewed_decorator_violation(tree, parents):
     namespace_members = {
         "__globals__", "__builtins__", "f_globals", "f_locals", "f_builtins",
         "gi_frame", "cr_frame", "ag_frame", "tb_frame", "_getframe", "_current_frames",
+        "globals", "locals", "vars",
     }
 
     def namespace_reference_in_class_suite(reference):
@@ -27344,6 +27346,12 @@ def python_unreviewed_decorator_violation(tree, parents):
             child = reference
             while child in parents and parents[child] is not scope:
                 child = parents[child]
+            if isinstance(scope, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)) and scope.generators:
+                current = reference
+                while current in parents and current is not scope.generators[0].iter:
+                    current = parents[current]
+                if current is scope.generators[0].iter:
+                    continue  # The first iterable executes before the comprehension scope exists.
             if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)) and (
                 child is scope.args or child is getattr(scope, "returns", None)
                 or child in getattr(scope, "decorator_list", ())
@@ -27353,6 +27361,29 @@ def python_unreviewed_decorator_violation(tree, parents):
             if isinstance(scope, ast.ClassDef) and child not in scope.body:
                 continue
             yield scope
+
+    def namespace_binding_owner(reference, inventory):
+        scopes = list(namespace_reference_scope_chain(reference))
+        for position, scope in enumerate(scopes):
+            bindings = inventory.get((id(scope), reference.id), ())
+            if not bindings:
+                continue
+            kinds = {kind for kind, _binding in bindings}
+            if "global" in kinds:
+                return tree if "nonlocal" not in kinds else None
+            if "nonlocal" in kinds:
+                for outer in scopes[position + 1:]:
+                    if not isinstance(outer, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                        continue
+                    outer_bindings = inventory.get((id(outer), reference.id), ())
+                    outer_kinds = {kind for kind, _binding in outer_bindings}
+                    if "global" in outer_kinds:
+                        return None
+                    if outer_bindings and "nonlocal" not in outer_kinds:
+                        return outer
+                return None
+            return scope
+        return None
 
     header_rebindings = set()
     for binding in ast.walk(tree):
@@ -27411,9 +27442,7 @@ def python_unreviewed_decorator_violation(tree, parents):
                     continue
                 if namespace_reference_in_class_suite(use):
                     return None  # Class LOAD_NAME can export an outer helper before binding a namesake.
-                binding_scope = next((candidate_scope
-                    for candidate_scope in namespace_reference_scope_chain(use)
-                    if inventory.get((id(candidate_scope), use.id))), None)
+                binding_scope = namespace_binding_owner(use, inventory)
                 if binding_scope is scope:
                     holder = parents.get(use)
                     if not (isinstance(holder, ast.Call) and holder.func is use):
@@ -27457,9 +27486,7 @@ def python_unreviewed_decorator_violation(tree, parents):
                                 continue
                             if namespace_reference_in_class_suite(use):
                                 return None
-                            binding_scope = next((candidate_scope
-                                for candidate_scope in namespace_reference_scope_chain(use)
-                                if inventory.get((id(candidate_scope), use.id))), None)
+                            binding_scope = namespace_binding_owner(use, inventory)
                             if binding_scope is not function_scope:
                                 continue
                             call = parents.get(use)
@@ -27501,9 +27528,7 @@ def python_unreviewed_decorator_violation(tree, parents):
                                 if (not isinstance(use, ast.Name) or not isinstance(use.ctx, ast.Load)
                                     or use.id != iterator.id or use is iterator):
                                     continue
-                                binding_scope = next((candidate_scope
-                                    for candidate_scope in namespace_reference_scope_chain(use)
-                                    if inventory.get((id(candidate_scope), use.id))), None)
+                                binding_scope = namespace_binding_owner(use, inventory)
                                 if binding_scope is not scope:
                                     continue
                                 if (python_sensitive_alias_scope(use, parents) is not scope
@@ -27530,6 +27555,15 @@ def python_unreviewed_decorator_violation(tree, parents):
         return result
 
     for candidate in ast.walk(tree):
+        if isinstance(candidate, ast.Name) and isinstance(candidate.ctx, ast.Load):
+            if candidate.id in {"globals", "locals"}:
+                return "Python heredoc exposes a mutable execution namespace callable"
+            if candidate.id == "vars":
+                holder = parents.get(candidate)
+                if (not isinstance(holder, ast.Call) or holder.func is not candidate
+                    or len(holder.args) != 1 or isinstance(holder.args[0], ast.Starred)
+                    or holder.keywords):
+                    return "Python vars requires one explicit object and cannot escape as a callable"
         if isinstance(candidate, (ast.Name, ast.Attribute)) and isinstance(candidate.ctx, ast.Load):
             references = (python_value_provenance(candidate, tree, parents)
                 if isinstance(candidate, ast.Name) else [candidate])

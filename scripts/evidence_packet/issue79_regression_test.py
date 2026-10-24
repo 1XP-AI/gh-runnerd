@@ -9527,9 +9527,73 @@ def synthetic_read(_fd, _size):
                     + '\nnamespace = lookup("".join(["__", "globals__"]))\n'
                     'namespace["m"]["x"] = {"value": os.environ}\nprint(m)\n'))
 
+    def test_pr103_v28_comprehension_inputs_cannot_hide_helper_escape(self) -> None:
+        for box, selected in (
+            ('[name for name in [name]]', 'box[0]'),
+            ('{0: name for name in [name]}', 'box[0]'),
+            ('{name for name in [name]}', 'next(iter(box))'),
+            ('(name for name in [name])', 'next(box)'),
+        ):
+            with self.subTest(box=box):
+                self.assertIsNotNone(self.inspect('import os\nm = {"x": "safe"}\n'
+                    'def f():\n    pass\ndef name():\n    return "body"\n'
+                    'def evil():\n    return "".join(["__", "globals__"])\n'
+                    'box = ' + box + '\n' + selected + '.__code__ = evil.__code__\n'
+                    'namespace = getattr(tuple([f])[0], name())\n'
+                    'namespace["m"]["x"] = {"value": os.environ}\nprint(m)\n'))
+
+    def test_pr103_v28_declarations_preserve_helper_binding_owners(self) -> None:
+        for definition, mutation, selection in (
+            ('def name():\n    return "body"\n',
+                'global name\n    name.__code__ = evil.__code__',
+                'getattr(tuple([f])[0], name())'),
+            ('def read(receiver, member="body"):\n    return getattr(receiver, member, None)\n',
+                'global read\n    read.__defaults__ = ("__globals__",)', 'read(tuple([f])[0])'),
+        ):
+            with self.subTest(mutation=mutation):
+                self.assertIsNotNone(self.inspect('import os\nm = {"x": "safe"}\n'
+                    'def f():\n    pass\ndef evil():\n    return "".join(["__", "globals__"])\n'
+                    + definition + 'def mutate():\n    ' + mutation + '\nmutate()\n'
+                    'namespace = ' + selection + '\nnamespace["m"]["x"] = {"value": os.environ}\nprint(m)\n'))
+        self.assertIsNotNone(self.inspect('import os\nm = {"x": "safe"}\n'
+            'def f():\n    pass\ndef outer():\n'
+            '    def name():\n        return "body"\n'
+            '    def evil():\n        return "".join(["__", "globals__"])\n'
+            '    def mutate():\n        nonlocal name\n        name.__code__ = evil.__code__\n'
+            '    mutate()\n    namespace = getattr(tuple([f])[0], name())\n'
+            '    namespace["m"]["x"] = {"value": os.environ}\n    print(m)\nouter()\n'))
+        self.assertIsNone(self.inspect('import ast\ndef name():\n    return "body"\n'
+            'def observe():\n    global name\n    return name()\nobserve()\n'
+            'value = getattr(ast.parse("x"), name(), None)\n'))
+
+    def test_pr103_v28_namespace_callables_cannot_escape_as_data(self) -> None:
+        for setup, lookup in (
+            ('readers = {"g": globals}\n', 'readers["g"]()'),
+            ('readers = {"g": locals}\n', 'readers["g"]()'),
+            ('readers = {"g": vars}\n', 'readers["g"]()'),
+            ('empty = ()\n', 'vars(*empty)'),
+            ('', 'getattr(len.__self__, "globals")()'),
+            ('', 'len.__self__.globals()'),
+            ('', 'getattr(len.__self__, "vars")()'),
+            ('', 'len.__self__.vars()'),
+        ):
+            with self.subTest(setup=setup, lookup=lookup):
+                self.assertIsNotNone(self.inspect('import os\nm = {"x": "safe"}\n'
+                    + setup + 'namespace = ' + lookup + '\n'
+                    'namespace["m"]["x"] = {"value": os.environ}\nprint(m)\n'))
+        self.assertIsNone(self.inspect('import ast\nvalue = vars(ast.parse("x"))\n'))
+
     def test_pr103_v26_scanner_runtime_type_admission(self) -> None:
         tree = ast.parse(_scanner_module_source(PACKET_TEXT))
         self.assertIsNone(self.scanner['python_subprocess_os_reexport_violation'](tree))
+
+    def test_pr103_v29_primitive_call_launcher_admission(self) -> None:
+        source_tree = ast.parse(_scanner_module_source(PACKET_TEXT))
+        helper = next(node for node in ast.walk(source_tree)
+                      if isinstance(node, ast.FunctionDef) and node.name == 'v22_primitive_call')
+        tree = ast.Module(body=[helper], type_ignores=[])
+        modules, functions, _unresolved = self.scanner['python_import_bindings'](tree)
+        self.assertIsNone(self.scanner['python_class_command_attribute_violation'](tree, modules, functions))
 
     def test_pr103_v22_dynamic_lookup_complete_key_domain(self) -> None:
         for effect, safe in (
