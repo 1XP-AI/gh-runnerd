@@ -9634,6 +9634,27 @@ def synthetic_read(_fd, _size):
         modules, functions, _unresolved = self.scanner['python_import_bindings'](tree)
         self.assertIsNone(self.scanner['python_class_command_attribute_violation'](tree, modules, functions))
 
+    def test_pr103_v32_scanner_ast_bindings_are_not_launcher_targets(self) -> None:
+        tree = ast.parse(_scanner_module_source(PACKET_TEXT))
+        modules, functions, _unresolved = self.scanner['python_import_bindings'](tree)
+        self.assertIsNone(self.scanner['python_callback_command_violation'](tree, modules, functions))
+        self.assertNotIn('call', functions, 'AST-node bindings acquired launcher provenance')
+        parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+        unresolved = []
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id in functions and functions[node.func.id] is None):
+                continue
+            # Match the existing inspector's sole direct-call exception, not a
+            # new allowance for unresolved callbacks or AST helper names.
+            if node.func.id == 'value' and any(
+                    isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and parent.name == 'python_literal_bindings'
+                    for parent in self.scanner['_python_parent_chain'](node, parents)):
+                continue
+            unresolved.append((node.func.id, node.lineno))
+        self.assertEqual([], unresolved)
+
     def test_pr103_v22_dynamic_lookup_complete_key_domain(self) -> None:
         for effect, safe in (
             ('', True), ('defaults["OTHER"] = "safe"\n', True),

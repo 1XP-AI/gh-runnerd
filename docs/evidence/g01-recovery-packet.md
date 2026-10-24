@@ -23491,20 +23491,20 @@ def python_sensitive_read_violation(tree, parents):
                     continue
                 if v22_unrelated_parameter_reference(reference, function):
                     continue
-                call = parents.get(reference)
-                if not isinstance(call, ast.Call) or call.func is not reference or v22_local_definition(call) is not function:
+                syntax_call = parents.get(reference)
+                if not isinstance(syntax_call, ast.Call) or syntax_call.func is not reference or v22_local_definition(syntax_call) is not function:
                     return None
-                if any(isinstance(arg, ast.Starred) for arg in call.args) or any(keyword.arg is None for keyword in call.keywords):
+                if any(isinstance(arg, ast.Starred) for arg in syntax_call.args) or any(keyword.arg is None for keyword in syntax_call.keywords):
                     return None
-                caller = python_enclosing_scope(call, parents)
+                caller = python_enclosing_scope(syntax_call, parents)
                 if caller is v22_scope:
-                    if v22_position(call) < v22_position(expression):
-                        frames.add((call,))
+                    if v22_position(syntax_call) < v22_position(expression):
+                        frames.add((syntax_call,))
                 elif isinstance(caller, ast.FunctionDef):
                     prefixes = v22_actual_frames(caller, visiting + (function,))
                     if prefixes is None:
                         return None
-                    frames.update(prefix + (call,) for prefix in prefixes)
+                    frames.update(prefix + (syntax_call,) for prefix in prefixes)
                 else:
                     return None
                 if len(frames) > 256:
@@ -23516,13 +23516,13 @@ def python_sensitive_read_violation(tree, parents):
         def v22_frame_parameter(name, function, frames):
             if not frames or v22_local_definition(frames[-1]) is not function:
                 return None
-            call = frames[-1]
+            syntax_call = frames[-1]
             positional = list(function.args.posonlyargs) + list(function.args.args)
-            if function.args.vararg is not None or len(call.args) > len(positional):
+            if function.args.vararg is not None or len(syntax_call.args) > len(positional):
                 return None
-            actual = [(argument, frames[:-1]) for parameter, argument in zip(positional, call.args)
+            actual = [(argument, frames[:-1]) for parameter, argument in zip(positional, syntax_call.args)
                 if parameter.arg == name]
-            actual.extend((keyword.value, frames[:-1]) for keyword in call.keywords if keyword.arg == name)
+            actual.extend((keyword.value, frames[:-1]) for keyword in syntax_call.keywords if keyword.arg == name)
             return actual[0] if len(actual) == 1 else None  # Captured defaults remain unsupported.
 
         def v22_process_origin(node, point, frames=None):
@@ -23545,7 +23545,7 @@ def python_sensitive_read_violation(tree, parents):
                         return None
                     combined.update(sources)
                 return frozenset(combined) if len(combined) <= 256 else None
-            token = v22_guard("process:" + str(tuple(id(call) for call in frames)), node, point)
+            token = v22_guard("process:" + str(tuple(id(syntax_call) for syntax_call in frames)), node, point)
             if token is None:
                 return None
             try:
@@ -23601,7 +23601,7 @@ def python_sensitive_read_violation(tree, parents):
                 v22_active.remove(token)
 
         def v22_frame_object(node, frames):
-            token = v22_guard("frame-object:" + str(tuple(id(call) for call in frames)), node, node)
+            token = v22_guard("frame-object:" + str(tuple(id(syntax_call) for syntax_call in frames)), node, node)
             if token is None:
                 return None
             try:
@@ -24335,8 +24335,8 @@ def python_sensitive_read_violation(tree, parents):
             # A completed query may rely on B only after each C and D premise
             # has independently finished. No baseline/getter implication calls
             # this conjunction while it is being established.
-            for call in tuple(v22_field_reads):
-                if not v22_process_field_read(call, True) or not v22_field_dependencies_closed(call):
+            for syntax_call in tuple(v22_field_reads):
+                if not v22_process_field_read(syntax_call, True) or not v22_field_dependencies_closed(syntax_call):
                     return False
             if not v22_process_dependencies_closed():
                 return False
@@ -24412,13 +24412,13 @@ def python_sensitive_read_violation(tree, parents):
                 and isinstance(holder.ctx, ast.Load)):
                 return False
 
-            def index(part):
+            def v22_sequence_index_is_scalar(part):
                 if isinstance(part, ast.Constant):
                     return (isinstance(part.value, int) and not isinstance(part.value, bool)) or part.value is None
                 if isinstance(part, ast.Name):
                     return part.id != reference.id and v22_data_fact(part, part, "scalar")
                 if isinstance(part, ast.BinOp) and isinstance(part.op, (ast.Add, ast.Sub)):
-                    return index(part.left) and index(part.right)
+                    return v22_sequence_index_is_scalar(part.left) and v22_sequence_index_is_scalar(part.right)
                 if isinstance(part, ast.Call):
                     return (len(part.args) == 1 and not part.keywords
                         and python_unshadowed_builtin_reference(part.func, {"len"}, tree, parents)
@@ -24430,9 +24430,9 @@ def python_sensitive_read_violation(tree, parents):
             if len(list(ast.walk(holder.slice))) > 256:
                 return False
             if isinstance(holder.slice, ast.Slice):
-                return all(bound is None or index(bound)
+                return all(bound is None or v22_sequence_index_is_scalar(bound)
                     for bound in (holder.slice.lower, holder.slice.upper, holder.slice.step))
-            return index(holder.slice)
+            return v22_sequence_index_is_scalar(holder.slice)
 
         def v22_sequence_binding_closed(node, initial=None):
             cache_key = (node, initial)
@@ -25329,29 +25329,29 @@ def python_sensitive_read_violation(tree, parents):
                     if isinstance(owner, ast.Call) and entry in owner.args and v22_closed_call(owner, allocation):
                         continue
                     if isinstance(owner, ast.keyword):
-                        call = parents.get(owner)
-                        if owner.arg is None and isinstance(call, ast.Call) and v22_dict_reference(call.func, call):
+                        syntax_call = parents.get(owner)
+                        if owner.arg is None and isinstance(syntax_call, ast.Call) and v22_dict_reference(syntax_call.func, syntax_call):
                             continue
-                        if isinstance(call, ast.Call) and v22_closed_call(call, allocation):
+                        if isinstance(syntax_call, ast.Call) and v22_closed_call(syntax_call, allocation):
                             continue
                     if isinstance(owner, ast.Attribute) and owner.value is entry:
-                        call = parents.get(owner)
-                        if isinstance(call, ast.Call) and call.func is owner and owner.attr in {
+                        syntax_call = parents.get(owner)
+                        if isinstance(syntax_call, ast.Call) and syntax_call.func is owner and owner.attr in {
                             "update", "setdefault", "__setitem__", "pop", "get", "items", "keys", "values"}:
                             # The stores above classify mutation values. Closed
                             # read operands are required before allowing calls.
                             if owner.attr in {"update", "setdefault", "__setitem__"}:
                                 continue
-                            if not all(v22_scalar(arg, call) == "SAFE" or v22_data_fact(arg, call, "scalar")
-                                for arg in call.args):
+                            if not all(v22_scalar(arg, syntax_call) == "SAFE" or v22_data_fact(arg, syntax_call, "scalar")
+                                for arg in syntax_call.args):
                                 result = "UNKNOWN"
                                 continue
                             if owner.attr in {"items", "keys", "values"}:
-                                consumer = parents.get(call)
-                                if not isinstance(consumer, (ast.For, ast.comprehension)) or consumer.iter is not call:
+                                consumer = parents.get(syntax_call)
+                                if not isinstance(consumer, (ast.For, ast.comprehension)) or consumer.iter is not syntax_call:
                                     result = "UNKNOWN"
                                     continue
-                            if v22_plain_mapping(allocation, call):
+                            if v22_plain_mapping(allocation, syntax_call):
                                 continue
                     if isinstance(owner, ast.AugAssign) and owner.target is entry and isinstance(owner.op, ast.BitOr):
                         continue
@@ -27492,14 +27492,14 @@ def python_unreviewed_decorator_violation(tree, parents):
                             binding_scope = namespace_binding_owner(use, inventory)
                             if binding_scope is not function_scope:
                                 continue
-                            call = parents.get(use)
-                            if (not isinstance(call, ast.Call) or call.func is not use
-                                or any(isinstance(argument, ast.Starred) for argument in call.args)
-                                or any(keyword.arg is None for keyword in call.keywords)):
+                            syntax_call = parents.get(use)
+                            if (not isinstance(syntax_call, ast.Call) or syntax_call.func is not use
+                                or any(isinstance(argument, ast.Starred) for argument in syntax_call.args)
+                                or any(keyword.arg is None for keyword in syntax_call.keywords)):
                                 return None  # An escaping function has unknown callers or metadata writes.
-                            supplied = [keyword.value for keyword in call.keywords if keyword.arg == binding.arg]
-                            if binding in positional and positional.index(binding) < len(call.args):
-                                supplied.append(call.args[positional.index(binding)])
+                            supplied = [keyword.value for keyword in syntax_call.keywords if keyword.arg == binding.arg]
+                            if binding in positional and positional.index(binding) < len(syntax_call.args):
+                                supplied.append(syntax_call.args[positional.index(binding)])
                             if not supplied:
                                 supplied = [defaults.get(binding)]
                             if len(supplied) != 1 or supplied[0] is None:
