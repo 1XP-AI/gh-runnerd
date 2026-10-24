@@ -9655,6 +9655,16 @@ def synthetic_read(_fd, _size):
             unresolved.append((node.func.id, node.lineno))
         self.assertEqual([], unresolved)
 
+    def test_pr103_v33_actual_position_helper_has_no_reflective_result_escape(self) -> None:
+        source_tree = ast.parse(_scanner_module_source(PACKET_TEXT))
+        names = {'v22_position', 'v22_read_only_call'}
+        helpers = [node for node in ast.walk(source_tree)
+                   if isinstance(node, ast.FunctionDef) and node.name in names]
+        self.assertEqual(len(names), len(helpers))
+        tree = ast.Module(body=helpers, type_ignores=[])
+        parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+        self.assertIsNone(self.scanner['python_filesystem_mutator_alias_violation'](tree, parents))
+
     def test_pr103_v22_dynamic_lookup_complete_key_domain(self) -> None:
         for effect, safe in (
             ('', True), ('defaults["OTHER"] = "safe"\n', True),

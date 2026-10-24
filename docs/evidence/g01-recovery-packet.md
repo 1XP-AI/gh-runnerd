@@ -22604,8 +22604,17 @@ def python_sensitive_read_violation(tree, parents):
                         v22_binding_index.setdefault(v22_target.id, []).append(v22_entry)
 
         def v22_position(node):
-            return (getattr(node, "end_lineno", getattr(node, "lineno", -1)),
-                getattr(node, "end_col_offset", getattr(node, "col_offset", -1)))
+            line = -1
+            if hasattr(node, "lineno"):
+                line = node.lineno
+            if hasattr(node, "end_lineno"):
+                line = node.end_lineno
+            column = -1
+            if hasattr(node, "col_offset"):
+                column = node.col_offset
+            if hasattr(node, "end_col_offset"):
+                column = node.end_col_offset
+            return line, column
 
         def v22_reference_point(node, context):
             return node if python_enclosing_scope(node, parents) is python_enclosing_scope(context, parents) else context
