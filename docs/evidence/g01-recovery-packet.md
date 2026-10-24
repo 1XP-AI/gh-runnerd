@@ -27358,8 +27358,8 @@ def python_unreviewed_decorator_violation(tree, parents):
                 or child in getattr(scope, "type_params", ())
             ):
                 continue
-            if isinstance(scope, ast.ClassDef) and child not in scope.body:
-                continue
+            if isinstance(scope, ast.ClassDef):
+                continue  # Class suites are unsupported proof contexts, never method lexical parents.
             yield scope
 
     def namespace_binding_owner(reference, inventory):
@@ -27394,7 +27394,9 @@ def python_unreviewed_decorator_violation(tree, parents):
         if actual_owner is not python_sensitive_alias_binding_scope(binding.target, parents):
             # The shared inventory intentionally has no header-walrus proof.
             # Do not let its missing outer binder expose an earlier literal.
-            header_rebindings.add((id(actual_owner), binding.target.id))
+            for possible_owner in namespace_reference_scope_chain(binding.target):
+                if not isinstance(possible_owner, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+                    header_rebindings.add((id(possible_owner), binding.target.id))
 
     def closed_member_domain(expression, seen=None, budget=None):
         """A complete bounded string domain, never a known-only approximation."""

@@ -9583,6 +9583,32 @@ def synthetic_read(_fd, _size):
                     'namespace["m"]["x"] = {"value": os.environ}\nprint(m)\n'))
         self.assertIsNone(self.inspect('import ast\nvalue = vars(ast.parse("x"))\n'))
 
+    def test_pr103_v30_control_flow_methods_do_not_capture_class_bindings(self) -> None:
+        prefix = ('import os\nm = {"x": "safe"}\ndef f():\n    pass\n'
+            'def name():\n    return "body"\n'
+            'def evil():\n    return "".join(["__", "globals__"])\n')
+        for guard in ('if True:', 'try:', 'for unused in (None,):'):
+            with self.subTest(guard=guard):
+                method = ('class C:\n    name = "safe"\n    ' + guard + '\n'
+                    '        def mutate():\n            name.__code__ = evil.__code__\n')
+                if guard == 'try:':
+                    method += '    finally:\n        pass\n'
+                self.assertIsNotNone(self.inspect(prefix + method + 'C.mutate()\n'
+                    'namespace = getattr(tuple([f])[0], name())\n'
+                    'namespace["m"]["x"] = {"value": os.environ}\nprint(m)\n'))
+        self.assertIsNone(self.inspect('import ast\ndef name():\n    return "body"\n'
+            'class C:\n    name = "safe"\n    if True:\n        def read():\n            return name()\n'
+            'value = getattr(ast.parse("x"), name(), None)\nC.read()\n'))
+
+    def test_pr103_v30_unindexed_class_header_rebinding_refuses_outer_proof(self) -> None:
+        self.assertIsNotNone(self.inspect('import os\nm = {"x": "safe"}\n'
+            'def f():\n    pass\ndef name():\n    return "body"\n'
+            'def evil():\n    return "".join(["__", "globals__"])\n'
+            'def outer():\n    class C:\n        global name\n'
+            '        def capture(unused=(name := evil)):\n            pass\nouter()\n'
+            'namespace = getattr(tuple([f])[0], name())\n'
+            'namespace["m"]["x"] = {"value": os.environ}\nprint(m)\n'))
+
     def test_pr103_v26_scanner_runtime_type_admission(self) -> None:
         tree = ast.parse(_scanner_module_source(PACKET_TEXT))
         self.assertIsNone(self.scanner['python_subprocess_os_reexport_violation'](tree))
