@@ -667,3 +667,125 @@ still OPEN and In progress when checked through `gh`; #79 was In review.
 The live canary, remaining review/merge criteria, and production G01/G02 gates
 remain unresolved. No GitHub write or live operation occurred. This is an
 evidence-only addition; rollback is reverting its local documentation commit.
+
+### 2026-10-25 SDK release checkpoint and baseline comparison
+
+This is a new writer checkpoint, not a replacement for the historical results
+above, an independent protocol approval, a pin upgrade, or live qualification.
+G01 #1 remains OPEN / In progress. The new evidence closes the previously
+unexecuted **Go 1.26.9 comparison of the two existing SDK selections**; it does
+not close the newly discovered successor-release qualification work below.
+
+#### Immutable inputs and release freshness
+
+The source was clean `1eb30fcfe010f25c16bfe1a87c69c0189a7bfc62`, the
+reviewed/merged PR #103 result. The existing G01 branch was fast-forwarded to
+that main after checking that it had no unique commits or working-tree changes.
+The G01 module tree was `da98e542ea2a8066a3af664a4b5d3f7bdf655ebb` and
+`compare-sdk.sh` blob `23856ea76205190817183280bdcc15bd8a417da6` before and
+after the comparison. No module, checksum, script, protocol or packet bytes
+were edited for this batch.
+
+Public upstream metadata/source was read through `gh api` on 2026-10-25:
+
+| Input | Exact observation | Limit |
+| --- | --- | --- |
+| [SDK v0.5.0 release](https://github.com/actions/scaleset/releases/tag/v0.5.0) | Published 2026-10-23T12:28:53Z; tag and main resolved to `af394d86c0d5024225238b0209043c70193bcfe6` at this check. | A source snapshot, not permission to upgrade or execute a canary. |
+| [SDK v0.5.0 module](https://github.com/actions/scaleset/blob/af394d86c0d5024225238b0209043c70193bcfe6/go.mod) | Minimum `go 1.27.3`. | The current shared baseline remains Go 1.26.9. |
+| Existing release v0.4.0 | Tag still resolved to `6ce025902cd964747a078c2aabe7340ebc667eca`. Its listener blob and the audited `cb0405b2d874500e75ae34eff8d582ab75956b45` listener blob were both `77802ab4eebfc619997f815fcffa01de8e5a3ba5` (8,480 bytes). | Their unchanged listener does not characterize v0.5.0. |
+| New listener | [v0.5.0 listener](https://github.com/actions/scaleset/blob/af394d86c0d5024225238b0209043c70193bcfe6/listener/listener.go) blob `1ca83e264edfa170291925d9a3ac9ed8a97f6040` (5,932 bytes). | The former unchanged-listener comparison must not be generalized to this release. |
+| [Runner v2.338.1](https://github.com/actions/runner/releases/tag/v2.338.1) | Published 2026-10-22T14:14:46Z; tag commit `e78522a9a7b01c3bcd7ac0da6e3a9bb6cd513a76`. | No new archive/digest/runtime or tenant-availability qualification; existing experimental runner selection is unchanged. |
+
+#### Existing SDK comparison: actual execution
+
+The already checked-in, inspected `experiments/g01-scaleset/compare-sdk.sh`
+ran unchanged. It copies only the module's root Go files and module metadata
+to its own disposable directory, removes the copied local G02 dependency,
+sets each explicit SDK requirement, tidies that copy, reports the selected
+module, runs `go test -race -count=1 -timeout=45s ./...`, and runs `go vet ./...`.
+Its `set -eu` success exit follows both selections and their vet invocations.
+It does not run the nested controller/worker commands or packet prescriptions.
+
+Actual invocation, from the repository root, was
+`sh experiments/g01-scaleset/compare-sdk.sh` in a fresh allowlisted environment:
+verified cached Go 1.26.9 first on PATH, system utilities afterwards;
+`GOTOOLCHAIN=go1.26.9`, `GOENV=off`, `GOWORK=off`, `GOEXPERIMENT=none`,
+`GOAUTH=off`, `GOTELEMETRY=off`, `GOMAXPROCS=2`, `GOFLAGS=-p=2`, explicit
+existing GOPATH/build cache, Darwin/ARM64 v8.0, cgo enabled, and the trusted
+Xcode clang/clang++ paths. Public dependency resolution used
+`GOPROXY=https://proxy.golang.org` without direct fallback and
+`GOSUMDB=sum.golang.org`; private/proxy/checksum exemptions were empty.
+No HOME, GitHub/SSH credentials, overlays, compiler flag overrides, private
+credential proxy or GOROOT override was inherited. `-mod=readonly` was not
+supplied because the comparison deliberately tidies its **temporary copies**;
+the checked-in module and checksum files remained unchanged.
+
+| Actual selected SDK | Race-test package result | Vet | Overall script |
+| --- | --- | --- | --- |
+| `v0.4.0` | PASS, 1.406s | No diagnostics; continued successfully | Both selections completed; exit 0 |
+| `v0.4.1-0.20260721134647-cb0405b2d874` | PASS, 1.377s | No diagnostics; final success exit | Same invocation, not a second full-matrix run |
+
+The script was launched around 04:13 UTC and completion was observed at
+04:15 UTC. These package durations are the reported test durations, not the
+unmeasured wall time of dependency downloads, tidy, compilation and vet.
+Some public modules were downloaded. Test traffic used only the existing
+loopback fixture with synthetic authentication and its non-fixture-address
+denial. No real runner, JIT, Scale Set or workflow was created or executed.
+
+The current packet's separate inert-text profile checker also passed all four
+tests in 0.007s. This establishes agreement of the current Go 1.26.9 pins and
+preservation of historical records, not execution/requalification of every
+embedded recipe. The PR #103
+[frozen static packet result](https://github.com/1XP-AI/gh-runnerd/pull/103#issuecomment-6380571117)
+and [same-main Public CI](https://github.com/1XP-AI/gh-runnerd/actions/runs/40067852573)
+remain evidence for their recorded inputs; neither suite was repeated here.
+
+#### v0.5.0: source findings, not runtime results
+
+The released source replaces the three-method `Scaler` interface with
+`Scale(ctx, message)` and removes `WithMetricsRecorder` from the listener API.
+`Run` invokes `Scale` before `DeleteMessage`; a returned handler error exits
+before that ACK call. The handler receives the original cancellation context,
+whereas successful-message ACK uses `context.WithoutCancel`. The caller now
+owns acquisition and lifecycle processing, initial synthetic-message handling
+(`InitialMessageID = -1`), and nil-message/statistics-cache behavior.
+
+These are observations of the immutable Go source, **not measured GitHub
+redelivery, durable processing or exactly-once results**. A handler may have
+completed an uncertain external side effect before returning an error. The new
+source does not establish acquisition/JIT idempotency, eliminate quarantine, or
+prove safe idle drain. Its changed HTTP/retry implementation also needs its own
+bounded transport/timeout/error evidence, not reuse of the old client tests.
+
+A separate admission probe ran outside any repository module, in an owned
+empty temporary directory, with the same fixed Go 1.26.9 selection:
+`go mod download github.com/actions/scaleset@v0.5.0`.
+The **Go child exited 1**, reporting that v0.5.0 requires Go >= 1.27.3 while
+running Go 1.26.9. This is toolchain-admission evidence, not a behavior-change
+RED test or a failed runtime contract. The temporary directory was removed;
+public module-cache writes are not deployment. No v0.5.0 test/application
+binary or Go 1.27.3 toolchain was compiled, installed or executed by this batch.
+
+#### Decision and remaining work
+
+Keep the one reviewed experimental SDK pin at v0.4.0 for the existing Go 1.26.9
+baseline. This is not a claim that v0.5.0 is unsafe, that v0.4.0 is the latest,
+or that a toolchain mismatch proves upstream support withdrawal. The released
+successor is a material **new qualification candidate** for G01, not a one-line
+drop-in upgrade and not a reason to fork/reorder the old ACK loop.
+
+Before the final supported-path decision, evaluate v0.5.0 in an explicitly
+separate Go 1.27.3 offline candidate profile without silently changing shared
+pins. Port the causal ACK/handler, partial side-effect, acquisition/JIT,
+202/statistics, cancellation/deadline, retry and session-fencing controls to its
+actual API. Review its imported dependency/license surface separately from its
+larger example/tool graph. Then obtain the required independent protocol and
+exact-head GitHub reviews for a stable candidate; the PR #103-only internal
+review replacement does not approve this new work.
+
+Recipe execution, candidate adoption, tenant/archive/runtime qualification,
+explicit live canary authorization and sanitized server-side recovery/drain
+evidence remain unresolved. This writer checkpoint is not independently
+reviewed or merged merely because its baseline inputs were reviewed. G01 and
+dependent production gates stay open. Revert only this bounded evidence addition
+if needed; no protocol, toolchain pin, live resource or host service changed.

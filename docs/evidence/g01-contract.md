@@ -55,6 +55,14 @@ unresolved.
 
 ## Exact inputs and primary sources
 
+Freshness addendum (2026-10-25): the
+[current release checkpoint and Go 1.26.9 comparison](g01-runner-release-checkpoint.md#2026-10-25-sdk-release-checkpoint-and-baseline-comparison)
+records actual race/vet success for both existing SDK selections and discovery of
+released v0.5.0 with a changed handler/ACK API and Go 1.27.3 minimum. The table
+below remains the dated 2026-09-07 source snapshot; it must not be read as saying
+that v0.4.0 is still the latest SDK or that v0.5.0 preserves that listener.
+No new independent protocol approval or live evidence is asserted.
+
 | Input | Exact selection / finding |
 |---|---|
 | SDK pin | `github.com/actions/scaleset v0.4.0`, tag commit `6ce025902cd964747a078c2aabe7340ebc667eca` |
