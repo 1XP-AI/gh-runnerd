@@ -890,7 +890,7 @@ capabilities, no-new-privileges and absence of host/socket mounts are unchanged.
 
 ### Change, TDD and review boundary
 
-Only `liveworker.ImageReference` changes behavior. The new table test requires
+The initial candidate changed only `liveworker.ImageReference` behavior. The new table test requires
 the verified platform manifest and rejects the superseded manifest, mutable
 release tag, multi-platform index and config-as-manifest. With the old constant,
 the initial selector `TestApprovalPinsQualifiedRunner3380ARM64` exited 1
@@ -919,6 +919,40 @@ is claimed by this writer ledger. Record their immutable receipts in the PR
 without creating a new source head merely to copy review results. The main
 matrix belongs to the eventual merge commit. Unchanged SDK, Go and historical
 packet evidence is reused rather than rerun or relabeled.
+
+#### F1: align the broker's paired-worker admission
+
+Independent Codex Sol/medium review of initial head
+`07cfc727cf45cf05cbf034a24b63ea1e8e9c1ca6` approved the bounded scope but
+identified a useful P2 regression: G02's broker still admitted only the old
+image, so broker and worker had no common admissible image. Its existing bridge
+fixture stops at controller quarantine before exercising worker preparation.
+The integrator chose to fix this contained mismatch in the same PR; see the
+[immutable F1 triage](https://github.com/1XP-AI/gh-runnerd/pull/108#issuecomment-6394314259).
+No new follow-up issue or weakening of quarantine was needed.
+
+`TestPairedWorkerImageAdmissionMatchesCanonicalSelection` reads the canonical
+G01 image constant as Go syntax, without importing/executing G01 or introducing
+a module cycle. It exercises the real broker approval-file reader and its
+admission predicate with that image and four negative identities. Before the
+broker fix, this selector exited 1 (0.436s): the canonical image was rejected
+and the superseded image accepted. The only additional behavior change aligns
+`pairedWorkerImage` with the same byte-verified ARM64 manifest. Afterwards,
+under the stock environment above, this G02 command passed (exit 0, 1.408s):
+
+```text
+go test -race -count=1 -timeout=45s -run '^(TestPairedWorkerImageAdmissionMatchesCanonicalSelection|TestPairedWorkerBindingRetainsApprovalAndStateIdentity|TestPairedWorkerApprovalMismatchRefusesBeforeBinding|TestPairedWorkerDaemonIDMatchesCanonicalBoundaries|TestPairedWorkerPreparationReceiptFencesJournalMutation|TestPairedWorkerPreparationReceiptFencesClaimMutation)$' .
+```
+
+`go vet .` in G02 and `git diff --check` also exited 0. A repository-wide
+experimental Go source scan found the superseded digest only in the two negative
+tests, not an active consumer. No SDK, module dependency, handoff schema,
+provenance or cleanup behavior changed. G01 test evidence above is reused for
+its unchanged source; no full paired-runtime pass is claimed. Initial-head
+GitHub review reported no findings and PR quick passed in 35s, but fresh
+independent delta review, GitHub review and PR quick remain required for the
+correction head. Carry their receipts in PR #108, not by rewriting this ledger
+after each review.
 
 No Docker daemon contact, image load, container/runner/service operation,
 workflow dispatch, credential provisioning, configuration change or live
