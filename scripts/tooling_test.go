@@ -142,6 +142,22 @@ func TestToolingPinsNewerSystemGo(t *testing.T) {
 	}
 }
 
+func TestToolingCheckToolchainRequiresReleaseDefaults(t *testing.T) {
+	for _, experiment := range []string{"", "none"} {
+		t.Run("GOEXPERIMENT="+experiment, func(t *testing.T) {
+			root := toolingFixture(t)
+			out, err := toolingRun(t, root, []string{"GOEXPERIMENT=" + experiment}, "bash", "scripts/check-toolchain.sh")
+			if experiment == "" {
+				if err != nil {
+					t.Fatalf("release defaults rejected: %s", out)
+				}
+			} else if err == nil || !strings.Contains(out, "GOEXPERIMENT") {
+				t.Fatalf("non-default compiler profile accepted by exact-toolchain check: %s", out)
+			}
+		})
+	}
+}
+
 func TestToolingCheckToolchainRequiresGo1273(t *testing.T) {
 	for _, tc := range []struct {
 		name, reportedVersion, want string
@@ -150,6 +166,7 @@ func TestToolingCheckToolchainRequiresGo1273(t *testing.T) {
 		{name: "accept exact patch", reportedVersion: "go1.27.3", want: "toolchain: go1.27.3"},
 		{name: "reject prior shared pin", reportedVersion: "go1.26.9", want: "selected go1.26.9, want go1.27.3", wantError: true},
 		{name: "reject previous patch", reportedVersion: "go1.27.2", want: "selected go1.27.2, want go1.27.3", wantError: true},
+		{name: "reject nondefault build stamp", reportedVersion: "go1.27.3-X:nojsonv2", want: "selected go1.27.3-X:nojsonv2, want go1.27.3", wantError: true},
 		{name: "reject different newer patch", reportedVersion: "go1.27.4", want: "selected go1.27.4, want go1.27.3", wantError: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -37,6 +37,7 @@ jobs:
     env:
       # Match Make's explicit selection even if the installed default changes.
       GOTOOLCHAIN: go1.27.3
+      GOEXPERIMENT: ""
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -82,6 +83,7 @@ jobs:
     env:
       # Match Make's explicit selection even if the installed default changes.
       GOTOOLCHAIN: go1.27.3
+      GOEXPERIMENT: ""
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -112,6 +114,7 @@ jobs:
           - experiments/r1-credentials
     env:
       GOTOOLCHAIN: go1.27.3
+      GOEXPERIMENT: ""
       OFFLINE_EXPERIMENT_MODULE: ${{ matrix.module }}
     steps:
       - name: Check out source
@@ -137,6 +140,7 @@ jobs:
     env:
       # Match Make's explicit selection even if the installed default changes.
       GOTOOLCHAIN: go1.27.3
+      GOEXPERIMENT: ""
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

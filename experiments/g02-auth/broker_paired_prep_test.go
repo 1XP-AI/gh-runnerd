@@ -194,7 +194,7 @@ func TestPairedFixtureBuildRequiresExactGo1273(t *testing.T) {
 	if !validPairedFixtureBuild(info, head, pairedFixtureBridgeTags) {
 		t.Fatal("Go 1.27.3 fixture build rejected")
 	}
-	for _, version := range []string{"go1.26.8", "go1.26.9", "go1.27.2", "go1.28.1", ""} {
+	for _, version := range []string{"go1.26.8", "go1.26.9", "go1.27.2", "go1.27.3-X:nojsonv2", "go1.28.1", ""} {
 		previous := *info
 		previous.GoVersion = version
 		if validPairedFixtureBuild(&previous, head, pairedFixtureBridgeTags) {

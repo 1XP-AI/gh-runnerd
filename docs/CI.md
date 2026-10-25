@@ -10,6 +10,11 @@ version into its normal per-user toolchain cache. The hosted workflow uses
 Conventional settings such as `make GOFLAGS=-mod=readonly build` are exported
 through Go's environment, rather than placed before its subcommand.
 
+Qualified Go 1.27 builds use `GOEXPERIMENT=` (release defaults). `none` disables
+default features and produces a non-default Go build stamp; the G01/broker
+exact-version gates reject it. Development toggles do not qualify a live binary,
+and this policy does not modify global Go settings.
+
 The repository uses two hosted CI cadences on `ubuntu-24.04`. `pr-fast.yml` runs
 for opened, synchronized and reopened pull requests with `contents: read`, no
 secrets, no privileged hardware and pinned external actions. It always checks diff

@@ -5,6 +5,10 @@ The [adoption ledger](g01-sdk-v05-adoption.md) tracks the later pin/adapter chan
 and promotion of these unchanged test files into the G01 module root. Statements
 below about unchanged shared pins and manual-only coverage describe that earlier
 qualification batch, not the later adoption candidate.
+Its `GOEXPERIMENT=none` setting is also a non-default Go 1.27 build profile;
+the adoption ledger records the strict metadata refusal and separate stock
+release-default qualification. Do not reuse that earlier profile as stock ABI
+or live-binary approval.
 
 Issue: [G01 #1](https://github.com/1XP-AI/gh-runnerd/issues/1).
 Writer: Codex, current maintainer-selected Sol medium route.

@@ -10,6 +10,7 @@ cp "$experiment_dir/testdata/sdk-v05/go.mod" "$experiment_dir/testdata/sdk-v05/g
     "$experiment_dir/client_test.go" "$experiment_dir/listener_test.go" \
     "$experiment_dir/server_test.go" "$experiment_dir/recovery.go" "$candidate_dir/"
 export GOTOOLCHAIN=go1.27.3
+export GOEXPERIMENT=
 export GOWORK=off
 cd "$candidate_dir"
 go version

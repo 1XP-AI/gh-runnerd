@@ -71,13 +71,15 @@ SDK v0.5.0. It does not disable a mismatch check or claim recipe execution. The
 unchanged packet bytes reuse their earlier frozen static review; the expensive
 whole-packet scan was not repeated. This profile/checker delta still needs review.
 
-## Actual local validation so far
+## Initial supplemental profile
 
-All Go execution uses the scrubbed exact-toolchain environment described in the
-qualification record (selected cached Go/compiler, no credential/configuration
-environment, public proxy/checksum database, GOMAXPROCS=2, GOFLAGS=-p=2).
-SDK traffic is synthetic fixture traffic only. No real runner/JIT/workflow
-operation or runtime image execution occurs.
+The initial measurements below used the qualification record's scrubbed
+environment, including `GOEXPERIMENT=none`. A subsequent real-binary check showed
+that Go 1.27 stamps this non-default selection with a `-X:nojsonv2,...` suffix.
+Those results remain supplemental evidence, **not stock release-ABI
+qualification**. No credential/configuration environment was forwarded; SDK
+traffic was synthetic fixtures only. No real runner/JIT/workflow or runtime
+image operation occurred.
 
 | Check | Actual result |
 | --- | --- |
@@ -95,7 +97,46 @@ operation or runtime image execution occurs.
 | Controller/worker admission | Tagged `g01_live,g01_worker`, exact `TestBuildRevisionAdmissionRequiresGo1273`: race PASS, controller 1.336s and worker 1.325s; prior/shared and unexpected versions rejected. |
 | Preserved legacy comparison | `compare-sdk.sh`: exit 0; v0.4.0 race 1.478s, audited pseudo-version race 1.381s; both vet passes. Three moved fixture files also matched old main bytes via cmp. |
 | Packet profile classification | Prior dynamic comparison failed three of four assertions after the pin changed. New frozen-identity/active-profile checks: seven PASS, 0.008s, inert parse/read only. Packet unchanged. |
-| Broader tooling observations | A five-test selector timed out at 90s during `TestToolingDefaultG02PartitionsRun`; its subsequent isolated observation also timed out at 180s. **Neither is passing evidence**. The task process limits ended observation; product/child 45s partition limits were not widened. Exhaustive tooling verification remains outstanding. |
+| Broader tooling observations | A five-test selector timed out at 90s during `TestToolingDefaultG02PartitionsRun`; its isolated observation also timed out at 180s. Neither is passing evidence. A final isolated 10m observation passed in 242.106s under the initial non-default profile. Product/child 45s limits were unchanged. This is tooling-routing evidence, not stock release-ABI qualification. |
+
+## Stock release-profile correction and actual results
+
+The real prepared-binary test at source
+`69e33aa97ea47e25aa2dcc5cd167d57e452e79f3` failed in 3.231s with the initial
+`GOEXPERIMENT=none` profile. The compiled artifact reported
+`go1.27.3-X:nojsonv2,nogreenteagc,norandomizedheapbase64,nosizespecializedmalloc`;
+its clean revision, SDK and tags matched, but the exact Go gate correctly
+refused it. **No prefix/suffix allowance was added to the admission code.**
+
+Canonical verification/builds use **`GOEXPERIMENT=` (release defaults)**, not
+`none`. Other scrubbed settings remain: exact cached Go/compiler, public proxy
+without direct fallback plus checksum database, GOENV/GOWORK/GOAUTH/telemetry off,
+empty private-module selectors, GOMAXPROCS=2, GOFLAGS=-p=2, CGO_ENABLED=1,
+GOOS=darwin, GOARCH=arm64 and GOARM64=v8.0. This is a per-command environment,
+not a change to the user's global Go configuration.
+
+| Canonical check at the same source | Actual result |
+| --- | --- |
+| `TestPairedBrokerPrepareReviewedG01LiveBinary`, race, 45s | PASS 11.568s. Built both fixture tag variants from the clean committed source, stored/reloaded the private receipts, validated exact Go 1.27.3/SDK v0.5.0/source SHA/tags/platform/cgo and unchanged byte digest. `go version -m` confirmed bare `go1.27.3`; this was build/read qualification, not live execution. |
+| Default G01 protocol package, race, 60s | PASS 1.380s; all 17 top-level protocol tests. |
+| Actual SDK adapter/fault/drain boundaries, race, 45s | PASS 3.892s; selector covers `TestPinnedSDK*`, `TestDriver.*PinnedSDK*`, the new handler gate, baseline admission, supported fault barriers, missing-message/foreign-work rejection and drain listener cases. |
+| Tagged vet (`g01_live,g01_worker,g01_pair_fixture`) | Exit 0, no diagnostics. |
+| govulncheck v1.7.0 | Exit 0/no vulnerabilities for G01 default test-inclusive source, `g01_live,g01_worker` source, and `g01_pair_fixture` livecanary source profiles. Other module scans are recorded separately when complete. |
+| Other module security profiles | Root, G02 and R1 `govulncheck@v1.7.0 -test ./...`: each exit 0, no vulnerabilities found under release defaults. |
+| Non-default-profile preflight | New `TestToolingCheckToolchainRequiresReleaseDefaults` first failed (exit 1, 0.515s): the old checker accepted GOEXPERIMENT=none because `go version` still reported base 1.27.3. The checker now rejects nonempty GOEXPERIMENT with a fixed safe message; CI sets it empty and the minimal v0.5 comparison exports release defaults. |
+| Exact/profile-selection regression | Release-default, exact-patch and newer-system-Go tests passed together, 1.718s. Parse-only frozen-packet/current-profile checks also passed all seven tests, 0.007s. |
+| Stock admission negatives | Controller/worker version tests: race PASS 1.332s/1.313s. G02 broker/paired metadata tests: race PASS 1.444s, then vet exit 0. Non-default `-X:nojsonv2` Go stamps are explicitly rejected without normalizing the actual version string. |
+| Cadence-tagged source security | Test-inclusive `g01_live,g01_pair_fixture,g01_pair_real_cadence` cmd/livecanary govulncheck: exit 0, no vulnerabilities; not cadence execution evidence. |
+| Go 1.27 tooling execution delta | Six focused checks covering GOFLAGS, JSON output, complete subtest matching, synthetic/spoofed TestMain output and skipped selections: PASS 10.007s under release defaults. The exhaustive stock root matrix remains postmerge CI evidence, not a local claim. |
+| R1 shared-toolchain delta | Full R1 default race suite PASS 7.516s, vet exit 0. |
+| Frozen SDK comparison under release defaults | `compare-sdk.sh` exit 0: SDK v0.4.0 race 1.370s, audited pseudo-version race 1.381s, both vet passes. The wrapper still explicitly selects Go 1.26.9; it is not the active G01 profile. |
+| Updated minimal v0.5 wrapper | `compare-v05.sh` exit 0, race 1.414s, tidy/vet pass. It copies promoted tests correctly and explicitly selects empty GOEXPERIMENT/release defaults. |
+
+The real-cadence bridge selector does **not** prove a 35-second run: it reaches
+the existing controller provenance quarantine and skips before that cadence.
+Neither package `ok` output nor the compiled cadence variant is a live or
+real-cadence success. Verbose verification explicitly reported SKIP at the
+broker-only provenance guard (case 0.15s; package 1.430s). Keep this gate unresolved.
 
 Formatting, local document link targets, diff hygiene and new-artifact secret/
 personal-path scans also passed. The generated Python bytecode cache was moved
