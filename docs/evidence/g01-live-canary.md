@@ -26,12 +26,12 @@ provisioning/rotation remain unresolved, as does the provider-side conditional
 delete gate. This template correction closes neither gate and authorizes no live
 execution.
 
-Release/source freshness (2026-10-13): see the
-[runner release checkpoint](g01-runner-release-checkpoint.md). Keep this plan's
-`v2.337.0` selection unless a later authorized revision identifies the version
-offered to the named organization/repository. Before any candidate change, verify
-the archive bytes against the published digest and record the exact runtime/image
-digest; the checkpoint is source/metadata evidence only and authorizes no swap.
+Release/source and byte qualification (2026-10-25): the named private target
+offers Linux ARM64 runner `v2.338.0`. Its official archive and all ten image
+layers have been hash-verified, and selected image runner/Node bytes match the
+archive. The current experimental pin selects that immutable ARM64 manifest;
+see the [runner checkpoint](g01-runner-release-checkpoint.md#2026-10-25-target-offer-archive-and-image-bytes).
+These static results do not establish runtime behavior or authorize a canary.
 
 ## Required environment and authorization record
 
@@ -65,6 +65,16 @@ explicit approval; do not dispatch even the baseline from this checkpoint.
 
 ### Execution checklist
 
+The 2026-10-25 read-only preparation additionally verified the target's offered
+runner package and static distribution/image bytes. The earlier authenticated
+UI inspection confirmed a dedicated, nondefault group selecting only the private
+target with public repositories disabled and zero configured runners; its
+All-workflows policy still needs the approved workflow restriction. Current
+`gh` runner-group reads remain HTTP 403. Neither the earlier UI observation nor
+the successful package-list read proves authority of the eventual execution
+principal. Exact workflow/runtime/controller identities and the provenance and
+cleanup capabilities below remain required.
+
 - [ ] Maintainer identifies one disposable **private** repository and one
   organization; no public fork/PR execution. Record the reviewed workflow SHA.
 - [ ] Dedicated runner group allows only that repository, and a unique canary
@@ -83,10 +93,11 @@ explicit approval; do not dispatch even the baseline from this checkpoint.
   target after host headroom is checked, 10-minute job deadline. Increase any
   limit only with new concrete authorization. No service-container workloads in
   this protocol canary.
-- [ ] Use the reviewed SDK `v0.5.0`/Go `1.27.3` adoption profile and runner `2.337.0`; verify runner bytes
-  against [published digests](g01-contract.md#runner-and-jit-transport) and record
-  exact runtime/image digest. Recheck support/security status before execution.
-  See the [adoption ledger](g01-sdk-v05-adoption.md) for pending review and actual
+- [ ] Use the reviewed SDK `v0.5.0`/Go `1.27.3` adoption profile and the byte-verified
+  runner `2.338.0` ARM64 image. The archive, manifest and config digests are in the
+  [runner checkpoint](g01-runner-release-checkpoint.md#2026-10-25-target-offer-archive-and-image-bytes);
+  qualify the approved daemon/runtime and recheck support/security before execution.
+  See the [adoption ledger](g01-sdk-v05-adoption.md) and PR #107 for SDK review and
   verification. The frozen v0.4 recovery packet (Go 1.26.9 wrapper and older
   Go 1.26.8 historical/specimen text) is not the current execution profile and
   must not be relabeled by replacing version strings. This checklist does not authorize a

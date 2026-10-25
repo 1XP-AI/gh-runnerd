@@ -48,8 +48,20 @@ ARM64 image digest, enforce the approved CPU/memory/process bounds, suppress raw
 runner diagnostics, and retain unknown/busy resources. The controller-only
 canary driver does not implement that executor.
 
-Sources: [runner image source at v2.337.0](https://github.com/actions/runner/blob/v2.337.0/images/Dockerfile)
+Sources: [runner image source at v2.338.0](https://github.com/actions/runner/blob/197ca027b90de199464dee3bb9ff198a1db60967/images/Dockerfile)
 and [official runner image](https://github.com/actions/runner/pkgs/container/actions-runner).
+
+## Current image byte qualification — 2026-10-25
+
+The named private target offers runner `2.338.0`. The official ARM64 archive,
+image index/platform/config and all ten layer digests have now been verified,
+including equality of six selected runner/Node files in the archive and final
+layer view. The worker pin selects ARM64 manifest
+`sha256:9644537b29b4799cb752a2f23a45a1e603cf74c3c5998241a1533f0e8c3dc649`.
+See the [single runner checkpoint](../../docs/evidence/g01-runner-release-checkpoint.md#2026-10-25-target-offer-archive-and-image-bytes)
+for exact byte identities, scope and remaining runtime gates. No Docker daemon,
+container or runner was executed; the template remains inactive. The following
+older metadata is historical and is no longer the active worker pin.
 
 ## Registry metadata observed on 2026-09-07
 
