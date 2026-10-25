@@ -8,7 +8,8 @@ trap 'rm -rf -- "$comparison_dir"' EXIT HUP INT TERM
 export GOTOOLCHAIN=go1.26.9
 for sdk_version in v0.4.0 v0.4.1-0.20260721134647-cb0405b2d874; do
     mkdir "$comparison_dir/$sdk_version"
-    cp "$experiment_dir/go.mod" "$experiment_dir/go.sum" "$experiment_dir/"*.go "$comparison_dir/$sdk_version/"
+    cp "$experiment_dir/testdata/sdk-v04/go.mod" "$experiment_dir/testdata/sdk-v04/go.sum" \
+        "$experiment_dir/testdata/sdk-v04/"*.go "$experiment_dir/recovery.go" "$comparison_dir/$sdk_version/"
     (
         cd "$comparison_dir/$sdk_version"
         go mod edit -droprequire=github.com/1XP-AI/gh-runnerd/experiments/g02-auth -dropreplace=github.com/1XP-AI/gh-runnerd/experiments/g02-auth

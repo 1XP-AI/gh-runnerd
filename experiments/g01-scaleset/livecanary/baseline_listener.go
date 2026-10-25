@@ -14,6 +14,90 @@ import (
 
 var errBaselineCollected = errors.New("baseline callback collection complete")
 
+func (b *baselineListener) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage) error {
+	if msg != nil && msg.MessageID == listener.InitialMessageID {
+		if msg.Statistics == nil {
+			return ErrQuarantine
+		}
+		_, err := b.HandleDesiredRunnerCount(ctx, msg.Statistics.TotalAssignedJobs)
+		return err
+	}
+	if err := b.enter(); err != nil {
+		return err
+	}
+	s, err := b.state()
+	if err != nil || s.latest == nil || s.latest.Assigned == nil {
+		b.mu.Unlock()
+		return ErrQuarantine
+	}
+	if msg == nil {
+		// v0.5.0 does not cache 202 statistics. This caller deliberately keeps
+		// its journaled observation; it does not claim that snapshot is fresh.
+		desired := *s.latest.Assigned
+		b.mu.Unlock()
+		_, err := b.HandleDesiredRunnerCount(ctx, desired)
+		return err
+	}
+	// The complete poll and approved-source result are already durable. The
+	// handler validates them BEFORE SDK ACK; failed validation must not ACK.
+	valid := s.batch != nil && !s.messageDone && s.sourceRef.Sequence > 0 && s.ackRef.Sequence == 0 && s.batch.matches(msg)
+	b.mu.Unlock()
+	if !valid {
+		return ErrQuarantine
+	}
+	return nil
+}
+
+// v0.5.0 owns only Scale -> ACK. This experiment explicitly keeps acquisition
+// and lifecycle continuation AFTER a successful journaled ACK, under the
+// original bounded authority context. They are caller policy, not SDK callbacks
+// or an SDK idempotency guarantee. The upstream ACK loop is not patched.
+type baselineListenerClient struct {
+	*baselineListener
+	message *scaleset.RunnerScaleSetMessage
+}
+
+func (c *baselineListenerClient) GetMessage(ctx context.Context, last, capacity int) (*scaleset.RunnerScaleSetMessage, error) {
+	msg, err := c.baselineListener.GetMessage(ctx, last, capacity)
+	c.message = msg
+	return msg, err
+}
+
+func (c *baselineListenerClient) DeleteMessage(ctx context.Context, id int) error {
+	msg := c.message
+	if msg == nil || msg.MessageID != id || msg.Statistics == nil {
+		return ErrQuarantine
+	}
+	if err := c.baselineListener.DeleteMessage(ctx, id); err != nil {
+		return err
+	}
+	if len(msg.JobAvailableMessages) > 0 {
+		ids := make([]int64, len(msg.JobAvailableMessages))
+		for i, job := range msg.JobAvailableMessages {
+			if job == nil {
+				return ErrQuarantine
+			}
+			ids[i] = job.RunnerRequestID
+		}
+		if _, err := c.AcquireJobs(c.ctx, ids); err != nil {
+			return err
+		}
+	}
+	for _, job := range msg.JobStartedMessages {
+		if err := c.HandleJobStarted(c.ctx, job); err != nil {
+			return err
+		}
+	}
+	for _, job := range msg.JobCompletedMessages {
+		if err := c.HandleJobCompleted(c.ctx, job); err != nil {
+			return err
+		}
+	}
+	_, err := c.HandleDesiredRunnerCount(c.ctx, msg.Statistics.TotalAssignedJobs)
+	c.message = nil
+	return err
+}
+
 // Private protocol collection under the caller's concrete controller lease.
 // No current phase/CLI calls this. The future pair orchestrator must prove
 // completed pairing and host preflight before invoking this experiment slice.
@@ -209,7 +293,7 @@ func (b *baselineListener) run(after func(context.Context, baselineAcquisition) 
 	if err := b.initialize(); err != nil {
 		return err
 	}
-	l, err := listener.New(b, listener.Config{ScaleSetID: b.setID, MaxRunners: 1})
+	l, err := listener.New(&baselineListenerClient{baselineListener: b}, listener.Config{ScaleSetID: b.setID, MaxRunners: 1})
 	if err != nil {
 		return ErrQuarantine
 	}

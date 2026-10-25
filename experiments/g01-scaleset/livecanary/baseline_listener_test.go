@@ -18,7 +18,6 @@ import (
 
 	"github.com/actions/scaleset"
 	"github.com/google/uuid"
-	"github.com/hashicorp/go-retryablehttp"
 )
 
 type baselineRoundTrip func(*http.Request) (*http.Response, error)
@@ -182,11 +181,9 @@ func newBaselineFixtureWithApproval(t *testing.T, change func(string, any) any, 
 		return response, err
 	}))
 	httpClient := &http.Client{Transport: outer, Timeout: 3 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	retry := retryablehttp.NewClient()
-	retry.RetryMax = 0
-	retry.Logger = nil
-	retry.HTTPClient = httpClient
-	options := []scaleset.HTTPOption{scaleset.WithRetryableHTTPClint(retry), scaleset.WithLogger(slog.New(slog.DiscardHandler))}
+	retry := &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone()}
+	retry = httpClient
+	options := []scaleset.HTTPOption{scaleset.WithHTTPClient(retry), scaleset.WithRetry(scaleset.RetryConfig{Max: 0}), scaleset.WithLogger(slog.New(slog.DiscardHandler))}
 	client, err := scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{GitHubConfigURL: server.URL + "/" + f.a.Organization, PersonalAccessToken: c.InstallationToken}, options...)
 	if err != nil {
 		t.Fatal("SDK fixture construction failed")

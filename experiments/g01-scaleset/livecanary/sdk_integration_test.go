@@ -20,7 +20,6 @@ import (
 
 	"github.com/actions/scaleset"
 	"github.com/google/uuid"
-	"github.com/hashicorp/go-retryablehttp"
 )
 
 type fixtureSDK struct{ *SDKAPI }
@@ -125,11 +124,9 @@ func TestDriverBarriersThroughPinnedSDK(t *testing.T) {
 				_ = json.NewEncoder(w).Encode(body)
 			}))
 			defer server.Close()
-			retry := retryablehttp.NewClient()
-			retry.RetryMax = 0
-			retry.Logger = nil
-			retry.HTTPClient.Timeout = time.Second
-			transport := retry.HTTPClient.Transport.(*http.Transport)
+			retry := &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone()}
+			retry.Timeout = time.Second
+			transport := retry.Transport.(*http.Transport)
 			transport.Proxy = nil
 			transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 				if address != server.Listener.Addr().String() {
@@ -138,8 +135,8 @@ func TestDriverBarriersThroughPinnedSDK(t *testing.T) {
 				return (&net.Dialer{}).DialContext(ctx, network, address)
 			}
 			defer transport.CloseIdleConnections()
-			retry.HTTPClient.Transport = withResponseBudget(transport)
-			options := []scaleset.HTTPOption{scaleset.WithRetryableHTTPClint(retry)}
+			retry.Transport = withResponseBudget(transport)
+			options := []scaleset.HTTPOption{scaleset.WithHTTPClient(retry), scaleset.WithRetry(scaleset.RetryConfig{Max: 0})}
 			client, err := scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{GitHubConfigURL: server.URL + "/fixture-org", PersonalAccessToken: "synthetic-installation"}, options...)
 			if err != nil {
 				t.Fatal("SDK fixture construction failed")
@@ -273,10 +270,8 @@ func TestDriverDrainThroughPinnedSDKAndPollHook(t *testing.T) {
 	fixtureApproval.ActionsHosts = []string{server.Listener.Addr().String()}
 
 	buildAPI := func(hook *drainPollHook) (*SDKAPI, error) {
-		retry := retryablehttp.NewClient()
-		retry.RetryMax = 0
-		retry.Logger = nil
-		retry.HTTPClient.Timeout = time.Second
+		retry := &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone()}
+		retry.Timeout = time.Second
 		fixtureTransport, ok := server.Client().Transport.(*http.Transport)
 		if !ok {
 			return nil, errors.New("TLS fixture transport is not an HTTP transport")
@@ -296,13 +291,13 @@ func TestDriverDrainThroughPinnedSDKAndPollHook(t *testing.T) {
 				return hook
 			})
 		}
-		retry.HTTPClient.Transport = withResponseBudget(transport, wrappers...)
-		options := []scaleset.HTTPOption{scaleset.WithRetryableHTTPClint(retry), scaleset.WithLogger(slog.New(slog.DiscardHandler))}
+		retry.Transport = withResponseBudget(transport, wrappers...)
+		options := []scaleset.HTTPOption{scaleset.WithHTTPClient(retry), scaleset.WithRetry(scaleset.RetryConfig{Max: 0}), scaleset.WithLogger(slog.New(slog.DiscardHandler))}
 		client, err := scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{GitHubConfigURL: server.URL + "/fixture-org", PersonalAccessToken: "synthetic-installation"}, options...)
 		if err != nil {
 			return nil, err
 		}
-		return &SDKAPI{client: client, rest: retry.HTTPClient, baseURL: server.URL + "/api/v3", approval: fixtureApproval, credentials: credentials(fixtureApproval), options: options}, nil
+		return &SDKAPI{client: client, rest: retry, baseURL: server.URL + "/api/v3", approval: fixtureApproval, credentials: credentials(fixtureApproval), options: options}, nil
 	}
 	base, err := buildAPI(nil)
 	if err != nil {
@@ -1321,10 +1316,8 @@ func newPinnedDrainSessionOptions(t *testing.T, a Approval, body string, options
 	fixtureApproval.ActionsHosts = append([]string{fixture.server.Listener.Addr().String()}, options.extraActionsHosts...)
 
 	buildAPI := func(hook *drainPollHook) (*SDKAPI, error) {
-		retry := retryablehttp.NewClient()
-		retry.RetryMax = 0
-		retry.Logger = nil
-		retry.HTTPClient.Timeout = time.Second
+		retry := &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone()}
+		retry.Timeout = time.Second
 		fixtureTransport, ok := fixture.server.Client().Transport.(*http.Transport)
 		if !ok {
 			return nil, errors.New("TLS fixture transport is not an HTTP transport")
@@ -1383,13 +1376,13 @@ func newPinnedDrainSessionOptions(t *testing.T, a Approval, body string, options
 				return sdkRequestMutationRoundTripper{inner: inner, mutate: options.mutateRequest}
 			})
 		}
-		retry.HTTPClient.Transport = withResponseBudget(transport, wrappers...)
-		options := []scaleset.HTTPOption{scaleset.WithRetryableHTTPClint(retry), scaleset.WithLogger(slog.New(slog.DiscardHandler))}
+		retry.Transport = withResponseBudget(transport, wrappers...)
+		options := []scaleset.HTTPOption{scaleset.WithHTTPClient(retry), scaleset.WithRetry(scaleset.RetryConfig{Max: 0}), scaleset.WithLogger(slog.New(slog.DiscardHandler))}
 		client, err := scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{GitHubConfigURL: fixture.server.URL + "/fixture-org", PersonalAccessToken: "synthetic-installation"}, options...)
 		if err != nil {
 			return nil, err
 		}
-		return &SDKAPI{client: client, rest: retry.HTTPClient, baseURL: fixture.server.URL + "/api/v3", approval: fixtureApproval, credentials: credentials(fixtureApproval), options: options}, nil
+		return &SDKAPI{client: client, rest: retry, baseURL: fixture.server.URL + "/api/v3", approval: fixtureApproval, credentials: credentials(fixtureApproval), options: options}, nil
 	}
 	base, err := buildAPI(nil)
 	if err != nil {

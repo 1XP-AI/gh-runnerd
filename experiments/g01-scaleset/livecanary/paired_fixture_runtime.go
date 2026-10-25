@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/actions/scaleset"
-	"github.com/hashicorp/go-retryablehttp"
 
 	"github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/liveworker"
 )
@@ -100,12 +99,10 @@ func NewSDKAPIForPairedFixture(a Approval, c Credentials, baseURL string, caPEM 
 		}
 		return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, network, target)
 	}
-	retry := retryablehttp.NewClient()
-	retry.RetryMax = 0
-	retry.Logger = nil
+	retry := &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone()}
 	httpClient := &http.Client{Transport: withResponseBudget(transport), Timeout: operationTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	retry.HTTPClient = httpClient
-	options := []scaleset.HTTPOption{scaleset.WithRetryableHTTPClint(retry), scaleset.WithLogger(slog.New(slog.DiscardHandler))}
+	retry = httpClient
+	options := []scaleset.HTTPOption{scaleset.WithHTTPClient(retry), scaleset.WithRetry(scaleset.RetryConfig{Max: 0}), scaleset.WithLogger(slog.New(slog.DiscardHandler))}
 	client, err := scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{GitHubConfigURL: baseURL + "/" + a.Organization, PersonalAccessToken: c.InstallationToken}, options...)
 	if err != nil {
 		return nil, ErrApproval

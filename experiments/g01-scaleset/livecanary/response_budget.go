@@ -10,10 +10,10 @@ const responseBodyLimit int64 = 1 << 20
 
 var errResponseBudget = errors.New("response body budget exceeded")
 
-// SDK v0.4.0 requires its HTTPClient.Transport to be a *http.Transport, including
-// when it constructs session clients. Standard RegisterProtocol permits a shared
-// response wrapper without replacing that required type or patching the SDK.
-// The inner clone preserves the already configured TLS/host/proxy restrictions.
+// Keep the established response-capture transport shape when selecting SDK
+// v0.5.0. It no longer requires a concrete transport, but RegisterProtocol still
+// preserves the inspected inner TLS/host/proxy restrictions without patching
+// SDK code. Session clients inherit this guarded HTTP client.
 func withResponseBudget(transport *http.Transport, wrappers ...func(http.RoundTripper) http.RoundTripper) *http.Transport {
 	var inner http.RoundTripper = baselineRequestCaptureTransport{inner: transport}
 	for _, wrap := range wrappers {

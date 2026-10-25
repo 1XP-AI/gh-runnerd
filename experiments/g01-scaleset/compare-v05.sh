@@ -7,7 +7,8 @@ experiment_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 candidate_dir=$(mktemp -d "${TMPDIR:-/tmp}/g01-v05.XXXXXXXX")
 trap 'rm -rf -- "$candidate_dir"' EXIT HUP INT TERM
 cp "$experiment_dir/testdata/sdk-v05/go.mod" "$experiment_dir/testdata/sdk-v05/go.sum" \
-    "$experiment_dir/testdata/sdk-v05/"*.go "$experiment_dir/recovery.go" "$candidate_dir/"
+    "$experiment_dir/client_test.go" "$experiment_dir/listener_test.go" \
+    "$experiment_dir/server_test.go" "$experiment_dir/recovery.go" "$candidate_dir/"
 export GOTOOLCHAIN=go1.27.3
 export GOWORK=off
 cd "$candidate_dir"

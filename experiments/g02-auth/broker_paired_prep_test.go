@@ -19,8 +19,8 @@ const (
 	pairedFixtureBridgeTags     = "g01_live,g01_pair_fixture"
 	pairedRealCadenceBridgeTags = "g01_live,g01_pair_fixture,g01_pair_real_cadence"
 	pairedFixtureProgramPath    = "github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/cmd/g01-live"
-	pairedFixtureSDKVersion     = "v0.4.0"
-	pairedFixtureGoVersion      = "go1.26.9"
+	pairedFixtureSDKVersion     = "v0.5.0"
+	pairedFixtureGoVersion      = "go1.27.3"
 )
 
 type preparedBridgeBinary struct {
@@ -101,7 +101,7 @@ func compilePairedG01Binaries(t *testing.T, tagSets []string) map[string]prepare
 		}
 		command = exec.Command("go", "build", "-buildvcs=true", "-tags", tags, "-o", out, "./cmd/g01-live")
 		command.Dir = filepath.Join(cloneRoot, "experiments", "g01-scaleset")
-		command.Env = append(os.Environ(), "GOTOOLCHAIN=go1.26.9")
+		command.Env = append(os.Environ(), "GOTOOLCHAIN=go1.27.3")
 		if output, err := command.CombinedOutput(); err != nil {
 			_ = output
 			t.Fatal("build reviewed g01 bridge binary")
@@ -176,7 +176,7 @@ func validPairedFixtureBuild(info *debug.BuildInfo, expectedHead, expectedTags s
 	return goos == runtime.GOOS && goarch == runtime.GOARCH && cgo == "1" && revision == expectedHead && clean && sdk && tags == expectedTags
 }
 
-func TestPairedFixtureBuildRequiresExactGo1269(t *testing.T) {
+func TestPairedFixtureBuildRequiresExactGo1273(t *testing.T) {
 	head := strings.Repeat("a", 40)
 	info := &debug.BuildInfo{
 		GoVersion: pairedFixtureGoVersion,
@@ -192,13 +192,20 @@ func TestPairedFixtureBuildRequiresExactGo1269(t *testing.T) {
 		},
 	}
 	if !validPairedFixtureBuild(info, head, pairedFixtureBridgeTags) {
-		t.Fatal("Go 1.26.9 fixture build rejected")
+		t.Fatal("Go 1.27.3 fixture build rejected")
 	}
-	for _, version := range []string{"go1.26.8", "go1.27.1", ""} {
+	for _, version := range []string{"go1.26.8", "go1.26.9", "go1.27.2", "go1.28.1", ""} {
 		previous := *info
 		previous.GoVersion = version
 		if validPairedFixtureBuild(&previous, head, pairedFixtureBridgeTags) {
 			t.Fatalf("fixture build with Go %q admitted", version)
+		}
+	}
+	for _, version := range []string{"v0.4.0", "v0.5.1", ""} {
+		previous := *info
+		previous.Deps = []*debug.Module{{Path: "github.com/actions/scaleset", Version: version}}
+		if validPairedFixtureBuild(&previous, head, pairedFixtureBridgeTags) {
+			t.Fatalf("fixture SDK %q admitted", version)
 		}
 	}
 }

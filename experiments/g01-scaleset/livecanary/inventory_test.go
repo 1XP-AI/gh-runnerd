@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/actions/scaleset"
-	"github.com/hashicorp/go-retryablehttp"
 )
 
 // This fixture uses only a private TLS listener. No configurable external endpoint
@@ -238,11 +237,9 @@ func TestInventoryMalformedStopsLegacyEffects(t *testing.T) {
 				_ = json.NewEncoder(w).Encode(body)
 			}))
 			baseURL = server.URL
-			retry := retryablehttp.NewClient()
-			retry.RetryMax = 0
-			retry.Logger = nil
-			retry.HTTPClient = client
-			options := []scaleset.HTTPOption{scaleset.WithRetryableHTTPClint(retry)}
+			retry := &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone()}
+			retry = client
+			options := []scaleset.HTTPOption{scaleset.WithHTTPClient(retry), scaleset.WithRetry(scaleset.RetryConfig{Max: 0})}
 			sdk, err := scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{GitHubConfigURL: server.URL + "/fixture-org", PersonalAccessToken: c.InstallationToken}, options...)
 			if err != nil {
 				t.Fatal("SDK construction failed")

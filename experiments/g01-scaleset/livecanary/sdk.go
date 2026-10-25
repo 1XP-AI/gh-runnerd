@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/actions/scaleset"
-	"github.com/hashicorp/go-retryablehttp"
 )
 
 // Credentials come only from the trusted controller-side broker on stdin.
@@ -75,9 +74,7 @@ func newSDKAPIWithPollHook(a Approval, c Credentials, hook *drainPollHook) (*SDK
 		return nil, ErrApproval
 	}
 	transport := newSDKTransport(a)
-	retry := retryablehttp.NewClient()
-	retry.RetryMax = 0
-	retry.Logger = nil
+	retry := &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone()}
 	wrappers := []func(http.RoundTripper) http.RoundTripper(nil)
 	if hook != nil {
 		wrappers = append(wrappers, func(inner http.RoundTripper) http.RoundTripper {
@@ -85,13 +82,13 @@ func newSDKAPIWithPollHook(a Approval, c Credentials, hook *drainPollHook) (*SDK
 			return hook
 		})
 	}
-	retry.HTTPClient = &http.Client{Transport: withResponseBudget(transport, wrappers...), Timeout: operationTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	options := []scaleset.HTTPOption{scaleset.WithRetryableHTTPClint(retry), scaleset.WithLogger(slog.New(slog.DiscardHandler))}
+	retry = &http.Client{Transport: withResponseBudget(transport, wrappers...), Timeout: operationTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	options := []scaleset.HTTPOption{scaleset.WithHTTPClient(retry), scaleset.WithRetry(scaleset.RetryConfig{Max: 0}), scaleset.WithLogger(slog.New(slog.DiscardHandler))}
 	client, err := scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{GitHubConfigURL: "https://github.com/" + a.Organization, PersonalAccessToken: c.InstallationToken}, options...)
 	if err != nil {
 		return nil, ErrApproval
 	}
-	return &SDKAPI{client: client, rest: retry.HTTPClient, baseURL: "https://api.github.com", approval: a, credentials: c, options: options}, nil
+	return &SDKAPI{client: client, rest: retry, baseURL: "https://api.github.com", approval: a, credentials: c, options: options}, nil
 }
 
 // Keep the production transport construction separate so its TLS protocol and

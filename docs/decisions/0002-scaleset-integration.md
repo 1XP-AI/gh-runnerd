@@ -1,25 +1,28 @@
 # ADR 0002: Released Scale Set listener with independent reconciliation
 
-Status: **provisional integration selection; independent offline protocol review
-approved on 2026-10-03; G01 closure and production G01/G02 remain unresolved.**
+Status: **v0.5.0/Go 1.27.3 adoption candidate; new review pending. Historical
+v0.4.0 offline review approved on 2026-10-03. G01 closure and production G01/G02
+remain unresolved.** See the [current adoption ledger](../evidence/g01-sdk-v05-adoption.md).
 
 Issue: [G01](https://github.com/1XP-AI/gh-runnerd/issues/1).
 Checked: 2026-09-07. See [measured offline evidence](../evidence/g01-contract.md)
 and [required live experiment](../evidence/g01-live-canary.md).
 
-Freshness checkpoint (2026-10-25): released SDK v0.5.0 now has a different
+Historical qualification checkpoint (2026-10-25): released SDK v0.5.0 has a different
 handler/ACK API and requires Go 1.27.3. The
 [successor assessment and actual Go 1.26.9 baseline comparison](../evidence/g01-runner-release-checkpoint.md#2026-10-25-sdk-release-checkpoint-and-baseline-comparison)
-keep the existing v0.4.0 experimental pin unchanged while opening separate
+kept the existing v0.4.0 experimental pin unchanged while opening separate
 successor qualification. The unchanged-listener statements below compare only
 v0.4.0 with the named historical audited commit, not v0.5.0. No successor runtime
-or live result is implied, and the final G01 selection/closure remains gated.
+or live result was implied by that checkpoint. The later adoption candidate is
+the current decision below; G01 closure remains gated.
 
 A later [v0.5.0 offline candidate](../evidence/g01-sdk-v05-candidate.md) measures
 the new API on isolated Go 1.27.3. It confirms handler-before-ACK and remaining
-partial-effect/session/drain limits without changing the provisional pin or
-admitting v0.5.0 to the existing driver/broker. Its reviews and adoption remain
-separate gates; the historical review below does not cover this new profile.
+partial-effect/session/drain limits without changing the pin in that batch.
+PR #106 qualified that isolated profile; the current adoption changes the
+driver/broker pin and needs its own review. The historical review below does not
+cover this changed profile.
 
 The review is limited to the offline evidence and this provisional selection; it
 does not satisfy the authorized live canary, sanitized live evidence or safe-drain
@@ -28,6 +31,20 @@ gate. See the [independent protocol review](../evidence/g01-contract.md#independ
 and [focused-test supplement](https://github.com/1XP-AI/gh-runnerd/issues/1#issuecomment-5967258854).
 
 ## Decision
+
+Select `github.com/actions/scaleset v0.5.0`, source
+`af394d86c0d5024225238b0209043c70193bcfe6`, with exact Go 1.27.3. Keep the
+high-level listener plus independent reconciliation. The handler validates the
+already durable poll and approved-source records before SDK ACK. The bounded
+experiment explicitly acquires and processes lifecycle observations after its
+journaled ACK, preserving the receipt chain required before worker continuation.
+That post-ACK policy belongs to the experiment, not the SDK: v0.5.0 itself does
+not acquire jobs or provide the old lifecycle callbacks. Uncertain side effects
+still require quarantine, not automatic replay. The adoption has its own
+protocol/security and exact-head review gates; the historical approval below
+does not approve these changed interfaces.
+
+### Historical v0.4.0 selection
 
 Pin `github.com/actions/scaleset v0.4.0` (source
 `6ce025902cd964747a078c2aabe7340ebc667eca`) behind an adapter. Use its high-level
@@ -74,16 +91,18 @@ execution. Restoring desired demand is distinct from restoring lost job identity
 The production adapter must fence observations by a local session generation,
 discard late responses from replaced sessions, and reset cursor state for a
 newly created session. Message IDs are not a global ordering clock. A 202 has no
-new statistics; the listener reuses its last snapshot. Even a later GET has no
+new statistics; v0.5.0 passes nil rather than caching. The experiment explicitly
+retains its journaled observation without declaring it fresh. Even a later GET has no
 server revision in the SDK statistic type. No stale observation may authorize
 deletion; periodic reads provide convergence candidates, not linearizability.
 
-Use bounded operation deadlines and sanitized error categories. The listener
-removes cancellation while processing a message, so callbacks need their own
-deadline. Keep SDK/retry logging discarded; raw SDK errors include URL/body
+Use bounded operation deadlines and sanitized error categories. v0.5.0 passes
+the original Run context to Scale and removes cancellation only for ACK. The
+experiment additionally bounds ACK and post-ACK work by its captured authority
+context. Keep SDK/retry logging discarded; raw SDK errors include URL/body
 details. Configure retry explicitly using the SDK's public HTTP options: do not
 blindly retry uncertain side-effecting JIT/acquisition requests. The experiment
-uses `WithRetryableHTTPClint` with HTTP `RetryMax=0`; SDK queue-token 401 refresh
+uses `WithHTTPClient` and `WithRetry(RetryConfig{Max: 0})`; SDK queue-token 401 refresh
 still retries once. Production 429/permission handling, backoff and safe status
 classification require adapter tests, not raw error-string parsing.
 

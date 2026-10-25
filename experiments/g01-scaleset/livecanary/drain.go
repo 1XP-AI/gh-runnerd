@@ -1158,27 +1158,41 @@ func (c *drainClient) AcquireJobs(ctx context.Context, ids []int64) ([]int64, er
 
 type drainScaler struct{ client *drainClient }
 
-func (s drainScaler) HandleDesiredRunnerCount(_ context.Context, count int) (int, error) {
-	if count < 0 {
-		return 0, ErrQuarantine
+func (s drainScaler) Scale(_ context.Context, msg *scaleset.RunnerScaleSetMessage) error {
+	if msg != nil && (msg.Statistics == nil || msg.Statistics.TotalAssignedJobs < 0) {
+		return ErrQuarantine
 	}
+	// The only nil-message decisions are bounded collection termination below;
+	// never synthesize fresh statistics from a cached observation.
 	s.client.mu.Lock()
-	polls := s.client.polls
-	messageID := s.client.messageID
+	polls, messageID := s.client.polls, s.client.messageID
 	s.client.mu.Unlock()
 	if !s.client.active() {
-		return 0, s.client.rejectCall("observe-poll")
+		return s.client.rejectCall("observe-poll")
 	}
 	if polls >= 2 || polls >= 1 && messageID == 0 {
-		return 0, errDrainCollected
+		return errDrainCollected
 	}
-	return min(count, drainInitialCapacity), nil
+	return nil
 }
-func (drainScaler) HandleJobStarted(context.Context, *scaleset.JobStarted) error {
-	return ErrQuarantine
-}
-func (drainScaler) HandleJobCompleted(context.Context, *scaleset.JobCompleted) error {
-	return ErrQuarantine
+
+// Acquisition is this experiment's explicit post-ACK policy, not a behavior
+// supplied by v0.5.0's listener. Use the original drain authority context even
+// though SDK ACK itself is cancellation-independent.
+type drainListenerClient struct{ *drainClient }
+
+func (c drainListenerClient) DeleteMessage(ctx context.Context, id int) error {
+	if err := c.drainClient.DeleteMessage(ctx, id); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	requestID, phaseCtx := c.requestID, c.phaseCtx
+	c.mu.Unlock()
+	if phaseCtx == nil {
+		return ErrQuarantine
+	}
+	_, err := c.AcquireJobs(phaseCtx, []int64{requestID})
+	return err
 }
 
 func cancelAndJoinDrain(stop, release func(), join func()) {
@@ -1220,7 +1234,7 @@ func runDrainListener(ctx context.Context, client listener.Client, setID int, ho
 	if rejecter, ok := client.(interface{ reject(string) error }); ok {
 		c.reject = rejecter.reject
 	}
-	l, err := listener.New(c, listener.Config{ScaleSetID: setID, MaxRunners: drainInitialCapacity})
+	l, err := listener.New(drainListenerClient{c}, listener.Config{ScaleSetID: setID, MaxRunners: drainInitialCapacity})
 	if err != nil {
 		return obs, ErrQuarantine
 	}

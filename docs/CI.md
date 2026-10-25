@@ -1,11 +1,11 @@
 # Public CI and local checks
 
-G03 established the reproducible development baseline. Its 2026-09-07 snapshot recorded Go 1.26.8 in [go.mod](../go.mod) and selected it as the latest patch in the supported 1.26 line then observed; the official release history on that date listed Go 1.27.1 and Go 1.26.8. The Go directive is a minimum under automatic toolchain selection, and Make selects an exact toolchain without a redundant `toolchain` directive. Following the 2026-10-13 source-mode vulnerability result for Go 1.26.8, the approved current shared pin is Go 1.26.9. The patch and source re-verification evidence is recorded in the [G01 runner release checkpoint](evidence/g01-runner-release-checkpoint.md); it does not close the remaining G01/G02 or live qualification gates. The released Scale Set SDK baseline requires Go 1.25.3 or newer.
+G03 established the reproducible development baseline. Its 2026-09-07 snapshot recorded Go 1.26.8 and the October remediation selected Go 1.26.9; their dated evidence remains in the [G01 runner release checkpoint](evidence/g01-runner-release-checkpoint.md). The selected shared pin is now Go 1.27.3, the minimum required by SDK v0.5.0. See the [G01 adoption ledger](evidence/g01-sdk-v05-adoption.md) for changed-boundary validation and review status. This does not close G01/G02 or authorize live execution. The Go directive remains an exact checked minimum without a redundant `toolchain` directive.
 
-Make and standalone `scripts/check-toolchain.sh` select `go1.26.9` explicitly;
+Make and standalone `scripts/check-toolchain.sh` select `go1.27.3` explicitly;
 they do not change the user's global Go configuration. Go may download that
 version into its normal per-user toolchain cache. The hosted workflow uses
-`actions/setup-go` to install 1.26.9 from `go.mod` and uses the same explicit
+`actions/setup-go` to install 1.27.3 from `go.mod` and uses the same explicit
 `GOTOOLCHAIN` value. The equality check still refuses an unexpected toolchain.
 Conventional settings such as `make GOFLAGS=-mod=readonly build` are exported
 through Go's environment, rather than placed before its subcommand.
@@ -88,7 +88,7 @@ Individual commands are available when iterating:
 
 | Command | Check |
 | --- | --- |
-| `make toolchain` | Confirm the module directives and selected Go toolchain are exactly 1.26.9. |
+| `make toolchain` | Confirm the module directives and selected Go toolchain are exactly 1.27.3. |
 | `make build` | Link the application executable; included in `make check` and hosted CI. |
 | `make fmt` / `make fmt-check` | Format or verify all Go sources with the selected toolchain. |
 | `make vet` | Run `go vet ./...`. |
