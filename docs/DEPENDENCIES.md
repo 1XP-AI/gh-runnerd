@@ -19,6 +19,10 @@ equivalent file. This checks the recorded identity and license-file presence;
 human review must still determine the license and its obligations. The current
 runtime graph contains only the local module; nested experiments remain separate.
 
+The opt-in [G01 v0.5.0 candidate](evidence/g01-sdk-v05-candidate.md) has a separate
+testdata module/Go 1.27.3 profile. Its imported SDK/JWT/uuid license inventory is
+recorded there; it changes neither this runtime table nor the shared toolchain.
+
 ## Toolchain
 
 Go standard library: `go1.26.9`, BSD-3-Clause, the language/runtime baseline;

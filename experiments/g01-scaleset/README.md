@@ -36,3 +36,13 @@ build tag. It is never run by these tests and has not run live. Its private
 approval, authority split, bounded phases and remaining worker/live gaps are in
 [the driver guide](../../docs/evidence/g01-live-driver.md). The original fixture
 remains loopback-only and cannot be repointed to GitHub.
+
+## SDK v0.5.0 candidate (opt-in)
+
+From the repository root, `sh experiments/g01-scaleset/compare-v05.sh` runs a
+separate Go 1.27.3/SDK v0.5.0 candidate against synthetic loopback HTTP fixtures.
+Public toolchain/module downloads may occur. It copies `testdata/sdk-v05` plus
+unchanged `recovery.go` to a disposable module; do not run the incomplete fixture
+directory directly. Default Go discovery/Public CI and all shared Go 1.26.9/
+SDK v0.4.0 pins are unchanged. This is not a live experiment or adoption.
+See the [candidate evidence and limitations](../../docs/evidence/g01-sdk-v05-candidate.md).
