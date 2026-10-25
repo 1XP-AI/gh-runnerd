@@ -13,6 +13,7 @@ import (
 // BrokerApproval describes one future, explicitly approved credential issuance
 // and either hostname discovery or one already-reviewed controller phase.
 type BrokerApproval struct {
+	ManagementScope            string    `json:"management_scope,omitempty"`
 	OwnerNonce                 string    `json:"owner_nonce"`
 	Mode                       string    `json:"mode"`
 	AppID                      int64     `json:"app_id"`
@@ -52,6 +53,8 @@ var brokerWorkerComponent = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,12
 var brokerPhases = map[string]bool{"create": true, "before-ack": true, "after-ack": true, "before-acquire": true, "acquire-loss": true, "jit-loss": true, "drain": true, "inspect": true, "cleanup": true}
 var brokerSpecialSlots = map[string]bool{"discover-actions-host": true, "paired-terminal": true}
 
+const organizationOnlyManagementScope = "organization-only"
+
 func brokerSlotAllowed(slot string) bool { return brokerPhases[slot] || brokerSpecialSlots[slot] }
 
 // One header, one claim and one completion for every finite schema slot, and
@@ -73,6 +76,9 @@ const (
 )
 
 func (a BrokerApproval) validate(now time.Time) error {
+	if a.ManagementScope != "" && a.ManagementScope != organizationOnlyManagementScope {
+		return errBroker
+	}
 	minimumLifetime := time.Minute
 	if a.Mode == "paired-terminal" {
 		minimumLifetime = pairedTerminalMinimumAuthority
@@ -292,6 +298,7 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 	// These facts are from authenticated identity reads and the actual mint
 	// response. The broker does not accept user-provided token issuance claims.
 	payload := struct {
+		ManagementScope   string    `json:"management_scope,omitempty"`
 		InstallationToken string    `json:"installation_token"`
 		VerificationToken string    `json:"verification_token"`
 		AppID             int64     `json:"app_id"`
@@ -300,7 +307,7 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 		ExpiresAt         time.Time `json:"expires_at"`
 		SelfHostedRunners string    `json:"organization_self_hosted_runners"`
 		Metadata          string    `json:"metadata"`
-	}{issued.Token, input.VerificationToken, identity.ID, install.ID, install.Login, issued.ExpiresAt, issued.Permissions["organization_self_hosted_runners"], issued.Permissions["metadata"]}
+	}{a.ManagementScope, issued.Token, input.VerificationToken, identity.ID, install.ID, install.Login, issued.ExpiresAt, issued.Permissions["organization_self_hosted_runners"], issued.Permissions["metadata"]}
 	data, _ := json.Marshal(payload)
 	defer clear(data)
 	if len(data) > 16384 || j.append("controller_handoff_started", nil) != nil {

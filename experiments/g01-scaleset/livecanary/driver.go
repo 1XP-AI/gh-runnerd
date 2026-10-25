@@ -23,6 +23,8 @@ var (
 )
 
 type Approval struct {
+	ManagementScope string `json:"management_scope,omitempty"`
+
 	AppID          int64     `json:"app_id"`
 	InstallationID int64     `json:"installation_id"`
 	Organization   string    `json:"organization"`

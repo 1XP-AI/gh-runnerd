@@ -1,6 +1,7 @@
 # ADR 0002: Released Scale Set listener with independent reconciliation
 
-Status: **v0.5.0/Go 1.27.3 adoption candidate; new review pending. Historical
+Status: **v0.5.0/Go 1.27.3 experimental adoption merged in PR #107 after protocol,
+security and GitHub review. Historical
 v0.4.0 offline review approved on 2026-10-03. G01 closure and production G01/G02
 remain unresolved.** See the [current adoption ledger](../evidence/g01-sdk-v05-adoption.md).
 
@@ -21,8 +22,9 @@ A later [v0.5.0 offline candidate](../evidence/g01-sdk-v05-candidate.md) measure
 the new API on isolated Go 1.27.3. It confirms handler-before-ACK and remaining
 partial-effect/session/drain limits without changing the pin in that batch.
 PR #106 qualified that isolated profile; the current adoption changes the
-driver/broker pin and needs its own review. The historical review below does not
-cover this changed profile.
+driver/broker pin. [PR #107](https://github.com/1XP-AI/gh-runnerd/pull/107)
+subsequently completed that adoption and its separate reviews. The historical
+review below does not cover the changed profile.
 
 The review is limited to the offline evidence and this provisional selection; it
 does not satisfy the authorized live canary, sanitized live evidence or safe-drain
@@ -40,9 +42,10 @@ experiment explicitly acquires and processes lifecycle observations after its
 journaled ACK, preserving the receipt chain required before worker continuation.
 That post-ACK policy belongs to the experiment, not the SDK: v0.5.0 itself does
 not acquire jobs or provide the old lifecycle callbacks. Uncertain side effects
-still require quarantine, not automatic replay. The adoption has its own
-protocol/security and exact-head review gates; the historical approval below
-does not approve these changed interfaces.
+still require quarantine, not automatic replay. The adoption completed its own
+[protocol/security and GitHub review gates](https://github.com/1XP-AI/gh-runnerd/pull/107#issuecomment-6394130044);
+those approvals cover the offline experimental interfaces, with live and full
+G01/G02 acceptance still unresolved.
 
 ### Historical v0.4.0 selection
 

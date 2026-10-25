@@ -28,7 +28,7 @@ func brokerTestPlan(t *testing.T, a *BrokerApproval, parent string, launch func(
 		t.Fatal(e)
 	}
 	t.Cleanup(func() { root.Close() })
-	c := controllerApproval{AppID: a.AppID, InstallationID: a.InstallationID, Organization: a.Organization, Repository: a.Repository, RepositoryID: a.RepositoryID, RunnerGroupID: a.RunnerGroupID, OwnerNonce: a.OwnerNonce, HarnessSHA: a.ControllerHarnessSHA, WorkflowSHA: strings.Repeat("b", 40), WorkflowPath: ".github/workflows/canary.yml", Controller: "trusted-controller", ExpiresAt: a.ExpiresAt, ActionsHosts: []string{"fixture.actions.githubusercontent.com"}, Phases: []string{"create", "jit-loss", "inspect", "cleanup"}}
+	c := controllerApproval{ManagementScope: a.ManagementScope, AppID: a.AppID, InstallationID: a.InstallationID, Organization: a.Organization, Repository: a.Repository, RepositoryID: a.RepositoryID, RunnerGroupID: a.RunnerGroupID, OwnerNonce: a.OwnerNonce, HarnessSHA: a.ControllerHarnessSHA, WorkflowSHA: strings.Repeat("b", 40), WorkflowPath: ".github/workflows/canary.yml", Controller: "trusted-controller", ExpiresAt: a.ExpiresAt, ActionsHosts: []string{"fixture.actions.githubusercontent.com"}, Phases: []string{"create", "jit-loss", "inspect", "cleanup"}}
 	raw, _ := json.Marshal(c)
 	a.ControllerApprovalSHA256 = brokerBytesDigest(raw)
 	p, e := newBrokerControllerPlan(*a, c, raw, root, state, func() error { return nil }, launch)

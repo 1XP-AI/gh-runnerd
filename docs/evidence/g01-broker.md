@@ -4,6 +4,16 @@ Status: implemented and tested with **synthetic HTTP and subprocess fixtures onl
 
 ## Causal order and authority
 
+The current experimental broker additionally supports explicit
+`management_scope: "organization-only"` for a runner-management App without
+repository permission. Its [scope compatibility ledger](g01-organization-management-scope.md)
+defines exact approval/credential matching, permission response and group-policy
+checks. The repository-scoped sequence below remains the omitted/empty-scope
+contract; it must not be used to justify adding repository permissions to an
+organization-only App. Current builds use the adopted SDK v0.5.0/Go 1.27.3
+[profile](g01-sdk-v05-adoption.md); older build observations below retain their
+historical inputs. This addition does not enable the quarantined live entrypoint.
+
 The broker has two explicit modes in its private approval: `discover-actions-host` and `controller`. Both authenticate the existing App using the audited G02 RSA/JWT and App/installation identity utilities. App ID, exact App slug, owner login/ID/type, organization login/ID, installation/App/account/target identities, explicit known suspension status and minimal installation permissions must match before any token request. The small shared API extension exposes whether `suspended_at` was supplied; the broker refuses an unknown suspension state.
 
 Runner-group and private repository inspection require an installation/user authority; App JWT alone cannot perform those checks. The agreed executable sequence is therefore:

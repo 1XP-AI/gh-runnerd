@@ -19,6 +19,9 @@ func (a Approval) setName() string    { return "g01-" + a.OwnerNonce }
 func (a Approval) workerName() string { return a.setName() + "-worker-1" }
 
 func (a Approval) Validate(now time.Time) error {
+	if a.ManagementScope != "" && a.ManagementScope != organizationOnlyManagementScope {
+		return ErrApproval
+	}
 	if a.AppID <= 0 || a.InstallationID <= 0 {
 		return ErrApproval
 	}

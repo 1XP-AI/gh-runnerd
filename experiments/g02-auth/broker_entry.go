@@ -17,6 +17,8 @@ import (
 // BrokerFiles are private paths only. Credentials are accepted exclusively from
 // the supplied owned stdin descriptor, never flags, environment or these files.
 type controllerApproval struct {
+	ManagementScope string `json:"management_scope,omitempty"`
+
 	AppID          int64     `json:"app_id"`
 	InstallationID int64     `json:"installation_id"`
 	Organization   string    `json:"organization"`
@@ -44,6 +46,9 @@ func (c controllerApproval) needsVerification() bool {
 	})
 }
 func (c controllerApproval) validate(a BrokerApproval, now time.Time) error {
+	if c.ManagementScope != a.ManagementScope || (c.ManagementScope != "" && c.ManagementScope != organizationOnlyManagementScope) {
+		return errBroker
+	}
 	if c.OwnerNonce != a.OwnerNonce || c.AppID != a.AppID || c.InstallationID != a.InstallationID || c.Organization != a.Organization || c.Repository != a.Repository || c.RepositoryID != a.RepositoryID || c.RunnerGroupID != a.RunnerGroupID || c.HarnessSHA != a.ControllerHarnessSHA || !brokerSHA40.MatchString(c.HarnessSHA) || !brokerSHA40.MatchString(c.WorkflowSHA) || !brokerNonce.MatchString(c.OwnerNonce) || !brokerWorkflow.MatchString(c.WorkflowPath) || !brokerComponent.MatchString(c.Controller) || !c.ExpiresAt.After(now.Add(time.Minute)) || c.ExpiresAt.After(now.Add(24*time.Hour)) || c.ExpiresAt.Before(a.ExpiresAt) || len(c.ActionsHosts) < 1 || len(c.ActionsHosts) > 8 || len(c.Phases) < 1 || len(c.Phases) > 9 || c.needsVerification() != a.AllowVerificationAuthority || (c.needsVerification() && c.WorkflowRunID < 1) {
 		return errBroker
 	}
