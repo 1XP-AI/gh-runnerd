@@ -207,8 +207,11 @@ No current passing hosted CI or review is claimed for this unpushed candidate.
 G01 remains OPEN and Project In progress. Production provenance/trust-root
 provisioning and conditional cleanup remain quarantined; private target/group,
 runtime/archive inputs and concrete live authorization remain required. The
-runner selection remains 2.337.0 pending its own authorized archive/runtime
-qualification. Do not launch the separately planned canary from this change.
+runner selection at this adoption checkpoint was 2.337.0 pending separate
+archive/runtime qualification. The subsequent [runner byte-verification
+checkpoint](g01-runner-release-checkpoint.md#2026-10-25-target-offer-archive-and-image-bytes)
+records the later image pin and retains the runtime/live gaps. Do not launch the
+separately planned canary from this change.
 
 Rollback is reverting the adoption as one coherent unit (pins, admission,
 adapters, test routing and current-profile docs), retaining the historical

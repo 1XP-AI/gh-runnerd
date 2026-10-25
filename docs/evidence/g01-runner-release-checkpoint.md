@@ -1,5 +1,9 @@
 # G01 runner release-source readiness checkpoint
 
+For the current experimental worker image, see the later
+[target-offer and byte-verification checkpoint](#2026-10-25-target-offer-archive-and-image-bytes).
+Earlier dated observations below retain their original inputs and limits.
+
 Date: 2026-10-13. This checkpoint combines read-only public GitHub release,
 source, published-advisory, and pinned SDK disclosure-policy queries through the
 REST API. The advisory results are a point-in-time screen of the stated filters.
@@ -798,3 +802,128 @@ test-inclusive vulnerability results. This supersedes the *remaining offline
 candidate evaluation* item above, not the earlier batch's truthful statement
 that it did not execute Go 1.27.3. Shared pins, live authorization and G01
 closure are unchanged; new candidate review/adoption remain required.
+
+## 2026-10-25 target offer, archive and image bytes
+
+This is the single change-impact ledger for the subsequent experimental runner
+pin update, based on merged main `0b376359ec60754e9ef074343fb8cf409727da78`.
+The separate [SDK adoption](g01-sdk-v05-adoption.md) was already merged in
+[PR #107](https://github.com/1XP-AI/gh-runnerd/pull/107), with all seven
+[same-main Public CI jobs passing](https://github.com/1XP-AI/gh-runnerd/actions/runs/40167263192).
+Those results do not qualify the new image or constitute its review.
+
+### Offered package and immutable inputs
+
+An authenticated, read-only `gh api repos/OWNER/PRIVATE_TARGET/actions/runners/downloads`
+request offered Linux ARM64 runner **2.338.0** and the archive digest below.
+The private target's identity remains in the private authorization record. This
+observation establishes availability to that target, not execution-principal
+authority, universal rollout, latest-release status, or withdrawal of 2.337.0.
+The previously observed 2.338.1 release is not the selected target package.
+
+| Input | Observed identity |
+| --- | --- |
+| [Runner release](https://github.com/actions/runner/releases/tag/v2.338.0) | Published `2026-10-06T13:55:11Z`; release ID `404787068`; tag commit `197ca027b90de199464dee3bb9ff198a1db60967` |
+| `actions-runner-linux-arm64-2.338.0.tar.gz` | Asset ID `615678837`; 140,012,091 bytes; SHA-256 `628b4a7258487b80c1d3c221095a7ded349f5ae0175fd3dfab708d07428f041b` |
+| GHCR `actions/actions-runner:2.338.0` index | `sha256:4ffadc0002b2581327e06101fc8c06cd189232baf79fe561fac9caeb76f5e807` |
+| Selected Linux ARM64 platform manifest / new worker pin | `sha256:9644537b29b4799cb752a2f23a45a1e603cf74c3c5998241a1533f0e8c3dc649` |
+| Config digest | `sha256:5149aa9f00e2f5f0bbb0d5127cf31aea260e45e559d3d2f3d829623439660eae`; 5,405 bytes |
+
+The release API reports `immutable: false`; therefore the version tag is not
+an immutable byte identity. The manifest digest, not the tag or multi-platform
+index, is the accepted worker reference. The config digest is a different
+identity and has not been observed as an image ID on any approved local daemon.
+
+### Actual daemonless byte checks
+
+`gh release download v2.338.0 --repo actions/runner --pattern actions-runner-linux-arm64-2.338.0.tar.gz --dir OWNED_TEMP`
+downloaded the public asset. A local diagnostic hashed its actual bytes: size
+and SHA-256 matched both the release API and the target's offered package.
+Read-only streaming tar inspection (no filesystem extraction) counted 11,548
+entries: 2,152 directories, 9,390 regular files and six symlinks; regular file
+content totaled 448,533,656 bytes. The bounded inspection found no duplicate,
+absolute/traversing/control-character paths, escaping link targets or special
+entries, and no preconfigured `.runner`, `.credentials` or
+`.credentials_rsaparams` members. This is a diagnostic observation, not a
+general-purpose archive-loader guarantee.
+
+Runner metadata identified `Runner.Listener/2.338.0`, Linux ARM64 and included
+`Microsoft.NETCore.App` 8.0.31. Listener/Worker and Node 20/24 executables were
+ELF64 little-endian AArch64. They were read as bytes, never run or imported.
+
+A separate bounded, daemonless GHCR diagnostic used an anonymous public pull
+ticket held in memory. It did not read Docker credentials, the Keychain, an App
+key or management tokens. It verified actual index/manifest/config hashes,
+config size and Linux/ARM64 identity, then downloaded all ten compressed layer
+blobs (434,552,467 bytes total). Each compressed digest and size matched its
+manifest descriptor; each full decompressed-stream SHA-256 matched the config's
+corresponding `rootfs.diff_ids`. No layer member was extracted to disk.
+The final layer view accounted for whiteouts/opaque directories and refused
+indirect or ambiguous selected members/ancestors. All six selected files matched
+the release archive:
+
+| File relative to the archive root / image `/home/runner` | SHA-256 in both inputs |
+| --- | --- |
+| `bin/Runner.Listener` | `6eef6a36b9e2510c90aacef7da7053c904e7eef077a277d8320ef46889c332ef` |
+| `bin/Runner.Worker` | `e4a31dc3312341025f9cff40c5d64fbe1c2fb38bca8149861ced803a7bb309b7` |
+| `bin/Runner.Listener.dll` | `8d3e33cd0fea290655fd838c2c45c5d3b40fc32b206ab973d81f9e4537e919b6` |
+| `bin/Runner.Worker.dll` | `61247b8e5bb99171fe199a44983db7c33e217f47c049f59a7a209dfe108a8d9c` |
+| `externals/node20/bin/node` | `05a69ccdcb795f2a8b86c145e71a6a37cce84fccef5aaf25a8fe38bc9423e732` |
+| `externals/node24/bin/node` | `0f8949d1028f6d61506b2d5bc57e7e6fe893d7b1997509b7847294fc9c616584` |
+
+Both local diagnostic programs completed with exit 0. Their downloaded public
+inputs and source were retained locally for independent inspection, not committed
+as executables or diagnostic bundles. Digest agreement is **not** publisher
+signature/provenance attestation, a vulnerability scan, a full base-package
+audit, runtime qualification, or proof of secret isolation.
+
+The immutable [Dockerfile](https://github.com/actions/runner/blob/197ca027b90de199464dee3bb9ff198a1db60967/images/Dockerfile)
+and command-input/listener sources were also read through `gh`. The
+`CommandSettings.cs` and `Runner.cs` blobs remain respectively
+`7c29e2b6d2a2b44d40e5ed6496af439c62aa543b` and
+`31c87130257f534a1a30f0cbcc37bc61e6406405`, identical to the preceding
+reviewed selection. This supports unchanged source-level JIT input and one-job
+behavior, not measured JIT secret inheritance. Registry config reports user
+`runner`, workdir `/home/runner`, no entrypoint and command `/bin/bash`.
+The worker's explicit numeric identity, command, resource limits, dropped
+capabilities, no-new-privileges and absence of host/socket mounts are unchanged.
+
+### Change, TDD and review boundary
+
+Only `liveworker.ImageReference` changes behavior. The new table test requires
+the verified platform manifest and rejects the superseded manifest, mutable
+release tag, multi-platform index and config-as-manifest. With the old constant,
+the initial selector `TestApprovalPinsQualifiedRunner3380ARM64` exited 1
+(0.297s): it rejected the new manifest and accepted the superseded manifest.
+The test was renamed `TestApprovalPinsByteVerifiedRunner3380ARM64` to avoid
+implying runtime qualification. After the one-line pin update, this focused
+race command passed (exit 0, package 1.234s):
+
+```text
+go test -race -count=1 -timeout=45s -run '^(TestApprovalPinsByteVerifiedRunner3380ARM64|TestUnixRuntimeRejectsWrongIdentityImagesAndUnsupportedLimits|TestEveryRuntimeBoundaryRejectsProfileAndOwnershipMismatch|TestUnknownCreateNeverRetriesAfterRestart|TestChangedDaemonCannotCreate|TestNoCreateBeforeDurableIntent)$' ./liveworker
+```
+
+It ran from the G01 module with the existing allowlisted stock Go 1.27.3
+Darwin/ARM64 environment: empty `GOEXPERIMENT`, `GOENV=off`, `GOWORK=off`,
+`GOTOOLCHAIN=go1.27.3`, `GOAUTH=off`, `GOTELEMETRY=off`, `GOMAXPROCS=2`,
+`GOFLAGS=-p=2`, cgo enabled and explicit trusted toolchain/cache/compiler
+locations. No ambient credentials or private proxy were inherited. Runtime
+tests use synthetic Unix HTTP fixtures, not a Docker daemon.
+`go vet ./liveworker` also exited 0 without diagnostics. `git diff --check`
+passed. The active worker/docs pin scan found the prior manifest only in the
+explicit negative test and dated historical asset record.
+
+Independent protocol/security delta review, exact-head GitHub Codex review and
+the same-head PR quick check are pending for this new candidate; no approval
+is claimed by this writer ledger. Record their immutable receipts in the PR
+without creating a new source head merely to copy review results. The main
+matrix belongs to the eventual merge commit. Unchanged SDK, Go and historical
+packet evidence is reused rather than rerun or relabeled.
+
+No Docker daemon contact, image load, container/runner/service operation,
+workflow dispatch, credential provisioning, configuration change or live
+canary occurred. Execution remains quarantined pending authenticated broker
+provenance and trust-root provisioning, provider-supported conditional cleanup,
+exact workflow/group restrictions, approved-runtime checks and concrete live
+authorization. G01 and full G02 remain unresolved. Rollback is reverting this
+bounded pin/test/current-docs change; no live resource needs cleanup.

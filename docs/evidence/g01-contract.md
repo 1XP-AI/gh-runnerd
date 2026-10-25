@@ -137,9 +137,9 @@ Source details: [listener](https://github.com/actions/scaleset/blob/6ce025902cd9
 
 ## Runner and JIT transport
 
-Official runner source checked: `v2.337.0`, commit
+Initial runner source check: `v2.337.0`, commit
 `397b032cbf865e9c3ddfab89d533ec19325e1273`, released 2026-08-26. No runner binary
-was downloaded or executed. Candidate canary assets from the official release
+was downloaded or executed by that initial check. Candidate canary assets from the official release
 API (must verify bytes before execution):
 
 | Asset | Published SHA-256 digest |
@@ -152,8 +152,11 @@ Source: [official runner release](https://github.com/actions/runner/releases/tag
 Release/source freshness update (2026-10-13): the
 [runner release checkpoint](g01-runner-release-checkpoint.md) records official
 `v2.338.0` metadata and reviewed source changes. The existing `v2.337.0`
-selection remains in force until a named tenant's availability and candidate
-archive bytes are qualified; the checkpoint does not change this pin.
+selection was retained pending a named tenant's availability and candidate
+archive bytes. The later [2026-10-25 byte-verification checkpoint](g01-runner-release-checkpoint.md#2026-10-25-target-offer-archive-and-image-bytes)
+establishes those facts for `v2.338.0` and changes the experimental worker image
+pin to its immutable ARM64 manifest. The historical `v2.337.0` hashes above are
+unchanged. Actual runtime/secret-inheritance and live recovery remain unqualified.
 
 | Transport | Evidence and exposure |
 |---|---|

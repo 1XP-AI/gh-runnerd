@@ -3,8 +3,10 @@
 Status: implemented and tested with synthetic Unix HTTP servers only. This is a
 bounded continuation of [issue 1](https://github.com/1XP-AI/gh-runnerd/issues/1),
 not live approval or a production provider. G01's GitHub protocol, worker and
-cleanup evidence gates remain open. No Docker daemon, container, image layer,
-runner registration or workflow was used to verify this change.
+cleanup evidence gates remain open. The later [runner byte-verification
+checkpoint](g01-runner-release-checkpoint.md#2026-10-25-target-offer-archive-and-image-bytes)
+qualifies the current image's static contents. No Docker daemon, container,
+runner registration or workflow has been used for runtime verification.
 
 ## Executable scope
 
@@ -58,17 +60,20 @@ not evidence that GitHub's runner/job is absent.
 The only accepted image reference is the reviewed Linux ARM64 manifest:
 
 ```text
-ghcr.io/actions/actions-runner@sha256:f5a0d9a3d857315f2aed7075a02a29f46927ad198221c3b1c66585ae9fe36c0d
+ghcr.io/actions/actions-runner@sha256:9644537b29b4799cb752a2f23a45a1e603cf74c3c5998241a1533f0e8c3dc649
 ```
 
-The approval also pins its local image config ID. That ID and the actual image
-contents have not yet been measured on an approved runtime. Preflight requires
+The corresponding verified registry config digest is
+`sha256:5149aa9f00e2f5f0bbb0d5127cf31aea260e45e559d3d2f3d829623439660eae`.
+All ten layer digests and the selected runner/Node bytes have been checked
+without extraction or execution. The approval also pins the local image config
+ID; this image has not yet been loaded or measured on an approved runtime. Preflight requires
 both IDs, Linux/ARM64 metadata and the exact repository digest to agree; it never
 fetches missing image layers. See the separately reviewed canary assets for the
 registry metadata provenance.
 
 The invocation is fixed to entrypoint `/home/runner/bin/Runner.Listener`, command
-`["run", "--once"]` and working directory `/home/runner`. Runner v2.337.0 reads
+`["run", "--once"]` and working directory `/home/runner`. Runner v2.338.0 reads
 `ACTIONS_RUNNER_INPUT_JITCONFIG` through its supported command-input path. Its
 listener supports `--once`, although that option is deprecated; this experiment
 uses the pinned behavior to exit after one job. The image has no default runner
@@ -186,7 +191,7 @@ private approval schema and cannot authorize execution:
   "endpoint": "/PRIVATE/APPROVED/docker.sock",
   "daemon_id": "OBSERVED_APPROVED_DAEMON_ID",
   "image_id": "sha256:OBSERVED_APPROVED_64_HEX_CONFIG_ID",
-  "image": "ghcr.io/actions/actions-runner@sha256:f5a0d9a3d857315f2aed7075a02a29f46927ad198221c3b1c66585ae9fe36c0d",
+  "image": "ghcr.io/actions/actions-runner@sha256:9644537b29b4799cb752a2f23a45a1e603cf74c3c5998241a1533f0e8c3dc649",
   "expires_at": "2000-01-01T00:00:00Z",
   "phases": ["create", "start", "inspect", "cleanup"]
 }
@@ -248,9 +253,9 @@ private canary. Keep G01 open until its separate evidence plan is satisfied.
 
 Primary contracts:
 
-- [Runner v2.337.0 image definition](https://github.com/actions/runner/blob/v2.337.0/images/Dockerfile).
-- [Runner command-input parsing](https://github.com/actions/runner/blob/v2.337.0/src/Runner.Listener/CommandSettings.cs) and [JIT/one-job listener behavior](https://github.com/actions/runner/blob/v2.337.0/src/Runner.Listener/Runner.cs).
-- [Runner wrapper restart behavior](https://github.com/actions/runner/blob/v2.337.0/src/Misc/layoutroot/run.sh).
+- [Runner v2.338.0 image definition](https://github.com/actions/runner/blob/197ca027b90de199464dee3bb9ff198a1db60967/images/Dockerfile).
+- [Runner command-input parsing](https://github.com/actions/runner/blob/197ca027b90de199464dee3bb9ff198a1db60967/src/Runner.Listener/CommandSettings.cs) and [JIT/one-job listener behavior](https://github.com/actions/runner/blob/197ca027b90de199464dee3bb9ff198a1db60967/src/Runner.Listener/Runner.cs).
+- [Runner wrapper restart behavior](https://github.com/actions/runner/blob/197ca027b90de199464dee3bb9ff198a1db60967/src/Misc/layoutroot/run.sh).
 - [Docker Engine API 1.45](https://docs.docker.com/reference/api/engine/version/v1.45/) and [pinned Moby schema](https://github.com/moby/moby/blob/v26.1.5/api/swagger.yaml).
 - [Moby non-force removal](https://github.com/moby/moby/blob/v26.1.5/daemon/delete.go) and [start/removal exclusion](https://github.com/moby/moby/blob/v26.1.5/daemon/start.go).
 - [Apple Unix-domain connection access checks](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/connect.2.html).

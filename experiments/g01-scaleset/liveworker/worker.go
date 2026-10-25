@@ -16,7 +16,7 @@ var (
 	ErrRemote    = errors.New("worker runtime operation failed")
 )
 
-const ImageReference = "ghcr.io/actions/actions-runner@sha256:f5a0d9a3d857315f2aed7075a02a29f46927ad198221c3b1c66585ae9fe36c0d"
+const ImageReference = "ghcr.io/actions/actions-runner@sha256:9644537b29b4799cb752a2f23a45a1e603cf74c3c5998241a1533f0e8c3dc649"
 
 type Approval struct {
 	RunnerUpdatesDisabled bool      `json:"runner_updates_disabled"`
