@@ -789,3 +789,12 @@ evidence remain unresolved. This writer checkpoint is not independently
 reviewed or merged merely because its baseline inputs were reviewed. G01 and
 dependent production gates stay open. Revert only this bounded evidence addition
 if needed; no protocol, toolchain pin, live resource or host service changed.
+
+### 2026-10-25 isolated v0.5.0 runtime candidate
+
+The subsequent [candidate profile and single change-impact/review ledger](g01-sdk-v05-candidate.md)
+record actual Go 1.27.3/v0.5.0 loopback race/vet, mutation-control and
+test-inclusive vulnerability results. This supersedes the *remaining offline
+candidate evaluation* item above, not the earlier batch's truthful statement
+that it did not execute Go 1.27.3. Shared pins, live authorization and G01
+closure are unchanged; new candidate review/adoption remain required.

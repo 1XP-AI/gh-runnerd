@@ -15,6 +15,12 @@ successor qualification. The unchanged-listener statements below compare only
 v0.4.0 with the named historical audited commit, not v0.5.0. No successor runtime
 or live result is implied, and the final G01 selection/closure remains gated.
 
+A later [v0.5.0 offline candidate](../evidence/g01-sdk-v05-candidate.md) measures
+the new API on isolated Go 1.27.3. It confirms handler-before-ACK and remaining
+partial-effect/session/drain limits without changing the provisional pin or
+admitting v0.5.0 to the existing driver/broker. Its reviews and adoption remain
+separate gates; the historical review below does not cover this new profile.
+
 The review is limited to the offline evidence and this provisional selection; it
 does not satisfy the authorized live canary, sanitized live evidence or safe-drain
 gate. See the [independent protocol review](../evidence/g01-contract.md#independent-protocol-review-2026-10-03),
