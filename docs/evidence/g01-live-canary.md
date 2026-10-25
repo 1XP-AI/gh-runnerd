@@ -83,12 +83,13 @@ explicit approval; do not dispatch even the baseline from this checkpoint.
   target after host headroom is checked, 10-minute job deadline. Increase any
   limit only with new concrete authorization. No service-container workloads in
   this protocol canary.
-- [ ] Use SDK `v0.4.0`, Go `1.26.9` and runner `2.337.0`; verify runner bytes
+- [ ] Use the reviewed SDK `v0.5.0`/Go `1.27.3` adoption profile and runner `2.337.0`; verify runner bytes
   against [published digests](g01-contract.md#runner-and-jit-transport) and record
   exact runtime/image digest. Recheck support/security status before execution.
-  This supersedes the earlier Go `1.26.8` source profile. Go `1.26.8` commands
-  embedded in the recovery packet remain inert historical/specimen text and are
-  not current execution instructions; this checklist does not authorize a
+  See the [adoption ledger](g01-sdk-v05-adoption.md) for pending review and actual
+  verification. The frozen v0.4 recovery packet (Go 1.26.9 wrapper and older
+  Go 1.26.8 historical/specimen text) is not the current execution profile and
+  must not be relabeled by replacing version strings. This checklist does not authorize a
   canary or live runner operation.
 - [ ] Independent Luna max reviews the immutable live harness, authority
   checks, cleanup, fault barriers and sanitized telemetry. The offline fixture
@@ -117,7 +118,7 @@ to ten minutes; timeout means unresolved/quarantine, not success or forced clean
 |---|---|---|
 | Baseline | Register the dedicated scale set/session. Launch one runner with worker-only JIT environment and execute a reviewed no-op job with a heartbeat and normal completion. Inspect allowlisted booleans for JIT variable absence in the job and expected private credential-file existence, without printing values. | Exact SDK/runner/runtime inputs, one-job execution, normal deregistration/process exit and no management secret inheritance. |
 | Before ACK | On a new controlled job message, stop the listener at the barrier after poll receipt and before DELETE. Restart using the reviewed session recovery path. | Whether/how the unacknowledged message/request ID is redelivered, session owner/ID behavior, request cursor handling and aggregate demand. Do not assume the documented replay timing. |
-| After ACK / callback loss | Allow DELETE to return success, then stop the listener before the first callback or acquisition. Resume with independent statistics/reference reads. | Whether aggregate demand converges, which request identities are lost, whether availability redelivers, and what remains quarantined. Restored count alone is not complete recovery. |
+| After ACK / continuation loss | Allow DELETE to return success, then stop before caller acquisition/lifecycle continuation. The v0.5 handler has already validated the durable poll/source records; it is not a legacy SDK callback. Resume with independent statistics/reference reads. | Whether aggregate demand converges, which request identities survive in the journal, whether availability redelivers, and what remains quarantined. Restored count alone is not complete recovery. |
 | Acquisition ambiguity | Journal request IDs and intent. First stop before POST; separately allow POST success, suppress its result to the application, then restart. Observe GitHub state and owned workers without automatic retry. | Distinguish not-attempted from accepted/unknown. Any experiment repeating the same acquired request ID needs review of that exact step and may affect only the disposable no-op job. Establish reoffer/expiry/reacquisition behavior or keep it unresolved. |
 | JIT ambiguity | Journal one stable worker identity. Stop before JIT POST; separately issue JIT once, suppress its result and stop before launch. Lookup the stable runner name/ID. No new worker identity or JIT retry. | Confirm discoverability and metadata scope; show the unknown worker reservation remains held. Determine safe owned deregistration/reissue only after the original runner's inactive state is established. No claim that the secret can be recovered. |
 | Idle assignment during drain | Create one idle canary runner; hold one scale-set poll in flight, request local drain/zero capacity and dispatch one no-op job. Record whether the old poll acquires and whether the registered idle runner is assigned despite withdrawal. Never stop a worker based on an old idle observation. | Real ordering of withdrawal, acquisition and assignment. A fake server cannot supply this result. |

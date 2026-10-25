@@ -3,10 +3,17 @@
 set -euo pipefail
 
 go_cmd="${GO:-go}"
-expected_toolchain="go1.26.9"
-expected_go_directive="1.26.9"
+expected_toolchain="go1.27.3"
+expected_go_directive="1.27.3"
 # Standalone invocation must select the pin too; auto never downgrades a newer Go.
 export GOTOOLCHAIN="${expected_toolchain}"
+
+# `none` disables Go 1.27 release defaults and changes the binary build stamp.
+# Do not call such a build qualified merely because `go version` reports the pin.
+if [[ -n "${GOEXPERIMENT:-}" ]]; then
+	printf 'toolchain check failed: non-default GOEXPERIMENT is unqualified; use empty release defaults\n' >&2
+	exit 1
+fi
 
 if [[ ! -f go.mod ]]; then
 	printf 'toolchain check failed: go.mod is missing\n' >&2

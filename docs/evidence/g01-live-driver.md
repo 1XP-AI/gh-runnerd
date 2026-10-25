@@ -5,7 +5,8 @@ This is a controller slice of the [live-canary plan](g01-live-canary.md), not
 completion of G01. The original fixture remains permanently loopback-only. The
 separate command requires `-tags=g01_live` at build time, an explicit execution
 flag, an exact private approval and controller-side broker input. Public CI has
-no credentials. SDK `v0.4.0` and Go `1.26.8` remain pinned.
+no credentials. The adoption candidate selects SDK `v0.5.0` and Go `1.27.3`;
+see the [changed-boundary evidence and review status](g01-sdk-v05-adoption.md).
 The `--execute-approved-canary` entrypoint remains quarantined because
 broker-authenticated workflow-input provenance and conditional cleanup are
 still unresolved; the offline `--plan` check does not authorize it.
@@ -22,7 +23,7 @@ and one unknown reservation exhaust the budget.
 |---|---|
 | `create` | Verify private repository/group policy, record the initial runner-ID inventory, prove the nonce name absent, journal intent and create one scale set. Lost results quarantine; discovery never authorizes adoption/retry. |
 | `before-ack` | Create one owned session, run the supported listener at capacity 1, verify a controlled job, stop before DELETE, then close only that known owned session. |
-| `after-ack` | Stop after successful ACK, before acquisition/callbacks; record the barrier and close the known owned session. |
+| `after-ack` | Stop after successful ACK, before caller acquisition/lifecycle continuation; record the barrier and close the known owned session. |
 | `before-acquire` | ACK, then stop before acquisition POST; close the known owned session. |
 | `acquire-loss` | Journal exactly one request ID/intent, call `AcquireJobs` once, record only a response success boolean, suppress its application result, retain session/reservation and quarantine. |
 | `jit-loss` | Verify the stable worker name absent, journal one JIT intent, call once, record a response success boolean, discard JIT/result identity and quarantine the reservation. No worker starts. |
@@ -32,9 +33,10 @@ and one unknown reservation exhaust the budget.
 Each SDK/REST operation has a 30-second deadline; each phase is bounded by ten
 minutes and approval expiry, whichever comes first. Each phase is one-shot. An
 empty poll is **unresolved**, never a passed barrier. The high-level listener
-retains upstream ACK ordering; fault barriers use its public client interface.
-Adapter deadlines remain effective after the listener removes cancellation.
-The SDK ACK precedes acquisition; the `acquire-loss` probe permits exactly one
+calls Scale before ACK; fault barriers use its public client interface.
+Adapter deadlines remain effective for cancellation-independent SDK ACK.
+This caller explicitly acquires after ACK; v0.5.0 does not auto-acquire or call
+the old lifecycle interface. The `acquire-loss` probe permits exactly one
 request after that ACK. Observed
 job IDs remain reserved across later inspection and stale-zero counts; this
 harness has no terminal-job reconciliation. Unexpected work kinds or an empty

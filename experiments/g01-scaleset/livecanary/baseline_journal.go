@@ -511,7 +511,7 @@ func replayBaseline(events []Event, identity controllerJournalIdentity, a Approv
 				}
 				break
 			}
-			if r.HTTPStatus != 200 || r.Batch == nil || r.Batch.MessageID <= 0 || s.messageIDs[r.Batch.MessageID] || !r.Batch.Statistics.eligible(s.acquired) {
+			if r.HTTPStatus != 200 || r.Batch == nil || r.Batch.MessageID < 0 || s.messageIDs[r.Batch.MessageID] || !r.Batch.Statistics.eligible(s.acquired) {
 				return s, ErrJournal
 			}
 			if err := s.admitBatch(r.Batch, a); err != nil {

@@ -45,7 +45,7 @@ func pairedChildDeadline(parent context.Context, now time.Time) (time.Time, erro
 }
 
 func validBrokerBuild(info *debug.BuildInfo, expected string) bool {
-	if info == nil || info.GoVersion != "go1.26.9" || info.Path != "github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/cmd/g01-live" || !brokerSHA40.MatchString(expected) {
+	if info == nil || info.GoVersion != "go1.27.3" || info.Path != "github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/cmd/g01-live" || !brokerSHA40.MatchString(expected) {
 		return false
 	}
 	revision, clean, sdk := "", false, false
@@ -68,7 +68,7 @@ func validBrokerBuild(info *debug.BuildInfo, expected string) bool {
 	}
 	for _, dep := range info.Deps {
 		if dep.Path == "github.com/actions/scaleset" {
-			sdk = dep.Version == "v0.4.0" && dep.Replace == nil
+			sdk = dep.Version == "v0.5.0" && dep.Replace == nil
 		}
 	}
 	for _, tag := range strings.FieldsFunc(tags, func(r rune) bool { return r == ',' || unicode.IsSpace(r) }) {

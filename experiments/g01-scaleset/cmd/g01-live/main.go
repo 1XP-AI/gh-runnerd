@@ -25,7 +25,7 @@ func buildRevision() (string, bool) {
 }
 
 func buildRevisionFromInfo(info *debug.BuildInfo, ok bool) (string, bool) {
-	if !ok || info == nil || info.GoVersion != "go1.26.9" {
+	if !ok || info == nil || info.GoVersion != "go1.27.3" {
 		return "", false
 	}
 	version, clean, sdk := "", false, false
@@ -39,7 +39,7 @@ func buildRevisionFromInfo(info *debug.BuildInfo, ok bool) (string, bool) {
 	}
 	for _, dep := range info.Deps {
 		if dep.Path == "github.com/actions/scaleset" {
-			sdk = dep.Version == "v0.4.0" && dep.Replace == nil
+			sdk = dep.Version == "v0.5.0" && dep.Replace == nil
 		}
 	}
 	return version, clean && sdk && len(version) == 40

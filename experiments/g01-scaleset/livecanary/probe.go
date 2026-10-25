@@ -9,8 +9,9 @@ import (
 	"github.com/google/uuid"
 )
 
-// The supported high-level listener retains its upstream ordering. Faults are
-// injected at its public client boundary, never by patching HTTP response bodies.
+// The high-level listener validates Scale before ACK. This caller explicitly
+// acquires after its journaled ACK; faults use the public client boundary,
+// never patched SDK code or HTTP response bodies.
 type probeClient struct {
 	driver           *Driver
 	session          Session
@@ -64,11 +65,11 @@ func (p *probeClient) GetMessage(_ context.Context, last, capacity int) (*scales
 		return nil, ErrNoMessage
 	}
 	ids := make([]int64, 0, len(m.JobAvailableMessages))
-	if m.MessageID <= 0 || len(m.JobAvailableMessages) > 2 {
+	if m.MessageID < 0 || len(m.JobAvailableMessages) > 2 {
 		return nil, ErrQuarantine
 	}
-	// The listener ACKs a returned message before AcquireJobs. Validate the
-	// single-request acquisition boundary here, before that ACK can occur.
+	// Caller policy acquires after ACK. Validate the single-request acquisition
+	// boundary here, before that ACK can occur.
 	if (p.phase == "before-acquire" || p.phase == "acquire-loss") && len(m.JobAvailableMessages) != 1 {
 		return nil, ErrQuarantine
 	}
@@ -143,17 +144,35 @@ func (p *probeClient) AcquireJobs(_ context.Context, ids []int64) ([]int64, erro
 
 type observeOnly struct{}
 
-func (observeOnly) HandleDesiredRunnerCount(_ context.Context, n int) (int, error) {
-	if n < 0 {
-		return 0, ErrQuarantine
+func (observeOnly) Scale(_ context.Context, msg *scaleset.RunnerScaleSetMessage) error {
+	if msg == nil || msg.Statistics == nil || msg.Statistics.TotalAssignedJobs < 0 || len(msg.JobStartedMessages) > 0 || len(msg.JobCompletedMessages) > 0 || len(msg.JobAssignedMessages) > 0 {
+		return ErrQuarantine
 	}
-	return min(n, 1), nil
+	return nil
 }
-func (observeOnly) HandleJobStarted(context.Context, *scaleset.JobStarted) error {
-	return ErrQuarantine
+
+type probeListenerClient struct {
+	*probeClient
+	requestIDs []int64
 }
-func (observeOnly) HandleJobCompleted(context.Context, *scaleset.JobCompleted) error {
-	return ErrQuarantine
+
+func (p *probeListenerClient) GetMessage(ctx context.Context, last, capacity int) (*scaleset.RunnerScaleSetMessage, error) {
+	msg, err := p.probeClient.GetMessage(ctx, last, capacity)
+	p.requestIDs = nil
+	if err == nil && msg != nil {
+		for _, job := range msg.JobAvailableMessages {
+			p.requestIDs = append(p.requestIDs, job.RunnerRequestID)
+		}
+	}
+	return msg, err
+}
+
+func (p *probeListenerClient) DeleteMessage(ctx context.Context, id int) error {
+	if err := p.probeClient.DeleteMessage(ctx, id); err != nil {
+		return err
+	}
+	_, err := p.AcquireJobs(p.ctx, p.requestIDs)
+	return err
 }
 
 func (d *Driver) probe(ctx context.Context, phase string, setID int) error {
@@ -182,7 +201,7 @@ func (d *Driver) probe(ctx context.Context, phase string, setID int) error {
 		return err
 	}
 	p := &probeClient{d, session, ctx, phase, sid, initial}
-	l, err := listener.New(p, listener.Config{ScaleSetID: setID, MaxRunners: 1})
+	l, err := listener.New(&probeListenerClient{probeClient: p}, listener.Config{ScaleSetID: setID, MaxRunners: 1})
 	if err != nil {
 		return ErrQuarantine
 	}

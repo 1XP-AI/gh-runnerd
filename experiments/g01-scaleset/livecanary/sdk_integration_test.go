@@ -20,7 +20,6 @@ import (
 
 	"github.com/actions/scaleset"
 	"github.com/google/uuid"
-	"github.com/hashicorp/go-retryablehttp"
 )
 
 type fixtureSDK struct{ *SDKAPI }
@@ -43,9 +42,13 @@ func (f *countingFixtureSDK) VerifyRun(context.Context, Approval, int64) error {
 // transport is permanently fenced to its own loopback server, like the original
 // offline spike; no endpoint flag or environment can repoint it to GitHub.
 func TestDriverBarriersThroughPinnedSDK(t *testing.T) {
-	for _, scenario := range []string{"after-ack", "acquire-loss", "jit-loss", "ack-refresh", "create-oversize", "create-error-oversize"} {
+	for _, scenario := range []string{"after-ack", "acquire-loss", "jit-loss", "ack-refresh", "create-oversize", "create-error-oversize", "zero-after-ack", "zero-acquire-loss", "missing-message", "null-message", "negative-message"} {
 		t.Run(scenario, func(t *testing.T) {
-			phase := scenario
+			phase := strings.TrimPrefix(scenario, "zero-")
+			invalidMessage := strings.HasSuffix(scenario, "-message")
+			if invalidMessage {
+				phase = "after-ack"
+			}
 			if scenario == "ack-refresh" {
 				phase = "after-ack"
 			}
@@ -83,9 +86,27 @@ func TestDriverBarriersThroughPinnedSDK(t *testing.T) {
 						t.Error("capacity not bounded")
 					}
 					jobs, _ := json.Marshal([]any{map[string]any{"messageType": "JobAvailable", "runnerRequestId": 42, "workflowRunId": a.WorkflowRunID, "ownerName": a.Organization, "repositoryName": a.Repository}})
-					body = map[string]any{"messageId": 9, "messageType": "RunnerScaleSetJobMessages", "body": string(jobs), "statistics": map[string]int{"totalAssignedJobs": 1}}
-				case r.URL.Path == "/queue/9":
+					message := map[string]any{"messageId": 9, "messageType": "RunnerScaleSetJobMessages", "body": string(jobs), "statistics": map[string]int{"totalAssignedJobs": 1}}
+					switch {
+					case strings.HasPrefix(scenario, "zero-"):
+						message["messageId"] = 0
+					case scenario == "missing-message":
+						delete(message, "messageId")
+					case scenario == "null-message":
+						message["messageId"] = nil
+					case scenario == "negative-message":
+						message["messageId"] = -1
+					}
+					body = message
+				case strings.HasPrefix(r.URL.Path, "/queue/"):
 					acks++
+					wantPath := "/queue/9"
+					if strings.HasPrefix(scenario, "zero-") {
+						wantPath = "/queue/0"
+					}
+					if r.URL.Path != wantPath {
+						t.Error("ACK targeted the wrong message identity")
+					}
 					if scenario == "ack-refresh" {
 						w.WriteHeader(http.StatusUnauthorized)
 						return
@@ -125,11 +146,9 @@ func TestDriverBarriersThroughPinnedSDK(t *testing.T) {
 				_ = json.NewEncoder(w).Encode(body)
 			}))
 			defer server.Close()
-			retry := retryablehttp.NewClient()
-			retry.RetryMax = 0
-			retry.Logger = nil
-			retry.HTTPClient.Timeout = time.Second
-			transport := retry.HTTPClient.Transport.(*http.Transport)
+			retry := &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone()}
+			retry.Timeout = time.Second
+			transport := retry.Transport.(*http.Transport)
 			transport.Proxy = nil
 			transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 				if address != server.Listener.Addr().String() {
@@ -138,8 +157,8 @@ func TestDriverBarriersThroughPinnedSDK(t *testing.T) {
 				return (&net.Dialer{}).DialContext(ctx, network, address)
 			}
 			defer transport.CloseIdleConnections()
-			retry.HTTPClient.Transport = withResponseBudget(transport)
-			options := []scaleset.HTTPOption{scaleset.WithRetryableHTTPClint(retry)}
+			retry.Transport = withResponseBudget(transport)
+			options := []scaleset.HTTPOption{scaleset.WithHTTPClient(retry), scaleset.WithRetry(scaleset.RetryConfig{Max: 0})}
 			client, err := scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{GitHubConfigURL: server.URL + "/fixture-org", PersonalAccessToken: "synthetic-installation"}, options...)
 			if err != nil {
 				t.Fatal("SDK fixture construction failed")
@@ -164,6 +183,12 @@ func TestDriverBarriersThroughPinnedSDK(t *testing.T) {
 				t.Fatal("SDK create failed")
 			}
 			err = d.Run(context.Background(), phase)
+			if invalidMessage {
+				if !errors.Is(err, ErrQuarantine) || acks != 0 || acquires != 0 || closes != 0 || !replay(j.Events()).uncertain {
+					t.Fatal("invalid wire message identity reached effects or escaped quarantine")
+				}
+				return
+			}
 			if scenario == "ack-refresh" {
 				if !errors.Is(err, ErrQuarantine) || acks != 1 || refreshes != 0 || replacementACKs != 0 || closes != 0 || !replay(j.Events()).uncertain {
 					t.Fatal("SDK refreshed and acknowledged through a replaced session")
@@ -273,10 +298,8 @@ func TestDriverDrainThroughPinnedSDKAndPollHook(t *testing.T) {
 	fixtureApproval.ActionsHosts = []string{server.Listener.Addr().String()}
 
 	buildAPI := func(hook *drainPollHook) (*SDKAPI, error) {
-		retry := retryablehttp.NewClient()
-		retry.RetryMax = 0
-		retry.Logger = nil
-		retry.HTTPClient.Timeout = time.Second
+		retry := &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone()}
+		retry.Timeout = time.Second
 		fixtureTransport, ok := server.Client().Transport.(*http.Transport)
 		if !ok {
 			return nil, errors.New("TLS fixture transport is not an HTTP transport")
@@ -296,13 +319,13 @@ func TestDriverDrainThroughPinnedSDKAndPollHook(t *testing.T) {
 				return hook
 			})
 		}
-		retry.HTTPClient.Transport = withResponseBudget(transport, wrappers...)
-		options := []scaleset.HTTPOption{scaleset.WithRetryableHTTPClint(retry), scaleset.WithLogger(slog.New(slog.DiscardHandler))}
+		retry.Transport = withResponseBudget(transport, wrappers...)
+		options := []scaleset.HTTPOption{scaleset.WithHTTPClient(retry), scaleset.WithRetry(scaleset.RetryConfig{Max: 0}), scaleset.WithLogger(slog.New(slog.DiscardHandler))}
 		client, err := scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{GitHubConfigURL: server.URL + "/fixture-org", PersonalAccessToken: "synthetic-installation"}, options...)
 		if err != nil {
 			return nil, err
 		}
-		return &SDKAPI{client: client, rest: retry.HTTPClient, baseURL: server.URL + "/api/v3", approval: fixtureApproval, credentials: credentials(fixtureApproval), options: options}, nil
+		return &SDKAPI{client: client, rest: retry, baseURL: server.URL + "/api/v3", approval: fixtureApproval, credentials: credentials(fixtureApproval), options: options}, nil
 	}
 	base, err := buildAPI(nil)
 	if err != nil {
@@ -1321,10 +1344,8 @@ func newPinnedDrainSessionOptions(t *testing.T, a Approval, body string, options
 	fixtureApproval.ActionsHosts = append([]string{fixture.server.Listener.Addr().String()}, options.extraActionsHosts...)
 
 	buildAPI := func(hook *drainPollHook) (*SDKAPI, error) {
-		retry := retryablehttp.NewClient()
-		retry.RetryMax = 0
-		retry.Logger = nil
-		retry.HTTPClient.Timeout = time.Second
+		retry := &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone()}
+		retry.Timeout = time.Second
 		fixtureTransport, ok := fixture.server.Client().Transport.(*http.Transport)
 		if !ok {
 			return nil, errors.New("TLS fixture transport is not an HTTP transport")
@@ -1383,13 +1404,13 @@ func newPinnedDrainSessionOptions(t *testing.T, a Approval, body string, options
 				return sdkRequestMutationRoundTripper{inner: inner, mutate: options.mutateRequest}
 			})
 		}
-		retry.HTTPClient.Transport = withResponseBudget(transport, wrappers...)
-		options := []scaleset.HTTPOption{scaleset.WithRetryableHTTPClint(retry), scaleset.WithLogger(slog.New(slog.DiscardHandler))}
+		retry.Transport = withResponseBudget(transport, wrappers...)
+		options := []scaleset.HTTPOption{scaleset.WithHTTPClient(retry), scaleset.WithRetry(scaleset.RetryConfig{Max: 0}), scaleset.WithLogger(slog.New(slog.DiscardHandler))}
 		client, err := scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{GitHubConfigURL: fixture.server.URL + "/fixture-org", PersonalAccessToken: "synthetic-installation"}, options...)
 		if err != nil {
 			return nil, err
 		}
-		return &SDKAPI{client: client, rest: retry.HTTPClient, baseURL: fixture.server.URL + "/api/v3", approval: fixtureApproval, credentials: credentials(fixtureApproval), options: options}, nil
+		return &SDKAPI{client: client, rest: retry, baseURL: fixture.server.URL + "/api/v3", approval: fixtureApproval, credentials: credentials(fixtureApproval), options: options}, nil
 	}
 	base, err := buildAPI(nil)
 	if err != nil {

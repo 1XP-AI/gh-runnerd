@@ -19,13 +19,15 @@ equivalent file. This checks the recorded identity and license-file presence;
 human review must still determine the license and its obligations. The current
 runtime graph contains only the local module; nested experiments remain separate.
 
-The opt-in [G01 v0.5.0 candidate](evidence/g01-sdk-v05-candidate.md) has a separate
-testdata module/Go 1.27.3 profile. Its imported SDK/JWT/uuid license inventory is
-recorded there; it changes neither this runtime table nor the shared toolchain.
+The [G01 v0.5.0 qualification](evidence/g01-sdk-v05-candidate.md) records imported
+SDK/JWT/uuid licenses. The [adoption ledger](evidence/g01-sdk-v05-adoption.md)
+tracks promotion into G01 and shared Go 1.27.3. These experiment dependencies do
+not enter the root runtime table. The v0.4 baseline remains a frozen manual
+comparison fixture with its original dependencies/licenses.
 
 ## Toolchain
 
-Go standard library: `go1.26.9`, BSD-3-Clause, the language/runtime baseline;
+Go standard library: `go1.27.3`, BSD-3-Clause, the language/runtime baseline;
 [official release history](https://go.dev/doc/devel/release).
 
 The selector matcher helper adapted from the Go standard library is documented
@@ -44,7 +46,7 @@ Both immutable manifests declare `runs.using: node24`; the upstream action
 documentation lists Actions Runner `v2.327.1` or later as the Node 24 minimum.
 The workflows stay on GitHub-hosted `ubuntu-24.04`. Setup Go v7's ESM migration
 does not change its inputs or behavior. The workflow keeps `go-version-file:
-go.mod`, the Go 1.26.9 declaration and `GOTOOLCHAIN=go1.26.9`; `cache: false`
+go.mod`, the Go 1.27.3 declaration and `GOTOOLCHAIN=go1.27.3`; `cache: false`
 keeps module caching disabled. Checkout keeps the exact triggering SHA for
 Public CI, the PR head SHA with `fetch-depth: 0`, and
 `persist-credentials: false`. The v7 unsafe fork checkout opt-in remains unset.

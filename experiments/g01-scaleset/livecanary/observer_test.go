@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/actions/scaleset"
-	"github.com/hashicorp/go-retryablehttp"
 )
 
 // The only dialable address comes from this private loopback fixture. No flag,
@@ -58,11 +57,9 @@ func observationFixture(t *testing.T, handler http.HandlerFunc, intercept ...fun
 	}
 	t.Cleanup(transport.CloseIdleConnections)
 	httpClient := &http.Client{Transport: withResponseBudget(transport), Timeout: operationTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	retry := retryablehttp.NewClient()
-	retry.RetryMax = 0
-	retry.Logger = nil
-	retry.HTTPClient = httpClient
-	options := []scaleset.HTTPOption{scaleset.WithRetryableHTTPClint(retry), scaleset.WithLogger(slog.New(slog.DiscardHandler))}
+	retry := &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone()}
+	retry = httpClient
+	options := []scaleset.HTTPOption{scaleset.WithHTTPClient(retry), scaleset.WithRetry(scaleset.RetryConfig{Max: 0}), scaleset.WithLogger(slog.New(slog.DiscardHandler))}
 	client, err := scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{GitHubConfigURL: server.URL + "/" + a.Organization, PersonalAccessToken: c.InstallationToken}, options...)
 	if err != nil {
 		t.Fatal("fixture SDK construction failed")

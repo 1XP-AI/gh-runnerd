@@ -100,7 +100,7 @@ func (c *journaledDrainClient) GetMessage(ctx context.Context, last, capacity in
 				return Event{}, ErrRemote
 			}
 		}
-		if message.MessageID <= 0 || len(message.JobAvailableMessages) != 1 || len(message.JobAssignedMessages) != 0 || len(message.JobStartedMessages) != 0 || len(message.JobCompletedMessages) != 0 || message.Statistics == nil {
+		if message.MessageID < 0 || len(message.JobAvailableMessages) != 1 || len(message.JobAssignedMessages) != 0 || len(message.JobStartedMessages) != 0 || len(message.JobCompletedMessages) != 0 || message.Statistics == nil {
 			return Event{}, ErrRemote
 		}
 		for _, job := range message.JobAvailableMessages {
@@ -137,6 +137,10 @@ func (c *journaledDrainClient) DeleteMessage(ctx context.Context, id int) error 
 			runtimePathPrefix := c.hook.runtimePathPrefix
 			runtimePathPrefixSet := c.hook.runtimePathPrefixSet
 			c.hook.mu.Unlock()
+			batch, batchKnown := c.hook.pollBatch(1)
+			if !batchKnown || batch.MessageID != id || id < 0 {
+				return Event{}, c.reject("ack")
+			}
 			if !runtimePathPrefixSet {
 				return Event{}, c.reject("ack")
 			}
@@ -161,7 +165,7 @@ func (c *journaledDrainClient) DeleteMessage(ctx context.Context, id int) error 
 			if c.d != nil {
 				approval = c.d.Approval
 			}
-			wire = &baselineWireCapture{stage: "ack", setID: setID, sessionID: sessionID, queue: queue, cursor: id, origin: origin, authorization: authorization, runtimePathPrefix: runtimePathPrefix, runtimePathPrefixSet: runtimePathPrefixSet, allowedHosts: baselineWireAllowedHosts(approval, apiHost)}
+			wire = &baselineWireCapture{stage: "ack", setID: setID, sessionID: sessionID, queue: queue, cursor: id, cursorKnown: true, origin: origin, authorization: authorization, runtimePathPrefix: runtimePathPrefix, runtimePathPrefixSet: runtimePathPrefixSet, allowedHosts: baselineWireAllowedHosts(approval, apiHost)}
 			call = wire.context(call)
 		}
 		if err := c.inner.DeleteMessage(call, id); err != nil {

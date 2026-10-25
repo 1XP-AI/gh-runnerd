@@ -477,8 +477,10 @@ func (h *drainPollHook) pollRequestValid(req *http.Request, attempt int) bool {
 	target := h.target
 	authorization := h.authorization
 	messageID := 0
+	messageKnown := false
 	if attempt == 2 && h.batches[1] != nil {
 		messageID = h.batches[1].MessageID
+		messageKnown = true
 	}
 	h.mu.Unlock()
 	want, err := url.Parse(target)
@@ -537,10 +539,13 @@ func (h *drainPollHook) pollRequestValid(req *http.Request, attempt int) bool {
 	if attempt == 1 {
 		return sameDrainQuery(wantQuery, gotQuery)
 	}
-	if messageID <= 0 {
+	if !messageKnown || messageID < 0 {
 		return false
 	}
-	wantQuery.Set("lastMessageId", strconv.Itoa(messageID))
+	// The pinned SDK omits this query for zero even after ACKing message zero.
+	if messageID > 0 {
+		wantQuery.Set("lastMessageId", strconv.Itoa(messageID))
+	}
 	return sameDrainQuery(wantQuery, gotQuery)
 }
 
@@ -994,7 +999,7 @@ func (c *drainClient) GetMessage(ctx context.Context, last, capacity int) (*scal
 		wantCapacity = drainWithdrawnCapacity
 		wantLast = c.messageID
 	}
-	if c.polls >= 2 || capacity != wantCapacity || last != wantLast || c.polls == 1 && (c.messageID <= 0 || c.obs.poll(c.polls).ACK != drainResponseSucceeded) {
+	if c.polls >= 2 || capacity != wantCapacity || last != wantLast || c.polls == 1 && (c.messageID < 0 || c.obs.poll(c.polls).Message != drainMessagePresent || c.obs.poll(c.polls).ACK != drainResponseSucceeded) {
 		c.mu.Unlock()
 		return nil, ErrQuarantine
 	}
@@ -1073,7 +1078,7 @@ func (c *drainClient) GetMessage(ctx context.Context, last, capacity int) (*scal
 		}
 	}
 	messageStats, statsErr := newDrainStatistics(message.Statistics)
-	if statsErr != nil || (c.hook != nil && stats != messageStats) || (index <= 2 && c.ownedRunnerStatsKnown && !sameDrainRunnerPartition(stats, c.ownedRunnerStats)) || message.MessageID <= 0 || len(message.JobAssignedMessages) != 0 || len(message.JobStartedMessages) != 0 || len(message.JobCompletedMessages) != 0 || len(message.JobAvailableMessages) != 1 || message.JobAvailableMessages[0] == nil || message.JobAvailableMessages[0].RunnerRequestID <= 0 {
+	if statsErr != nil || (c.hook != nil && stats != messageStats) || (index <= 2 && c.ownedRunnerStatsKnown && !sameDrainRunnerPartition(stats, c.ownedRunnerStats)) || message.MessageID < 0 || len(message.JobAssignedMessages) != 0 || len(message.JobStartedMessages) != 0 || len(message.JobCompletedMessages) != 0 || len(message.JobAvailableMessages) != 1 || message.JobAvailableMessages[0] == nil || message.JobAvailableMessages[0].RunnerRequestID <= 0 {
 		c.mu.Lock()
 		c.obs.poll(index).Message = drainMessageUnknown
 		c.mu.Unlock()
@@ -1113,7 +1118,7 @@ func (c *drainClient) DeleteMessage(ctx context.Context, id int) error {
 	}
 	c.mu.Lock()
 	index := c.polls
-	valid := index == 1 && c.messageID > 0 && id == c.messageID && c.obs.poll(index).ACK == drainResponseNotAttempted
+	valid := index == 1 && c.messageID >= 0 && c.obs.poll(index).Message == drainMessagePresent && id == c.messageID && c.obs.poll(index).ACK == drainResponseNotAttempted
 	c.mu.Unlock()
 	if !valid {
 		return c.rejectCall("ack")
@@ -1158,27 +1163,42 @@ func (c *drainClient) AcquireJobs(ctx context.Context, ids []int64) ([]int64, er
 
 type drainScaler struct{ client *drainClient }
 
-func (s drainScaler) HandleDesiredRunnerCount(_ context.Context, count int) (int, error) {
-	if count < 0 {
-		return 0, ErrQuarantine
+func (s drainScaler) Scale(_ context.Context, msg *scaleset.RunnerScaleSetMessage) error {
+	if msg != nil && (msg.Statistics == nil || msg.Statistics.TotalAssignedJobs < 0) {
+		return ErrQuarantine
 	}
+	// The only nil-message decisions are bounded collection termination below;
+	// never synthesize fresh statistics from a cached observation.
 	s.client.mu.Lock()
 	polls := s.client.polls
-	messageID := s.client.messageID
+	messagePresent := polls >= 1 && s.client.obs.poll(1).Message == drainMessagePresent
 	s.client.mu.Unlock()
 	if !s.client.active() {
-		return 0, s.client.rejectCall("observe-poll")
+		return s.client.rejectCall("observe-poll")
 	}
-	if polls >= 2 || polls >= 1 && messageID == 0 {
-		return 0, errDrainCollected
+	if polls >= 2 || polls >= 1 && !messagePresent {
+		return errDrainCollected
 	}
-	return min(count, drainInitialCapacity), nil
+	return nil
 }
-func (drainScaler) HandleJobStarted(context.Context, *scaleset.JobStarted) error {
-	return ErrQuarantine
-}
-func (drainScaler) HandleJobCompleted(context.Context, *scaleset.JobCompleted) error {
-	return ErrQuarantine
+
+// Acquisition is this experiment's explicit post-ACK policy, not a behavior
+// supplied by v0.5.0's listener. Use the original drain authority context even
+// though SDK ACK itself is cancellation-independent.
+type drainListenerClient struct{ *drainClient }
+
+func (c drainListenerClient) DeleteMessage(ctx context.Context, id int) error {
+	if err := c.drainClient.DeleteMessage(ctx, id); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	requestID, phaseCtx := c.requestID, c.phaseCtx
+	c.mu.Unlock()
+	if phaseCtx == nil {
+		return ErrQuarantine
+	}
+	_, err := c.AcquireJobs(phaseCtx, []int64{requestID})
+	return err
 }
 
 func cancelAndJoinDrain(stop, release func(), join func()) {
@@ -1220,7 +1240,7 @@ func runDrainListener(ctx context.Context, client listener.Client, setID int, ho
 	if rejecter, ok := client.(interface{ reject(string) error }); ok {
 		c.reject = rejecter.reject
 	}
-	l, err := listener.New(c, listener.Config{ScaleSetID: setID, MaxRunners: drainInitialCapacity})
+	l, err := listener.New(drainListenerClient{c}, listener.Config{ScaleSetID: setID, MaxRunners: drainInitialCapacity})
 	if err != nil {
 		return obs, ErrQuarantine
 	}
