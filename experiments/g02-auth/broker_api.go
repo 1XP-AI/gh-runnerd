@@ -155,30 +155,52 @@ type brokerIssued struct {
 
 func (brokerIssued) String() string   { return "[redacted issuance]" }
 func (brokerIssued) GoString() string { return "[redacted issuance]" }
+
+func (r brokerIssued) matchesScope(a BrokerApproval) bool {
+	if a.ManagementScope == organizationOnlyManagementScope {
+		return len(r.Permissions) == 1 && r.Permissions["organization_self_hosted_runners"] == "write" && len(r.Repositories) == 0 && (r.RepositorySelection == "" || r.RepositorySelection == "all" || r.RepositorySelection == "selected")
+	}
+	return a.ManagementScope == "" && len(r.Permissions) == 2 && r.Permissions["metadata"] == "read" && minimalPermissions(r.Permissions) && r.RepositorySelection == "selected" && len(r.Repositories) == 1 && r.Repositories[0].matches(a)
+}
+
 func (a *brokerAPI) mint(ctx context.Context, approval BrokerApproval, cred Credential) (brokerIssued, error) {
+	if approval.ManagementScope != "" && approval.ManagementScope != organizationOnlyManagementScope {
+		return brokerIssued{}, errBroker
+	}
 	jwt, err := a.github.jwt(cred)
 	if err != nil {
 		return brokerIssued{}, errBroker
 	}
+	permissions := map[string]string{"organization_self_hosted_runners": "write", "metadata": "read"}
+	repositories := []int64{approval.RepositoryID}
+	if approval.ManagementScope == organizationOnlyManagementScope {
+		permissions = map[string]string{"organization_self_hosted_runners": "write"}
+		repositories = nil
+	}
 	body := struct {
-		RepositoryIDs []int64           `json:"repository_ids"`
+		RepositoryIDs []int64           `json:"repository_ids,omitempty"`
 		Permissions   map[string]string `json:"permissions"`
-	}{[]int64{approval.RepositoryID}, map[string]string{"organization_self_hosted_runners": "write", "metadata": "read"}}
+	}{repositories, permissions}
 	var result brokerIssued
-	if a.call(ctx, "POST", "/app/installations/"+strconv.FormatInt(approval.InstallationID, 10)+"/access_tokens", "Bearer "+jwt, body, 201, &result) != nil || !validBrokerToken(result.Token) || len(result.Token) > 1024 || !result.ExpiresAt.After(a.now().Add(time.Minute)) || result.ExpiresAt.After(a.now().Add(65*time.Minute)) || len(result.Permissions) != 2 || result.Permissions["metadata"] != "read" || !minimalPermissions(result.Permissions) || result.RepositorySelection != "selected" || len(result.Repositories) != 1 || !result.Repositories[0].matches(approval) {
+	if a.call(ctx, "POST", "/app/installations/"+strconv.FormatInt(approval.InstallationID, 10)+"/access_tokens", "Bearer "+jwt, body, 201, &result) != nil || !validBrokerToken(result.Token) || len(result.Token) > 1024 || !result.ExpiresAt.After(a.now().Add(time.Minute)) || result.ExpiresAt.After(a.now().Add(65*time.Minute)) || !result.matchesScope(approval) {
 		return brokerIssued{}, errBroker
 	}
 	return result, nil
 }
 func (a *brokerAPI) preflight(ctx context.Context, approval BrokerApproval, token string) error {
-	auth := "Bearer " + token
-	var installed brokerRepositories
-	if a.call(ctx, "GET", "/installation/repositories?per_page=100", auth, nil, 200, &installed) != nil || !installed.matches(approval) {
+	if approval.ManagementScope != "" && approval.ManagementScope != organizationOnlyManagementScope {
 		return errBroker
 	}
-	var current brokerRepository
-	if a.call(ctx, "GET", "/repos/"+approval.Organization+"/"+approval.Repository, auth, nil, 200, &current) != nil || !current.matches(approval) {
-		return errBroker
+	auth := "Bearer " + token
+	if approval.ManagementScope == "" {
+		var installed brokerRepositories
+		if a.call(ctx, "GET", "/installation/repositories?per_page=100", auth, nil, 200, &installed) != nil || !installed.matches(approval) {
+			return errBroker
+		}
+		var current brokerRepository
+		if a.call(ctx, "GET", "/repos/"+approval.Organization+"/"+approval.Repository, auth, nil, 200, &current) != nil || !current.matches(approval) {
+			return errBroker
+		}
 	}
 	var group struct {
 		ID           int64  `json:"id"`

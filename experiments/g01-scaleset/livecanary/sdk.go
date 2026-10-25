@@ -19,12 +19,15 @@ import (
 	"github.com/actions/scaleset"
 )
 
+const organizationOnlyManagementScope = "organization-only"
+
 // Credentials come only from the trusted controller-side broker on stdin.
 // The broker attests issuance identity, permission and expiry; GitHub does not
 // expose an installation-token introspection endpoint for those fields.
-// Preflight independently proves installation-token use, repository scope and
-// current target policy. It cannot independently prove broker provenance.
+// Preflight independently checks installation-token use and current target
+// policy for the approved scope. It cannot independently prove broker provenance.
 type Credentials struct {
+	ManagementScope   string                 `json:"management_scope,omitempty"`
 	InstallationToken string                 `json:"installation_token"`
 	VerificationToken string                 `json:"verification_token"`
 	AppID             int64                  `json:"app_id"`
@@ -37,7 +40,10 @@ type Credentials struct {
 }
 
 func (c Credentials) validate(a Approval, now time.Time) error {
-	if c.AppID != a.AppID || c.InstallationID != a.InstallationID || c.Organization != a.Organization || c.SelfHostedRunners != "write" || c.Metadata != "read" || !c.ExpiresAt.After(now.Add(time.Minute)) || c.ExpiresAt.After(now.Add(65*time.Minute)) || len(c.InstallationToken) < 20 || len(c.InstallationToken) > 1024 || strings.ContainsAny(c.InstallationToken, "\r\n\x00") {
+	if c.ManagementScope != a.ManagementScope || (c.ManagementScope != "" && c.ManagementScope != organizationOnlyManagementScope) || (c.ManagementScope == "" && c.Metadata != "read") || (c.ManagementScope == organizationOnlyManagementScope && c.Metadata != "") {
+		return ErrApproval
+	}
+	if c.AppID != a.AppID || c.InstallationID != a.InstallationID || c.Organization != a.Organization || c.SelfHostedRunners != "write" || !c.ExpiresAt.After(now.Add(time.Minute)) || c.ExpiresAt.After(now.Add(65*time.Minute)) || len(c.InstallationToken) < 20 || len(c.InstallationToken) > 1024 || strings.ContainsAny(c.InstallationToken, "\r\n\x00") {
 		return ErrApproval
 	}
 	needsVerification := slices.ContainsFunc(a.Phases, func(p string) bool {
@@ -162,6 +168,9 @@ type repositories struct {
 func (a *SDKAPI) Preflight(ctx context.Context, approval Approval) error {
 	if a.credentials.validate(approval, time.Now()) != nil {
 		return ErrApproval
+	}
+	if approval.ManagementScope == organizationOnlyManagementScope {
+		return a.preflightOrganizationOnly(ctx, approval)
 	}
 	var installed repositories
 	// The broker must narrow this temporary token to the one private repository.

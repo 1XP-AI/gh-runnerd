@@ -83,6 +83,11 @@ cleanup capabilities below remain required.
   organization self-hosted runners write permission. G01 does not create an App,
   change its permissions or borrow credentials from existing runner installs.
   A separate secret broker keeps management credentials on the controller.
+  The existing organization-only App does not need repository access. Its broker
+  and controller approvals must explicitly select the reviewed
+  [organization-only management scope](g01-organization-management-scope.md),
+  with separate workflow verification authority where required. Scope support
+  alone does not qualify issuance, provenance or execution.
 - [ ] Dedicated trusted controller and disposable worker environment is named.
   Prefer one Linux ARM64 worker on an explicitly chosen Docker endpoint/runtime;
   Docker Desktop presence alone is not authorization to use it. Native macOS

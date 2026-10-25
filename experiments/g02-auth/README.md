@@ -46,6 +46,14 @@ See the [evidence record](../../docs/evidence/g02-enrollment-evidence.md), [rema
 
 ## Broker-only workflow provenance gate
 
+The bounded G01 broker supports an explicitly approved
+`management_scope: "organization-only"` without repository selectors or metadata
+permission. It checks the dedicated group's private repository policy with the
+management token and keeps workflow verification separate. The
+[scope ledger](../../docs/evidence/g01-organization-management-scope.md) records
+offline evidence and unchanged execution gates. Omitted scope preserves the
+existing selected-repository contract; the broker never guesses or falls back.
+
 Controller and paired-terminal entrypoints require a one-shot signed
 `BrokerProvenanceReceipt` before reading credential input. Its Ed25519 payload
 binds the controller-approval SHA-256, workflow run ID, workflow ref and

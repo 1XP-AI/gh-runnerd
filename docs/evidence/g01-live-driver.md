@@ -5,11 +5,19 @@ This is a controller slice of the [live-canary plan](g01-live-canary.md), not
 completion of G01. The original fixture remains permanently loopback-only. The
 separate command requires `-tags=g01_live` at build time, an explicit execution
 flag, an exact private approval and controller-side broker input. Public CI has
-no credentials. The adoption candidate selects SDK `v0.5.0` and Go `1.27.3`;
+no credentials. The adopted profile selects SDK `v0.5.0` and Go `1.27.3`;
 see the [changed-boundary evidence and review status](g01-sdk-v05-adoption.md).
 The `--execute-approved-canary` entrypoint remains quarantined because
 broker-authenticated workflow-input provenance and conditional cleanup are
 still unresolved; the offline `--plan` check does not authorize it.
+
+For an App with organization runner-management permission and no repository
+access, the controller and broker approvals must explicitly select matching
+`management_scope: "organization-only"`; the handed-off credentials carry that
+scope and empty metadata permission. The [scope ledger](g01-organization-management-scope.md)
+records exact group-policy checks and compatibility limits. Omitted/empty scope
+retains the existing selected-repository/metadata-read contract. Scope changes
+cannot renew or reuse an existing experiment's authority.
 
 ## Executable scope
 
