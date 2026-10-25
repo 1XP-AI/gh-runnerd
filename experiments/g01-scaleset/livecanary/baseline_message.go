@@ -47,6 +47,22 @@ type baselineBatch struct {
 	Statistics *baselineStatistics `json:"statistics"`
 	Items      []baselineItem      `json:"items"`
 }
+
+// A durable batch must preserve a present zero identity, not manufacture one
+// when a journal record omits/nulls the field. Wire decoding has the same rule.
+func (b *baselineBatch) UnmarshalJSON(data []byte) error {
+	var w struct {
+		MessageID  *int                `json:"message_id"`
+		Statistics *baselineStatistics `json:"statistics"`
+		Items      []baselineItem      `json:"items"`
+	}
+	if DecodeStrict(data, &w) != nil || w.MessageID == nil || *w.MessageID < 0 {
+		return ErrJournal
+	}
+	*b = baselineBatch{MessageID: *w.MessageID, Statistics: w.Statistics, Items: w.Items}
+	return nil
+}
+
 type baselineSessionFacts struct {
 	SessionID        string              `json:"session_id"`
 	Owner            string              `json:"owner"`
@@ -326,19 +342,19 @@ func (x baselineItem) bounded() bool {
 }
 func decodeBaselineBatch(data []byte) (*baselineBatch, error) {
 	var w struct {
-		ID    int             `json:"messageId"`
+		ID    *int            `json:"messageId"`
 		Type  string          `json:"messageType"`
 		Body  *string         `json:"body"`
 		Stats json.RawMessage `json:"statistics"`
 	}
-	if DecodeStrict(data, &w) != nil || w.Type != "RunnerScaleSetJobMessages" || w.Body == nil {
+	if DecodeStrict(data, &w) != nil || w.ID == nil || *w.ID < 0 || w.Type != "RunnerScaleSetJobMessages" || w.Body == nil {
 		return nil, ErrRemote
 	}
 	s, err := baselineStats(w.Stats)
 	if err != nil {
 		return nil, err
 	}
-	b := &baselineBatch{MessageID: w.ID, Statistics: s}
+	b := &baselineBatch{MessageID: *w.ID, Statistics: s}
 	var items []json.RawMessage
 	if strings.TrimSpace(*w.Body) == "null" || json.Unmarshal([]byte(*w.Body), &items) != nil || len(items) > 4 {
 		return b, ErrRemote

@@ -1,9 +1,13 @@
 package livecanary
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+
+	"github.com/actions/scaleset"
 )
 
 const responseBodyLimit int64 = 1 << 20
@@ -60,7 +64,32 @@ func (t responseBudgetTransport) RoundTrip(req *http.Request) (*http.Response, e
 		return nil, errResponseBudget
 	}
 	response.Body = &responseBudgetBody{source: response.Body, remaining: responseBodyLimit}
+	if response, err = guardQueueMessageIdentity(wireReq, response); err != nil {
+		return nil, err
+	}
 	return guardBaselineResponse(wireReq, response)
+}
+
+// SDK DTO decoding collapses absent/null messageId to zero, but zero is a real
+// queue identity. Validate presence before the SDK can lose that distinction.
+// Only successful queue GETs carry the capacity header; bootstrap, REST reads
+// and 202 no-message responses keep their existing handling. Bytes are replayed
+// unchanged, bounded, and cleared on close; no raw response enters evidence.
+func guardQueueMessageIdentity(req *http.Request, response *http.Response) (*http.Response, error) {
+	if req.Method != http.MethodGet || response.StatusCode != http.StatusOK || len(drainHeaderValues(req.Header, scaleset.HeaderScaleSetMaxCapacity)) == 0 {
+		return response, nil
+	}
+	data, readErr := io.ReadAll(response.Body)
+	closeErr := response.Body.Close()
+	var w struct {
+		ID *int `json:"messageId"`
+	}
+	if readErr != nil || closeErr != nil || int64(len(data)) > responseBodyLimit || !uniqueKeys(json.NewDecoder(bytes.NewReader(data))) || json.Unmarshal(data, &w) != nil || w.ID == nil || *w.ID < 0 {
+		clear(data)
+		return nil, ErrRemote
+	}
+	response.Body = &baselineCopiedBody{Reader: bytes.NewReader(data), data: data}
+	return response, nil
 }
 
 // Read at most the budget plus one detection byte, including decoded gzip and

@@ -426,7 +426,7 @@ func (b *baselineListener) GetMessage(_ context.Context, last, capacity int) (*s
 	r.Batch = batch
 	r.HTTPStatus = status
 	r.NoMessage = status == 202 && m == nil
-	known := c.observed() && (callErr == nil || b.ctx.Err() != nil) && (r.NoMessage || (batch != nil && (batch.matches(m) || callErr != nil && b.ctx.Err() != nil) && batch.MessageID > 0 && !s.messageIDs[batch.MessageID] && batch.Statistics.eligible(s.acquired)))
+	known := c.observed() && (callErr == nil || b.ctx.Err() != nil) && (r.NoMessage || (batch != nil && (batch.matches(m) || callErr != nil && b.ctx.Err() != nil) && batch.MessageID >= 0 && !s.messageIDs[batch.MessageID] && batch.Statistics.eligible(s.acquired)))
 	if known && !r.NoMessage {
 		copyState := s
 		if err := copyState.admitBatch(batch, b.approval); err != nil {
@@ -486,6 +486,7 @@ func (b *baselineListener) DeleteMessage(_ context.Context, id int) error {
 	}
 	c := b.wire("ack")
 	c.cursor = id
+	c.cursorKnown = true // bound above to the replayed, present batch identity
 	ctx, cancel := context.WithTimeout(b.ctx, operationTimeout)
 	callErr := b.session.DeleteMessage(c.context(ctx), id)
 	cancel()

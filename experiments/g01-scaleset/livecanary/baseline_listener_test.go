@@ -99,7 +99,10 @@ func newBaselineFixtureWithApproval(t *testing.T, change func(string, any) any, 
 			wantCursor := ""
 			for _, e := range f.j.Events() {
 				if e.Baseline != nil && e.Baseline.Stage == "ack" && e.Baseline.Outcome == "result" {
-					wantCursor = strconv.Itoa(e.Baseline.MessageID)
+					wantCursor = ""
+					if e.Baseline.MessageID > 0 {
+						wantCursor = strconv.Itoa(e.Baseline.MessageID)
+					}
 				}
 			}
 			if r.URL.Query().Get("lastMessageId") != wantCursor {

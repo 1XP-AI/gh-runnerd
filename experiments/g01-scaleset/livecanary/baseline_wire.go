@@ -32,6 +32,7 @@ type baselineWireCapture struct {
 	runtimePathPrefixSet bool
 	allowedHosts         []string
 	cursor               int
+	cursorKnown          bool // required to distinguish a validated zero ACK from unset
 	count, status        int
 	requestIDs           []int64
 	requestCount         int
@@ -148,7 +149,7 @@ func (c *baselineWireCapture) target(r *http.Request) bool {
 		return r.Method == "GET" && r.URL.String() == u.String()
 	}
 	if c.stage == "ack" {
-		if !c.markedDeleteIdentityReady() || c.queue == "" || c.cursor <= 0 {
+		if !c.markedDeleteIdentityReady() || c.queue == "" || c.cursor < 0 || c.cursor == 0 && !c.cursorKnown {
 			return false
 		}
 		u, err := url.Parse(c.queue)

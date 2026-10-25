@@ -42,9 +42,13 @@ func (f *countingFixtureSDK) VerifyRun(context.Context, Approval, int64) error {
 // transport is permanently fenced to its own loopback server, like the original
 // offline spike; no endpoint flag or environment can repoint it to GitHub.
 func TestDriverBarriersThroughPinnedSDK(t *testing.T) {
-	for _, scenario := range []string{"after-ack", "acquire-loss", "jit-loss", "ack-refresh", "create-oversize", "create-error-oversize"} {
+	for _, scenario := range []string{"after-ack", "acquire-loss", "jit-loss", "ack-refresh", "create-oversize", "create-error-oversize", "zero-after-ack", "zero-acquire-loss", "missing-message", "null-message", "negative-message"} {
 		t.Run(scenario, func(t *testing.T) {
-			phase := scenario
+			phase := strings.TrimPrefix(scenario, "zero-")
+			invalidMessage := strings.HasSuffix(scenario, "-message")
+			if invalidMessage {
+				phase = "after-ack"
+			}
 			if scenario == "ack-refresh" {
 				phase = "after-ack"
 			}
@@ -82,9 +86,27 @@ func TestDriverBarriersThroughPinnedSDK(t *testing.T) {
 						t.Error("capacity not bounded")
 					}
 					jobs, _ := json.Marshal([]any{map[string]any{"messageType": "JobAvailable", "runnerRequestId": 42, "workflowRunId": a.WorkflowRunID, "ownerName": a.Organization, "repositoryName": a.Repository}})
-					body = map[string]any{"messageId": 9, "messageType": "RunnerScaleSetJobMessages", "body": string(jobs), "statistics": map[string]int{"totalAssignedJobs": 1}}
-				case r.URL.Path == "/queue/9":
+					message := map[string]any{"messageId": 9, "messageType": "RunnerScaleSetJobMessages", "body": string(jobs), "statistics": map[string]int{"totalAssignedJobs": 1}}
+					switch {
+					case strings.HasPrefix(scenario, "zero-"):
+						message["messageId"] = 0
+					case scenario == "missing-message":
+						delete(message, "messageId")
+					case scenario == "null-message":
+						message["messageId"] = nil
+					case scenario == "negative-message":
+						message["messageId"] = -1
+					}
+					body = message
+				case strings.HasPrefix(r.URL.Path, "/queue/"):
 					acks++
+					wantPath := "/queue/9"
+					if strings.HasPrefix(scenario, "zero-") {
+						wantPath = "/queue/0"
+					}
+					if r.URL.Path != wantPath {
+						t.Error("ACK targeted the wrong message identity")
+					}
 					if scenario == "ack-refresh" {
 						w.WriteHeader(http.StatusUnauthorized)
 						return
@@ -161,6 +183,12 @@ func TestDriverBarriersThroughPinnedSDK(t *testing.T) {
 				t.Fatal("SDK create failed")
 			}
 			err = d.Run(context.Background(), phase)
+			if invalidMessage {
+				if !errors.Is(err, ErrQuarantine) || acks != 0 || acquires != 0 || closes != 0 || !replay(j.Events()).uncertain {
+					t.Fatal("invalid wire message identity reached effects or escaped quarantine")
+				}
+				return
+			}
 			if scenario == "ack-refresh" {
 				if !errors.Is(err, ErrQuarantine) || acks != 1 || refreshes != 0 || replacementACKs != 0 || closes != 0 || !replay(j.Events()).uncertain {
 					t.Fatal("SDK refreshed and acknowledged through a replaced session")

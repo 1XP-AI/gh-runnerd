@@ -1,7 +1,8 @@
 # G01 v0.5.0 adoption ledger and current evidence profile
 
 Issue: [G01 #1](https://github.com/1XP-AI/gh-runnerd/issues/1). Writer: Codex,
-maintainer-selected Sol medium. Status: **local adoption candidate, unreviewed**.
+maintainer-selected Sol medium. Status: **local adoption candidate; independent
+base review approved, zero-identity delta and GitHub review pending**.
 No live execution, G01 closure or dependent production approval.
 
 ## Selection and change boundary
@@ -21,7 +22,7 @@ That is old-profile integration evidence, not evidence for this later adoption.
 | Default protocol tests | The 17 v0.5 tests are promoted unchanged from testdata to the module root. They now participate in default G01 discovery and its CI leg, rather than remaining opt-in. |
 | Baseline, fault and drain listeners | Real new Scale interface plus explicit caller-owned post-ACK policy below. No upstream patch/fork or production provider. |
 | G02 | Only shared pin and G01 controller-build compatibility expectations; no enrollment, provenance trust-root, credential or service behavior implemented. |
-| Review | New independent protocol/security and exact-head GitHub Codex reviews pending. PR #106 approval does not cover this interface/pin migration. |
+| Review | Independent Sol medium protocol/security review approved `586091b05b6c76c556c6538eeef63d259ffb40e7` with nonblocking Q1 below. Its correction needs focused delta review; exact-head GitHub Codex review remains pending. PR #106 approval does not cover this interface/pin migration. |
 
 ## Handler, ACK and continuation policy
 
@@ -142,10 +143,58 @@ Formatting, local document link targets, diff hygiene and new-artifact secret/
 personal-path scans also passed. The generated Python bytecode cache was moved
 out of the worktree and is not part of the candidate.
 
+## Independent finding Q1: real message identity zero
+
+The independent two-pass review of `586091b` approved the bounded experiment,
+with one inherited nonblocking P2 qualification limit: the selected SDK documents
+real messages numbered from zero, but baseline, fault and drain paths required
+positive IDs. No unsafe effect was found; a legitimate first message could be
+refused. This useful offline gap is corrected in the same batch, without a new
+follow-up issue or any claim that the review covered the later fix.
+
+Meaningful RED: `TestBaselineMessageZeroIsNotMissingOrNegative` accepted absent,
+null and negative wire IDs, and
+`TestBaselineZeroMessageTraversesJournalACKAndContinuation` rejected valid zero
+before ACK/acquisition/continuation. Focused run exit 1, package 0.308s. The
+previous positive-only downstream check concealed DTO defaulting; simply changing
+`<= 0` to `< 0` would have admitted missing identities.
+
+The correction requires a present nonnegative wire ID before SDK DTO decoding,
+and the same required identity when decoding a durable batch. The transport reads
+only successful capacity-bearing queue GETs under its existing decoded-body
+budget, rejects duplicate/case-folded keys and read/close errors, and replays
+identical bytes. Baseline ACK still binds the durable batch/source references;
+zero needs an explicit known-cursor fact. Drain uses observed-message presence
+instead of zero as absence. Both cursor guards retain the selected SDK's omission
+of `lastMessageId` for zero, while rejecting missing prior batches and unacknowledged
+work. Resource/request/runner IDs remain positive; synthetic initial `-1` is not
+admitted as a wire message. No upstream SDK patch or response mutation is used.
+
+Canonical release-profile checks after the correction:
+
+- Focused SDK/baseline/drain/identity race selection: PASS 3.138s. A later new
+  journal assertion initially failed because it incorrectly expected the generic
+  result event's unused `Succeeded` flag; the assertion now checks the actual
+  result-kind, session and ID contract. This was a test correction, not a product
+  success reclassified from failure.
+- Broader race regression, `go test -race -count=1 -timeout=120s -run
+  '^Test(Baseline.*|DurableBatch.*|QueueIdentity.*|ZeroACK.*|GuardBaseline.*|Response.*|SharedTransport.*|PinnedSDK.*|Driver.*PinnedSDK.*|SupportedListenerBarriersAndReservation|NoMessageDoesNotCountAsCompletedBarrier|ForeignIdentityAndUnreviewedWorkNeverACKOrDelete|DrainListener.*)$'
+  ./livecanary`: PASS **32.296s**. Covers valid zero through durable baseline and
+  journaled drain ACK/acquisition, actual SDK fault barriers, omitted zero cursor,
+  repeated zero, missing/null/negative/duplicate IDs, body errors/budget, and
+  existing authority/ownership/wire safety controls. Synthetic HTTP only.
+- `go vet -tags=g01_live,g01_worker,g01_pair_fixture ./...`: exit 0.
+- `go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 -test ./livecanary`:
+  exit 0, no vulnerabilities found. This is the changed source profile; earlier
+  unchanged-module checks above are not relabeled as reruns.
+- Exact `586091b` clean prepared-binary fixture verification also passed, 4.587s;
+  that is the pre-Q1 source, not a claim that the correction was already built.
+
 ## Still required before merge / execution
 
-Finish remaining changed-surface admission/compile/tagged and vulnerability
-checks, inspect their actual results, and batch any fixes. The G02 prepared
+The changed-surface admission/compile/tagged and vulnerability checks above have
+completed. Obtain the focused independent Q1 delta review and exact final-head
+GitHub review/PR quick checks before merge. The G02 prepared
 binary fixture clones an immutable committed source, so its verification must
 use the coherent local adoption commit, not silently build the old committed
 source while checking new uncommitted expectations.

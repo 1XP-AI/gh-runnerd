@@ -477,8 +477,10 @@ func (h *drainPollHook) pollRequestValid(req *http.Request, attempt int) bool {
 	target := h.target
 	authorization := h.authorization
 	messageID := 0
+	messageKnown := false
 	if attempt == 2 && h.batches[1] != nil {
 		messageID = h.batches[1].MessageID
+		messageKnown = true
 	}
 	h.mu.Unlock()
 	want, err := url.Parse(target)
@@ -537,10 +539,13 @@ func (h *drainPollHook) pollRequestValid(req *http.Request, attempt int) bool {
 	if attempt == 1 {
 		return sameDrainQuery(wantQuery, gotQuery)
 	}
-	if messageID <= 0 {
+	if !messageKnown || messageID < 0 {
 		return false
 	}
-	wantQuery.Set("lastMessageId", strconv.Itoa(messageID))
+	// The pinned SDK omits this query for zero even after ACKing message zero.
+	if messageID > 0 {
+		wantQuery.Set("lastMessageId", strconv.Itoa(messageID))
+	}
 	return sameDrainQuery(wantQuery, gotQuery)
 }
 
@@ -994,7 +999,7 @@ func (c *drainClient) GetMessage(ctx context.Context, last, capacity int) (*scal
 		wantCapacity = drainWithdrawnCapacity
 		wantLast = c.messageID
 	}
-	if c.polls >= 2 || capacity != wantCapacity || last != wantLast || c.polls == 1 && (c.messageID <= 0 || c.obs.poll(c.polls).ACK != drainResponseSucceeded) {
+	if c.polls >= 2 || capacity != wantCapacity || last != wantLast || c.polls == 1 && (c.messageID < 0 || c.obs.poll(c.polls).Message != drainMessagePresent || c.obs.poll(c.polls).ACK != drainResponseSucceeded) {
 		c.mu.Unlock()
 		return nil, ErrQuarantine
 	}
@@ -1073,7 +1078,7 @@ func (c *drainClient) GetMessage(ctx context.Context, last, capacity int) (*scal
 		}
 	}
 	messageStats, statsErr := newDrainStatistics(message.Statistics)
-	if statsErr != nil || (c.hook != nil && stats != messageStats) || (index <= 2 && c.ownedRunnerStatsKnown && !sameDrainRunnerPartition(stats, c.ownedRunnerStats)) || message.MessageID <= 0 || len(message.JobAssignedMessages) != 0 || len(message.JobStartedMessages) != 0 || len(message.JobCompletedMessages) != 0 || len(message.JobAvailableMessages) != 1 || message.JobAvailableMessages[0] == nil || message.JobAvailableMessages[0].RunnerRequestID <= 0 {
+	if statsErr != nil || (c.hook != nil && stats != messageStats) || (index <= 2 && c.ownedRunnerStatsKnown && !sameDrainRunnerPartition(stats, c.ownedRunnerStats)) || message.MessageID < 0 || len(message.JobAssignedMessages) != 0 || len(message.JobStartedMessages) != 0 || len(message.JobCompletedMessages) != 0 || len(message.JobAvailableMessages) != 1 || message.JobAvailableMessages[0] == nil || message.JobAvailableMessages[0].RunnerRequestID <= 0 {
 		c.mu.Lock()
 		c.obs.poll(index).Message = drainMessageUnknown
 		c.mu.Unlock()
@@ -1113,7 +1118,7 @@ func (c *drainClient) DeleteMessage(ctx context.Context, id int) error {
 	}
 	c.mu.Lock()
 	index := c.polls
-	valid := index == 1 && c.messageID > 0 && id == c.messageID && c.obs.poll(index).ACK == drainResponseNotAttempted
+	valid := index == 1 && c.messageID >= 0 && c.obs.poll(index).Message == drainMessagePresent && id == c.messageID && c.obs.poll(index).ACK == drainResponseNotAttempted
 	c.mu.Unlock()
 	if !valid {
 		return c.rejectCall("ack")
@@ -1165,12 +1170,13 @@ func (s drainScaler) Scale(_ context.Context, msg *scaleset.RunnerScaleSetMessag
 	// The only nil-message decisions are bounded collection termination below;
 	// never synthesize fresh statistics from a cached observation.
 	s.client.mu.Lock()
-	polls, messageID := s.client.polls, s.client.messageID
+	polls := s.client.polls
+	messagePresent := polls >= 1 && s.client.obs.poll(1).Message == drainMessagePresent
 	s.client.mu.Unlock()
 	if !s.client.active() {
 		return s.client.rejectCall("observe-poll")
 	}
-	if polls >= 2 || polls >= 1 && messageID == 0 {
+	if polls >= 2 || polls >= 1 && !messagePresent {
 		return errDrainCollected
 	}
 	return nil

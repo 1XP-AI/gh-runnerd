@@ -65,7 +65,7 @@ func (p *probeClient) GetMessage(_ context.Context, last, capacity int) (*scales
 		return nil, ErrNoMessage
 	}
 	ids := make([]int64, 0, len(m.JobAvailableMessages))
-	if m.MessageID <= 0 || len(m.JobAvailableMessages) > 2 {
+	if m.MessageID < 0 || len(m.JobAvailableMessages) > 2 {
 		return nil, ErrQuarantine
 	}
 	// Caller policy acquires after ACK. Validate the single-request acquisition
