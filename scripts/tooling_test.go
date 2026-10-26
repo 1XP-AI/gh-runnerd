@@ -18,9 +18,12 @@ const (
 	g01TerminalHeavyRegex          = `^TestPairedTerminal(FinalResultCapacity|PendingChildCapacity|EligibilityUsesFreshExactFacts|CapturedAcknowledgementCancellation|MissingAcknowledgementsAndPostchecks)$`
 	g01TerminalRemainderSkipRegex  = `^TestPairedTerminal(FinalResultCapacity|PendingChildCapacity|EligibilityUsesFreshExactFacts|CapturedAcknowledgementCancellation|MissingAcknowledgementsAndPostchecks|Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$`
 	g01TerminalStorageRegex        = `^TestPairedTerminal(Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$`
+	g01StorageJournalRegex         = `^TestPairedTerminalPostIntentJournalIdentity$`
 	g01TerminalHeavyInvocation     = "go1.27.3\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run " + g01TerminalHeavyRegex + " ./livecanary"
 	g01TerminalRemainderInvocation = "go1.27.3\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run ^TestPairedTerminal -skip " + g01TerminalRemainderSkipRegex + " ./livecanary"
-	g01TerminalStorageInvocation   = "go1.27.3\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run " + g01TerminalStorageRegex + " ./livecanary"
+	g01StorageJournalInvocation    = "go1.27.3\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run " + g01StorageJournalRegex + " ./livecanary"
+	g01TerminalStorageInvocation   = "go1.27.3\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run " + g01TerminalStorageRegex + " -skip " + g01StorageJournalRegex + " ./livecanary"
+	g01LegacyStorageInvocation     = "go1.27.3\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run " + g01TerminalStorageRegex + " ./livecanary"
 	g01LegacyTerminalInvocation    = "go1.27.3\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run ^TestPairedTerminal -skip " + g01TerminalStorageRegex + " ./livecanary"
 )
 
@@ -2178,6 +2181,7 @@ func TestToolingTaggedPairFixturePartitionsRun(t *testing.T) {
 	const terminalHeavySentinel = "tagged-pair-fixture-terminal-heavy-regression"
 	const terminalFutureSentinel = "tagged-pair-fixture-terminal-future-regression"
 	const storageSentinel = "tagged-pair-fixture-storage-regression"
+	const storageJournalSentinel = "tagged-pair-fixture-storage-journal-regression"
 	pairedCollectionPath := "experiments/g01-scaleset/livecanary/pair_fixture_paired_collection_regression_test.go"
 	listenerPath := "experiments/g01-scaleset/livecanary/pair_fixture_listener_regression_test.go"
 	examplePath := "experiments/g01-scaleset/livecanary/pair_fixture_example_regression_test.go"
@@ -2186,6 +2190,7 @@ func TestToolingTaggedPairFixturePartitionsRun(t *testing.T) {
 	terminalHeavyPath := "experiments/g01-scaleset/livecanary/pair_fixture_terminal_heavy_regression_test.go"
 	terminalFuturePath := "experiments/g01-scaleset/livecanary/pair_fixture_terminal_future_regression_test.go"
 	storagePath := "experiments/g01-scaleset/livecanary/pair_fixture_storage_regression_test.go"
+	storageJournalPath := "experiments/g01-scaleset/livecanary/pair_fixture_storage_journal_regression_test.go"
 	remainingCollectionInvocation := "go1.27.3\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -skip ^TestPaired ./livecanary"
 	taggedPositiveSource := func(testName, marker string) string {
 		return `//go:build g01_pair_fixture && !g01_live && !g01_worker
@@ -2285,6 +2290,7 @@ func ` + fuzzName + `(f *testing.F) {
 	terminalHeavyPositiveSource := taggedPositiveSource("TestPairedTerminalFinalResultCapacity", "terminal-heavy-pass")
 	terminalFuturePositiveSource := taggedPositiveSource("TestPairedTerminalFutureCoverage", "terminal-future-pass")
 	storagePositiveSource := taggedPositiveSource("TestPairedTerminalFixtureStorageFailure", "storage-pass")
+	storageJournalPositiveSource := taggedPositiveSource("TestPairedTerminalPostIntentJournalIdentity", "storage-journal-pass")
 	pairedCollectionSource := `//go:build g01_pair_fixture && !g01_live && !g01_worker
 
 package livecanary
@@ -2325,6 +2331,16 @@ func TestPairedTerminalFixtureStorageFailure(t *testing.T) {
 	t.Fatal("tagged-pair-fixture-storage-regression")
 }
 `
+	storageJournalSource := `//go:build g01_pair_fixture && !g01_live && !g01_worker
+
+package livecanary
+
+import "testing"
+
+func TestPairedTerminalPostIntentJournalIdentity(t *testing.T) {
+	t.Fatal("tagged-pair-fixture-storage-journal-regression")
+}
+`
 	terminalHeavySource := `//go:build g01_pair_fixture && !g01_live && !g01_worker
 
 package livecanary
@@ -2349,7 +2365,7 @@ func TestPairedTerminalFutureCoverage(t *testing.T) {
 	sentinelLogPath := filepath.Join(root, "tagged-sentinel.log")
 	env := []string{"GO=" + wrapper, "TOOLING_REAL_GO=" + realGo, "TOOLING_GO_LOG=" + logPath, "TOOLING_SENTINEL_LOG=" + sentinelLogPath}
 	// Each generated witness must fail through its own reviewed partition. The
-	// log assertions prove the five livecanary partitions, including a future
+	// log assertions prove all six tagged livecanary partitions, including a future
 	// TestPairedTerminal name in the complementary remainder.
 	partitions := []struct {
 		path, sentinel, name, source, positiveSource, invocation string
@@ -2411,6 +2427,14 @@ func TestPairedTerminalFutureCoverage(t *testing.T) {
 			g01TerminalRemainderInvocation,
 		},
 		{
+			storageJournalPath,
+			storageJournalSentinel,
+			"storage-journal",
+			storageJournalSource,
+			storageJournalPositiveSource,
+			g01StorageJournalInvocation,
+		},
+		{
 			storagePath,
 			storageSentinel,
 			"storage",
@@ -2464,7 +2488,7 @@ func TestPairedTerminalFutureCoverage(t *testing.T) {
 		t.Fatal(err)
 	}
 	sentinelLines := strings.Split(strings.TrimSpace(string(sentinelData)), "\n")
-	for _, marker := range []string{"paired-collection-pass", "listener-pass", "example-pass", "fuzz-pass", "terminal-heavy-pass", "terminal-pass", "terminal-future-pass", "storage-pass"} {
+	for _, marker := range []string{"paired-collection-pass", "listener-pass", "example-pass", "fuzz-pass", "terminal-heavy-pass", "terminal-pass", "terminal-future-pass", "storage-journal-pass", "storage-pass"} {
 		count := 0
 		for _, line := range sentinelLines {
 			if line == marker {
@@ -2482,6 +2506,7 @@ func TestPairedTerminalFutureCoverage(t *testing.T) {
 		remainingCollectionInvocation,
 		g01TerminalHeavyInvocation,
 		g01TerminalRemainderInvocation,
+		g01StorageJournalInvocation,
 		g01TerminalStorageInvocation,
 		"go1.27.3\tvet -tags=g01_pair_fixture ./livecanary",
 	} {
@@ -2503,6 +2528,9 @@ func TestPairedTerminalFutureCoverage(t *testing.T) {
 		if line == g01LegacyTerminalInvocation {
 			t.Fatalf("offline gate retained the unsplit terminal non-storage invocation: %s", line)
 		}
+		if line == g01LegacyStorageInvocation {
+			t.Fatalf("offline gate retained the unsplit storage invocation: %s", line)
+		}
 	}
 }
 
@@ -2515,6 +2543,7 @@ func TestG01PairedTerminalPartitionRegistry(t *testing.T) {
 	heavy := toolingScriptAssignment(t, body, "terminal_heavy_regex")
 	remainderSkip := toolingScriptAssignment(t, body, "terminal_remainder_skip_regex")
 	storage := toolingScriptAssignment(t, body, "storage_regex")
+	journal := toolingScriptAssignment(t, body, "storage_journal_regex")
 	if heavy != g01TerminalHeavyRegex {
 		t.Fatalf("terminal_heavy_regex = %q", heavy)
 	}
@@ -2524,12 +2553,16 @@ func TestG01PairedTerminalPartitionRegistry(t *testing.T) {
 	if storage != g01TerminalStorageRegex {
 		t.Fatalf("storage_regex = %q", storage)
 	}
+	if journal != g01StorageJournalRegex {
+		t.Fatalf("storage_journal_regex = %q", journal)
+	}
 	if !strings.Contains(body, `chmod 0700 "${g02_prep_dir}"`) || !strings.Contains(body, `trap 'trap - EXIT; rm -rf -- "${g02_prep_dir}"; exit 143' TERM`) {
 		t.Fatal("G02 owned signal cleanup traps were removed")
 	}
 	all := toolingListLivecanary(t, "^TestPairedTerminal")
 	heavyNames := toolingListLivecanary(t, heavy)
 	storageNames := toolingListLivecanary(t, storage)
+	journalNames := toolingListLivecanary(t, journal)
 	heavySet := map[string]bool{}
 	for _, name := range heavyNames {
 		heavySet[name] = true
@@ -2537,6 +2570,19 @@ func TestG01PairedTerminalPartitionRegistry(t *testing.T) {
 	storageSet := map[string]bool{}
 	for _, name := range storageNames {
 		storageSet[name] = true
+	}
+	journalSet := map[string]bool{}
+	for _, name := range journalNames {
+		if !storageSet[name] {
+			t.Fatalf("journal partition contains a non-storage test: %s", name)
+		}
+		journalSet[name] = true
+	}
+	var storageRemainderNames []string
+	for _, name := range storageNames {
+		if !journalSet[name] {
+			storageRemainderNames = append(storageRemainderNames, name)
+		}
 	}
 	var remainderNames []string
 	for _, name := range all {
@@ -2563,6 +2609,12 @@ func TestG01PairedTerminalPartitionRegistry(t *testing.T) {
 	if len(storageNames) != 6 {
 		t.Fatalf("storage partition listed %d names, want 6: %q", len(storageNames), storageNames)
 	}
+	if len(journalNames) != 1 || len(storageRemainderNames) != 5 {
+		t.Fatalf("storage split listed journal=%d remainder=%d, want 1 and 5", len(journalNames), len(storageRemainderNames))
+	}
+	if out := toolingLivecanarySkipCheck(t, journal, journal); !strings.Contains(out, "[no tests to run]") {
+		t.Fatalf("storage skip still selects journal identity: %s", out)
+	}
 	seen := map[string]string{}
 	assign := func(partition string, names []string) {
 		t.Helper()
@@ -2575,7 +2627,8 @@ func TestG01PairedTerminalPartitionRegistry(t *testing.T) {
 	}
 	assign("heavy", heavyNames)
 	assign("remainder", remainderNames)
-	assign("storage", storageNames)
+	assign("storage-journal", journalNames)
+	assign("storage-remainder", storageRemainderNames)
 	if len(seen) != 26 {
 		t.Fatalf("partitions covered %d names, want 26", len(seen))
 	}
