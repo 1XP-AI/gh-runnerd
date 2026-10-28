@@ -22,6 +22,8 @@ type brokerAPI struct {
 	now            func() time.Time
 	provenance     BrokerProvenanceAdapter
 	provenanceRoot BrokerProvenanceTrustRoot
+	// Injection-only assembly receives the actual held attempt guard.
+	provenanceFactory func(func() error) (BrokerProvenanceAdapter, error)
 	// Private dependency injection for synthetic tests only; production selects
 	// the fixed native account root and exposes no path override.
 	admissionDirectory func() (string, error)
@@ -40,12 +42,13 @@ func (t brokerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	if res == nil || res.Body == nil {
 		return nil, errBroker
 	}
-	defer res.Body.Close()
-	if res.ContentLength > maxResponseBytes || (res.Header.Get("Content-Encoding") != "" && res.Header.Get("Content-Encoding") != "identity") {
+	if res.Uncompressed || res.ContentLength > maxResponseBytes || (res.Header.Get("Content-Encoding") != "" && res.Header.Get("Content-Encoding") != "identity") {
+		_ = res.Body.Close()
 		return nil, errBroker
 	}
 	data, err := io.ReadAll(io.LimitReader(res.Body, maxResponseBytes+1))
-	if err != nil || len(data) > maxResponseBytes {
+	closeErr := res.Body.Close()
+	if err != nil || closeErr != nil || r.Context().Err() != nil || len(data) > maxResponseBytes {
 		return nil, errBroker
 	}
 	// Apply duplicate-key/depth checks to identity responses reused from G02 too.
@@ -66,6 +69,11 @@ func newBrokerAPIWithProvenanceRoot(now func() time.Time, fixture http.RoundTrip
 	if now == nil {
 		now = time.Now
 	}
+	client := newBrokerHTTPClient(fixture)
+	return &brokerAPI{github: NewGitHubAPI(now, client.Transport), client: client, now: now, provenanceRoot: provenanceRoot, admissionDirectory: brokerAdmissionDirectory, syncDirectory: syncDirectory}
+}
+
+func newBrokerHTTPClient(fixture http.RoundTripper) *http.Client {
 	if fixture == nil {
 		transport := http.DefaultTransport.(*http.Transport).Clone()
 		transport.Protocols = new(http.Protocols)
@@ -85,7 +93,7 @@ func newBrokerAPIWithProvenanceRoot(now func() time.Time, fixture http.RoundTrip
 		fixture = transport
 	}
 	transport := brokerTransport{fixture}
-	return &brokerAPI{github: NewGitHubAPI(now, transport), client: &http.Client{Transport: transport, Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, now: now, provenanceRoot: provenanceRoot, admissionDirectory: brokerAdmissionDirectory, syncDirectory: syncDirectory}
+	return &http.Client{Transport: transport, Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 }
 func (a *brokerAPI) call(ctx context.Context, method, path, authorization string, body any, status int, out any) error {
 	var data []byte

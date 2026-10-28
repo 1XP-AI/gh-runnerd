@@ -8,7 +8,6 @@ import (
 	"os"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -151,7 +150,7 @@ func brokerProvenanceContext(parent context.Context, a BrokerApproval, c control
 }
 
 func brokerWorkflowReceipt(ctx context.Context, api *brokerAPI, a BrokerApproval, c controllerApproval, controllerDigest string, claimed ...*brokerJournal) (*BrokerProvenanceReceipt, error) {
-	if ctx == nil || ctx.Err() != nil || api == nil || api.provenance == nil {
+	if ctx == nil || ctx.Err() != nil || api == nil || (api.provenance == nil && api.provenanceFactory == nil) || (api.provenance != nil && api.provenanceFactory != nil) {
 		return nil, errBroker
 	}
 	root := api.provenanceRoot
@@ -167,7 +166,18 @@ func brokerWorkflowReceipt(ctx context.Context, api *brokerAPI, a BrokerApproval
 		}
 		return nil
 	}
-	request, err := brokerProvenanceRequest(a, c, api.provenance.Source())
+	adapter := api.provenance
+	if api.provenanceFactory != nil {
+		if len(claimed) != 1 {
+			return nil, errBroker
+		}
+		var err error
+		adapter, err = api.provenanceFactory(claimCheck)
+		if err != nil || adapter == nil || ctx.Err() != nil || claimCheck() != nil {
+			return nil, errBroker
+		}
+	}
+	request, err := brokerProvenanceRequest(a, c, adapter.Source())
 	if err != nil || request.ControllerApprovalSHA256 != controllerDigest {
 		return nil, errBroker
 	}
@@ -179,11 +189,11 @@ func brokerWorkflowReceipt(ctx context.Context, api *brokerAPI, a BrokerApproval
 	if claimCheck() != nil {
 		return nil, errBroker
 	}
-	receipt, err := api.provenance.Attest(provenanceCtx, request)
+	receipt, err := adapter.Attest(provenanceCtx, request)
 	if err != nil || provenanceCtx.Err() != nil || claimCheck() != nil || receipt.Validate(request, api.now()) != nil || receipt.ExpiresAt.Before(a.ExpiresAt) {
 		return nil, errBroker
 	}
-	if provenanceCtx.Err() != nil || claimCheck() != nil || root.Verify(request, receipt, api.now()) != nil || api.provenance.Verify(provenanceCtx, request, receipt) != nil || provenanceCtx.Err() != nil || claimCheck() != nil {
+	if provenanceCtx.Err() != nil || claimCheck() != nil || root.Verify(request, receipt, api.now()) != nil || adapter.Verify(provenanceCtx, request, receipt) != nil || provenanceCtx.Err() != nil || claimCheck() != nil {
 		return nil, errBroker
 	}
 	return &receipt, nil
@@ -326,17 +336,12 @@ func brokerWorkflowRunHeadBranchMatchesRef(headBranch, workflowRef string) bool 
 }
 
 func (a *brokerAPI) verifyWorkflowWithReceipt(ctx context.Context, approval BrokerApproval, controller controllerApproval, token string, provenance *BrokerProvenanceReceipt) error {
-	var run struct {
-		ID             int64            `json:"id"`
-		HeadSHA        string           `json:"head_sha"`
-		HeadBranch     string           `json:"head_branch"`
-		Event          string           `json:"event"`
-		Path           string           `json:"path"`
-		RunAttempt     int              `json:"run_attempt"`
-		Repository     brokerRepository `json:"repository"`
-		HeadRepository brokerRepository `json:"head_repository"`
+	var run workflowRunObservation
+	ref := ""
+	if provenance != nil {
+		ref = provenance.WorkflowRef
 	}
-	if a.call(ctx, "GET", "/repos/"+approval.Organization+"/"+approval.Repository+"/actions/runs/"+strconv.FormatInt(controller.WorkflowRunID, 10), "Bearer "+token, nil, 200, &run) != nil || run.ID != controller.WorkflowRunID || run.HeadSHA != controller.WorkflowSHA || run.Path != controller.WorkflowPath || run.Event != "workflow_dispatch" || run.RunAttempt != 1 || !run.Repository.matches(approval) || !run.HeadRepository.matches(approval) || (provenance != nil && !brokerWorkflowRunHeadBranchMatchesRef(run.HeadBranch, provenance.WorkflowRef)) {
+	if a.call(ctx, "GET", workflowRunPath(approval.Organization+"/"+approval.Repository, controller.WorkflowRunID), "Bearer "+token, nil, 200, &run) != nil || !run.matches(approval, controller.WorkflowRunID, controller.WorkflowSHA, controller.WorkflowPath, ref) {
 		return errBroker
 	}
 	return nil
