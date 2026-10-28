@@ -270,7 +270,11 @@ var pairedTerminalFixtureCadence func() pairedBaselineCadence
 // process. It returns only fixed error categories; no private SDK/Docker error
 // or path is part of the result boundary.
 func RunPairedTerminal(ctx context.Context, files PairedTerminalFiles, credentials Credentials) error {
-	if ctx == nil {
+	return runPairedTerminalOwned(ctx, files, credentials, nil, nil)
+}
+
+func runPairedTerminalOwned(ctx context.Context, files PairedTerminalFiles, credentials Credentials, owned *FileJournal, proof *controllerHandoffProof) error {
+	if ctx == nil || ctx.Err() != nil {
 		return ErrApproval
 	}
 	if credentials.PairedBinding == nil {
@@ -287,11 +291,19 @@ func RunPairedTerminal(ctx context.Context, files PairedTerminalFiles, credentia
 	if pairedTerminalFixtureAdapters != nil {
 		adapters = *pairedTerminalFixtureAdapters
 	}
-	controllerJournal, err := adapters.openController(files.ControllerStateDirectory, controller)
-	if err != nil {
-		return ErrJournal
+	controllerJournal := owned
+	if controllerJournal == nil {
+		controllerJournal, err = adapters.openController(files.ControllerStateDirectory, controller)
+		if err != nil {
+			return ErrJournal
+		}
+		defer controllerJournal.Close()
+	} else if proof == nil || proof.Phase != pairedPreparationPhase || !proof.validAt(ctx, controller, controllerJournal, time.Now()) {
+		return ErrApproval
 	}
-	defer controllerJournal.Close()
+	if proof != nil {
+		ctx = context.WithValue(ctx, phaseProofContextKey{}, proof)
+	}
 	workerJournal, err := adapters.openWorker(files.WorkerStateDirectory, worker)
 	if err != nil {
 		return ErrJournal
@@ -311,6 +323,9 @@ func RunPairedTerminal(ctx context.Context, files PairedTerminalFiles, credentia
 		return ErrJournal
 	}
 	bindingCheck := func() error {
+		if proof != nil && !proof.validAt(ctx, controller, controllerJournal, time.Now()) {
+			return ErrApproval
+		}
 		_, _, controllerSnapshot, workerSnapshot, e := readPairedSnapshots(files)
 		if e != nil {
 			return ErrApproval

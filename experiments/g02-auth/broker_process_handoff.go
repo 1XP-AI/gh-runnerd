@@ -13,8 +13,9 @@ import (
 // Only the post-mint/preflight block in brokerExecute constructs this owned
 // value. It cannot be supplied through an exported issuance/signing API.
 type issuedControllerHandoff struct {
-	receipt, envelope, payload []byte
-	deadline                   time.Time
+	receipt, envelope, payload               []byte
+	deadline                                 time.Time
+	mode, phase, workerApproval, workerState string
 }
 
 func (h *issuedControllerHandoff) clear() {
@@ -26,11 +27,12 @@ func (h *issuedControllerHandoff) clear() {
 }
 
 type brokerHandoffAssembly struct {
-	signer   receiptSigner
-	issuer   handoff.IssuerRoot
-	workflow handoff.TrustRoot
-	source   string
-	launch   func(context.Context, *issuedControllerHandoff, string) error
+	experimental bool
+	signer       receiptSigner
+	issuer       handoff.IssuerRoot
+	workflow     handoff.TrustRoot
+	source       string
+	launch       func(context.Context, *issuedControllerHandoff, string) error
 }
 
 func (a *brokerHandoffAssembly) valid(root handoff.TrustRoot) bool {
@@ -49,7 +51,10 @@ func invokeBrokerControllerHandoff(parent context.Context, binary *verifiedBroke
 		return errBroker
 	}
 	defer clear(frame)
-	deadline := minTime(h.deadline, time.Now().Add(handoff.MaxProcessDuration))
+	deadline := h.deadline
+	if h.mode == "" {
+		deadline = minTime(deadline, time.Now().Add(handoff.MaxProcessDuration))
+	}
 	ctx, cancel := context.WithDeadline(parent, deadline)
 	defer cancel()
 	cr, cw, err := os.Pipe()
@@ -64,7 +69,17 @@ func invokeBrokerControllerHandoff(parent context.Context, binary *verifiedBroke
 	}
 	defer ir.Close()
 	defer iw.Close()
-	command := exec.CommandContext(ctx, binary.path, "--execute-approved-canary", "--approval", approvalPath, "--state-dir", stateDirectory, "--phase", "create")
+	args := []string{"--execute-approved-canary", "--approval", approvalPath, "--state-dir", stateDirectory, "--phase", "create"}
+	if h.mode != "" {
+		if h.mode != "controller" && h.mode != "paired-terminal" {
+			return errBroker
+		}
+		args = []string{"--execute-experimental-phase", "--mode", h.mode, "--approval", approvalPath, "--state-dir", stateDirectory, "--phase", h.phase}
+		if h.mode == "paired-terminal" {
+			args = append(args, "--worker-approval", h.workerApproval, "--worker-state-dir", h.workerState)
+		}
+	}
+	command := exec.CommandContext(ctx, binary.path, args...)
 	command.Dir = workingDirectory
 	command.Env = []string{"LANG=C", "LC_ALL=C"}
 	command.WaitDelay = time.Second

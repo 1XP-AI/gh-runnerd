@@ -353,8 +353,8 @@ func TestControllerHandoffFsyncsBeforeReadAndConsumesNonceGlobally(t *testing.T)
 	if err != nil {
 		t.Fatal("marshal fresh same-phase receipt")
 	}
-	if got, err := consumeControllerHandoff(context.Background(), reopened, fixture.snapshot, "before-ack", "signed-fixture-v1", newControllerHandoffMemorySource(freshNonceBytes), fixture.root, func() time.Time { return fixture.now }, reader); err != nil || string(got) != "synthetic-credential" || reads != 1 {
-		t.Fatalf("fresh nonce in an already-consumed phase was incorrectly claimed exactly once: credentials=%q reads=%d err=%v", got, reads, err)
+	if got, err := consumeControllerHandoff(context.Background(), reopened, fixture.snapshot, "before-ack", "signed-fixture-v1", newControllerHandoffMemorySource(freshNonceBytes), fixture.root, func() time.Time { return fixture.now }, reader); err == nil || len(got) != 0 || reads != 0 {
+		t.Fatalf("fresh nonce retried an already-consumed phase: credentials=%q reads=%d err=%v", got, reads, err)
 	}
 	_ = credentials
 }

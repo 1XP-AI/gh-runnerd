@@ -11,8 +11,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"runtime/debug"
 	"slices"
+	"syscall"
 	"time"
 
 	"github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/livecanary"
@@ -65,7 +67,10 @@ const controllerExecutionQuarantineMessage = "canary quarantined; broker provena
 func run(args []string, in io.Reader, out io.Writer) int {
 	return runWithPreparation(args, in, out, buildRevision, livecanary.PrepareJournal)
 }
-func runWithPreparation(args []string, in io.Reader, out io.Writer, revisionForBuild func() (string, bool), prepareJournal func(string, livecanary.Approval, string) (livecanary.PreparationReceipt, error)) (code int) {
+func runWithPreparation(args []string, in io.Reader, out io.Writer, revisionForBuild func() (string, bool), prepareJournal func(string, livecanary.Approval, string) (livecanary.PreparationReceipt, error)) int {
+	return runWithPreparationContext(context.Background(), args, in, out, revisionForBuild, prepareJournal)
+}
+func runWithPreparationContext(ctx context.Context, args []string, in io.Reader, out io.Writer, revisionForBuild func() (string, bool), prepareJournal func(string, livecanary.Approval, string) (livecanary.PreparationReceipt, error)) (code int) {
 	// SDK errors and panic values can contain bearer credentials/response bodies.
 	// This last-resort boundary prints no dynamic exception or caller input.
 	defer func() {
@@ -78,6 +83,8 @@ func runWithPreparation(args []string, in io.Reader, out io.Writer, revisionForB
 	flags.SetOutput(io.Discard)
 	plan := flags.Bool("plan", false, "")
 	execute := flags.Bool("execute-approved-canary", false, "")
+	experimental := flags.Bool("execute-experimental-phase", false, "")
+	experimentalMode := flags.String("mode", "", "")
 	pairedExecute := flags.Bool("execute-approved-paired-terminal", false, "")
 	prepare := flags.Bool("prepare-approved-journal", false, "")
 	pairedPrepare := flags.Bool("prepare-approved-paired-journal", false, "")
@@ -96,7 +103,37 @@ func runWithPreparation(args []string, in io.Reader, out io.Writer, revisionForB
 		return reject()
 	}
 	workerInputs := *workerApprovalPath != "" || *workerStatePath != ""
-	if *plan && !*execute && !*pairedExecute && !*prepare && !*pairedPrepare && !*prepareWorker {
+	if *experimental {
+		if ctx == nil || ctx.Err() != nil {
+			return reject()
+		}
+		if *plan || *execute || *pairedExecute || *prepare || *pairedPrepare || *prepareWorker || *pairedBinding != "" || *approvalPath == "" || *statePath == "" || *phase == "" {
+			return reject()
+		}
+		a, e := livecanary.ReadApproval(*approvalPath)
+		if e != nil {
+			return reject()
+		}
+		revision, ok := revisionForBuild()
+		if !ok || revision != a.HarnessSHA {
+			return reject()
+		}
+		input, ok := in.(*os.File)
+		if !ok {
+			return reject()
+		}
+		files := livecanary.PairedTerminalFiles{ControllerApprovalPath: *approvalPath, ControllerStateDirectory: *statePath, WorkerApprovalPath: *workerApprovalPath, WorkerStateDirectory: *workerStatePath}
+		if livecanary.RunControllerExperiment(ctx, files, *experimentalMode, *phase, input) != nil {
+			return reject()
+		}
+		fmt.Fprintln(out, "experimental phase completed; inspect private evidence")
+		return 0
+	}
+	if *experimentalMode != "" {
+		return reject()
+	}
+
+	if *plan && !*experimental && !*execute && !*pairedExecute && !*prepare && !*pairedPrepare && !*prepareWorker {
 		if *approvalPath != "" || *statePath != "" || *phase != "" || workerInputs || *pairedBinding != "" {
 			return reject()
 		}
@@ -247,4 +284,8 @@ func runWithPreparation(args []string, in io.Reader, out io.Writer, revisionForB
 	return 0
 }
 
-func main() { os.Exit(run(os.Args[1:], os.Stdin, os.Stdout)) }
+func main() {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	os.Exit(runWithPreparationContext(ctx, os.Args[1:], os.Stdin, os.Stdout, buildRevision, livecanary.PrepareJournal))
+}

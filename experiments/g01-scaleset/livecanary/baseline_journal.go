@@ -359,7 +359,7 @@ func replayBaseline(events []Event, identity controllerJournalIdentity, a Approv
 		r := e.Baseline
 		ref := controllerEventRef(identity, e)
 		if !s.seen {
-			history, err := parseCompletedCreateHistory(events[:index])
+			history, err := parsePairedCreatePrelude(events[:index])
 			if err != nil || e.Sequence != index+1 || (r.Stage != "set-observe" && r.Stage != "pair") || r.Outcome != "intent" || history.creation.ID != r.SetID || controllerEventRef(identity, history.creation) != r.Creation {
 				return s, ErrJournal
 			}

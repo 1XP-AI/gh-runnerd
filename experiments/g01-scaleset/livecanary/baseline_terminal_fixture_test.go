@@ -36,6 +36,9 @@ func newTerminalFixtureWithPhases(t *testing.T, phases []string) *terminalFixtur
 	return newTerminalFixtureWithControllerPhases(t, phases, nil)
 }
 func newTerminalFixtureWithControllerPhases(t *testing.T, phases, controllerPhases []string) *terminalFixture {
+	return newTerminalFixtureWithCreate(t, phases, controllerPhases, nil)
+}
+func newTerminalFixtureWithCreate(t *testing.T, phases, controllerPhases []string, create func(*FileJournal, Approval)) *terminalFixture {
 	t.Helper()
 	f := &terminalFixture{}
 	config := &pairedFixtureConfiguration{controllerResponse: func(stage string, value any) any {
@@ -51,6 +54,7 @@ func newTerminalFixtureWithControllerPhases(t *testing.T, phases, controllerPhas
 		}
 		return value
 	}}
+	config.controllerCreate = create
 	config.workerPhases = phases
 	config.controllerPhases = controllerPhases
 	f.pairedIntegrationFixture = newPairedIntegrationFixtureConfigured(t, config)

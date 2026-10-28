@@ -29,6 +29,7 @@ func run(ctx context.Context, args []string, input *os.File, out io.Writer) (cod
 	flags.SetOutput(io.Discard)
 	plan := flags.Bool("plan", false, "")
 	execute := flags.Bool("execute-approved-broker", false, "")
+	experimental := flags.Bool("execute-experimental-broker", false, "")
 	var files enrollment.BrokerFiles
 	flags.StringVar(&files.ApprovalPath, "approval", "", "")
 	flags.StringVar(&files.StateDirectory, "state-dir", "", "")
@@ -40,14 +41,20 @@ func run(ctx context.Context, args []string, input *os.File, out io.Writer) (cod
 	if flags.Parse(args) != nil || flags.NArg() != 0 {
 		return reject()
 	}
-	if *plan && !*execute {
+	if *plan && !*execute && !*experimental {
 		fmt.Fprintln(out, "Modes in the exact private approval: discover-actions-host, controller, or paired-terminal. Paired-terminal uses one fixed g01-live executable invocation with explicit worker approval/state inputs and one bounded controller credential stdin; no worker subprocess, App creation, workflow dispatch or persistent credentials. Required fixed private native-account admission root and owner nonce; one permanently consumed issuance slot per approved mode/phase. Live execution requires separate explicit authorization.")
 		return 0
 	}
-	if !*execute || *plan || files.ApprovalPath == "" || files.StateDirectory == "" {
+	if ctx == nil || ctx.Err() != nil || *execute == *experimental || *plan || files.ApprovalPath == "" || files.StateDirectory == "" {
 		return reject()
 	}
-	result, err := enrollment.RunBroker(ctx, files, input)
+	var result enrollment.BrokerResult
+	var err error
+	if *experimental {
+		result, err = enrollment.RunBrokerExperiment(ctx, files, input)
+	} else {
+		result, err = enrollment.RunBroker(ctx, files, input)
+	}
 	if err != nil {
 		fmt.Fprintln(out, "broker stopped; retain private intent; credentials not persisted; no automatic retry")
 		return 1
