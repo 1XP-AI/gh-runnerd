@@ -322,6 +322,8 @@ type brokerControllerPlan struct {
 	provenance         *BrokerProvenanceReceipt
 	prepared           *brokerPreparedState
 	worker             *brokerWorkerPlan
+	handoff            *brokerHandoffAssembly
+	receiptRaw         []byte
 	launch             func(context.Context, []byte, string) error
 }
 

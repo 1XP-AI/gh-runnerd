@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"os"
 	"regexp"
@@ -205,6 +206,11 @@ func RunBroker(ctx context.Context, files BrokerFiles, input *os.File) (BrokerRe
 	return runBrokerWithAPI(ctx, files, input, newBrokerAPI(time.Now, nil))
 }
 func runBrokerWithAPI(ctx context.Context, files BrokerFiles, input *os.File, api *brokerAPI) (BrokerResult, error) {
+	return runBrokerWithPrivateHandoff(ctx, files, input, api, nil)
+}
+
+// Private injection only; ordinary RunBroker never selects this assembly.
+func runBrokerWithPrivateHandoff(ctx context.Context, files BrokerFiles, input *os.File, api *brokerAPI, assembly *brokerHandoffAssembly) (BrokerResult, error) {
 	if ctx == nil || api == nil || !brokerCanonicalPath(files.StateDirectory) {
 		return BrokerResult{}, errBroker
 	}
@@ -219,6 +225,9 @@ func runBrokerWithAPI(ctx context.Context, files BrokerFiles, input *os.File, ap
 		return BrokerResult{}, errBroker
 	}
 	if approval.Mode == "paired-terminal" && (!brokerCanonicalPath(files.ControllerStateDirectory) || !brokerCanonicalPath(files.WorkerApproval) || !brokerCanonicalPath(files.WorkerStateDirectory)) {
+		return BrokerResult{}, errBroker
+	}
+	if assembly != nil && (approval.Mode != "controller" || approval.Phase != "create" || !assembly.valid(api.provenanceRoot)) {
 		return BrokerResult{}, errBroker
 	}
 	var binary *verifiedBrokerBinary
@@ -271,6 +280,16 @@ func runBrokerWithAPI(ctx context.Context, files BrokerFiles, input *os.File, ap
 			return BrokerResult{}, errBroker
 		}
 	}
+	var receiptRaw []byte
+	if assembly != nil {
+		if provenance == nil || provenance.Source != assembly.source {
+			return BrokerResult{}, errBroker
+		}
+		receiptRaw, err = json.Marshal(provenance)
+		if err != nil {
+			return BrokerResult{}, errBroker
+		}
+	}
 	if attempt.check() != nil {
 		return BrokerResult{}, errBroker
 	}
@@ -301,6 +320,17 @@ func runBrokerWithAPI(ctx context.Context, files BrokerFiles, input *os.File, ap
 			return BrokerResult{}, errBroker
 		}
 		plan.provenance = provenance
+		if assembly != nil {
+			selected := *assembly
+			selected.launch = func(ctx context.Context, h *issuedControllerHandoff, snapshotPath string) error {
+				if plan.check() != nil {
+					return errBroker
+				}
+				return invokeBrokerControllerHandoff(ctx, binary, files.StateDirectory, snapshotPath, files.ControllerStateDirectory, h)
+			}
+			plan.handoff = &selected
+			plan.receiptRaw = receiptRaw
+		}
 		plan.localPrepare = func(ctx context.Context, snapshotPath string) (brokerPreparationReceipt, error) {
 			if approval.Mode == "paired-terminal" {
 				return invokeBrokerPairedPreparation(ctx, binary, files.StateDirectory, snapshotPath, files.ControllerStateDirectory)

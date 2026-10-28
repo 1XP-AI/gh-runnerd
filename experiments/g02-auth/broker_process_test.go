@@ -198,6 +198,9 @@ func TestMain(m *testing.M) {
 				os.Exit(4)
 			}
 		}
+		if strings.HasPrefix(filepath.Base(os.Args[3]), "handoff-") {
+			os.Exit(runBrokerHandoffTestChild())
+		}
 		data, err := io.ReadAll(io.LimitReader(os.Stdin, 16385))
 		if err != nil || !bytes.Contains(data, []byte("synthetic-private-installation-token")) || bytes.Contains(data, []byte("PRIVATE KEY")) {
 			os.Exit(5)
