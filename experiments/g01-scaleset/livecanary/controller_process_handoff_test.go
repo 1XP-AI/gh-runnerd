@@ -7,8 +7,10 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -18,6 +20,128 @@ import (
 
 	"github.com/1XP-AI/gh-runnerd/experiments/g02-auth/handoff"
 )
+
+func TestPollableHandoffPipeForkExclusion(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	defer writer.Close()
+	type result struct {
+		file *os.File
+		err  error
+	}
+	started, done := make(chan struct{}), make(chan result, 1)
+	// Model the descriptor snapshot interval used by Go's fork/exec. The
+	// receiver must not allocate an inheritable duplicate during this interval.
+	syscall.ForkLock.Lock()
+	go func() {
+		close(started)
+		file, err := pollableHandoffPipe(reader)
+		done <- result{file, err}
+	}()
+	<-started
+	var got result
+	completed := false
+	select {
+	case got = <-done:
+		completed = true
+	case <-time.After(100 * time.Millisecond):
+	}
+	syscall.ForkLock.Unlock()
+	if !completed {
+		got = <-done
+	}
+	if got.file != nil {
+		defer got.file.Close()
+	}
+	if completed {
+		t.Fatal("pipe normalization completed during the fork descriptor snapshot")
+	}
+	if got.err != nil || got.file == nil {
+		t.Fatalf("normalize after fork: %v", got.err)
+	}
+	if _, err := reader.Stat(); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("original descriptor remains open: %v", err)
+	}
+	raw, err := got.file.SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = raw.Control(func(fd uintptr) {
+		flags, _, e := syscall.Syscall(syscall.SYS_FCNTL, fd, syscall.F_GETFD, 0)
+		if e != 0 || flags&syscall.FD_CLOEXEC == 0 {
+			t.Errorf("duplicate lacks close-on-exec: flags=%d err=%v", flags, e)
+		}
+		flags, _, e = syscall.Syscall(syscall.SYS_FCNTL, fd, syscall.F_GETFL, 0)
+		if e != 0 || flags&syscall.O_NONBLOCK == 0 {
+			t.Errorf("duplicate lacks nonblocking IO: flags=%d err=%v", flags, e)
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPollableHandoffPipeExecInheritance(t *testing.T) {
+	type probe struct {
+		FD            int
+		Dev, Ino      uint64
+		WantInherited bool
+	}
+	const probeEnv = "G01_TEST_PIPE_INHERITANCE"
+	if value := os.Getenv(probeEnv); value != "" {
+		var p probe
+		if err := json.Unmarshal([]byte(value), &p); err != nil {
+			t.Fatal(err)
+		}
+		var stat syscall.Stat_t
+		err := syscall.Fstat(p.FD, &stat)
+		inherited := err == nil && uint64(stat.Dev) == p.Dev && uint64(stat.Ino) == p.Ino
+		if err != nil && err != syscall.EBADF {
+			t.Fatal(err)
+		}
+		if inherited != p.WantInherited {
+			t.Fatalf("synthetic pipe inherited=%t, want %t", inherited, p.WantInherited)
+		}
+		return
+	}
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	defer writer.Close()
+	owned, err := pollableHandoffPipe(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owned.Close()
+	// Fd is used only in this inheritance probe, never for cancellation reads.
+	fd := int(owned.Fd())
+	var stat syscall.Stat_t
+	if err = syscall.Fstat(fd, &stat); err != nil {
+		t.Fatal(err)
+	}
+	for _, explicit := range []bool{true, false} {
+		p := probe{fd, uint64(stat.Dev), uint64(stat.Ino), explicit}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestPollableHandoffPipeExecInheritance$")
+		if explicit {
+			// Positive control: the child must recognize this exact pipe when
+			// intentionally passed, even if its descriptor number is reused.
+			cmd.ExtraFiles = []*os.File{owned}
+			p.FD = 3
+		}
+		value, _ := json.Marshal(p)
+		cmd.Env = []string{"LANG=C", "LC_ALL=C", probeEnv + "=" + string(value)}
+		output, err := cmd.CombinedOutput()
+		cancel()
+		if err != nil {
+			t.Fatalf("owned test child (explicit=%t): %v: %s", explicit, err, output)
+		}
+	}
+}
 
 func processBinding(t *testing.T, f controllerHandoffFixture, payload []byte) (handoff.CredentialBinding, handoff.IssuerRoot, ed25519.PrivateKey) {
 	t.Helper()

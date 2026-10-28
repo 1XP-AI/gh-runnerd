@@ -56,6 +56,19 @@ its cancellation watcher closes the concrete pipe and is joined before return.
 Transient byte buffers are cleared best effort; decoded strings/adapters retain
 copies. Journals/errors receive no payload/envelope hashes, envelope or tokens.
 
+Security correction S1 against `bdb4207a5d0b9b61532315f0943ec06b3d9ef89b`:
+raw Dup clears close-on-exec, so receiver normalization now holds
+`syscall.ForkLock.RLock` across Dup and CloseOnExec, excluding concurrent Go
+fork/exec descriptor snapshots. It releases the lock before nonblocking/poller
+conversion and preserves owned-original/error cleanup. A concurrency regression
+failed on the original helper while the fork snapshot lock was held and passed
+after correction; it also checks original closure and duplicate flags. An owned
+Go test child verifies the synthetic pipe is absent after exec, with explicit
+ExtraFiles inheritance as a positive control. Focused receiver normal/race checks
+cover aliases, withheld EOF, cancellation, deadlines and concurrent consumption.
+This is synchronization and synthetic inheritance evidence, not an end-to-end
+credential-leak reproduction or protection against forks bypassing Go's lock.
+
 Behavioral TDD: a compiling receiver with digest enforcement omitted accepted
 signed payload A plus valid payload B into one factory and one create. The test
 required durable consumption and zero factories/creates and failed. Adding the

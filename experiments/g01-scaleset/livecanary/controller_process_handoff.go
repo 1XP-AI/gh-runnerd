@@ -134,9 +134,15 @@ func pollableHandoffPipe(file *os.File) (*os.File, error) {
 	duplicate := -1
 	var duplicateErr error
 	err = raw.Control(func(fd uintptr) {
+		// Dup clears CLOEXEC. Exclude concurrent Go forks until it is restored;
+		// RawConn.Control protects only the original descriptor's lifetime.
+		syscall.ForkLock.RLock()
 		duplicate, duplicateErr = syscall.Dup(int(fd))
 		if duplicateErr == nil {
 			syscall.CloseOnExec(duplicate)
+		}
+		syscall.ForkLock.RUnlock()
+		if duplicateErr == nil {
 			duplicateErr = syscall.SetNonblock(duplicate, true)
 		}
 	})
