@@ -66,6 +66,10 @@ func newBaselineFixtureWithInventory(t *testing.T, change func(string, any) any,
 }
 
 func newBaselineFixtureWithApproval(t *testing.T, change func(string, any) any, inventory string, a Approval) *baselineFixture {
+	return newBaselineFixtureWithCreate(t, change, inventory, a, nil)
+}
+
+func newBaselineFixtureWithCreate(t *testing.T, change func(string, any) any, inventory string, a Approval, create func(*FileJournal)) *baselineFixture {
 	t.Helper()
 	f := &baselineFixture{a: a, change: change}
 	c := credentials(f.a)
@@ -203,11 +207,24 @@ func newBaselineFixtureWithApproval(t *testing.T, change func(string, any) any, 
 		}
 		_ = f.j.Close()
 	})
-	if inventory != "" && f.j.Append(Event{Kind: "inventory", Digest: inventory}) != nil {
-		t.Fatal("initial inventory fixture")
-	}
-	if f.j.Append(Event{Kind: "intent", Operation: "create"}) != nil || f.j.Append(Event{Kind: "result", Operation: "create", ID: 7}) != nil {
-		t.Fatal("owned set receipt fixture failed")
+	if create != nil {
+		create(f.j)
+	} else {
+		if inventory == "" {
+			inventory = strings.Repeat("a", 64)
+		}
+		for _, event := range []Event{
+			{Kind: "phase", Operation: "create"},
+			{Kind: "inventory", Digest: inventory},
+			{Kind: "intent", Operation: "observe-discovery"},
+			{Kind: "result", Operation: "observe-discovery"},
+			{Kind: "intent", Operation: "create"},
+			{Kind: "result", Operation: "create", ID: 7},
+		} {
+			if f.j.Append(event) != nil {
+				t.Fatal("canonical completed create fixture")
+			}
+		}
 	}
 	f.release, err = f.j.authorize(f.a)
 	if err != nil {

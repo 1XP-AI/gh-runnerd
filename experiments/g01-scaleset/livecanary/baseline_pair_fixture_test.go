@@ -39,6 +39,7 @@ type pairedIntegrationFixture struct {
 }
 
 type pairedFixtureConfiguration struct {
+	controllerCreate   func(*FileJournal, Approval)
 	workerPhases       []string
 	controllerPhases   []string
 	controllerResponse func(string, any) any
@@ -54,8 +55,13 @@ func newPairedIntegrationFixtureConfigured(t *testing.T, config *pairedFixtureCo
 	if config != nil && config.controllerPhases != nil {
 		a.Phases = append([]string(nil), config.controllerPhases...)
 	}
+	var create func(*FileJournal)
+	if config != nil && config.controllerCreate != nil {
+		a.WorkflowRef = "refs/heads/main"
+		create = func(j *FileJournal) { config.controllerCreate(j, a) }
+	}
 	empty := sha256.Sum256([]byte("null"))
-	f.c = newBaselineFixtureWithApproval(t, func(stage string, value any) any {
+	f.c = newBaselineFixtureWithCreate(t, func(stage string, value any) any {
 		if strings.HasSuffix(stage, "-items") {
 			for _, item := range value.([]any) {
 				m := item.(map[string]any)
@@ -68,7 +74,7 @@ func newPairedIntegrationFixtureConfigured(t *testing.T, config *pairedFixtureCo
 			return config.controllerResponse(stage, value)
 		}
 		return value
-	}, hex.EncodeToString(empty[:]), a)
+	}, hex.EncodeToString(empty[:]), a, create)
 	// The listener fixture normally owns C life; integration owns both leases.
 	f.c.release()
 	f.c.release = nil

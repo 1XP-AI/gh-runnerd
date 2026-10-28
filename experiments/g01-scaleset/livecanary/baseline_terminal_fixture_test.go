@@ -345,7 +345,7 @@ func TestPairedTerminalBindingRejectsChangedBytesAndStateBeforeEffects(t *testin
 
 func TestPairedTerminalActualJournalsFinalize(t *testing.T) {
 	f := newTerminalFixture(t, true)
-	if len(f.c.j.Events()) != 3 || f.wf.Journal == nil {
+	if len(f.c.j.Events()) != 6 || f.wf.Journal == nil {
 		t.Fatal("actual journal fixture not prepared")
 	}
 	out, err := f.run()
@@ -359,7 +359,7 @@ func TestPairedTerminalActualJournalsFinalize(t *testing.T) {
 func TestPairedTerminalMissingCleanupRefusesBeforePrefix(t *testing.T) {
 	f := newTerminalFixture(t, false)
 	_, err := f.run()
-	if err == nil || f.c.requests.Load() != 0 || f.dockerReads.Load() != 0 || len(f.c.j.Events()) != 3 {
+	if err == nil || f.c.requests.Load() != 0 || f.dockerReads.Load() != 0 || len(f.c.j.Events()) != 6 {
 		t.Fatal("missing cleanup authority reached the prefix")
 	}
 }
