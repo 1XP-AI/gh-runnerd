@@ -1,13 +1,17 @@
 package enrollment
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/1XP-AI/gh-runnerd/experiments/g02-auth/handoff"
 )
 
 // BrokerApproval describes one future, explicitly approved credential issuance
@@ -162,6 +166,9 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 		}
 		plan.provenance = provenance
 	}
+	if plan != nil && plan.handoff != nil && (a.Mode != "controller" || a.Phase != "create" || !plan.handoff.valid(api.provenanceRoot) || provenance == nil || len(plan.receiptRaw) == 0) {
+		return BrokerResult{}, errBroker
+	}
 	now := api.now()
 	deadline := minTime(a.ExpiresAt, now.Add(10*time.Minute))
 	if a.Mode == "paired-terminal" {
@@ -313,7 +320,64 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 	if len(data) > 16384 || j.append("controller_handoff_started", nil) != nil {
 		return BrokerResult{}, errBroker
 	}
-	if guardLive() != nil || plan.launch(ctx, data, filepath.Join(path, "controller-approval.json")) != nil || guardPostChild() != nil || j.append("controller_completed", nil) != nil || claim.complete() != nil || guardPostChild() != nil {
+	var launchErr error
+	if plan.handoff != nil {
+		assembly := plan.handoff
+		request, e := brokerProvenanceRequest(a, plan.controller, assembly.source)
+		rawReceipt, e2 := handoff.DecodeStrictReceipt(plan.receiptRaw)
+		deadline, ok := ctx.Deadline()
+		if e != nil || e2 != nil || !ok || provenance == nil || (!bytes.Equal(rawReceipt.SigningBytes(), provenance.SigningBytes()) || rawReceipt.Signature != provenance.Signature) || assembly.workflow.Verify(request, rawReceipt, api.now()) != nil || guardLive() != nil || ctx.Err() != nil {
+			return BrokerResult{}, errBroker
+		}
+		deadline = minTime(deadline, minTime(rawReceipt.ExpiresAt, plan.controller.ExpiresAt))
+		deadline = minTime(deadline, api.now().Add(handoff.MaxProcessDuration))
+		ctx, stopHandoff := context.WithDeadline(ctx, deadline)
+		defer stopHandoff()
+		binding := handoff.CredentialBinding{BindingClaims: handoff.BindingClaims{
+			Request:       request,
+			Version:       1,
+			Kind:          handoff.BindingKind,
+			Algorithm:     "ed25519",
+			Audience:      handoff.BindingAudience,
+			KeyID:         assembly.issuer.KeyID(),
+			IssuerSource:  handoff.IssuerSource,
+			WorkflowKeyID: rawReceipt.KeyID,
+			ReceiptSHA256: handoff.Digest(plan.receiptRaw),
+			PayloadSHA256: handoff.Digest(data),
+			PayloadLength: len(data),
+			ReceiptNonce:  rawReceipt.ReceiptNonce,
+			IssuedAt:      api.now(),
+			ExpiresAt:     deadline,
+		}}
+		signature, e := assembly.signer.Sign(ctx, binding.SigningBytes())
+		if e != nil || guardLive() != nil || ctx.Err() != nil {
+			clear(signature)
+			return BrokerResult{}, errBroker
+		}
+		binding.Signature = base64.RawURLEncoding.EncodeToString(signature)
+		clear(signature)
+		expected := handoff.BindingExpected{Request: request, Receipt: rawReceipt, ReceiptBytes: plan.receiptRaw, ApprovalExpiresAt: plan.controller.ExpiresAt, Deadline: deadline}
+		if assembly.issuer.VerifyBinding(expected, binding, api.now()) != nil {
+			return BrokerResult{}, errBroker
+		}
+		envelope, e := json.Marshal(binding)
+		if e != nil || len(envelope) > handoff.MaxBindingBytes || guardLive() != nil || ctx.Err() != nil {
+			clear(envelope)
+			return BrokerResult{}, errBroker
+		}
+		owned := &issuedControllerHandoff{receipt: bytes.Clone(plan.receiptRaw), envelope: envelope, payload: bytes.Clone(data), deadline: deadline}
+		defer owned.clear()
+		if guardLive() != nil || ctx.Err() != nil {
+			return BrokerResult{}, errBroker
+		}
+		launchErr = assembly.launch(ctx, owned, filepath.Join(path, "controller-approval.json"))
+	} else {
+		if guardLive() != nil {
+			return BrokerResult{}, errBroker
+		}
+		launchErr = plan.launch(ctx, data, filepath.Join(path, "controller-approval.json"))
+	}
+	if launchErr != nil || guardPostChild() != nil || j.append("controller_completed", nil) != nil || claim.complete() != nil || guardPostChild() != nil {
 		return BrokerResult{}, errBroker
 	}
 	if a.Mode == "paired-terminal" {

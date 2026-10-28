@@ -8,10 +8,13 @@ import (
 	"testing"
 )
 
-// Optional cross-module fixture is ONLY the Go test executable. Production has
-// no injected root/entry point. It calls the canonical local preparation helper,
-// never Driver.Run or an API, and must receive an empty stdin and fixed argv.
+// Cross-module fixtures are ONLY the Go test executable. Production has no
+// injected roots/entry point. Preparation requires empty stdin and fixed argv;
+// the private process receiver uses compiled test pins and an exclusively fake API.
 func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == "--execute-approved-canary" {
+		os.Exit(runProcessHandoffTestChild())
+	}
 	if len(os.Args) > 1 && os.Args[1] == "--prepare-approved-paired-journal" {
 		if len(os.Args) != 6 || os.Args[2] != "--approval" || os.Args[4] != "--state-dir" {
 			os.Exit(2)
