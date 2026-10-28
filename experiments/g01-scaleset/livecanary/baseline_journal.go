@@ -346,7 +346,7 @@ func replayBaseline(events []Event, identity controllerJournalIdentity, a Approv
 		}
 		return &e
 	}
-	for _, e := range events {
+	for index, e := range events {
 		if e.Baseline == nil {
 			if s.seen && e.Kind != "authority" {
 				return s, ErrJournal
@@ -359,8 +359,8 @@ func replayBaseline(events []Event, identity controllerJournalIdentity, a Approv
 		r := e.Baseline
 		ref := controllerEventRef(identity, e)
 		if !s.seen {
-			created := lookup(r.Creation)
-			if (r.Stage != "set-observe" && r.Stage != "pair") || r.Outcome != "intent" || created == nil || created.Sequence >= e.Sequence || created.Kind != "result" || created.Operation != "create" || created.ID != r.SetID {
+			history, err := parseCompletedCreateHistory(events[:index])
+			if err != nil || e.Sequence != index+1 || (r.Stage != "set-observe" && r.Stage != "pair") || r.Outcome != "intent" || history.creation.ID != r.SetID || controllerEventRef(identity, history.creation) != r.Creation {
 				return s, ErrJournal
 			}
 			s.setID = r.SetID

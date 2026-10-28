@@ -136,26 +136,11 @@ func newBaselineListenerHeld(ctx context.Context, a Approval, j *FileJournal, ap
 	if err != nil {
 		return nil, err
 	}
-	events := j.Events()
-	s := replay(events)
-	if s.setID != setID || s.uncertain || s.reserved || s.deleted || len(s.observedJobs) != 0 {
+	history, err := parseCompletedCreateHistory(j.Events())
+	if err != nil || history.state.setID != setID {
 		return nil, ErrQuarantine
 	}
-	var creation controllerRecordRef
-	for _, e := range events {
-		if e.Baseline != nil || (e.Kind == "phase" && e.Operation != "create") || e.Operation == "jit" || e.Operation == "acquire" || e.Operation == "session-open" {
-			return nil, ErrQuarantine
-		}
-		if e.Kind == "result" && e.Operation == "create" && e.ID == setID {
-			if creation.Sequence != 0 {
-				return nil, ErrQuarantine
-			}
-			creation = controllerEventRef(id, e)
-		}
-	}
-	if creation.Sequence == 0 {
-		return nil, ErrQuarantine
-	}
+	creation := controllerEventRef(id, history.creation)
 	a.Phases = slices.Clone(a.Phases)
 	a.ActionsHosts = slices.Clone(a.ActionsHosts)
 	captured := *api

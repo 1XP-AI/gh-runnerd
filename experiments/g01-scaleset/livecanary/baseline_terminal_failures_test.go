@@ -289,7 +289,7 @@ func TestPairedTerminalEveryOriginalWorkerPhaseRequired(t *testing.T) {
 				}
 			}
 			f := newTerminalFixtureWithPhases(t, phases)
-			if _, err := f.run(); err == nil || f.c.requests.Load() != 0 || f.dockerReads.Load() != 0 || len(f.c.j.Events()) != 3 || len(f.wf.Journal.Events()) != 0 {
+			if _, err := f.run(); err == nil || f.c.requests.Load() != 0 || f.dockerReads.Load() != 0 || len(f.c.j.Events()) != 6 || len(f.wf.Journal.Events()) != 0 {
 				t.Fatal("missing original phase reached prefix")
 			}
 		})
@@ -298,11 +298,11 @@ func TestPairedTerminalEveryOriginalWorkerPhaseRequired(t *testing.T) {
 
 func TestPairedTerminalOriginalControllerCleanupRequired(t *testing.T) {
 	f := newTerminalFixtureWithControllerPhases(t, []string{"create", "start", "inspect", "cleanup"}, []string{"create", "before-ack"})
-	if f.c.j.authority.Digest != approvalDigest(f.c.a) || len(f.c.j.Events()) != 3 {
+	if f.c.j.authority.Digest != approvalDigest(f.c.a) || len(f.c.j.Events()) != 6 {
 		t.Fatal("original controller authority fixture mismatch")
 	}
 	out, err := f.run()
-	if err == nil || out.Terminal != terminalUnresolved || f.c.requests.Load() != 0 || f.dockerReads.Load() != 0 || len(f.c.j.Events()) != 3 || len(f.wf.Journal.Events()) != 0 {
+	if err == nil || out.Terminal != terminalUnresolved || f.c.requests.Load() != 0 || f.dockerReads.Load() != 0 || len(f.c.j.Events()) != 6 || len(f.wf.Journal.Events()) != 0 {
 		t.Fatalf("missing C cleanup reached prefix: error=%v session_delete=%d worker_delete=%d set_delete=%d", err, f.sessionDeletes.Load(), f.workerDeletes.Load(), f.setDeletes.Load())
 	}
 }
