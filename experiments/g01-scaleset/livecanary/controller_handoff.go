@@ -190,6 +190,12 @@ func (j *FileJournal) consumeControllerHandoffAt(ctx context.Context, approval A
 	defer j.mu.Unlock()
 	appendNow := now()
 	event := Event{Kind: "controller-handoff-consumed", ControllerHandoff: &consumption}
+	// Create's per-open proof requires the first journal event. Fence all fresh
+	// nonces atomically here, before another credential callback can run, even
+	// after an earlier create failed while decoding credentials or building API.
+	if consumption.Phase == "create" && len(j.events) != 0 {
+		return Event{}, ErrJournal
+	}
 	if ctx == nil || ctx.Err() != nil || !deadline.After(appendNow) || !j.authorityHeldAt(approval, appendNow) || !validate(appendNow) || !validEvent(event) || controllerHandoffNonceUsed(j.events, consumption.ReceiptNonce) {
 		return Event{}, ErrJournal
 	}
