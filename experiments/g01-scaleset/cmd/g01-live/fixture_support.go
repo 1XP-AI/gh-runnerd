@@ -14,9 +14,12 @@ import (
 )
 
 type fixtureEndpointConfig struct {
-	BaseURL            string `json:"base_url"`
-	CAPEM              string `json:"ca_pem"`
-	AdmissionDirectory string `json:"admission_directory"`
+	WorkerAdmissionDirectory string `json:"worker_admission_directory,omitempty"`
+	ExperimentalPolicy       string `json:"experimental_policy,omitempty"`
+	HarnessSHA               string `json:"harness_sha,omitempty"`
+	BaseURL                  string `json:"base_url"`
+	CAPEM                    string `json:"ca_pem"`
+	AdmissionDirectory       string `json:"admission_directory"`
 }
 
 func readFixtureEndpointConfig(stateDirectory string) (fixtureEndpointConfig, error) {
@@ -63,6 +66,9 @@ func init() {
 			return liveworker.PreparationReceipt{}, liveworker.ErrState
 		}
 		admissionDirectory := filepath.Join(filepath.Dir(workerStateReal), "worker-admission")
+		if config, e := readFixtureEndpointConfig(stateDirectory); e == nil {
+			admissionDirectory = config.AdmissionDirectory
+		}
 		if err := os.Mkdir(admissionDirectory, 0700); err != nil && !os.IsExist(err) {
 			return liveworker.PreparationReceipt{}, liveworker.ErrState
 		}

@@ -101,6 +101,19 @@ for module_dir in "${selected_modules[@]}"; do
 			# is four complementary 120-second partitions: the five heavy names,
 			# the remaining TestPairedTerminal tests, storage journal identity,
 			# and the other storage names. Keep the storage union unchanged.
+            # Current-source synthetic TEST commands are prepared once, serially,
+            # then consumed by the existing non-paired fixture partition.
+            g01_phase_dir=$(mktemp -d)
+            trap 'rm -rf -- "${g01_phase_dir}"' EXIT
+            trap 'trap - EXIT; rm -rf -- "${g01_phase_dir}"; exit 130' INT
+            trap 'trap - EXIT; rm -rf -- "${g01_phase_dir}"; exit 143' TERM
+            trap 'trap - EXIT; rm -rf -- "${g01_phase_dir}"; exit 129' HUP
+            chmod 0700 "${g01_phase_dir}"
+            export G01_PHASE_HELPER_DIR="${g01_phase_dir}"
+            export G01_PHASE_GO="${go_cmd}"
+            export G01_PHASE_CONTROLLER_TEST_BINARY="${g01_phase_dir}/controller.test"
+            export G01_PHASE_BROKER_TEST_BINARY="${g01_phase_dir}/broker.test"
+            GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -tags=g01_pair_fixture -run '^TestExperimentalPrepareCommandHelpers$' ./livecanary
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run "${paired_collection_regex}" -skip '^TestPairedTerminal' ./livecanary
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -skip "${paired_collection_regex}" ./livecanary
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run "${terminal_heavy_regex}" ./livecanary

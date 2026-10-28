@@ -90,6 +90,86 @@ func runControllerProcessHandoffCreate(ctx context.Context, journal *FileJournal
 	}, factory)
 }
 
+func runControllerProcessHandoffPhase(ctx context.Context, journal *FileJournal, approvalSnapshot []byte, control, input *os.File, mode, phase string, paired *PairedTerminalFiles, source string, workflow handoff.TrustRoot, issuer handoff.IssuerRoot, now func() time.Time, factory func(context.Context, Approval, Credentials) (API, error)) error {
+	if control != nil {
+		defer control.Close()
+	}
+	if input != nil {
+		defer input.Close()
+	}
+	if len(approvalSnapshot) < 1 || len(approvalSnapshot) > maxControllerApprovalBytes || ctx == nil || ctx.Err() != nil || journal == nil || now == nil || factory == nil || !issuer.Independent(workflow) || !distinctHandoffPipes(control, input) {
+		return ErrApproval
+	}
+	// Inherited blocking descriptors must be registered with Go's poller.
+	// Merely closing a descriptor cannot interrupt a blocking kernel read on macOS.
+	var err error
+	control, err = pollableHandoffPipe(control)
+	if err != nil {
+		return ErrApproval
+	}
+	defer control.Close()
+	input, err = pollableHandoffPipe(input)
+	if err != nil {
+		return ErrApproval
+	}
+	defer input.Close()
+	snapshot := bytes.Clone(approvalSnapshot)
+	defer clear(snapshot)
+	a, request, err := controllerHandoffRequestOwned(snapshot, phase, source, now())
+	if err != nil {
+		return ErrApproval
+	}
+	if handoff.PhaseAudience(mode, phase) == "" || phase == "cleanup" {
+		return ErrApproval
+	}
+	deadline := controllerHandoffAcquisitionDeadline(ctx, a.ExpiresAt, now())
+	bounded, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+	var receiptBytes, bindingBytes []byte
+	err = withHandoffPipe(bounded, control, func() error { var e error; receiptBytes, bindingBytes, e = handoff.ReadControl(control); return e })
+	defer clear(receiptBytes)
+	defer clear(bindingBytes)
+	if err != nil || bounded.Err() != nil {
+		return ErrApproval
+	}
+	receipt, err := handoff.DecodeStrictReceipt(receiptBytes)
+	if err != nil || workflow.Verify(request, receipt, now()) != nil {
+		return ErrApproval
+	}
+	binding, err := handoff.DecodeStrictPhaseBinding(bindingBytes)
+	expected := handoff.BindingExpected{Request: request, Receipt: receipt, ReceiptBytes: receiptBytes, ApprovalExpiresAt: a.ExpiresAt, Deadline: controllerHandoffDeadline(ctx, a.ExpiresAt, receipt.ExpiresAt)}
+	if err != nil || binding.Mode != mode || issuer.VerifyPhaseBinding(expected, binding, now()) != nil {
+		return ErrApproval
+	}
+	// Preserve the original parent deadline, additionally capped by the envelope.
+	entry, cancelEntry := context.WithDeadline(ctx, binding.ExpiresAt)
+	defer cancelEntry()
+	return runControllerHandoffPhase(entry, journal, snapshot, receiptBytes, phase, source, workflow, now, func(readCtx context.Context) ([]byte, error) {
+		var data []byte
+		e := withHandoffPipe(readCtx, input, func() error {
+			var e error
+			data, e = io.ReadAll(io.LimitReader(input, handoff.MaxCredentialBytes+1))
+			return e
+		})
+		if e != nil || readCtx.Err() != nil || len(data) < 1 || len(data) > handoff.MaxCredentialBytes {
+			clear(data)
+			return nil, ErrApproval
+		}
+		// Exact serialized bytes are checked here, after durable consumption and
+		// before DecodeStrict or the network-lazy factory.
+		if len(data) != binding.PayloadLength || handoff.Digest(data) != binding.PayloadSHA256 {
+			clear(data)
+			return nil, ErrApproval
+		}
+		var c Credentials
+		if DecodeStrict(data, &c) != nil || binding.ExpiresAt.After(c.ExpiresAt.Add(-time.Minute)) {
+			clear(data)
+			return nil, ErrApproval
+		}
+		return data, nil
+	}, factory, paired)
+}
+
 func distinctHandoffPipes(control, input *os.File) bool {
 	if control == nil || input == nil || control == input {
 		return false

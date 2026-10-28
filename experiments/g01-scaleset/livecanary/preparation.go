@@ -59,6 +59,10 @@ func authorizePhaseWithProof(a Approval, j Journal, phase string, ctx context.Co
 func validateCreatePrefix(a Approval, j Journal, phase string, ctx context.Context, proof *controllerHandoffProof, post bool, events []Event) error {
 	if phase != "create" {
 		if proof != nil {
+			if proof.Phase != phase || !proof.validAt(ctx, a, j, time.Now()) || len(events) != proof.HandoffSequence || !proof.matchesEvent(events[len(events)-1]) {
+				return ErrQuarantine
+			}
+		} else if controllerPhaseConsumed(events, phase) && !replayWithApproval(events, &a).phaseSeen[phase] {
 			return ErrQuarantine
 		}
 		return nil

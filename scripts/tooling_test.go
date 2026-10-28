@@ -3756,3 +3756,63 @@ func TestToolingLicenseIdentityAndStaleRows(t *testing.T) {
 		}
 	}
 }
+
+func TestToolingExperimentalCommandHelpersOwnedRouting(t *testing.T) {
+	for _, failPrep := range []bool{false, true} {
+		t.Run(strconv.FormatBool(failPrep), func(t *testing.T) {
+			root := toolingFixture(t)
+			log := filepath.Join(root, "phase-routing.log")
+			toolingFile(t, root, "phase-go", `#!/bin/sh
+set -eu
+case "$*" in
+ *'TestExperimentalPrepareCommandHelpers$'*)
+  test -n "${G01_PHASE_HELPER_DIR:-}"
+  test -d "$G01_PHASE_HELPER_DIR"
+  test "$G01_PHASE_CONTROLLER_TEST_BINARY" = "$G01_PHASE_HELPER_DIR/controller.test"
+  test "$G01_PHASE_BROKER_TEST_BINARY" = "$G01_PHASE_HELPER_DIR/broker.test"
+  printf 'prepare %s\n' "$G01_PHASE_HELPER_DIR" >> "$PHASE_ROUTE_LOG"
+  if [ "$PHASE_FAIL_PREP" = 1 ]; then exit 29; fi
+  printf '#!/bin/sh\nexit 0\n' > "$G01_PHASE_CONTROLLER_TEST_BINARY"
+  cp "$G01_PHASE_CONTROLLER_TEST_BINARY" "$G01_PHASE_BROKER_TEST_BINARY"
+  chmod 0700 "$G01_PHASE_CONTROLLER_TEST_BINARY" "$G01_PHASE_BROKER_TEST_BINARY"
+  ;;
+ *'-tags=g01_pair_fixture -skip ^TestPaired ./livecanary'*)
+  if [ ! -x "${G01_PHASE_CONTROLLER_TEST_BINARY:-}" ] || [ ! -x "${G01_PHASE_BROKER_TEST_BINARY:-}" ]; then
+   printf 'missing-current-source-command-helpers\n' >&2
+   exit 31
+  fi
+  printf 'consume %s\n' "$G01_PHASE_HELPER_DIR" >> "$PHASE_ROUTE_LOG"
+  ;;
+esac
+exit 0
+`, 0700)
+			fail := "0"
+			if failPrep {
+				fail = "1"
+			}
+			output, err := toolingRun(t, root, []string{"OFFLINE_EXPERIMENT_MODULE=experiments/g01-scaleset", "GO=" + filepath.Join(root, "phase-go"), "PHASE_ROUTE_LOG=" + log, "PHASE_FAIL_PREP=" + fail}, "bash", "scripts/check-offline-experiments.sh")
+			if (err != nil) != failPrep {
+				t.Fatalf("helper preparation routing: failure=%t err=%v output=%s", failPrep, err, output)
+			}
+			data, e := os.ReadFile(log)
+			if e != nil {
+				t.Fatalf("no helper preparation: %v output=%s", e, output)
+			}
+			lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+			want := 2
+			if failPrep {
+				want = 1
+			}
+			if len(lines) != want || !strings.HasPrefix(lines[0], "prepare ") {
+				t.Fatalf("helper routing %s", data)
+			}
+			dir := strings.TrimPrefix(lines[0], "prepare ")
+			if _, e := os.Stat(dir); !os.IsNotExist(e) {
+				t.Fatal("owned helper directory survived completion")
+			}
+			if !failPrep && lines[1] != "consume "+dir {
+				t.Fatal("fixture partition consumed different helpers")
+			}
+		})
+	}
+}

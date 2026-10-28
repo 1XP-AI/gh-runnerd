@@ -136,7 +136,14 @@ func newBaselineListenerHeld(ctx context.Context, a Approval, j *FileJournal, ap
 	if err != nil {
 		return nil, err
 	}
-	history, err := parseCompletedCreateHistory(j.Events())
+	events := j.Events()
+	if len(events) > 0 && events[len(events)-1].ControllerHandoff != nil && events[len(events)-1].ControllerHandoff.Phase == pairedPreparationPhase {
+		p := pairedProofFromContext(ctx)
+		if p == nil || p.Phase != pairedPreparationPhase || !p.validAt(ctx, a, j, time.Now()) || !p.matchesEvent(events[len(events)-1]) {
+			return nil, ErrQuarantine
+		}
+	}
+	history, err := parsePairedCreatePrelude(events)
 	if err != nil || history.state.setID != setID {
 		return nil, ErrQuarantine
 	}

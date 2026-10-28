@@ -166,7 +166,7 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 		}
 		plan.provenance = provenance
 	}
-	if plan != nil && plan.handoff != nil && (a.Mode != "controller" || a.Phase != "create" || !plan.handoff.valid(api.provenanceRoot) || provenance == nil || len(plan.receiptRaw) == 0) {
+	if plan != nil && plan.handoff != nil && ((!plan.handoff.experimental && (a.Mode != "controller" || a.Phase != "create")) || !plan.handoff.valid(api.provenanceRoot) || provenance == nil || len(plan.receiptRaw) == 0) {
 		return BrokerResult{}, errBroker
 	}
 	now := api.now()
@@ -305,16 +305,24 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 	// These facts are from authenticated identity reads and the actual mint
 	// response. The broker does not accept user-provided token issuance claims.
 	payload := struct {
-		ManagementScope   string    `json:"management_scope,omitempty"`
-		InstallationToken string    `json:"installation_token"`
-		VerificationToken string    `json:"verification_token"`
-		AppID             int64     `json:"app_id"`
-		InstallationID    int64     `json:"installation_id"`
-		Organization      string    `json:"organization"`
-		ExpiresAt         time.Time `json:"expires_at"`
-		SelfHostedRunners string    `json:"organization_self_hosted_runners"`
-		Metadata          string    `json:"metadata"`
-	}{a.ManagementScope, issued.Token, input.VerificationToken, identity.ID, install.ID, install.Login, issued.ExpiresAt, issued.Permissions["organization_self_hosted_runners"], issued.Permissions["metadata"]}
+		ManagementScope   string               `json:"management_scope,omitempty"`
+		InstallationToken string               `json:"installation_token"`
+		VerificationToken string               `json:"verification_token"`
+		AppID             int64                `json:"app_id"`
+		InstallationID    int64                `json:"installation_id"`
+		Organization      string               `json:"organization"`
+		ExpiresAt         time.Time            `json:"expires_at"`
+		SelfHostedRunners string               `json:"organization_self_hosted_runners"`
+		Metadata          string               `json:"metadata"`
+		PairedBinding     *brokerPairedBinding `json:"paired_binding,omitempty"`
+	}{a.ManagementScope, issued.Token, input.VerificationToken, identity.ID, install.ID, install.Login, issued.ExpiresAt, issued.Permissions["organization_self_hosted_runners"], issued.Permissions["metadata"], nil}
+	if a.Mode == "paired-terminal" && plan.handoff != nil {
+		binding, e := plan.pairedBinding()
+		if e != nil {
+			return BrokerResult{}, errBroker
+		}
+		payload.PairedBinding = &binding
+	}
 	data, _ := json.Marshal(payload)
 	defer clear(data)
 	if len(data) > 16384 || j.append("controller_handoff_started", nil) != nil {
@@ -330,7 +338,12 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 			return BrokerResult{}, errBroker
 		}
 		deadline = minTime(deadline, minTime(rawReceipt.ExpiresAt, plan.controller.ExpiresAt))
-		deadline = minTime(deadline, api.now().Add(handoff.MaxProcessDuration))
+		if a.Mode == "controller" && a.Phase == "create" {
+			deadline = minTime(deadline, api.now().Add(handoff.MaxProcessDuration))
+		}
+		if a.Mode == "paired-terminal" && !deadline.After(api.now().Add(handoff.MinPairedRemaining)) {
+			return BrokerResult{}, errBroker
+		}
 		ctx, stopHandoff := context.WithDeadline(ctx, deadline)
 		defer stopHandoff()
 		binding := handoff.CredentialBinding{BindingClaims: handoff.BindingClaims{
@@ -349,22 +362,49 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 			IssuedAt:      api.now(),
 			ExpiresAt:     deadline,
 		}}
-		signature, e := assembly.signer.Sign(ctx, binding.SigningBytes())
-		if e != nil || guardLive() != nil || ctx.Err() != nil {
-			clear(signature)
-			return BrokerResult{}, errBroker
-		}
-		binding.Signature = base64.RawURLEncoding.EncodeToString(signature)
-		clear(signature)
+
 		expected := handoff.BindingExpected{Request: request, Receipt: rawReceipt, ReceiptBytes: plan.receiptRaw, ApprovalExpiresAt: plan.controller.ExpiresAt, Deadline: deadline}
-		if assembly.issuer.VerifyBinding(expected, binding, api.now()) != nil {
-			return BrokerResult{}, errBroker
+		var envelope []byte
+		if a.Mode == "controller" && a.Phase == "create" {
+			signature, e := assembly.signer.Sign(ctx, binding.SigningBytes())
+			if e != nil || guardLive() != nil || ctx.Err() != nil {
+				clear(signature)
+				return BrokerResult{}, errBroker
+			}
+			binding.Signature = base64.RawURLEncoding.EncodeToString(signature)
+			clear(signature)
+			if assembly.issuer.VerifyBinding(expected, binding, api.now()) != nil {
+				return BrokerResult{}, errBroker
+			}
+			envelope, e = json.Marshal(binding)
+			if e != nil {
+				return BrokerResult{}, errBroker
+			}
+		} else {
+			phase := handoff.PhaseBinding{BindingClaims: binding.BindingClaims, Mode: a.Mode}
+			phase.Version = 2
+			phase.Kind = handoff.PhaseBindingKind
+			phase.Audience = handoff.PhaseAudience(a.Mode, request.Phase)
+			signature, e := assembly.signer.Sign(ctx, phase.SigningBytes())
+			if e != nil || guardLive() != nil || ctx.Err() != nil {
+				clear(signature)
+				return BrokerResult{}, errBroker
+			}
+			phase.Signature = base64.RawURLEncoding.EncodeToString(signature)
+			clear(signature)
+			if assembly.issuer.VerifyPhaseBinding(expected, phase, api.now()) != nil {
+				return BrokerResult{}, errBroker
+			}
+			envelope, e = json.Marshal(phase)
+			if e != nil {
+				return BrokerResult{}, errBroker
+			}
 		}
-		envelope, e := json.Marshal(binding)
-		if e != nil || len(envelope) > handoff.MaxBindingBytes || guardLive() != nil || ctx.Err() != nil {
+		if len(envelope) > handoff.MaxBindingBytes || guardLive() != nil || ctx.Err() != nil {
 			clear(envelope)
 			return BrokerResult{}, errBroker
 		}
+
 		owned := &issuedControllerHandoff{receipt: bytes.Clone(plan.receiptRaw), envelope: envelope, payload: bytes.Clone(data), deadline: deadline}
 		defer owned.clear()
 		if guardLive() != nil || ctx.Err() != nil {

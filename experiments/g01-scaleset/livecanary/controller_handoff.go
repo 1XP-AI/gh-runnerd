@@ -47,6 +47,7 @@ type controllerHandoffProof struct {
 	ContextActiveAtReturn   bool
 	CredentialReadSucceeded bool
 	Phase                   string
+	Mode                    string
 	KeyID                   string
 	HandoffSequence         int
 	JournalIdentity         controllerJournalIdentity
@@ -101,7 +102,10 @@ func (p controllerHandoffProof) validAt(ctx context.Context, approval Approval, 
 		return false
 	}
 	fileJournal, ok := journal.(*FileJournal)
-	if !ok || fileJournal != p.journal || !p.ContextActiveAtReturn || !p.CredentialReadSucceeded || p.HandoffSequence != 1 || p.Phase != "create" {
+	if !ok || fileJournal != p.journal || !p.ContextActiveAtReturn || !p.CredentialReadSucceeded || p.HandoffSequence < 1 || (p.Phase == "create" && p.HandoffSequence != 1) {
+		return false
+	}
+	if p.Mode != controllerHandoffMode(p.Phase) {
 		return false
 	}
 	if !component.MatchString(p.KeyID) || !nonce.MatchString(p.ReceiptNonce) || !validHandoffSHA256(p.RawApprovalSHA256) || !validHandoffSHA256(p.ReceiptSHA256) {
@@ -132,7 +136,7 @@ func validControllerHandoffEvent(event Event) bool {
 		return false
 	}
 	consumption := event.ControllerHandoff
-	if !nonce.MatchString(consumption.ReceiptNonce) || !slices.Contains(phases, consumption.Phase) || !component.MatchString(consumption.KeyID) {
+	if !nonce.MatchString(consumption.ReceiptNonce) || (!slices.Contains(phases, consumption.Phase) && consumption.Phase != pairedPreparationPhase) || !component.MatchString(consumption.KeyID) {
 		return false
 	}
 	return validHandoffSHA256(consumption.ApprovalSHA256) && validHandoffSHA256(consumption.ReceiptSHA256)
@@ -157,6 +161,7 @@ func controllerHandoffNonceUsed(events []Event, receiptNonce string) bool {
 
 func validateControllerHandoffReplay(events []Event) error {
 	seen := make(map[string]struct{})
+	slots := make(map[string]bool)
 	for _, event := range events {
 		if event.ControllerHandoff == nil {
 			continue
@@ -165,6 +170,10 @@ func validateControllerHandoffReplay(events []Event) error {
 			return ErrJournal
 		}
 		nonce := event.ControllerHandoff.ReceiptNonce
+		if slots[event.ControllerHandoff.Phase] {
+			return ErrJournal
+		}
+		slots[event.ControllerHandoff.Phase] = true
 		if _, exists := seen[nonce]; exists {
 			return ErrJournal
 		}
@@ -190,6 +199,11 @@ func (j *FileJournal) consumeControllerHandoffAt(ctx context.Context, approval A
 	defer j.mu.Unlock()
 	appendNow := now()
 	event := Event{Kind: "controller-handoff-consumed", ControllerHandoff: &consumption}
+	// A nonce identifies one transport, but the phase is the durable retry slot.
+	// This fence is under the append mutex and precedes all credential input.
+	if controllerPhaseConsumed(j.events, consumption.Phase) || (ctx != nil && ctx.Value(experimentalPhaseAdmissionKey{}) == true && !phaseHandoffEligibleHistory(approval, consumption.Phase, j.events)) {
+		return Event{}, ErrJournal
+	}
 	// Create's per-open proof requires the first journal event. Fence all fresh
 	// nonces atomically here, before another credential callback can run, even
 	// after an earlier create failed while decoding credentials or building API.
@@ -211,7 +225,7 @@ func controllerHandoffRequest(approvalSnapshot []byte, phase, source string, now
 
 func controllerHandoffRequestOwned(approvalSnapshot []byte, phase, source string, now time.Time) (Approval, handoff.Request, error) {
 	var approval Approval
-	if len(approvalSnapshot) == 0 || len(approvalSnapshot) > maxControllerApprovalBytes || DecodeStrict(approvalSnapshot, &approval) != nil || approval.Validate(now) != nil || approval.WorkflowRunID <= 0 || approval.WorkflowRef == "" || !slices.Contains(approval.Phases, phase) {
+	if len(approvalSnapshot) == 0 || len(approvalSnapshot) > maxControllerApprovalBytes || DecodeStrict(approvalSnapshot, &approval) != nil || approval.Validate(now) != nil || approval.WorkflowRunID <= 0 || approval.WorkflowRef == "" || (!slices.Contains(approval.Phases, phase) && !(phase == pairedPreparationPhase && pairedPreparationReady(approval, now))) {
 		return Approval{}, handoff.Request{}, ErrApproval
 	}
 	approvalHash := sha256.Sum256(approvalSnapshot)
@@ -344,6 +358,12 @@ func consumeControllerHandoffWithProof(ctx context.Context, journal *FileJournal
 		return nil, zeroProof, ErrApproval
 	}
 	effectiveDeadline := acquisitionDeadline
+	if phase != "create" {
+		effectiveDeadline = controllerHandoffDeadline(ctx, approval.ExpiresAt, receipt.ExpiresAt)
+		if cap := started.Add(handoff.MaxPhaseDuration); cap.Before(effectiveDeadline) {
+			effectiveDeadline = cap
+		}
+	}
 	if receipt.ExpiresAt.Before(effectiveDeadline) {
 		effectiveDeadline = receipt.ExpiresAt
 	}
@@ -426,6 +446,7 @@ func consumeControllerHandoffWithProof(ctx context.Context, journal *FileJournal
 		ContextActiveAtReturn:   true,
 		CredentialReadSucceeded: true,
 		Phase:                   phase,
+		Mode:                    controllerHandoffMode(phase),
 		KeyID:                   root.KeyID(),
 		HandoffSequence:         consumedEvent.Sequence,
 		JournalIdentity:         identity,

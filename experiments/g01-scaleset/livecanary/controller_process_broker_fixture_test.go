@@ -21,6 +21,7 @@ import (
 )
 
 type processBrokerHTTP struct {
+	approval      *Approval
 	t             *testing.T
 	attempt       string
 	calls         []string
@@ -38,12 +39,17 @@ func (f *processBrokerHTTP) RoundTrip(r *http.Request) (*http.Response, error) {
 		payload = map[string]any{"id": 11, "slug": "fixture-app", "owner": map[string]any{"id": 101, "login": "fixture-org", "type": "Organization"}}
 	case "/orgs/fixture-org/installation":
 		payload = map[string]any{"id": 12, "app_id": 11, "target_id": 101, "target_type": "Organization", "suspended_at": nil, "account": map[string]any{"id": 101, "login": "fixture-org", "type": "Organization"}, "permissions": map[string]string{"organization_self_hosted_runners": "write", "metadata": "read"}}
-	case "/repos/fixture-org/canary/actions/runs/7":
+	case workflowRunFixturePath(f):
 		stored, e := os.ReadFile(filepath.Join(f.attempt, "broker.jsonl"))
 		if e != nil || len(stored) == 0 {
 			f.t.Error("observation preceded durable attempt")
 		}
-		payload = map[string]any{"id": 7, "head_sha": strings.Repeat("b", 40), "head_branch": "main", "event": "workflow_dispatch", "path": ".github/workflows/canary.yml", "run_attempt": 1, "repository": repo, "head_repository": repo}
+		runID, sha := int64(7), strings.Repeat("b", 40)
+		if f.approval != nil {
+			runID = f.approval.WorkflowRunID
+			sha = f.approval.WorkflowSHA
+		}
+		payload = map[string]any{"id": runID, "head_sha": sha, "head_branch": "main", "event": "workflow_dispatch", "path": ".github/workflows/canary.yml", "run_attempt": 1, "repository": repo, "head_repository": repo}
 	case "/app/installations/12/access_tokens":
 		f.mints++
 		stored, _ := os.ReadFile(filepath.Join(f.attempt, "broker.jsonl"))
@@ -151,4 +157,11 @@ func TestControllerProcessHandoffActualBrokerSeparateProcess(t *testing.T) {
 			}
 		})
 	}
+}
+
+func workflowRunFixturePath(f *processBrokerHTTP) string {
+	if f.approval != nil {
+		return fmt.Sprintf("/repos/fixture-org/canary/actions/runs/%d", f.approval.WorkflowRunID)
+	}
+	return "/repos/fixture-org/canary/actions/runs/7"
 }

@@ -43,3 +43,61 @@ func runControllerHandoffCreate(ctx context.Context, journal *FileJournal, appro
 	}
 	return nil
 }
+
+// The phase is selected by verified immutable policy before this private entry.
+func runControllerHandoffPhase(ctx context.Context, journal *FileJournal, snapshot, receipt []byte, phase, source string, root handoff.TrustRoot, now func() time.Time, read func(context.Context) ([]byte, error), factory func(context.Context, Approval, Credentials) (API, error), paired *PairedTerminalFiles) error {
+	if ctx == nil || ctx.Err() != nil || journal == nil || now == nil || factory == nil || phase == "create" || phase == "cleanup" {
+		return ErrApproval
+	}
+	a, _, err := controllerHandoffRequest(snapshot, phase, source, now())
+	if err != nil {
+		return ErrApproval
+	}
+	if phase == pairedPreparationPhase {
+		if paired == nil || !pairedPreparationReady(a, now()) {
+			return ErrApproval
+		}
+		release, e := journal.authorize(a)
+		if e != nil {
+			return ErrJournal
+		}
+		_, e = parseCompletedCreateHistory(journal.Events())
+		release()
+		if e != nil {
+			return ErrQuarantine
+		}
+	} else {
+		_, release, e := authorizePhase(a, journal, phase)
+		if e != nil {
+			return e
+		}
+		release()
+	}
+	ctx = context.WithValue(ctx, experimentalPhaseAdmissionKey{}, true)
+	data, proof, err := consumeControllerHandoffWithProof(ctx, journal, snapshot, phase, source, newControllerHandoffMemorySource(receipt), root, now, read)
+	if err != nil {
+		return err
+	}
+	defer clear(data)
+	var c Credentials
+	if DecodeStrict(data, &c) != nil || c.validate(a, now()) != nil || !proof.validAt(ctx, a, journal, now()) {
+		return ErrApproval
+	}
+	entry, cancel := context.WithDeadline(ctx, proof.EffectiveDeadline)
+	defer cancel()
+	entry = context.WithValue(entry, controllerHandoffParentContextKey{}, proof.parent)
+	if phase == pairedPreparationPhase {
+		if c.PairedBinding == nil || !proof.EffectiveDeadline.After(now().Add(handoff.MinPairedRemaining)) {
+			return ErrApproval
+		}
+		return runPairedTerminalOwned(entry, *paired, c, journal, &proof)
+	}
+	if c.PairedBinding != nil {
+		return ErrApproval
+	}
+	api, err := factory(entry, a, c)
+	if err != nil || api == nil || !proof.validAt(entry, a, journal, now()) {
+		return ErrApproval
+	}
+	return (&Driver{a, journal, api}).runWithHandoff(entry, phase, &proof)
+}

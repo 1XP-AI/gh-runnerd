@@ -227,7 +227,7 @@ func runBrokerWithPrivateHandoff(ctx context.Context, files BrokerFiles, input *
 	if approval.Mode == "paired-terminal" && (!brokerCanonicalPath(files.ControllerStateDirectory) || !brokerCanonicalPath(files.WorkerApproval) || !brokerCanonicalPath(files.WorkerStateDirectory)) {
 		return BrokerResult{}, errBroker
 	}
-	if assembly != nil && (approval.Mode != "controller" || approval.Phase != "create" || !assembly.valid(api.provenanceRoot)) {
+	if assembly != nil && ((!assembly.experimental && (approval.Mode != "controller" || approval.Phase != "create")) || !assembly.valid(api.provenanceRoot)) {
 		return BrokerResult{}, errBroker
 	}
 	var binary *verifiedBrokerBinary
@@ -293,7 +293,12 @@ func runBrokerWithPrivateHandoff(ctx context.Context, files BrokerFiles, input *
 	if attempt.check() != nil {
 		return BrokerResult{}, errBroker
 	}
-	credentialInput, err := readBrokerInput(ctx, input)
+	var credentialInput brokerInput
+	if assembly != nil && assembly.experimental {
+		credentialInput, err = readBrokerExperimentalInput(ctx, input)
+	} else {
+		credentialInput, err = readBrokerInput(ctx, input)
+	}
 	if err != nil || (approval.AllowVerificationAuthority && credentialInput.VerificationToken == "") {
 		return BrokerResult{}, errBroker
 	}
@@ -325,6 +330,15 @@ func runBrokerWithPrivateHandoff(ctx context.Context, files BrokerFiles, input *
 			selected.launch = func(ctx context.Context, h *issuedControllerHandoff, snapshotPath string) error {
 				if plan.check() != nil {
 					return errBroker
+				}
+				if selected.experimental {
+					h.mode = approval.Mode
+					h.phase = approval.Phase
+					if h.mode == "paired-terminal" {
+						h.phase = h.mode
+						h.workerApproval = files.WorkerApproval
+						h.workerState = files.WorkerStateDirectory
+					}
 				}
 				return invokeBrokerControllerHandoff(ctx, binary, files.StateDirectory, snapshotPath, files.ControllerStateDirectory, h)
 			}

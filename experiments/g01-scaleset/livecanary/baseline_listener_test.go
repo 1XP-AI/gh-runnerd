@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"io"
 	"log/slog"
@@ -31,6 +32,8 @@ type baselineReply struct {
 }
 
 type baselineFixture struct {
+	readEvents                                      func() []Event
+	caPEM                                           []byte
 	a                                               Approval
 	api                                             *SDKAPI
 	j                                               *FileJournal
@@ -101,7 +104,11 @@ func newBaselineFixtureWithCreate(t *testing.T, change func(string, any) any, in
 			stage = "poll" + strconv.Itoa(int(n))
 
 			wantCursor := ""
-			for _, e := range f.j.Events() {
+			events := f.j.Events()
+			if f.readEvents != nil {
+				events = f.readEvents()
+			}
+			for _, e := range events {
 				if e.Baseline != nil && e.Baseline.Stage == "ack" && e.Baseline.Outcome == "result" {
 					wantCursor = ""
 					if e.Baseline.MessageID > 0 {
@@ -168,6 +175,7 @@ func newBaselineFixtureWithCreate(t *testing.T, change func(string, any) any, in
 		}
 	}))
 	t.Cleanup(server.Close)
+	f.caPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})
 	transport := server.Client().Transport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	transport.Protocols = new(http.Protocols)
