@@ -76,9 +76,24 @@ func fixtureEndpoint(baseURL string, caPEM []byte) (*url.URL, *x509.CertPool, *x
 }
 
 func NewSDKAPIForPairedFixture(a Approval, c Credentials, baseURL string, caPEM []byte) (*SDKAPI, error) {
-	u, roots, certificate, err := fixtureEndpoint(baseURL, caPEM)
-	if err != nil || a.Validate(time.Now()) != nil || c.validate(a, time.Now()) != nil {
+	return newSDKAPIForPairedFixture(a, c, baseURL, caPEM, nil)
+}
+
+func newSDKAPIForPairedFixture(a Approval, c Credentials, baseURL string, caPEM []byte, hook *drainPollHook) (*SDKAPI, error) {
+	// Validate ORIGINAL authority before the private adapter substitutes its
+	// selected endpoint. The copy is never returned to authority admission.
+	if a.Validate(time.Now()) != nil || c.validate(a, time.Now()) != nil {
 		return nil, ErrApproval
+	}
+	u, roots, certificate, err := fixtureEndpoint(baseURL, caPEM)
+	if err != nil {
+		return nil, ErrApproval
+	}
+	a.ActionsHosts = append([]string(nil), a.ActionsHosts...)
+	a.Phases = append([]string(nil), a.Phases...)
+	original := a
+	if hook != nil {
+		a.ActionsHosts = []string{u.Host}
 	}
 	serverName := u.Hostname()
 	if err := certificate.VerifyHostname(serverName); err != nil {
@@ -100,14 +115,28 @@ func NewSDKAPIForPairedFixture(a Approval, c Credentials, baseURL string, caPEM 
 		return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, network, target)
 	}
 	retry := &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone()}
-	httpClient := &http.Client{Transport: withResponseBudget(transport), Timeout: operationTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	var wrappers []func(http.RoundTripper) http.RoundTripper
+	if hook != nil {
+		wrappers = append(wrappers, func(inner http.RoundTripper) http.RoundTripper {
+			hook.inner = inner
+			return hook
+		})
+	}
+	httpClient := &http.Client{Transport: withResponseBudget(transport, wrappers...), Timeout: operationTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	retry = httpClient
 	options := []scaleset.HTTPOption{scaleset.WithHTTPClient(retry), scaleset.WithRetry(scaleset.RetryConfig{Max: 0}), scaleset.WithLogger(slog.New(slog.DiscardHandler))}
 	client, err := scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{GitHubConfigURL: baseURL + "/" + a.Organization, PersonalAccessToken: c.InstallationToken}, options...)
 	if err != nil {
 		return nil, ErrApproval
 	}
-	return &SDKAPI{physical: transport, client: client, rest: httpClient, baseURL: baseURL, approval: a, credentials: c, options: options}, nil
+	api := &SDKAPI{physical: transport, client: client, rest: httpClient, baseURL: baseURL, approval: a, credentials: c, options: options}
+	if hook == nil {
+		ca := append([]byte(nil), caPEM...)
+		api.drainClientFactory = func(h *drainPollHook) (*SDKAPI, error) {
+			return newSDKAPIForPairedFixture(original, c, baseURL, ca, h)
+		}
+	}
+	return api, nil
 }
 
 func fixtureFastPairCadence() pairedBaselineCadence {

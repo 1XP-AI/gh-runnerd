@@ -178,12 +178,22 @@ type acquireLossCommandFixture struct {
 	raw, management, workflowSeed, issuerSeed                                []byte
 	transport                                                                *processBrokerHTTP
 	brokerMu                                                                 sync.Mutex
+	secretMu                                                                 sync.Mutex
+	additionalSecrets                                                        [][]byte
 }
 
 func newAcquireLossCommandFixture(t *testing.T, controller, broker, variant string) *acquireLossCommandFixture {
+	return newCommandQualificationFixture(t, controller, broker, variant, acquireLossPhase)
+}
+
+// Share signed command setup without weakening the acquisition assertions.
+func newCommandQualificationFixture(t *testing.T, controller, broker, variant, phase string) *acquireLossCommandFixture {
 	t.Helper()
 	a := approval()
 	a.WorkflowRef = "refs/heads/main"
+	if phase == "drain" {
+		a.Phases = append(append([]string(nil), a.Phases...), phase)
+	}
 	// The original approval is tighter than the ten-minute phase cap, so the
 	// actual broker and negative envelopes share this exact original deadline.
 	a.ExpiresAt = time.Now().Add(5 * time.Minute)
@@ -204,7 +214,7 @@ func newAcquireLossCommandFixture(t *testing.T, controller, broker, variant stri
 	f.base.release = nil
 	f.admission = f.base.j.claim.directory
 	parent := filepath.Dir(f.base.j.directory)
-	f.approvalPath, f.brokerApprovalPath, f.attempt = filepath.Join(parent, "controller-approval.json"), filepath.Join(parent, "broker-acquire-loss.json"), filepath.Join(parent, "attempt-acquire-loss")
+	f.approvalPath, f.brokerApprovalPath, f.attempt = filepath.Join(parent, "controller-approval.json"), filepath.Join(parent, "broker-"+phase+".json"), filepath.Join(parent, "attempt-"+phase)
 	if os.WriteFile(f.approvalPath, f.raw, 0600) != nil {
 		t.Fatal("original raw approval write")
 	}
@@ -303,7 +313,7 @@ func newAcquireLossCommandFixture(t *testing.T, controller, broker, variant stri
 	if f.base.j.Close() != nil {
 		t.Fatal("release completed-create writer")
 	}
-	writePhaseFixtureConfig(t, f.base.j.directory, f.admission, experimentalPolicy(t, a, f.raw, "controller", acquireLossPhase, "controller"), a.HarnessSHA, f.base.api, f.base.caPEM)
+	writePhaseFixtureConfig(t, f.base.j.directory, f.admission, experimentalPolicy(t, a, f.raw, "controller", phase, "controller"), a.HarnessSHA, f.base.api, f.base.caPEM)
 	// Broker binary admission requires an owned single-link executable in the
 	// original parent. Copy exactly the manifest-checked controller bytes.
 	data, e := os.ReadFile(controller)
@@ -314,7 +324,7 @@ func newAcquireLossCommandFixture(t *testing.T, controller, broker, variant stri
 	if os.WriteFile(f.controller, data, 0500) != nil {
 		t.Fatal("controller TEST helper copy")
 	}
-	ba := enrollment.BrokerApproval{OwnerNonce: a.OwnerNonce, Mode: "controller", Phase: acquireLossPhase, AppID: a.AppID, AppName: "fixture-app", AppOwner: a.Organization, AppOwnerID: 101, InstallationID: a.InstallationID, Organization: a.Organization, OrganizationID: 101, Repository: a.Repository, RepositoryID: a.RepositoryID, RunnerGroupID: int64(a.RunnerGroupID), RunnerGroupName: "fixture-group", ExpiresAt: a.ExpiresAt, ControllerBinarySHA256: handoff.Digest(data), ControllerApprovalSHA256: handoff.Digest(f.raw), ControllerHarnessSHA: a.HarnessSHA, AllowVerificationAuthority: true}
+	ba := enrollment.BrokerApproval{OwnerNonce: a.OwnerNonce, Mode: "controller", Phase: phase, AppID: a.AppID, AppName: "fixture-app", AppOwner: a.Organization, AppOwnerID: 101, InstallationID: a.InstallationID, Organization: a.Organization, OrganizationID: 101, Repository: a.Repository, RepositoryID: a.RepositoryID, RunnerGroupID: int64(a.RunnerGroupID), RunnerGroupName: "fixture-group", ExpiresAt: a.ExpiresAt, ControllerBinarySHA256: handoff.Digest(data), ControllerApprovalSHA256: handoff.Digest(f.raw), ControllerHarnessSHA: a.HarnessSHA, AllowVerificationAuthority: true}
 	raw, _ := json.Marshal(ba)
 	if os.WriteFile(f.brokerApprovalPath, raw, 0600) != nil {
 		t.Fatal("broker approval write")
@@ -336,7 +346,7 @@ func newAcquireLossCommandFixture(t *testing.T, controller, broker, variant stri
 		io.Copy(w, response.Body)
 	}))
 	t.Cleanup(server.Close)
-	config, _ := json.Marshal(map[string]string{"policy": experimentalPolicy(t, a, f.raw, "controller", acquireLossPhase, "broker"), "base_url": server.URL, "ca_pem": string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})), "admission": f.admission, "worker_admission": ""})
+	config, _ := json.Marshal(map[string]string{"policy": experimentalPolicy(t, a, f.raw, "controller", phase, "broker"), "base_url": server.URL, "ca_pem": string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})), "admission": f.admission, "worker_admission": ""})
 	if os.WriteFile(filepath.Join(f.base.j.directory, "broker-experiment-fixture.json"), config, 0600) != nil {
 		t.Fatal("broker fixture write")
 	}
@@ -350,6 +360,9 @@ func newAcquireLossCommandFixture(t *testing.T, controller, broker, variant stri
 func (f *acquireLossCommandFixture) noSecrets(data []byte) {
 	f.t.Helper()
 	secrets := [][]byte{f.management, f.workflowSeed, f.issuerSeed, []byte("PRIVATE KEY"), []byte("synthetic-process-installation-token"), []byte("synthetic-installation-token"), []byte("synthetic-observation-credential"), []byte("synthetic-secret-queue"), []byte(f.base.api.credentials.VerificationToken), []byte("synthetic-registration"), []byte("failed to issue acquire jobs"), []byte("failed to acquire jobs"), []byte("unexpected status code"), []byte("Post \""), []byte("EOF")}
+	f.secretMu.Lock()
+	secrets = append(secrets, f.additionalSecrets...)
+	f.secretMu.Unlock()
 	for i, secret := range secrets {
 		if len(secret) > 0 && bytes.Contains(data, secret) {
 			f.t.Errorf("secret/raw-error class %d escaped command or durable evidence", i)
@@ -358,36 +371,91 @@ func (f *acquireLossCommandFixture) noSecrets(data []byte) {
 }
 
 func (f *acquireLossCommandFixture) run(binary string, args []string, inputs ...[]byte) []*os.File {
+	return f.runOutcome(binary, args, false, inputs...)
+}
+
+func (f *acquireLossCommandFixture) runOutcome(binary string, args []string, success bool, inputs ...[]byte) []*os.File {
 	f.t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Env = []string{"LANG=C", "LC_ALL=C"}
 	var pipes []*os.File
+	var writers []*os.File
+	var joined []<-chan struct{}
 	for _, input := range inputs {
-		pipes = append(pipes, ownedExperimentalPipe(f.t, input))
+		r, w, e := os.Pipe()
+		if e != nil {
+			f.t.Fatal("owned command input pipe setup failed")
+		}
+		done := make(chan struct{})
+		go func(data []byte) {
+			defer close(done)
+			defer w.Close()
+			if n, e := w.Write(data); e != nil || n != len(data) {
+				f.t.Error("owned command input write incomplete")
+			}
+		}(input)
+		f.t.Cleanup(func() { r.Close(); w.Close(); <-done })
+		pipes = append(pipes, r)
+		writers = append(writers, w)
+		joined = append(joined, done)
 	}
 	if len(pipes) > 0 {
 		cmd.Stdin = pipes[0]
 		cmd.ExtraFiles = pipes[1:]
 	}
-	output, e := cmd.CombinedOutput()
-	f.noSecrets(output)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	e := cmd.Run()
+	for i, w := range writers {
+		w.Close()
+		<-joined[i]
+	}
+	f.noSecrets(stdout.Bytes())
+	f.noSecrets(stderr.Bytes())
+	f.scanCommandJournals()
 	var exit *exec.ExitError
 	if ctx.Err() != nil || e != nil && (!errors.As(e, &exit) || exit.ExitCode() != 1) {
 		f.t.Fatal("actual acquire-loss command setup failure or timeout")
 	}
-	if e == nil {
-		f.t.Error("actual acquire-loss command must exit nonzero with quarantine")
+	if (e == nil) != success {
+		f.t.Error("actual command success/quarantine outcome differs")
 	}
 	want := "canary refused; approval, authority or private state requires review\n"
 	if binary == f.broker {
 		want = "broker stopped; retain private intent; credentials not persisted; no automatic retry\n"
 	}
-	if string(output) != want {
+	if stderr.Len() != 0 || (!success && stdout.String() != want) {
 		f.t.Error("actual command fixed sanitized outcome differs")
 	}
+	if success {
+		var result enrollment.BrokerResult
+		if binary != f.broker || DecodeStrict(stdout.Bytes(), &result) != nil || result.Status != "controller_completed" || result.ActionsHost != "" {
+			f.t.Error("actual command successful broker receipt differs")
+		}
+	}
 	return pipes
+}
+
+// Scan before behavioral assertions can return on an intentional fault. The
+// records stay private; diagnostics contain only fixed classes, never contents.
+func (f *acquireLossCommandFixture) scanCommandJournals() {
+	for _, directory := range []string{f.base.j.directory, f.attempt, f.attempt + "-fresh", f.admission} {
+		paths, e := filepath.Glob(filepath.Join(directory, "*.jsonl"))
+		if e != nil {
+			f.t.Error("private command record inventory failed")
+			continue
+		}
+		for _, path := range paths {
+			data, e := os.ReadFile(path)
+			if e != nil {
+				f.t.Error("private command record unavailable")
+				continue
+			}
+			f.noSecrets(data)
+		}
+	}
 }
 
 func (f *acquireLossCommandFixture) brokerArgs(attempt string) []string {
@@ -466,6 +534,10 @@ func (f *acquireLossCommandFixture) assertRetained(variant string) []Event {
 }
 
 func (f *acquireLossCommandFixture) guardControls(events []Event) {
+	f.guardControlsForPhase(events, acquireLossPhase)
+}
+
+func (f *acquireLossCommandFixture) guardControlsForPhase(events []Event, phase string) {
 	t := f.t
 	journal := filepath.Join(f.base.j.directory, "journal.jsonl")
 	before, _ := os.ReadFile(journal)
@@ -480,7 +552,7 @@ func (f *acquireLossCommandFixture) guardControls(events []Event) {
 	requests := f.base.requests.Load()
 	var nonce string
 	for _, e := range events {
-		if e.ControllerHandoff != nil && e.ControllerHandoff.Phase == acquireLossPhase {
+		if e.ControllerHandoff != nil && e.ControllerHandoff.Phase == phase {
 			nonce = e.ControllerHandoff.ReceiptNonce
 		}
 	}
@@ -496,7 +568,7 @@ func (f *acquireLossCommandFixture) guardControls(events []Event) {
 	for _, n := range []string{nonce, freshNonce} {
 		a := f.base.a
 		now := time.Now().UTC().Truncate(time.Second)
-		_, request, e := controllerHandoffRequest(f.raw, acquireLossPhase, "github-rest-workflow-v1", now)
+		_, request, e := controllerHandoffRequest(f.raw, phase, "github-rest-workflow-v1", now)
 		if e != nil {
 			t.Fatal("receiver negative request setup")
 		}
@@ -507,7 +579,7 @@ func (f *acquireLossCommandFixture) guardControls(events []Event) {
 		receiptRaw, _ := json.Marshal(receipt)
 		payload := handoffCredentialBytes(t, a)
 		defer clear(payload)
-		binding := handoff.PhaseBinding{BindingClaims: handoff.BindingClaims{Request: request, Version: 2, Kind: handoff.PhaseBindingKind, Algorithm: "ed25519", Audience: handoff.PhaseAudience("controller", acquireLossPhase), KeyID: "fixture-issuer-v1", IssuerSource: handoff.IssuerSource, WorkflowKeyID: receipt.KeyID, ReceiptSHA256: handoff.Digest(receiptRaw), PayloadSHA256: handoff.Digest(payload), PayloadLength: len(payload), ReceiptNonce: n, IssuedAt: now, ExpiresAt: a.ExpiresAt}, Mode: "controller"}
+		binding := handoff.PhaseBinding{BindingClaims: handoff.BindingClaims{Request: request, Version: 2, Kind: handoff.PhaseBindingKind, Algorithm: "ed25519", Audience: handoff.PhaseAudience("controller", phase), KeyID: "fixture-issuer-v1", IssuerSource: handoff.IssuerSource, WorkflowKeyID: receipt.KeyID, ReceiptSHA256: handoff.Digest(receiptRaw), PayloadSHA256: handoff.Digest(payload), PayloadLength: len(payload), ReceiptNonce: n, IssuedAt: now, ExpiresAt: a.ExpiresAt}, Mode: "controller"}
 		issuerKey := ed25519.NewKeyFromSeed(f.issuerSeed)
 		binding.Signature = base64.RawURLEncoding.EncodeToString(ed25519.Sign(issuerKey, binding.SigningBytes()))
 		workflow, _ := handoff.NewTrustRoot(receipt.KeyID, key.Public().(ed25519.PublicKey))
@@ -522,13 +594,13 @@ func (f *acquireLossCommandFixture) guardControls(events []Event) {
 		if e != nil {
 			t.Fatal("receiver negative frame")
 		}
-		pipes := f.run(f.controller, []string{"--execute-experimental-phase", "--mode", "controller", "--approval", f.approvalPath, "--state-dir", f.base.j.directory, "--phase", acquireLossPhase}, payload, frame)
+		pipes := f.run(f.controller, []string{"--execute-experimental-phase", "--mode", "controller", "--approval", f.approvalPath, "--state-dir", f.base.j.directory, "--phase", phase}, payload, frame)
 		unread, e := io.ReadAll(pipes[0])
 		if e != nil || !bytes.Equal(unread, payload) {
 			t.Error("receiver replay read credential payload")
 		}
 	}
-	f.run(f.controller, []string{"--prepare-approved-journal", "--approval", f.approvalPath, "--state-dir", f.base.j.directory, "--phase", acquireLossPhase})
+	f.run(f.controller, []string{"--prepare-approved-journal", "--approval", f.approvalPath, "--state-dir", f.base.j.directory, "--phase", phase})
 	inputs := [][]byte{f.management, []byte("synthetic-observation-credential"), f.workflowSeed, f.issuerSeed}
 	pipes := f.run(f.broker, f.brokerArgs(f.attempt), inputs...)
 	for i, pipe := range pipes {
@@ -546,7 +618,7 @@ func (f *acquireLossCommandFixture) guardControls(events []Event) {
 	}
 	claimPath := filepath.Join(f.admission, "broker-admission.jsonl")
 	claim, e := os.ReadFile(claimPath)
-	if e != nil || !bytes.Contains(claim, []byte(`"slot":"acquire-loss"`)) {
+	if e != nil || !bytes.Contains(claim, []byte(`"slot":"`+phase+`"`)) {
 		t.Fatal("original occupied broker claim missing")
 	}
 	// Fresh valid inputs may be consumed. Require valid observation plus the

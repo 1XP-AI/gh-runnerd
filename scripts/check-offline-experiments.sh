@@ -10,13 +10,14 @@ default_heavy_and_handoff_skip_regex='^Test(BaselineStatisticsPresenceAndEligibi
 paired_collection_regex='^TestPaired'
 replacement_regex='^TestSessionReplacement'
 acquire_loss_command_regex='^TestExperimentalAcquireLossCommand$'
+drain_command_regex='^TestExperimentalDrainCommand$'
 jit_boundary_regex='^TestJITBoundary'
 jit_boundary_storage_regex='^TestJITBoundaryStorageAndCancellationEveryAppend$'
 jit_boundary_expiry_regex='^TestJITBoundaryExpiryAtEveryAppend$'
 jit_boundary_admission_regex='^TestJITBoundary(PreparationRequiresOriginalFreshCreate|AtomicPrefixBeforeCredentialInput|ConcurrentConsumesOnce|HistoryCannotResumeOrRenew|StrictJournalSchemaAndRawReferences|ProofCannotCrossOpen|DirectRunAndCredentialShapes|CloneOwnsNestedPayload)$'
 jit_boundary_physical_regex='^TestJITBoundaryPhysicalMutationsStop$'
 jit_boundary_heavy_regex='^TestJITBoundary(StorageAndCancellationEveryAppend|ExpiryAtEveryAppend|PreparationRequiresOriginalFreshCreate|AtomicPrefixBeforeCredentialInput|ConcurrentConsumesOnce|HistoryCannotResumeOrRenew|StrictJournalSchemaAndRawReferences|ProofCannotCrossOpen|DirectRunAndCredentialShapes|CloneOwnsNestedPayload|PhysicalMutationsStop)$'
-non_paired_skip_regex='^Test(Paired|SessionReplacement|JITBoundary|ExperimentalAcquireLossCommand$)'
+non_paired_skip_regex='^Test(Paired|SessionReplacement|JITBoundary|ExperimentalAcquireLossCommand$|ExperimentalDrainCommand$)'
 storage_regex='^TestPairedTerminal(Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$'
 storage_journal_regex='^TestPairedTerminalPostIntentJournalIdentity$'
 terminal_heavy_regex='^TestPairedTerminal(FinalResultCapacity|PendingChildCapacity|EligibilityUsesFreshExactFacts|CapturedAcknowledgementCancellation|MissingAcknowledgementsAndPostchecks)$'
@@ -151,6 +152,7 @@ for module_dir in "${selected_modules[@]}"; do
 				# non-paired remainder; the finite family selectors remain disjoint.
 				GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run "${replacement_regex}" ./livecanary
 				GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run "${acquire_loss_command_regex}" ./livecanary
+				GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run "${drain_command_regex}" ./livecanary
 			fi
 			if [[ "${profile}" != core ]]; then
 				GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run "${jit_boundary_storage_regex}" ./livecanary
