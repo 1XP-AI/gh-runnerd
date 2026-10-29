@@ -181,6 +181,7 @@ type acquireLossCommandFixture struct {
 	secretMu                                                                 sync.Mutex
 	additionalSecrets                                                        [][]byte
 	brokerBeforeRequest                                                      func(*http.Request)
+	afterCommand                                                             func()
 }
 
 func newAcquireLossCommandFixture(t *testing.T, controller, broker, variant string) *acquireLossCommandFixture {
@@ -441,6 +442,9 @@ func (f *acquireLossCommandFixture) runExpected(binary string, args []string, ou
 	f.noSecrets(stdout.Bytes())
 	f.noSecrets(stderr.Bytes())
 	f.scanCommandJournals()
+	if f.afterCommand != nil {
+		f.afterCommand()
+	}
 	var exit *exec.ExitError
 	if ctx.Err() != nil || e != nil && (!errors.As(e, &exit) || exit.ExitCode() != 1) {
 		f.t.Fatal("actual acquire-loss command setup failure or timeout")
@@ -714,5 +718,8 @@ func TestExperimentalAcquireLossCommand(t *testing.T) {
 	}
 	if a, b := knowledge["disconnect-after-commit"], knowledge["disconnect-without-commit"]; a != nil && b != nil && !reflect.DeepEqual(a, b) {
 		t.Error("fixture commit truth changed controller knowledge")
+	}
+	for _, mode := range []string{"cancel", "continue"} {
+		t.Run("original-"+mode+"-after-acquire-intent", func(t *testing.T) { runOriginalContextCommandCase(t, controller, broker, "acquire-loss", mode) })
 	}
 }

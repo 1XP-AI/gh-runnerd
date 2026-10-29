@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"testing"
 
@@ -15,10 +16,16 @@ import (
 // synthetic build-revision seam. Production build admission rejects its tags.
 func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && (os.Args[1] == "--execute-experimental-phase" || os.Args[1] == "--prepare-approved-journal" || os.Args[1] == "--prepare-approved-paired-journal" || os.Args[1] == "--prepare-approved-paired-worker-journal") {
-		var state, approvalPath string
+		var state, approvalPath, phase, mode string
 		for n := 2; n+1 < len(os.Args); n++ {
 			if os.Args[n] == "--state-dir" {
 				state = os.Args[n+1]
+			}
+			if os.Args[n] == "--phase" {
+				phase = os.Args[n+1]
+			}
+			if os.Args[n] == "--mode" {
+				mode = os.Args[n+1]
 			}
 			if os.Args[n] == "--approval" {
 				approvalPath = os.Args[n+1]
@@ -49,6 +56,25 @@ func TestMain(m *testing.M) {
 		}
 		prepareJITBoundaryJournalForCommand = func(path string, a livecanary.Approval, approvalPath, phase string) (livecanary.PreparationReceipt, error) {
 			return livecanary.PrepareJITBoundaryJournalForExperimentFixture(path, a, approvalPath, phase, config.AdmissionDirectory)
+		}
+		if os.Args[1] == "--execute-experimental-phase" {
+			original, fixture, err := livecanary.BeginOriginalContextCommandForFixture(state, approvalPath, mode, phase)
+			if err != nil {
+				os.Exit(94)
+			}
+			if fixture != nil {
+				if original == nil {
+					fixture.Close()
+					os.Exit(94)
+				}
+				var capture livecanary.OriginalContextFixtureOutput
+				// Pass the one fixture-owned original C0 directly to the real dispatcher.
+				code := runWithPreparationContext(original, os.Args[1:], os.Stdin, io.MultiWriter(os.Stdout, &capture), func() (string, bool) { return revision, true }, nil)
+				if fixture.Finish(code, capture.Bytes()) != nil {
+					os.Exit(95)
+				}
+				os.Exit(code)
+			}
 		}
 		os.Exit(runWithPreparation(os.Args[1:], os.Stdin, os.Stdout, func() (string, bool) { return revision, true }, func(path string, a livecanary.Approval, phase string) (livecanary.PreparationReceipt, error) {
 			return livecanary.PrepareJournalForExperimentFixture(path, a, phase, config.AdmissionDirectory)
