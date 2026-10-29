@@ -87,6 +87,7 @@ func toolingFixture(t *testing.T) string {
 		toolingFile(t, root, name, string(data), 0600)
 	}
 	toolingFile(t, root, "cmd/gh-runnerd/main.go", "package main\n\nfunc main() {}\n", 0600)
+	toolingFile(t, root, "scripts/fixture_test.go", "package tooling\n\nimport \"testing\"\n\nfunc TestToolingTaggedPairFixturePartitionsRun(t *testing.T) {}\n", 0600)
 	for _, module := range []string{"g01-scaleset", "g02-auth", "r1-credentials"} {
 		base := "experiments/" + module
 		toolingFile(t, root, base+"/go.mod", "module example.test/"+module+"\n\ngo 1.27.3\n", 0600)
@@ -112,6 +113,59 @@ func TestLivecanaryFixturePositiveControl(t *testing.T) {
 		t.Fatalf("fixture Git initialization: %s", out)
 	}
 	return root
+}
+
+func TestToolingRootTestPartitions(t *testing.T) {
+	const heavy = `^TestToolingTaggedPairFixturePartitionsRun$`
+	for _, target := range []struct{ name, flags string }{
+		{"test", "-count=1"},
+		{"test-race", "-race -count=1"},
+	} {
+		for _, failPackage := range []string{"", "./...", "./scripts"} {
+			t.Run(target.name+"/fail="+failPackage, func(t *testing.T) {
+				root := t.TempDir()
+				makefile, err := os.ReadFile("../Makefile")
+				if err != nil {
+					t.Fatal(err)
+				}
+				toolingFile(t, root, "Makefile", string(makefile), 0600)
+				// Record actual make execution without running the inherited suites.
+				// The spaced path also checks that both recipes honor the GO override.
+				toolingFile(t, root, "recording go", `#!/bin/sh
+set -eu
+printf '%s\t%s\t%s\n' "$GOTOOLCHAIN" "$GOFLAGS" "$*" >> "$TOOLING_GO_LOG"
+for package do :; done
+if [ "$package" = "$TOOLING_FAIL_PACKAGE" ]; then exit 23; fi
+printf 'done\n' >> "$TOOLING_GO_LOG"
+`, 0700)
+				logPath := filepath.Join(root, "calls.log")
+				out, err := toolingRun(t, root, []string{
+					"TOOLING_GO_LOG=" + logPath,
+					"TOOLING_FAIL_PACKAGE=" + failPackage,
+					"GOTOOLCHAIN=auto",
+				}, "make", "GO="+filepath.Join(root, "recording go"), "GOFLAGS=-mod=readonly -p=2", target.name)
+				if failPackage == "" && err != nil {
+					t.Fatalf("partitioned make failed: %v\n%s", err, out)
+				}
+				if failPackage != "" && (err == nil || !strings.Contains(out, "Error 23")) {
+					t.Fatalf("partition failure was not propagated: %v\n%s", err, out)
+				}
+				first := "go1.27.3\t-mod=readonly -p=2\ttest " + target.flags + " -skip " + heavy + " ./...\n"
+				second := "go1.27.3\t-mod=readonly -p=2\ttest " + target.flags + " -run " + heavy + " ./scripts\n"
+				want := first
+				if failPackage != "./..." {
+					want += "done\n" + second
+					if failPackage == "" {
+						want += "done\n"
+					}
+				}
+				got, err := os.ReadFile(logPath)
+				if err != nil || string(got) != want {
+					t.Fatalf("root partitions: err=%v\ngot  %q\nwant %q\nmake output: %s", err, got, want, out)
+				}
+			})
+		}
+	}
 }
 
 func TestToolingGOFLAGSUsesGoEnvironment(t *testing.T) {
