@@ -1898,6 +1898,35 @@ func TestPublicWorkflowCapacityContract(t *testing.T) {
 	if !strings.Contains(jobs["offline"], "OFFLINE_EXPERIMENT_MODULE: ${{ matrix.module }}") {
 		t.Error("offline matrix does not select its module")
 	}
+	const offlineMatrix = `      matrix:
+        include:
+          - module: experiments/g01-scaleset
+            profile: core
+          - module: experiments/g01-scaleset
+            profile: jit
+          - module: experiments/g02-auth
+            profile: all
+          - module: experiments/r1-credentials
+            profile: all
+`
+	offline := jobs["offline"]
+	matrixStart := strings.Index(offline, "      matrix:\n")
+	envStart := strings.Index(offline, "    env:\n")
+	if matrixStart < 0 || envStart < matrixStart || offline[matrixStart:envStart] != offlineMatrix {
+		t.Error("offline matrix must contain exactly G01 core/jit, G02 all, and R1 all")
+	}
+	for _, line := range []string{
+		"    name: Offline experiment checks (${{ matrix.module }}, ${{ matrix.profile }})",
+		"      max-parallel: 3", "      fail-fast: false",
+		"      OFFLINE_EXPERIMENT_PROFILE: ${{ matrix.profile }}",
+	} {
+		if !toolingHasActiveYAMLLine(offline, line) {
+			t.Errorf("offline job must preserve %q", line)
+		}
+	}
+	if strings.Contains(offline, "continue-on-error:") || strings.Contains(offline, "    if:") {
+		t.Error("every offline matrix row must remain required")
+	}
 	if !strings.Contains(jobs["vuln"], "run: make vuln") {
 		t.Error("vulnerability job omits make vuln")
 	}
@@ -3949,5 +3978,190 @@ func TestToolingSessionReplacementPartitionDisjoint(t *testing.T) {
 	}
 	if strings.Count(string(data), `-run "${replacement_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-run "${jit_boundary_storage_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-run "${jit_boundary_expiry_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-run "${jit_boundary_admission_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-run "${jit_boundary_physical_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-run "${jit_boundary_regex}" -skip "${jit_boundary_heavy_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-skip "${non_paired_skip_regex}" ./livecanary`) != 1 {
 		t.Fatal("replacement partition not consumed exactly once")
+	}
+}
+
+// Exercise the real checker with an inert recording Go. No inherited behavioral
+// suite runs here; argv and owned helper lifetime are the observable contract.
+func toolingG01ProfileCalls(t *testing.T, profile, module, fail string) ([]string, error) {
+	t.Helper()
+	root := toolingFixture(t)
+	log := filepath.Join(root, "profile.log")
+	toolingFile(t, root, "recording go", `#!/bin/sh
+set -eu
+printf '%s\t%s\t' "$GOTOOLCHAIN" "${G01_PHASE_HELPER_DIR:-}" >> "$PROFILE_LOG"
+printf '%s\t' "$@" >> "$PROFILE_LOG"
+printf '\n' >> "$PROFILE_LOG"
+case "$*" in
+ *'TestExperimentalPrepareCommandHelpers$'*)
+  test -d "$G01_PHASE_HELPER_DIR"
+  test "$G01_PHASE_GO" = "$0"
+  test "$G01_PHASE_CONTROLLER_TEST_BINARY" = "$G01_PHASE_HELPER_DIR/controller.test"
+  test "$G01_PHASE_BROKER_TEST_BINARY" = "$G01_PHASE_HELPER_DIR/broker.test"
+  case "$(LC_ALL=C ls -ld "$G01_PHASE_HELPER_DIR")" in drwx------*) ;; *) exit 38;; esac
+  printf '#!/bin/sh\nexit 0\n' > "$G01_PHASE_CONTROLLER_TEST_BINARY"
+  cp "$G01_PHASE_CONTROLLER_TEST_BINARY" "$G01_PHASE_BROKER_TEST_BINARY"
+  chmod 0700 "$G01_PHASE_CONTROLLER_TEST_BINARY" "$G01_PHASE_BROKER_TEST_BINARY"
+  ;;
+ *'-tags=g01_pair_fixture'*)
+  test -x "$G01_PHASE_CONTROLLER_TEST_BINARY"
+  test -x "$G01_PHASE_BROKER_TEST_BINARY"
+  ;;
+esac
+if [ -n "$PROFILE_FAIL" ] && [ "$*" = "$PROFILE_FAIL" ]; then exit 37; fi
+`, 0700)
+	out, runErr := toolingRun(t, root, []string{
+		"GO=" + filepath.Join(root, "recording go"), "PROFILE_LOG=" + log,
+		"PROFILE_FAIL=" + fail, "OFFLINE_EXPERIMENT_PROFILE=" + profile,
+		"OFFLINE_EXPERIMENT_MODULE=" + module,
+	}, "bash", "scripts/check-offline-experiments.sh")
+	data, err := os.ReadFile(log)
+	if os.IsNotExist(err) && runErr != nil {
+		return nil, runErr
+	}
+	if err != nil {
+		t.Fatalf("profile log: %v output=%s", err, out)
+	}
+	var calls []string
+	prepDir := ""
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		parts := strings.Split(strings.TrimRight(line, "\t"), "\t")
+		if len(parts) < 3 || parts[0] != "go1.27.3" {
+			t.Fatalf("unbounded/unpinned profile call %q", line)
+		}
+		if parts[1] != "" {
+			if prepDir != "" && prepDir != parts[1] {
+				t.Fatal("profile crossed helper directories")
+			}
+			prepDir = parts[1]
+		}
+		calls = append(calls, strings.Join(parts[2:], "\t"))
+	}
+	if prepDir != "" {
+		if _, err := os.Stat(prepDir); !os.IsNotExist(err) {
+			t.Fatalf("profile left owned helper directory %s", prepDir)
+		}
+		t.Logf("profile=%s cleaned owned helper directory %s", profile, prepDir)
+	}
+	return calls, runErr
+}
+
+func toolingG01ProfilePreparation(call string) bool {
+	return strings.Contains(call, "\t^TestExperimentalPrepareCommandHelpers$\t")
+}
+
+func TestToolingG01ProfileRouting(t *testing.T) {
+	profiles := map[string][]string{}
+	for _, profile := range []string{"", "all", "core", "jit"} {
+		calls, err := toolingG01ProfileCalls(t, profile, "experiments/g01-scaleset", "")
+		if err != nil {
+			t.Fatalf("profile %q failed: %v", profile, err)
+		}
+		prep := 0
+		for _, call := range calls {
+			if toolingG01ProfilePreparation(call) {
+				prep++
+				continue
+			}
+			profiles[profile] = append(profiles[profile], call)
+		}
+		if prep != 1 {
+			t.Fatalf("profile %q prepares helpers %d times", profile, prep)
+		}
+		t.Logf("profile=%q behavioral argv (%d):\n%s", profile, len(profiles[profile]), strings.Join(profiles[profile], "\n"))
+	}
+	if !toolingSameNames(profiles[""], profiles["all"]) {
+		t.Fatal("default no longer executes the complete all profile")
+	}
+	union := append(append([]string{}, profiles["core"]...), profiles["jit"]...)
+	if !toolingSameNames(profiles["all"], union) {
+		t.Error("core+jit behavioral command multiset differs from all")
+	}
+	if len(profiles["jit"]) != 5 {
+		t.Errorf("jit has %d behavioral calls, want exactly five", len(profiles["jit"]))
+	}
+	for profile, calls := range profiles {
+		for _, call := range calls {
+			jit := strings.Contains(call, "\t^TestJITBoundary")
+			if profile == "jit" && (!jit || !strings.Contains(call, "-timeout=120s\t-tags=g01_pair_fixture\t")) || profile == "core" && jit {
+				t.Errorf("misrouted %s command %q", profile, call)
+			}
+		}
+	}
+	// Name discovery compiles/lists current tagged tests without executing them.
+	// Include future family members and Example/Fuzz names to guard complements.
+	names := toolingListLivecanary(t, "^Test")
+	names = append(names, "TestJITBoundaryFuture", "TestSessionReplacementFuture", "TestPairedTerminalFuture", "TestFuture", "ExampleFuture", "FuzzFuture")
+	for _, name := range names {
+		if name == "TestExperimentalPrepareCommandHelpers" {
+			continue // Independent setup; also validates provenance in the remainder.
+		}
+		counts := map[string]int{}
+		for _, profile := range []string{"core", "jit"} {
+			for _, call := range profiles[profile] {
+				args := strings.Split(call, "\t")
+				if len(args) == 0 || args[0] != "test" || !toolingContainsString(args, "-tags=g01_pair_fixture") {
+					continue
+				}
+				run, skip := ".", "^$"
+				for i := 0; i+1 < len(args); i++ {
+					if args[i] == "-run" {
+						run = args[i+1]
+					}
+					if args[i] == "-skip" {
+						skip = args[i+1]
+					}
+				}
+				if regexp.MustCompile(run).MatchString(name) && !regexp.MustCompile(skip).MatchString(name) {
+					counts[profile]++
+				}
+			}
+		}
+		want := "core"
+		if strings.HasPrefix(name, "TestJITBoundary") {
+			want = "jit"
+		}
+		if counts[want] != 1 || counts["core"]+counts["jit"] != 1 {
+			t.Errorf("tagged name %s routes %v, want once in %s", name, counts, want)
+		}
+	}
+	t.Logf("routed %d current/synthetic tagged names", len(names))
+}
+
+func TestToolingG01ProfileRejectsBeforeGo(t *testing.T) {
+	for _, profile := range []string{"unknown", "core", "jit"} {
+		for _, module := range []string{"", "experiments/g01-scaleset", "experiments/g02-auth", "experiments/r1-credentials", "unsupported"} {
+			if profile != "unknown" && module == "experiments/g01-scaleset" {
+				continue
+			}
+			calls, err := toolingG01ProfileCalls(t, profile, module, "")
+			if err == nil || len(calls) != 0 {
+				t.Errorf("profile=%q module=%q: err=%v calls=%v; want rejection before Go", profile, module, err, calls)
+			}
+		}
+	}
+}
+
+func TestToolingG01ProfileFailuresCleanUp(t *testing.T) {
+	for _, profile := range []string{"core", "jit"} {
+		calls, err := toolingG01ProfileCalls(t, profile, "experiments/g01-scaleset", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Every call after helper allocation, including preparation and vet, must
+		// stop the checker immediately and remove only its owned helper pair.
+		prepared := false
+		for i, call := range calls {
+			prepared = prepared || toolingG01ProfilePreparation(call)
+			if !prepared {
+				continue
+			}
+			fail := strings.TrimSpace(strings.ReplaceAll(call, "\t", " "))
+			got, err := toolingG01ProfileCalls(t, profile, "experiments/g01-scaleset", fail)
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 37 || len(got) != i+1 {
+				t.Fatalf("%s call %d failure: err=%v count=%d want=%d", profile, i, err, len(got), i+1)
+			}
+		}
 	}
 }
