@@ -110,6 +110,7 @@ func controllerEventRef(identity controllerJournalIdentity, e Event) controllerR
 	return controllerRecordRef{e.Sequence, hex.EncodeToString(h.Sum(nil))}
 }
 func cloneEvent(e Event) Event {
+	e.JITBoundary = cloneJITBoundary(e.JITBoundary)
 	e.Replacement = cloneReplacement(e.Replacement)
 	if e.ControllerHandoff != nil {
 		x := *e.ControllerHandoff
@@ -163,6 +164,9 @@ func (j *FileJournal) appendRecord(e Event) (controllerRecordRef, error) {
 // appendStored is called under mu. It also supports authority renewal before
 // the admission claim is opened; that path returns no domain-bound reference.
 func (j *FileJournal) appendStored(e Event) (Event, error) {
+	if e.JITBoundary != nil && !j.jitBoundaryWriting {
+		return Event{}, ErrJournal
+	}
 	if j.writeFailed || !validEvent(e) {
 		return Event{}, ErrJournal
 	}
@@ -174,6 +178,9 @@ func (j *FileJournal) appendStored(e Event) (Event, error) {
 	}
 	e = cloneEvent(e)
 	e.Sequence = len(j.events) + 1
+	if err := j.replayJITBoundary(append(slices.Clone(j.events), e)); err != nil {
+		return Event{}, err
+	}
 	if e.Replacement != nil || (e.ControllerHandoff != nil && e.ControllerHandoff.Phase == replacementPhase) || controllerPhaseConsumed(j.events, replacementPhase) {
 		if err := j.replayReplacement(append(slices.Clone(j.events), e)); err != nil {
 			return Event{}, err

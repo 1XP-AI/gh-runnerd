@@ -42,7 +42,7 @@ var brokerWorkflow = regexp.MustCompile(`^\.github/workflows/[a-zA-Z0-9_-]+\.ya?
 
 func (c controllerApproval) needsVerification() bool {
 	return slices.ContainsFunc(c.Phases, func(phase string) bool {
-		return phase == "before-ack" || phase == "after-ack" || phase == "before-acquire" || phase == "acquire-loss" || phase == "drain" || phase == "session-replacement"
+		return phase == "before-ack" || phase == "after-ack" || phase == "before-acquire" || phase == "acquire-loss" || phase == "drain" || phase == "session-replacement" || phase == "before-jit"
 	})
 }
 func (c controllerApproval) validate(a BrokerApproval, now time.Time) error {

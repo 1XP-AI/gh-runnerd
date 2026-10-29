@@ -134,7 +134,7 @@ func runControllerExperimentOwned(parent context.Context, files PairedTerminalFi
 	if phase == "create" {
 		return runControllerProcessHandoffCreate(ctx, j, snap.raw, owned[0], owned[1], selected.policy.Source, selected.workflow, selected.issuer, time.Now, factory)
 	}
-	if phase == replacementPhase {
+	if phase == replacementPhase || jitBoundaryPhase(phase) {
 		ctx = context.WithValue(ctx, replacementApprovalGuardKey{}, func() error {
 			var current Approval
 			live, err := readPairedApproval(files.ControllerApprovalPath, &current, DecodeStrict)
@@ -143,6 +143,9 @@ func runControllerExperimentOwned(parent context.Context, files PairedTerminalFi
 			}
 			return nil
 		})
+		if jitBoundaryPhase(phase) {
+			ctx = context.WithValue(ctx, jitBoundaryGuardKey{}, ctx.Value(replacementApprovalGuardKey{}))
+		}
 	}
 	var paired *PairedTerminalFiles
 	if mode == "paired-terminal" {

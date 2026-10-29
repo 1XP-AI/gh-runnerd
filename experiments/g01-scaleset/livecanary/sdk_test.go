@@ -16,7 +16,11 @@ import (
 )
 
 func credentials(a Approval) Credentials {
-	return Credentials{InstallationToken: "synthetic-installation-token", VerificationToken: "synthetic-actions-read-token", AppID: a.AppID, InstallationID: a.InstallationID, Organization: a.Organization, ExpiresAt: time.Now().Add(time.Hour), SelfHostedRunners: "write", Metadata: "read"}
+	c := Credentials{ManagementScope: a.ManagementScope, InstallationToken: "synthetic-installation-token", VerificationToken: "synthetic-actions-read-token", AppID: a.AppID, InstallationID: a.InstallationID, Organization: a.Organization, ExpiresAt: time.Now().Add(time.Hour), SelfHostedRunners: "write", Metadata: "read"}
+	if a.ManagementScope == organizationOnlyManagementScope {
+		c.Metadata = ""
+	}
+	return c
 }
 
 func TestAuthoritySplitAndPolicyRejection(t *testing.T) {

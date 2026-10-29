@@ -9,7 +9,13 @@ default_handoff_test_regex='^TestControllerHandoff'
 default_heavy_and_handoff_skip_regex='^Test(BaselineStatisticsPresenceAndEligibility|ControllerHandoff.*)$'
 paired_collection_regex='^TestPaired'
 replacement_regex='^TestSessionReplacement'
-non_paired_skip_regex='^Test(Paired|SessionReplacement)'
+jit_boundary_regex='^TestJITBoundary'
+jit_boundary_storage_regex='^TestJITBoundaryStorageAndCancellationEveryAppend$'
+jit_boundary_expiry_regex='^TestJITBoundaryExpiryAtEveryAppend$'
+jit_boundary_admission_regex='^TestJITBoundary(PreparationRequiresOriginalFreshCreate|AtomicPrefixBeforeCredentialInput|ConcurrentConsumesOnce|HistoryCannotResumeOrRenew|StrictJournalSchemaAndRawReferences|ProofCannotCrossOpen|DirectRunAndCredentialShapes|CloneOwnsNestedPayload)$'
+jit_boundary_physical_regex='^TestJITBoundaryPhysicalMutationsStop$'
+jit_boundary_heavy_regex='^TestJITBoundary(StorageAndCancellationEveryAppend|ExpiryAtEveryAppend|PreparationRequiresOriginalFreshCreate|AtomicPrefixBeforeCredentialInput|ConcurrentConsumesOnce|HistoryCannotResumeOrRenew|StrictJournalSchemaAndRawReferences|ProofCannotCrossOpen|DirectRunAndCredentialShapes|CloneOwnsNestedPayload|PhysicalMutationsStop)$'
+non_paired_skip_regex='^Test(Paired|SessionReplacement|JITBoundary)'
 storage_regex='^TestPairedTerminal(Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$'
 storage_journal_regex='^TestPairedTerminalPostIntentJournalIdentity$'
 terminal_heavy_regex='^TestPairedTerminal(FinalResultCapacity|PendingChildCapacity|EligibilityUsesFreshExactFacts|CapturedAcknowledgementCancellation|MissingAcknowledgementsAndPostchecks)$'
@@ -99,7 +105,7 @@ for module_dir in "${selected_modules[@]}"; do
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -tags=g01_live,g01_worker ./cmd/g01-live ./cmd/g01-worker
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" vet -tags=g01_live,g01_worker ./cmd/g01-live ./cmd/g01-worker
 			# Keep the non-terminal collection/listener tests exhaustive and disjoint:
-			# paired collection, replacement, then the non-paired remainder. Terminal coverage
+			# paired collection, replacement, JIT boundary, then the non-paired remainder. Terminal coverage
 			# is four complementary 120-second partitions: the five heavy names,
 			# the remaining TestPairedTerminal tests, storage journal identity,
 			# and the other storage names. Keep the storage union unchanged.
@@ -118,8 +124,13 @@ for module_dir in "${selected_modules[@]}"; do
             GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -tags=g01_pair_fixture -run '^TestExperimentalPrepareCommandHelpers$' ./livecanary
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run "${paired_collection_regex}" -skip '^TestPairedTerminal' ./livecanary
 			# Keep the new storage/expiry-heavy family out of the already bounded
-			# non-paired remainder; the two selectors are exhaustive and disjoint.
+			# non-paired remainder; the finite family selectors remain disjoint.
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run "${replacement_regex}" ./livecanary
+			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run "${jit_boundary_storage_regex}" ./livecanary
+			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run "${jit_boundary_expiry_regex}" ./livecanary
+			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run "${jit_boundary_admission_regex}" ./livecanary
+			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run "${jit_boundary_physical_regex}" ./livecanary
+			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run "${jit_boundary_regex}" -skip "${jit_boundary_heavy_regex}" ./livecanary
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -skip "${non_paired_skip_regex}" ./livecanary
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run "${terminal_heavy_regex}" ./livecanary
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run '^TestPairedTerminal' -skip "${terminal_remainder_skip_regex}" ./livecanary

@@ -192,13 +192,25 @@ func (j *FileJournal) consumeControllerHandoff(approval Approval, consumption co
 // the fsynced one-shot nonce append. Callers may not pass a timestamp captured
 // before waiting for this critical section.
 func (j *FileJournal) consumeControllerHandoffAt(ctx context.Context, approval Approval, consumption controllerHandoffConsumption, deadline time.Time, now func() time.Time, validate func(time.Time) bool) (Event, error) {
-	if now == nil || validate == nil {
+	if ctx == nil || now == nil || validate == nil {
 		return Event{}, ErrJournal
 	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	appendNow := now()
 	event := Event{Kind: "controller-handoff-consumed", ControllerHandoff: &consumption}
+	if jitBoundaryPhase(consumption.Phase) {
+		raw, _ := ctx.Value(jitBoundarySnapshotKey{}).(string)
+		if raw != consumption.ApprovalSHA256 || !j.jitBoundaryPhysicalLocked() {
+			return Event{}, ErrJournal
+		}
+		if _, e := jitBoundaryCreatePrefix(approval, j, raw, consumption.Phase, j.events); e != nil {
+			return Event{}, ErrJournal
+		}
+		if guard, _ := ctx.Value(jitBoundaryGuardKey{}).(func() error); guard != nil && guard() != nil {
+			return Event{}, ErrJournal
+		}
+	}
 	if consumption.Phase == replacementPhase {
 		if !j.replacementPhysicalHistoryLocked() {
 			return Event{}, ErrJournal
@@ -412,6 +424,18 @@ func consumeControllerHandoffWithProof(ctx context.Context, journal *FileJournal
 	postAppendNow := now()
 	if ctx.Err() != nil || !effectiveDeadline.After(postAppendNow) || !controllerHandoffActive(ctx, approval.ExpiresAt, receipt.ExpiresAt, postAppendNow) {
 		return nil, zeroProof, ErrApproval
+	}
+	if jitBoundaryPhase(phase) {
+		journal.mu.Lock()
+		_, prefixErr := jitBoundaryCreatePrefix(approval, journal, request.ControllerApprovalSHA256, phase, journal.events[:min(7, len(journal.events))])
+		valid := prefixErr == nil && len(journal.events) == 8 && reflect.DeepEqual(journal.events[7], consumedEvent) && journal.jitBoundaryPhysicalLocked()
+		if guard, _ := ctx.Value(jitBoundaryGuardKey{}).(func() error); guard != nil && guard() != nil {
+			valid = false
+		}
+		journal.mu.Unlock()
+		if !valid || !controllerHandoffActive(ctx, approval.ExpiresAt, receipt.ExpiresAt, now()) || !effectiveDeadline.After(now()) {
+			return nil, zeroProof, ErrJournal
+		}
 	}
 	// The durable nonce fence is committed before credentials are read, but the
 	// journal lifecycle lease is deliberately not held across that input.

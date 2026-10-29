@@ -80,12 +80,12 @@ func newBaselineFixtureWithCreate(t *testing.T, change func(string, any) any, in
 	var server *httptest.Server
 	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.requests.Add(1)
-		_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, 1<<20))
-		_ = r.Body.Close()
-		w.Header().Set("Content-Type", "application/json")
 		if f.beforeRequest != nil && f.beforeRequest(w, r) {
 			return
 		}
+		_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, 1<<20))
+		_ = r.Body.Close()
+		w.Header().Set("Content-Type", "application/json")
 		stage := ""
 		var body any
 		switch {

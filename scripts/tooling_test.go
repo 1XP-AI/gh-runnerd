@@ -2192,7 +2192,7 @@ func TestToolingTaggedPairFixturePartitionsRun(t *testing.T) {
 	terminalFuturePath := "experiments/g01-scaleset/livecanary/pair_fixture_terminal_future_regression_test.go"
 	storagePath := "experiments/g01-scaleset/livecanary/pair_fixture_storage_regression_test.go"
 	storageJournalPath := "experiments/g01-scaleset/livecanary/pair_fixture_storage_journal_regression_test.go"
-	remainingCollectionInvocation := "go1.27.3\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -skip ^Test(Paired|SessionReplacement) ./livecanary"
+	remainingCollectionInvocation := "go1.27.3\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -skip ^Test(Paired|SessionReplacement|JITBoundary) ./livecanary"
 	taggedPositiveSource := func(testName, marker string) string {
 		return `//go:build g01_pair_fixture && !g01_live && !g01_worker
 
@@ -3783,7 +3783,32 @@ case "$*" in
   test -x "$G01_PHASE_BROKER_TEST_BINARY"
   printf 'replacement %s\n' "$G01_PHASE_HELPER_DIR" >> "$PHASE_ROUTE_LOG"
   ;;
- *'-tags=g01_pair_fixture -skip ^Test(Paired|SessionReplacement) ./livecanary'*)
+ *'-tags=g01_pair_fixture -run ^TestJITBoundaryStorageAndCancellationEveryAppend$ ./livecanary'*)
+  test -x "$G01_PHASE_CONTROLLER_TEST_BINARY"
+  test -x "$G01_PHASE_BROKER_TEST_BINARY"
+  printf 'jit-storage %s\n' "$G01_PHASE_HELPER_DIR" >> "$PHASE_ROUTE_LOG"
+  ;;
+ *'-tags=g01_pair_fixture -run ^TestJITBoundaryExpiryAtEveryAppend$ ./livecanary'*)
+  test -x "$G01_PHASE_CONTROLLER_TEST_BINARY"
+  test -x "$G01_PHASE_BROKER_TEST_BINARY"
+  printf 'jit-expiry %s\n' "$G01_PHASE_HELPER_DIR" >> "$PHASE_ROUTE_LOG"
+  ;;
+ *'-tags=g01_pair_fixture -run ^TestJITBoundary(PreparationRequiresOriginalFreshCreate|AtomicPrefixBeforeCredentialInput|ConcurrentConsumesOnce|HistoryCannotResumeOrRenew|StrictJournalSchemaAndRawReferences|ProofCannotCrossOpen|DirectRunAndCredentialShapes|CloneOwnsNestedPayload)$ ./livecanary'*)
+  test -x "$G01_PHASE_CONTROLLER_TEST_BINARY"
+  test -x "$G01_PHASE_BROKER_TEST_BINARY"
+  printf 'jit-admission %s\n' "$G01_PHASE_HELPER_DIR" >> "$PHASE_ROUTE_LOG"
+  ;;
+ *'-tags=g01_pair_fixture -run ^TestJITBoundaryPhysicalMutationsStop$ ./livecanary'*)
+  test -x "$G01_PHASE_CONTROLLER_TEST_BINARY"
+  test -x "$G01_PHASE_BROKER_TEST_BINARY"
+  printf 'jit-physical %s\n' "$G01_PHASE_HELPER_DIR" >> "$PHASE_ROUTE_LOG"
+  ;;
+ *'-tags=g01_pair_fixture -run ^TestJITBoundary -skip ^TestJITBoundary(StorageAndCancellationEveryAppend|ExpiryAtEveryAppend|PreparationRequiresOriginalFreshCreate|AtomicPrefixBeforeCredentialInput|ConcurrentConsumesOnce|HistoryCannotResumeOrRenew|StrictJournalSchemaAndRawReferences|ProofCannotCrossOpen|DirectRunAndCredentialShapes|CloneOwnsNestedPayload|PhysicalMutationsStop)$ ./livecanary'*)
+  test -x "$G01_PHASE_CONTROLLER_TEST_BINARY"
+  test -x "$G01_PHASE_BROKER_TEST_BINARY"
+  printf 'jit-boundary %s\n' "$G01_PHASE_HELPER_DIR" >> "$PHASE_ROUTE_LOG"
+  ;;
+ *'-tags=g01_pair_fixture -skip ^Test(Paired|SessionReplacement|JITBoundary) ./livecanary'*)
   if [ ! -x "${G01_PHASE_CONTROLLER_TEST_BINARY:-}" ] || [ ! -x "${G01_PHASE_BROKER_TEST_BINARY:-}" ]; then
    printf 'missing-current-source-command-helpers\n' >&2
    exit 31
@@ -3806,7 +3831,7 @@ exit 0
 				t.Fatalf("no helper preparation: %v output=%s", e, output)
 			}
 			lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-			want := 3
+			want := 8
 			if failPrep {
 				want = 1
 			}
@@ -3817,7 +3842,7 @@ exit 0
 			if _, e := os.Stat(dir); !os.IsNotExist(e) {
 				t.Fatal("owned helper directory survived completion")
 			}
-			if !failPrep && (lines[1] != "replacement "+dir || lines[2] != "consume "+dir) {
+			if !failPrep && (lines[1] != "replacement "+dir || lines[2] != "jit-storage "+dir || lines[3] != "jit-expiry "+dir || lines[4] != "jit-admission "+dir || lines[5] != "jit-physical "+dir || lines[6] != "jit-boundary "+dir || lines[7] != "consume "+dir) {
 				t.Fatal("fixture partition consumed different helpers")
 			}
 		})
@@ -3830,11 +3855,32 @@ func TestToolingSessionReplacementPartitionDisjoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	separate := regexp.MustCompile(toolingScriptAssignment(t, string(data), "replacement_regex"))
+	jit := regexp.MustCompile(toolingScriptAssignment(t, string(data), "jit_boundary_regex"))
+	storage := regexp.MustCompile(toolingScriptAssignment(t, string(data), "jit_boundary_storage_regex"))
+	expiry := regexp.MustCompile(toolingScriptAssignment(t, string(data), "jit_boundary_expiry_regex"))
+	admission := regexp.MustCompile(toolingScriptAssignment(t, string(data), "jit_boundary_admission_regex"))
+	physical := regexp.MustCompile(toolingScriptAssignment(t, string(data), "jit_boundary_physical_regex"))
+	heavy := regexp.MustCompile(toolingScriptAssignment(t, string(data), "jit_boundary_heavy_regex"))
 	skip := regexp.MustCompile(toolingScriptAssignment(t, string(data), "non_paired_skip_regex"))
 	paired := regexp.MustCompile(toolingScriptAssignment(t, string(data), "paired_collection_regex"))
-	for _, name := range []string{"TestSessionReplacementProtocol", "TestSessionReplacementFutureNegative", "TestExperimentalActualCommandBrokerReceiver", "TestPairedTerminalFutureCoverage", "ExampleFuture", "FuzzFuture"} {
+	for _, name := range []string{"TestJITBoundaryPhysicalMutationsStop", "TestJITBoundaryPreparationRequiresOriginalFreshCreate", "TestJITBoundaryStrictJournalSchemaAndRawReferences", "TestJITBoundaryStorageAndCancellationEveryAppend", "TestJITBoundaryExpiryAtEveryAppend", "TestJITBoundaryProtocol", "TestJITBoundaryFutureNegative", "TestSessionReplacementProtocol", "TestSessionReplacementFutureNegative", "TestExperimentalActualCommandBrokerReceiver", "TestPairedTerminalFutureCoverage", "ExampleFuture", "FuzzFuture"} {
 		count := 0
 		if separate.MatchString(name) {
+			count++
+		}
+		if jit.MatchString(name) && !heavy.MatchString(name) {
+			count++
+		}
+		if storage.MatchString(name) {
+			count++
+		}
+		if expiry.MatchString(name) {
+			count++
+		}
+		if admission.MatchString(name) {
+			count++
+		}
+		if physical.MatchString(name) {
 			count++
 		}
 		if !skip.MatchString(name) {
@@ -3847,7 +3893,7 @@ func TestToolingSessionReplacementPartitionDisjoint(t *testing.T) {
 			t.Fatalf("%s covered %d times", name, count)
 		}
 	}
-	if strings.Count(string(data), `-run "${replacement_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-skip "${non_paired_skip_regex}" ./livecanary`) != 1 {
+	if strings.Count(string(data), `-run "${replacement_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-run "${jit_boundary_storage_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-run "${jit_boundary_expiry_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-run "${jit_boundary_admission_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-run "${jit_boundary_physical_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-run "${jit_boundary_regex}" -skip "${jit_boundary_heavy_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-skip "${non_paired_skip_regex}" ./livecanary`) != 1 {
 		t.Fatal("replacement partition not consumed exactly once")
 	}
 }

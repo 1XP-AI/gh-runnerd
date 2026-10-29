@@ -19,24 +19,25 @@ import (
 // single locked inode is retained even after crashes. A damaged tail is rejected,
 // never truncated, repaired or interpreted as permission to retry.
 type FileJournal struct {
-	claim         *admissionClaim
-	root          *os.Root
-	directory     string
-	directoryInfo os.FileInfo
-	fileInfo      os.FileInfo
-	life          sync.Mutex
-	closed        bool
-	ownership     string
-	authority     phaseAuthority
-	file          *os.File
-	events        []Event
-	eventBytes    [][]byte // exact stored event lines, including newline
-	headerBytes   []byte
-	mu            sync.Mutex
-	approval      Approval
-	writeFailed   bool
-	syncFile      func(*os.File) error // nil in production; tests gate a real file fsync
-	writeFile     func(*os.File, []byte) (int, error)
+	claim              *admissionClaim
+	root               *os.Root
+	directory          string
+	directoryInfo      os.FileInfo
+	fileInfo           os.FileInfo
+	life               sync.Mutex
+	closed             bool
+	ownership          string
+	authority          phaseAuthority
+	file               *os.File
+	events             []Event
+	eventBytes         [][]byte // exact stored event lines, including newline
+	headerBytes        []byte
+	mu                 sync.Mutex
+	jitBoundaryWriting bool // mu-held, private same-invocation append authority
+	approval           Approval
+	writeFailed        bool
+	syncFile           func(*os.File) error // nil in production; tests gate a real file fsync
+	writeFile          func(*os.File, []byte) (int, error)
 }
 
 func privateFile(info os.FileInfo, mode os.FileMode) bool {
@@ -216,6 +217,9 @@ func openJournalAtAdmission(directory string, a Approval, admissionDirectory str
 			if DecodeStrict(line, &e) != nil || e.Sequence != len(j.events)+1 || !validEvent(e) {
 				return nil, ErrJournal
 			}
+			if e.JITBoundary != nil && len(line) > jitBoundaryRecordLimit {
+				return nil, ErrJournal
+			}
 			if e.Kind == "authority" {
 				if !e.Authority.matchesOwnership(a) || !e.Authority.renews(j.authority) {
 					return nil, ErrJournal
@@ -230,7 +234,7 @@ func openJournalAtAdmission(directory string, a Approval, admissionDirectory str
 		}
 	}
 	if incoming.Digest != j.authority.Digest {
-		if slices.Contains(a.Phases, replacementPhase) {
+		if slices.Contains(a.Phases, replacementPhase) || slices.Contains(a.Phases, beforeJITPhase) || slices.ContainsFunc(j.events, func(e Event) bool { return e.JITBoundary != nil }) {
 			return nil, ErrJournal
 		}
 		if !incoming.renews(j.authority) {
@@ -271,12 +275,19 @@ func openJournalAtAdmission(directory string, a Approval, admissionDirectory str
 		_ = claim.close()
 		return nil, err
 	}
+	if err = j.replayJITBoundary(j.events); err != nil {
+		_ = claim.close()
+		return nil, err
+	}
 	rootKept = true
 	ok = true
 	return j, nil
 }
 
 func validEvent(e Event) bool {
+	if e.JITBoundary != nil || e.Kind == "jit-boundary" {
+		return validJITBoundaryShape(e)
+	}
 	if e.Replacement != nil || e.Kind == "session-replacement" {
 		return validReplacementShape(e)
 	}

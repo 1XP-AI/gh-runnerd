@@ -36,7 +36,7 @@ func pairedProofFromContext(ctx context.Context) *controllerHandoffProof {
 type experimentalPhaseAdmissionKey struct{}
 
 func phaseHandoffEligibleHistory(a Approval, phase string, events []Event) bool {
-	if phase == replacementPhase {
+	if phase == replacementPhase || jitBoundaryPhase(phase) {
 		return len(events) == 7
 	}
 	if controllerPhaseConsumed(events, phase) {
