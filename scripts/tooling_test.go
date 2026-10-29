@@ -2275,7 +2275,7 @@ func TestToolingTaggedPairFixturePartitionsRun(t *testing.T) {
 	terminalFuturePath := "experiments/g01-scaleset/livecanary/pair_fixture_terminal_future_regression_test.go"
 	storagePath := "experiments/g01-scaleset/livecanary/pair_fixture_storage_regression_test.go"
 	storageJournalPath := "experiments/g01-scaleset/livecanary/pair_fixture_storage_journal_regression_test.go"
-	remainingCollectionInvocation := "go1.27.3\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -skip ^Test(Paired|SessionReplacement|JITBoundary) ./livecanary"
+	remainingCollectionInvocation := "go1.27.3\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -skip ^Test(Paired|SessionReplacement|JITBoundary|ExperimentalAcquireLossCommand$) ./livecanary"
 	taggedPositiveSource := func(testName, marker string) string {
 		return `//go:build g01_pair_fixture && !g01_live && !g01_worker
 
@@ -3866,6 +3866,11 @@ case "$*" in
   test -x "$G01_PHASE_BROKER_TEST_BINARY"
   printf 'replacement %s\n' "$G01_PHASE_HELPER_DIR" >> "$PHASE_ROUTE_LOG"
   ;;
+ *'-tags=g01_pair_fixture -run ^TestExperimentalAcquireLossCommand$ ./livecanary'*)
+  test -x "$G01_PHASE_CONTROLLER_TEST_BINARY"
+  test -x "$G01_PHASE_BROKER_TEST_BINARY"
+  printf 'acquire-loss %s\n' "$G01_PHASE_HELPER_DIR" >> "$PHASE_ROUTE_LOG"
+  ;;
  *'-tags=g01_pair_fixture -run ^TestJITBoundaryStorageAndCancellationEveryAppend$ ./livecanary'*)
   test -x "$G01_PHASE_CONTROLLER_TEST_BINARY"
   test -x "$G01_PHASE_BROKER_TEST_BINARY"
@@ -3891,7 +3896,7 @@ case "$*" in
   test -x "$G01_PHASE_BROKER_TEST_BINARY"
   printf 'jit-boundary %s\n' "$G01_PHASE_HELPER_DIR" >> "$PHASE_ROUTE_LOG"
   ;;
- *'-tags=g01_pair_fixture -skip ^Test(Paired|SessionReplacement|JITBoundary) ./livecanary'*)
+ *'-tags=g01_pair_fixture -skip ^Test(Paired|SessionReplacement|JITBoundary|ExperimentalAcquireLossCommand$) ./livecanary'*)
   if [ ! -x "${G01_PHASE_CONTROLLER_TEST_BINARY:-}" ] || [ ! -x "${G01_PHASE_BROKER_TEST_BINARY:-}" ]; then
    printf 'missing-current-source-command-helpers\n' >&2
    exit 31
@@ -3914,7 +3919,7 @@ exit 0
 				t.Fatalf("no helper preparation: %v output=%s", e, output)
 			}
 			lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-			want := 8
+			want := 9
 			if failPrep {
 				want = 1
 			}
@@ -3925,7 +3930,7 @@ exit 0
 			if _, e := os.Stat(dir); !os.IsNotExist(e) {
 				t.Fatal("owned helper directory survived completion")
 			}
-			if !failPrep && (lines[1] != "replacement "+dir || lines[2] != "jit-storage "+dir || lines[3] != "jit-expiry "+dir || lines[4] != "jit-admission "+dir || lines[5] != "jit-physical "+dir || lines[6] != "jit-boundary "+dir || lines[7] != "consume "+dir) {
+			if !failPrep && (lines[1] != "replacement "+dir || lines[2] != "acquire-loss "+dir || lines[3] != "jit-storage "+dir || lines[4] != "jit-expiry "+dir || lines[5] != "jit-admission "+dir || lines[6] != "jit-physical "+dir || lines[7] != "jit-boundary "+dir || lines[8] != "consume "+dir) {
 				t.Fatal("fixture partition consumed different helpers")
 			}
 		})
@@ -3938,6 +3943,7 @@ func TestToolingSessionReplacementPartitionDisjoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	separate := regexp.MustCompile(toolingScriptAssignment(t, string(data), "replacement_regex"))
+	acquireLoss := regexp.MustCompile(toolingScriptAssignment(t, string(data), "acquire_loss_command_regex"))
 	jit := regexp.MustCompile(toolingScriptAssignment(t, string(data), "jit_boundary_regex"))
 	storage := regexp.MustCompile(toolingScriptAssignment(t, string(data), "jit_boundary_storage_regex"))
 	expiry := regexp.MustCompile(toolingScriptAssignment(t, string(data), "jit_boundary_expiry_regex"))
@@ -3946,8 +3952,11 @@ func TestToolingSessionReplacementPartitionDisjoint(t *testing.T) {
 	heavy := regexp.MustCompile(toolingScriptAssignment(t, string(data), "jit_boundary_heavy_regex"))
 	skip := regexp.MustCompile(toolingScriptAssignment(t, string(data), "non_paired_skip_regex"))
 	paired := regexp.MustCompile(toolingScriptAssignment(t, string(data), "paired_collection_regex"))
-	for _, name := range []string{"TestJITBoundaryPhysicalMutationsStop", "TestJITBoundaryPreparationRequiresOriginalFreshCreate", "TestJITBoundaryStrictJournalSchemaAndRawReferences", "TestJITBoundaryStorageAndCancellationEveryAppend", "TestJITBoundaryExpiryAtEveryAppend", "TestJITBoundaryProtocol", "TestJITBoundaryFutureNegative", "TestSessionReplacementProtocol", "TestSessionReplacementFutureNegative", "TestExperimentalActualCommandBrokerReceiver", "TestPairedTerminalFutureCoverage", "ExampleFuture", "FuzzFuture"} {
+	for _, name := range []string{"TestJITBoundaryPhysicalMutationsStop", "TestJITBoundaryPreparationRequiresOriginalFreshCreate", "TestJITBoundaryStrictJournalSchemaAndRawReferences", "TestJITBoundaryStorageAndCancellationEveryAppend", "TestJITBoundaryExpiryAtEveryAppend", "TestJITBoundaryProtocol", "TestJITBoundaryFutureNegative", "TestSessionReplacementProtocol", "TestSessionReplacementFutureNegative", "TestExperimentalActualCommandBrokerReceiver", "TestExperimentalAcquireLossCommand", "TestExperimentalAcquireLossCommandFuture", "TestPairedTerminalFutureCoverage", "ExampleFuture", "FuzzFuture"} {
 		count := 0
+		if acquireLoss.MatchString(name) {
+			count++
+		}
 		if separate.MatchString(name) {
 			count++
 		}
@@ -3976,7 +3985,7 @@ func TestToolingSessionReplacementPartitionDisjoint(t *testing.T) {
 			t.Fatalf("%s covered %d times", name, count)
 		}
 	}
-	if strings.Count(string(data), `-run "${replacement_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-run "${jit_boundary_storage_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-run "${jit_boundary_expiry_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-run "${jit_boundary_admission_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-run "${jit_boundary_physical_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-run "${jit_boundary_regex}" -skip "${jit_boundary_heavy_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-skip "${non_paired_skip_regex}" ./livecanary`) != 1 {
+	if strings.Count(string(data), `-run "${acquire_loss_command_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-run "${replacement_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-run "${jit_boundary_storage_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-run "${jit_boundary_expiry_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-run "${jit_boundary_admission_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-run "${jit_boundary_physical_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-run "${jit_boundary_regex}" -skip "${jit_boundary_heavy_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-skip "${non_paired_skip_regex}" ./livecanary`) != 1 {
 		t.Fatal("replacement partition not consumed exactly once")
 	}
 }
@@ -4081,11 +4090,25 @@ func TestToolingG01ProfileRouting(t *testing.T) {
 		t.Errorf("jit has %d behavioral calls, want exactly five", len(profiles["jit"]))
 	}
 	for profile, calls := range profiles {
+		acquireLoss := 0
 		for _, call := range calls {
+			if strings.Contains(call, "\t^TestExperimentalAcquireLossCommand$\t") {
+				acquireLoss++
+				if !strings.Contains(call, "test\t-race\t-count=1\t-timeout=120s\t-tags=g01_pair_fixture\t-run\t") {
+					t.Errorf("unbounded acquire-loss command %q", call)
+				}
+			}
 			jit := strings.Contains(call, "\t^TestJITBoundary")
 			if profile == "jit" && (!jit || !strings.Contains(call, "-timeout=120s\t-tags=g01_pair_fixture\t")) || profile == "core" && jit {
 				t.Errorf("misrouted %s command %q", profile, call)
 			}
+		}
+		want := 1
+		if profile == "jit" {
+			want = 0
+		}
+		if acquireLoss != want {
+			t.Errorf("profile %q acquire-loss calls=%d want=%d", profile, acquireLoss, want)
 		}
 	}
 	// Name discovery compiles/lists current tagged tests without executing them.
@@ -4150,8 +4173,9 @@ func TestToolingG01ProfileFailuresCleanUp(t *testing.T) {
 		}
 		// Every call after helper allocation, including preparation and vet, must
 		// stop the checker immediately and remove only its owned helper pair.
-		prepared := false
+		prepared, acquireLoss := false, false
 		for i, call := range calls {
+			acquireLoss = acquireLoss || strings.Contains(call, "\t^TestExperimentalAcquireLossCommand$\t")
 			prepared = prepared || toolingG01ProfilePreparation(call)
 			if !prepared {
 				continue
@@ -4162,6 +4186,9 @@ func TestToolingG01ProfileFailuresCleanUp(t *testing.T) {
 			if !errors.As(err, &exit) || exit.ExitCode() != 37 || len(got) != i+1 {
 				t.Fatalf("%s call %d failure: err=%v count=%d want=%d", profile, i, err, len(got), i+1)
 			}
+		}
+		if acquireLoss != (profile == "core") {
+			t.Error("acquire-loss failure cleanup coverage missing or leaked into jit")
 		}
 	}
 }
