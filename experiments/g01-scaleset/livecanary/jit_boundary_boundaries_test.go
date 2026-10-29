@@ -259,24 +259,51 @@ func TestJITBoundaryExpiryAtEveryAppend(t *testing.T) {
 	for _, phase := range []string{beforeJITPhase, "jit-loss"} {
 		for target := 1; target <= len(jitBoundarySteps(phase))+2; target++ {
 			t.Run(fmt.Sprintf("%s/%02d", phase, target), func(t *testing.T) {
-				f := newJITBoundaryFixture(t, phase, "")
-				ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(2*time.Second))
-				defer cancel()
-				calls, stopped := 0, int32(-1)
-				f.base.j.syncFile = func(file *os.File) error {
-					err := file.Sync()
-					calls++
-					if calls == target {
-						stopped = f.base.requests.Load()
-						<-ctx.Done()
-					}
-					return err
-				}
-				if f.run(t, ctx) == nil || stopped < 0 || ctx.Err() != context.DeadlineExceeded || f.base.requests.Load() != stopped {
-					t.Fatal("expiry crossed physical boundary", calls, stopped, f.base.requests.Load())
-				}
+				checkJITBoundaryExpiryAtAppend(t, phase, target, 0)
 			})
 		}
+	}
+	t.Run("slow-append", func(t *testing.T) {
+		// Reproduce pre-target wall-clock exhaustion at the hosted failure's
+		// late target: hold the preceding append until 2.1 seconds after
+		// context creation, without changing context errors or the real fsync.
+		checkJITBoundaryExpiryAtAppend(t, "jit-loss", 16, 2100*time.Millisecond)
+	})
+}
+
+func checkJITBoundaryExpiryAtAppend(t *testing.T, phase string, target int, minPreTargetElapsed time.Duration) {
+	t.Helper()
+	f := newJITBoundaryFixture(t, phase, "")
+	// Allow pre-target fsync/network setup to exceed the old two-second
+	// deadline. All 31 targets plus the slow-append witness budget 96 seconds
+	// on these deadlines, leaving 24 seconds of the 120-second
+	// invocation cap for fixture setup, cleanup and scheduling overhead.
+	// This remains a finite scheduling allowance, not a flake-proof bound.
+	started := time.Now()
+	ctx, cancel := context.WithDeadline(context.Background(), started.Add(3*time.Second))
+	defer cancel()
+	calls, stopped := 0, int32(-1)
+	f.base.j.syncFile = func(file *os.File) error {
+		err := file.Sync()
+		calls++
+		if calls == target-1 && minPreTargetElapsed > 0 {
+			time.Sleep(time.Until(started.Add(minPreTargetElapsed)))
+		}
+		if calls == target {
+			stopped = f.base.requests.Load()
+			<-ctx.Done()
+		}
+		return err
+	}
+	runErr := f.run(t, ctx)
+	if stopped < 0 {
+		t.Fatalf("expiry fixture exhausted before target append: phase=%s target=%d calls=%d requests=%d deadlineExceeded=%t", phase, target, calls, f.base.requests.Load(), ctx.Err() == context.DeadlineExceeded)
+	}
+	if runErr == nil || ctx.Err() != context.DeadlineExceeded {
+		t.Fatalf("target append did not refuse after real deadline: phase=%s target=%d calls=%d refused=%t deadlineExceeded=%t", phase, target, calls, runErr != nil, ctx.Err() == context.DeadlineExceeded)
+	}
+	if f.base.requests.Load() != stopped {
+		t.Fatalf("expiry crossed physical boundary: phase=%s target=%d calls=%d stopped=%d requests=%d", phase, target, calls, stopped, f.base.requests.Load())
 	}
 }
 
