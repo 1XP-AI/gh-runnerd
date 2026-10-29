@@ -199,6 +199,18 @@ func (j *FileJournal) consumeControllerHandoffAt(ctx context.Context, approval A
 	defer j.mu.Unlock()
 	appendNow := now()
 	event := Event{Kind: "controller-handoff-consumed", ControllerHandoff: &consumption}
+	if consumption.Phase == replacementPhase {
+		if !j.replacementPhysicalHistoryLocked() {
+			return Event{}, ErrJournal
+		}
+		raw, _ := ctx.Value(replacementSnapshotKey{}).(string)
+		if raw != consumption.ApprovalSHA256 {
+			return Event{}, ErrJournal
+		}
+		if _, e := replacementCreatePrefix(approval, j, raw, j.events); e != nil {
+			return Event{}, ErrJournal
+		}
+	}
 	// A nonce identifies one transport, but the phase is the durable retry slot.
 	// This fence is under the append mutex and precedes all credential input.
 	if controllerPhaseConsumed(j.events, consumption.Phase) || (ctx != nil && ctx.Value(experimentalPhaseAdmissionKey{}) == true && !phaseHandoffEligibleHistory(approval, consumption.Phase, j.events)) {

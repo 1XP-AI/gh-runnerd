@@ -50,6 +50,7 @@ func buildRevisionFromInfo(info *debug.BuildInfo, ok bool) (string, bool) {
 var openJournalForCommand = livecanary.OpenJournal
 var pairedPrepareJournalForCommand = livecanary.PreparePairedJournal
 var prepareWorkerJournalForCommand = liveworker.PrepareJournal
+var prepareReplacementJournalForCommand = livecanary.PrepareSessionReplacementJournal
 var newSDKAPIForCommand = func(a livecanary.Approval, c livecanary.Credentials, _ string) (*livecanary.SDKAPI, error) {
 	return livecanary.NewSDKAPI(a, c)
 }
@@ -224,7 +225,13 @@ func runWithPreparationContext(ctx context.Context, args []string, in io.Reader,
 		if prepareJournal == nil {
 			return reject()
 		}
-		receipt, e := prepareJournal(*statePath, a, *phase)
+		var receipt livecanary.PreparationReceipt
+		var e error
+		if *phase == "session-replacement" {
+			receipt, e = prepareReplacementJournalForCommand(*statePath, a, *approvalPath)
+		} else {
+			receipt, e = prepareJournal(*statePath, a, *phase)
+		}
 		if e != nil {
 			return reject()
 		}

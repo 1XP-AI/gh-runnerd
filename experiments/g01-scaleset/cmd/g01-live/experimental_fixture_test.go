@@ -44,6 +44,9 @@ func TestMain(m *testing.M) {
 		if e != nil {
 			os.Exit(93)
 		}
+		prepareReplacementJournalForCommand = func(path string, a livecanary.Approval, approvalPath string) (livecanary.PreparationReceipt, error) {
+			return livecanary.PrepareSessionReplacementJournalForExperimentFixture(path, a, approvalPath, config.AdmissionDirectory)
+		}
 		os.Exit(runWithPreparation(os.Args[1:], os.Stdin, os.Stdout, func() (string, bool) { return revision, true }, func(path string, a livecanary.Approval, phase string) (livecanary.PreparationReceipt, error) {
 			return livecanary.PrepareJournalForExperimentFixture(path, a, phase, config.AdmissionDirectory)
 		}))

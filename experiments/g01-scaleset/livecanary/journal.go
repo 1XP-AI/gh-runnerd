@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/user"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -29,6 +30,8 @@ type FileJournal struct {
 	authority     phaseAuthority
 	file          *os.File
 	events        []Event
+	eventBytes    [][]byte // exact stored event lines, including newline
+	headerBytes   []byte
 	mu            sync.Mutex
 	approval      Approval
 	writeFailed   bool
@@ -186,6 +189,8 @@ func openJournalAtAdmission(directory string, a Approval, admissionDirectory str
 		if err = j.write(journalHeader{1, j.ownership, incoming}); err != nil {
 			return nil, err
 		}
+		data, _ := json.Marshal(journalHeader{1, j.ownership, incoming})
+		j.headerBytes = append(data, '\n')
 
 	} else {
 		reader := bufio.NewReader(io.LimitReader(f, 1<<20+1))
@@ -198,6 +203,7 @@ func openJournalAtAdmission(directory string, a Approval, admissionDirectory str
 			return nil, ErrJournal
 		}
 		j.authority = header.Authority
+		j.headerBytes = bytes.Clone(line)
 		for {
 			line, err = reader.ReadBytes('\n')
 			if err == io.EOF && len(line) == 0 {
@@ -217,12 +223,16 @@ func openJournalAtAdmission(directory string, a Approval, admissionDirectory str
 				j.authority = *e.Authority
 			}
 			j.events = append(j.events, e)
+			j.eventBytes = append(j.eventBytes, bytes.Clone(line))
 		}
 		if validateControllerHandoffReplay(j.events) != nil {
 			return nil, ErrJournal
 		}
 	}
 	if incoming.Digest != j.authority.Digest {
+		if slices.Contains(a.Phases, replacementPhase) {
+			return nil, ErrJournal
+		}
 		if !incoming.renews(j.authority) {
 			return nil, ErrJournal
 		}
@@ -257,12 +267,19 @@ func openJournalAtAdmission(directory string, a Approval, admissionDirectory str
 		_ = claim.close()
 		return nil, err
 	}
+	if err = j.replayReplacement(j.events); err != nil {
+		_ = claim.close()
+		return nil, err
+	}
 	rootKept = true
 	ok = true
 	return j, nil
 }
 
 func validEvent(e Event) bool {
+	if e.Replacement != nil || e.Kind == "session-replacement" {
+		return validReplacementShape(e)
+	}
 	if e.ControllerHandoff != nil || e.Kind == "controller-handoff-consumed" {
 		return validControllerHandoffEvent(e)
 	}

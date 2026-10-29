@@ -19,7 +19,10 @@ var errResponseBudget = errors.New("response body budget exceeded")
 // preserves the inspected inner TLS/host/proxy restrictions without patching
 // SDK code. Session clients inherit this guarded HTTP client.
 func withResponseBudget(transport *http.Transport, wrappers ...func(http.RoundTripper) http.RoundTripper) *http.Transport {
-	var inner http.RoundTripper = baselineRequestCaptureTransport{inner: transport}
+	return withOwnedResponseBudget(transport, nil, wrappers...)
+}
+func withOwnedResponseBudget(transport *http.Transport, replacement *replacementScope, wrappers ...func(http.RoundTripper) http.RoundTripper) *http.Transport {
+	var inner http.RoundTripper = baselineRequestCaptureTransport{inner: transport, replacement: replacement}
 	for _, wrap := range wrappers {
 		if wrap != nil {
 			inner = wrap(inner)

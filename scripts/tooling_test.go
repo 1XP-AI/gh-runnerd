@@ -25,6 +25,7 @@ const (
 	g01TerminalStorageInvocation   = "go1.27.3\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run " + g01TerminalStorageRegex + " -skip " + g01StorageJournalRegex + " ./livecanary"
 	g01LegacyStorageInvocation     = "go1.27.3\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run " + g01TerminalStorageRegex + " ./livecanary"
 	g01LegacyTerminalInvocation    = "go1.27.3\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run ^TestPairedTerminal -skip " + g01TerminalStorageRegex + " ./livecanary"
+	g01ReplacementInvocation       = "go1.27.3\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run ^TestSessionReplacement ./livecanary"
 )
 
 func toolingFile(t *testing.T, root, name, data string, mode os.FileMode) {
@@ -2191,7 +2192,7 @@ func TestToolingTaggedPairFixturePartitionsRun(t *testing.T) {
 	terminalFuturePath := "experiments/g01-scaleset/livecanary/pair_fixture_terminal_future_regression_test.go"
 	storagePath := "experiments/g01-scaleset/livecanary/pair_fixture_storage_regression_test.go"
 	storageJournalPath := "experiments/g01-scaleset/livecanary/pair_fixture_storage_journal_regression_test.go"
-	remainingCollectionInvocation := "go1.27.3\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -skip ^TestPaired ./livecanary"
+	remainingCollectionInvocation := "go1.27.3\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -skip ^Test(Paired|SessionReplacement) ./livecanary"
 	taggedPositiveSource := func(testName, marker string) string {
 		return `//go:build g01_pair_fixture && !g01_live && !g01_worker
 
@@ -2365,7 +2366,7 @@ func TestPairedTerminalFutureCoverage(t *testing.T) {
 	sentinelLogPath := filepath.Join(root, "tagged-sentinel.log")
 	env := []string{"GO=" + wrapper, "TOOLING_REAL_GO=" + realGo, "TOOLING_GO_LOG=" + logPath, "TOOLING_SENTINEL_LOG=" + sentinelLogPath}
 	// Each generated witness must fail through its own reviewed partition. The
-	// log assertions prove all six tagged livecanary partitions, including a future
+	// log assertions prove the bounded tagged livecanary partitions, including a future
 	// TestPairedTerminal name in the complementary remainder.
 	partitions := []struct {
 		path, sentinel, name, source, positiveSource, invocation string
@@ -2504,6 +2505,7 @@ func TestPairedTerminalFutureCoverage(t *testing.T) {
 	for _, invocation := range []string{
 		"go1.27.3\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run ^TestPaired -skip ^TestPairedTerminal ./livecanary",
 		remainingCollectionInvocation,
+		g01ReplacementInvocation,
 		g01TerminalHeavyInvocation,
 		g01TerminalRemainderInvocation,
 		g01StorageJournalInvocation,
@@ -3776,7 +3778,12 @@ case "$*" in
   cp "$G01_PHASE_CONTROLLER_TEST_BINARY" "$G01_PHASE_BROKER_TEST_BINARY"
   chmod 0700 "$G01_PHASE_CONTROLLER_TEST_BINARY" "$G01_PHASE_BROKER_TEST_BINARY"
   ;;
- *'-tags=g01_pair_fixture -skip ^TestPaired ./livecanary'*)
+ *'-tags=g01_pair_fixture -run ^TestSessionReplacement ./livecanary'*)
+  test -x "$G01_PHASE_CONTROLLER_TEST_BINARY"
+  test -x "$G01_PHASE_BROKER_TEST_BINARY"
+  printf 'replacement %s\n' "$G01_PHASE_HELPER_DIR" >> "$PHASE_ROUTE_LOG"
+  ;;
+ *'-tags=g01_pair_fixture -skip ^Test(Paired|SessionReplacement) ./livecanary'*)
   if [ ! -x "${G01_PHASE_CONTROLLER_TEST_BINARY:-}" ] || [ ! -x "${G01_PHASE_BROKER_TEST_BINARY:-}" ]; then
    printf 'missing-current-source-command-helpers\n' >&2
    exit 31
@@ -3799,7 +3806,7 @@ exit 0
 				t.Fatalf("no helper preparation: %v output=%s", e, output)
 			}
 			lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-			want := 2
+			want := 3
 			if failPrep {
 				want = 1
 			}
@@ -3810,9 +3817,37 @@ exit 0
 			if _, e := os.Stat(dir); !os.IsNotExist(e) {
 				t.Fatal("owned helper directory survived completion")
 			}
-			if !failPrep && lines[1] != "consume "+dir {
+			if !failPrep && (lines[1] != "replacement "+dir || lines[2] != "consume "+dir) {
 				t.Fatal("fixture partition consumed different helpers")
 			}
 		})
+	}
+}
+
+func TestToolingSessionReplacementPartitionDisjoint(t *testing.T) {
+	data, err := os.ReadFile("check-offline-experiments.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	separate := regexp.MustCompile(toolingScriptAssignment(t, string(data), "replacement_regex"))
+	skip := regexp.MustCompile(toolingScriptAssignment(t, string(data), "non_paired_skip_regex"))
+	paired := regexp.MustCompile(toolingScriptAssignment(t, string(data), "paired_collection_regex"))
+	for _, name := range []string{"TestSessionReplacementProtocol", "TestSessionReplacementFutureNegative", "TestExperimentalActualCommandBrokerReceiver", "TestPairedTerminalFutureCoverage", "ExampleFuture", "FuzzFuture"} {
+		count := 0
+		if separate.MatchString(name) {
+			count++
+		}
+		if !skip.MatchString(name) {
+			count++
+		}
+		if paired.MatchString(name) {
+			count++
+		}
+		if count != 1 {
+			t.Fatalf("%s covered %d times", name, count)
+		}
+	}
+	if strings.Count(string(data), `-run "${replacement_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-skip "${non_paired_skip_regex}" ./livecanary`) != 1 {
+		t.Fatal("replacement partition not consumed exactly once")
 	}
 }

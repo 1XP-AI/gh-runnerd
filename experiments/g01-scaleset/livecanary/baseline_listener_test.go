@@ -43,6 +43,7 @@ type baselineFixture struct {
 	change                                          func(string, any) any
 	afterResponse                                   func(*http.Request, *http.Response)
 	extra                                           func(http.ResponseWriter, *http.Request) bool
+	beforeRequest                                   func(http.ResponseWriter, *http.Request) bool
 }
 
 func baselineFixtureItem(a Approval, kind string) map[string]any {
@@ -82,6 +83,9 @@ func newBaselineFixtureWithCreate(t *testing.T, change func(string, any) any, in
 		_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, 1<<20))
 		_ = r.Body.Close()
 		w.Header().Set("Content-Type", "application/json")
+		if f.beforeRequest != nil && f.beforeRequest(w, r) {
+			return
+		}
 		stage := ""
 		var body any
 		switch {
@@ -203,7 +207,7 @@ func newBaselineFixtureWithCreate(t *testing.T, change func(string, any) any, in
 	if err != nil {
 		t.Fatal("SDK fixture construction failed")
 	}
-	f.api = &SDKAPI{client: client, rest: httpClient, baseURL: server.URL, approval: f.a, credentials: c, options: options}
+	f.api = &SDKAPI{physical: transport, client: client, rest: httpClient, baseURL: server.URL, approval: f.a, credentials: c, options: options}
 	f.j, err = openTestJournal(t, privateDir(t), f.a)
 	if err != nil {
 		t.Fatal(err)

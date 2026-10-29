@@ -51,3 +51,9 @@ func PrepareJournalForExperimentFixture(path string, a Approval, phase, admissio
 		return OpenJournalForPairedFixtureAt(path, a, admission)
 	})
 }
+
+func PrepareSessionReplacementJournalForExperimentFixture(path string, a Approval, approvalPath, admission string) (PreparationReceipt, error) {
+	return prepareSessionReplacementJournal(path, a, approvalPath, func(path string, a Approval) (*FileJournal, error) {
+		return OpenJournalForPairedFixtureAt(path, a, admission)
+	})
+}
