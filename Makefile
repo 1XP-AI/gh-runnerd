@@ -13,7 +13,7 @@ export FAST_MODULE FAST_PACKAGE FAST_TEST
 FUZZTIME ?= 1s
 GOVULNCHECK_VERSION ?= v1.7.0
 
-.PHONY: help build check fast toolchain fmt fmt-check vet test test-race fuzz-smoke deps licenses vuln experiments
+.PHONY: help build check fast toolchain fmt fmt-check vet test test-race test-core test-fixtures test-race-core test-race-fixtures fuzz-smoke deps licenses vuln experiments
 
 help:
 	@printf '%s\n' \
@@ -45,15 +45,36 @@ fmt-check:
 vet:
 	"$(GO)" vet ./...
 
+# Reuse recipes, rather than prerequisites: complete local gates keep all three
+# invocations serial and fail fast even when Make is invoked with parallel jobs.
+define root-test-core
+	"$(GO)" test $(1) -count=1 -skip '^Test(ToolingTaggedPairFixturePartitionsRun$$|G02OwnedPrepDir)' ./...
+endef
+
+define root-test-fixtures
+	"$(GO)" test $(1) -count=1 -run '^TestG02OwnedPrepDir' ./scripts
+	"$(GO)" test $(1) -count=1 -run '^TestToolingTaggedPairFixturePartitionsRun$$' ./scripts
+endef
+
 test:
-	"$(GO)" test -count=1 -skip '^Test(ToolingTaggedPairFixturePartitionsRun$$|G02OwnedPrepDir)' ./...
-	"$(GO)" test -count=1 -run '^TestG02OwnedPrepDir' ./scripts
-	"$(GO)" test -count=1 -run '^TestToolingTaggedPairFixturePartitionsRun$$' ./scripts
+	$(call root-test-core,)
+	$(call root-test-fixtures,)
 
 test-race:
-	"$(GO)" test -race -count=1 -skip '^Test(ToolingTaggedPairFixturePartitionsRun$$|G02OwnedPrepDir)' ./...
-	"$(GO)" test -race -count=1 -run '^TestG02OwnedPrepDir' ./scripts
-	"$(GO)" test -race -count=1 -run '^TestToolingTaggedPairFixturePartitionsRun$$' ./scripts
+	$(call root-test-core,-race)
+	$(call root-test-fixtures,-race)
+
+test-core:
+	$(call root-test-core,)
+
+test-fixtures:
+	$(call root-test-fixtures,)
+
+test-race-core:
+	$(call root-test-core,-race)
+
+test-race-fixtures:
+	$(call root-test-fixtures,-race)
 
 fuzz-smoke:
 	GO="$(GO)" FUZZTIME="$(FUZZTIME)" bash scripts/fuzz-smoke.sh

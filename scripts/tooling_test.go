@@ -3,7 +3,11 @@ package tooling
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -119,11 +123,19 @@ func TestToolingRootTestPartitions(t *testing.T) {
 	const heavy = `^TestToolingTaggedPairFixturePartitionsRun$`
 	const owned = `^TestG02OwnedPrepDir`
 	const remainderSkip = `^Test(ToolingTaggedPairFixturePartitionsRun$|G02OwnedPrepDir)`
-	for _, target := range []struct{ name, flags string }{
-		{"test", "-count=1"},
-		{"test-race", "-race -count=1"},
+	traces := make(map[string]string)
+	for _, target := range []struct {
+		name, flags string
+		first, last int
+	}{
+		{"test", "-count=1", 1, 3},
+		{"test-race", "-race -count=1", 1, 3},
+		{"test-core", "-count=1", 1, 1},
+		{"test-fixtures", "-count=1", 2, 3},
+		{"test-race-core", "-race -count=1", 1, 1},
+		{"test-race-fixtures", "-race -count=1", 2, 3},
 	} {
-		for _, failCall := range []int{0, 1, 2, 3} {
+		for failCall := 0; failCall <= target.last-target.first+1; failCall++ {
 			t.Run(target.name+"/fail="+strconv.Itoa(failCall), func(t *testing.T) {
 				root := t.TempDir()
 				makefile, err := os.ReadFile("../Makefile")
@@ -148,7 +160,7 @@ printf 'done\n' >> "$TOOLING_GO_LOG"
 					"TOOLING_GO_LOG=" + logPath,
 					"TOOLING_FAIL_CALL=" + strconv.Itoa(failCall),
 					"GOTOOLCHAIN=auto",
-				}, "make", "GO="+filepath.Join(root, "recording go"), "GOFLAGS=-mod=readonly -p=2", target.name)
+				}, "make", "-j2", "GO="+filepath.Join(root, "recording go"), "GOFLAGS=-mod=readonly -p=2", target.name)
 				if failCall == 0 && err != nil {
 					t.Fatalf("partitioned make failed: %v\n%s", err, out)
 				}
@@ -161,8 +173,11 @@ printf 'done\n' >> "$TOOLING_GO_LOG"
 					"-run " + owned + " ./scripts",
 					"-run " + heavy + " ./scripts",
 				} {
+					if i+1 < target.first || i+1 > target.last {
+						continue
+					}
 					want += "go1.27.3\t-mod=readonly -p=2\ttest " + target.flags + " " + selection + "\n"
-					if failCall == i+1 {
+					if failCall == i+2-target.first {
 						break
 					}
 					want += "done\n"
@@ -174,15 +189,27 @@ printf 'done\n' >> "$TOOLING_GO_LOG"
 				if failCall != 0 {
 					return
 				}
+				traces[target.name] = string(got)
+				t.Logf("%s trace:\n%s", target.name, got)
+				if target.first != 1 || target.last != 3 {
+					return
+				}
 				// Evaluate the actual selectors received by Go, after Make's dollar
 				// expansion, so a future name cannot fall into a gap or run twice.
-				var selectors []struct{ run, skip *regexp.Regexp }
+				var selectors []struct {
+					run, skip *regexp.Regexp
+					pkg       string
+				}
 				for _, line := range strings.Split(strings.TrimSpace(string(got)), "\n") {
 					if line == "done" {
 						continue
 					}
-					selection := struct{ run, skip *regexp.Regexp }{regexp.MustCompile(""), regexp.MustCompile("a^")}
+					selection := struct {
+						run, skip *regexp.Regexp
+						pkg       string
+					}{regexp.MustCompile(""), regexp.MustCompile("a^"), ""}
 					args := strings.Fields(strings.Split(line, "\t")[2])
+					selection.pkg = args[len(args)-1]
 					for i, arg := range args {
 						switch arg {
 						case "-run":
@@ -193,26 +220,80 @@ printf 'done\n' >> "$TOOLING_GO_LOG"
 					}
 					selectors = append(selectors, selection)
 				}
-				for _, tc := range []struct {
+				cases := []struct {
 					name  string
 					stage int
+					pkg   string
 				}{
-					{"TestToolingRootTestPartitions", 1},
-					{"TestG02OwnedPrepCleanupContract", 1},
-					{"TestFutureUnrelated", 1},
-					{"ExampleFuture", 1},
-					{"FuzzFuture", 1},
-					{"TestToolingTaggedPairFixturePartitionsRunExtension", 1},
-					{"TestG02OwnedPrepDirRemovedAfterPrepFailure", 2},
-					{"TestG02OwnedPrepDirRemovedAfterSuccess", 2},
-					{"TestG02OwnedPrepDirRemovedAfterExit91", 2},
-					{"TestG02OwnedPrepDirRemovedAfterSignal", 2},
-					{"TestG02OwnedPrepDirFuture", 2},
-					{"TestToolingTaggedPairFixturePartitionsRun", 3},
-				} {
+					{"TestToolingRootTestPartitions", 1, "./scripts"},
+					{"TestG02OwnedPrepCleanupContract", 1, "./scripts"},
+					{"TestFutureUnrelated", 1, "./scripts"},
+					{"ExampleFuture", 1, "./scripts"},
+					{"FuzzFuture", 1, "./scripts"},
+					{"TestToolingTaggedPairFixturePartitionsRunExtension", 1, "./scripts"},
+					{"TestG02OwnedPrepDirRemovedAfterPrepFailure", 2, "./scripts"},
+					{"TestG02OwnedPrepDirRemovedAfterSuccess", 2, "./scripts"},
+					{"TestG02OwnedPrepDirRemovedAfterExit91", 2, "./scripts"},
+					{"TestG02OwnedPrepDirRemovedAfterSignal", 2, "./scripts"},
+					{"TestG02OwnedPrepDirFuture", 2, "./scripts"},
+					{"TestToolingTaggedPairFixturePartitionsRun", 3, "./scripts"},
+				}
+				for _, name := range []string{"TestFutureUnrelated", "ExampleFuture", "FuzzFuture", "TestToolingTaggedPairFixturePartitionsRunExtension", "TestOtherG02OwnedPrepDir"} {
+					cases = append(cases, struct {
+						name  string
+						stage int
+						pkg   string
+					}{name, 1, "./other"})
+				}
+				// Include every current root test declaration, without compiling or
+				// executing application tests. Reserved names in another package
+				// must fail this ownership audit rather than silently disappear.
+				err = filepath.WalkDir("..", func(path string, d os.DirEntry, walkErr error) error {
+					if walkErr != nil {
+						return walkErr
+					}
+					if d.IsDir() {
+						if d.Name() == ".git" || d.Name() == "experiments" {
+							return filepath.SkipDir
+						}
+						return nil
+					}
+					if !strings.HasSuffix(path, "_test.go") {
+						return nil
+					}
+					file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+					if err != nil {
+						return err
+					}
+					for _, decl := range file.Decls {
+						fn, ok := decl.(*ast.FuncDecl)
+						if !ok || fn.Recv != nil || !regexp.MustCompile(`^(Test|Example|Fuzz)`).MatchString(fn.Name.Name) {
+							continue
+						}
+						pkg := "./" + filepath.ToSlash(filepath.Dir(strings.TrimPrefix(path, "../")))
+						stage := 1
+						if regexp.MustCompile(owned).MatchString(fn.Name.Name) {
+							stage = 2
+						}
+						if regexp.MustCompile(heavy).MatchString(fn.Name.Name) {
+							stage = 3
+						}
+						cases = append(cases, struct {
+							name  string
+							stage int
+							pkg   string
+						}{fn.Name.Name, stage, pkg})
+					}
+					return nil
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Logf("%s selector audit: %d current and future-name declarations", target.name, len(cases))
+				for _, tc := range cases {
 					var stages []int
 					for i, selection := range selectors {
-						if selection.run.MatchString(tc.name) && !selection.skip.MatchString(tc.name) {
+						if (selection.pkg == "./..." || selection.pkg == tc.pkg) && selection.run.MatchString(tc.name) && !selection.skip.MatchString(tc.name) {
 							stages = append(stages, i+1)
 						}
 					}
@@ -222,6 +303,18 @@ printf 'done\n' >> "$TOOLING_GO_LOG"
 				}
 			})
 		}
+	}
+	for _, mode := range []string{"test", "test-race"} {
+		if traces[mode] == "" || traces[mode] != traces[mode+"-core"]+traces[mode+"-fixtures"] {
+			t.Errorf("%s core + fixtures must equal the complete legacy trace exactly once", mode)
+		}
+	}
+	makefile, err := os.ReadFile("../Makefile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(makefile), "check: toolchain fmt-check build vet test test-race fuzz-smoke deps licenses experiments vuln\n") {
+		t.Error("default check must retain every complete gate prerequisite")
 	}
 }
 
@@ -1836,6 +1929,149 @@ func toolingContainsString(values []string, wanted string) bool {
 	return false
 }
 
+// Check only this fixed hosted dispatcher; caller-supplied target selection is
+// deliberately unsupported. Keep the executable recipes covered by Make traces.
+func toolingRootWorkflowPartitions(root, checks string) error {
+	const strategy = `    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - mode: normal
+            partition: core
+            target: test-core
+          - mode: race
+            partition: core
+            target: test-race-core
+          - mode: normal
+            partition: fixtures
+            target: test-fixtures
+          - mode: race
+            partition: fixtures
+            target: test-race-fixtures
+`
+	start := strings.Index(root, "    strategy:\n")
+	end := strings.Index(root, "    env:\n")
+	if start < 0 || end <= start || root[start:end] != strategy {
+		return errors.New("root strategy must contain exactly four fixed normal/race core/fixtures targets, fail-fast false and max-parallel 2")
+	}
+	const condition = "        if: ${{ matrix.mode == 'normal' && matrix.partition == 'core' }}"
+	want := map[string]string{
+		"make toolchain": condition, "make build": condition,
+		"make fmt-check": condition, "make vet": condition,
+		`make "${{ matrix.target }}"`: "",
+		"make fuzz-smoke":             condition, "make deps": condition, "make licenses": condition,
+	}
+	seen := make(map[string]bool)
+	var stepIf, run string
+	finish := func() error {
+		if run == "" {
+			if stepIf != "" {
+				return errors.New("unexpected conditional root setup step")
+			}
+			return nil
+		}
+		expected, ok := want[run]
+		if !ok || seen[run] || stepIf != expected {
+			return errors.New("root step target/condition must execute each fixed check exactly once")
+		}
+		seen[run] = true
+		return nil
+	}
+	for _, raw := range strings.Split(root, "\n") {
+		line := toolingActiveYAMLLine(raw)
+		if strings.Contains(line, "continue-on-error:") || strings.HasPrefix(line, "    if:") {
+			return errors.New("every root partition must remain required")
+		}
+		if strings.HasPrefix(line, "      - name:") {
+			if err := finish(); err != nil {
+				return err
+			}
+			stepIf, run = "", ""
+		}
+		if strings.HasPrefix(line, "        if:") {
+			stepIf = line
+		}
+		if strings.HasPrefix(line, "        run:") {
+			run = strings.TrimPrefix(line, "        run: ")
+		}
+	}
+	if err := finish(); err != nil {
+		return err
+	}
+	if len(seen) != len(want) {
+		return errors.New("root partition dispatcher omits required checks")
+	}
+	for _, line := range []string{
+		"    needs: [root, offline, vuln]", "    if: ${{ always() }}",
+		"      ROOT_RESULT: ${{ needs.root.result }}", "      OFFLINE_RESULT: ${{ needs.offline.result }}", "      VULN_RESULT: ${{ needs.vuln.result }}",
+		`          for result in "$ROOT_RESULT" "$OFFLINE_RESULT" "$VULN_RESULT"; do`,
+	} {
+		if !toolingHasActiveYAMLLine(checks, line) {
+			return errors.New("aggregate must require and inspect the entire root/offline matrices and vulnerability job")
+		}
+	}
+	if strings.Contains(checks, "continue-on-error:") {
+		return errors.New("aggregate must remain required")
+	}
+	return nil
+}
+
+func TestPublicWorkflowRootPartitionsRejectMutations(t *testing.T) {
+	data, err := os.ReadFile("../.github/workflows/ci.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs := toolingWorkflowJobs(t, string(data))
+	root, checks := jobs["root"], jobs["checks"]
+	if err := toolingRootWorkflowPartitions(root, checks); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, before, after string
+		aggregate           bool
+	}{
+		{"missing row", "          - mode: race\n            partition: fixtures\n            target: test-race-fixtures\n", "", false},
+		{"duplicate row", "          - mode: race\n            partition: fixtures\n            target: test-race-fixtures\n", "          - mode: normal\n            partition: fixtures\n            target: test-fixtures\n", false},
+		{"wrong mode", "          - mode: race", "          - mode: normal", false},
+		{"wrong target", "target: test-race-core", "target: test-core", false},
+		{"extra row", "    env:\n", "          - mode: normal\n            partition: core\n            target: test-core\n    env:\n", false},
+		{"raised peak", "max-parallel: 2", "max-parallel: 3", false},
+		{"cancel siblings", "fail-fast: false", "fail-fast: true", false},
+		{"skip root", "    runs-on:", "    if: false\n    runs-on:", false},
+		{"ignore root failure", "    runs-on:", "    continue-on-error: true\n    runs-on:", false},
+		{"skip partition step", `        run: make "${{ matrix.target }}"`, "        if: false\n" + `        run: make "${{ matrix.target }}"`, false},
+		{"ignore step failure", `        run: make "${{ matrix.target }}"`, "        continue-on-error: true\n" + `        run: make "${{ matrix.target }}"`, false},
+		{"auxiliary duplicated", "matrix.mode == 'normal' && matrix.partition == 'core'", "matrix.mode == 'normal'", false},
+		{"full suite duplicated", `make "${{ matrix.target }}"`, "make test", false},
+		{"omit root need", "needs: [root, offline, vuln]", "needs: [offline, vuln]", true},
+		{"omit offline need", "needs: [root, offline, vuln]", "needs: [root, vuln]", true},
+		{"omit vulnerability need", "needs: [root, offline, vuln]", "needs: [root, offline]", true},
+		{"omit root result", "ROOT_RESULT: ${{ needs.root.result }}", "ROOT_RESULT: success", true},
+		{"omit root loop", `"$ROOT_RESULT" "$OFFLINE_RESULT"`, `"$OFFLINE_RESULT"`, true},
+		{"omit offline loop", `"$ROOT_RESULT" "$OFFLINE_RESULT"`, `"$ROOT_RESULT"`, true},
+		{"omit vulnerability loop", ` "$VULN_RESULT"; do`, "; do", true},
+		{"skip aggregate", "if: ${{ always() }}", "if: ${{ success() }}", true},
+		{"ignore aggregate failure", "    runs-on:", "    continue-on-error: true\n    runs-on:", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, c := root, checks
+			if tc.aggregate {
+				c = strings.Replace(c, tc.before, tc.after, 1)
+			} else {
+				r = strings.Replace(r, tc.before, tc.after, 1)
+			}
+			if r == root && c == checks {
+				t.Fatal("mutation did not change fixture")
+			}
+			t.Logf("mutated root + newline + checks sha256=%x", sha256.Sum256([]byte(r+"\n"+c)))
+			if toolingRootWorkflowPartitions(r, c) == nil {
+				t.Fatal("unsafe workflow mutation accepted")
+			}
+		})
+	}
+}
+
 func TestPublicWorkflowCapacityContract(t *testing.T) {
 	workflowData, err := os.ReadFile("../.github/workflows/ci.yml")
 	if err != nil {
@@ -1904,7 +2140,7 @@ func TestPublicWorkflowCapacityContract(t *testing.T) {
 	}
 
 	jobs := toolingWorkflowJobs(t, workflow)
-	requiredJobs := []string{"root", "race", "offline", "vuln", "checks"}
+	requiredJobs := []string{"root", "offline", "vuln", "checks"}
 	for _, job := range requiredJobs {
 		if _, ok := jobs[job]; !ok {
 			t.Fatalf("workflow is missing required job %q; got jobs %v", job, toolingWorkflowJobNames(jobs))
@@ -1919,8 +2155,6 @@ func TestPublicWorkflowCapacityContract(t *testing.T) {
 		"build",
 		"fmt-check",
 		"vet",
-		"test",
-		"test-race",
 		"fuzz-smoke",
 		"deps",
 		"licenses",
@@ -1933,16 +2167,13 @@ func TestPublicWorkflowCapacityContract(t *testing.T) {
 			t.Errorf("make %s appears %d times in hosted workflow, want exactly once", command, got)
 		}
 	}
-	for _, command := range []string{"toolchain", "build", "fmt-check", "vet", "test", "fuzz-smoke", "deps", "licenses"} {
+	for _, command := range []string{"toolchain", "build", "fmt-check", "vet", "fuzz-smoke", "deps", "licenses"} {
 		if !strings.Contains(jobs["root"], "run: make "+command) {
 			t.Errorf("root job omits make %s", command)
 		}
 	}
-	if !strings.Contains(jobs["race"], "run: make test-race") {
-		t.Error("race job omits make test-race")
-	}
-	if strings.Contains(jobs["root"], "run: make test-race") {
-		t.Error("root job redundantly runs make test-race")
+	if err := toolingRootWorkflowPartitions(jobs["root"], jobs["checks"]); err != nil {
+		t.Error(err)
 	}
 	if !strings.Contains(jobs["offline"], "run: make experiments") {
 		t.Error("offline job omits make experiments")
@@ -1993,9 +2224,9 @@ func TestPublicWorkflowCapacityContract(t *testing.T) {
 		setupGo  = "uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e"
 		mainHead = "ref: ${{ github.sha }}"
 	)
-	for _, job := range []string{"root", "race", "offline", "vuln"} {
+	for _, job := range []string{"root", "offline", "vuln"} {
 		block := jobs[job]
-		for _, required := range []string{checkout, setupGo, "timeout-minutes: 15", "persist-credentials: false", "cache: false", mainHead} {
+		for _, required := range []string{checkout, setupGo, "timeout-minutes: 15", "persist-credentials: false", "cache: false", mainHead, "runs-on: ubuntu-24.04", "GOTOOLCHAIN: go1.27.3", `GOEXPERIMENT: ""`, "go-version-file: go.mod"} {
 			if !strings.Contains(block, required) {
 				t.Errorf("job %s is missing %q", job, required)
 			}
@@ -2023,13 +2254,13 @@ func TestPublicWorkflowCapacityContract(t *testing.T) {
 	if !strings.Contains(aggregator, "name: Go checks") {
 		t.Error("required public check name Go checks is not preserved")
 	}
-	if !strings.Contains(aggregator, "needs: [root, race, offline, vuln]") {
+	if !strings.Contains(aggregator, "needs: [root, offline, vuln]") {
 		t.Error("Go checks aggregator does not depend on every required job")
 	}
 	if !strings.Contains(aggregator, "if: ${{ always() }}") {
 		t.Error("Go checks aggregator must inspect dependencies after failure, cancellation, or skip")
 	}
-	for _, job := range []string{"root", "race", "offline", "vuln"} {
+	for _, job := range []string{"root", "offline", "vuln"} {
 		if !strings.Contains(aggregator, "needs."+job+".result") {
 			t.Errorf("Go checks aggregator does not inspect %s result", job)
 		}
@@ -2045,20 +2276,19 @@ func TestPublicWorkflowCapacityContract(t *testing.T) {
 	}
 	aggregatorScript := toolingWorkflowRunScript(t, aggregator)
 	for _, tc := range []struct {
-		name                      string
-		root, race, offline, vuln string
-		succeeds                  bool
+		name                string
+		root, offline, vuln string
+		succeeds            bool
 	}{
-		{name: "all success", root: "success", race: "success", offline: "success", vuln: "success", succeeds: true},
-		{name: "root failure", root: "failure", race: "success", offline: "success", vuln: "success", succeeds: false},
-		{name: "race cancellation", root: "success", race: "cancelled", offline: "success", vuln: "success", succeeds: false},
-		{name: "offline cancellation", root: "success", race: "success", offline: "cancelled", vuln: "success", succeeds: false},
-		{name: "vulnerability skipped", root: "success", race: "success", offline: "success", vuln: "skipped", succeeds: false},
+		{name: "all success", root: "success", offline: "success", vuln: "success", succeeds: true},
+		{name: "root failure", root: "failure", offline: "success", vuln: "success", succeeds: false},
+		{name: "root partition cancellation", root: "cancelled", offline: "success", vuln: "success", succeeds: false},
+		{name: "offline cancellation", root: "success", offline: "cancelled", vuln: "success", succeeds: false},
+		{name: "vulnerability skipped", root: "success", offline: "success", vuln: "skipped", succeeds: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out, err := toolingRun(t, t.TempDir(), []string{
 				"ROOT_RESULT=" + tc.root,
-				"RACE_RESULT=" + tc.race,
 				"OFFLINE_RESULT=" + tc.offline,
 				"VULN_RESULT=" + tc.vuln,
 			}, "bash", "-c", aggregatorScript)
@@ -2067,6 +2297,15 @@ func TestPublicWorkflowCapacityContract(t *testing.T) {
 			}
 		})
 	}
+	for _, dependency := range []string{"ROOT_RESULT", "OFFLINE_RESULT", "VULN_RESULT"} {
+		for _, state := range []string{"", "failure", "cancelled", "skipped", "pending"} {
+			env := []string{"ROOT_RESULT=success", "OFFLINE_RESULT=success", "VULN_RESULT=success", dependency + "=" + state}
+			if out, err := toolingRun(t, t.TempDir(), env, "bash", "-c", aggregatorScript); err == nil {
+				t.Errorf("aggregate accepted %s=%q: %s", dependency, state, out)
+			}
+		}
+	}
+
 }
 
 func TestPullRequestQuickWorkflowContract(t *testing.T) {
