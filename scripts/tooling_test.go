@@ -117,12 +117,14 @@ func TestLivecanaryFixturePositiveControl(t *testing.T) {
 
 func TestToolingRootTestPartitions(t *testing.T) {
 	const heavy = `^TestToolingTaggedPairFixturePartitionsRun$`
+	const owned = `^TestG02OwnedPrepDir`
+	const remainderSkip = `^Test(ToolingTaggedPairFixturePartitionsRun$|G02OwnedPrepDir)`
 	for _, target := range []struct{ name, flags string }{
 		{"test", "-count=1"},
 		{"test-race", "-race -count=1"},
 	} {
-		for _, failPackage := range []string{"", "./...", "./scripts"} {
-			t.Run(target.name+"/fail="+failPackage, func(t *testing.T) {
+		for _, failCall := range []int{0, 1, 2, 3} {
+			t.Run(target.name+"/fail="+strconv.Itoa(failCall), func(t *testing.T) {
 				root := t.TempDir()
 				makefile, err := os.ReadFile("../Makefile")
 				if err != nil {
@@ -130,38 +132,93 @@ func TestToolingRootTestPartitions(t *testing.T) {
 				}
 				toolingFile(t, root, "Makefile", string(makefile), 0600)
 				// Record actual make execution without running the inherited suites.
-				// The spaced path also checks that both recipes honor the GO override.
+				// The spaced path also checks that all recipes honor the GO override.
 				toolingFile(t, root, "recording go", `#!/bin/sh
 set -eu
 printf '%s\t%s\t%s\n' "$GOTOOLCHAIN" "$GOFLAGS" "$*" >> "$TOOLING_GO_LOG"
-for package do :; done
-if [ "$package" = "$TOOLING_FAIL_PACKAGE" ]; then exit 23; fi
+ordinal=0
+if [ -f "$TOOLING_GO_LOG.count" ]; then read -r ordinal < "$TOOLING_GO_LOG.count"; fi
+ordinal=$((ordinal + 1))
+printf '%s\n' "$ordinal" > "$TOOLING_GO_LOG.count"
+if [ "$ordinal" = "$TOOLING_FAIL_CALL" ]; then exit 23; fi
 printf 'done\n' >> "$TOOLING_GO_LOG"
 `, 0700)
 				logPath := filepath.Join(root, "calls.log")
 				out, err := toolingRun(t, root, []string{
 					"TOOLING_GO_LOG=" + logPath,
-					"TOOLING_FAIL_PACKAGE=" + failPackage,
+					"TOOLING_FAIL_CALL=" + strconv.Itoa(failCall),
 					"GOTOOLCHAIN=auto",
 				}, "make", "GO="+filepath.Join(root, "recording go"), "GOFLAGS=-mod=readonly -p=2", target.name)
-				if failPackage == "" && err != nil {
+				if failCall == 0 && err != nil {
 					t.Fatalf("partitioned make failed: %v\n%s", err, out)
 				}
-				if failPackage != "" && (err == nil || !strings.Contains(out, "Error 23")) {
+				if failCall != 0 && (err == nil || !strings.Contains(out, "Error 23")) {
 					t.Fatalf("partition failure was not propagated: %v\n%s", err, out)
 				}
-				first := "go1.27.3\t-mod=readonly -p=2\ttest " + target.flags + " -skip " + heavy + " ./...\n"
-				second := "go1.27.3\t-mod=readonly -p=2\ttest " + target.flags + " -run " + heavy + " ./scripts\n"
-				want := first
-				if failPackage != "./..." {
-					want += "done\n" + second
-					if failPackage == "" {
-						want += "done\n"
+				var want string
+				for i, selection := range []string{
+					"-skip " + remainderSkip + " ./...",
+					"-run " + owned + " ./scripts",
+					"-run " + heavy + " ./scripts",
+				} {
+					want += "go1.27.3\t-mod=readonly -p=2\ttest " + target.flags + " " + selection + "\n"
+					if failCall == i+1 {
+						break
 					}
+					want += "done\n"
 				}
 				got, err := os.ReadFile(logPath)
 				if err != nil || string(got) != want {
 					t.Fatalf("root partitions: err=%v\ngot  %q\nwant %q\nmake output: %s", err, got, want, out)
+				}
+				if failCall != 0 {
+					return
+				}
+				// Evaluate the actual selectors received by Go, after Make's dollar
+				// expansion, so a future name cannot fall into a gap or run twice.
+				var selectors []struct{ run, skip *regexp.Regexp }
+				for _, line := range strings.Split(strings.TrimSpace(string(got)), "\n") {
+					if line == "done" {
+						continue
+					}
+					selection := struct{ run, skip *regexp.Regexp }{regexp.MustCompile(""), regexp.MustCompile("a^")}
+					args := strings.Fields(strings.Split(line, "\t")[2])
+					for i, arg := range args {
+						switch arg {
+						case "-run":
+							selection.run = regexp.MustCompile(args[i+1])
+						case "-skip":
+							selection.skip = regexp.MustCompile(args[i+1])
+						}
+					}
+					selectors = append(selectors, selection)
+				}
+				for _, tc := range []struct {
+					name  string
+					stage int
+				}{
+					{"TestToolingRootTestPartitions", 1},
+					{"TestG02OwnedPrepCleanupContract", 1},
+					{"TestFutureUnrelated", 1},
+					{"ExampleFuture", 1},
+					{"FuzzFuture", 1},
+					{"TestToolingTaggedPairFixturePartitionsRunExtension", 1},
+					{"TestG02OwnedPrepDirRemovedAfterPrepFailure", 2},
+					{"TestG02OwnedPrepDirRemovedAfterSuccess", 2},
+					{"TestG02OwnedPrepDirRemovedAfterExit91", 2},
+					{"TestG02OwnedPrepDirRemovedAfterSignal", 2},
+					{"TestG02OwnedPrepDirFuture", 2},
+					{"TestToolingTaggedPairFixturePartitionsRun", 3},
+				} {
+					var stages []int
+					for i, selection := range selectors {
+						if selection.run.MatchString(tc.name) && !selection.skip.MatchString(tc.name) {
+							stages = append(stages, i+1)
+						}
+					}
+					if len(stages) != 1 || stages[0] != tc.stage {
+						t.Errorf("%s selected by stages %v; want only %d", tc.name, stages, tc.stage)
+					}
 				}
 			})
 		}
