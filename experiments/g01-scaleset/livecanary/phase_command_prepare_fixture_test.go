@@ -29,11 +29,16 @@ func TestExperimentalPrepareCommandHelpers(t *testing.T) {
 	}
 	goTool := os.Getenv("G01_PHASE_GO")
 	if goTool == "" {
-		var e error
-		goTool, e = exec.LookPath("go")
-		if e != nil {
-			t.Fatal("Go helper tool unavailable")
-		}
+		goTool = "go"
+	}
+	goTool, e := exec.LookPath(goTool)
+	if e != nil {
+		t.Fatal("Go helper tool unavailable")
+	}
+	// Hash and invoke the same tool even after changing the child working directory.
+	goTool, e = filepath.Abs(goTool)
+	if e != nil {
+		t.Fatal("Go helper tool unavailable")
 	}
 	source := phaseHelperSourceFingerprint(t)
 	tool := phaseHelperFileDigest(t, goTool)
