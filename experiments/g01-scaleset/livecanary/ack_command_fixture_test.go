@@ -44,6 +44,7 @@ type ackCommandFixture struct {
 	entryMu                    sync.Mutex
 	handlers                   sync.WaitGroup
 	closing                    bool
+	originalContext            *originalContextCommandCase
 }
 
 func newACKCommandFixture(t *testing.T, controller, broker, phase, variant string) *ackCommandFixture {
@@ -250,12 +251,17 @@ func (f *ackCommandFixture) serve(w http.ResponseWriter, r *http.Request) bool {
 		reply(204, nil)
 	case "POST " + runtime + "/acquirejobs":
 		// Keep this precise physical witness ahead of generic history/quarantine.
-		t.Errorf("ACK physical acquire0 witness: actual=%d want=0", f.counts[key])
+		if f.originalContext == nil || !f.originalContext.acquireAllowed() {
+			t.Errorf("ACK physical acquire0 witness: actual=%d want=0", f.counts[key])
+		}
 		query("api-version=6.0-preview")
 		content()
 		auth(queueAuth)
 		if !bytes.Equal(data, []byte("[42]")) {
 			t.Error("ACK physical acquire request differs")
+		}
+		if f.originalContext != nil {
+			f.checkpoint("acquire", 19)
 		}
 		events := f.base.readEvents()
 		if len(events) != 19 || !reflect.DeepEqual(events[18], Event{Sequence: 19, Kind: "intent", Operation: "acquire", RequestIDs: []int64{42}}) {
@@ -266,6 +272,9 @@ func (f *ackCommandFixture) serve(w http.ResponseWriter, r *http.Request) bool {
 		end := 20
 		if f.variant == "empty" {
 			end = 16
+		}
+		if f.originalContext != nil && !f.originalContext.closeAllowed() {
+			t.Errorf("original context physical close0 witness: actual=%d want=0", f.counts[key])
 		}
 		f.checkpoint("close", end)
 		query("api-version=6.0-preview")
@@ -455,6 +464,9 @@ func (f *ackCommandFixture) expected() []Event {
 		add(Event{Kind: "intent", Operation: "session-close"})
 		add(Event{Kind: "result", Operation: "session-close", SessionID: f.sid})
 	}
+	if f.originalContext != nil {
+		return f.originalContext.expected(events[:18])
+	}
 	return events
 }
 
@@ -488,6 +500,9 @@ func (f *ackCommandFixture) checkpoint(stage string, end int) {
 }
 
 func (f *ackCommandFixture) assertSettled() []Event {
+	if f.originalContext != nil {
+		return f.assertOriginalContextSettled()
+	}
 	f.t.Helper()
 	t := f.t
 	f.mu.Lock()
@@ -601,7 +616,7 @@ func (f *ackCommandFixture) assertBroker() {
 		}
 	}
 	wantComplete := 0
-	if f.variant == "job9" || f.variant == "job0" {
+	if (f.variant == "job9" || f.variant == "job0") && (f.originalContext == nil || f.originalContext.closeAllowed()) {
 		wantComplete = 1
 	}
 	if completed != wantComplete || prepared != 1 {
@@ -674,6 +689,8 @@ func (f *ackCommandFixture) alternatePreparation() {
 }
 
 func TestExperimentalACKBoundaryCommand(t *testing.T) {
+	t.Run("original-context-protocol", originalContextProtocolNegatives)
+	t.Run("original-context-setup", originalContextSetupNegatives)
 	controller, broker := acquireLossHelpers(t)
 	for _, phase := range []string{"after-ack", "before-acquire"} {
 		for _, variant := range []string{"job9", "job0", "foreign-source", "empty"} {
@@ -696,5 +713,8 @@ func TestExperimentalACKBoundaryCommand(t *testing.T) {
 				f.scanCommandJournals()
 			})
 		}
+	}
+	for _, mode := range []string{"cancel", "continue"} {
+		t.Run("after-ack/original-"+mode+"-after-ack-result", func(t *testing.T) { runOriginalContextCommandCase(t, controller, broker, "after-ack", mode) })
 	}
 }
