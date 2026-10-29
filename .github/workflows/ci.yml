@@ -31,9 +31,26 @@ concurrency:
 
 jobs:
   root:
-    name: Root and tooling checks
+    name: Root checks (${{ matrix.mode }}, ${{ matrix.partition }})
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - mode: normal
+            partition: core
+            target: test-core
+          - mode: race
+            partition: core
+            target: test-race-core
+          - mode: normal
+            partition: fixtures
+            target: test-fixtures
+          - mode: race
+            partition: fixtures
+            target: test-race-fixtures
     env:
       # Match Make's explicit selection even if the installed default changes.
       GOTOOLCHAIN: go1.27.3
@@ -53,53 +70,35 @@ jobs:
           cache-dependency-path: go.mod
 
       - name: Verify toolchain
+        if: ${{ matrix.mode == 'normal' && matrix.partition == 'core' }}
         run: make toolchain
 
       - name: Build executable
+        if: ${{ matrix.mode == 'normal' && matrix.partition == 'core' }}
         run: make build
 
       - name: Check formatting
+        if: ${{ matrix.mode == 'normal' && matrix.partition == 'core' }}
         run: make fmt-check
 
       - name: Run vet
+        if: ${{ matrix.mode == 'normal' && matrix.partition == 'core' }}
         run: make vet
 
-      - name: Run unit and tooling regression tests
-        run: make test
+      - name: Run root test partition
+        run: make "${{ matrix.target }}"
 
       - name: Run fuzz smoke (explicit skip when no targets exist)
+        if: ${{ matrix.mode == 'normal' && matrix.partition == 'core' }}
         run: make fuzz-smoke
 
       - name: Check dependencies
+        if: ${{ matrix.mode == 'normal' && matrix.partition == 'core' }}
         run: make deps
 
       - name: Check license inventory
+        if: ${{ matrix.mode == 'normal' && matrix.partition == 'core' }}
         run: make licenses
-
-  race:
-    name: Root race checks
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    env:
-      # Match Make's explicit selection even if the installed default changes.
-      GOTOOLCHAIN: go1.27.3
-      GOEXPERIMENT: ""
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          cache: false
-          cache-dependency-path: go.mod
-
-      - name: Run race tests
-        run: make test-race
 
   offline:
     name: Offline experiment checks (${{ matrix.module }}, ${{ matrix.profile }})
@@ -168,19 +167,18 @@ jobs:
   checks:
     name: Go checks
     if: ${{ always() }}
-    needs: [root, race, offline, vuln]
+    needs: [root, offline, vuln]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
       ROOT_RESULT: ${{ needs.root.result }}
-      RACE_RESULT: ${{ needs.race.result }}
       OFFLINE_RESULT: ${{ needs.offline.result }}
       VULN_RESULT: ${{ needs.vuln.result }}
     steps:
       - name: Require every required job to succeed
         run: |
           set -eu
-          for result in "$ROOT_RESULT" "$RACE_RESULT" "$OFFLINE_RESULT" "$VULN_RESULT"; do
+          for result in "$ROOT_RESULT" "$OFFLINE_RESULT" "$VULN_RESULT"; do
             if [ "$result" != success ]; then
               echo "required CI job did not succeed: $result" >&2
               exit 1
