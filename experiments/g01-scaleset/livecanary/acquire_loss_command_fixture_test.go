@@ -180,6 +180,7 @@ type acquireLossCommandFixture struct {
 	brokerMu                                                                 sync.Mutex
 	secretMu                                                                 sync.Mutex
 	additionalSecrets                                                        [][]byte
+	brokerBeforeRequest                                                      func(*http.Request)
 }
 
 func newAcquireLossCommandFixture(t *testing.T, controller, broker, variant string) *acquireLossCommandFixture {
@@ -333,6 +334,9 @@ func newCommandQualificationFixture(t *testing.T, controller, broker, variant, p
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.brokerMu.Lock()
 		defer f.brokerMu.Unlock()
+		if f.brokerBeforeRequest != nil {
+			f.brokerBeforeRequest(r)
+		}
 		if r.URL.Path == workflowRunFixturePath(f.transport) && r.Header.Get("Authorization") != "Bearer synthetic-observation-credential" && r.Header.Get("Authorization") != "Bearer "+f.base.api.credentials.VerificationToken {
 			t.Error("broker observation authority differs")
 		}
@@ -375,7 +379,29 @@ func (f *acquireLossCommandFixture) run(binary string, args []string, inputs ...
 }
 
 func (f *acquireLossCommandFixture) runOutcome(binary string, args []string, success bool, inputs ...[]byte) []*os.File {
+	outcome := commandRefused
+	if success {
+		outcome = commandBrokerCompleted
+	}
+	return f.runExpected(binary, args, outcome, nil, inputs...)
+}
+
+type commandOutcome int
+
+const (
+	commandRefused commandOutcome = iota
+	commandBrokerCompleted
+	commandJournalPrepared
+)
+
+// Preparation has a distinct concrete receipt contract; it cannot use the
+// broker-success path or silently accept an arbitrary successful command.
+func (f *acquireLossCommandFixture) runExpected(binary string, args []string, outcome commandOutcome, prepared *PreparationReceipt, inputs ...[]byte) []*os.File {
 	f.t.Helper()
+	if outcome < commandRefused || outcome > commandJournalPrepared || outcome == commandBrokerCompleted && binary != f.broker || outcome == commandJournalPrepared && (binary != f.controller || prepared == nil || len(args) == 0 || args[0] != "--prepare-approved-journal" || len(inputs) != 0) {
+		f.t.Fatal("invalid explicit command outcome contract")
+	}
+	success := outcome != commandRefused
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binary, args...)
@@ -429,11 +455,14 @@ func (f *acquireLossCommandFixture) runOutcome(binary string, args []string, suc
 	if stderr.Len() != 0 || (!success && stdout.String() != want) {
 		f.t.Error("actual command fixed sanitized outcome differs")
 	}
-	if success {
+	if outcome == commandBrokerCompleted {
 		var result enrollment.BrokerResult
 		if binary != f.broker || DecodeStrict(stdout.Bytes(), &result) != nil || result.Status != "controller_completed" || result.ActionsHost != "" {
 			f.t.Error("actual command successful broker receipt differs")
 		}
+	}
+	if outcome == commandJournalPrepared && (DecodeStrict(stdout.Bytes(), prepared) != nil || prepared.Version != 1 || prepared.Status != "controller_journal_prepared") {
+		f.t.Error("actual command successful preparation receipt differs")
 	}
 	return pipes
 }
