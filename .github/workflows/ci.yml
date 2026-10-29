@@ -102,20 +102,27 @@ jobs:
         run: make test-race
 
   offline:
-    name: Offline experiment checks (${{ matrix.module }})
+    name: Offline experiment checks (${{ matrix.module }}, ${{ matrix.profile }})
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
       fail-fast: false
+      max-parallel: 3
       matrix:
-        module:
-          - experiments/g01-scaleset
-          - experiments/g02-auth
-          - experiments/r1-credentials
+        include:
+          - module: experiments/g01-scaleset
+            profile: core
+          - module: experiments/g01-scaleset
+            profile: jit
+          - module: experiments/g02-auth
+            profile: all
+          - module: experiments/r1-credentials
+            profile: all
     env:
       GOTOOLCHAIN: go1.27.3
       GOEXPERIMENT: ""
       OFFLINE_EXPERIMENT_MODULE: ${{ matrix.module }}
+      OFFLINE_EXPERIMENT_PROFILE: ${{ matrix.profile }}
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
