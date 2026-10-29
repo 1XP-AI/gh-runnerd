@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -81,19 +82,25 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 			}
 		}
 	}
-	cases := []string{"before-ack", "inspect", "paired-terminal"}
+	cases := []string{"before-ack", "inspect", "paired-terminal", "session-replacement", "session-replacement-zero", "session-replacement-new202", "session-replacement-missing", "session-replacement-null", "session-replacement-raw-drift"}
 	if os.Getenv("G01_PHASE_BROKER_TEST_BINARY") != "" {
 		cases = append(cases, "alias", "workflow-seed", "issuer-seed", "rootless", "unknown-policy")
 	}
 	for _, caseName := range cases {
 		t.Run(caseName, func(t *testing.T) {
 			mode := caseName
-			negative := mode != "before-ack" && mode != "inspect" && mode != "paired-terminal"
+			variant := "old41"
+			if strings.HasPrefix(caseName, "session-replacement-") {
+				mode = replacementPhase
+				variant = strings.TrimPrefix(caseName, "session-replacement-")
+			}
+			negative := mode != "before-ack" && mode != "inspect" && mode != "paired-terminal" && mode != "session-replacement"
 			if negative {
 				mode = "before-ack"
 			}
 			var terminal *terminalFixture
 			var base *baselineFixture
+			var replacement *replacementTrace
 			var files PairedTerminalFiles
 			if mode == "paired-terminal" {
 				terminal = newTerminalFixtureWithCreate(t, []string{"create", "start", "inspect", "cleanup"}, nil, func(j *FileJournal, a Approval) { completedHandoffCreate(t, j, a) })
@@ -103,12 +110,23 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 			} else {
 				a := approval()
 				a.WorkflowRef = "refs/heads/main"
-				base = newBaselineFixtureWithCreate(t, nil, "", a, func(j *FileJournal) { completedHandoffCreate(t, j, a) })
+				if mode == "session-replacement" {
+					a.Phases = append(a.Phases, mode)
+				}
+				var original []byte
+				var change func(string, any) any
+				if mode == "session-replacement" {
+					change = replacementResponse(a, variant)
+				}
+				base = newBaselineFixtureWithCreate(t, change, "", a, func(j *FileJournal) { f, _ := completedHandoffCreate(t, j, a); original = f.snapshot })
 				base.release()
 				base.release = nil
 				root := filepath.Dir(base.j.directory)
 				files = PairedTerminalFiles{ControllerStateDirectory: base.j.directory, ControllerApprovalPath: filepath.Join(root, "controller-approval.json")}
 				raw, _ := json.Marshal(a)
+				if mode == "session-replacement" && variant != "raw-drift" {
+					raw = original
+				}
 				if os.WriteFile(files.ControllerApprovalPath, raw, 0600) != nil {
 					t.Fatal("approval")
 				}
@@ -136,6 +154,9 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 					}
 					json.NewEncoder(w).Encode(body)
 					return true
+				}
+				if mode == replacementPhase {
+					replacement = attachReplacementTrace(t, base, variant)
 				}
 			}
 			base.readEvents = func() []Event {
@@ -302,6 +323,18 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 				}
 				return
 			}
+			if mode == replacementPhase && variant == "raw-drift" {
+				if e == nil || transport.mints != 0 || base.requests.Load() != 0 {
+					t.Fatal("raw approval mismatch crossed preparation/remint boundary")
+				}
+				return
+			}
+			if mode == replacementPhase && (variant == "missing" || variant == "null") {
+				if e == nil || transport.mints != 1 || !reflect.DeepEqual(replacement.snapshot(), []string{"set", "worker", "open1", "poll1"}) || base.acks.Load() != 0 || base.acquires.Load() != 0 {
+					t.Fatal("missing/null identity crossed replacement boundary", replacement.snapshot())
+				}
+				return
+			}
 			if e != nil || transport.mints != 1 {
 				for _, path := range []string{filepath.Join(brokerFiles.StateDirectory, "broker.jsonl"), filepath.Join(files.ControllerStateDirectory, "journal.jsonl")} {
 					data, _ := os.ReadFile(path)
@@ -324,6 +357,12 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 			}
 			if mode == "before-ack" && (!bytes.Contains(data, []byte(`"kind":"barrier"`)) || base.acks.Load() != 0 || base.acquires.Load() != 0) {
 				t.Fatal("fault barrier not exercised")
+			}
+			if mode == "session-replacement" && (base.sessions.Load() != 2 || base.polls.Load() != 2 || base.acks.Load() != 0 || base.acquires.Load() != 0 || !bytes.Contains(data, []byte(`"stage":"complete"`))) {
+				t.Fatal("actual two-generation replacement trace incomplete")
+			}
+			if replacement != nil && !reflect.DeepEqual(replacement.snapshot(), replacementSuccessTrace) {
+				t.Fatal("actual physical two-generation trace differed", replacement.snapshot())
 			}
 			if mode == "paired-terminal" && (terminal.c.acks.Load() != 2 || terminal.c.acquires.Load() != 1 || terminal.jit.Load() != 1 || terminal.creates.Load() != 1 || terminal.starts.Load() != 1 || terminal.sessionDeletes.Load() != 1 || terminal.workerDeletes.Load() != 1 || terminal.setDeletes.Load() != 1 || terminal.setAbsences.Load() != 1 || terminal.workerAbsences.Load() != 1 || terminal.rosters.Load() != 4) {
 				t.Fatal("full paired command incomplete")

@@ -35,6 +35,9 @@ func authorizePhaseWithProof(a Approval, j Journal, phase string, ctx context.Co
 		return state{}, nil, err
 	}
 	s := replayWithApproval(events, &a)
+	if phase == replacementPhase {
+		s = replayWithApproval(events[:7], &a)
+	}
 	// Every approved phase, including the read-only inspect slot, is consumed
 	// by its durable phase record. A second inspect must not become a fresh
 	// authority merely because its implementation has no external write. One
@@ -57,6 +60,13 @@ func authorizePhaseWithProof(a Approval, j Journal, phase string, ctx context.Co
 // validateCreatePrefix is the exact create-event grammar shared by the
 // pre-phase authorization check and Driver's post-phase check.
 func validateCreatePrefix(a Approval, j Journal, phase string, ctx context.Context, proof *controllerHandoffProof, post bool, events []Event) error {
+	if phase == replacementPhase {
+		fj, ok := j.(*FileJournal)
+		if !ok || proof == nil {
+			return ErrQuarantine
+		}
+		return replacementAdmission(a, fj, proof.RawApprovalSHA256, events, proof, ctx, post)
+	}
 	if phase != "create" {
 		if proof != nil {
 			if proof.Phase != phase || !proof.validAt(ctx, a, j, time.Now()) || len(events) != proof.HandoffSequence || !proof.matchesEvent(events[len(events)-1]) {
@@ -236,6 +246,9 @@ func preparePairedJournal(directory string, a Approval, open func(string, Approv
 }
 
 func prepareJournal(directory string, a Approval, phase string, open func(string, Approval) (*FileJournal, error)) (receipt PreparationReceipt, err error) {
+	return prepareJournalSnapshot(directory, a, phase, open, "")
+}
+func prepareJournalSnapshot(directory string, a Approval, phase string, open func(string, Approval) (*FileJournal, error), raw string) (receipt PreparationReceipt, err error) {
 	if a.Validate(time.Now()) != nil || !slices.Contains(a.Phases, phase) || open == nil {
 		return receipt, ErrApproval
 	}
@@ -249,7 +262,19 @@ func prepareJournal(directory string, a Approval, phase string, open func(string
 			err = ErrJournal
 		}
 	}()
-	_, release, e := authorizePhase(a, j, phase)
+	var release func()
+	if phase == replacementPhase {
+		release, e = j.authorize(a)
+		if e == nil {
+			e = replacementAdmission(a, j, raw, j.Events(), nil, context.Background(), false)
+		}
+		if e != nil && release != nil {
+			release()
+			release = nil
+		}
+	} else {
+		_, release, e = authorizePhase(a, j, phase)
+	}
 	if e != nil {
 		return receipt, e
 	}

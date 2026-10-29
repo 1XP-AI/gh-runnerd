@@ -110,6 +110,7 @@ func controllerEventRef(identity controllerJournalIdentity, e Event) controllerR
 	return controllerRecordRef{e.Sequence, hex.EncodeToString(h.Sum(nil))}
 }
 func cloneEvent(e Event) Event {
+	e.Replacement = cloneReplacement(e.Replacement)
 	if e.ControllerHandoff != nil {
 		x := *e.ControllerHandoff
 		e.ControllerHandoff = &x
@@ -173,6 +174,11 @@ func (j *FileJournal) appendStored(e Event) (Event, error) {
 	}
 	e = cloneEvent(e)
 	e.Sequence = len(j.events) + 1
+	if e.Replacement != nil || (e.ControllerHandoff != nil && e.ControllerHandoff.Phase == replacementPhase) || controllerPhaseConsumed(j.events, replacementPhase) {
+		if err := j.replayReplacement(append(slices.Clone(j.events), e)); err != nil {
+			return Event{}, err
+		}
+	}
 	if e.Baseline != nil {
 		id, err := j.controllerIdentity()
 		if err != nil {
@@ -187,6 +193,8 @@ func (j *FileJournal) appendStored(e Event) (Event, error) {
 		return Event{}, err
 	}
 	j.events = append(j.events, e)
+	data, _ := json.Marshal(e)
+	j.eventBytes = append(j.eventBytes, append(data, '\n'))
 	return cloneEvent(e), nil
 }
 func (j *FileJournal) baselineCapacity() error {

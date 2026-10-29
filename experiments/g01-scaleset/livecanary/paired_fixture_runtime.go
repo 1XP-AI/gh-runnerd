@@ -107,7 +107,7 @@ func NewSDKAPIForPairedFixture(a Approval, c Credentials, baseURL string, caPEM 
 	if err != nil {
 		return nil, ErrApproval
 	}
-	return &SDKAPI{client: client, rest: httpClient, baseURL: baseURL, approval: a, credentials: c, options: options}, nil
+	return &SDKAPI{physical: transport, client: client, rest: httpClient, baseURL: baseURL, approval: a, credentials: c, options: options}, nil
 }
 
 func fixtureFastPairCadence() pairedBaselineCadence {

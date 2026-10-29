@@ -40,7 +40,7 @@ func TestExperimentalPhaseFreshNonceBurnsBeforeInput(t *testing.T) {
 func phasePipes(t *testing.T, f controllerHandoffFixture, payload []byte, mode string) (*os.File, *os.File, handoff.IssuerRoot) {
 	return phasePipesDelivered(t, f, payload, payload, mode)
 }
-func phasePipesDelivered(t *testing.T, f controllerHandoffFixture, payload, delivered []byte, mode string) (*os.File, *os.File, handoff.IssuerRoot) {
+func phasePipesDelivered(t *testing.T, f controllerHandoffFixture, payload, delivered []byte, mode string, deadline ...time.Time) (*os.File, *os.File, handoff.IssuerRoot) {
 	t.Helper()
 	b, root, key := processBinding(t, f, payload)
 	phase := handoff.PhaseBinding{BindingClaims: b.BindingClaims, Mode: mode}
@@ -48,6 +48,9 @@ func phasePipesDelivered(t *testing.T, f controllerHandoffFixture, payload, deli
 	phase.Kind = handoff.PhaseBindingKind
 	phase.Audience = handoff.PhaseAudience(mode, f.request.Phase)
 	phase.ExpiresAt = time.Now().Add(5 * time.Minute)
+	if len(deadline) == 1 && deadline[0].Before(phase.ExpiresAt) {
+		phase.ExpiresAt = deadline[0]
+	}
 	phase.Signature = base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, phase.SigningBytes()))
 	raw, _ := json.Marshal(phase)
 	frame, e := handoff.EncodeControl(f.receiptBytes, raw)

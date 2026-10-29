@@ -8,6 +8,8 @@ default_heavy_test_regex='^TestBaselineStatisticsPresenceAndEligibility$'
 default_handoff_test_regex='^TestControllerHandoff'
 default_heavy_and_handoff_skip_regex='^Test(BaselineStatisticsPresenceAndEligibility|ControllerHandoff.*)$'
 paired_collection_regex='^TestPaired'
+replacement_regex='^TestSessionReplacement'
+non_paired_skip_regex='^Test(Paired|SessionReplacement)'
 storage_regex='^TestPairedTerminal(Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$'
 storage_journal_regex='^TestPairedTerminalPostIntentJournalIdentity$'
 terminal_heavy_regex='^TestPairedTerminal(FinalResultCapacity|PendingChildCapacity|EligibilityUsesFreshExactFacts|CapturedAcknowledgementCancellation|MissingAcknowledgementsAndPostchecks)$'
@@ -97,7 +99,7 @@ for module_dir in "${selected_modules[@]}"; do
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -tags=g01_live,g01_worker ./cmd/g01-live ./cmd/g01-worker
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" vet -tags=g01_live,g01_worker ./cmd/g01-live ./cmd/g01-worker
 			# Keep the non-terminal collection/listener tests exhaustive and disjoint:
-			# paired collection first, then every non-paired test. Terminal coverage
+			# paired collection, replacement, then the non-paired remainder. Terminal coverage
 			# is four complementary 120-second partitions: the five heavy names,
 			# the remaining TestPairedTerminal tests, storage journal identity,
 			# and the other storage names. Keep the storage union unchanged.
@@ -115,7 +117,10 @@ for module_dir in "${selected_modules[@]}"; do
             export G01_PHASE_BROKER_TEST_BINARY="${g01_phase_dir}/broker.test"
             GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -tags=g01_pair_fixture -run '^TestExperimentalPrepareCommandHelpers$' ./livecanary
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run "${paired_collection_regex}" -skip '^TestPairedTerminal' ./livecanary
-			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -skip "${paired_collection_regex}" ./livecanary
+			# Keep the new storage/expiry-heavy family out of the already bounded
+			# non-paired remainder; the two selectors are exhaustive and disjoint.
+			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run "${replacement_regex}" ./livecanary
+			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -skip "${non_paired_skip_regex}" ./livecanary
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run "${terminal_heavy_regex}" ./livecanary
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run '^TestPairedTerminal' -skip "${terminal_remainder_skip_regex}" ./livecanary
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run "${storage_journal_regex}" ./livecanary

@@ -44,6 +44,7 @@ type Approval struct {
 }
 
 type Event struct {
+	Replacement        *replacementRecord            `json:"replacement,omitempty"`
 	Baseline           *baselineRecord               `json:"baseline,omitempty"`
 	ControllerHandoff  *controllerHandoffConsumption `json:"controller_handoff,omitempty"`
 	Drain              *drainObservation             `json:"drain,omitempty"`
@@ -233,10 +234,20 @@ func replayWithApproval(events []Event, approval *Approval) state {
 	pending := ""
 	for index, e := range events {
 		switch e.Kind {
-		case "baseline":
+		case "controller-handoff-consumed":
+			if e.ControllerHandoff != nil && e.ControllerHandoff.Phase == replacementPhase {
+				s.reserved, s.uncertain, s.workObserved = true, true, true
+			}
+		case "baseline", "session-replacement":
 			// This library slice never grants a legacy fault/cleanup phase.
 			s.reserved, s.uncertain, s.workObserved = true, true, true
+			if e.Replacement != nil && e.Replacement.Work != nil {
+				s.observedJobs[e.Replacement.Work.RequestID] = true
+			}
 		case "phase":
+			if e.Operation == replacementPhase {
+				s.reserved, s.uncertain, s.workObserved = true, true, true
+			}
 			if e.Operation == "drain" {
 				if s.phaseSeen[e.Operation] || s.drainPhasePending || s.drainPhaseCompleted {
 					// A drain observation may discharge exactly one phase. A
@@ -513,6 +524,9 @@ func (d *Driver) Run(ctx context.Context, phase string) error {
 }
 
 func (d *Driver) runWithHandoff(ctx context.Context, phase string, proof *controllerHandoffProof) error {
+	if phase == replacementPhase {
+		return d.runSessionReplacement(ctx, proof)
+	}
 	if ctx == nil {
 		return ErrApproval
 	}

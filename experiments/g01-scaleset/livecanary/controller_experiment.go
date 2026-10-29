@@ -134,6 +134,16 @@ func runControllerExperimentOwned(parent context.Context, files PairedTerminalFi
 	if phase == "create" {
 		return runControllerProcessHandoffCreate(ctx, j, snap.raw, owned[0], owned[1], selected.policy.Source, selected.workflow, selected.issuer, time.Now, factory)
 	}
+	if phase == replacementPhase {
+		ctx = context.WithValue(ctx, replacementApprovalGuardKey{}, func() error {
+			var current Approval
+			live, err := readPairedApproval(files.ControllerApprovalPath, &current, DecodeStrict)
+			if err != nil || !os.SameFile(live.info, snap.info) || handoff.Digest(live.raw) != handoff.Digest(snap.raw) || approvalDigest(current) != approvalDigest(a) {
+				return ErrApproval
+			}
+			return nil
+		})
+	}
 	var paired *PairedTerminalFiles
 	if mode == "paired-terminal" {
 		paired = &files

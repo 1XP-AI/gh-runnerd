@@ -110,10 +110,10 @@ func TestBrokerFinitePhasesAndUnknownRetention(t *testing.T) {
 
 func TestBrokerLedgerCapacityDerivesFromFiniteSlotSchema(t *testing.T) {
 	want := 1 + 2*(len(brokerPhases)+len(brokerSpecialSlots)) + 1
-	if got := brokerLedgerMaxLines(); got != want || got != 24 {
+	if got := brokerLedgerMaxLines(); got != want || got != 26 {
 		t.Fatalf("ledger line bound=%d want schema-derived %d", got, want)
 	}
-	if brokerSlotAllowed("unreviewed-slot") || !brokerSlotAllowed("paired-terminal") || !brokerSlotAllowed("discover-actions-host") {
+	if brokerSlotAllowed("unreviewed-slot") || !brokerSlotAllowed("paired-terminal") || !brokerSlotAllowed("discover-actions-host") || !brokerSlotAllowed("session-replacement") {
 		t.Fatal("ledger schema widened beyond the finite reviewed slots")
 	}
 }

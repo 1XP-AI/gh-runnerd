@@ -425,7 +425,10 @@ func markBaselineWireRequest(req *http.Request) *http.Request {
 // transport. User-supplied test wrappers may mutate a request before it gets
 // here, so this is the final request-side boundary before any bytes leave the
 // process. Only explicitly marked G01 runtime requests are inspected.
-type baselineRequestCaptureTransport struct{ inner http.RoundTripper }
+type baselineRequestCaptureTransport struct {
+	inner       http.RoundTripper
+	replacement *replacementScope
+}
 
 // baselineRequestHostMatchesURL fences Request.Host, which overrides the
 // physical HTTP Host header. The SDK normally leaves it empty; an explicitly
@@ -434,9 +437,29 @@ func baselineRequestHostMatchesURL(req *http.Request) bool {
 	return req != nil && req.URL != nil && req.URL.Opaque == "" && (req.Host == "" || req.Host == req.URL.Host)
 }
 
-func (t baselineRequestCaptureTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+func (t baselineRequestCaptureTransport) RoundTrip(req *http.Request) (response *http.Response, err error) {
+	defer func() {
+		if err != nil && t.replacement != nil {
+			t.replacement.invalid.Store(true)
+		}
+	}()
 	if req == nil {
 		return nil, ErrRemote
+	}
+	p, _ := req.Context().Value(replacementRequestKey{}).(*replacementPermit)
+	if t.replacement != nil && (p == nil || p.scope != t.replacement) {
+		if req.Body != nil {
+			_ = req.Body.Close()
+		}
+		return nil, ErrQuarantine
+	}
+	if p != nil {
+		if err := p.before(req); err != nil {
+			if req.Body != nil {
+				_ = req.Body.Close()
+			}
+			return nil, err
+		}
 	}
 	c, _ := req.Context().Value(baselineWireKey{}).(*baselineWireCapture)
 	markerValues, markerKeyCount := baselineWireMarkerValues(req)
@@ -461,7 +484,11 @@ func (t baselineRequestCaptureTransport) RoundTrip(req *http.Request) (*http.Res
 			return nil, err
 		}
 	}
-	return t.inner.RoundTrip(req)
+	response, err = t.inner.RoundTrip(req)
+	if err == nil && p != nil {
+		return p.after(req, response)
+	}
+	return response, err
 }
 
 func validBaselineRequestIDs(ids []int64) bool {

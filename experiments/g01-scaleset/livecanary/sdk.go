@@ -47,7 +47,7 @@ func (c Credentials) validate(a Approval, now time.Time) error {
 		return ErrApproval
 	}
 	needsVerification := slices.ContainsFunc(a.Phases, func(p string) bool {
-		return p == "before-ack" || p == "after-ack" || p == "before-acquire" || p == "acquire-loss" || p == "drain"
+		return p == "before-ack" || p == "after-ack" || p == "before-acquire" || p == "acquire-loss" || p == "drain" || p == "session-replacement"
 	})
 	if needsVerification && (len(c.VerificationToken) < 20 || len(c.VerificationToken) > 1024 || c.VerificationToken == c.InstallationToken || strings.ContainsAny(c.VerificationToken, "\r\n\x00")) {
 		return ErrApproval
@@ -56,6 +56,7 @@ func (c Credentials) validate(a Approval, now time.Time) error {
 }
 
 type SDKAPI struct {
+	physical    *http.Transport
 	client      *scaleset.Client
 	rest        *http.Client
 	baseURL     string
@@ -94,7 +95,7 @@ func newSDKAPIWithPollHook(a Approval, c Credentials, hook *drainPollHook) (*SDK
 	if err != nil {
 		return nil, ErrApproval
 	}
-	return &SDKAPI{client: client, rest: retry, baseURL: "https://api.github.com", approval: a, credentials: c, options: options}, nil
+	return &SDKAPI{physical: transport, client: client, rest: retry, baseURL: "https://api.github.com", approval: a, credentials: c, options: options}, nil
 }
 
 // Keep the production transport construction separate so its TLS protocol and

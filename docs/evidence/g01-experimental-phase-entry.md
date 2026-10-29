@@ -62,6 +62,10 @@ conditional deletion capability. The paired normal-success direct deletion
 remains its existing exclusive experiment policy; no fault reconciliation or
 unconditional fallback was added.
 
+The separately bounded [session replacement experiment](g01-session-replacement.md)
+uses its exact signed phase, original create prefix and v2 audience. Its two
+same-invocation session closes confer no legacy cleanup or recovery authority.
+
 The official offline checker prepares current-source synthetic TEST dispatchers
 once in an owned temporary directory, with serial bounded race builds, supplies
 them to the existing fixture partition and removes only its owned directory.
