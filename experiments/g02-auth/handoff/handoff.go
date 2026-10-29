@@ -46,7 +46,7 @@ func (r Request) Valid() bool {
 
 func validPhase(phase string) bool {
 	switch phase {
-	case "create", "before-ack", "after-ack", "before-acquire", "acquire-loss", "jit-loss", "drain", "inspect", "cleanup", "discover-actions-host", "paired-terminal", "session-replacement":
+	case "create", "before-ack", "after-ack", "before-acquire", "acquire-loss", "jit-loss", "drain", "inspect", "cleanup", "discover-actions-host", "paired-terminal", "session-replacement", "before-jit":
 		return true
 	default:
 		return false

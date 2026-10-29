@@ -26,6 +26,7 @@ import (
 
 	enrollment "github.com/1XP-AI/gh-runnerd/experiments/g02-auth"
 	"github.com/1XP-AI/gh-runnerd/experiments/g02-auth/handoff"
+	"github.com/actions/scaleset"
 )
 
 func experimentalPolicy(t *testing.T, a Approval, raw []byte, mode, phase, role string) string {
@@ -82,7 +83,7 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 			}
 		}
 	}
-	cases := []string{"before-ack", "inspect", "paired-terminal", "session-replacement", "session-replacement-zero", "session-replacement-new202", "session-replacement-missing", "session-replacement-null", "session-replacement-raw-drift"}
+	cases := []string{"before-jit", "jit-loss", "before-jit-raw-drift", "jit-loss-raw-drift", "before-jit-extra", "jit-loss-extra", "before-ack", "inspect", "paired-terminal", "session-replacement", "session-replacement-zero", "session-replacement-new202", "session-replacement-missing", "session-replacement-null", "session-replacement-raw-drift"}
 	if os.Getenv("G01_PHASE_BROKER_TEST_BINARY") != "" {
 		cases = append(cases, "alias", "workflow-seed", "issuer-seed", "rootless", "unknown-policy")
 	}
@@ -94,7 +95,14 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 				mode = replacementPhase
 				variant = strings.TrimPrefix(caseName, "session-replacement-")
 			}
-			negative := mode != "before-ack" && mode != "inspect" && mode != "paired-terminal" && mode != "session-replacement"
+			for _, p := range []string{"before-jit", "jit-loss"} {
+				if strings.HasPrefix(caseName, p+"-") {
+					mode = p
+					variant = strings.TrimPrefix(caseName, p+"-")
+				}
+			}
+			jitBoundary := mode == "before-jit" || mode == "jit-loss"
+			negative := !jitBoundary && mode != "before-ack" && mode != "inspect" && mode != "paired-terminal" && mode != "session-replacement"
 			if negative {
 				mode = "before-ack"
 			}
@@ -102,6 +110,8 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 			var base *baselineFixture
 			var replacement *replacementTrace
 			var files PairedTerminalFiles
+			var physicalJIT, workerReads int
+			committedName := ""
 			if mode == "paired-terminal" {
 				terminal = newTerminalFixtureWithCreate(t, []string{"create", "start", "inspect", "cleanup"}, nil, func(j *FileJournal, a Approval) { completedHandoffCreate(t, j, a) })
 				base = terminal.c
@@ -110,7 +120,7 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 			} else {
 				a := approval()
 				a.WorkflowRef = "refs/heads/main"
-				if mode == "session-replacement" {
+				if mode == "session-replacement" || mode == "before-jit" {
 					a.Phases = append(a.Phases, mode)
 				}
 				var original []byte
@@ -118,13 +128,29 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 				if mode == "session-replacement" {
 					change = replacementResponse(a, variant)
 				}
+				if jitBoundary {
+					change = func(stage string, value any) any {
+						if stage == "set" {
+							x := value.(scaleset.RunnerScaleSet)
+							x.Labels[0].Type = "System"
+							x.Statistics = &scaleset.RunnerScaleSetStatistic{}
+							return x
+						}
+						return value
+					}
+				}
 				base = newBaselineFixtureWithCreate(t, change, "", a, func(j *FileJournal) { f, _ := completedHandoffCreate(t, j, a); original = f.snapshot })
 				base.release()
 				base.release = nil
+				if jitBoundary && variant == "extra" {
+					if base.j.Append(Event{Kind: "phase", Operation: "inspect"}) != nil {
+						t.Fatal("extra history fixture")
+					}
+				}
 				root := filepath.Dir(base.j.directory)
 				files = PairedTerminalFiles{ControllerStateDirectory: base.j.directory, ControllerApprovalPath: filepath.Join(root, "controller-approval.json")}
 				raw, _ := json.Marshal(a)
-				if mode == "session-replacement" && variant != "raw-drift" {
+				if (mode == "session-replacement" || jitBoundary) && variant != "raw-drift" {
 					raw = original
 				}
 				if os.WriteFile(files.ControllerApprovalPath, raw, 0600) != nil {
@@ -132,6 +158,19 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 				}
 				// Actual Driver Preflight routes, with all other calls on the pinned SDK.
 				base.extra = func(w http.ResponseWriter, r *http.Request) bool {
+					if jitBoundary && strings.HasSuffix(r.URL.Path, "/generatejitconfig") {
+						physicalJIT++
+						var body struct {
+							Name       string `json:"name"`
+							WorkFolder string `json:"workFolder"`
+						}
+						if json.NewDecoder(r.Body).Decode(&body) != nil || body.Name != a.workerName() || body.WorkFolder != "_work" {
+							t.Error("physical JIT identity differs")
+						}
+						committedName = body.Name
+						json.NewEncoder(w).Encode(map[string]any{"runner": map[string]any{"id": 991, "name": committedName, "runnerScaleSetId": 7}, "encodedJITConfig": "c3ludGhldGljLWppdC1ib3VuZGFyeS1zZWNyZXQ="})
+						return true
+					}
 					repo := map[string]any{"id": a.RepositoryID, "full_name": a.Organization + "/" + a.Repository, "private": true, "fork": false}
 					var body any
 					if r.Method == "DELETE" && strings.Contains(r.URL.Path, "/sessions/") {
@@ -139,7 +178,12 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 						return true
 					}
 					if strings.HasSuffix(r.URL.Path, "/agents") {
-						json.NewEncoder(w).Encode(map[string]any{"count": 0, "value": []any{}})
+						workerReads++
+						value := []any{}
+						if jitBoundary && committedName != "" {
+							value = append(value, map[string]any{"id": 991, "name": committedName, "runnerScaleSetId": 7})
+						}
+						json.NewEncoder(w).Encode(map[string]any{"count": len(value), "value": value})
 						return true
 					}
 					switch r.URL.Path {
@@ -157,6 +201,14 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 				}
 				if mode == replacementPhase {
 					replacement = attachReplacementTrace(t, base, variant)
+				}
+				if jitBoundary {
+					base.beforeRequest = func(w http.ResponseWriter, r *http.Request) bool {
+						if strings.HasSuffix(r.URL.Path, "/generatejitconfig") {
+							return base.extra(w, r)
+						}
+						return false
+					}
 				}
 			}
 			base.readEvents = func() []Event {
@@ -299,6 +351,9 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 				}
 				var output []byte
 				output, e = command.CombinedOutput()
+				if bytes.Contains(output, []byte(jitBoundaryFixtureSecret)) {
+					t.Fatal("JIT secret escaped actual command stdout/stderr")
+				}
 				if e == nil {
 					e = json.Unmarshal(output, &result)
 				}
@@ -329,11 +384,26 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 				}
 				return
 			}
+			if jitBoundary && (variant == "raw-drift" || variant == "extra") {
+				if e == nil || transport.mints != 0 || base.requests.Load() != 0 {
+					t.Fatal("JIT raw/prefix drift crossed preparation/remint boundary")
+				}
+				return
+			}
 			if mode == replacementPhase && (variant == "missing" || variant == "null") {
 				if e == nil || transport.mints != 1 || !reflect.DeepEqual(replacement.snapshot(), []string{"set", "worker", "open1", "poll1"}) || base.acks.Load() != 0 || base.acquires.Load() != 0 {
 					t.Fatal("missing/null identity crossed replacement boundary", replacement.snapshot())
 				}
 				return
+			}
+			if jitBoundary && mode == "before-jit" && physicalJIT != 0 {
+				t.Fatalf("physical JIT count = %d, want 0", physicalJIT)
+			}
+			if jitBoundary && e != nil {
+				data, _ := os.ReadFile(filepath.Join(files.ControllerStateDirectory, "journal.jsonl"))
+				if !bytes.Contains(data, []byte(`"jit_boundary":`)) {
+					t.Fatalf("actual %s command produced no typed physical boundary evidence (physical JIT %d)", mode, physicalJIT)
+				}
 			}
 			if e != nil || transport.mints != 1 {
 				for _, path := range []string{filepath.Join(brokerFiles.StateDirectory, "broker.jsonl"), filepath.Join(files.ControllerStateDirectory, "journal.jsonl")} {
@@ -351,6 +421,24 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 			data, e := os.ReadFile(filepath.Join(files.ControllerStateDirectory, "journal.jsonl"))
 			if e != nil {
 				t.Fatal(e)
+			}
+			if jitBoundary {
+				want := 0
+				outcome := "not-attempted"
+				if mode == "jit-loss" {
+					want = 1
+					outcome = "response-suppressed"
+				}
+				if physicalJIT != want {
+					t.Fatalf("physical JIT count = %d, want %d", physicalJIT, want)
+				}
+				if workerReads != 2 || !bytes.Contains(data, []byte(`"jit_boundary":`)) || !bytes.Contains(data, []byte(`"outcome":"`+outcome+`"`)) || !bytes.Contains(data, []byte(`"stage":"complete"`)) {
+					t.Fatal("typed physical boundary/suppression and independent lookup evidence missing")
+				}
+				if bytes.Contains(data, []byte("c3ludGhldGljLWppdC1ib3VuZGFyeS1zZWNyZXQ=")) || base.sessions.Load() != 0 || base.acks.Load() != 0 || base.acquires.Load() != 0 {
+					t.Fatal("JIT secret or downstream effects escaped")
+				}
+				return
 			}
 			if strings.Count(string(data), `"phase":"`+phase+`"`) != 1 {
 				t.Fatal("phase singleton missing")

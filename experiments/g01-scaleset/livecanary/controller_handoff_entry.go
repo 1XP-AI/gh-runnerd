@@ -66,6 +66,16 @@ func runControllerHandoffPhase(ctx context.Context, journal *FileJournal, snapsh
 		if e != nil {
 			return ErrQuarantine
 		}
+	} else if jitBoundaryPhase(phase) {
+		release, e := journal.authorize(a)
+		if e != nil {
+			return ErrJournal
+		}
+		e = jitBoundaryAdmission(a, journal, handoff.Digest(snapshot), phase, journal.Events(), nil, ctx, false)
+		release()
+		if e != nil {
+			return e
+		}
 	} else if phase == replacementPhase {
 		release, e := journal.authorize(a)
 		if e != nil {
@@ -84,6 +94,8 @@ func runControllerHandoffPhase(ctx context.Context, journal *FileJournal, snapsh
 		release()
 	}
 	ctx = context.WithValue(ctx, experimentalPhaseAdmissionKey{}, true)
+	ctx = context.WithValue(ctx, jitBoundarySnapshotKey{}, handoff.Digest(snapshot))
+	ctx = context.WithValue(ctx, jitBoundaryRawKey{}, snapshot)
 	ctx = context.WithValue(ctx, replacementSnapshotKey{}, handoff.Digest(snapshot))
 	ctx = context.WithValue(ctx, replacementRawSnapshotKey{}, snapshot)
 	data, proof, err := consumeControllerHandoffWithProof(ctx, journal, snapshot, phase, source, newControllerHandoffMemorySource(receipt), root, now, read)

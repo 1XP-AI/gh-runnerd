@@ -35,7 +35,7 @@ func authorizePhaseWithProof(a Approval, j Journal, phase string, ctx context.Co
 		return state{}, nil, err
 	}
 	s := replayWithApproval(events, &a)
-	if phase == replacementPhase {
+	if phase == replacementPhase || jitBoundaryPhase(phase) && proof != nil {
 		s = replayWithApproval(events[:7], &a)
 	}
 	// Every approved phase, including the read-only inspect slot, is consumed
@@ -60,6 +60,13 @@ func authorizePhaseWithProof(a Approval, j Journal, phase string, ctx context.Co
 // validateCreatePrefix is the exact create-event grammar shared by the
 // pre-phase authorization check and Driver's post-phase check.
 func validateCreatePrefix(a Approval, j Journal, phase string, ctx context.Context, proof *controllerHandoffProof, post bool, events []Event) error {
+	if phase == beforeJITPhase || phase == "jit-loss" && proof != nil {
+		fj, ok := j.(*FileJournal)
+		if !ok || proof == nil {
+			return ErrQuarantine
+		}
+		return jitBoundaryAdmission(a, fj, proof.RawApprovalSHA256, phase, events, proof, ctx, post)
+	}
 	if phase == replacementPhase {
 		fj, ok := j.(*FileJournal)
 		if !ok || proof == nil {
@@ -263,7 +270,16 @@ func prepareJournalSnapshot(directory string, a Approval, phase string, open fun
 		}
 	}()
 	var release func()
-	if phase == replacementPhase {
+	if jitBoundaryPhase(phase) {
+		release, e = j.authorize(a)
+		if e == nil {
+			e = jitBoundaryAdmission(a, j, raw, phase, j.Events(), nil, context.Background(), false)
+		}
+		if e != nil && release != nil {
+			release()
+			release = nil
+		}
+	} else if phase == replacementPhase {
 		release, e = j.authorize(a)
 		if e == nil {
 			e = replacementAdmission(a, j, raw, j.Events(), nil, context.Background(), false)
@@ -279,6 +295,13 @@ func prepareJournalSnapshot(directory string, a Approval, phase string, open fun
 		return receipt, e
 	}
 	defer release()
+	if jitBoundaryPhase(phase) {
+		j.mu.Lock()
+		defer j.mu.Unlock()
+		if _, err := jitBoundaryCreatePrefix(a, j, raw, phase, j.events); err != nil || !j.jitBoundaryPhysicalLocked() {
+			return receipt, ErrQuarantine
+		}
+	}
 	jd, e := preparedDigest(j.file, 1<<20)
 	if e != nil {
 		return receipt, e
@@ -296,5 +319,8 @@ func prepareJournalSnapshot(directory string, a Approval, phase string, open fun
 		return receipt, ErrJournal
 	}
 	receipt = PreparationReceipt{Version: 1, Status: "controller_journal_prepared", Phase: phase, ApprovalDigest: approvalDigest(a), State: preparedIdentity(j.directoryInfo), Journal: preparedIdentity(ji), Claim: preparedIdentity(ci), AdmissionDirectory: preparedIdentity(j.claim.rootInfo), JournalDigest: jd, ClaimDigest: cd}
+	if jitBoundaryPhase(phase) && (!j.authorityHeld(a) || !j.jitBoundaryPhysicalLocked()) {
+		return PreparationReceipt{}, ErrJournal
+	}
 	return receipt, nil
 }

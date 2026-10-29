@@ -13,7 +13,7 @@ var sha = regexp.MustCompile(`^[a-f0-9]{40}$`)
 var actionsHost = regexp.MustCompile(`^[a-z0-9-]+(?:\.[a-z0-9-]+)*\.actions\.githubusercontent\.com$`)
 var workflowRef = regexp.MustCompile(`^refs/(?:heads|tags)/[A-Za-z0-9._/-]+$|^refs/pull/[1-9][0-9]*/(?:head|merge)$`)
 var workflowPath = regexp.MustCompile(`^\.github/workflows/[a-zA-Z0-9_-]+\.ya?ml$`)
-var phases = []string{"create", "before-ack", "after-ack", "before-acquire", "acquire-loss", "jit-loss", "drain", "inspect", "cleanup", "session-replacement"}
+var phases = []string{"create", "before-ack", "after-ack", "before-acquire", "acquire-loss", "jit-loss", "drain", "inspect", "cleanup", "session-replacement", "before-jit"}
 
 func (a Approval) setName() string    { return "g01-" + a.OwnerNonce }
 func (a Approval) workerName() string { return a.setName() + "-worker-1" }

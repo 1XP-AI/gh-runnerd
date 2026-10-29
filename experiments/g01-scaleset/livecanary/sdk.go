@@ -47,7 +47,7 @@ func (c Credentials) validate(a Approval, now time.Time) error {
 		return ErrApproval
 	}
 	needsVerification := slices.ContainsFunc(a.Phases, func(p string) bool {
-		return p == "before-ack" || p == "after-ack" || p == "before-acquire" || p == "acquire-loss" || p == "drain" || p == "session-replacement"
+		return p == "before-ack" || p == "after-ack" || p == "before-acquire" || p == "acquire-loss" || p == "drain" || p == "session-replacement" || p == "before-jit"
 	})
 	if needsVerification && (len(c.VerificationToken) < 20 || len(c.VerificationToken) > 1024 || c.VerificationToken == c.InstallationToken || strings.ContainsAny(c.VerificationToken, "\r\n\x00")) {
 		return ErrApproval
