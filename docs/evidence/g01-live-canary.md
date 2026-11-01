@@ -107,13 +107,23 @@ checks, plus the runner-group `GroupPolicy` v2 preflight;
 is coordinator-reported as passed on merge
 `f41f782527f30fddb254165625ec7f772a63b2bc` using hosted runners; this document
 review did not query the remote run status.
-This source/CI result
-does not establish production trust-root provisioning, runner/JIT readiness, or
-server-side conditional cleanup. The local Docker Desktop Linux context is
-configured, but daemon availability, worker isolation, and resource limits were
-not verified. The private-target revalidation made read-only GitHub metadata
-requests only. During that revalidation, no canary workflow was dispatched; no
-self-hosted runner or JIT operation, canary credential mint/read, Docker
+This source/CI result does not establish production trust-root provisioning,
+runner/JIT readiness, or server-side conditional cleanup.
+
+The public [actual-host checkpoint dated 2026-10-28](https://github.com/1XP-AI/gh-runnerd/issues/1#issuecomment-6395166330)
+separately reports Docker Engine metadata on the test host and successful
+download and digest verification of the selected immutable ARM64 runner image.
+No container was started. These are coordinator-reported observations from
+that date; this review did not repeat them. They establish endpoint metadata
+and image presence at that time, not current readiness, worker isolation, or
+effective resource enforcement.
+
+That actual-host checkpoint is distinct from the development host's configured
+Docker Desktop Linux context. For that separate context, daemon availability,
+worker isolation, and resource limits have not been verified. The
+private-target revalidation made read-only GitHub metadata requests only.
+During that revalidation, no canary workflow was dispatched; no self-hosted
+runner or JIT operation, canary credential mint/read, Docker
 daemon/image/container operation, or Scale Set operation occurred. Live
 acceptance remains open.
 
