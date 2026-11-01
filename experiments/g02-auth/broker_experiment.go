@@ -73,7 +73,7 @@ func RunBrokerExperiment(ctx context.Context, files BrokerFiles, input *os.File)
 		return BrokerResult{}, errBroker
 	}
 	selected, e := selectBrokerExperiment(files, time.Now())
-	if e != nil || selected.policy.Version == 3 {
+	if e != nil {
 		return BrokerResult{}, errBroker
 	}
 	return runBrokerExperimentOwned(ctx, files, input, os.NewFile(3, "g01-observation"), os.NewFile(4, "g01-workflow-signer"), os.NewFile(5, "g01-issuer-signer"), selected)
@@ -91,7 +91,7 @@ func RunBrokerExperimentWithInputs(ctx context.Context, files BrokerFiles, input
 		return BrokerResult{}, errBroker
 	}
 	selected, e := selectBrokerExperiment(files, time.Now())
-	if e != nil || selected.policy.Version == 3 {
+	if e != nil {
 		return BrokerResult{}, errBroker
 	}
 	return runBrokerExperimentOwned(ctx, files, input, observation, workflowSeed, issuerSeed, selected)
@@ -127,8 +127,7 @@ func readExperimentalSeed(ctx context.Context, file *os.File, matches func(ed255
 	return key, nil
 }
 func runBrokerExperimentOwned(parent context.Context, files BrokerFiles, input, observation, workflowSeed, issuerSeed *os.File, selected brokerExperimentSelection) (BrokerResult, error) {
-	// Selection alone does not authorize v2 receipt handling or effects.
-	if parent == nil || parent.Err() != nil || selected.policy.Version == 3 {
+	if parent == nil || parent.Err() != nil {
 		return BrokerResult{}, errBroker
 	}
 	owned, e := handoff.ProtectPipes(input, observation, workflowSeed, issuerSeed)
@@ -152,7 +151,7 @@ func runBrokerExperimentOwned(parent context.Context, files BrokerFiles, input, 
 	}
 	workflowSigner, issuerSigner := &experimentalSigner{}, &experimentalSigner{}
 	defer func() { clear(workflowSigner.key); clear(issuerSigner.key) }()
-	assembly := &brokerHandoffAssembly{experimental: true, signer: issuerSigner, issuer: selected.issuer, workflow: selected.workflow, source: selected.policy.Source, launch: func(context.Context, *issuedControllerHandoff, string) error { return errBroker }}
+	assembly := &brokerHandoffAssembly{experimental: true, signer: issuerSigner, issuer: selected.issuer, workflow: selected.workflow, request: selected.grant.Request, source: selected.grant.Request.Source, launch: func(context.Context, *issuedControllerHandoff, string) error { return errBroker }}
 	api.provenanceFactory = func(check func() error) (BrokerProvenanceAdapter, error) {
 		if ctx.Err() != nil {
 			return nil, errBroker

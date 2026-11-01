@@ -164,7 +164,7 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 		if plan == nil || (a.Mode != "controller" && a.Mode != "paired-terminal") {
 			return BrokerResult{}, errBroker
 		}
-		request, err := brokerProvenanceRequest(a, plan.controller, provenance.Source)
+		request, err := brokerHandoffRequest(a, plan, provenance.Source)
 		if err != nil || provenance.Validate(request, api.now()) != nil || provenance.ExpiresAt.Before(a.ExpiresAt) {
 			return BrokerResult{}, errBroker
 		}
@@ -335,7 +335,7 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 	var launchErr error
 	if plan.handoff != nil {
 		assembly := plan.handoff
-		request, e := brokerProvenanceRequest(a, plan.controller, assembly.source)
+		request, e := brokerHandoffRequest(a, plan, assembly.source)
 		rawReceipt, e2 := handoff.DecodeStrictReceipt(plan.receiptRaw)
 		deadline, ok := ctx.Deadline()
 		if e != nil || e2 != nil || !ok || provenance == nil || (!bytes.Equal(rawReceipt.SigningBytes(), provenance.SigningBytes()) || rawReceipt.Signature != provenance.Signature) || assembly.workflow.Verify(request, rawReceipt, api.now()) != nil || guardLive() != nil || ctx.Err() != nil {

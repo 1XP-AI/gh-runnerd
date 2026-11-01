@@ -157,6 +157,10 @@ func brokerProvenanceContext(parent context.Context, a BrokerApproval, c control
 }
 
 func brokerWorkflowReceipt(ctx context.Context, api *brokerAPI, a BrokerApproval, c controllerApproval, controllerDigest string, claimed ...*brokerJournal) (*BrokerProvenanceReceipt, error) {
+	return brokerWorkflowReceiptForRequest(ctx, api, a, c, controllerDigest, nil, claimed...)
+}
+
+func brokerWorkflowReceiptForRequest(ctx context.Context, api *brokerAPI, a BrokerApproval, c controllerApproval, controllerDigest string, selected *BrokerProvenanceRequest, claimed ...*brokerJournal) (*BrokerProvenanceReceipt, error) {
 	if ctx == nil || ctx.Err() != nil || api == nil || (api.provenance == nil && api.provenanceFactory == nil) || (api.provenance != nil && api.provenanceFactory != nil) {
 		return nil, errBroker
 	}
@@ -174,17 +178,25 @@ func brokerWorkflowReceipt(ctx context.Context, api *brokerAPI, a BrokerApproval
 		return nil
 	}
 	adapter := api.provenance
+	var err error
 	if api.provenanceFactory != nil {
 		if len(claimed) != 1 {
 			return nil, errBroker
 		}
-		var err error
 		adapter, err = api.provenanceFactory(claimCheck)
 		if err != nil || adapter == nil || ctx.Err() != nil || claimCheck() != nil {
 			return nil, errBroker
 		}
 	}
-	request, err := brokerProvenanceRequest(a, c, adapter.Source())
+	var request BrokerProvenanceRequest
+	if selected == nil {
+		request, err = brokerProvenanceRequest(a, c, adapter.Source())
+	} else {
+		request = *selected
+		if !selectedBrokerRequestMatchesApproval(a, c, request, adapter.Source()) {
+			err = errBroker
+		}
+	}
 	if err != nil || request.ControllerApprovalSHA256 != controllerDigest {
 		return nil, errBroker
 	}
@@ -284,7 +296,12 @@ func runBrokerWithPrivateHandoff(ctx context.Context, files BrokerFiles, input *
 		if attempt.check() != nil {
 			return BrokerResult{}, errBroker
 		}
-		provenance, err = brokerWorkflowReceipt(ctx, api, approval, controller, approval.ControllerApprovalSHA256, attempt)
+		if assembly != nil && assembly.experimental {
+			request := assembly.request
+			provenance, err = brokerWorkflowReceiptForRequest(ctx, api, approval, controller, approval.ControllerApprovalSHA256, &request, attempt)
+		} else {
+			provenance, err = brokerWorkflowReceipt(ctx, api, approval, controller, approval.ControllerApprovalSHA256, attempt)
+		}
 		if err != nil || attempt.check() != nil {
 			return BrokerResult{}, errBroker
 		}

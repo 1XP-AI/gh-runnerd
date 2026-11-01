@@ -31,12 +31,16 @@ type brokerHandoffAssembly struct {
 	signer       receiptSigner
 	issuer       handoff.IssuerRoot
 	workflow     handoff.TrustRoot
+	request      BrokerProvenanceRequest
 	source       string
 	launch       func(context.Context, *issuedControllerHandoff, string) error
 }
 
 func (a *brokerHandoffAssembly) valid(root handoff.TrustRoot) bool {
-	return a != nil && a.signer != nil && a.launch != nil && a.issuer.Independent(a.workflow) && a.workflow.Equal(root) && a.workflow.Valid() && brokerProvenanceSource.MatchString(a.source)
+	if a == nil || a.signer == nil || a.launch == nil || !a.issuer.Independent(a.workflow) || !a.workflow.Equal(root) || !a.workflow.Valid() || !brokerProvenanceSource.MatchString(a.source) {
+		return false
+	}
+	return !a.experimental || a.request.Valid() && a.request.Source == a.source
 }
 
 // Own both complete pipes, close every duplicate child endpoint after Start,
