@@ -157,6 +157,10 @@ func brokerProvenanceContext(parent context.Context, a BrokerApproval, c control
 }
 
 func brokerWorkflowReceipt(ctx context.Context, api *brokerAPI, a BrokerApproval, c controllerApproval, controllerDigest string, claimed ...*brokerJournal) (*BrokerProvenanceReceipt, error) {
+	return brokerWorkflowReceiptForRequest(ctx, api, a, c, controllerDigest, nil, claimed...)
+}
+
+func brokerWorkflowReceiptForRequest(ctx context.Context, api *brokerAPI, a BrokerApproval, c controllerApproval, controllerDigest string, selected *BrokerProvenanceRequest, claimed ...*brokerJournal) (*BrokerProvenanceReceipt, error) {
 	if ctx == nil || ctx.Err() != nil || api == nil || (api.provenance == nil && api.provenanceFactory == nil) || (api.provenance != nil && api.provenanceFactory != nil) {
 		return nil, errBroker
 	}
@@ -174,17 +178,25 @@ func brokerWorkflowReceipt(ctx context.Context, api *brokerAPI, a BrokerApproval
 		return nil
 	}
 	adapter := api.provenance
+	var err error
 	if api.provenanceFactory != nil {
 		if len(claimed) != 1 {
 			return nil, errBroker
 		}
-		var err error
 		adapter, err = api.provenanceFactory(claimCheck)
 		if err != nil || adapter == nil || ctx.Err() != nil || claimCheck() != nil {
 			return nil, errBroker
 		}
 	}
-	request, err := brokerProvenanceRequest(a, c, adapter.Source())
+	var request BrokerProvenanceRequest
+	if selected == nil {
+		request, err = brokerProvenanceRequest(a, c, adapter.Source())
+	} else {
+		request = *selected
+		if !selectedBrokerRequestMatchesApproval(a, c, request, adapter.Source()) {
+			err = errBroker
+		}
+	}
 	if err != nil || request.ControllerApprovalSHA256 != controllerDigest {
 		return nil, errBroker
 	}
@@ -284,7 +296,12 @@ func runBrokerWithPrivateHandoff(ctx context.Context, files BrokerFiles, input *
 		if attempt.check() != nil {
 			return BrokerResult{}, errBroker
 		}
-		provenance, err = brokerWorkflowReceipt(ctx, api, approval, controller, approval.ControllerApprovalSHA256, attempt)
+		if assembly != nil && assembly.experimental {
+			request := assembly.request
+			provenance, err = brokerWorkflowReceiptForRequest(ctx, api, approval, controller, approval.ControllerApprovalSHA256, &request, attempt)
+		} else {
+			provenance, err = brokerWorkflowReceipt(ctx, api, approval, controller, approval.ControllerApprovalSHA256, attempt)
+		}
 		if err != nil || attempt.check() != nil {
 			return BrokerResult{}, errBroker
 		}
@@ -339,6 +356,11 @@ func runBrokerWithPrivateHandoff(ctx context.Context, files BrokerFiles, input *
 			selected.launch = func(ctx context.Context, h *issuedControllerHandoff, snapshotPath string) error {
 				if plan.check() != nil {
 					return errBroker
+				}
+				if selected.fixtureTransform != nil {
+					if selected.fixtureTransform(h) != nil {
+						return errBroker
+					}
 				}
 				if selected.experimental {
 					h.mode = approval.Mode
@@ -395,6 +417,23 @@ func (a *brokerAPI) verifyWorkflowWithReceipt(ctx context.Context, approval Brok
 		ref = provenance.WorkflowRef
 	}
 	if a.call(ctx, "GET", workflowRunPath(approval.Organization+"/"+approval.Repository, controller.WorkflowRunID), "Bearer "+token, nil, 200, &run) != nil || !run.matches(approval, controller.WorkflowRunID, controller.WorkflowSHA, controller.WorkflowPath, ref) {
+		return errBroker
+	}
+	return nil
+}
+
+// verifyFinalReusableWorkflow is the final offline reusable-callee GET. The
+// caller supplies an independently selected grant; neither the receipt nor the
+// provider response can select or rewrite its expected callee identity.
+func (a *brokerAPI) verifyFinalReusableWorkflow(ctx context.Context, approval BrokerApproval, controller controllerApproval, token string, grant reviewedWorkflowGrant) error {
+	if a == nil || a.client == nil || a.now == nil || ctx == nil || ctx.Err() != nil || !grant.valid() || grant.Request.Version != 2 || !grant.ExpiresAt.After(a.now()) || grant.Request.Repository != approval.Organization+"/"+approval.Repository || grant.OrganizationID != approval.OrganizationID || grant.RepositoryID != approval.RepositoryID || grant.Request.WorkflowRunID != controller.WorkflowRunID || grant.Request.WorkflowSHA != controller.WorkflowSHA || grant.Request.WorkflowRef != controller.WorkflowRef || grant.Request.WorkflowPath != controller.WorkflowPath {
+		return errBroker
+	}
+	observer := workflowRunObserver{client: a.client}
+	if _, err := observer.observe(ctx, grant, token); err != nil {
+		return errBroker
+	}
+	if ctx.Err() != nil || !grant.ExpiresAt.After(a.now()) {
 		return errBroker
 	}
 	return nil

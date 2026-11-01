@@ -203,15 +203,20 @@ func processChildRoots() (handoff.TrustRoot, handoff.IssuerRoot) {
 	return w, i
 }
 func runProcessHandoffTestChild() int {
-	if len(os.Args) != 8 || os.Args[2] != "--approval" || os.Args[4] != "--state-dir" || os.Args[6] != "--phase" || os.Args[7] != "create" {
+	experimental := len(os.Args) > 1 && os.Args[1] == "--execute-experimental-phase"
+	if (!experimental && (len(os.Args) != 8 || os.Args[2] != "--approval" || os.Args[4] != "--state-dir" || os.Args[6] != "--phase" || os.Args[7] != "create")) || (experimental && (len(os.Args) != 10 || os.Args[2] != "--mode" || os.Args[3] != "controller" || os.Args[4] != "--approval" || os.Args[6] != "--state-dir" || os.Args[8] != "--phase" || os.Args[9] != "create")) {
 		return 2
+	}
+	approvalPath, statePath := os.Args[3], os.Args[5]
+	if experimental {
+		approvalPath, statePath = os.Args[5], os.Args[7]
 	}
 	for _, entry := range os.Environ() {
 		if entry != "LANG=C" && entry != "LC_ALL=C" {
 			return 3
 		}
 	}
-	raw, e := os.ReadFile(os.Args[3])
+	raw, e := os.ReadFile(approvalPath)
 	if e != nil {
 		return 4
 	}
@@ -219,11 +224,14 @@ func runProcessHandoffTestChild() int {
 	if DecodeStrict(raw, &a) != nil {
 		return 5
 	}
-	directory, e := filepath.EvalSymlinks(filepath.Join(filepath.Dir(os.Args[5]), "admission"))
+	directory, e := filepath.EvalSymlinks(filepath.Join(filepath.Dir(statePath), "admission"))
 	if e != nil {
 		return 6
 	}
-	j, e := openJournalAtAdmission(os.Args[5], a, directory, func(f *os.File) error { return f.Sync() })
+	if policy, policyErr := os.ReadFile(filepath.Join(statePath, "controller-policy.json")); policyErr == nil {
+		return runProcessV3HandoffTestChild(approvalPath, statePath, policy, directory)
+	}
+	j, e := openJournalAtAdmission(statePath, a, directory, func(f *os.File) error { return f.Sync() })
 	if e != nil {
 		return 7
 	}
@@ -252,6 +260,31 @@ func runProcessHandoffTestChild() int {
 	})
 	if e != nil || factories != 1 || fake.createCalls != 1 {
 		return 8
+	}
+	return 0
+}
+
+func runProcessV3HandoffTestChild(approvalPath, statePath string, policy []byte, admission string) int {
+	controllerExperimentPolicyJSON = string(policy)
+	files := PairedTerminalFiles{ControllerApprovalPath: approvalPath, ControllerStateDirectory: statePath}
+	effects := map[string]int{"factory_calls": 0, "create_calls": 0}
+	controllerExperimentFixtureOpen = func(path string, a Approval) (*FileJournal, error) {
+		return openJournalAtAdmission(path, a, admission, func(f *os.File) error { return f.Sync() })
+	}
+	fake := &fakeAPI{}
+	factories := 0
+	controllerExperimentFixtureAPI = func(Approval, Credentials) (API, error) {
+		factories++
+		return handoffValidInventoryAPI{fake}, nil
+	}
+	err := RunControllerExperiment(context.Background(), files, "controller", "create", os.Stdin)
+	effects["factory_calls"], effects["create_calls"] = factories, fake.createCalls
+	data, marshalErr := json.Marshal(effects)
+	if marshalErr != nil || os.WriteFile(filepath.Join(statePath, "controller-effects.json"), data, 0600) != nil {
+		return 8
+	}
+	if err != nil || factories != 1 || fake.createCalls != 1 {
+		return 9
 	}
 	return 0
 }

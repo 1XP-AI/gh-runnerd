@@ -37,12 +37,22 @@ func selectControllerExperiment(files PairedTerminalFiles, mode, phase string, n
 	if e != nil {
 		return controllerExperimentSelection{}, ErrApproval
 	}
-	a, request, e := controllerHandoffRequest(snap.raw, phase, p.Source, now)
+	source := p.Source
+	if p.Version == 3 {
+		source = "github-rest-workflow-v1"
+	}
+	a, request, e := controllerHandoffRequest(snap.raw, phase, source, now)
 	if e != nil {
 		return controllerExperimentSelection{}, ErrApproval
 	}
-	groupDigest := a.GroupPolicy.GrantDigest(request, a.RepositoryID, int64(a.RunnerGroupID), a.ManagementScope)
-	g, e := p.SelectGroup(mode, request, groupDigest, now)
+	var g handoff.PhaseGrant
+	if p.Version == 3 {
+		request.Version, request.Source = 2, handoff.ReusableCalleeSource
+		g, e = p.SelectCallee(mode, request, a.GroupPolicy.OrganizationID, a.RepositoryID, int64(a.RunnerGroupID), a.ManagementScope, a.GroupPolicy, now)
+	} else {
+		groupDigest := a.GroupPolicy.GrantDigest(request, a.RepositoryID, int64(a.RunnerGroupID), a.ManagementScope)
+		g, e = p.SelectGroup(mode, request, groupDigest, now)
+	}
 	if e != nil || g.RepositoryID != a.RepositoryID || (a.GroupPolicy.Version == 2 && g.OrganizationID != a.GroupPolicy.OrganizationID) || g.ExpiresAt.Before(a.ExpiresAt) {
 		return controllerExperimentSelection{}, ErrApproval
 	}
@@ -90,6 +100,11 @@ func runControllerExperimentOwned(parent context.Context, files PairedTerminalFi
 	if parent == nil || parent.Err() != nil {
 		return ErrApproval
 	}
+	var expected *handoff.Request
+	if selected.policy.Version == 3 {
+		request := selected.grant.Request
+		expected = &request
+	}
 	owned, e := handoff.ProtectPipes(control, input)
 	if e != nil {
 		return ErrApproval
@@ -133,7 +148,7 @@ func runControllerExperimentOwned(parent context.Context, files PairedTerminalFi
 		return NewSDKAPI(a, c)
 	}
 	if phase == "create" {
-		return runControllerProcessHandoffCreate(ctx, j, snap.raw, owned[0], owned[1], selected.policy.Source, selected.workflow, selected.issuer, time.Now, factory)
+		return runControllerProcessHandoffCreateExpected(ctx, j, snap.raw, owned[0], owned[1], selected.policy.Source, expected, selected.workflow, selected.issuer, time.Now, factory)
 	}
 	if phase == replacementPhase || jitBoundaryPhase(phase) {
 		ctx = context.WithValue(ctx, replacementApprovalGuardKey{}, func() error {
@@ -152,7 +167,7 @@ func runControllerExperimentOwned(parent context.Context, files PairedTerminalFi
 	if mode == "paired-terminal" {
 		paired = &files
 	}
-	return runControllerProcessHandoffPhase(ctx, j, snap.raw, owned[0], owned[1], mode, phase, paired, selected.policy.Source, selected.workflow, selected.issuer, time.Now, factory)
+	return runControllerProcessHandoffPhaseExpected(ctx, j, snap.raw, owned[0], owned[1], mode, phase, paired, selected.policy.Source, expected, selected.workflow, selected.issuer, time.Now, factory)
 }
 
 // Only fixture-tag code may assign these private concrete constructors.

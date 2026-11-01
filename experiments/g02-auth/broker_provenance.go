@@ -32,7 +32,7 @@ var (
 )
 
 func brokerProvenanceRequestValid(request BrokerProvenanceRequest) bool {
-	return request.Valid()
+	return request.Source != handoff.ReusableCalleeSource && request.Valid()
 }
 
 func brokerProvenanceRequest(approval BrokerApproval, controller controllerApproval, source string) (BrokerProvenanceRequest, error) {
@@ -45,4 +45,37 @@ func brokerProvenanceRequest(approval BrokerApproval, controller controllerAppro
 		return BrokerProvenanceRequest{}, errBroker
 	}
 	return request, nil
+}
+
+// selectedBrokerRequestMatchesApproval keeps the caller identity anchored to
+// the broker/controller approvals while allowing an independently selected
+// reusable-callee request to carry its additional callee identity. The callee
+// is never reconstructed from a receipt or provider response.
+func selectedBrokerRequestMatchesApproval(approval BrokerApproval, controller controllerApproval, request BrokerProvenanceRequest, source string) bool {
+	baseSource := source
+	if source == handoff.ReusableCalleeSource {
+		baseSource = workflowProvenanceSource
+	}
+	base, err := brokerProvenanceRequest(approval, controller, baseSource)
+	if err != nil || !request.Valid() || request.Source != source || request.ControllerApprovalSHA256 != base.ControllerApprovalSHA256 || request.Repository != base.Repository || request.WorkflowRunID != base.WorkflowRunID || request.WorkflowRef != base.WorkflowRef || request.WorkflowSHA != base.WorkflowSHA || request.WorkflowPath != base.WorkflowPath || request.Phase != base.Phase || request.OwnerNonce != base.OwnerNonce {
+		return false
+	}
+	if request.Version == 0 {
+		return request == base
+	}
+	return request.Version == 2 && request.Source == handoff.ReusableCalleeSource
+}
+
+func brokerHandoffRequest(approval BrokerApproval, plan *brokerControllerPlan, source string) (BrokerProvenanceRequest, error) {
+	if plan == nil {
+		return BrokerProvenanceRequest{}, errBroker
+	}
+	if plan.handoff != nil && plan.handoff.experimental {
+		request := plan.handoff.request
+		if !selectedBrokerRequestMatchesApproval(approval, plan.controller, request, source) {
+			return BrokerProvenanceRequest{}, errBroker
+		}
+		return request, nil
+	}
+	return brokerProvenanceRequest(approval, plan.controller, source)
 }

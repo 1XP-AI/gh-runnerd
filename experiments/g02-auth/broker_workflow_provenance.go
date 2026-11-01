@@ -8,6 +8,8 @@ import (
 	"encoding/hex"
 	"strings"
 	"time"
+
+	"github.com/1XP-AI/gh-runnerd/experiments/g02-auth/handoff"
 )
 
 const workflowProvenanceSource = "github-rest-workflow-v1"
@@ -21,7 +23,7 @@ type reviewedWorkflowGrant struct {
 }
 
 func (g reviewedWorkflowGrant) valid() bool {
-	return g.Request.Valid() && g.Request.Source == workflowProvenanceSource && brokerWorkflowRunHeadBranchMatchesRef(strings.TrimPrefix(g.Request.WorkflowRef, "refs/heads/"), g.Request.WorkflowRef) && g.OrganizationID > 0 && g.RepositoryID > 0 && !g.ExpiresAt.IsZero()
+	return g.Request.Valid() && (g.Request.Version == 0 && g.Request.Source == workflowProvenanceSource || g.Request.Version == 2 && g.Request.Source == handoff.ReusableCalleeSource) && brokerWorkflowRunHeadBranchMatchesRef(strings.TrimPrefix(g.Request.WorkflowRef, "refs/heads/"), g.Request.WorkflowRef) && g.OrganizationID > 0 && g.RepositoryID > 0 && !g.ExpiresAt.IsZero()
 }
 
 type receiptSigner interface {
@@ -56,7 +58,7 @@ func newWorkflowProvenanceAdapter(grant reviewedWorkflowGrant, observer *workflo
 	}
 	return &workflowProvenanceAdapter{grant: grant, observer: observer, readCredential: readCredential, signer: signer, keyID: keyID, now: now, nonce: nonce, checkAttempt: checkAttempt}, nil
 }
-func (*workflowProvenanceAdapter) Source() string { return workflowProvenanceSource }
+func (a *workflowProvenanceAdapter) Source() string { return a.grant.Request.Source }
 func (a *workflowProvenanceAdapter) check(ctx context.Context) error {
 	if ctx == nil || ctx.Err() != nil || a.checkAttempt() != nil {
 		return errBroker
@@ -103,6 +105,11 @@ func (a *workflowProvenanceAdapter) Attest(parent context.Context, request Broke
 		WorkflowPath: request.WorkflowPath, Phase: request.Phase,
 		OwnerNonce: request.OwnerNonce, ReceiptNonce: nonceHex,
 		Source: workflowProvenanceSource, IssuedAt: a.now().UTC(), ExpiresAt: a.grant.ExpiresAt,
+	}
+	if request.Version == 2 {
+		receipt.Version = 2
+		receipt.Callee = request.Callee
+		receipt.Source = request.Source
 	}
 	if a.check(ctx) != nil {
 		return fail, errBroker

@@ -26,7 +26,24 @@ func (b PhaseBinding) SigningBytes() []byte {
 		BindingClaims
 		Mode string `json:"mode"`
 	}{b.BindingClaims, b.Mode})
+	if b.Request.Version == 2 {
+		data, _ = json.Marshal(struct {
+			BindingClaims
+			Mode           string `json:"mode"`
+			RequestVersion int    `json:"request_version"`
+		}{b.BindingClaims, b.Mode, 2})
+	}
 	return append([]byte("gh-runnerd/g01-issued-phase-binding/v2\x00"), data...)
+}
+func (b PhaseBinding) MarshalJSON() ([]byte, error) {
+	type wire PhaseBinding
+	if b.Request.Version == 2 {
+		return json.Marshal(struct {
+			wire
+			RequestVersion int `json:"request_version"`
+		}{wire(b), 2})
+	}
+	return json.Marshal(wire(b))
 }
 func PhaseAudience(mode, phase string) string {
 	if mode == "paired-terminal" && phase == mode {
@@ -39,9 +56,27 @@ func PhaseAudience(mode, phase string) string {
 }
 func DecodeStrictPhaseBinding(data []byte) (PhaseBinding, error) {
 	var b PhaseBinding
-	if decodeExactObject(data, &b, MaxBindingBytes) != nil {
+	if len(data) == 0 || len(data) > MaxBindingBytes || !hasUniqueObjectKeys(data) {
 		return b, ErrInvalid
 	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(data, &fields) != nil {
+		return b, ErrInvalid
+	}
+	mode, ok := fields["mode"]
+	if !ok || bytes.Equal(bytes.TrimSpace(mode), []byte("null")) || json.Unmarshal(mode, &b.Mode) != nil {
+		return PhaseBinding{}, ErrInvalid
+	}
+	delete(fields, "mode")
+	rest, err := json.Marshal(fields)
+	if err != nil {
+		return PhaseBinding{}, ErrInvalid
+	}
+	credential, err := DecodeStrictBinding(rest)
+	if err != nil {
+		return PhaseBinding{}, ErrInvalid
+	}
+	b.BindingClaims, b.Signature = credential.BindingClaims, credential.Signature
 	return b, nil
 }
 func decodeExactObject(data []byte, target any, limit int) error {
@@ -68,7 +103,7 @@ func decodeExactObject(data []byte, target any, limit int) error {
 }
 func (r IssuerRoot) VerifyPhaseBinding(e BindingExpected, b PhaseBinding, now time.Time) error {
 	audience := PhaseAudience(b.Mode, b.Phase)
-	if audience == "" || !r.Valid() || !e.Request.Valid() || b.Request != e.Request || b.Version != 2 || b.Kind != PhaseBindingKind || b.Algorithm != "ed25519" || b.Audience != audience || b.IssuerSource != IssuerSource || b.KeyID != r.keyID || b.WorkflowKeyID != e.Receipt.KeyID || b.ReceiptNonce != e.Receipt.ReceiptNonce || b.ReceiptSHA256 != Digest(e.ReceiptBytes) || !sha256Hex.MatchString(b.PayloadSHA256) || b.PayloadLength < 1 || b.PayloadLength > MaxCredentialBytes || b.IssuedAt.IsZero() || b.IssuedAt.Before(e.Receipt.IssuedAt) || b.IssuedAt.After(now.Add(30*time.Second)) || !b.ExpiresAt.After(now) || !b.ExpiresAt.After(b.IssuedAt) || b.ExpiresAt.After(b.IssuedAt.Add(MaxPhaseDuration)) || b.ExpiresAt.After(e.Receipt.ExpiresAt) || b.ExpiresAt.After(e.ApprovalExpiresAt) || e.Deadline.IsZero() || b.ExpiresAt.After(e.Deadline) || b.Mode == "paired-terminal" && !b.ExpiresAt.After(now.Add(MinPairedRemaining)) {
+	if (e.Request.Version == 0 && e.Request.Source == ReusableCalleeSource) || audience == "" || !r.Valid() || !e.Request.Valid() || b.Request != e.Request || b.Version != 2 || b.Kind != PhaseBindingKind || b.Algorithm != "ed25519" || b.Audience != audience || b.IssuerSource != IssuerSource || b.KeyID != r.keyID || b.WorkflowKeyID != e.Receipt.KeyID || b.ReceiptNonce != e.Receipt.ReceiptNonce || b.ReceiptSHA256 != Digest(e.ReceiptBytes) || !sha256Hex.MatchString(b.PayloadSHA256) || b.PayloadLength < 1 || b.PayloadLength > MaxCredentialBytes || b.IssuedAt.IsZero() || b.IssuedAt.Before(e.Receipt.IssuedAt) || b.IssuedAt.After(now.Add(30*time.Second)) || !b.ExpiresAt.After(now) || !b.ExpiresAt.After(b.IssuedAt) || b.ExpiresAt.After(b.IssuedAt.Add(MaxPhaseDuration)) || b.ExpiresAt.After(e.Receipt.ExpiresAt) || b.ExpiresAt.After(e.ApprovalExpiresAt) || e.Deadline.IsZero() || b.ExpiresAt.After(e.Deadline) || b.Mode == "paired-terminal" && !b.ExpiresAt.After(now.Add(MinPairedRemaining)) {
 		return ErrInvalid
 	}
 	sig, err := base64.RawURLEncoding.DecodeString(b.Signature)

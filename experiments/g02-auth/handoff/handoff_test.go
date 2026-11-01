@@ -53,6 +53,9 @@ func deterministicFixture(t *testing.T) (Request, Receipt, ed25519.PublicKey, ti
 
 func TestDeterministicV1WireSigningAndPinnedRoot(t *testing.T) {
 	request, receipt, publicKey, now := deterministicFixture(t)
+	if receipt.Signature != "1wra4DrLaZRewsui-9ERlrHAW6dbnF-A7kyoPYpSZoDAHJ3jjdSVKlpL6LFREyRQsfqzhzHfWUJeOG-KvALgAg" {
+		t.Fatal("v1 signature changed")
+	}
 	want := []byte(`{"version":1,"algorithm":"ed25519","key_id":"fixture-ed25519-v1","controller_approval_sha256":"1343ffdc5440d65d48e2b1916e6aff470f1d11cdfa30aefe54b63293f15ecdf3","repository":"fixture-org/canary","workflow_run_id":7,"workflow_ref":"refs/heads/main","workflow_sha":"` + strings.Repeat("b", 40) + `","workflow_path":".github/workflows/canary.yml","phase":"before-ack","owner_nonce":"` + strings.Repeat("c", 32) + `","receipt_nonce":"` + strings.Repeat("d", 32) + `","source":"signed-fixture-v1","issued_at":"2026-09-22T12:00:00Z","expires_at":"2026-09-22T13:00:00Z"}`)
 	if !bytes.Equal(receipt.SigningBytes(), want) {
 		t.Fatalf("v1 signing payload changed: %s", receipt.SigningBytes())
@@ -160,5 +163,99 @@ func TestRequestRequiresRunAndWorkflowRef(t *testing.T) {
 	request.WorkflowRef = ""
 	if request.Valid() {
 		t.Fatal("request without a workflow ref accepted")
+	}
+}
+
+func TestReusableCalleeV2Contract(t *testing.T) {
+	request, receipt, pub, now := deterministicFixture(t)
+	request.Version = 2
+	request.Source = ReusableCalleeSource
+	request.Callee = CalleeIdentity{Repository: request.Repository, WorkflowPath: ".github/workflows/reusable.yml", SHA: strings.Repeat("a", 40)}
+	receipt.Version = 2
+	receipt.Source = request.Source
+	receipt.Callee = request.Callee
+	seed := make([]byte, ed25519.SeedSize)
+	for i := range seed {
+		seed[i] = byte(i)
+	}
+	receipt.Signature = base64.RawURLEncoding.EncodeToString(ed25519.Sign(ed25519.NewKeyFromSeed(seed), receipt.SigningBytes()))
+	if !bytes.HasPrefix(receipt.SigningBytes(), []byte("gh-runnerd/handoff/reusable-callee/v2\x00")) {
+		t.Fatal("missing v2 signing domain")
+	}
+	root, _ := NewTrustRoot(receipt.KeyID, pub)
+	if err := root.Verify(request, receipt, now); err != nil {
+		t.Fatalf("valid v2: %v", err)
+	}
+	wire, _ := json.Marshal(receipt)
+	decoded, err := DecodeStrictReceipt(wire)
+	if err != nil || root.Verify(request, decoded, now) != nil {
+		t.Fatal("v2 round trip failed")
+	}
+	for name, mutate := range map[string]func(*Request){
+		"missing":          func(r *Request) { r.Callee = CalleeIdentity{} },
+		"partial":          func(r *Request) { r.Callee = CalleeIdentity{Repository: r.Repository} },
+		"cross repository": func(r *Request) { c := r.Callee; c.Repository = "other/repo"; r.Callee = c },
+		"uppercase sha":    func(r *Request) { c := r.Callee; c.SHA = strings.Repeat("A", 40); r.Callee = c },
+		"other path":       func(r *Request) { c := r.Callee; c.WorkflowPath = ".github/workflows/other.yml"; r.Callee = c },
+		"other sha":        func(r *Request) { c := r.Callee; c.SHA = strings.Repeat("b", 40); r.Callee = c },
+		"downgrade":        func(r *Request) { r.Version = 1 },
+		"source":           func(r *Request) { r.Source = "signed-fixture-v1" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := request
+			mutate(&r)
+			if root.Verify(r, receipt, now) == nil {
+				t.Fatal("accepted")
+			}
+		})
+	}
+	downgraded := receipt
+	downgraded.Version = 1
+	if root.Verify(request, downgraded, now) == nil {
+		t.Fatal("downgraded receipt accepted")
+	}
+	v1request, v1receipt, _, _ := deterministicFixture(t)
+	v1request.Source = ReusableCalleeSource
+	v1receipt.Source = ReusableCalleeSource
+	if root.Verify(v1request, v1receipt, now) == nil {
+		t.Fatal("v2 source accepted as v1")
+	}
+	tampered := receipt
+	c := receipt.Callee
+	c.SHA = strings.Repeat("e", 40)
+	tampered.Callee = c
+	altered := request
+	altered.Callee = c
+	if root.Verify(altered, tampered, now) == nil {
+		t.Fatal("tampered signed identity accepted")
+	}
+	for name, input := range map[string][]byte{
+		"duplicate nested": bytes.Replace(wire, []byte(`"callee":{`), []byte(`"callee":{"repository":"fixture-org/canary",`), 1),
+		"folded":           bytes.Replace(wire, []byte(`"callee"`), []byte(`"CALLEE"`), 1),
+		"unknown":          bytes.Replace(wire, []byte(`"callee":{`), []byte(`"callee":{"unknown":1,`), 1),
+		"trailing":         append(bytes.Clone(wire), []byte(` {}`)...),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := DecodeStrictReceipt(input); err == nil {
+				t.Fatal("accepted")
+			}
+		})
+	}
+}
+
+func TestLegacyReceiptMixedCaseKeyRoundTrip(t *testing.T) {
+	request, receipt, key, now := deterministicFixture(t)
+	raw, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw = bytes.Replace(raw, []byte(`"repository"`), []byte(`"Repository"`), 1)
+	decoded, err := DecodeStrictReceipt(raw)
+	if err != nil {
+		t.Fatalf("legacy key rejected: %v", err)
+	}
+	root, _ := NewTrustRoot(receipt.KeyID, key)
+	if err := root.Verify(request, decoded, now); err != nil {
+		t.Fatalf("signed receipt rejected: %v", err)
 	}
 }

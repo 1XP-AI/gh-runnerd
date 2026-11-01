@@ -35,12 +35,22 @@ func selectBrokerExperiment(files BrokerFiles, now time.Time) (brokerExperimentS
 	if e != nil || handoff.Digest(raw) != a.ControllerApprovalSHA256 || c.validate(a, now) != nil {
 		return brokerExperimentSelection{}, errBroker
 	}
-	request, e := brokerProvenanceRequest(a, c, p.Source)
+	source := p.Source
+	if p.Version == 3 {
+		source = workflowProvenanceSource
+	}
+	request, e := brokerProvenanceRequest(a, c, source)
 	if e != nil {
 		return brokerExperimentSelection{}, errBroker
 	}
-	groupDigest := a.GroupPolicy.GrantDigest(request, a.RepositoryID, a.RunnerGroupID, a.ManagementScope)
-	g, e := p.SelectGroup(a.Mode, request, groupDigest, now)
+	var g handoff.PhaseGrant
+	if p.Version == 3 {
+		request.Version, request.Source = 2, handoff.ReusableCalleeSource
+		g, e = p.SelectCallee(a.Mode, request, a.OrganizationID, a.RepositoryID, a.RunnerGroupID, a.ManagementScope, a.GroupPolicy, now)
+	} else {
+		groupDigest := a.GroupPolicy.GrantDigest(request, a.RepositoryID, a.RunnerGroupID, a.ManagementScope)
+		g, e = p.SelectGroup(a.Mode, request, groupDigest, now)
+	}
 	if e != nil || g.OrganizationID != a.OrganizationID || g.RepositoryID != a.RepositoryID || g.ExpiresAt.Before(a.ExpiresAt) {
 		return brokerExperimentSelection{}, errBroker
 	}
@@ -141,7 +151,7 @@ func runBrokerExperimentOwned(parent context.Context, files BrokerFiles, input, 
 	}
 	workflowSigner, issuerSigner := &experimentalSigner{}, &experimentalSigner{}
 	defer func() { clear(workflowSigner.key); clear(issuerSigner.key) }()
-	assembly := &brokerHandoffAssembly{experimental: true, signer: issuerSigner, issuer: selected.issuer, workflow: selected.workflow, source: selected.policy.Source, launch: func(context.Context, *issuedControllerHandoff, string) error { return errBroker }}
+	assembly := &brokerHandoffAssembly{experimental: true, signer: issuerSigner, issuer: selected.issuer, workflow: selected.workflow, request: selected.grant.Request, grant: reviewedWorkflowGrant{Request: selected.grant.Request, OrganizationID: selected.grant.OrganizationID, RepositoryID: selected.grant.RepositoryID, ExpiresAt: selected.grant.ExpiresAt}, source: selected.grant.Request.Source, launch: func(context.Context, *issuedControllerHandoff, string) error { return errBroker }}
 	api.provenanceFactory = func(check func() error) (BrokerProvenanceAdapter, error) {
 		if ctx.Err() != nil {
 			return nil, errBroker

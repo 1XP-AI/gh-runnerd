@@ -174,7 +174,7 @@ func TestBrokerHandoffAssemblyRefusesBeforeManagementInput(t *testing.T) {
 }
 func TestBrokerHandoffPostMintGuardAndPermanentAttempt(t *testing.T) {
 	binary := testBrokerBinary(t)
-	for _, fault := range []string{"positive", "preflight", "claim loss", "sign failure", "claim loss during sign", "launch failure", "child early-exit", "child blocked-control", "child blocked-input", "child overflow", "child canceled", "child start-fail", "child failure"} {
+	for _, fault := range []string{"positive", "source mismatch", "reserved source", "preflight", "claim loss", "sign failure", "claim loss during sign", "launch failure", "child early-exit", "child blocked-control", "child blocked-input", "child overflow", "child canceled", "child start-fail", "child failure"} {
 		t.Run(fault, func(t *testing.T) {
 			a, c, api, f, path := newBrokerFixture(t)
 			a.Mode = "controller"
@@ -197,6 +197,18 @@ func TestBrokerHandoffPostMintGuardAndPermanentAttempt(t *testing.T) {
 			plan.receiptRaw, _ = json.Marshal(receipt)
 			assembly, signer := testHandoffAssembly(t, api)
 			plan.handoff = assembly
+			preparations := 0
+			prepare := plan.localPrepare
+			plan.localPrepare = func(ctx context.Context, path string) (brokerPreparationReceipt, error) {
+				preparations++
+				return prepare(ctx, path)
+			}
+			if fault == "reserved source" {
+				assembly.source = handoff.ReusableCalleeSource
+			}
+			if fault == "source mismatch" {
+				assembly.source = "other-valid-source"
+			}
 			launches := 0
 			assembly.launch = func(ctx context.Context, h *issuedControllerHandoff, _ string) error {
 				launches++
@@ -245,6 +257,12 @@ func TestBrokerHandoffPostMintGuardAndPermanentAttempt(t *testing.T) {
 				signer.before = func() { os.Rename(f.admissionRoot, f.admissionRoot+"-lost") }
 			}
 			result, e := brokerExecuteWithProvenance(context.Background(), a, brokerInput{PEM: string(c.PEM)}, path, api, plan, &receipt)
+			if fault == "source mismatch" || fault == "reserved source" {
+				if e == nil || preparations != 0 || f.tokenCalls != 0 || len(f.calls) != 0 || signer.calls != 0 || launches != 0 {
+					t.Fatalf("source mismatch reached effects: err=%v preparations=%d mints=%d calls=%v signs=%d launches=%d", e, preparations, f.tokenCalls, f.calls, signer.calls, launches)
+				}
+				return
+			}
 			if (e == nil) != (fault == "positive") || f.tokenCalls != 1 || legacy != 0 {
 				t.Fatalf("unsafe broker path: result=%+v err=%v mints=%d legacy=%d", result, e, f.tokenCalls, legacy)
 			}

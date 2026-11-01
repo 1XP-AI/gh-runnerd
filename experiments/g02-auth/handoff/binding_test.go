@@ -194,3 +194,78 @@ func TestControlExactBoundedFraming(t *testing.T) {
 		}
 	}
 }
+
+func TestV2BindingWireRoundTrip(t *testing.T) {
+	b, root, expected, key := bindingFixture(t)
+	b.Request.Version = 2
+	b.Request.Source = ReusableCalleeSource
+	b.Request.Callee = CalleeIdentity{Repository: b.Repository, WorkflowPath: ".github/workflows/reusable.yml", SHA: strings.Repeat("a", 40)}
+	expected.Request = b.Request
+	b.Signature = base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, b.SigningBytes()))
+	raw, err := json.Marshal(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeStrictBinding(raw)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if decoded.Request != b.Request {
+		t.Fatalf("request lost in wire round trip: got %+v", decoded.Request)
+	}
+	if err := root.VerifyBinding(expected, decoded, time.Now()); err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+}
+
+func TestV2BindingStrictControls(t *testing.T) {
+	b, root, expected, key := bindingFixture(t)
+	b.Request.Version = 2
+	b.Request.Source = ReusableCalleeSource
+	b.Request.Callee = CalleeIdentity{Repository: b.Repository, WorkflowPath: ".github/workflows/reusable.yml", SHA: strings.Repeat("a", 40)}
+	expected.Request = b.Request
+	b.Signature = base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, b.SigningBytes()))
+	raw, _ := json.Marshal(b)
+	for name, input := range map[string][]byte{
+		"missing request version": bytes.Replace(raw, []byte(`,"request_version":2`), nil, 1),
+		"downgrade":               bytes.Replace(raw, []byte(`"request_version":2`), []byte(`"request_version":1`), 1),
+		"null version":            bytes.Replace(raw, []byte(`"request_version":2`), []byte(`"request_version":null`), 1),
+		"unknown":                 append([]byte(`{"extra":1,`), raw[1:]...),
+		"duplicate":               append([]byte(`{"request_version":2,`), raw[1:]...),
+		"folded":                  append([]byte(`{"REQUEST_VERSION":2,`), raw[1:]...),
+		"nested unknown":          bytes.Replace(raw, []byte(`"sha":`), []byte(`"extra":1,"sha":`), 1),
+		"nested null":             bytes.Replace(raw, []byte(`"workflow_path":".github/workflows/reusable.yml"`), []byte(`"workflow_path":null`), 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := DecodeStrictBinding(input); err == nil {
+				t.Fatal("invalid binding accepted")
+			}
+		})
+	}
+	decoded, err := DecodeStrictBinding(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded.Callee.SHA = strings.Repeat("b", 40)
+	if root.VerifyBinding(expected, decoded, time.Now()) == nil {
+		t.Fatal("tampered callee accepted")
+	}
+	expected.Request = decoded.Request
+	if root.VerifyBinding(expected, decoded, time.Now()) == nil {
+		t.Fatal("tampered signature accepted")
+	}
+}
+
+func TestV1BindingGolden(t *testing.T) {
+	b, _, _, key := bindingFixture(t)
+	b.IssuedAt = time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
+	b.ExpiresAt = b.IssuedAt.Add(time.Minute)
+	b.Signature = base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, b.SigningBytes()))
+	raw, err := json.Marshal(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if Digest(raw) != "0b39000e510b745b45684e0c3f23f1c2f3ba1f1290e4a99a2454fb55be2a4cbf" || b.Signature != "PB8DbBluDDD6GVwqgPnf6nfXhMdCMIOiJq2qMCNwO1NBT-P6sHGJPgoG_yHMKZjoO664Ny1lswbpLM8LpijCAg" || Digest(b.SigningBytes()) != "f0cfb09a7d9e606c69468e738ead287f662d97a07e09396835b3cef9e4d3a442" {
+		t.Fatal("v1 binding wire, signature, or signing bytes changed")
+	}
+}

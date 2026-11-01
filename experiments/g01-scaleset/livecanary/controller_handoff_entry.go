@@ -12,16 +12,20 @@ import (
 // The injected factory must be network-lazy. It receives validated credentials,
 // never the per-open proof; only Driver may use that proof for the single create.
 func runControllerHandoffCreate(ctx context.Context, journal *FileJournal, approvalSnapshot, receiptBytes []byte, source string, root handoff.TrustRoot, now func() time.Time, readCredentials func(context.Context) ([]byte, error), apiFactory func(context.Context, Approval, Credentials) (API, error)) error {
+	return runControllerHandoffCreateExpected(ctx, journal, approvalSnapshot, receiptBytes, source, nil, root, now, readCredentials, apiFactory)
+}
+
+func runControllerHandoffCreateExpected(ctx context.Context, journal *FileJournal, approvalSnapshot, receiptBytes []byte, source string, expected *handoff.Request, root handoff.TrustRoot, now func() time.Time, readCredentials func(context.Context) ([]byte, error), apiFactory func(context.Context, Approval, Credentials) (API, error)) error {
 	if ctx == nil || now == nil || apiFactory == nil || len(approvalSnapshot) == 0 || len(approvalSnapshot) > maxControllerApprovalBytes {
 		return ErrApproval
 	}
 	// One private snapshot supplies both the receipt request and Driver approval.
 	snapshot := bytes.Clone(approvalSnapshot)
-	approval, _, err := controllerHandoffRequestOwned(snapshot, "create", source, now())
+	approval, _, err := controllerHandoffRequestForExpected(snapshot, "create", source, expected, now())
 	if err != nil {
 		return ErrApproval
 	}
-	data, proof, err := consumeControllerHandoffWithProof(ctx, journal, snapshot, "create", source, newControllerHandoffMemorySource(receiptBytes), root, now, readCredentials)
+	data, proof, err := consumeControllerHandoffWithProofExpected(ctx, journal, snapshot, "create", source, expected, newControllerHandoffMemorySource(receiptBytes), root, now, readCredentials)
 	if err != nil {
 		return err
 	}
@@ -46,10 +50,14 @@ func runControllerHandoffCreate(ctx context.Context, journal *FileJournal, appro
 
 // The phase is selected by verified immutable policy before this private entry.
 func runControllerHandoffPhase(ctx context.Context, journal *FileJournal, snapshot, receipt []byte, phase, source string, root handoff.TrustRoot, now func() time.Time, read func(context.Context) ([]byte, error), factory func(context.Context, Approval, Credentials) (API, error), paired *PairedTerminalFiles) error {
+	return runControllerHandoffPhaseExpected(ctx, journal, snapshot, receipt, phase, source, nil, root, now, read, factory, paired)
+}
+
+func runControllerHandoffPhaseExpected(ctx context.Context, journal *FileJournal, snapshot, receipt []byte, phase, source string, expected *handoff.Request, root handoff.TrustRoot, now func() time.Time, read func(context.Context) ([]byte, error), factory func(context.Context, Approval, Credentials) (API, error), paired *PairedTerminalFiles) error {
 	if ctx == nil || ctx.Err() != nil || journal == nil || now == nil || factory == nil || phase == "create" || phase == "cleanup" {
 		return ErrApproval
 	}
-	a, _, err := controllerHandoffRequest(snapshot, phase, source, now())
+	a, _, err := controllerHandoffRequestForExpected(snapshot, phase, source, expected, now())
 	if err != nil {
 		return ErrApproval
 	}
@@ -98,7 +106,7 @@ func runControllerHandoffPhase(ctx context.Context, journal *FileJournal, snapsh
 	ctx = context.WithValue(ctx, jitBoundaryRawKey{}, snapshot)
 	ctx = context.WithValue(ctx, replacementSnapshotKey{}, handoff.Digest(snapshot))
 	ctx = context.WithValue(ctx, replacementRawSnapshotKey{}, snapshot)
-	data, proof, err := consumeControllerHandoffWithProof(ctx, journal, snapshot, phase, source, newControllerHandoffMemorySource(receipt), root, now, read)
+	data, proof, err := consumeControllerHandoffWithProofExpected(ctx, journal, snapshot, phase, source, expected, newControllerHandoffMemorySource(receipt), root, now, read)
 	if err != nil {
 		return err
 	}

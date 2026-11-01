@@ -47,7 +47,25 @@ type CredentialBinding struct {
 
 func (b CredentialBinding) SigningBytes() []byte {
 	data, _ := json.Marshal(b.BindingClaims)
+	if b.Request.Version == 2 {
+		data, _ = json.Marshal(struct {
+			BindingClaims
+			RequestVersion int `json:"request_version"`
+		}{b.BindingClaims, 2})
+	}
 	return append([]byte("gh-runnerd/g01-issued-credential-binding/v1\x00"), data...)
+}
+
+// MarshalJSON preserves the v1 envelope and gives v2 its own request version.
+func (b CredentialBinding) MarshalJSON() ([]byte, error) {
+	type wire CredentialBinding
+	if b.Request.Version == 2 {
+		return json.Marshal(struct {
+			wire
+			RequestVersion int `json:"request_version"`
+		}{wire(b), 2})
+	}
+	return json.Marshal(wire(b))
 }
 func Digest(data []byte) string { sum := sha256.Sum256(data); return hex.EncodeToString(sum[:]) }
 
@@ -61,6 +79,14 @@ func DecodeStrictBinding(data []byte) (CredentialBinding, error) {
 	if json.Unmarshal(data, &fields) != nil {
 		return b, ErrInvalid
 	}
+	var requestVersion int
+	if raw, ok := fields["request_version"]; ok {
+		if json.Unmarshal(raw, &requestVersion) != nil || requestVersion != 2 {
+			return b, ErrInvalid
+		}
+		b.Request.Version = 2
+		b.Request.Callee = CalleeIdentity{Repository: "x", WorkflowPath: "x", SHA: "x"}
+	}
 	template, _ := json.Marshal(b)
 	var required map[string]json.RawMessage
 	_ = json.Unmarshal(template, &required)
@@ -73,11 +99,26 @@ func DecodeStrictBinding(data []byte) (CredentialBinding, error) {
 			return b, ErrInvalid
 		}
 	}
+	if requestVersion == 2 {
+		var callee map[string]json.RawMessage
+		if json.Unmarshal(fields["callee"], &callee) != nil || len(callee) != 3 {
+			return CredentialBinding{}, ErrInvalid
+		}
+		for _, key := range []string{"repository", "workflow_path", "sha"} {
+			if value, ok := callee[key]; !ok || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+				return CredentialBinding{}, ErrInvalid
+			}
+		}
+		delete(fields, "request_version")
+		data, _ = json.Marshal(fields)
+	}
+	b = CredentialBinding{}
 	d := json.NewDecoder(bytes.NewReader(data))
 	d.DisallowUnknownFields()
 	if d.Decode(&b) != nil {
 		return CredentialBinding{}, ErrInvalid
 	}
+	b.Request.Version = requestVersion
 	return b, nil
 }
 

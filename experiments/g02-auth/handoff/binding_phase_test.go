@@ -149,3 +149,32 @@ func TestPhasePolicyStrictImmutableRolesAndExactGrants(t *testing.T) {
 		}
 	}
 }
+
+func TestPhaseBindingRejectsReusableCalleeDowngrade(t *testing.T) {
+	v1, root, expected, key := bindingFixture(t)
+	expected.Request.Phase = "inspect"
+	expected.Request.Version = 2
+	expected.Request.Source = ReusableCalleeSource
+	expected.Request.Callee = CalleeIdentity{Repository: expected.Request.Repository, WorkflowPath: ".github/workflows/callee.yml", SHA: strings.Repeat("a", 40)}
+	b := PhaseBinding{BindingClaims: v1.BindingClaims, Mode: "controller"}
+	b.Request = expected.Request
+	b.Version = 2
+	b.Kind = PhaseBindingKind
+	b.Audience = PhaseAudience(b.Mode, b.Phase)
+	b.Signature = base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, b.SigningBytes()))
+	legacy := b
+	legacy.Request.Version = 0
+	legacy.Request.Callee = CalleeIdentity{}
+	legacyExpected := expected
+	legacyExpected.Request = legacy.Request
+	legacy.Signature = base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, legacy.SigningBytes()))
+	if root.VerifyPhaseBinding(legacyExpected, legacy, time.Now()) == nil {
+		t.Fatal("reserved source accepted as legacy phase")
+	}
+	downgraded := expected
+	downgraded.Request.Version = 0
+	downgraded.Request.Callee = CalleeIdentity{}
+	if root.VerifyPhaseBinding(downgraded, b, time.Now()) == nil {
+		t.Fatal("downgraded expected request accepted")
+	}
+}

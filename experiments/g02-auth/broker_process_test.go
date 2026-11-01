@@ -175,6 +175,12 @@ func TestMain(m *testing.M) {
 		if e != nil || len(data) != 0 {
 			os.Exit(5)
 		}
+		if receipt, ok := brokerPreparationReceiptFixtureForTest(); ok {
+			if json.NewEncoder(os.Stdout).Encode(receipt) != nil {
+				os.Exit(13)
+			}
+			os.Exit(0)
+		}
 		switch os.Args[7] {
 		case "before-ack":
 			time.Sleep(time.Minute)
@@ -189,8 +195,9 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 
-	if len(os.Args) > 1 && os.Args[1] == "--execute-approved-canary" {
-		if len(os.Args) != 8 || os.Args[2] != "--approval" || os.Args[4] != "--state-dir" || os.Args[6] != "--phase" {
+	if len(os.Args) > 1 && (os.Args[1] == "--execute-approved-canary" || os.Args[1] == "--execute-experimental-phase") {
+		experimental := os.Args[1] == "--execute-experimental-phase"
+		if (!experimental && (len(os.Args) != 8 || os.Args[2] != "--approval" || os.Args[4] != "--state-dir" || os.Args[6] != "--phase")) || (experimental && (len(os.Args) != 10 || os.Args[2] != "--mode" || os.Args[3] != "controller" || os.Args[4] != "--approval" || os.Args[6] != "--state-dir" || os.Args[8] != "--phase")) {
 			os.Exit(3)
 		}
 		for _, entry := range os.Environ() {
@@ -198,21 +205,29 @@ func TestMain(m *testing.M) {
 				os.Exit(4)
 			}
 		}
-		if strings.HasPrefix(filepath.Base(os.Args[3]), "handoff-") {
+		approvalPath, phase := os.Args[3], os.Args[7]
+		if experimental {
+			approvalPath, phase = os.Args[5], os.Args[9]
+		}
+		if strings.HasPrefix(filepath.Base(approvalPath), "handoff-") {
 			os.Exit(runBrokerHandoffTestChild())
 		}
 		data, err := io.ReadAll(io.LimitReader(os.Stdin, 16385))
 		if err != nil || !bytes.Contains(data, []byte("synthetic-private-installation-token")) || bytes.Contains(data, []byte("PRIVATE KEY")) {
 			os.Exit(5)
 		}
-		switch os.Args[7] {
-		case "inspect":
-			fmt.Fprint(os.Stdout, strings.Repeat("synthetic-private-output", 1000))
-		case "before-ack":
-			time.Sleep(time.Minute)
-		default:
+		if experimental {
 			fmt.Fprintln(os.Stdout, "synthetic-private-output")
-			fmt.Fprintln(os.Stderr, "synthetic-private-error")
+		} else {
+			switch phase {
+			case "inspect":
+				fmt.Fprint(os.Stdout, strings.Repeat("synthetic-private-output", 1000))
+			case "before-ack":
+				time.Sleep(time.Minute)
+			default:
+				fmt.Fprintln(os.Stdout, "synthetic-private-output")
+				fmt.Fprintln(os.Stderr, "synthetic-private-error")
+			}
 		}
 		os.Exit(0)
 	}
@@ -258,6 +273,63 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 	os.Exit(m.Run())
+}
+
+func brokerPreparationReceiptFixtureForTest() (brokerPreparationReceipt, bool) {
+	var controller controllerApproval
+	if _, err := readBrokerPrivateJSON(os.Args[3], &controller); err != nil {
+		return brokerPreparationReceipt{}, false
+	}
+	statePath := os.Args[5]
+	if _, err := os.Stat(statePath); err != nil {
+		return brokerPreparationReceipt{}, false
+	}
+	admissionPath := filepath.Join(filepath.Dir(statePath), "admission")
+	if err := os.Mkdir(admissionPath, 0700); err != nil && !os.IsExist(err) {
+		return brokerPreparationReceipt{}, false
+	}
+	journalPath := filepath.Join(statePath, "journal.jsonl")
+	if _, err := os.Stat(journalPath); os.IsNotExist(err) {
+		if err := os.WriteFile(journalPath, []byte("synthetic prepared journal\n"), 0600); err != nil {
+			return brokerPreparationReceipt{}, false
+		}
+	}
+	journalData, err := os.ReadFile(journalPath)
+	if err != nil {
+		return brokerPreparationReceipt{}, false
+	}
+	journalInfo, err := os.Stat(journalPath)
+	if err != nil {
+		return brokerPreparationReceipt{}, false
+	}
+	stateInfo, err := os.Stat(statePath)
+	if err != nil {
+		return brokerPreparationReceipt{}, false
+	}
+	claimPath := filepath.Join(admissionPath, "admission.json")
+	if _, err := os.Stat(claimPath); os.IsNotExist(err) {
+		ownership := controller
+		ownership.ExpiresAt = time.Time{}
+		ownership.Phases = nil
+		claim := map[string]any{"version": 1, "ownership": brokerDigest(ownership), "state_device": brokerFileIdentity(stateInfo).Device, "state_inode": brokerFileIdentity(stateInfo).Inode, "journal_device": brokerFileIdentity(journalInfo).Device, "journal_inode": brokerFileIdentity(journalInfo).Inode}
+		claimData, _ := json.Marshal(claim)
+		if err := os.WriteFile(claimPath, append(claimData, '\n'), 0600); err != nil {
+			return brokerPreparationReceipt{}, false
+		}
+	}
+	claimData, err := os.ReadFile(claimPath)
+	if err != nil {
+		return brokerPreparationReceipt{}, false
+	}
+	claimInfo, err := os.Stat(claimPath)
+	if err != nil {
+		return brokerPreparationReceipt{}, false
+	}
+	admissionInfo, err := os.Lstat(admissionPath)
+	if err != nil {
+		return brokerPreparationReceipt{}, false
+	}
+	return brokerPreparationReceipt{Version: 1, Status: "controller_journal_prepared", Phase: os.Args[7], ApprovalDigest: brokerDigest(controller), State: brokerFileIdentity(stateInfo), Journal: brokerFileIdentity(journalInfo), Claim: brokerFileIdentity(claimInfo), AdmissionDirectory: brokerFileIdentity(admissionInfo), JournalDigest: brokerBytesDigest(journalData), ClaimDigest: brokerBytesDigest(claimData)}, true
 }
 func testBrokerBinary(t *testing.T) *verifiedBrokerBinary {
 	t.Helper()

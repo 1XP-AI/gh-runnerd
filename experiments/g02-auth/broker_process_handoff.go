@@ -31,12 +31,30 @@ type brokerHandoffAssembly struct {
 	signer       receiptSigner
 	issuer       handoff.IssuerRoot
 	workflow     handoff.TrustRoot
+	request      BrokerProvenanceRequest
+	grant        reviewedWorkflowGrant
 	source       string
 	launch       func(context.Context, *issuedControllerHandoff, string) error
+	// fixtureTransform is populated only by the tagged offline fixture helper.
+	// Production assemblies leave it nil; it is applied after the broker's own
+	// receipt/binding checks and immediately before the existing child launch.
+	fixtureTransform func(*issuedControllerHandoff) error
 }
 
 func (a *brokerHandoffAssembly) valid(root handoff.TrustRoot) bool {
-	return a != nil && a.signer != nil && a.launch != nil && a.issuer.Independent(a.workflow) && a.workflow.Equal(root) && a.workflow.Valid() && brokerProvenanceSource.MatchString(a.source)
+	if a == nil || a.signer == nil || a.launch == nil || !a.issuer.Independent(a.workflow) || !a.workflow.Equal(root) || !a.workflow.Valid() || !brokerProvenanceSource.MatchString(a.source) {
+		return false
+	}
+	if !a.experimental {
+		return true
+	}
+	if !a.request.Valid() || a.request.Source != a.source {
+		return false
+	}
+	if a.request.Source != handoff.ReusableCalleeSource {
+		return true
+	}
+	return a.grant.valid() && a.grant.Request == a.request && a.grant.OrganizationID > 0 && a.grant.RepositoryID > 0
 }
 
 // Own both complete pipes, close every duplicate child endpoint after Start,
