@@ -170,7 +170,7 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 		}
 		plan.provenance = provenance
 	}
-	if plan != nil && plan.handoff != nil && ((!plan.handoff.experimental && (a.Mode != "controller" || a.Phase != "create")) || !plan.handoff.valid(api.provenanceRoot) || provenance == nil || len(plan.receiptRaw) == 0) {
+	if plan != nil && plan.handoff != nil && ((!plan.handoff.experimental && (a.Mode != "controller" || a.Phase != "create")) || !plan.handoff.valid(api.provenanceRoot) || provenance == nil || plan.handoff.source != provenance.Source || len(plan.receiptRaw) == 0) {
 		return BrokerResult{}, errBroker
 	}
 	now := api.now()
