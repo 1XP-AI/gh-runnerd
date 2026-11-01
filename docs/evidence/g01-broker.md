@@ -32,7 +32,10 @@ A failed/ambiguous token request, failed policy check, expired credential, uncer
 
 ## Discovery is an authentication effect
 
-`discover-actions-host` follows only the credential exchange observed in pinned official Scale Set SDK `v0.4.0` source:
+The following source observation comes from the historical SDK `v0.4.0` review;
+it is not a claim of current source requalification or a successful live test.
+`discover-actions-host` followed the credential exchange observed in that pinned
+official Scale Set SDK source:
 
 - `POST /orgs/{approved-org}/actions/runners/registration-token` using the scoped installation token.
 - `POST https://api.github.com/actions/runner-registration` using `RemoteAuth` with that temporary registration credential and the fixed body `{"url":"https://github.com/{approved-org}","runner_event":"register"}`.
@@ -41,7 +44,7 @@ The authenticated response supplies a tenant URL and admin credential. The broke
 
 ## Controller handoff
 
-`controller` requires a separate digest-pinned G01 controller approval, the exact binary SHA-256 and matching reviewed `harness_sha`. The broker verifies the binary's Go `1.26.8`, command import path, native host `GOOS`/`GOARCH`, `CGO_ENABLED=1`, absence of the exact `osusergo` build tag, clean embedded VCS revision and un-replaced `github.com/actions/scaleset v0.4.0` dependency. It requires a current-UID private source directory and an owned singly-linked regular binary of mode `0500`, capped at 128 MiB; symlinks are refused. It keeps the opened descriptor and checks the named inode and content hash again immediately before execution. This catches accidental replacement; it does not isolate a hostile process with the same controlling UID.
+`controller` requires a separate digest-pinned G01 controller approval, the exact binary SHA-256 and matching reviewed `harness_sha`. The Go `1.26.8`/SDK `v0.4.0` controller-admission values below describe the historical broker profile. Current source admission requires Go `1.27.3` and the un-replaced SDK `v0.5.0` (`experiments/g02-auth/broker_process.go` and `experiments/g01-scaleset/cmd/g01-live/main.go`); this is static pin evidence, not a live run. The broker also verifies the command import path, native host `GOOS`/`GOARCH`, `CGO_ENABLED=1`, absence of the exact `osusergo` build tag and clean embedded VCS revision. It requires a current-UID private source directory and an owned singly-linked regular binary of mode `0500`, capped at 128 MiB; symlinks are refused. It keeps the opened descriptor and checks the named inode and content hash again immediately before execution. This catches accidental replacement; it does not isolate a hostile process with the same controlling UID.
 
 The controller approval is bounded, strict JSON with no duplicate/unknown keys. Its raw SHA-256 must match the broker approval; its App/installation/repo/group identity, exact phase, harness SHA, workflow facts, expiry and exact Actions hosts must agree. Before issuance, the broker exclusively reserves, writes and syncs only a non-secret snapshot of the digest-verified bytes into its private attempt directory. A pre-existing file or symlink refuses before any API call. The owned snapshot inode and digest are checked before authenticated calls and again before handoff; local replacement stops the attempt. The child's persistent state directory must already be owned and mode `0700`; the broker verifies the captured directory identity again before execution. The existing G01 controller independently validates approval/build metadata and its own journal during both local preparation and later execution.
 
@@ -114,7 +117,7 @@ Build only the reviewed broker source; these path variables are non-secret opera
 
 ```sh
 cd experiments/g02-auth
-CGO_ENABLED=1 GOTOOLCHAIN=go1.26.8 go build -trimpath -o "$G01_BROKER_BINARY" ./cmd/g01-broker
+GOEXPERIMENT= CGO_ENABLED=1 GOTOOLCHAIN=go1.27.3 go build -trimpath -o "$G01_BROKER_BINARY" ./cmd/g01-broker
 "$G01_BROKER_BINARY" --plan  # offline plan check; no live authorization
 ```
 
@@ -164,4 +167,4 @@ After integrating main `f1fe70c`, one final combined `make check` passed, includ
 
 No test proves live GitHub acceptance of the selected token response fields or registration/admin exchange, physical power-loss durability, exact target/controller identity, a production credential store, worker isolation, workflow execution or completion of any G01/G02 live gate. Review and future explicit authorization remain required.
 
-Primary contracts: GitHub [installation-token issuance](https://docs.github.com/en/rest/apps/apps#create-an-installation-access-token-for-an-app) supports repository/permission narrowing and returns expiry/permissions; [runner-group GET](https://docs.github.com/en/rest/actions/self-hosted-runner-groups#get-a-self-hosted-runner-group-for-an-organization) requires a suitable organization authority; the pinned [official SDK authentication source](https://github.com/actions/scaleset/blob/v0.4.0/client.go) supplies the discovery exchange. These sources establish the proposed protocol, not a live result.
+Primary contracts: GitHub [installation-token issuance](https://docs.github.com/en/rest/apps/apps#create-an-installation-access-token-for-an-app) supports repository/permission narrowing and returns expiry/permissions; [runner-group GET](https://docs.github.com/en/rest/actions/self-hosted-runner-groups#get-a-self-hosted-runner-group-for-an-organization) requires a suitable organization authority; the historical [SDK v0.4.0 authentication source](https://github.com/actions/scaleset/blob/v0.4.0/client.go) was used for the discovery exchange described above. These sources establish the proposed protocol, not a current source requalification or live result.

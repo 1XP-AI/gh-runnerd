@@ -97,7 +97,7 @@ PR33 separately adds both reviewed tagged G01 CLI packages to the hosted offline
 test list. No live approval, credentials or self-hosted runner enters that CI.
 
 Creation requests `RunnerSetting.DisableUpdate=true` using the pinned SDK's
-[`RunnerSetting` field](https://github.com/actions/scaleset/blob/v0.4.0/types.go).
+[`RunnerSetting` field](https://github.com/actions/scaleset/blob/af394d86c0d5024225238b0209043c70193bcfe6/types.go).
 The returned create object must confirm it; false or omitted settings quarantine
 the uncertain create without retry. The driver reads the owned scale set again
 before session/JIT phases and refuses those effects if updates are enabled.
@@ -224,15 +224,16 @@ enforcement. The controller account must be trusted. A same-UID attacker can
 alter state; permissions/locks do not isolate hostile jobs. Keep approval,
 journal and credentials outside repository/shared directories and worker mounts.
 
-Build from a clean **standalone clone with a real `.git` directory**, detached
-at the reviewed SHA, writing the binary outside the checkout. On the measured
-Go 1.26.8 toolchain, a linked worktree's `.git` file is not recognized for VCS
-stamping, even with `-buildvcs=true`; that binary correctly fails the live gate.
-A local clone of the reviewed repository is sufficient and needs no live API.
+For the current Go 1.27.3 profile, build from a clean **standalone clone with a
+real `.git` directory**, detached at the reviewed SHA, and write the binary
+outside the checkout. The linked-worktree `.git`-file VCS-stamping failure was
+observed with Go 1.26.8; it remains historical evidence and is not a claim about
+Go 1.27.3. A local clone of the reviewed repository is sufficient and needs no
+live API.
 
 ```sh
 cd experiments/g01-scaleset
-CGO_ENABLED=1 GOTOOLCHAIN=go1.26.8 go build -buildvcs=true -trimpath -tags=g01_live -o "$G01_PRIVATE_BINARY" ./cmd/g01-live
+GOEXPERIMENT= CGO_ENABLED=1 GOTOOLCHAIN=go1.27.3 go build -buildvcs=true -trimpath -tags=g01_live -o "$G01_PRIVATE_BINARY" ./cmd/g01-live
 "$G01_PRIVATE_BINARY" --plan  # offline plan check; no live authorization
 go version -m "$G01_PRIVATE_BINARY"
 ```
@@ -332,7 +333,8 @@ for successful/error and known/chunked bodies. Green tests additionally prove
 the budget-plus-one read bound, gzip coverage, and quarantine/no retry after
 oversized SDK creation success/error responses.
 
-Validation (all offline):
+Historical validation record (Go 1.26.8; retained as executed, not the current
+Go 1.27.3 profile):
 
 ```sh
 GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s ./...
