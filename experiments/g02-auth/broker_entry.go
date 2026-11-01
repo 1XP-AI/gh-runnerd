@@ -399,3 +399,20 @@ func (a *brokerAPI) verifyWorkflowWithReceipt(ctx context.Context, approval Brok
 	}
 	return nil
 }
+
+// verifyFinalReusableWorkflow is an offline-only final GET seam. The caller must
+// supply an independently selected grant and separately authenticate the receipt.
+// It is intentionally not wired into the quarantined live entrypoint.
+func (a *brokerAPI) verifyFinalReusableWorkflow(ctx context.Context, approval BrokerApproval, controller controllerApproval, token string, grant reviewedWorkflowGrant) error {
+	if a == nil || a.client == nil || a.now == nil || ctx == nil || ctx.Err() != nil || !grant.valid() || grant.Request.Version != 2 || !grant.ExpiresAt.After(a.now()) || grant.Request.Repository != approval.Organization+"/"+approval.Repository || grant.OrganizationID != approval.OrganizationID || grant.RepositoryID != approval.RepositoryID || grant.Request.WorkflowRunID != controller.WorkflowRunID || grant.Request.WorkflowSHA != controller.WorkflowSHA || grant.Request.WorkflowRef != controller.WorkflowRef || grant.Request.WorkflowPath != controller.WorkflowPath {
+		return errBroker
+	}
+	observer := workflowRunObserver{client: a.client}
+	if _, err := observer.observe(ctx, grant, token); err != nil {
+		return errBroker
+	}
+	if ctx.Err() != nil || !grant.ExpiresAt.After(a.now()) {
+		return errBroker
+	}
+	return nil
+}
