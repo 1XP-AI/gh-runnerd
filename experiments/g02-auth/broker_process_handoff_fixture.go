@@ -19,17 +19,32 @@ import (
 	"github.com/1XP-AI/gh-runnerd/experiments/g02-auth/handoff"
 )
 
-type ProcessHandoffEffectsForFixture struct{ BindingSignatures int }
+type ProcessHandoffEffectsForFixture struct {
+	WorkflowSignatures int
+	BindingSignatures  int
+}
+
+// ProcessHandoffFixtureOptions changes only the tagged offline fixture's
+// handoff observation. It cannot configure an ordinary broker build.
+type ProcessHandoffFixtureOptions struct {
+	ObserveHandoff func(receipt, envelope []byte)
+	MutateReceipt  func([]byte) []byte
+}
 type processFixtureSigner struct {
 	key     ed25519.PrivateKey
 	effects *ProcessHandoffEffectsForFixture
+	kind    string
 }
 
 func (s processFixtureSigner) Sign(ctx context.Context, b []byte) ([]byte, error) {
 	if ctx.Err() != nil {
 		return nil, errBroker
 	}
-	s.effects.BindingSignatures++
+	if s.kind == "workflow" {
+		s.effects.WorkflowSignatures++
+	} else {
+		s.effects.BindingSignatures++
+	}
 	return ed25519.Sign(s.key, b), nil
 }
 
@@ -38,6 +53,12 @@ func (s processFixtureSigner) Sign(ctx context.Context, b []byte) ([]byte, error
 // held claims, observer, mint/preflight, private assembly and fixed FD3 launcher.
 // The receiver's public pins are compiled independently in its TEST process.
 func RunProcessHandoffForFixture(ctx context.Context, files BrokerFiles, transport http.RoundTripper, grant WorkflowGrantForFixture) (BrokerResult, ProcessHandoffEffectsForFixture, error) {
+	return RunProcessHandoffForFixtureWithOptions(ctx, files, transport, grant, ProcessHandoffFixtureOptions{})
+}
+
+// RunProcessHandoffForFixtureWithOptions reuses the actual broker entry and
+// child FD launcher while permitting a bounded fixture-only receipt fault.
+func RunProcessHandoffForFixtureWithOptions(ctx context.Context, files BrokerFiles, transport http.RoundTripper, grant WorkflowGrantForFixture, options ProcessHandoffFixtureOptions) (BrokerResult, ProcessHandoffEffectsForFixture, error) {
 	var effects ProcessHandoffEffectsForFixture
 	if transport == nil {
 		return BrokerResult{}, effects, errBroker
@@ -59,7 +80,7 @@ func RunProcessHandoffForFixture(ctx context.Context, files BrokerFiles, transpo
 	}
 	api.provenanceFactory = func(check func() error) (BrokerProvenanceAdapter, error) {
 		reviewed := reviewedWorkflowGrant{grant.Request, grant.OrganizationID, grant.RepositoryID, grant.ExpiresAt}
-		return newWorkflowProvenanceAdapter(reviewed, newWorkflowRunObserver(transport), func(context.Context) (string, error) { return "synthetic-observation-token", nil }, processFixtureSigner{workflowKey, &ProcessHandoffEffectsForFixture{}}, workflowRoot.KeyID(), time.Now, nil, check)
+		return newWorkflowProvenanceAdapter(reviewed, newWorkflowRunObserver(transport), func(context.Context) (string, error) { return "synthetic-observation-token", nil }, processFixtureSigner{key: workflowKey, effects: &effects, kind: "workflow"}, workflowRoot.KeyID(), time.Now, nil, check)
 	}
 	// Narrow existing offline seam; production validBrokerBuild remains exact.
 	old := brokerBinaryOpener
@@ -82,7 +103,11 @@ func RunProcessHandoffForFixture(ctx context.Context, files BrokerFiles, transpo
 	}
 	private := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
 	defer clear(private)
-	data, e := json.Marshal(brokerInput{PEM: string(private)})
+	verificationToken := ""
+	if grant.Request.Version == 2 && grant.Request.Source == handoff.ReusableCalleeSource {
+		verificationToken = "synthetic-process-verification-token"
+	}
+	data, e := json.Marshal(brokerInput{PEM: string(private), VerificationToken: verificationToken})
 	if e != nil {
 		return BrokerResult{}, effects, errBroker
 	}
@@ -98,7 +123,34 @@ func RunProcessHandoffForFixture(ctx context.Context, files BrokerFiles, transpo
 	if _, e = input.Seek(0, 0); e != nil {
 		return BrokerResult{}, effects, errBroker
 	}
-	assembly := &brokerHandoffAssembly{signer: processFixtureSigner{issuerKey, &effects}, issuer: issuerRoot, workflow: workflowRoot, source: grant.Request.Source, launch: func(context.Context, *issuedControllerHandoff, string) error { return errBroker }}
+	experimental := grant.Request.Version == 2 && grant.Request.Source == handoff.ReusableCalleeSource
+	assembly := &brokerHandoffAssembly{
+		experimental: experimental,
+		signer:       processFixtureSigner{key: issuerKey, effects: &effects, kind: "binding"},
+		issuer:       issuerRoot,
+		workflow:     workflowRoot,
+		request:      grant.Request,
+		grant:        reviewedWorkflowGrant{Request: grant.Request, OrganizationID: grant.OrganizationID, RepositoryID: grant.RepositoryID, ExpiresAt: grant.ExpiresAt},
+		source:       grant.Request.Source,
+		launch:       func(context.Context, *issuedControllerHandoff, string) error { return errBroker },
+	}
+	assembly.fixtureTransform = func(h *issuedControllerHandoff) error {
+		if h == nil {
+			return errBroker
+		}
+		if options.ObserveHandoff != nil {
+			options.ObserveHandoff(bytes.Clone(h.receipt), bytes.Clone(h.envelope))
+		}
+		if options.MutateReceipt != nil {
+			mutated := options.MutateReceipt(bytes.Clone(h.receipt))
+			if len(mutated) == 0 {
+				return errBroker
+			}
+			clear(h.receipt)
+			h.receipt = mutated
+		}
+		return nil
+	}
 	result, e := runBrokerWithPrivateHandoff(ctx, files, input, api, assembly)
 	return result, effects, e
 }

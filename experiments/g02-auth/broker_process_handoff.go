@@ -35,6 +35,10 @@ type brokerHandoffAssembly struct {
 	grant        reviewedWorkflowGrant
 	source       string
 	launch       func(context.Context, *issuedControllerHandoff, string) error
+	// fixtureTransform is populated only by the tagged offline fixture helper.
+	// Production assemblies leave it nil; it is applied after the broker's own
+	// receipt/binding checks and immediately before the existing child launch.
+	fixtureTransform func(*issuedControllerHandoff) error
 }
 
 func (a *brokerHandoffAssembly) valid(root handoff.TrustRoot) bool {

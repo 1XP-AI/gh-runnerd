@@ -12,7 +12,7 @@ import (
 // injected roots/entry point. Preparation requires empty stdin and fixed argv;
 // the private process receiver uses compiled test pins and an exclusively fake API.
 func TestMain(m *testing.M) {
-	if len(os.Args) > 1 && os.Args[1] == "--execute-approved-canary" {
+	if len(os.Args) > 1 && (os.Args[1] == "--execute-approved-canary" || os.Args[1] == "--execute-experimental-phase") {
 		os.Exit(runProcessHandoffTestChild())
 	}
 	if len(os.Args) > 1 && os.Args[1] == "--prepare-approved-paired-journal" {

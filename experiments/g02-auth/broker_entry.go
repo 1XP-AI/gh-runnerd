@@ -357,6 +357,11 @@ func runBrokerWithPrivateHandoff(ctx context.Context, files BrokerFiles, input *
 				if plan.check() != nil {
 					return errBroker
 				}
+				if selected.fixtureTransform != nil {
+					if selected.fixtureTransform(h) != nil {
+						return errBroker
+					}
+				}
 				if selected.experimental {
 					h.mode = approval.Mode
 					h.phase = approval.Phase
