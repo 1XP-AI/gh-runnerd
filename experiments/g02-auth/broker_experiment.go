@@ -35,12 +35,22 @@ func selectBrokerExperiment(files BrokerFiles, now time.Time) (brokerExperimentS
 	if e != nil || handoff.Digest(raw) != a.ControllerApprovalSHA256 || c.validate(a, now) != nil {
 		return brokerExperimentSelection{}, errBroker
 	}
-	request, e := brokerProvenanceRequest(a, c, p.Source)
+	source := p.Source
+	if p.Version == 3 {
+		source = workflowProvenanceSource
+	}
+	request, e := brokerProvenanceRequest(a, c, source)
 	if e != nil {
 		return brokerExperimentSelection{}, errBroker
 	}
-	groupDigest := a.GroupPolicy.GrantDigest(request, a.RepositoryID, a.RunnerGroupID, a.ManagementScope)
-	g, e := p.SelectGroup(a.Mode, request, groupDigest, now)
+	var g handoff.PhaseGrant
+	if p.Version == 3 {
+		request.Version, request.Source = 2, handoff.ReusableCalleeSource
+		g, e = p.SelectCallee(a.Mode, request, a.OrganizationID, a.RepositoryID, a.RunnerGroupID, a.ManagementScope, a.GroupPolicy, now)
+	} else {
+		groupDigest := a.GroupPolicy.GrantDigest(request, a.RepositoryID, a.RunnerGroupID, a.ManagementScope)
+		g, e = p.SelectGroup(a.Mode, request, groupDigest, now)
+	}
 	if e != nil || g.OrganizationID != a.OrganizationID || g.RepositoryID != a.RepositoryID || g.ExpiresAt.Before(a.ExpiresAt) {
 		return brokerExperimentSelection{}, errBroker
 	}
@@ -63,7 +73,7 @@ func RunBrokerExperiment(ctx context.Context, files BrokerFiles, input *os.File)
 		return BrokerResult{}, errBroker
 	}
 	selected, e := selectBrokerExperiment(files, time.Now())
-	if e != nil {
+	if e != nil || selected.policy.Version == 3 {
 		return BrokerResult{}, errBroker
 	}
 	return runBrokerExperimentOwned(ctx, files, input, os.NewFile(3, "g01-observation"), os.NewFile(4, "g01-workflow-signer"), os.NewFile(5, "g01-issuer-signer"), selected)
@@ -81,7 +91,7 @@ func RunBrokerExperimentWithInputs(ctx context.Context, files BrokerFiles, input
 		return BrokerResult{}, errBroker
 	}
 	selected, e := selectBrokerExperiment(files, time.Now())
-	if e != nil {
+	if e != nil || selected.policy.Version == 3 {
 		return BrokerResult{}, errBroker
 	}
 	return runBrokerExperimentOwned(ctx, files, input, observation, workflowSeed, issuerSeed, selected)
@@ -117,7 +127,8 @@ func readExperimentalSeed(ctx context.Context, file *os.File, matches func(ed255
 	return key, nil
 }
 func runBrokerExperimentOwned(parent context.Context, files BrokerFiles, input, observation, workflowSeed, issuerSeed *os.File, selected brokerExperimentSelection) (BrokerResult, error) {
-	if parent == nil || parent.Err() != nil {
+	// Selection alone does not authorize v2 receipt handling or effects.
+	if parent == nil || parent.Err() != nil || selected.policy.Version == 3 {
 		return BrokerResult{}, errBroker
 	}
 	owned, e := handoff.ProtectPipes(input, observation, workflowSeed, issuerSeed)
