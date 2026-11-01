@@ -19,6 +19,25 @@ jit_boundary_admission_regex='^TestJITBoundary(PreparationRequiresOriginalFreshC
 jit_boundary_physical_regex='^TestJITBoundaryPhysicalMutationsStop$'
 jit_boundary_heavy_regex='^TestJITBoundary(StorageAndCancellationEveryAppend|ExpiryAtEveryAppend|PreparationRequiresOriginalFreshCreate|AtomicPrefixBeforeCredentialInput|ConcurrentConsumesOnce|HistoryCannotResumeOrRenew|StrictJournalSchemaAndRawReferences|ProofCannotCrossOpen|DirectRunAndCredentialShapes|CloneOwnsNestedPayload|PhysicalMutationsStop)$'
 non_paired_skip_regex='^Test(Paired|SessionReplacement|JITBoundary|ExperimentalAcquireLossCommand$|ExperimentalDrainCommand$|ExperimentalACKBoundaryCommand$)'
+non_paired_a_regex='^TestA'
+non_paired_b_regex='^TestB'
+non_paired_c_regex='^TestC'
+non_paired_d_to_f_regex='^Test[D-F]'
+non_paired_g_to_j_regex='^Test[G-J]'
+non_paired_k_to_p_regex='^Test[K-P]'
+non_paired_q_to_z_regex='^Test[Q-Z]'
+non_paired_other_test_regex='^Test($|[^A-Za-z])'
+non_paired_example_fuzz_regex='^(Example|Fuzz)'
+non_paired_test_regexes=(
+	"${non_paired_a_regex}"
+	"${non_paired_b_regex}"
+	"${non_paired_c_regex}"
+	"${non_paired_d_to_f_regex}"
+	"${non_paired_g_to_j_regex}"
+	"${non_paired_k_to_p_regex}"
+	"${non_paired_q_to_z_regex}"
+	"${non_paired_other_test_regex}"
+)
 storage_regex='^TestPairedTerminal(Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$'
 storage_journal_regex='^TestPairedTerminalPostIntentJournalIdentity$'
 terminal_heavy_regex='^TestPairedTerminal(FinalResultCapacity|PendingChildCapacity|EligibilityUsesFreshExactFacts|CapturedAcknowledgementCancellation|MissingAcknowledgementsAndPostchecks)$'
@@ -137,7 +156,7 @@ for module_dir in "${selected_modules[@]}"; do
 				GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" vet -tags=g01_live,g01_worker ./cmd/g01-live ./cmd/g01-worker
 			fi
 			# Keep the non-terminal collection/listener tests exhaustive and disjoint:
-			# paired collection, replacement, JIT boundary, then the non-paired remainder. Terminal coverage
+			# paired collection, replacement, JIT boundary, then fixed non-paired name ranges. Terminal coverage
 			# is four complementary 120-second partitions: the five heavy names,
 			# the remaining TestPairedTerminal tests, storage journal identity,
 			# and the other storage names. Keep the storage union unchanged.
@@ -171,7 +190,12 @@ for module_dir in "${selected_modules[@]}"; do
 				GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run "${jit_boundary_regex}" -skip "${jit_boundary_heavy_regex}" ./livecanary
 			fi
 			if [[ "${profile}" != jit ]]; then
-				GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -skip "${non_paired_skip_regex}" ./livecanary
+				# Bound the broad tagged remainder by test-name ranges. The profile
+				# contract test discovers current test names and checks exact-once routing.
+				for test_regex in "${non_paired_test_regexes[@]}"; do
+					GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run "${test_regex}" -skip "${non_paired_skip_regex}" ./livecanary
+				done
+				GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run "${non_paired_example_fuzz_regex}" ./livecanary
 				GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run "${terminal_heavy_regex}" ./livecanary
 				GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run '^TestPairedTerminal' -skip "${terminal_remainder_skip_regex}" ./livecanary
 				GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run "${storage_journal_regex}" ./livecanary
