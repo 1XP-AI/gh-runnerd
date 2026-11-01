@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -44,10 +45,26 @@ func toolingFile(t *testing.T, root, name, data string, mode os.FileMode) {
 }
 
 func toolingRun(t *testing.T, root string, extra []string, args ...string) (string, error) {
+	return toolingRunWithTimeout(t, 45*time.Second, root, extra, args...)
+}
+
+func toolingRunWithTimeout(t *testing.T, timeout time.Duration, root string, extra []string, args ...string) (string, error) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.WaitDelay = 2 * time.Second
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
+		return err
+	}
 	cmd.Dir = root
 	env := make([]string, 0, len(os.Environ())+3+len(extra))
 	for _, entry := range os.Environ() {
@@ -59,7 +76,21 @@ func toolingRun(t *testing.T, root string, extra []string, args ...string) (stri
 	cmd.Env = append(env, "GOTOOLCHAIN=go1.27.3", "GOFLAGS=", "GOWORK=off")
 	cmd.Env = append(cmd.Env, extra...)
 	data, err := cmd.CombinedOutput()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return string(data), errors.Join(ctxErr, err)
+	}
 	return string(data), err
+}
+
+func TestToolingRunDeadlineKillsOwnedProcessGroup(t *testing.T) {
+	started := time.Now()
+	_, err := toolingRunWithTimeout(t, 50*time.Millisecond, t.TempDir(), nil, "bash", "-c", "sleep 1 & wait")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("tooling command error = %v; want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed >= 750*time.Millisecond {
+		t.Fatalf("tooling command waited %s for a descendant holding output pipes", elapsed)
+	}
 }
 
 func toolingGoWrapper(t *testing.T, root string) (string, string, string) {
@@ -73,6 +104,7 @@ func toolingGoWrapper(t *testing.T, root string) (string, string, string) {
 	toolingFile(t, root, "logging-go", `#!/bin/sh
 set -eu
 if [ "${1:-}" != run ]; then
+	export TOOLING_GO_INVOCATION="${GOTOOLCHAIN:-} $*"
 	printf '%s\t%s\n' "${GOTOOLCHAIN:-}" "$*" >> "$TOOLING_GO_LOG"
 fi
 exec "$TOOLING_REAL_GO" "$@"
@@ -3341,8 +3373,10 @@ func FuzzDefaultG01Fixture(f *testing.F) {
 		"go1.27.3\ttest -race -count=1 -timeout=45s -skip ^Test(BaselineStatisticsPresenceAndEligibility|ControllerHandoff.*)$ ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerPrepareReviewedG01LiveBinary$ ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
+		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
+		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint)$ ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPaired -skip ^TestPairedBroker(PrepareReviewedG01LiveBinary|RealCadenceChildExceedsThirtySeconds)$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -skip ^TestPaired ./...",
+		"go1.27.3\ttest -race -count=1 -timeout=45s -skip ^TestPaired|^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint)$|^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
 	} {
 		count := 0
 		for _, line := range lines {
@@ -3365,6 +3399,7 @@ func FuzzDefaultG01Fixture(f *testing.F) {
 		t.Fatalf("offline gate ran the R1 fixture invocation %d times; wrapper log:\n%s", r1Count, log)
 	}
 	for _, invocation := range []string{
+		"go1.27.3\ttest -race -count=1 -timeout=45s -skip ^TestPaired ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPaired -skip ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -skip ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=120s -run ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
@@ -3452,12 +3487,16 @@ func ` + testName + `(t *testing.T) {
 	if path == "" {
 		t.Fatal("TOOLING_SENTINEL_LOG is not set")
 	}
+	invocation := os.Getenv("TOOLING_GO_INVOCATION")
+	if invocation == "" {
+		t.Fatal("TOOLING_GO_INVOCATION is not set")
+	}
 	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer file.Close()
-	if _, err := file.WriteString("` + marker + `\n"); err != nil {
+	if _, err := file.WriteString("` + marker + `\t" + invocation + "\n"); err != nil {
 		t.Fatal(err)
 	}` + failureLine + `
 }
@@ -3476,12 +3515,16 @@ func Example_g02FixtureOutput() {
 	if path == "" {
 		panic("TOOLING_SENTINEL_LOG is not set")
 	}
+	invocation := os.Getenv("TOOLING_GO_INVOCATION")
+	if invocation == "" {
+		panic("TOOLING_GO_INVOCATION is not set")
+	}
 	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		panic(err)
 	}
 	defer file.Close()
-	if _, err := file.WriteString("` + marker + `\n"); err != nil {
+	if _, err := file.WriteString("` + marker + `\t" + invocation + "\n"); err != nil {
 		panic(err)
 	}
 	fmt.Println("` + marker + `")
@@ -3508,12 +3551,16 @@ func FuzzG02Fixture(f *testing.F) {
 		if path == "" {
 			t.Fatal("TOOLING_SENTINEL_LOG is not set")
 		}
+		invocation := os.Getenv("TOOLING_GO_INVOCATION")
+		if invocation == "" {
+			t.Fatal("TOOLING_GO_INVOCATION is not set")
+		}
 		file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer file.Close()
-		if _, err := file.WriteString("` + marker + `\n"); err != nil {
+		if _, err := file.WriteString("` + marker + `\t" + invocation + "\n"); err != nil {
 			t.Fatal(err)
 		}` + failureLine + `
 	})
@@ -3522,6 +3569,7 @@ func FuzzG02Fixture(f *testing.F) {
 	}
 	type fixture struct {
 		name, path, marker, positiveSource, failureSource string
+		partition                                         int
 	}
 	fixtures := []fixture{
 		{
@@ -3530,6 +3578,7 @@ func FuzzG02Fixture(f *testing.F) {
 			marker:         prepSentinel,
 			positiveSource: defaultTestSource("fixture", prepName, prepSentinel, ""),
 			failureSource:  defaultTestSource("fixture", prepName, prepSentinel, prepSentinel),
+			partition:      0,
 		},
 		{
 			name:           "heavy",
@@ -3537,6 +3586,7 @@ func FuzzG02Fixture(f *testing.F) {
 			marker:         heavySentinel,
 			positiveSource: defaultTestSource("fixture", heavyName, heavySentinel, ""),
 			failureSource:  defaultTestSource("fixture", heavyName, heavySentinel, heavySentinel),
+			partition:      1,
 		},
 		{
 			name:           "legacy controller",
@@ -3544,6 +3594,7 @@ func FuzzG02Fixture(f *testing.F) {
 			marker:         legacyControllerSentinel,
 			positiveSource: defaultTestSource("fixture", legacyControllerName, legacyControllerSentinel, ""),
 			failureSource:  defaultTestSource("fixture", legacyControllerName, legacyControllerSentinel, legacyControllerSentinel),
+			partition:      2,
 		},
 		{
 			name:           "legacy paired",
@@ -3551,6 +3602,7 @@ func FuzzG02Fixture(f *testing.F) {
 			marker:         legacyPairedSentinel,
 			positiveSource: defaultTestSource("fixture", legacyPairedName, legacyPairedSentinel, ""),
 			failureSource:  defaultTestSource("fixture", legacyPairedName, legacyPairedSentinel, legacyPairedSentinel),
+			partition:      2,
 		},
 		{
 			name:           "controller claims",
@@ -3558,6 +3610,7 @@ func FuzzG02Fixture(f *testing.F) {
 			marker:         controllerClaimsSentinel,
 			positiveSource: defaultTestSource("fixture", controllerClaimsName, controllerClaimsSentinel, ""),
 			failureSource:  defaultTestSource("fixture", controllerClaimsName, controllerClaimsSentinel, controllerClaimsSentinel),
+			partition:      2,
 		},
 		{
 			name:           "final fence",
@@ -3565,6 +3618,7 @@ func FuzzG02Fixture(f *testing.F) {
 			marker:         finalSentinel,
 			positiveSource: defaultTestSource("fixture", finalName, finalSentinel, ""),
 			failureSource:  defaultTestSource("fixture", finalName, finalSentinel, finalSentinel),
+			partition:      3,
 		},
 		{
 			name:           "final root mismatch",
@@ -3572,6 +3626,7 @@ func FuzzG02Fixture(f *testing.F) {
 			marker:         finalRootMismatchSentinel,
 			positiveSource: defaultTestSource("fixture", finalRootMismatchName, finalRootMismatchSentinel, ""),
 			failureSource:  defaultTestSource("fixture", finalRootMismatchName, finalRootMismatchSentinel, finalRootMismatchSentinel),
+			partition:      3,
 		},
 		{
 			name:           "paired family",
@@ -3579,6 +3634,7 @@ func FuzzG02Fixture(f *testing.F) {
 			marker:         pairedFamilySentinel,
 			positiveSource: defaultTestSource("fixture", pairedFamilyName, pairedFamilySentinel, ""),
 			failureSource:  defaultTestSource("fixture", pairedFamilyName, pairedFamilySentinel, pairedFamilySentinel),
+			partition:      4,
 		},
 		{
 			name:           "remainder",
@@ -3586,6 +3642,7 @@ func FuzzG02Fixture(f *testing.F) {
 			marker:         remainderSentinel,
 			positiveSource: defaultTestSource("remainderfixture", "TestDefaultG02RemainderFixture", remainderSentinel, ""),
 			failureSource:  defaultTestSource("remainderfixture", "TestDefaultG02RemainderFixture", remainderSentinel, remainderSentinel),
+			partition:      5,
 		},
 		{
 			name:           "other package",
@@ -3593,6 +3650,7 @@ func FuzzG02Fixture(f *testing.F) {
 			marker:         otherPackageSentinel,
 			positiveSource: defaultTestSource("otherfixture", "TestDefaultG02OtherPackageFixture", otherPackageSentinel, ""),
 			failureSource:  defaultTestSource("otherfixture", "TestDefaultG02OtherPackageFixture", otherPackageSentinel, otherPackageSentinel),
+			partition:      5,
 		},
 		{
 			name:           "same-name other package",
@@ -3600,6 +3658,7 @@ func FuzzG02Fixture(f *testing.F) {
 			marker:         sameNameOtherPackageSentinel,
 			positiveSource: defaultTestSource("samefixture", heavyName, sameNameOtherPackageSentinel, ""),
 			failureSource:  defaultTestSource("samefixture", heavyName, sameNameOtherPackageSentinel, sameNameOtherPackageSentinel),
+			partition:      1,
 		},
 		{
 			name:           "same-name paired family other package",
@@ -3607,6 +3666,7 @@ func FuzzG02Fixture(f *testing.F) {
 			marker:         sameNamePairedFamilySentinel,
 			positiveSource: defaultTestSource("pairedfixture", pairedFamilyName, sameNamePairedFamilySentinel, ""),
 			failureSource:  defaultTestSource("pairedfixture", pairedFamilyName, sameNamePairedFamilySentinel, sameNamePairedFamilySentinel),
+			partition:      4,
 		},
 		{
 			name:           "same-name prep other package",
@@ -3614,6 +3674,7 @@ func FuzzG02Fixture(f *testing.F) {
 			marker:         sameNamePrepSentinel,
 			positiveSource: defaultTestSource("prepfixture", prepName, sameNamePrepSentinel, ""),
 			failureSource:  defaultTestSource("prepfixture", prepName, sameNamePrepSentinel, sameNamePrepSentinel),
+			partition:      0,
 		},
 		{
 			name:           "Example Output",
@@ -3621,6 +3682,7 @@ func FuzzG02Fixture(f *testing.F) {
 			marker:         exampleSentinel,
 			positiveSource: defaultExampleSource(exampleSentinel, exampleSentinel),
 			failureSource:  defaultExampleSource(exampleSentinel, "unexpected-default-g02-example-output"),
+			partition:      5,
 		},
 		{
 			name:           "Fuzz seed",
@@ -3628,6 +3690,7 @@ func FuzzG02Fixture(f *testing.F) {
 			marker:         fuzzSentinel,
 			positiveSource: defaultFuzzSource(fuzzSentinel, ""),
 			failureSource:  defaultFuzzSource(fuzzSentinel, fuzzSentinel),
+			partition:      5,
 		},
 	}
 	toolingFile(t, root, remainderPackageBase+"/fixture.go", "package remainderfixture\n", 0600)
@@ -3646,6 +3709,14 @@ func FuzzG02Fixture(f *testing.F) {
 		"TOOLING_GO_LOG=" + logPath,
 		"TOOLING_SENTINEL_LOG=" + sentinelLogPath,
 	}
+	g02Invocations := []string{
+		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerPrepareReviewedG01LiveBinary$ ./...",
+		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
+		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
+		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint)$ ./...",
+		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPaired -skip ^TestPairedBroker(PrepareReviewedG01LiveBinary|RealCadenceChildExceedsThirtySeconds)$ ./...",
+		"go1.27.3\ttest -race -count=1 -timeout=45s -skip ^TestPaired|^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint)$|^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
+	}
 	if out, err := toolingRun(t, root, env, "bash", "scripts/check-offline-experiments.sh"); err != nil {
 		t.Fatalf("default G02 positive control: %s", out)
 	}
@@ -3655,14 +3726,18 @@ func FuzzG02Fixture(f *testing.F) {
 	}
 	sentinelLines := strings.Split(strings.TrimSpace(string(sentinelData)), "\n")
 	for _, tc := range fixtures {
-		count := 0
+		expected := tc.marker + "\t" + strings.Replace(g02Invocations[tc.partition], "\t", " ", 1)
+		markerCount, routeCount := 0, 0
 		for _, line := range sentinelLines {
-			if line == tc.marker {
-				count++
+			if strings.HasPrefix(line, tc.marker+"\t") {
+				markerCount++
+			}
+			if line == expected {
+				routeCount++
 			}
 		}
-		if count != 1 {
-			t.Fatalf("positive %s sentinel %q ran %d times; sentinel log:\n%s", tc.name, tc.marker, count, sentinelData)
+		if markerCount != 1 || routeCount != 1 {
+			t.Fatalf("positive %s sentinel %q ran %d times, with %d under expected invocation %q; sentinel log:\n%s", tc.name, tc.marker, markerCount, routeCount, expected, sentinelData)
 		}
 	}
 	logData, err := os.ReadFile(logPath)
@@ -3671,14 +3746,7 @@ func FuzzG02Fixture(f *testing.F) {
 	}
 	log := string(logData)
 	lines := strings.Split(strings.TrimSpace(log), "\n")
-	for _, invocation := range []string{
-		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerPrepareReviewedG01LiveBinary$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint)$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPaired -skip ^TestPairedBroker(PrepareReviewedG01LiveBinary|RealCadenceChildExceedsThirtySeconds)$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -skip ^TestPaired|^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint)$|^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
-	} {
+	for _, invocation := range g02Invocations {
 		count := 0
 		for _, line := range lines {
 			if line == invocation {
@@ -3711,8 +3779,19 @@ func FuzzG02Fixture(f *testing.F) {
 	if r1Count != 1 {
 		t.Fatalf("offline gate ran the R1 fixture invocation %d times; wrapper log:\n%s", r1Count, log)
 	}
-	for _, tc := range fixtures {
-		toolingFile(t, root, tc.path, tc.failureSource, 0600)
+	for partition, invocation := range g02Invocations {
+		var group []fixture
+		for _, tc := range fixtures {
+			if tc.partition == partition {
+				group = append(group, tc)
+			}
+		}
+		if len(group) == 0 {
+			t.Fatalf("default G02 partition %d has no failure fixture", partition)
+		}
+		for _, tc := range group {
+			toolingFile(t, root, tc.path, tc.failureSource, 0600)
+		}
 		if err := os.WriteFile(logPath, nil, 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -3720,23 +3799,50 @@ func FuzzG02Fixture(f *testing.F) {
 			t.Fatal(err)
 		}
 		out, runErr := toolingRun(t, root, env, "bash", "scripts/check-offline-experiments.sh")
-		if runErr == nil || !strings.Contains(out, tc.marker) {
-			t.Errorf("default G02 %s failure was skipped: %s", tc.name, out)
+		if errors.Is(runErr, context.DeadlineExceeded) {
+			t.Fatalf("default G02 partition %d timed out before reporting its fixture failure: %s", partition, out)
+		}
+		if runErr == nil {
+			t.Errorf("default G02 partition %d failure passed unexpectedly: %s", partition, out)
 		}
 		data, readErr := os.ReadFile(sentinelLogPath)
 		if readErr != nil {
 			t.Fatal(readErr)
 		}
-		count := 0
-		for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-			if line == tc.marker {
-				count++
+		for _, tc := range group {
+			expected := tc.marker + "\t" + strings.Replace(invocation, "\t", " ", 1)
+			markerCount, routeCount := 0, 0
+			for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+				if strings.HasPrefix(line, tc.marker+"\t") {
+					markerCount++
+				}
+				if line == expected {
+					routeCount++
+				}
+			}
+			if !strings.Contains(out, tc.marker) {
+				t.Errorf("default G02 %s failure did not reach partition %d: %s", tc.name, partition, out)
+			}
+			if markerCount != 1 || routeCount != 1 {
+				t.Errorf("default G02 %s sentinel %q ran %d times, with %d under expected invocation %q; sentinel log:\n%s", tc.name, tc.marker, markerCount, routeCount, expected, data)
 			}
 		}
-		if count != 1 {
-			t.Errorf("default G02 %s sentinel %q ran %d times; sentinel log:\n%s", tc.name, tc.marker, count, data)
+		failureLogData, readErr := os.ReadFile(logPath)
+		if readErr != nil {
+			t.Fatal(readErr)
 		}
-		toolingFile(t, root, tc.path, tc.positiveSource, 0600)
+		invocationCount := 0
+		for _, line := range strings.Split(strings.TrimSpace(string(failureLogData)), "\n") {
+			if line == invocation {
+				invocationCount++
+			}
+		}
+		if invocationCount != 1 {
+			t.Errorf("default G02 partition %d invocation %q ran %d times; wrapper log:\n%s", partition, invocation, invocationCount, failureLogData)
+		}
+		for _, tc := range group {
+			toolingFile(t, root, tc.path, tc.positiveSource, 0600)
+		}
 	}
 }
 
