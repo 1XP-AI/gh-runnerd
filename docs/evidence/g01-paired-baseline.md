@@ -123,14 +123,51 @@ One full collection positive retains actual five-second waits. No full suite or 
 is inferred from a focused test; final combined results are recorded below.
 
 The original 200 ms deadline may expire during valid local preparation before
-the host request starts. Both early expiry and an entered blocked request must
-return unresolved and prevent later operations. Fixture red `924f032` reproduced
-the former case at an actual C intent sync (race 1.013 seconds); requiring host
-entry incorrectly rejected that safe outcome. The corrected timer test and a
-separate synchronized original-parent cancellation test passed with race in
-2.158 seconds. The latter waits for actual `/version` entry, then cancels the
-parent and observes request exit and zero later operations; it does not claim
-to prove timed expiry inside an active request. No production timeout changed.
+the private Docker fixture request starts. Fixture red `924f032` reproduced
+that case at an actual C intent sync (race 1.013 seconds); requiring request
+entry incorrectly rejected that safe outcome. The corrected bootstrap test
+keeps that early-expiry case separate from two entered-request boundaries:
+parent cancellation and timed deadline expiry. The cancellation test waits for
+the private Unix HTTP fixture's `/version` handler to enter, then cancels the
+parent while the handler waits on the request context. The timed test creates a
+10-second parent deadline after fixture setup and has a five-second entry guard;
+the handler records its entry time and stays behind a release barrier through
+the deadline. After the paired invocation returns, the test waits until the
+server-side request context observes cancellation while the handler is still
+blocked, then releases it. Both entered-request tests require an unresolved
+collection and no later controller, session, acquisition, JIT, Docker read,
+create, start or cleanup operation. The bootstrap deadline test also asserts no
+Docker read or cleanup. Cancellation alone is not evidence of timed expiry.
+
+On Go 1.27.3, the three focused tests passed both normally and with race:
+
+```text
+GOTOOLCHAIN=go1.27.3 go test -count=1 -timeout=120s -tags=g01_pair_fixture -run '^TestPairedOriginal(Deadline|Cancellation)' ./livecanary
+ok  github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/livecanary  11.124s
+
+GOTOOLCHAIN=go1.27.3 go test -race -count=1 -timeout=120s -tags=g01_pair_fixture -run '^TestPairedOriginal(Deadline|Cancellation)' ./livecanary
+ok  github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/livecanary  12.127s
+
+GOTOOLCHAIN=go1.27.3 go vet -tags=g01_pair_fixture ./livecanary
+PASS (exit 0, no diagnostics)
+```
+
+These are writer-run local fixture results, not an independent review, hosted
+CI or live result. Their source identity is base commit
+`10ba8bc8cd64635c2bd6f77bc73d253568fdaf13` plus SHA-256
+`26e46de025b063233d6ccd3b7c5444f585091fac8d6c4b67bd7574dd3c161f01` for
+`experiments/g01-scaleset/livecanary/baseline_pair_effects_test.go`; at run time
+`git status --short --branch` showed exactly:
+
+```text
+## orca/issue-1-active-deadline-evidence
+ M docs/evidence/g01-paired-baseline.md
+ M experiments/g01-scaleset/livecanary/baseline_pair_effects_test.go
+```
+
+This closes the offline timed-expiry evidence gap at an entered fixture request;
+it does not establish behavior against a daemon, hosted runner, GitHub or a live
+Scale Set. No production timeout changed.
 
 The C fixture seeds inventory/create receipts. It does not execute remote policy
 Preflight or prove a live original scale-set creation. Docker fixtures are private
