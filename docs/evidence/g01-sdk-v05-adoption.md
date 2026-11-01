@@ -16,6 +16,13 @@ provider-side conditional cleanup, runtime qualification and the separately
 authorized live canary remain unresolved. No live operation is authorized by
 this status note.
 
+## Historical premerge checkpoint — PR #107
+
+The candidate status and review/merge checklist below record the state before
+PR #107 merged on 2026-10-25. They remain as historical evidence; their
+"pending" and "required before merge" statements are not current disposition.
+Use the current status above for the merged profile and remaining G01 gates.
+
 Issue: [G01 #1](https://github.com/1XP-AI/gh-runnerd/issues/1). Writer: Codex,
 maintainer-selected Sol medium. Status: **local adoption candidate; independent
 base review approved, zero-identity delta and GitHub review pending**.
@@ -206,7 +213,7 @@ Canonical release-profile checks after the correction:
 - Exact `586091b` clean prepared-binary fixture verification also passed, 4.587s;
   that is the pre-Q1 source, not a claim that the correction was already built.
 
-## Still required before merge / execution
+## Historical premerge gate checklist — PR #107
 
 The changed-surface admission/compile/tagged and vulnerability checks above have
 completed. Obtain the focused independent Q1 delta review and exact final-head

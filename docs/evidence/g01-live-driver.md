@@ -233,7 +233,7 @@ live API.
 
 ```sh
 cd experiments/g01-scaleset
-CGO_ENABLED=1 GOTOOLCHAIN=go1.27.3 go build -buildvcs=true -trimpath -tags=g01_live -o "$G01_PRIVATE_BINARY" ./cmd/g01-live
+GOEXPERIMENT= CGO_ENABLED=1 GOTOOLCHAIN=go1.27.3 go build -buildvcs=true -trimpath -tags=g01_live -o "$G01_PRIVATE_BINARY" ./cmd/g01-live
 "$G01_PRIVATE_BINARY" --plan  # offline plan check; no live authorization
 go version -m "$G01_PRIVATE_BINARY"
 ```

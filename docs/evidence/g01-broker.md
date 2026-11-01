@@ -117,7 +117,7 @@ Build only the reviewed broker source; these path variables are non-secret opera
 
 ```sh
 cd experiments/g02-auth
-CGO_ENABLED=1 GOTOOLCHAIN=go1.27.3 go build -trimpath -o "$G01_BROKER_BINARY" ./cmd/g01-broker
+GOEXPERIMENT= CGO_ENABLED=1 GOTOOLCHAIN=go1.27.3 go build -trimpath -o "$G01_BROKER_BINARY" ./cmd/g01-broker
 "$G01_BROKER_BINARY" --plan  # offline plan check; no live authorization
 ```
 
