@@ -161,6 +161,26 @@ No canary was performed, and this re-review does not authorize one. The
 reviewer made no source changes, tests, GitHub writes, commit, or push. Rollback:
 revert this subsection only; it changes no source, runtime, or GitHub state.
 
+### Read-only host runtime recheck — 2026-11-01
+
+Coordinator-observed facts from the existing connected SSH terminal during this
+turn: the host was Darwin/arm64; the Docker context was `colima`; and Docker
+reported Linux/aarch64, 4 CPUs, `MemTotal` 8307113984 bytes, and
+`ServerVersion` 29.5.2. Host-root disk reporting showed 460 GiB total, 12 GiB
+used, and 222 GiB available; this is the host root filesystem, not the Docker
+VM disk. An image inspection for
+`ghcr.io/actions/actions-runner@sha256:9644537b29b4799cb752a2f23a45a1e603cf74c3c5998241a1533f0e8c3dc649`
+reported the expected image reference absent from this Docker context.
+
+No image pull, container start, runner/JIT operation, workflow dispatch, Scale
+Set operation, or resource/configuration change was performed. This
+point-in-time observation does not prove current VM disk headroom,
+isolation/resource enforcement, trusted runtime readiness, or live Scale Set
+behavior. The Oct 28 report remains historical; this newer observation
+supersedes it only for current Docker version and image presence. Rollback:
+remove this subsection only; it is documentation-only and changes no source,
+runtime, or GitHub state.
+
 - [ ] Maintainer identifies one disposable **private** repository and one
   organization; no public fork/PR execution. Record the reviewed workflow SHA.
 - [ ] Dedicated runner group allows only that repository, and a unique canary
