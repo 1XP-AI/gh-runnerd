@@ -9,6 +9,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/1XP-AI/gh-runnerd/experiments/g02-auth/handoff"
 	"github.com/actions/scaleset"
 	"github.com/actions/scaleset/listener"
 )
@@ -23,7 +24,8 @@ var (
 )
 
 type Approval struct {
-	ManagementScope string `json:"management_scope,omitempty"`
+	GroupPolicy     handoff.GroupPolicy `json:"group_policy,omitzero"`
+	ManagementScope string              `json:"management_scope,omitempty"`
 
 	AppID          int64     `json:"app_id"`
 	InstallationID int64     `json:"installation_id"`
@@ -525,6 +527,9 @@ func (d *Driver) Run(ctx context.Context, phase string) error {
 }
 
 func (d *Driver) runWithHandoff(ctx context.Context, phase string, proof *controllerHandoffProof) error {
+	if d != nil && d.Approval.GroupPolicy.Version == 2 && proof == nil {
+		return ErrApproval
+	}
 	if phase == beforeJITPhase || phase == "jit-loss" && proof != nil {
 		return d.runJITBoundary(ctx, phase, proof)
 	}

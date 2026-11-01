@@ -20,11 +20,12 @@ type PublicPolicy struct {
 	Grants            []PhaseGrant `json:"grants"`
 }
 type PhaseGrant struct {
-	Request        Request   `json:"request"`
-	Mode           string    `json:"mode"`
-	OrganizationID int64     `json:"organization_id"`
-	RepositoryID   int64     `json:"repository_id"`
-	ExpiresAt      time.Time `json:"expires_at"`
+	GroupPolicySHA256 string    `json:"group_policy_sha256,omitempty"`
+	Request           Request   `json:"request"`
+	Mode              string    `json:"mode"`
+	OrganizationID    int64     `json:"organization_id"`
+	RepositoryID      int64     `json:"repository_id"`
+	ExpiresAt         time.Time `json:"expires_at"`
 }
 
 func DecodePublicPolicy(data []byte, role string, now time.Time) (PublicPolicy, TrustRoot, IssuerRoot, error) {
@@ -32,7 +33,7 @@ func DecodePublicPolicy(data []byte, role string, now time.Time) (PublicPolicy, 
 	fail := func() (PublicPolicy, TrustRoot, IssuerRoot, error) {
 		return PublicPolicy{}, TrustRoot{}, IssuerRoot{}, ErrInvalid
 	}
-	if decodeExactObject(data, &p, 32768) != nil || p.Version != 1 || p.Role != role || (role != "broker" && role != "controller") || p.Source != "github-rest-workflow-v1" || len(p.Grants) < 1 || len(p.Grants) > 16 {
+	if decodeExactObject(data, &p, 32768) != nil || (p.Version != 1 && p.Version != 2) || p.Role != role || (role != "broker" && role != "controller") || p.Source != "github-rest-workflow-v1" || len(p.Grants) < 1 || len(p.Grants) > 16 {
 		return fail()
 	}
 	wk, e := hex.DecodeString(p.WorkflowPublicKey)
@@ -51,6 +52,9 @@ func DecodePublicPolicy(data []byte, role string, now time.Time) (PublicPolicy, 
 	_ = json.Unmarshal(fields["grants"], &grants)
 	for _, raw := range grants {
 		var g PhaseGrant
+		if p.Version == 2 {
+			g.GroupPolicySHA256 = strings.Repeat("0", 64)
+		}
 		if decodeExactObject(raw, &g, 32768) != nil {
 			return fail()
 		}
@@ -64,7 +68,7 @@ func DecodePublicPolicy(data []byte, role string, now time.Time) (PublicPolicy, 
 	seen := map[Request]bool{}
 	for _, g := range p.Grants {
 		// Strict nested fields and duplicate keys are checked independently too.
-		if !g.Request.Valid() || g.Request.Source != p.Source || !strings.HasPrefix(g.Request.WorkflowRef, "refs/heads/") || g.OrganizationID < 1 || g.RepositoryID < 1 || !g.ExpiresAt.After(now) || g.ExpiresAt.After(now.Add(24*time.Hour)) || seen[g.Request] {
+		if (p.Version == 1 && g.GroupPolicySHA256 != "") || (p.Version == 2 && !sha256Hex.MatchString(g.GroupPolicySHA256)) || !g.Request.Valid() || g.Request.Source != p.Source || !strings.HasPrefix(g.Request.WorkflowRef, "refs/heads/") || g.OrganizationID < 1 || g.RepositoryID < 1 || !g.ExpiresAt.After(now) || g.ExpiresAt.After(now.Add(24*time.Hour)) || seen[g.Request] {
 			return fail()
 		}
 		if !(g.Mode == "controller" && g.Request.Phase == "create") && PhaseAudience(g.Mode, g.Request.Phase) == "" {
@@ -75,8 +79,17 @@ func DecodePublicPolicy(data []byte, role string, now time.Time) (PublicPolicy, 
 	return p, w, i, nil
 }
 func (p PublicPolicy) Select(mode string, request Request, now time.Time) (PhaseGrant, error) {
+	return p.SelectGroup(mode, request, "", now)
+}
+
+// SelectGroup has no legacy fallback: a nonempty digest requires v2, and v2
+// requires the independently granted digest of the exact group approval.
+func (p PublicPolicy) SelectGroup(mode string, request Request, digest string, now time.Time) (PhaseGrant, error) {
+	if (p.Version != 1 || digest != "") && (p.Version != 2 || !sha256Hex.MatchString(digest)) {
+		return PhaseGrant{}, ErrInvalid
+	}
 	for _, g := range p.Grants {
-		if g.Mode == mode && g.Request == request && g.ExpiresAt.After(now) {
+		if g.GroupPolicySHA256 == digest && g.Mode == mode && g.Request == request && g.ExpiresAt.After(now) {
 			return g, nil
 		}
 	}

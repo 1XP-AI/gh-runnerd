@@ -19,6 +19,16 @@ records exact group-policy checks and compatibility limits. Omitted/empty scope
 retains the existing selected-repository/metadata-read contract. Scope changes
 cannot renew or reuse an existing experiment's authority.
 
+The offline group-only v2 contract requires matching independently approved
+organization ID and exact same-repository reusable-workflow literal in broker
+and controller approvals, plus independently compiled role/phase grants bound
+to the approval bytes, target group and management scope. Both preflights require
+the selected group to restrict workflows to that one literal. The broker group
+read occurs after its existing management-token mint. V1 receipt provenance still
+covers the caller only; this contract does not establish provider callee metadata,
+scheduler enforcement, private runtime behavior or live authorization. Empty
+compiled policies grant no authority; v2 has no legacy selection fallback.
+
 ## Executable scope
 
 One command executes one named phase. The driver never launches a worker, opens

@@ -33,6 +33,10 @@ func experimentalPolicy(t *testing.T, a Approval, raw []byte, mode, phase, role 
 	t.Helper()
 	request := handoff.Request{ControllerApprovalSHA256: handoff.Digest(raw), Repository: a.Organization + "/" + a.Repository, WorkflowRunID: a.WorkflowRunID, WorkflowRef: a.WorkflowRef, WorkflowSHA: a.WorkflowSHA, WorkflowPath: a.WorkflowPath, Phase: phase, OwnerNonce: a.OwnerNonce, Source: "github-rest-workflow-v1"}
 	p := handoff.PublicPolicy{Version: 1, Role: role, Source: request.Source, WorkflowKeyID: "fixture-ed25519-v1", WorkflowPublicKey: "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8", IssuerKeyID: "fixture-issuer-v1", IssuerPublicKey: "e28a8970753332bd72fef413e6b0b2ef1b4aadda7aa2c141f233712a6876b351", Grants: []handoff.PhaseGrant{{Request: request, Mode: mode, OrganizationID: 101, RepositoryID: a.RepositoryID, ExpiresAt: a.ExpiresAt}}}
+	if a.GroupPolicy.Version == 2 {
+		p.Version = 2
+		p.Grants[0].GroupPolicySHA256 = a.GroupPolicy.GrantDigest(request, a.RepositoryID, int64(a.RunnerGroupID), a.ManagementScope)
+	}
 	data, _ := json.Marshal(p)
 	return string(data)
 }
@@ -83,13 +87,17 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 			}
 		}
 	}
-	cases := []string{"before-jit", "jit-loss", "before-jit-raw-drift", "jit-loss-raw-drift", "before-jit-extra", "jit-loss-extra", "before-ack", "inspect", "paired-terminal", "session-replacement", "session-replacement-zero", "session-replacement-new202", "session-replacement-missing", "session-replacement-null", "session-replacement-raw-drift"}
+	cases := []string{"group-policy", "group-policy-org", "group-policy-broker-wrong", "group-policy-controller-wrong", "before-jit", "jit-loss", "before-jit-raw-drift", "jit-loss-raw-drift", "before-jit-extra", "jit-loss-extra", "before-ack", "inspect", "paired-terminal", "session-replacement", "session-replacement-zero", "session-replacement-new202", "session-replacement-missing", "session-replacement-null", "session-replacement-raw-drift"}
 	if os.Getenv("G01_PHASE_BROKER_TEST_BINARY") != "" {
 		cases = append(cases, "alias", "workflow-seed", "issuer-seed", "rootless", "unknown-policy")
 	}
 	for _, caseName := range cases {
 		t.Run(caseName, func(t *testing.T) {
 			mode := caseName
+			groupCase := strings.HasPrefix(caseName, "group-policy")
+			if groupCase {
+				mode = "before-ack"
+			}
 			variant := "old41"
 			if strings.HasPrefix(caseName, "session-replacement-") {
 				mode = replacementPhase
@@ -120,6 +128,12 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 			} else {
 				a := approval()
 				a.WorkflowRef = "refs/heads/main"
+				if groupCase {
+					a.GroupPolicy = handoff.GroupPolicy{Version: 2, OrganizationID: 101, Workflow: a.Organization + "/" + a.Repository + "/.github/workflows/runner.yml@" + strings.Repeat("d", 40)}
+				}
+				if caseName == "group-policy-org" {
+					a.ManagementScope = "organization-only"
+				}
 				if mode == "session-replacement" || mode == "before-jit" {
 					a.Phases = append(a.Phases, mode)
 				}
@@ -171,7 +185,7 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 						json.NewEncoder(w).Encode(map[string]any{"runner": map[string]any{"id": 991, "name": committedName, "runnerScaleSetId": 7}, "encodedJITConfig": "c3ludGhldGljLWppdC1ib3VuZGFyeS1zZWNyZXQ="})
 						return true
 					}
-					repo := map[string]any{"id": a.RepositoryID, "full_name": a.Organization + "/" + a.Repository, "private": true, "fork": false}
+					repo := map[string]any{"id": a.RepositoryID, "full_name": a.Organization + "/" + a.Repository, "private": true, "fork": false, "owner": map[string]any{"login": a.Organization}}
 					var body any
 					if r.Method == "DELETE" && strings.Contains(r.URL.Path, "/sessions/") {
 						w.WriteHeader(204)
@@ -193,6 +207,14 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 						body = repo
 					case "/orgs/fixture-org/actions/runner-groups/3":
 						body = map[string]any{"id": 3, "visibility": "selected", "default": false, "allows_public_repositories": false, "inherited": false}
+						if groupCase {
+							expected := a.GroupPolicy.Workflow
+							if caseName == "group-policy-controller-wrong" {
+								expected = strings.Replace(expected, "dddd", "eeee", 1)
+							}
+							body.(map[string]any)["restricted_to_workflows"] = true
+							body.(map[string]any)["selected_workflows"] = []string{expected}
+						}
 					default:
 						return false
 					}
@@ -276,7 +298,7 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 			if os.WriteFile(binPath, binData, 0500) != nil {
 				t.Fatal("binary")
 			}
-			ba := enrollment.BrokerApproval{OwnerNonce: a.OwnerNonce, Mode: brokerMode, Phase: phase, AppID: a.AppID, AppName: "fixture-app", AppOwner: a.Organization, AppOwnerID: 101, InstallationID: a.InstallationID, Organization: a.Organization, OrganizationID: 101, Repository: a.Repository, RepositoryID: a.RepositoryID, RunnerGroupID: int64(a.RunnerGroupID), RunnerGroupName: "fixture-group", ExpiresAt: a.ExpiresAt, ControllerBinarySHA256: handoff.Digest(binData), ControllerApprovalSHA256: handoff.Digest(raw), ControllerHarnessSHA: a.HarnessSHA, AllowVerificationAuthority: true}
+			ba := enrollment.BrokerApproval{GroupPolicy: a.GroupPolicy, ManagementScope: a.ManagementScope, OwnerNonce: a.OwnerNonce, Mode: brokerMode, Phase: phase, AppID: a.AppID, AppName: "fixture-app", AppOwner: a.Organization, AppOwnerID: 101, InstallationID: a.InstallationID, Organization: a.Organization, OrganizationID: 101, Repository: a.Repository, RepositoryID: a.RepositoryID, RunnerGroupID: int64(a.RunnerGroupID), RunnerGroupName: "fixture-group", ExpiresAt: a.ExpiresAt, ControllerBinarySHA256: handoff.Digest(binData), ControllerApprovalSHA256: handoff.Digest(raw), ControllerHarnessSHA: a.HarnessSHA, AllowVerificationAuthority: true}
 			if brokerMode == "paired-terminal" {
 				ba.Phase = "paired-terminal"
 			}
@@ -286,7 +308,7 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 				t.Fatal("broker approval")
 			}
 			brokerFiles := enrollment.BrokerFiles{ApprovalPath: approvalPath, StateDirectory: filepath.Join(parent, "attempt-"+mode), ControllerBinary: binPath, ControllerApproval: files.ControllerApprovalPath, ControllerStateDirectory: files.ControllerStateDirectory, WorkerApproval: files.WorkerApprovalPath, WorkerStateDirectory: files.WorkerStateDirectory}
-			transport := &processBrokerHTTP{t: t, attempt: brokerFiles.StateDirectory, approval: &a}
+			transport := &processBrokerHTTP{t: t, attempt: brokerFiles.StateDirectory, approval: &a, groupFault: caseName == "group-policy-broker-wrong"}
 			if e := enrollment.ConfigureBrokerExperimentForFixture(experimentalPolicy(t, a, raw, brokerMode, phase, "broker"), transport, admission, workerAdmission); e != nil {
 				t.Fatal(e)
 			}
@@ -404,6 +426,21 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 				if !bytes.Contains(data, []byte(`"jit_boundary":`)) {
 					t.Fatalf("actual %s command produced no typed physical boundary evidence (physical JIT %d)", mode, physicalJIT)
 				}
+			}
+			if caseName == "group-policy-broker-wrong" || caseName == "group-policy-controller-wrong" {
+				if e == nil || transport.mints != 1 || base.acks.Load() != 0 || base.acquires.Load() != 0 {
+					t.Fatal("wrong group crossed actual command boundary", e, transport.mints)
+				}
+				consumed := false
+				for _, event := range base.readEvents() {
+					if event.ControllerHandoff != nil && event.ControllerHandoff.Phase == phase {
+						consumed = true
+					}
+				}
+				if consumed != (caseName == "group-policy-controller-wrong") {
+					t.Fatal("unexpected signed handoff consumption", consumed)
+				}
+				return
 			}
 			if e != nil || transport.mints != 1 {
 				for _, path := range []string{filepath.Join(brokerFiles.StateDirectory, "broker.jsonl"), filepath.Join(files.ControllerStateDirectory, "journal.jsonl")} {

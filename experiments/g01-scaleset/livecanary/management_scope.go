@@ -2,6 +2,7 @@ package livecanary
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"time"
@@ -15,17 +16,23 @@ func (a *SDKAPI) preflightOrganizationOnly(ctx context.Context, approval Approva
 		return ErrApproval
 	}
 	var group struct {
-		ID           int    `json:"id"`
-		Visibility   string `json:"visibility"`
-		Default      *bool  `json:"default"`
-		AllowsPublic *bool  `json:"allows_public_repositories"`
-		Inherited    *bool  `json:"inherited"`
+		RestrictedToWorkflows json.RawMessage `json:"restricted_to_workflows"`
+		SelectedWorkflows     json.RawMessage `json:"selected_workflows"`
+		ID                    int             `json:"id"`
+		Visibility            string          `json:"visibility"`
+		Default               *bool           `json:"default"`
+		AllowsPublic          *bool           `json:"allows_public_repositories"`
+		Inherited             *bool           `json:"inherited"`
 	}
 	prefix := "/orgs/" + approval.Organization + "/actions/runner-groups/" + strconv.Itoa(approval.RunnerGroupID)
 	observed, err := a.observationGET(ctx, prefix, a.credentials.InstallationToken, "rest_group_policy", &group)
 	if err != nil || observed.Status != http.StatusOK || group.ID != approval.RunnerGroupID || group.Visibility != "selected" || group.Default == nil || *group.Default || group.Inherited == nil || *group.Inherited || group.AllowsPublic == nil || *group.AllowsPublic {
 		return ErrApproval
 	}
+	if !approval.GroupPolicy.MatchesObserved(group.RestrictedToWorkflows, group.SelectedWorkflows) {
+		return ErrApproval
+	}
+
 	var allowed struct {
 		TotalCount   int `json:"total_count"`
 		Repositories []struct {

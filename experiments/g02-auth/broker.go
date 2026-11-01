@@ -17,26 +17,27 @@ import (
 // BrokerApproval describes one future, explicitly approved credential issuance
 // and either hostname discovery or one already-reviewed controller phase.
 type BrokerApproval struct {
-	ManagementScope            string    `json:"management_scope,omitempty"`
-	OwnerNonce                 string    `json:"owner_nonce"`
-	Mode                       string    `json:"mode"`
-	AppID                      int64     `json:"app_id"`
-	AppName                    string    `json:"app_name"`
-	AppOwner                   string    `json:"app_owner"`
-	AppOwnerID                 int64     `json:"app_owner_id"`
-	InstallationID             int64     `json:"installation_id"`
-	Organization               string    `json:"organization"`
-	OrganizationID             int64     `json:"organization_id"`
-	Repository                 string    `json:"repository"`
-	RepositoryID               int64     `json:"repository_id"`
-	RunnerGroupID              int64     `json:"runner_group_id"`
-	RunnerGroupName            string    `json:"runner_group_name"`
-	ExpiresAt                  time.Time `json:"expires_at"`
-	Phase                      string    `json:"phase,omitempty"`
-	AllowVerificationAuthority bool      `json:"allow_verification_authority"`
-	ControllerBinarySHA256     string    `json:"controller_binary_sha256,omitempty"`
-	ControllerApprovalSHA256   string    `json:"controller_approval_sha256,omitempty"`
-	ControllerHarnessSHA       string    `json:"controller_harness_sha,omitempty"`
+	GroupPolicy                handoff.GroupPolicy `json:"group_policy,omitzero"`
+	ManagementScope            string              `json:"management_scope,omitempty"`
+	OwnerNonce                 string              `json:"owner_nonce"`
+	Mode                       string              `json:"mode"`
+	AppID                      int64               `json:"app_id"`
+	AppName                    string              `json:"app_name"`
+	AppOwner                   string              `json:"app_owner"`
+	AppOwnerID                 int64               `json:"app_owner_id"`
+	InstallationID             int64               `json:"installation_id"`
+	Organization               string              `json:"organization"`
+	OrganizationID             int64               `json:"organization_id"`
+	Repository                 string              `json:"repository"`
+	RepositoryID               int64               `json:"repository_id"`
+	RunnerGroupID              int64               `json:"runner_group_id"`
+	RunnerGroupName            string              `json:"runner_group_name"`
+	ExpiresAt                  time.Time           `json:"expires_at"`
+	Phase                      string              `json:"phase,omitempty"`
+	AllowVerificationAuthority bool                `json:"allow_verification_authority"`
+	ControllerBinarySHA256     string              `json:"controller_binary_sha256,omitempty"`
+	ControllerApprovalSHA256   string              `json:"controller_approval_sha256,omitempty"`
+	ControllerHarnessSHA       string              `json:"controller_harness_sha,omitempty"`
 }
 type brokerInput struct {
 	PEM               string `json:"pem"`
@@ -80,6 +81,9 @@ const (
 )
 
 func (a BrokerApproval) validate(now time.Time) error {
+	if !a.GroupPolicy.Valid(a.Organization+"/"+a.Repository, "") || (a.GroupPolicy.Version == 2 && (a.GroupPolicy.OrganizationID != a.OrganizationID || a.Mode == "discover-actions-host")) {
+		return errBroker
+	}
 	if a.ManagementScope != "" && a.ManagementScope != organizationOnlyManagementScope {
 		return errBroker
 	}

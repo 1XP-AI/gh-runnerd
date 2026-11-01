@@ -39,7 +39,8 @@ func selectBrokerExperiment(files BrokerFiles, now time.Time) (brokerExperimentS
 	if e != nil {
 		return brokerExperimentSelection{}, errBroker
 	}
-	g, e := p.Select(a.Mode, request, now)
+	groupDigest := a.GroupPolicy.GrantDigest(request, a.RepositoryID, a.RunnerGroupID, a.ManagementScope)
+	g, e := p.SelectGroup(a.Mode, request, groupDigest, now)
 	if e != nil || g.OrganizationID != a.OrganizationID || g.RepositoryID != a.RepositoryID || g.ExpiresAt.Before(a.ExpiresAt) {
 		return brokerExperimentSelection{}, errBroker
 	}

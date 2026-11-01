@@ -27,6 +27,7 @@ type processBrokerHTTP struct {
 	calls         []string
 	mints         int
 	failPreflight bool
+	groupFault    bool
 }
 
 func (f *processBrokerHTTP) RoundTrip(r *http.Request) (*http.Response, error) {
@@ -57,17 +58,34 @@ func (f *processBrokerHTTP) RoundTrip(r *http.Request) (*http.Response, error) {
 			f.t.Error("mint preceded durable intent")
 		}
 		body, _ := io.ReadAll(r.Body)
-		if !bytes.Contains(body, []byte(`"repository_ids":[42]`)) {
+		organizationOnly := f.approval != nil && f.approval.ManagementScope == "organization-only"
+		if !organizationOnly && !bytes.Contains(body, []byte(`"repository_ids":[42]`)) {
 			f.t.Error("mint not scoped")
 		}
 		status = 201
 		payload = map[string]any{"token": "synthetic-process-installation-token", "expires_at": time.Now().Add(time.Hour), "permissions": map[string]string{"organization_self_hosted_runners": "write", "metadata": "read"}, "repository_selection": "selected", "repositories": []any{repo}}
+		if organizationOnly {
+			var request map[string]any
+			_ = json.Unmarshal(body, &request)
+			if len(request) != 1 {
+				f.t.Error("organization-only mint widened")
+			}
+			payload = map[string]any{"token": "synthetic-process-installation-token", "expires_at": time.Now().Add(time.Hour), "permissions": map[string]string{"organization_self_hosted_runners": "write"}}
+		}
 	case "/installation/repositories":
 		payload = map[string]any{"total_count": 1, "repositories": []any{repo}}
 	case "/repos/fixture-org/canary":
 		payload = repo
 	case "/orgs/fixture-org/actions/runner-groups/3":
 		payload = map[string]any{"id": 3, "name": "fixture-group", "visibility": "selected", "default": false, "inherited": false, "allows_public_repositories": f.failPreflight}
+		if f.approval != nil && f.approval.GroupPolicy.Version == 2 {
+			expected := f.approval.GroupPolicy.Workflow
+			if f.groupFault {
+				expected = strings.Replace(expected, "dddd", "eeee", 1)
+			}
+			payload.(map[string]any)["restricted_to_workflows"] = true
+			payload.(map[string]any)["selected_workflows"] = []string{expected}
+		}
 	case "/orgs/fixture-org/actions/runner-groups/3/repositories":
 		payload = map[string]any{"total_count": 1, "repositories": []any{repo}}
 	default:
