@@ -191,25 +191,31 @@ generated-fixture SIGTERM/SIGINT/SIGHUP cases that assert status 0, 91, 143,
 The tagged CLI tests use synthetic input/subprocess fixtures and static plan or
 refusal paths. The `g01_pair_fixture` livecanary checks use private synthetic
 fixtures: one paired-collection run selects `^TestPaired` while excluding
-`^TestPairedTerminal`; one remaining collection/listener run has no `-run`
-filter while excluding `^TestPaired`; one heavy terminal run selects the exact
-five names
+`^TestPairedTerminal`; the non-paired collection/listener remainder is split
+across eight fixed, disjoint positive `-run` ranges: `Test` names whose next
+character is A, B, C, D-F, G-J, K-P, or Q-Z, plus names whose next character
+is outside ASCII A-Z (including the exact name `Test`). These runs skip the
+paired, replacement, JIT-boundary, acquire-loss, drain, and ACK command suites,
+which have their own partitions. A separate `^(Example|Fuzz)` run preserves
+tagged examples and fuzz seeds. One heavy
+terminal run selects the exact five names
 `^TestPairedTerminal(FinalResultCapacity|PendingChildCapacity|EligibilityUsesFreshExactFacts|CapturedAcknowledgementCancellation|MissingAcknowledgementsAndPostchecks)$`;
 one complementary remainder selects `^TestPairedTerminal` while skipping those
-five names and the persistence set; and a fifth run selects the exact
-persistence set
+five names and the persistence set; two further runs split the persistence set
+into journal identity and the other storage names. The `storage_regex` value
+for that set is
 `^TestPairedTerminal(Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$`.
 `FixtureStorageFailure` is the unique generated sentinel from
 `scripts/tooling_test.go`; it is intentionally distinct from the real
 `TestPairedTerminalClosedReplayActualFile` test. This exact expression is the
 script's `storage_regex` value and is also the `STORAGE` alias in issue #54.
-The two collection/listener partitions are explicit and disjoint: every
-non-terminal `TestPaired*` test is in the first, and every other test, example or
-fuzz seed is in the second. The three terminal partitions are likewise
+The paired and non-paired collection/listener partitions are explicit and
+disjoint. `TestToolingG01ProfileRouting` checks that current and synthetic test,
+example, and fuzz names route exactly once, and that each tagged test command
+has a bounded positive selector. The four terminal partitions are likewise
 exhaustive and disjoint for current `TestPairedTerminal` names, and a future
-top-level terminal name lands in the remainder. The unfiltered second command
-preserves Go's normal execution of tagged examples and fuzz seeds. One tagged
-vet follows those five race-tested runs. None of these tagged checks
+top-level terminal name lands in the remainder. One tagged vet follows the
+race-tested partitions. None of these tagged checks
 executes approved live controller/worker operations or exposes a public terminal
 phase/API. The implementation and evidence boundaries are recorded in the
 [G01 paired terminal guide](evidence/g01-paired-terminal.md). The script permits

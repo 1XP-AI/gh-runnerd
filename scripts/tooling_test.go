@@ -2603,7 +2603,16 @@ func TestToolingTaggedPairFixturePartitionsRun(t *testing.T) {
 	terminalFuturePath := "experiments/g01-scaleset/livecanary/pair_fixture_terminal_future_regression_test.go"
 	storagePath := "experiments/g01-scaleset/livecanary/pair_fixture_storage_regression_test.go"
 	storageJournalPath := "experiments/g01-scaleset/livecanary/pair_fixture_storage_journal_regression_test.go"
-	remainingCollectionInvocation := "go1.27.3\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -skip ^Test(Paired|SessionReplacement|JITBoundary|ExperimentalAcquireLossCommand$|ExperimentalDrainCommand$|ExperimentalACKBoundaryCommand$) ./livecanary"
+	nonPairedTestRegexes := []string{"^TestA", "^TestB", "^TestC", "^Test[D-F]", "^Test[G-J]", "^Test[K-P]", "^Test[Q-Z]", `^Test($|[^A-Za-z])`}
+	nonPairedTestInvocation := func(testRegex string) string {
+		return "go1.27.3\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run " + testRegex + " -skip ^Test(Paired|SessionReplacement|JITBoundary|ExperimentalAcquireLossCommand$|ExperimentalDrainCommand$|ExperimentalACKBoundaryCommand$) ./livecanary"
+	}
+	var nonPairedTestInvocations []string
+	for _, testRegex := range nonPairedTestRegexes {
+		nonPairedTestInvocations = append(nonPairedTestInvocations, nonPairedTestInvocation(testRegex))
+	}
+	listenerInvocation := nonPairedTestInvocation("^Test[K-P]")
+	exampleFuzzInvocation := "go1.27.3\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run ^(Example|Fuzz) ./livecanary"
 	taggedPositiveSource := func(testName, marker string) string {
 		return `//go:build g01_pair_fixture && !g01_live && !g01_worker
 
@@ -2775,7 +2784,7 @@ func TestPairedTerminalFutureCoverage(t *testing.T) {
 `
 	wrapper, logPath, realGo := toolingGoWrapper(t, root)
 	sentinelLogPath := filepath.Join(root, "tagged-sentinel.log")
-	env := []string{"GO=" + wrapper, "TOOLING_REAL_GO=" + realGo, "TOOLING_GO_LOG=" + logPath, "TOOLING_SENTINEL_LOG=" + sentinelLogPath}
+	env := []string{"GO=" + wrapper, "TOOLING_REAL_GO=" + realGo, "TOOLING_GO_LOG=" + logPath, "TOOLING_SENTINEL_LOG=" + sentinelLogPath, "OFFLINE_EXPERIMENT_MODULE=experiments/g01-scaleset", "OFFLINE_EXPERIMENT_PROFILE=core"}
 	// Each generated witness must fail through its own reviewed partition. The
 	// log assertions prove the bounded tagged livecanary partitions, including a future
 	// TestPairedTerminal name in the complementary remainder.
@@ -2796,7 +2805,7 @@ func TestPairedTerminalFutureCoverage(t *testing.T) {
 			"listener",
 			listenerSource,
 			listenerPositiveSource,
-			remainingCollectionInvocation,
+			listenerInvocation,
 		},
 		{
 			examplePath,
@@ -2804,7 +2813,7 @@ func TestPairedTerminalFutureCoverage(t *testing.T) {
 			"example",
 			exampleSource,
 			examplePositiveSource,
-			remainingCollectionInvocation,
+			exampleFuzzInvocation,
 		},
 		{
 			fuzzPath,
@@ -2812,7 +2821,7 @@ func TestPairedTerminalFutureCoverage(t *testing.T) {
 			"fuzz",
 			fuzzSource,
 			fuzzPositiveSource,
-			remainingCollectionInvocation,
+			exampleFuzzInvocation,
 		},
 		{
 			terminalHeavyPath,
@@ -2915,7 +2924,6 @@ func TestPairedTerminalFutureCoverage(t *testing.T) {
 	lines := strings.Split(strings.TrimSpace(log), "\n")
 	for _, invocation := range []string{
 		"go1.27.3\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run ^TestPaired -skip ^TestPairedTerminal ./livecanary",
-		remainingCollectionInvocation,
 		g01ReplacementInvocation,
 		g01TerminalHeavyInvocation,
 		g01TerminalRemainderInvocation,
@@ -2923,6 +2931,17 @@ func TestPairedTerminalFutureCoverage(t *testing.T) {
 		g01TerminalStorageInvocation,
 		"go1.27.3\tvet -tags=g01_pair_fixture ./livecanary",
 	} {
+		count := 0
+		for _, line := range lines {
+			if line == invocation {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Fatalf("offline gate logged %q %d times; wrapper log:\n%s", invocation, count, log)
+		}
+	}
+	for _, invocation := range append(nonPairedTestInvocations, exampleFuzzInvocation) {
 		count := 0
 		for _, line := range lines {
 			if line == invocation {
@@ -4412,8 +4431,19 @@ func TestToolingSessionReplacementPartitionDisjoint(t *testing.T) {
 	physical := regexp.MustCompile(toolingScriptAssignment(t, string(data), "jit_boundary_physical_regex"))
 	heavy := regexp.MustCompile(toolingScriptAssignment(t, string(data), "jit_boundary_heavy_regex"))
 	skip := regexp.MustCompile(toolingScriptAssignment(t, string(data), "non_paired_skip_regex"))
+	nonPairedSelectors := []*regexp.Regexp{
+		regexp.MustCompile(toolingScriptAssignment(t, string(data), "non_paired_a_regex")),
+		regexp.MustCompile(toolingScriptAssignment(t, string(data), "non_paired_b_regex")),
+		regexp.MustCompile(toolingScriptAssignment(t, string(data), "non_paired_c_regex")),
+		regexp.MustCompile(toolingScriptAssignment(t, string(data), "non_paired_d_to_f_regex")),
+		regexp.MustCompile(toolingScriptAssignment(t, string(data), "non_paired_g_to_j_regex")),
+		regexp.MustCompile(toolingScriptAssignment(t, string(data), "non_paired_k_to_p_regex")),
+		regexp.MustCompile(toolingScriptAssignment(t, string(data), "non_paired_q_to_z_regex")),
+		regexp.MustCompile(toolingScriptAssignment(t, string(data), "non_paired_other_test_regex")),
+	}
+	nonPairedExampleFuzz := regexp.MustCompile(toolingScriptAssignment(t, string(data), "non_paired_example_fuzz_regex"))
 	paired := regexp.MustCompile(toolingScriptAssignment(t, string(data), "paired_collection_regex"))
-	for _, name := range []string{"TestJITBoundaryPhysicalMutationsStop", "TestJITBoundaryPreparationRequiresOriginalFreshCreate", "TestJITBoundaryStrictJournalSchemaAndRawReferences", "TestJITBoundaryStorageAndCancellationEveryAppend", "TestJITBoundaryExpiryAtEveryAppend", "TestJITBoundaryProtocol", "TestJITBoundaryFutureNegative", "TestSessionReplacementProtocol", "TestSessionReplacementFutureNegative", "TestExperimentalActualCommandBrokerReceiver", "TestExperimentalAcquireLossCommand", "TestExperimentalAcquireLossCommandFuture", "TestExperimentalDrainCommand", "TestExperimentalDrainCommandFuture", "TestExperimentalACKBoundaryCommand", "TestExperimentalACKBoundaryCommandFuture", "TestPairedTerminalFutureCoverage", "ExampleFuture", "FuzzFuture"} {
+	for _, name := range []string{"TestJITBoundaryPhysicalMutationsStop", "TestJITBoundaryPreparationRequiresOriginalFreshCreate", "TestJITBoundaryStrictJournalSchemaAndRawReferences", "TestJITBoundaryStorageAndCancellationEveryAppend", "TestJITBoundaryExpiryAtEveryAppend", "TestJITBoundaryProtocol", "TestJITBoundaryFutureNegative", "TestSessionReplacementProtocol", "TestSessionReplacementFutureNegative", "TestExperimentalActualCommandBrokerReceiver", "TestExperimentalAcquireLossCommand", "TestExperimentalAcquireLossCommandFuture", "TestExperimentalDrainCommand", "TestExperimentalDrainCommandFuture", "TestExperimentalACKBoundaryCommand", "TestExperimentalACKBoundaryCommandFuture", "TestPairedTerminalFutureCoverage", "Test", "Test_", "ExampleFuture", "FuzzFuture"} {
 		count := 0
 		if ack.MatchString(name) {
 			count++
@@ -4442,7 +4472,12 @@ func TestToolingSessionReplacementPartitionDisjoint(t *testing.T) {
 		if physical.MatchString(name) {
 			count++
 		}
-		if !skip.MatchString(name) {
+		for _, selector := range nonPairedSelectors {
+			if selector.MatchString(name) && !skip.MatchString(name) {
+				count++
+			}
+		}
+		if nonPairedExampleFuzz.MatchString(name) {
 			count++
 		}
 		if paired.MatchString(name) {
@@ -4452,7 +4487,13 @@ func TestToolingSessionReplacementPartitionDisjoint(t *testing.T) {
 			t.Fatalf("%s covered %d times", name, count)
 		}
 	}
-	if strings.Count(string(data), `-run "${ack_command_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-run "${drain_command_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-run "${acquire_loss_command_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-run "${replacement_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-run "${jit_boundary_storage_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-run "${jit_boundary_expiry_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-run "${jit_boundary_admission_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-run "${jit_boundary_physical_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-run "${jit_boundary_regex}" -skip "${jit_boundary_heavy_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-skip "${non_paired_skip_regex}" ./livecanary`) != 1 {
+	nonPairedVariables := []string{"non_paired_a_regex", "non_paired_b_regex", "non_paired_c_regex", "non_paired_d_to_f_regex", "non_paired_g_to_j_regex", "non_paired_k_to_p_regex", "non_paired_q_to_z_regex", "non_paired_other_test_regex"}
+	for _, variable := range nonPairedVariables {
+		if strings.Count(string(data), "\t\"${"+variable+"}\"") != 1 {
+			t.Fatalf("non-paired selector %s is not registered exactly once", variable)
+		}
+	}
+	if strings.Count(string(data), `-run "${non_paired_example_fuzz_regex}" ./livecanary`) != 1 || strings.Count(string(data), `for test_regex in "${non_paired_test_regexes[@]}"; do`) != 1 || strings.Count(string(data), `-run "${test_regex}" -skip "${non_paired_skip_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-run "${ack_command_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-run "${drain_command_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-run "${acquire_loss_command_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-run "${replacement_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-run "${jit_boundary_storage_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-run "${jit_boundary_expiry_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-run "${jit_boundary_admission_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-run "${jit_boundary_physical_regex}" ./livecanary`) != 1 || strings.Count(string(data), `-run "${jit_boundary_regex}" -skip "${jit_boundary_heavy_regex}" ./livecanary`) != 1 {
 		t.Fatal("replacement partition not consumed exactly once")
 	}
 }
@@ -4559,6 +4600,14 @@ func TestToolingG01ProfileRouting(t *testing.T) {
 	for profile, calls := range profiles {
 		acquireLoss, drain, ack := 0, 0, 0
 		for _, call := range calls {
+			if strings.HasPrefix(call, "test\t") && strings.Contains(call, "\t-tags=g01_pair_fixture\t") {
+				if !strings.Contains(call, "\t-race\t-count=1\t-timeout=120s\t-tags=g01_pair_fixture\t") {
+					t.Errorf("profile %q has an unbounded tagged test command %q", profile, call)
+				}
+				if !strings.Contains(call, "\t-run\t") {
+					t.Errorf("profile %q has a catch-all tagged test command without a positive selector %q", profile, call)
+				}
+			}
 			if strings.Contains(call, "\t^TestExperimentalACKBoundaryCommand$\t") {
 				ack++
 				if !strings.Contains(call, "test\t-race\t-count=1\t-timeout=120s\t-tags=g01_pair_fixture\t-run\t") {
@@ -4599,7 +4648,7 @@ func TestToolingG01ProfileRouting(t *testing.T) {
 	// Name discovery compiles/lists current tagged tests without executing them.
 	// Include future family members and Example/Fuzz names to guard complements.
 	names := toolingListLivecanary(t, "^Test")
-	names = append(names, "TestJITBoundaryFuture", "TestSessionReplacementFuture", "TestPairedTerminalFuture", "TestFuture", "TestExperimentalACKBoundaryCommandFuture", "ExampleFuture", "FuzzFuture")
+	names = append(names, "TestJITBoundaryFuture", "TestSessionReplacementFuture", "TestPairedTerminalFuture", "TestFuture", "Test", "Test_", "TestExperimentalACKBoundaryCommandFuture", "ExampleFuture", "FuzzFuture")
 	for _, name := range names {
 		if name == "TestExperimentalPrepareCommandHelpers" {
 			continue // Independent setup; also validates provenance in the remainder.
