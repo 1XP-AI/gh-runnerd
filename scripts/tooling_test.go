@@ -59,6 +59,9 @@ func toolingRun(t *testing.T, root string, extra []string, args ...string) (stri
 	cmd.Env = append(env, "GOTOOLCHAIN=go1.27.3", "GOFLAGS=", "GOWORK=off")
 	cmd.Env = append(cmd.Env, extra...)
 	data, err := cmd.CombinedOutput()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return string(data), errors.Join(ctxErr, err)
+	}
 	return string(data), err
 }
 
@@ -3341,8 +3344,10 @@ func FuzzDefaultG01Fixture(f *testing.F) {
 		"go1.27.3\ttest -race -count=1 -timeout=45s -skip ^Test(BaselineStatisticsPresenceAndEligibility|ControllerHandoff.*)$ ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerPrepareReviewedG01LiveBinary$ ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
+		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
+		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint)$ ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPaired -skip ^TestPairedBroker(PrepareReviewedG01LiveBinary|RealCadenceChildExceedsThirtySeconds)$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -skip ^TestPaired ./...",
+		"go1.27.3\ttest -race -count=1 -timeout=45s -skip ^TestPaired|^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint)$|^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
 	} {
 		count := 0
 		for _, line := range lines {
@@ -3365,6 +3370,7 @@ func FuzzDefaultG01Fixture(f *testing.F) {
 		t.Fatalf("offline gate ran the R1 fixture invocation %d times; wrapper log:\n%s", r1Count, log)
 	}
 	for _, invocation := range []string{
+		"go1.27.3\ttest -race -count=1 -timeout=45s -skip ^TestPaired ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPaired -skip ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -skip ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=120s -run ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
@@ -3522,6 +3528,7 @@ func FuzzG02Fixture(f *testing.F) {
 	}
 	type fixture struct {
 		name, path, marker, positiveSource, failureSource string
+		partition                                         int
 	}
 	fixtures := []fixture{
 		{
@@ -3530,6 +3537,7 @@ func FuzzG02Fixture(f *testing.F) {
 			marker:         prepSentinel,
 			positiveSource: defaultTestSource("fixture", prepName, prepSentinel, ""),
 			failureSource:  defaultTestSource("fixture", prepName, prepSentinel, prepSentinel),
+			partition:      0,
 		},
 		{
 			name:           "heavy",
@@ -3537,6 +3545,7 @@ func FuzzG02Fixture(f *testing.F) {
 			marker:         heavySentinel,
 			positiveSource: defaultTestSource("fixture", heavyName, heavySentinel, ""),
 			failureSource:  defaultTestSource("fixture", heavyName, heavySentinel, heavySentinel),
+			partition:      1,
 		},
 		{
 			name:           "legacy controller",
@@ -3544,6 +3553,7 @@ func FuzzG02Fixture(f *testing.F) {
 			marker:         legacyControllerSentinel,
 			positiveSource: defaultTestSource("fixture", legacyControllerName, legacyControllerSentinel, ""),
 			failureSource:  defaultTestSource("fixture", legacyControllerName, legacyControllerSentinel, legacyControllerSentinel),
+			partition:      2,
 		},
 		{
 			name:           "legacy paired",
@@ -3551,6 +3561,7 @@ func FuzzG02Fixture(f *testing.F) {
 			marker:         legacyPairedSentinel,
 			positiveSource: defaultTestSource("fixture", legacyPairedName, legacyPairedSentinel, ""),
 			failureSource:  defaultTestSource("fixture", legacyPairedName, legacyPairedSentinel, legacyPairedSentinel),
+			partition:      2,
 		},
 		{
 			name:           "controller claims",
@@ -3558,6 +3569,7 @@ func FuzzG02Fixture(f *testing.F) {
 			marker:         controllerClaimsSentinel,
 			positiveSource: defaultTestSource("fixture", controllerClaimsName, controllerClaimsSentinel, ""),
 			failureSource:  defaultTestSource("fixture", controllerClaimsName, controllerClaimsSentinel, controllerClaimsSentinel),
+			partition:      2,
 		},
 		{
 			name:           "final fence",
@@ -3565,6 +3577,7 @@ func FuzzG02Fixture(f *testing.F) {
 			marker:         finalSentinel,
 			positiveSource: defaultTestSource("fixture", finalName, finalSentinel, ""),
 			failureSource:  defaultTestSource("fixture", finalName, finalSentinel, finalSentinel),
+			partition:      3,
 		},
 		{
 			name:           "final root mismatch",
@@ -3572,6 +3585,7 @@ func FuzzG02Fixture(f *testing.F) {
 			marker:         finalRootMismatchSentinel,
 			positiveSource: defaultTestSource("fixture", finalRootMismatchName, finalRootMismatchSentinel, ""),
 			failureSource:  defaultTestSource("fixture", finalRootMismatchName, finalRootMismatchSentinel, finalRootMismatchSentinel),
+			partition:      3,
 		},
 		{
 			name:           "paired family",
@@ -3579,6 +3593,7 @@ func FuzzG02Fixture(f *testing.F) {
 			marker:         pairedFamilySentinel,
 			positiveSource: defaultTestSource("fixture", pairedFamilyName, pairedFamilySentinel, ""),
 			failureSource:  defaultTestSource("fixture", pairedFamilyName, pairedFamilySentinel, pairedFamilySentinel),
+			partition:      4,
 		},
 		{
 			name:           "remainder",
@@ -3586,6 +3601,7 @@ func FuzzG02Fixture(f *testing.F) {
 			marker:         remainderSentinel,
 			positiveSource: defaultTestSource("remainderfixture", "TestDefaultG02RemainderFixture", remainderSentinel, ""),
 			failureSource:  defaultTestSource("remainderfixture", "TestDefaultG02RemainderFixture", remainderSentinel, remainderSentinel),
+			partition:      5,
 		},
 		{
 			name:           "other package",
@@ -3593,6 +3609,7 @@ func FuzzG02Fixture(f *testing.F) {
 			marker:         otherPackageSentinel,
 			positiveSource: defaultTestSource("otherfixture", "TestDefaultG02OtherPackageFixture", otherPackageSentinel, ""),
 			failureSource:  defaultTestSource("otherfixture", "TestDefaultG02OtherPackageFixture", otherPackageSentinel, otherPackageSentinel),
+			partition:      5,
 		},
 		{
 			name:           "same-name other package",
@@ -3600,6 +3617,7 @@ func FuzzG02Fixture(f *testing.F) {
 			marker:         sameNameOtherPackageSentinel,
 			positiveSource: defaultTestSource("samefixture", heavyName, sameNameOtherPackageSentinel, ""),
 			failureSource:  defaultTestSource("samefixture", heavyName, sameNameOtherPackageSentinel, sameNameOtherPackageSentinel),
+			partition:      1,
 		},
 		{
 			name:           "same-name paired family other package",
@@ -3607,6 +3625,7 @@ func FuzzG02Fixture(f *testing.F) {
 			marker:         sameNamePairedFamilySentinel,
 			positiveSource: defaultTestSource("pairedfixture", pairedFamilyName, sameNamePairedFamilySentinel, ""),
 			failureSource:  defaultTestSource("pairedfixture", pairedFamilyName, sameNamePairedFamilySentinel, sameNamePairedFamilySentinel),
+			partition:      4,
 		},
 		{
 			name:           "same-name prep other package",
@@ -3614,6 +3633,7 @@ func FuzzG02Fixture(f *testing.F) {
 			marker:         sameNamePrepSentinel,
 			positiveSource: defaultTestSource("prepfixture", prepName, sameNamePrepSentinel, ""),
 			failureSource:  defaultTestSource("prepfixture", prepName, sameNamePrepSentinel, sameNamePrepSentinel),
+			partition:      0,
 		},
 		{
 			name:           "Example Output",
@@ -3621,6 +3641,7 @@ func FuzzG02Fixture(f *testing.F) {
 			marker:         exampleSentinel,
 			positiveSource: defaultExampleSource(exampleSentinel, exampleSentinel),
 			failureSource:  defaultExampleSource(exampleSentinel, "unexpected-default-g02-example-output"),
+			partition:      5,
 		},
 		{
 			name:           "Fuzz seed",
@@ -3628,6 +3649,7 @@ func FuzzG02Fixture(f *testing.F) {
 			marker:         fuzzSentinel,
 			positiveSource: defaultFuzzSource(fuzzSentinel, ""),
 			failureSource:  defaultFuzzSource(fuzzSentinel, fuzzSentinel),
+			partition:      5,
 		},
 	}
 	toolingFile(t, root, remainderPackageBase+"/fixture.go", "package remainderfixture\n", 0600)
@@ -3671,14 +3693,15 @@ func FuzzG02Fixture(f *testing.F) {
 	}
 	log := string(logData)
 	lines := strings.Split(strings.TrimSpace(log), "\n")
-	for _, invocation := range []string{
+	g02Invocations := []string{
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerPrepareReviewedG01LiveBinary$ ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint)$ ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPaired -skip ^TestPairedBroker(PrepareReviewedG01LiveBinary|RealCadenceChildExceedsThirtySeconds)$ ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -skip ^TestPaired|^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint)$|^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
-	} {
+	}
+	for _, invocation := range g02Invocations {
 		count := 0
 		for _, line := range lines {
 			if line == invocation {
@@ -3711,8 +3734,19 @@ func FuzzG02Fixture(f *testing.F) {
 	if r1Count != 1 {
 		t.Fatalf("offline gate ran the R1 fixture invocation %d times; wrapper log:\n%s", r1Count, log)
 	}
-	for _, tc := range fixtures {
-		toolingFile(t, root, tc.path, tc.failureSource, 0600)
+	for partition, invocation := range g02Invocations {
+		var group []fixture
+		for _, tc := range fixtures {
+			if tc.partition == partition {
+				group = append(group, tc)
+			}
+		}
+		if len(group) == 0 {
+			t.Fatalf("default G02 partition %d has no failure fixture", partition)
+		}
+		for _, tc := range group {
+			toolingFile(t, root, tc.path, tc.failureSource, 0600)
+		}
 		if err := os.WriteFile(logPath, nil, 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -3720,23 +3754,46 @@ func FuzzG02Fixture(f *testing.F) {
 			t.Fatal(err)
 		}
 		out, runErr := toolingRun(t, root, env, "bash", "scripts/check-offline-experiments.sh")
-		if runErr == nil || !strings.Contains(out, tc.marker) {
-			t.Errorf("default G02 %s failure was skipped: %s", tc.name, out)
+		if errors.Is(runErr, context.DeadlineExceeded) {
+			t.Fatalf("default G02 partition %d timed out before reporting its fixture failure: %s", partition, out)
+		}
+		if runErr == nil {
+			t.Errorf("default G02 partition %d failure passed unexpectedly: %s", partition, out)
 		}
 		data, readErr := os.ReadFile(sentinelLogPath)
 		if readErr != nil {
 			t.Fatal(readErr)
 		}
-		count := 0
-		for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-			if line == tc.marker {
-				count++
+		for _, tc := range group {
+			if !strings.Contains(out, tc.marker) {
+				t.Errorf("default G02 %s failure did not reach partition %d: %s", tc.name, partition, out)
+			}
+			count := 0
+			for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+				if line == tc.marker {
+					count++
+				}
+			}
+			if count != 1 {
+				t.Errorf("default G02 %s sentinel %q ran %d times; sentinel log:\n%s", tc.name, tc.marker, count, data)
 			}
 		}
-		if count != 1 {
-			t.Errorf("default G02 %s sentinel %q ran %d times; sentinel log:\n%s", tc.name, tc.marker, count, data)
+		failureLogData, readErr := os.ReadFile(logPath)
+		if readErr != nil {
+			t.Fatal(readErr)
 		}
-		toolingFile(t, root, tc.path, tc.positiveSource, 0600)
+		invocationCount := 0
+		for _, line := range strings.Split(strings.TrimSpace(string(failureLogData)), "\n") {
+			if line == invocation {
+				invocationCount++
+			}
+		}
+		if invocationCount != 1 {
+			t.Errorf("default G02 partition %d invocation %q ran %d times; wrapper log:\n%s", partition, invocation, invocationCount, failureLogData)
+		}
+		for _, tc := range group {
+			toolingFile(t, root, tc.path, tc.positiveSource, 0600)
+		}
 	}
 }
 
