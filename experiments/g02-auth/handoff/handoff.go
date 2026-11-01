@@ -28,20 +28,41 @@ var (
 	workflowPath       = regexp.MustCompile(`^\.github/workflows/[a-zA-Z0-9_-]+\.ya?ml$`)
 )
 
+const ReusableCalleeSource = "signed-reusable-callee-v2"
+
+type CalleeIdentity struct {
+	Repository   string `json:"repository"`
+	WorkflowPath string `json:"workflow_path"`
+	SHA          string `json:"sha"`
+}
+
 type Request struct {
-	ControllerApprovalSHA256 string `json:"controller_approval_sha256"`
-	Repository               string `json:"repository"`
-	WorkflowRunID            int64  `json:"workflow_run_id"`
-	WorkflowRef              string `json:"workflow_ref"`
-	WorkflowSHA              string `json:"workflow_sha"`
-	WorkflowPath             string `json:"workflow_path"`
-	Phase                    string `json:"phase"`
-	OwnerNonce               string `json:"owner_nonce"`
-	Source                   string `json:"source"`
+	Version                  int            `json:"version,omitempty"`
+	Callee                   CalleeIdentity `json:"callee,omitzero"`
+	ControllerApprovalSHA256 string         `json:"controller_approval_sha256"`
+	Repository               string         `json:"repository"`
+	WorkflowRunID            int64          `json:"workflow_run_id"`
+	WorkflowRef              string         `json:"workflow_ref"`
+	WorkflowSHA              string         `json:"workflow_sha"`
+	WorkflowPath             string         `json:"workflow_path"`
+	Phase                    string         `json:"phase"`
+	OwnerNonce               string         `json:"owner_nonce"`
+	Source                   string         `json:"source"`
 }
 
 func (r Request) Valid() bool {
-	return sha256Hex.MatchString(r.ControllerApprovalSHA256) && repositoryFullName.MatchString(r.Repository) && r.WorkflowRunID > 0 && workflowRef.MatchString(r.WorkflowRef) && sha40Hex.MatchString(r.WorkflowSHA) && workflowPath.MatchString(r.WorkflowPath) && validPhase(r.Phase) && nonceHex.MatchString(r.OwnerNonce) && provenanceSource.MatchString(r.Source)
+	return r.validVersion() && sha256Hex.MatchString(r.ControllerApprovalSHA256) && repositoryFullName.MatchString(r.Repository) && r.WorkflowRunID > 0 && workflowRef.MatchString(r.WorkflowRef) && sha40Hex.MatchString(r.WorkflowSHA) && workflowPath.MatchString(r.WorkflowPath) && validPhase(r.Phase) && nonceHex.MatchString(r.OwnerNonce) && provenanceSource.MatchString(r.Source)
+}
+
+func (r Request) validVersion() bool {
+	switch r.Version {
+	case 0, 1:
+		return r.Callee == (CalleeIdentity{}) && r.Source != ReusableCalleeSource
+	case 2:
+		return r.Source == ReusableCalleeSource && r.Callee.Repository == r.Repository && repositoryFullName.MatchString(r.Callee.Repository) && workflowPath.MatchString(r.Callee.WorkflowPath) && sha40Hex.MatchString(r.Callee.SHA)
+	default:
+		return false
+	}
 }
 
 func validPhase(phase string) bool {
@@ -54,22 +75,23 @@ func validPhase(phase string) bool {
 }
 
 type Receipt struct {
-	Version                  int       `json:"version"`
-	Algorithm                string    `json:"algorithm"`
-	KeyID                    string    `json:"key_id"`
-	ControllerApprovalSHA256 string    `json:"controller_approval_sha256"`
-	Repository               string    `json:"repository"`
-	WorkflowRunID            int64     `json:"workflow_run_id"`
-	WorkflowRef              string    `json:"workflow_ref"`
-	WorkflowSHA              string    `json:"workflow_sha"`
-	WorkflowPath             string    `json:"workflow_path"`
-	Phase                    string    `json:"phase"`
-	OwnerNonce               string    `json:"owner_nonce"`
-	ReceiptNonce             string    `json:"receipt_nonce"`
-	Source                   string    `json:"source"`
-	IssuedAt                 time.Time `json:"issued_at"`
-	ExpiresAt                time.Time `json:"expires_at"`
-	Signature                string    `json:"signature"`
+	Callee                   CalleeIdentity `json:"callee,omitzero"`
+	Version                  int            `json:"version"`
+	Algorithm                string         `json:"algorithm"`
+	KeyID                    string         `json:"key_id"`
+	ControllerApprovalSHA256 string         `json:"controller_approval_sha256"`
+	Repository               string         `json:"repository"`
+	WorkflowRunID            int64          `json:"workflow_run_id"`
+	WorkflowRef              string         `json:"workflow_ref"`
+	WorkflowSHA              string         `json:"workflow_sha"`
+	WorkflowPath             string         `json:"workflow_path"`
+	Phase                    string         `json:"phase"`
+	OwnerNonce               string         `json:"owner_nonce"`
+	ReceiptNonce             string         `json:"receipt_nonce"`
+	Source                   string         `json:"source"`
+	IssuedAt                 time.Time      `json:"issued_at"`
+	ExpiresAt                time.Time      `json:"expires_at"`
+	Signature                string         `json:"signature"`
 }
 
 type signedPayload struct {
@@ -109,11 +131,18 @@ func (r Receipt) SigningBytes() []byte {
 		ExpiresAt:                r.ExpiresAt,
 	}
 	data, _ := json.Marshal(payload)
+	if r.Version == 2 {
+		data, _ = json.Marshal(struct {
+			signedPayload
+			Callee CalleeIdentity `json:"callee"`
+		}{payload, r.Callee})
+		return append([]byte("gh-runnerd/handoff/reusable-callee/v2\x00"), data...)
+	}
 	return data
 }
 
 func (r Receipt) Validate(request Request, now time.Time) error {
-	if !request.Valid() || r.Version != 1 || r.Algorithm != "ed25519" || !component.MatchString(r.KeyID) || r.ControllerApprovalSHA256 != request.ControllerApprovalSHA256 || r.Repository != request.Repository || r.WorkflowRunID != request.WorkflowRunID || r.WorkflowRef != request.WorkflowRef || r.WorkflowSHA != request.WorkflowSHA || r.WorkflowPath != request.WorkflowPath || r.Phase != request.Phase || r.OwnerNonce != request.OwnerNonce || !nonceHex.MatchString(r.ReceiptNonce) || r.ReceiptNonce == r.OwnerNonce || r.Source != request.Source || r.IssuedAt.IsZero() || r.ExpiresAt.IsZero() || r.IssuedAt.After(now.Add(30*time.Second)) || !r.ExpiresAt.After(now) || !r.ExpiresAt.After(r.IssuedAt) || r.ExpiresAt.After(now.Add(24*time.Hour)) {
+	if !request.Valid() || ((request.Version == 0 || request.Version == 1) && r.Version != 1 || request.Version == 2 && r.Version != 2) || r.Callee != request.Callee || r.Algorithm != "ed25519" || !component.MatchString(r.KeyID) || r.ControllerApprovalSHA256 != request.ControllerApprovalSHA256 || r.Repository != request.Repository || r.WorkflowRunID != request.WorkflowRunID || r.WorkflowRef != request.WorkflowRef || r.WorkflowSHA != request.WorkflowSHA || r.WorkflowPath != request.WorkflowPath || r.Phase != request.Phase || r.OwnerNonce != request.OwnerNonce || !nonceHex.MatchString(r.ReceiptNonce) || r.ReceiptNonce == r.OwnerNonce || r.Source != request.Source || r.IssuedAt.IsZero() || r.ExpiresAt.IsZero() || r.IssuedAt.After(now.Add(30*time.Second)) || !r.ExpiresAt.After(now) || !r.ExpiresAt.After(r.IssuedAt) || r.ExpiresAt.After(now.Add(24*time.Hour)) {
 		return ErrInvalid
 	}
 	signature, err := base64.RawURLEncoding.DecodeString(r.Signature)
@@ -125,6 +154,7 @@ func (r Receipt) Validate(request Request, now time.Time) error {
 
 func (r Receipt) VerifyEd25519(publicKey ed25519.PublicKey) error {
 	request := Request{
+		Callee:                   r.Callee,
 		ControllerApprovalSHA256: r.ControllerApprovalSHA256,
 		Repository:               r.Repository,
 		WorkflowRunID:            r.WorkflowRunID,
@@ -134,6 +164,9 @@ func (r Receipt) VerifyEd25519(publicKey ed25519.PublicKey) error {
 		Phase:                    r.Phase,
 		OwnerNonce:               r.OwnerNonce,
 		Source:                   r.Source,
+	}
+	if r.Version == 2 {
+		request.Version = 2
 	}
 	if len(publicKey) != ed25519.PublicKeySize || r.Validate(request, time.Now()) != nil {
 		return ErrInvalid
@@ -182,7 +215,7 @@ func (r TrustRoot) Verify(request Request, receipt Receipt, now time.Time) error
 
 func DecodeStrictReceipt(data []byte) (Receipt, error) {
 	var receipt Receipt
-	if len(data) == 0 || len(data) > MaxReceiptBytes || !hasUniqueObjectKeys(data) {
+	if len(data) == 0 || len(data) > MaxReceiptBytes || !hasUniqueObjectKeys(data) || !exactReceiptKeys(data) {
 		return receipt, ErrInvalid
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
@@ -195,6 +228,35 @@ func DecodeStrictReceipt(data []byte) (Receipt, error) {
 		return Receipt{}, ErrInvalid
 	}
 	return receipt, nil
+}
+
+func exactReceiptKeys(data []byte) bool {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(data, &fields) != nil {
+		return false
+	}
+	allowed := map[string]bool{"version": true, "algorithm": true, "key_id": true, "controller_approval_sha256": true, "repository": true, "workflow_run_id": true, "workflow_ref": true, "workflow_sha": true, "workflow_path": true, "phase": true, "owner_nonce": true, "receipt_nonce": true, "source": true, "issued_at": true, "expires_at": true, "signature": true, "callee": true}
+	for key := range fields {
+		if !allowed[key] {
+			return false
+		}
+	}
+	if raw, ok := fields["callee"]; ok {
+		var nested map[string]json.RawMessage
+		if json.Unmarshal(raw, &nested) != nil || nested == nil {
+			return false
+		}
+		for key := range nested {
+			if key != "repository" && key != "workflow_path" && key != "sha" {
+				return false
+			}
+		}
+		var version int
+		if json.Unmarshal(fields["version"], &version) != nil || version != 2 {
+			return false
+		}
+	}
+	return true
 }
 
 func hasUniqueObjectKeys(data []byte) bool {
