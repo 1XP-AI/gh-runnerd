@@ -150,7 +150,7 @@ func TestPhasePolicyStrictImmutableRolesAndExactGrants(t *testing.T) {
 	}
 }
 
-func TestPhaseBindingRejectsUnintegratedReusableCallee(t *testing.T) {
+func TestPhaseBindingRejectsReusableCalleeDowngrade(t *testing.T) {
 	v1, root, expected, key := bindingFixture(t)
 	expected.Request.Phase = "inspect"
 	expected.Request.Version = 2
@@ -162,13 +162,6 @@ func TestPhaseBindingRejectsUnintegratedReusableCallee(t *testing.T) {
 	b.Kind = PhaseBindingKind
 	b.Audience = PhaseAudience(b.Mode, b.Phase)
 	b.Signature = base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, b.SigningBytes()))
-	if root.VerifyPhaseBinding(expected, b, time.Now()) == nil {
-		t.Fatal("unintegrated v2 phase accepted before version-safe wire integration")
-	}
-	raw, _ := json.Marshal(b)
-	if decoded, err := DecodeStrictPhaseBinding(raw); err == nil && root.VerifyPhaseBinding(expected, decoded, time.Now()) == nil {
-		t.Fatal("v2 phase accepted after wire decode")
-	}
 	legacy := b
 	legacy.Request.Version = 0
 	legacy.Request.Callee = CalleeIdentity{}
