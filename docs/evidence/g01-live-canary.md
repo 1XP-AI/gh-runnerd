@@ -75,6 +75,48 @@ the successful package-list read proves authority of the eventual execution
 principal. Exact workflow/runtime/controller identities and the provenance and
 cleanup capabilities below remain required.
 
+### Read-only revalidation — 2026-11-01
+
+Private observation record: `G01-CANARY-READONLY-2026-11-01`; captured
+2026-11-01 (date-only; the exact query time was not retained in this public
+record). The private GitHub metadata, workflow, prior-run, current-head, and
+separate-review claims below are coordinator-supplied from the private approval
+record; this document review did not query GitHub or independently verify them.
+Private repository/workflow identities and raw responses remain omitted here.
+
+The target remains private and non-forked. Its dedicated runner group is
+selected-only, selects one private repository, blocks public repositories, and
+currently has zero registered runners. The group reports
+`restricted_to_workflows: false` with no selected workflow entries, so the
+current policy is not execution-ready. The runner-group `GroupPolicy` v2
+preflight requires workflow restriction to be enabled and exactly one selected
+entry matching the independently approved full-SHA reusable-callee workflow;
+the observed policy fails that gate. No runner-group setting was changed.
+
+The private approval record says the workflow uses a manual caller pinned to a
+reusable callee by full commit SHA, and that a separate Luna Max static review
+returned HOLD because the group policy and runtime readiness do not qualify. It
+also records an earlier successful baseline run on an older macOS ARM64 workflow;
+that run does not qualify the current Linux ARM64 nonce workflow. The record
+reports no run for the current private workflow head.
+
+Public source at merge `f41f782527f30fddb254165625ec7f772a63b2bc` contains
+reusable-callee `Request`/signed `Receipt` v2 and `PublicPolicy` v3 provenance
+checks, plus the runner-group `GroupPolicy` v2 preflight;
+[Public CI #41304144352](https://github.com/1XP-AI/gh-runnerd/actions/runs/41304144352)
+is coordinator-reported as passed on merge
+`f41f782527f30fddb254165625ec7f772a63b2bc` using hosted runners; this document
+review did not query the remote run status.
+This source/CI result
+does not establish production trust-root provisioning, runner/JIT readiness, or
+server-side conditional cleanup. The local Docker Desktop Linux context is
+configured, but daemon availability, worker isolation, and resource limits were
+not verified. The private-target revalidation made read-only GitHub metadata
+requests only. During that revalidation, no canary workflow was dispatched; no
+self-hosted runner or JIT operation, canary credential mint/read, Docker
+daemon/image/container operation, or Scale Set operation occurred. Live
+acceptance remains open.
+
 - [ ] Maintainer identifies one disposable **private** repository and one
   organization; no public fork/PR execution. Record the reviewed workflow SHA.
 - [ ] Dedicated runner group allows only that repository, and a unique canary
