@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -44,10 +45,26 @@ func toolingFile(t *testing.T, root, name, data string, mode os.FileMode) {
 }
 
 func toolingRun(t *testing.T, root string, extra []string, args ...string) (string, error) {
+	return toolingRunWithTimeout(t, 45*time.Second, root, extra, args...)
+}
+
+func toolingRunWithTimeout(t *testing.T, timeout time.Duration, root string, extra []string, args ...string) (string, error) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.WaitDelay = 2 * time.Second
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
+		return err
+	}
 	cmd.Dir = root
 	env := make([]string, 0, len(os.Environ())+3+len(extra))
 	for _, entry := range os.Environ() {
@@ -65,6 +82,17 @@ func toolingRun(t *testing.T, root string, extra []string, args ...string) (stri
 	return string(data), err
 }
 
+func TestToolingRunDeadlineKillsOwnedProcessGroup(t *testing.T) {
+	started := time.Now()
+	_, err := toolingRunWithTimeout(t, 50*time.Millisecond, t.TempDir(), nil, "bash", "-c", "sleep 1 & wait")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("tooling command error = %v; want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed >= 750*time.Millisecond {
+		t.Fatalf("tooling command waited %s for a descendant holding output pipes", elapsed)
+	}
+}
+
 func toolingGoWrapper(t *testing.T, root string) (string, string, string) {
 	t.Helper()
 	realGo, err := exec.LookPath("go")
@@ -76,6 +104,7 @@ func toolingGoWrapper(t *testing.T, root string) (string, string, string) {
 	toolingFile(t, root, "logging-go", `#!/bin/sh
 set -eu
 if [ "${1:-}" != run ]; then
+	export TOOLING_GO_INVOCATION="${GOTOOLCHAIN:-} $*"
 	printf '%s\t%s\n' "${GOTOOLCHAIN:-}" "$*" >> "$TOOLING_GO_LOG"
 fi
 exec "$TOOLING_REAL_GO" "$@"
@@ -3458,12 +3487,16 @@ func ` + testName + `(t *testing.T) {
 	if path == "" {
 		t.Fatal("TOOLING_SENTINEL_LOG is not set")
 	}
+	invocation := os.Getenv("TOOLING_GO_INVOCATION")
+	if invocation == "" {
+		t.Fatal("TOOLING_GO_INVOCATION is not set")
+	}
 	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer file.Close()
-	if _, err := file.WriteString("` + marker + `\n"); err != nil {
+	if _, err := file.WriteString("` + marker + `\t" + invocation + "\n"); err != nil {
 		t.Fatal(err)
 	}` + failureLine + `
 }
@@ -3482,12 +3515,16 @@ func Example_g02FixtureOutput() {
 	if path == "" {
 		panic("TOOLING_SENTINEL_LOG is not set")
 	}
+	invocation := os.Getenv("TOOLING_GO_INVOCATION")
+	if invocation == "" {
+		panic("TOOLING_GO_INVOCATION is not set")
+	}
 	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		panic(err)
 	}
 	defer file.Close()
-	if _, err := file.WriteString("` + marker + `\n"); err != nil {
+	if _, err := file.WriteString("` + marker + `\t" + invocation + "\n"); err != nil {
 		panic(err)
 	}
 	fmt.Println("` + marker + `")
@@ -3514,12 +3551,16 @@ func FuzzG02Fixture(f *testing.F) {
 		if path == "" {
 			t.Fatal("TOOLING_SENTINEL_LOG is not set")
 		}
+		invocation := os.Getenv("TOOLING_GO_INVOCATION")
+		if invocation == "" {
+			t.Fatal("TOOLING_GO_INVOCATION is not set")
+		}
 		file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer file.Close()
-		if _, err := file.WriteString("` + marker + `\n"); err != nil {
+		if _, err := file.WriteString("` + marker + `\t" + invocation + "\n"); err != nil {
 			t.Fatal(err)
 		}` + failureLine + `
 	})
@@ -3668,6 +3709,14 @@ func FuzzG02Fixture(f *testing.F) {
 		"TOOLING_GO_LOG=" + logPath,
 		"TOOLING_SENTINEL_LOG=" + sentinelLogPath,
 	}
+	g02Invocations := []string{
+		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerPrepareReviewedG01LiveBinary$ ./...",
+		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
+		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
+		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint)$ ./...",
+		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPaired -skip ^TestPairedBroker(PrepareReviewedG01LiveBinary|RealCadenceChildExceedsThirtySeconds)$ ./...",
+		"go1.27.3\ttest -race -count=1 -timeout=45s -skip ^TestPaired|^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint)$|^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
+	}
 	if out, err := toolingRun(t, root, env, "bash", "scripts/check-offline-experiments.sh"); err != nil {
 		t.Fatalf("default G02 positive control: %s", out)
 	}
@@ -3677,14 +3726,18 @@ func FuzzG02Fixture(f *testing.F) {
 	}
 	sentinelLines := strings.Split(strings.TrimSpace(string(sentinelData)), "\n")
 	for _, tc := range fixtures {
-		count := 0
+		expected := tc.marker + "\t" + strings.Replace(g02Invocations[tc.partition], "\t", " ", 1)
+		markerCount, routeCount := 0, 0
 		for _, line := range sentinelLines {
-			if line == tc.marker {
-				count++
+			if strings.HasPrefix(line, tc.marker+"\t") {
+				markerCount++
+			}
+			if line == expected {
+				routeCount++
 			}
 		}
-		if count != 1 {
-			t.Fatalf("positive %s sentinel %q ran %d times; sentinel log:\n%s", tc.name, tc.marker, count, sentinelData)
+		if markerCount != 1 || routeCount != 1 {
+			t.Fatalf("positive %s sentinel %q ran %d times, with %d under expected invocation %q; sentinel log:\n%s", tc.name, tc.marker, markerCount, routeCount, expected, sentinelData)
 		}
 	}
 	logData, err := os.ReadFile(logPath)
@@ -3693,14 +3746,6 @@ func FuzzG02Fixture(f *testing.F) {
 	}
 	log := string(logData)
 	lines := strings.Split(strings.TrimSpace(log), "\n")
-	g02Invocations := []string{
-		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerPrepareReviewedG01LiveBinary$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint)$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPaired -skip ^TestPairedBroker(PrepareReviewedG01LiveBinary|RealCadenceChildExceedsThirtySeconds)$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -skip ^TestPaired|^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint)$|^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
-	}
 	for _, invocation := range g02Invocations {
 		count := 0
 		for _, line := range lines {
@@ -3765,17 +3810,21 @@ func FuzzG02Fixture(f *testing.F) {
 			t.Fatal(readErr)
 		}
 		for _, tc := range group {
+			expected := tc.marker + "\t" + strings.Replace(invocation, "\t", " ", 1)
+			markerCount, routeCount := 0, 0
+			for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+				if strings.HasPrefix(line, tc.marker+"\t") {
+					markerCount++
+				}
+				if line == expected {
+					routeCount++
+				}
+			}
 			if !strings.Contains(out, tc.marker) {
 				t.Errorf("default G02 %s failure did not reach partition %d: %s", tc.name, partition, out)
 			}
-			count := 0
-			for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-				if line == tc.marker {
-					count++
-				}
-			}
-			if count != 1 {
-				t.Errorf("default G02 %s sentinel %q ran %d times; sentinel log:\n%s", tc.name, tc.marker, count, data)
+			if markerCount != 1 || routeCount != 1 {
+				t.Errorf("default G02 %s sentinel %q ran %d times, with %d under expected invocation %q; sentinel log:\n%s", tc.name, tc.marker, markerCount, routeCount, expected, data)
 			}
 		}
 		failureLogData, readErr := os.ReadFile(logPath)
