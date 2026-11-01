@@ -319,6 +319,24 @@ func runBrokerWithPrivateHandoff(ctx context.Context, files BrokerFiles, input *
 	if attempt.check() != nil {
 		return BrokerResult{}, errBroker
 	}
+	// Only the controller reusable-callee v3 assembly has independently
+	// selected roots bound by preparation. Legacy controller/paired paths must
+	// consume and validate management input before persistent broker admission.
+	deferInput := approval.Mode == "controller" && assembly != nil && assembly.experimental && assembly.request.Version == 2 && assembly.request.Source == handoff.ReusableCalleeSource
+	var credentialInput brokerInput
+	if !deferInput {
+		if assembly != nil && assembly.experimental {
+			credentialInput, err = readBrokerExperimentalInput(ctx, input)
+		} else {
+			credentialInput, err = readBrokerInput(ctx, input)
+		}
+		if err != nil {
+			return BrokerResult{}, errBroker
+		}
+		if attempt.check() != nil {
+			return BrokerResult{}, errBroker
+		}
+	}
 	var plan *brokerControllerPlan
 	if approval.Mode == "controller" || approval.Mode == "paired-terminal" {
 		plan, err = newBrokerControllerPlan(approval, controller, controllerData, controllerRoot, files.ControllerStateDirectory, binary.check, func(ctx context.Context, data []byte, snapshotPath string) error {
@@ -379,13 +397,9 @@ func runBrokerWithPrivateHandoff(ctx context.Context, files BrokerFiles, input *
 			}
 			return invokeBrokerPreparation(ctx, binary, files.StateDirectory, snapshotPath, files.ControllerStateDirectory, approval.Phase)
 		}
-		if assembly != nil && assembly.experimental {
+		if deferInput {
 			plan.inputSource = func(ctx context.Context) (brokerInput, error) {
 				return readBrokerExperimentalInput(ctx, input)
-			}
-		} else {
-			plan.inputSource = func(ctx context.Context) (brokerInput, error) {
-				return readBrokerInput(ctx, input)
 			}
 		}
 		plan.worker = workerPlan
@@ -393,17 +407,6 @@ func runBrokerWithPrivateHandoff(ctx context.Context, files BrokerFiles, input *
 			workerPlan.prepare = func(ctx context.Context) (brokerPreparationReceipt, error) {
 				return invokeBrokerPairedWorkerPreparation(ctx, binary, files.StateDirectory, files.WorkerApproval, files.WorkerStateDirectory)
 			}
-		}
-	}
-	var credentialInput brokerInput
-	if plan == nil {
-		if assembly != nil && assembly.experimental {
-			credentialInput, err = readBrokerExperimentalInput(ctx, input)
-		} else {
-			credentialInput, err = readBrokerInput(ctx, input)
-		}
-		if err != nil {
-			return BrokerResult{}, errBroker
 		}
 	}
 	return brokerExecuteWithProvenance(ctx, approval, credentialInput, files.StateDirectory, api, plan, provenance, attempt)
