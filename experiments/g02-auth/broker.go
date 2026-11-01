@@ -154,7 +154,8 @@ func brokerExecute(parent context.Context, a BrokerApproval, input brokerInput, 
 }
 
 func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input brokerInput, path string, api *brokerAPI, plan *brokerControllerPlan, provenance *BrokerProvenanceReceipt, claimed ...*brokerJournal) (BrokerResult, error) {
-	if parent == nil || api == nil || !brokerCanonicalPath(path) || a.validate(api.now()) != nil || (a.AllowVerificationAuthority && input.VerificationToken == "") || (input.VerificationToken != "" && (!a.AllowVerificationAuthority || !validBrokerToken(input.VerificationToken))) || ((a.Mode == "controller" || a.Mode == "paired-terminal") && plan == nil) || (a.Mode != "controller" && a.Mode != "paired-terminal" && plan != nil) {
+	v3ReusableCallee := plan != nil && plan.handoff != nil && plan.handoff.experimental && plan.handoff.request.Version == 2 && plan.handoff.request.Source == handoff.ReusableCalleeSource
+	if parent == nil || api == nil || !brokerCanonicalPath(path) || a.validate(api.now()) != nil || ((a.AllowVerificationAuthority || v3ReusableCallee) && input.VerificationToken == "") || (input.VerificationToken != "" && (!validBrokerToken(input.VerificationToken) || (!a.AllowVerificationAuthority && !v3ReusableCallee))) || ((a.Mode == "controller" || a.Mode == "paired-terminal") && plan == nil) || (a.Mode != "controller" && a.Mode != "paired-terminal" && plan != nil) {
 		return BrokerResult{}, errBroker
 	}
 	if len(claimed) > 1 || (len(claimed) == 1 && (claimed[0] == nil || claimed[0].path != path || claimed[0].check() != nil)) {
@@ -271,7 +272,14 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 	// already supplied verification credential, but must precede token minting
 	// and every later authenticated effect. A provenance receipt additionally
 	// binds the API result to the signed workflow ref and selected outer phase.
-	if a.Mode == "paired-terminal" || (plan != nil && plan.controller.needsVerification()) {
+	// Reusable-callee grants require a second exact observation here: the first
+	// v3 observation signs the receipt, while this final GET fences the selected
+	// callee immediately before management issuance and handoff.
+	if v3ReusableCallee {
+		if api.verifyFinalReusableWorkflow(ctx, a, plan.controller, input.VerificationToken, plan.handoff.grant) != nil {
+			return BrokerResult{}, errBroker
+		}
+	} else if a.Mode == "paired-terminal" || (plan != nil && plan.controller.needsVerification()) {
 		if provenance != nil {
 			if api.verifyWorkflowWithReceipt(ctx, a, plan.controller, input.VerificationToken, provenance) != nil {
 				return BrokerResult{}, errBroker

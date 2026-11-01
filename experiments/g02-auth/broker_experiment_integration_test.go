@@ -141,6 +141,7 @@ func TestBrokerOfflineReusableCalleeReceiptReachesHandoff(t *testing.T) {
 		issuer:   selected.issuer,
 		workflow: selected.workflow,
 		request:  selected.grant.Request,
+		grant:    reviewedWorkflowGrant{Request: selected.grant.Request, OrganizationID: selected.grant.OrganizationID, RepositoryID: selected.grant.RepositoryID, ExpiresAt: selected.grant.ExpiresAt},
 		source:   selected.grant.Request.Source,
 		launch: func(_ context.Context, h *issuedControllerHandoff, _ string) error {
 			launches++
@@ -154,7 +155,7 @@ func TestBrokerOfflineReusableCalleeReceiptReachesHandoff(t *testing.T) {
 	if !plan.handoff.valid(api.provenanceRoot) {
 		t.Fatal("selected handoff assembly invalid before execution")
 	}
-	result, err := brokerExecuteWithProvenance(context.Background(), a, brokerInput{PEM: string(candidate.PEM)}, attempt, api, plan, &provenance, journal)
+	result, err := brokerExecuteWithProvenance(context.Background(), a, brokerInput{PEM: string(candidate.PEM), VerificationToken: "synthetic-private-workflow-token"}, attempt, api, plan, &provenance, journal)
 	if err != nil || result.Status != "controller_completed" || launches != 1 {
 		t.Fatalf("offline v2 broker handoff failed: result=%+v err=%v launches=%d token=%d calls=%v", result, err, launches, fixture.tokenCalls, fixture.calls)
 	}

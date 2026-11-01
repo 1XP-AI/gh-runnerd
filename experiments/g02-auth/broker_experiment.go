@@ -151,7 +151,7 @@ func runBrokerExperimentOwned(parent context.Context, files BrokerFiles, input, 
 	}
 	workflowSigner, issuerSigner := &experimentalSigner{}, &experimentalSigner{}
 	defer func() { clear(workflowSigner.key); clear(issuerSigner.key) }()
-	assembly := &brokerHandoffAssembly{experimental: true, signer: issuerSigner, issuer: selected.issuer, workflow: selected.workflow, request: selected.grant.Request, source: selected.grant.Request.Source, launch: func(context.Context, *issuedControllerHandoff, string) error { return errBroker }}
+	assembly := &brokerHandoffAssembly{experimental: true, signer: issuerSigner, issuer: selected.issuer, workflow: selected.workflow, request: selected.grant.Request, grant: reviewedWorkflowGrant{Request: selected.grant.Request, OrganizationID: selected.grant.OrganizationID, RepositoryID: selected.grant.RepositoryID, ExpiresAt: selected.grant.ExpiresAt}, source: selected.grant.Request.Source, launch: func(context.Context, *issuedControllerHandoff, string) error { return errBroker }}
 	api.provenanceFactory = func(check func() error) (BrokerProvenanceAdapter, error) {
 		if ctx.Err() != nil {
 			return nil, errBroker

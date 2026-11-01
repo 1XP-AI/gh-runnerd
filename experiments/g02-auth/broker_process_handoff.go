@@ -32,6 +32,7 @@ type brokerHandoffAssembly struct {
 	issuer       handoff.IssuerRoot
 	workflow     handoff.TrustRoot
 	request      BrokerProvenanceRequest
+	grant        reviewedWorkflowGrant
 	source       string
 	launch       func(context.Context, *issuedControllerHandoff, string) error
 }
@@ -40,7 +41,16 @@ func (a *brokerHandoffAssembly) valid(root handoff.TrustRoot) bool {
 	if a == nil || a.signer == nil || a.launch == nil || !a.issuer.Independent(a.workflow) || !a.workflow.Equal(root) || !a.workflow.Valid() || !brokerProvenanceSource.MatchString(a.source) {
 		return false
 	}
-	return !a.experimental || a.request.Valid() && a.request.Source == a.source
+	if !a.experimental {
+		return true
+	}
+	if !a.request.Valid() || a.request.Source != a.source {
+		return false
+	}
+	if a.request.Source != handoff.ReusableCalleeSource {
+		return true
+	}
+	return a.grant.valid() && a.grant.Request == a.request && a.grant.OrganizationID > 0 && a.grant.RepositoryID > 0
 }
 
 // Own both complete pipes, close every duplicate child endpoint after Start,

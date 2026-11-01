@@ -14,7 +14,10 @@ import (
 	"github.com/1XP-AI/gh-runnerd/experiments/g02-auth/handoff"
 )
 
-func TestBrokerExperimentSelectsReusableCalleeIndependently(t *testing.T) {
+// This is a policy-selection and malformed-front-door test. The complete
+// public-entry v3 behavior, including successive workflow GETs, is covered by
+// TestBrokerExperimentV3FinalGETFencesCalleeBeforeMintAndHandoff.
+func TestBrokerExperimentV3SelectionRejectsMissingStateBeforePipeOwnership(t *testing.T) {
 	a := brokerApprovalFixture()
 	a.Mode, a.Phase = "controller", "create"
 	a.GroupPolicy = groupPolicyFixture()
