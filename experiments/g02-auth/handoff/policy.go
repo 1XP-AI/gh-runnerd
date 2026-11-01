@@ -121,8 +121,10 @@ func (p PublicPolicy) SelectGroup(mode string, request Request, digest string, n
 
 // SelectCallee selects a v3 grant using independently supplied caller fields.
 // The caller must leave Callee empty; the selected compiled grant supplies it.
-func (p PublicPolicy) SelectCallee(mode string, caller Request, organizationID, repositoryID int64, digest string, now time.Time) (PhaseGrant, error) {
-	if p.Version != 3 || p.Source != ReusableCalleeSource || caller.Version != 2 || caller.Source != ReusableCalleeSource || caller.Callee != (CalleeIdentity{}) || organizationID < 1 || repositoryID < 1 || !sha256Hex.MatchString(digest) {
+// groupPolicy and target inputs must come from independent approval, never a
+// provider response or receipt. The digest binds those inputs to the full grant.
+func (p PublicPolicy) SelectCallee(mode string, caller Request, organizationID, repositoryID, groupID int64, managementScope string, groupPolicy GroupPolicy, now time.Time) (PhaseGrant, error) {
+	if p.Version != 3 || p.Source != ReusableCalleeSource || caller.Version != 2 || caller.Source != ReusableCalleeSource || caller.Callee != (CalleeIdentity{}) || organizationID < 1 || repositoryID < 1 || groupID < 1 || groupPolicy == (GroupPolicy{}) || groupPolicy.OrganizationID != organizationID {
 		return PhaseGrant{}, ErrInvalid
 	}
 	var result PhaseGrant
@@ -130,7 +132,7 @@ func (p PublicPolicy) SelectCallee(mode string, caller Request, organizationID, 
 	for _, g := range p.Grants {
 		key := g.Request
 		key.Callee = CalleeIdentity{}
-		if key == caller && g.Mode == mode && g.OrganizationID == organizationID && g.RepositoryID == repositoryID && g.GroupPolicySHA256 == digest && g.ExpiresAt.After(now) && g.Request.Valid() {
+		if key == caller && g.Mode == mode && g.OrganizationID == organizationID && g.RepositoryID == repositoryID && g.ExpiresAt.After(now) && g.Request.Valid() && groupPolicy.Valid(g.Request.Repository, g.Request.WorkflowPath) && groupPolicy.Workflow == g.Request.Callee.Repository+"/"+g.Request.Callee.WorkflowPath+"@"+g.Request.Callee.SHA && g.GroupPolicySHA256 != "" && g.GroupPolicySHA256 == groupPolicy.GrantDigest(g.Request, repositoryID, groupID, managementScope) {
 			if found {
 				return PhaseGrant{}, ErrInvalid
 			}

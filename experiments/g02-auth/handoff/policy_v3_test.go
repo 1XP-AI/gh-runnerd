@@ -14,7 +14,8 @@ func TestPolicyV3IndependentCalleeSelection(t *testing.T) {
 	g := &p.Grants[0]
 	g.Request.Version, g.Request.Source = 2, ReusableCalleeSource
 	g.Request.Callee = CalleeIdentity{Repository: g.Request.Repository, WorkflowPath: ".github/workflows/callee.yml", SHA: strings.Repeat("a", 40)}
-	g.GroupPolicySHA256 = strings.Repeat("b", 64)
+	gp := GroupPolicy{Version: 2, OrganizationID: g.OrganizationID, Workflow: g.Request.Repository + "/" + g.Request.Callee.WorkflowPath + "@" + g.Request.Callee.SHA}
+	g.GroupPolicySHA256 = gp.GrantDigest(g.Request, g.RepositoryID, 7, "organization-only")
 	raw, _ := json.Marshal(p)
 	decoded, _, _, err := DecodePublicPolicy(raw, "broker", now)
 	if err != nil {
@@ -22,7 +23,7 @@ func TestPolicyV3IndependentCalleeSelection(t *testing.T) {
 	}
 	caller := g.Request
 	caller.Callee = CalleeIdentity{}
-	selected, err := decoded.SelectCallee(g.Mode, caller, g.OrganizationID, g.RepositoryID, g.GroupPolicySHA256, now)
+	selected, err := decoded.SelectCallee(g.Mode, caller, g.OrganizationID, g.RepositoryID, 7, "organization-only", gp, now)
 	if err != nil || selected.Request != g.Request || !selected.ExpiresAt.Equal(g.ExpiresAt) {
 		t.Fatalf("selection: %+v %v", selected, err)
 	}
@@ -38,21 +39,20 @@ func TestPolicyV3IndependentCalleeSelection(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			x := caller
 			change(&x)
-			if _, e := decoded.SelectCallee(g.Mode, x, g.OrganizationID, g.RepositoryID, g.GroupPolicySHA256, now); e == nil {
+			if _, e := decoded.SelectCallee(g.Mode, x, g.OrganizationID, g.RepositoryID, 7, "organization-only", gp, now); e == nil {
 				t.Fatal("accepted altered caller")
 			}
 		})
 	}
 	for _, tc := range []struct {
 		org, repo int64
-		digest    string
 		at        time.Time
-	}{{g.OrganizationID + 1, g.RepositoryID, g.GroupPolicySHA256, now}, {g.OrganizationID, g.RepositoryID + 1, g.GroupPolicySHA256, now}, {g.OrganizationID, g.RepositoryID, strings.Repeat("c", 64), now}, {g.OrganizationID, g.RepositoryID, "", now}, {g.OrganizationID, g.RepositoryID, g.GroupPolicySHA256, g.ExpiresAt}} {
-		if _, e := decoded.SelectCallee(g.Mode, caller, tc.org, tc.repo, tc.digest, tc.at); e == nil {
+	}{{g.OrganizationID + 1, g.RepositoryID, now}, {g.OrganizationID, g.RepositoryID + 1, now}, {g.OrganizationID, g.RepositoryID, g.ExpiresAt}} {
+		if _, e := decoded.SelectCallee(g.Mode, caller, tc.org, tc.repo, 7, "organization-only", gp, tc.at); e == nil {
 			t.Fatal("accepted altered grant input")
 		}
 	}
-	if _, e := decoded.SelectCallee("paired-terminal", caller, g.OrganizationID, g.RepositoryID, g.GroupPolicySHA256, now); e == nil {
+	if _, e := decoded.SelectCallee("paired-terminal", caller, g.OrganizationID, g.RepositoryID, 7, "organization-only", gp, now); e == nil {
 		t.Fatal("accepted wrong mode")
 	}
 	if _, e := decoded.SelectGroup(g.Mode, g.Request, g.GroupPolicySHA256, now); e == nil {
@@ -118,5 +118,80 @@ func TestPolicyLegacyWireAndDigestGolden(t *testing.T) {
 	gp := GroupPolicy{Version: 2, OrganizationID: 101, Workflow: "fixture-org/canary/.github/workflows/runner.yml@" + strings.Repeat("d", 40)}
 	if got := gp.GrantDigest(p.Grants[0].Request, 42, 3, ""); got != "3fb7a5ac1cfadccc3b1e8e23a8ecec343eb2c225984ffe59a3a7c30e6590510c" {
 		t.Fatalf("group digest changed: %s", got)
+	}
+}
+
+func TestPolicyV3RejectsDigestCommittedWorkflowMismatch(t *testing.T) {
+	now := time.Now().UTC()
+	p := phasePolicyFixture(t)
+	p.Version, p.Source = 3, ReusableCalleeSource
+	g := &p.Grants[0]
+	g.Request.Version, g.Request.Source = 2, ReusableCalleeSource
+	g.Request.Callee = CalleeIdentity{Repository: g.Request.Repository, WorkflowPath: ".github/workflows/callee.yml", SHA: strings.Repeat("a", 40)}
+	gp := GroupPolicy{Version: 2, OrganizationID: g.OrganizationID, Workflow: g.Request.Repository + "/.github/workflows/other.yml@" + strings.Repeat("b", 40)}
+	g.GroupPolicySHA256 = gp.GrantDigest(g.Request, g.RepositoryID, 7, "organization-only")
+	if g.GroupPolicySHA256 == "" {
+		t.Fatal("fixture digest invalid")
+	}
+	raw, _ := json.Marshal(p)
+	decoded, _, _, err := DecodePublicPolicy(raw, "broker", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caller := g.Request
+	caller.Callee = CalleeIdentity{}
+	if _, err := decoded.SelectCallee(g.Mode, caller, g.OrganizationID, g.RepositoryID, 7, "organization-only", gp, now); err == nil {
+		t.Fatal("accepted digest-committed workflow mismatch")
+	}
+}
+
+func TestPolicyV3GroupApprovalControls(t *testing.T) {
+	now := time.Now().UTC()
+	p := phasePolicyFixture(t)
+	p.Version, p.Source = 3, ReusableCalleeSource
+	g := &p.Grants[0]
+	g.Request.Version, g.Request.Source = 2, ReusableCalleeSource
+	g.Request.Callee = CalleeIdentity{Repository: g.Request.Repository, WorkflowPath: ".github/workflows/callee.yml", SHA: strings.Repeat("a", 40)}
+	gp := GroupPolicy{Version: 2, OrganizationID: g.OrganizationID, Workflow: g.Request.Repository + "/" + g.Request.Callee.WorkflowPath + "@" + g.Request.Callee.SHA}
+	g.GroupPolicySHA256 = gp.GrantDigest(g.Request, g.RepositoryID, 7, "organization-only")
+	caller := g.Request
+	caller.Callee = CalleeIdentity{}
+	for name, change := range map[string]func(*PublicPolicy, *GroupPolicy, *int64, *int64, *string){
+		"workflow path matching digest": func(p *PublicPolicy, gp *GroupPolicy, repo, group *int64, scope *string) {
+			gp.Workflow = p.Grants[0].Request.Repository + "/.github/workflows/other.yml@" + strings.Repeat("a", 40)
+			p.Grants[0].GroupPolicySHA256 = gp.GrantDigest(p.Grants[0].Request, *repo, *group, *scope)
+		},
+		"workflow sha matching digest": func(p *PublicPolicy, gp *GroupPolicy, repo, group *int64, scope *string) {
+			gp.Workflow = p.Grants[0].Request.Repository + "/.github/workflows/callee.yml@" + strings.Repeat("b", 40)
+			p.Grants[0].GroupPolicySHA256 = gp.GrantDigest(p.Grants[0].Request, *repo, *group, *scope)
+		},
+		"workflow repository": func(_ *PublicPolicy, gp *GroupPolicy, _, _ *int64, _ *string) {
+			gp.Workflow = "other/repo/.github/workflows/callee.yml@" + strings.Repeat("a", 40)
+		},
+		"organization matching digest": func(p *PublicPolicy, gp *GroupPolicy, repo, group *int64, scope *string) {
+			gp.OrganizationID++
+			p.Grants[0].GroupPolicySHA256 = gp.GrantDigest(p.Grants[0].Request, *repo, *group, *scope)
+		},
+		"repository id":    func(_ *PublicPolicy, _ *GroupPolicy, repo, _ *int64, _ *string) { *repo++ },
+		"group id":         func(_ *PublicPolicy, _ *GroupPolicy, _, group *int64, _ *string) { *group++ },
+		"management scope": func(_ *PublicPolicy, _ *GroupPolicy, _, _ *int64, scope *string) { *scope = "" },
+		"invalid scope":    func(_ *PublicPolicy, _ *GroupPolicy, _, _ *int64, scope *string) { *scope = "invalid" },
+		"wrong digest": func(p *PublicPolicy, _ *GroupPolicy, _, _ *int64, _ *string) {
+			p.Grants[0].GroupPolicySHA256 = strings.Repeat("c", 64)
+		},
+		"ambiguous grant": func(p *PublicPolicy, _ *GroupPolicy, _, _ *int64, _ *string) {
+			p.Grants = append(p.Grants, p.Grants[0])
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			x := p
+			x.Grants = append([]PhaseGrant(nil), p.Grants...)
+			approval := gp
+			org, repo, group, scope := g.OrganizationID, g.RepositoryID, int64(7), "organization-only"
+			change(&x, &approval, &repo, &group, &scope)
+			if _, err := x.SelectCallee(g.Mode, caller, org, repo, group, scope, approval, now); err == nil {
+				t.Fatal("accepted altered approval")
+			}
+		})
 	}
 }
