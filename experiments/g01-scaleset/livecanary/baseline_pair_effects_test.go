@@ -231,7 +231,7 @@ func TestPairedOriginalDeadlineBoundsBootstrap(t *testing.T) {
 			t.Logf("prefix_sync=%t host_entered=%t deadline=%t error=%t outcome=%s elapsed=%s sessions=%d acquire=%d JIT=%d create=%d start=%d", prefixSeen, entered.Load(), ctx.Err() == context.DeadlineExceeded, err != nil, out.Outcome, elapsed, f.c.sessions.Load(), f.c.acquires.Load(), f.jit.Load(), f.creates.Load(), f.starts.Load())
 			// Original authority can expire during valid local preparation, before
 			// a host request starts. Both paths must refuse every later effect.
-			if ctx.Err() != context.DeadlineExceeded || err == nil || out.Outcome != collectionUnresolved || elapsed > 2*time.Second || f.c.requests.Load() != 0 || f.c.sessions.Load() != 0 || f.c.acquires.Load() != 0 || f.jit.Load() != 0 || f.creates.Load() != 0 || f.starts.Load() != 0 {
+			if ctx.Err() != context.DeadlineExceeded || err == nil || out.Outcome != collectionUnresolved || elapsed > 2*time.Second || f.c.requests.Load() != 0 || f.c.sessions.Load() != 0 || f.c.acquires.Load() != 0 || f.jit.Load() != 0 || f.creates.Load() != 0 || f.starts.Load() != 0 || f.dockerReads.Load() != 0 || f.cleanup.Load() != 0 {
 				t.Fatal("original deadline failed to bound host work")
 			}
 		})
@@ -241,9 +241,8 @@ func TestPairedOriginalDeadlineBoundsBootstrap(t *testing.T) {
 func TestPairedOriginalCancellationStopsEnteredHostRead(t *testing.T) {
 	f := newPairedIntegrationFixture(t)
 	entered, exited, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
-	var enterOnce, exitOnce sync.Once
+	var enterOnce, exitOnce, releaseOnce sync.Once
 	var hostCalls atomic.Int32
-	t.Cleanup(func() { close(release) })
 	f.dockerBefore = func(_ http.ResponseWriter, r *http.Request) bool {
 		if r.URL.Path != "/version" {
 			return false
@@ -258,13 +257,30 @@ func TestPairedOriginalCancellationStopsEnteredHostRead(t *testing.T) {
 		return true
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	type result struct {
 		out pairedBaselineCollection
 		err error
 	}
 	done := make(chan result, 1)
+	finished := make(chan struct{})
+	t.Cleanup(func() {
+		cancel()
+		releaseOnce.Do(func() { close(release) })
+		select {
+		case <-finished:
+		case <-time.After(10 * time.Second):
+			t.Error("paired invocation did not stop during cleanup")
+		}
+		if hostCalls.Load() > 0 {
+			select {
+			case <-exited:
+			case <-time.After(10 * time.Second):
+				t.Error("fixture handler did not exit during cleanup")
+			}
+		}
+	})
 	go func() {
+		defer close(finished)
 		out, err := runPairedBaselineWithCadence(ctx, &Driver{Approval: f.c.a, Journal: f.c.j, API: f.c.api}, f.w, fastPairCadence())
 		done <- result{out, err}
 	}()
@@ -281,11 +297,108 @@ func TestPairedOriginalCancellationStopsEnteredHostRead(t *testing.T) {
 	}
 	select {
 	case got := <-done:
-		if ctx.Err() != context.Canceled || got.err == nil || got.out.Outcome != collectionUnresolved || hostCalls.Load() != 1 || f.c.requests.Load() != 0 || f.c.sessions.Load() != 0 || f.c.acquires.Load() != 0 || f.jit.Load() != 0 || f.creates.Load() != 0 || f.starts.Load() != 0 {
+		if ctx.Err() != context.Canceled || got.err == nil || got.out.Outcome != collectionUnresolved || hostCalls.Load() != 1 || f.c.requests.Load() != 0 || f.c.sessions.Load() != 0 || f.c.acquires.Load() != 0 || f.jit.Load() != 0 || f.creates.Load() != 0 || f.starts.Load() != 0 || f.dockerReads.Load() != 0 || f.cleanup.Load() != 0 {
 			t.Fatal("original cancellation crossed the entered-host boundary")
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("paired invocation failed to drain after parent cancellation")
+	}
+}
+
+func TestPairedOriginalDeadlineStopsEnteredHostRead(t *testing.T) {
+	f := newPairedIntegrationFixture(t)
+	entered, release, handlerExited, requestCanceled := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
+	enteredAt := make(chan time.Time, 1)
+	var enterOnce, exitOnce, releaseOnce, requestCancelOnce sync.Once
+	var hostCalls atomic.Int32
+	f.dockerBefore = func(_ http.ResponseWriter, r *http.Request) bool {
+		if r.URL.Path != "/version" {
+			return false
+		}
+		hostCalls.Add(1)
+		enterOnce.Do(func() {
+			enteredAt <- time.Now()
+			close(entered)
+		})
+		defer exitOnce.Do(func() { close(handlerExited) })
+		select {
+		case <-r.Context().Done():
+			requestCancelOnce.Do(func() { close(requestCanceled) })
+			<-release // Keep the handler active until the test observes cancellation.
+		case <-release:
+		}
+		return true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("original context has no deadline")
+	}
+	type result struct {
+		out        pairedBaselineCollection
+		err        error
+		finishedAt time.Time
+	}
+	done := make(chan result, 1)
+	finished := make(chan struct{})
+	t.Cleanup(func() {
+		cancel()
+		releaseOnce.Do(func() { close(release) })
+		select {
+		case <-finished:
+		case <-time.After(10 * time.Second):
+			t.Error("paired invocation did not stop during cleanup")
+		}
+		if hostCalls.Load() > 0 {
+			select {
+			case <-handlerExited:
+			case <-time.After(10 * time.Second):
+				t.Error("fixture handler did not exit during cleanup")
+			}
+		}
+	})
+	go func() {
+		defer close(finished)
+		out, err := runPairedBaselineWithCadence(ctx, &Driver{Approval: f.c.a, Journal: f.c.j, API: f.c.api}, f.w, fastPairCadence())
+		done <- result{out: out, err: err, finishedAt: time.Now()}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("host request did not enter before independent test guard")
+	}
+	if !(<-enteredAt).Before(deadline) {
+		t.Fatal("host request entered after the original deadline")
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(12 * time.Second):
+		t.Fatal("original deadline did not expire before independent test guard")
+	}
+	if ctx.Err() != context.DeadlineExceeded {
+		t.Fatal("original deadline did not expire")
+	}
+	select {
+	case got := <-done:
+		if got.finishedAt.Before(deadline) {
+			t.Fatal("paired invocation returned before the original deadline while the request remained blocked")
+		}
+		if got.err == nil || got.out.Outcome != collectionUnresolved || hostCalls.Load() != 1 || f.c.requests.Load() != 0 || f.c.sessions.Load() != 0 || f.c.acquires.Load() != 0 || f.jit.Load() != 0 || f.creates.Load() != 0 || f.starts.Load() != 0 || f.dockerReads.Load() != 0 || f.cleanup.Load() != 0 {
+			t.Fatal("original deadline crossed the entered-host boundary")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("paired invocation failed to drain after original deadline")
+	}
+	select {
+	case <-requestCanceled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("deadline cancellation did not reach the still-blocked fixture handler")
+	}
+	releaseOnce.Do(func() { close(release) })
+	select {
+	case <-handlerExited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("fixture handler failed to observe the canceled request and exit")
 	}
 }
 
