@@ -335,6 +335,22 @@ func TestControllerProcessHandoffV3PhaseBinding(t *testing.T) {
 	}
 }
 
+func TestControllerExperimentRootBindingUsesCompiledPolicy(t *testing.T) {
+	fixture := newControllerV3HandoffFixture(t, "create")
+	oldPolicy := controllerExperimentPolicyJSON
+	defer func() { controllerExperimentPolicyJSON = oldPolicy }()
+	controllerExperimentPolicyJSON = string(fixture.policyRaw)
+	expected, err := handoff.NewRootBinding(fixture.workflow, fixture.issuer)
+	if err != nil || VerifyControllerExperimentRootBinding(expected) != nil {
+		t.Fatalf("compiled controller roots were not accepted: binding=%+v err=%v", expected, err)
+	}
+	forged := expected
+	forged.WorkflowPublicKeySHA256 = strings.Repeat("f", 64)
+	if VerifyControllerExperimentRootBinding(forged) == nil {
+		t.Fatal("forged controller root binding was accepted")
+	}
+}
+
 func stringsToBytes(value byte, length int) []byte {
 	data := make([]byte, length)
 	for i := range data {

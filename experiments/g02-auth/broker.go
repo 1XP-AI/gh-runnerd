@@ -155,7 +155,8 @@ func brokerExecute(parent context.Context, a BrokerApproval, input brokerInput, 
 
 func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input brokerInput, path string, api *brokerAPI, plan *brokerControllerPlan, provenance *BrokerProvenanceReceipt, claimed ...*brokerJournal) (BrokerResult, error) {
 	v3ReusableCallee := plan != nil && plan.handoff != nil && plan.handoff.experimental && plan.handoff.request.Version == 2 && plan.handoff.request.Source == handoff.ReusableCalleeSource
-	if parent == nil || api == nil || !brokerCanonicalPath(path) || a.validate(api.now()) != nil || ((a.AllowVerificationAuthority || v3ReusableCallee) && input.VerificationToken == "") || (input.VerificationToken != "" && (!validBrokerToken(input.VerificationToken) || (!a.AllowVerificationAuthority && !v3ReusableCallee))) || ((a.Mode == "controller" || a.Mode == "paired-terminal") && plan == nil) || (a.Mode != "controller" && a.Mode != "paired-terminal" && plan != nil) {
+	deferredInput := plan != nil && plan.inputSource != nil
+	if parent == nil || api == nil || !brokerCanonicalPath(path) || a.validate(api.now()) != nil || (!deferredInput && ((a.AllowVerificationAuthority || v3ReusableCallee) && input.VerificationToken == "" || input.VerificationToken != "" && (!validBrokerToken(input.VerificationToken) || (!a.AllowVerificationAuthority && !v3ReusableCallee)))) || ((a.Mode == "controller" || a.Mode == "paired-terminal") && plan == nil) || (a.Mode != "controller" && a.Mode != "paired-terminal" && plan != nil) {
 		return BrokerResult{}, errBroker
 	}
 	if len(claimed) > 1 || (len(claimed) == 1 && (claimed[0] == nil || claimed[0].path != path || claimed[0].check() != nil)) {
@@ -197,12 +198,6 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 		}
 		defer j.close()
 	}
-	candidate := Candidate{AppID: a.AppID, PEM: []byte(input.PEM)}
-	defer clear(candidate.PEM)
-	cred, err := parseCredential(candidate)
-	if err != nil {
-		return BrokerResult{}, errBroker
-	}
 	if api.admissionDirectory == nil {
 		return BrokerResult{}, errBroker
 	}
@@ -216,7 +211,6 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 			return BrokerResult{}, errBroker
 		}
 	}
-
 	claim, e := openBrokerAdmission(directory, a, j, plan, api.syncDirectory)
 	if e != nil {
 		return BrokerResult{}, errBroker
@@ -236,6 +230,7 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 	if guardLive() != nil {
 		return BrokerResult{}, errBroker
 	}
+	var err error
 
 	if plan != nil {
 		if j.append("controller_preparation_started", nil) != nil {
@@ -252,6 +247,21 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 		if j.append("controller_state_prepared", map[string]any{"receipt": receipt}) != nil || guardLive() != nil {
 			return BrokerResult{}, errBroker
 		}
+	}
+	if deferredInput {
+		input, err = plan.inputSource(ctx)
+		if err != nil {
+			return BrokerResult{}, errBroker
+		}
+	}
+	if (a.AllowVerificationAuthority || v3ReusableCallee) && input.VerificationToken == "" || input.VerificationToken != "" && (!validBrokerToken(input.VerificationToken) || (!a.AllowVerificationAuthority && !v3ReusableCallee)) {
+		return BrokerResult{}, errBroker
+	}
+	candidate := Candidate{AppID: a.AppID, PEM: []byte(input.PEM)}
+	defer clear(candidate.PEM)
+	cred, err := parseCredential(candidate)
+	if err != nil {
+		return BrokerResult{}, errBroker
 	}
 
 	// Every authenticated call revalidates the still-held durable claim.

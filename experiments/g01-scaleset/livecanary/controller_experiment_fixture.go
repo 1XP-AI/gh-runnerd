@@ -52,6 +52,20 @@ func PrepareJournalForExperimentFixture(path string, a Approval, phase, admissio
 	})
 }
 
+func PrepareJournalWithRootBindingForExperimentFixture(path string, a Approval, phase, admission string, expected handoff.RootBinding) (PreparationReceipt, error) {
+	if VerifyControllerExperimentRootBinding(expected) != nil {
+		return PreparationReceipt{}, ErrApproval
+	}
+	receipt, err := prepareJournal(path, a, phase, func(path string, a Approval) (*FileJournal, error) {
+		return OpenJournalForPairedFixtureAt(path, a, admission)
+	})
+	if err != nil {
+		return PreparationReceipt{}, err
+	}
+	receipt.RootBinding = &expected
+	return receipt, nil
+}
+
 func PrepareSessionReplacementJournalForExperimentFixture(path string, a Approval, approvalPath, admission string) (PreparationReceipt, error) {
 	return prepareSessionReplacementJournal(path, a, approvalPath, func(path string, a Approval) (*FileJournal, error) {
 		return OpenJournalForPairedFixtureAt(path, a, admission)

@@ -54,7 +54,7 @@ func brokerSyntheticPreparation(t *testing.T, p *brokerControllerPlan, directory
 	if e != nil {
 		return brokerPreparationReceipt{}, errBroker
 	}
-	return brokerPreparationReceipt{1, "controller_journal_prepared", p.approval.Phase, brokerDigest(p.controller), binding.State, id, brokerFileIdentity(ci), brokerFileIdentity(di), brokerBytesDigest(jb), brokerBytesDigest(cb)}, nil
+	return brokerPreparationReceipt{Version: 1, Status: "controller_journal_prepared", Phase: p.approval.Phase, ApprovalDigest: brokerDigest(p.controller), State: binding.State, Journal: id, Claim: brokerFileIdentity(ci), AdmissionDirectory: brokerFileIdentity(di), JournalDigest: brokerBytesDigest(jb), ClaimDigest: brokerBytesDigest(cb)}, nil
 }
 
 // This models the explicit nonproduction worker-preparer seam used by direct

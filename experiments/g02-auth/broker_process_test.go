@@ -16,6 +16,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/1XP-AI/gh-runnerd/experiments/g02-auth/handoff"
 )
 
 // This child is only the Go test executable, never a controller or worker. The
@@ -163,7 +165,7 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 	if len(os.Args) > 1 && os.Args[1] == "--prepare-approved-journal" {
-		if len(os.Args) != 8 || os.Args[2] != "--approval" || os.Args[4] != "--state-dir" || os.Args[6] != "--phase" {
+		if (len(os.Args) != 8 && len(os.Args) != 10) || os.Args[2] != "--approval" || os.Args[4] != "--state-dir" || os.Args[6] != "--phase" || len(os.Args) == 10 && os.Args[8] != "--root-binding" {
 			os.Exit(3)
 		}
 		for _, entry := range os.Environ() {
@@ -205,12 +207,15 @@ func TestMain(m *testing.M) {
 				os.Exit(4)
 			}
 		}
-		approvalPath, phase := os.Args[3], os.Args[7]
+		approvalPath, statePath, phase := os.Args[3], os.Args[5], os.Args[7]
 		if experimental {
-			approvalPath, phase = os.Args[5], os.Args[9]
+			approvalPath, statePath, phase = os.Args[5], os.Args[7], os.Args[9]
 		}
 		if strings.HasPrefix(filepath.Base(approvalPath), "handoff-") {
 			os.Exit(runBrokerHandoffTestChild())
+		}
+		if strings.Contains(filepath.Base(statePath), "root-mismatch") {
+			os.Exit(17)
 		}
 		data, err := io.ReadAll(io.LimitReader(os.Stdin, 16385))
 		if err != nil || !bytes.Contains(data, []byte("synthetic-private-installation-token")) || bytes.Contains(data, []byte("PRIVATE KEY")) {
@@ -329,7 +334,18 @@ func brokerPreparationReceiptFixtureForTest() (brokerPreparationReceipt, bool) {
 	if err != nil {
 		return brokerPreparationReceipt{}, false
 	}
-	return brokerPreparationReceipt{Version: 1, Status: "controller_journal_prepared", Phase: os.Args[7], ApprovalDigest: brokerDigest(controller), State: brokerFileIdentity(stateInfo), Journal: brokerFileIdentity(journalInfo), Claim: brokerFileIdentity(claimInfo), AdmissionDirectory: brokerFileIdentity(admissionInfo), JournalDigest: brokerBytesDigest(journalData), ClaimDigest: brokerBytesDigest(claimData)}, true
+	var rootBinding *handoff.RootBinding
+	if len(os.Args) == 10 {
+		binding, err := handoff.DecodeStrictRootBinding([]byte(os.Args[9]))
+		if err != nil {
+			return brokerPreparationReceipt{}, false
+		}
+		if strings.Contains(filepath.Base(statePath), "root-mismatch") {
+			binding.WorkflowPublicKeySHA256 = strings.Repeat("f", 64)
+		}
+		rootBinding = &binding
+	}
+	return brokerPreparationReceipt{Version: 1, Status: "controller_journal_prepared", Phase: os.Args[7], ApprovalDigest: brokerDigest(controller), State: brokerFileIdentity(stateInfo), Journal: brokerFileIdentity(journalInfo), Claim: brokerFileIdentity(claimInfo), AdmissionDirectory: brokerFileIdentity(admissionInfo), JournalDigest: brokerBytesDigest(journalData), ClaimDigest: brokerBytesDigest(claimData), RootBinding: rootBinding}, true
 }
 func testBrokerBinary(t *testing.T) *verifiedBrokerBinary {
 	t.Helper()

@@ -10,6 +10,8 @@ import (
 	"slices"
 	"syscall"
 	"time"
+
+	"github.com/1XP-AI/gh-runnerd/experiments/g02-auth/handoff"
 )
 
 // authorizePhase is the canonical local gate shared by preparation and Run.
@@ -144,16 +146,17 @@ type PreparedIdentity struct {
 	Inode  uint64 `json:"inode"`
 }
 type PreparationReceipt struct {
-	Version            int              `json:"version"`
-	Status             string           `json:"status"`
-	Phase              string           `json:"phase"`
-	ApprovalDigest     string           `json:"approval_digest"`
-	State              PreparedIdentity `json:"state"`
-	Journal            PreparedIdentity `json:"journal"`
-	Claim              PreparedIdentity `json:"claim"`
-	AdmissionDirectory PreparedIdentity `json:"admission_directory"`
-	JournalDigest      string           `json:"journal_digest"`
-	ClaimDigest        string           `json:"claim_digest"`
+	Version            int                  `json:"version"`
+	Status             string               `json:"status"`
+	Phase              string               `json:"phase"`
+	ApprovalDigest     string               `json:"approval_digest"`
+	State              PreparedIdentity     `json:"state"`
+	Journal            PreparedIdentity     `json:"journal"`
+	Claim              PreparedIdentity     `json:"claim"`
+	AdmissionDirectory PreparedIdentity     `json:"admission_directory"`
+	JournalDigest      string               `json:"journal_digest"`
+	ClaimDigest        string               `json:"claim_digest"`
+	RootBinding        *handoff.RootBinding `json:"root_binding,omitempty"`
 }
 
 const pairedPreparationPhase = "paired-terminal"
@@ -182,6 +185,40 @@ func preparedDigest(f *os.File, limit int64) (string, error) {
 // return. Consumers must compare these exact receipts before subsequent effects.
 func PrepareJournal(directory string, a Approval, phase string) (PreparationReceipt, error) {
 	return prepareJournal(directory, a, phase, OpenJournal)
+}
+
+// VerifyControllerExperimentRootBinding checks the independently compiled
+// controller policy before preparation can create or inspect local state.
+// The binding is public identity evidence only; it never carries credentials
+// or selects a root.
+func VerifyControllerExperimentRootBinding(expected handoff.RootBinding) error {
+	if !expected.Valid() {
+		return ErrApproval
+	}
+	policy, workflow, issuer, err := handoff.DecodePublicPolicy([]byte(controllerExperimentPolicyJSON), "controller", time.Now())
+	if err != nil || policy.Version != 3 || policy.Source != handoff.ReusableCalleeSource {
+		return ErrApproval
+	}
+	actual, err := handoff.NewRootBinding(workflow, issuer)
+	if err != nil || !actual.Equal(expected) {
+		return ErrApproval
+	}
+	return nil
+}
+
+// PrepareJournalWithRootBinding is the reusable-callee preparation contract.
+// The selected controller roots are checked before journal preparation and the
+// resulting credential-free identity is returned for broker comparison.
+func PrepareJournalWithRootBinding(directory string, a Approval, phase string, expected handoff.RootBinding) (PreparationReceipt, error) {
+	if VerifyControllerExperimentRootBinding(expected) != nil {
+		return PreparationReceipt{}, ErrApproval
+	}
+	receipt, err := prepareJournal(directory, a, phase, OpenJournal)
+	if err != nil {
+		return PreparationReceipt{}, err
+	}
+	receipt.RootBinding = &expected
+	return receipt, nil
 }
 
 // PreparePairedJournal is the paired terminal's explicit local preparation
