@@ -53,13 +53,46 @@ func (o *workflowRunObserver) observe(ctx context.Context, grant reviewedWorkflo
 	if api.call(ctx, "GET", workflowRunPath(grant.Request.Repository, grant.Request.WorkflowRunID), "Bearer "+token, nil, 200, target) != nil || ctx.Err() != nil {
 		return workflowRunObservation{}, errBroker
 	}
-	if grant.Request.Version == 2 && (decodeBrokerJSON(raw, &run, false) != nil || !matchesReusableReference(raw, grant)) {
+	if grant.Request.Version == 2 && (decodeBrokerJSON(raw, &run, false) != nil || !exactWorkflowAuthorityKeys(raw) || !matchesReusableReference(raw, grant)) {
 		return workflowRunObservation{}, errBroker
 	}
 	if !run.matches(a, grant.Request.WorkflowRunID, grant.Request.WorkflowSHA, grant.Request.WorkflowPath, grant.Request.WorkflowRef) {
 		return workflowRunObservation{}, errBroker
 	}
 	return run, nil
+}
+
+// Require each authority field by its exact JSON spelling before using the
+// decoded values. decodeBrokerJSON already rejects folded duplicates; this
+// check also rejects a singleton alias and null values, including false fields.
+func exactWorkflowAuthorityKeys(raw json.RawMessage) bool {
+	object := func(data json.RawMessage, keys ...string) (map[string]json.RawMessage, bool) {
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(data, &fields) != nil || fields == nil {
+			return nil, false
+		}
+		for _, key := range keys {
+			value, ok := fields[key]
+			if !ok || string(value) == "null" {
+				return nil, false
+			}
+		}
+		return fields, true
+	}
+	run, ok := object(raw, "id", "head_sha", "head_branch", "event", "path", "run_attempt", "repository", "head_repository")
+	if !ok {
+		return false
+	}
+	for _, key := range []string{"repository", "head_repository"} {
+		repo, ok := object(run[key], "id", "full_name", "private", "fork", "owner")
+		if !ok {
+			return false
+		}
+		if _, ok := object(repo["owner"], "id", "login"); !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // The only reviewed referenced entry is the exact same-repository immutable callee.

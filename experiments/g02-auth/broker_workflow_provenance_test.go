@@ -613,3 +613,78 @@ func TestWorkflowProvenanceReusableResponseFailuresBeforeSigning(t *testing.T) {
 		})
 	}
 }
+
+func TestWorkflowProvenanceV2AuthorityKeysExact(t *testing.T) {
+	grant := workflowGrantFixture()
+	grant.Request.Version = 2
+	grant.Request.Source = handoff.ReusableCalleeSource
+	grant.Request.Callee = handoff.CalleeIdentity{Repository: grant.Request.Repository, WorkflowPath: ".github/workflows/reusable.yml", SHA: strings.Repeat("d", 40)}
+	base := strings.TrimSuffix(workflowRunJSON(t, grant), "}") + `,"referenced_workflows":[{"path":"` + grant.Request.Repository + `/` + grant.Request.Callee.WorkflowPath + `@` + grant.Request.Callee.SHA + `","sha":"` + grant.Request.Callee.SHA + `"}]}`
+	paths := [][]string{{"id"}, {"head_sha"}, {"head_branch"}, {"event"}, {"path"}, {"run_attempt"}, {"repository"}, {"head_repository"}}
+	for _, repo := range []string{"repository", "head_repository"} {
+		for _, key := range []string{"id", "full_name", "private", "fork", "owner"} {
+			paths = append(paths, []string{repo, key})
+		}
+		for _, key := range []string{"id", "login"} {
+			paths = append(paths, []string{repo, "owner", key})
+		}
+	}
+	run := func(t *testing.T, body string, accept bool) {
+		t.Helper()
+		_, priv, _ := ed25519.GenerateKey(nil)
+		signs := 0
+		adapter, err := newWorkflowProvenanceAdapter(grant, newWorkflowRunObserver(transportFunc(func(*http.Request) (*http.Response, error) { return response(200, body), nil })), func(context.Context) (string, error) { return "synthetic-observation-token", nil }, workflowSignerFunc(func(_ context.Context, b []byte) ([]byte, error) { signs++; return ed25519.Sign(priv, b), nil }), "reviewed-key", time.Now, nil, func() error { return nil })
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = adapter.Attest(context.Background(), grant.Request)
+		if accept && (err != nil || signs != 1) || !accept && (err == nil || signs != 0) {
+			t.Fatalf("accept=%v err=%v signs=%d", accept, err, signs)
+		}
+	}
+	t.Run("metadata", func(t *testing.T) {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(base), &m); err != nil {
+			t.Fatal(err)
+		}
+		m["metadata"] = map[string]any{"anything": true}
+		for _, key := range []string{"repository", "head_repository"} {
+			r := m[key].(map[string]any)
+			r["metadata"] = []any{1, "x"}
+			r["owner"].(map[string]any)["metadata"] = true
+		}
+		b, _ := json.Marshal(m)
+		run(t, string(b), true)
+	})
+	for _, path := range paths {
+		for _, fault := range []string{"alias", "missing", "null", "wrong type", "duplicate"} {
+			t.Run(strings.Join(path, "/")+"/"+fault, func(t *testing.T) {
+				var m map[string]any
+				if err := json.Unmarshal([]byte(base), &m); err != nil {
+					t.Fatal(err)
+				}
+				obj := m
+				for _, part := range path[:len(path)-1] {
+					obj = obj[part].(map[string]any)
+				}
+				key := path[len(path)-1]
+				value := obj[key]
+				switch fault {
+				case "alias":
+					delete(obj, key)
+					obj[strings.ToUpper(key)] = value
+				case "missing":
+					delete(obj, key)
+				case "null":
+					obj[key] = nil
+				case "wrong type":
+					obj[key] = []any{}
+				case "duplicate":
+					obj[strings.ToUpper(key)] = value
+				}
+				b, _ := json.Marshal(m)
+				run(t, string(b), false)
+			})
+		}
+	}
+}
