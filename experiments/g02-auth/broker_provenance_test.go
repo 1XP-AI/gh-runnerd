@@ -560,3 +560,28 @@ func TestBrokerControllerClaimsAttemptBeforeProvenanceSideEffects(t *testing.T) 
 		t.Fatalf("provenance adapter ran without a held attempt claim: result=%+v err=%v attest=%t verify=%t", result, err, adapter.attestHeld, adapter.verifyHeld)
 	}
 }
+
+func TestBrokerLegacyReservedSourceRejected(t *testing.T) {
+	grant := workflowGrantFixture()
+	request := grant.Request
+	a := BrokerApproval{Mode: "controller", Phase: request.Phase, ControllerApprovalSHA256: request.ControllerApprovalSHA256, Organization: "org-a", Repository: "canary", OwnerNonce: request.OwnerNonce}
+	c := controllerApproval{WorkflowRunID: request.WorkflowRunID, WorkflowRef: request.WorkflowRef, WorkflowSHA: request.WorkflowSHA, WorkflowPath: request.WorkflowPath}
+	if _, err := brokerProvenanceRequest(a, c, brokerFixtureProvenanceSource); err != nil {
+		t.Fatal("v1 broker control rejected", err)
+	}
+	if _, err := brokerProvenanceRequest(a, c, handoff.ReusableCalleeSource); err == nil {
+		t.Fatal("broker entry accepted reserved source")
+	}
+	request.Source = handoff.ReusableCalleeSource
+	fixture := newSignedBrokerFixtureAdapter(t)
+	receipt, err := fixture.Attest(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fixture.root.Verify(request, receipt, time.Now()) != nil {
+		t.Fatal("generic legacy receipt compatibility changed")
+	}
+	if brokerProvenanceRequestValid(request) {
+		t.Fatal("broker accepted reserved v2 source without a v2 selector")
+	}
+}

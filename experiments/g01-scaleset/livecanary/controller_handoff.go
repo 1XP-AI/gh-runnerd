@@ -264,7 +264,7 @@ func controllerHandoffRequestOwned(approvalSnapshot []byte, phase, source string
 		OwnerNonce:               approval.OwnerNonce,
 		Source:                   source,
 	}
-	if !request.Valid() {
+	if source == handoff.ReusableCalleeSource || !request.Valid() {
 		return Approval{}, handoff.Request{}, ErrApproval
 	}
 	return approval, request, nil

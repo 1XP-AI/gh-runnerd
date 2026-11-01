@@ -1115,3 +1115,27 @@ func TestControllerHandoffNonceAppendResamplesAfterJournalLock(t *testing.T) {
 		t.Fatalf("expired authorization consumed a durable nonce: err=%v events=%+v", appendErr, journal.Events())
 	}
 }
+
+func TestControllerRejectsReservedReusableSourceAtLegacyBoundary(t *testing.T) {
+	now := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
+	snapshot := []byte(`{"app_id":11,"installation_id":12,"organization":"fixture-org","repository":"canary","repository_id":42,"runner_group_id":3,"owner_nonce":"cccccccccccccccccccccccccccccccc","harness_sha":"1111111111111111111111111111111111111111","workflow_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","workflow_ref":"refs/heads/main","workflow_path":".github/workflows/canary.yml","workflow_run_id":7,"controller":"fixture-controller","expires_at":"2026-09-22T13:00:00Z","actions_hosts":["fixture.actions.githubusercontent.com"],"phases":["before-ack"]}`)
+	_, request, err := controllerHandoffRequest(snapshot, "before-ack", "signed-fixture-v1", now)
+	if err != nil {
+		t.Fatal("v1 control rejected", err)
+	}
+	request.Source = handoff.ReusableCalleeSource
+	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	receipt := signedControllerReceipt(t, request, now, strings.Repeat("d", 32), key)
+	root, err := handoff.NewTrustRoot(receipt.KeyID, key.Public().(ed25519.PublicKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireHandoffReaderUntouched(t, snapshot, "before-ack", handoff.ReusableCalleeSource, raw, root, now)
+	if _, _, err := controllerHandoffRequest(snapshot, "before-ack", handoff.ReusableCalleeSource, now); err == nil {
+		t.Fatal("reserved source accepted without v2 policy")
+	}
+}

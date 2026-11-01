@@ -32,7 +32,7 @@ var (
 )
 
 func brokerProvenanceRequestValid(request BrokerProvenanceRequest) bool {
-	return request.Valid()
+	return request.Source != handoff.ReusableCalleeSource && request.Valid()
 }
 
 func brokerProvenanceRequest(approval BrokerApproval, controller controllerApproval, source string) (BrokerProvenanceRequest, error) {
