@@ -14,6 +14,10 @@ import (
 // Private injection-only receiver. Neither the CLI nor ordinary runtime supplies
 // role roots. Files transfer ownership even on rejection; possession is no proof.
 func runControllerProcessHandoffCreate(ctx context.Context, journal *FileJournal, approvalSnapshot []byte, control, input *os.File, source string, workflow handoff.TrustRoot, issuer handoff.IssuerRoot, now func() time.Time, factory func(context.Context, Approval, Credentials) (API, error)) error {
+	return runControllerProcessHandoffCreateExpected(ctx, journal, approvalSnapshot, control, input, source, nil, workflow, issuer, now, factory)
+}
+
+func runControllerProcessHandoffCreateExpected(ctx context.Context, journal *FileJournal, approvalSnapshot []byte, control, input *os.File, source string, expected *handoff.Request, workflow handoff.TrustRoot, issuer handoff.IssuerRoot, now func() time.Time, factory func(context.Context, Approval, Credentials) (API, error)) error {
 	if control != nil {
 		defer control.Close()
 	}
@@ -38,7 +42,7 @@ func runControllerProcessHandoffCreate(ctx context.Context, journal *FileJournal
 	defer input.Close()
 	snapshot := bytes.Clone(approvalSnapshot)
 	defer clear(snapshot)
-	a, request, err := controllerHandoffRequestOwned(snapshot, "create", source, now())
+	a, request, err := controllerHandoffRequestForExpected(snapshot, "create", source, expected, now())
 	if err != nil {
 		return ErrApproval
 	}
@@ -57,14 +61,14 @@ func runControllerProcessHandoffCreate(ctx context.Context, journal *FileJournal
 		return ErrApproval
 	}
 	binding, err := handoff.DecodeStrictBinding(bindingBytes)
-	expected := handoff.BindingExpected{Request: request, Receipt: receipt, ReceiptBytes: receiptBytes, ApprovalExpiresAt: a.ExpiresAt, Deadline: controllerHandoffDeadline(bounded, a.ExpiresAt, receipt.ExpiresAt)}
-	if err != nil || issuer.VerifyBinding(expected, binding, now()) != nil {
+	bindingExpected := handoff.BindingExpected{Request: request, Receipt: receipt, ReceiptBytes: receiptBytes, ApprovalExpiresAt: a.ExpiresAt, Deadline: controllerHandoffDeadline(bounded, a.ExpiresAt, receipt.ExpiresAt)}
+	if err != nil || issuer.VerifyBinding(bindingExpected, binding, now()) != nil {
 		return ErrApproval
 	}
 	// Preserve the original parent deadline, additionally capped by the envelope.
 	entry, cancelEntry := context.WithDeadline(bounded, binding.ExpiresAt)
 	defer cancelEntry()
-	return runControllerHandoffCreate(entry, journal, snapshot, receiptBytes, source, workflow, now, func(readCtx context.Context) ([]byte, error) {
+	return runControllerHandoffCreateExpected(entry, journal, snapshot, receiptBytes, source, expected, workflow, now, func(readCtx context.Context) ([]byte, error) {
 		var data []byte
 		e := withHandoffPipe(readCtx, input, func() error {
 			var e error
@@ -91,6 +95,10 @@ func runControllerProcessHandoffCreate(ctx context.Context, journal *FileJournal
 }
 
 func runControllerProcessHandoffPhase(ctx context.Context, journal *FileJournal, approvalSnapshot []byte, control, input *os.File, mode, phase string, paired *PairedTerminalFiles, source string, workflow handoff.TrustRoot, issuer handoff.IssuerRoot, now func() time.Time, factory func(context.Context, Approval, Credentials) (API, error)) error {
+	return runControllerProcessHandoffPhaseExpected(ctx, journal, approvalSnapshot, control, input, mode, phase, paired, source, nil, workflow, issuer, now, factory)
+}
+
+func runControllerProcessHandoffPhaseExpected(ctx context.Context, journal *FileJournal, approvalSnapshot []byte, control, input *os.File, mode, phase string, paired *PairedTerminalFiles, source string, expected *handoff.Request, workflow handoff.TrustRoot, issuer handoff.IssuerRoot, now func() time.Time, factory func(context.Context, Approval, Credentials) (API, error)) error {
 	if control != nil {
 		defer control.Close()
 	}
@@ -115,7 +123,7 @@ func runControllerProcessHandoffPhase(ctx context.Context, journal *FileJournal,
 	defer input.Close()
 	snapshot := bytes.Clone(approvalSnapshot)
 	defer clear(snapshot)
-	a, request, err := controllerHandoffRequestOwned(snapshot, phase, source, now())
+	a, request, err := controllerHandoffRequestForExpected(snapshot, phase, source, expected, now())
 	if err != nil {
 		return ErrApproval
 	}
@@ -137,14 +145,14 @@ func runControllerProcessHandoffPhase(ctx context.Context, journal *FileJournal,
 		return ErrApproval
 	}
 	binding, err := handoff.DecodeStrictPhaseBinding(bindingBytes)
-	expected := handoff.BindingExpected{Request: request, Receipt: receipt, ReceiptBytes: receiptBytes, ApprovalExpiresAt: a.ExpiresAt, Deadline: controllerHandoffDeadline(ctx, a.ExpiresAt, receipt.ExpiresAt)}
-	if err != nil || binding.Mode != mode || issuer.VerifyPhaseBinding(expected, binding, now()) != nil {
+	bindingExpected := handoff.BindingExpected{Request: request, Receipt: receipt, ReceiptBytes: receiptBytes, ApprovalExpiresAt: a.ExpiresAt, Deadline: controllerHandoffDeadline(ctx, a.ExpiresAt, receipt.ExpiresAt)}
+	if err != nil || binding.Mode != mode || issuer.VerifyPhaseBinding(bindingExpected, binding, now()) != nil {
 		return ErrApproval
 	}
 	// Preserve the original parent deadline, additionally capped by the envelope.
 	entry, cancelEntry := context.WithDeadline(ctx, binding.ExpiresAt)
 	defer cancelEntry()
-	return runControllerHandoffPhase(entry, journal, snapshot, receiptBytes, phase, source, workflow, now, func(readCtx context.Context) ([]byte, error) {
+	return runControllerHandoffPhaseExpected(entry, journal, snapshot, receiptBytes, phase, source, expected, workflow, now, func(readCtx context.Context) ([]byte, error) {
 		var data []byte
 		e := withHandoffPipe(readCtx, input, func() error {
 			var e error

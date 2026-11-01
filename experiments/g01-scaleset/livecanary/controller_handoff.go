@@ -270,6 +270,30 @@ func controllerHandoffRequestOwned(approvalSnapshot []byte, phase, source string
 	return approval, request, nil
 }
 
+// controllerHandoffRequestForExpected derives the legacy caller tuple from the
+// exact approval bytes, then upgrades it only to the independently selected
+// reusable-callee request. The expected request is never taken from a receipt
+// or observed provider response.
+func controllerHandoffRequestForExpected(approvalSnapshot []byte, phase, source string, expected *handoff.Request, now time.Time) (Approval, handoff.Request, error) {
+	if expected == nil {
+		return controllerHandoffRequestOwned(approvalSnapshot, phase, source, now)
+	}
+	if source != handoff.ReusableCalleeSource || expected.Version != 2 || expected.Source != handoff.ReusableCalleeSource || expected.Phase != phase || !expected.Valid() {
+		return Approval{}, handoff.Request{}, ErrApproval
+	}
+	approval, caller, err := controllerHandoffRequestOwned(approvalSnapshot, phase, "github-rest-workflow-v1", now)
+	if err != nil {
+		return Approval{}, handoff.Request{}, err
+	}
+	caller.Version = 2
+	caller.Source = handoff.ReusableCalleeSource
+	caller.Callee = expected.Callee
+	if caller != *expected {
+		return Approval{}, handoff.Request{}, ErrApproval
+	}
+	return approval, *expected, nil
+}
+
 func controllerHandoffDeadline(ctx context.Context, approvalExpiry, receiptExpiry time.Time) time.Time {
 	deadline := approvalExpiry
 	if receiptExpiry.Before(deadline) {
@@ -335,10 +359,14 @@ func controllerHandoffActive(ctx context.Context, approvalExpiry, receiptExpiry,
 }
 
 func controllerHandoffInputsMatch(ctx context.Context, journal *FileJournal, approvalSnapshot []byte, approval Approval, request handoff.Request, phase, source string, receiptBytes []byte, receipt handoff.Receipt, root handoff.TrustRoot, effectiveDeadline, now time.Time) bool {
+	return controllerHandoffInputsMatchExpected(ctx, journal, approvalSnapshot, approval, request, nil, phase, source, receiptBytes, receipt, root, effectiveDeadline, now)
+}
+
+func controllerHandoffInputsMatchExpected(ctx context.Context, journal *FileJournal, approvalSnapshot []byte, approval Approval, request handoff.Request, expected *handoff.Request, phase, source string, receiptBytes []byte, receipt handoff.Receipt, root handoff.TrustRoot, effectiveDeadline, now time.Time) bool {
 	if ctx == nil || ctx.Err() != nil || !effectiveDeadline.After(now) || !controllerHandoffActive(ctx, approval.ExpiresAt, receipt.ExpiresAt, now) {
 		return false
 	}
-	derivedApproval, derivedRequest, err := controllerHandoffRequestOwned(approvalSnapshot, phase, source, now)
+	derivedApproval, derivedRequest, err := controllerHandoffRequestForExpected(approvalSnapshot, phase, source, expected, now)
 	if err != nil || !reflect.DeepEqual(derivedApproval, approval) || derivedRequest != request || root.Verify(request, receipt, now) != nil || !journal.authorityHeldAt(approval, now) {
 		return false
 	}
@@ -352,6 +380,10 @@ func consumeControllerHandoff(ctx context.Context, journal *FileJournal, approva
 }
 
 func consumeControllerHandoffWithProof(ctx context.Context, journal *FileJournal, approvalSnapshot []byte, phase, source string, receiptSource *controllerHandoffReceiptSource, root handoff.TrustRoot, now func() time.Time, readCredentials func(context.Context) ([]byte, error)) ([]byte, controllerHandoffProof, error) {
+	return consumeControllerHandoffWithProofExpected(ctx, journal, approvalSnapshot, phase, source, nil, receiptSource, root, now, readCredentials)
+}
+
+func consumeControllerHandoffWithProofExpected(ctx context.Context, journal *FileJournal, approvalSnapshot []byte, phase, source string, expected *handoff.Request, receiptSource *controllerHandoffReceiptSource, root handoff.TrustRoot, now func() time.Time, readCredentials func(context.Context) ([]byte, error)) ([]byte, controllerHandoffProof, error) {
 	var zeroProof controllerHandoffProof
 	defer receiptSource.close()
 	if ctx == nil || journal == nil || receiptSource == nil || !root.Valid() || now == nil || readCredentials == nil || ctx.Err() != nil {
@@ -362,7 +394,7 @@ func consumeControllerHandoffWithProof(ctx context.Context, journal *FileJournal
 		return nil, zeroProof, ErrApproval
 	}
 	ownedApprovalSnapshot := bytes.Clone(approvalSnapshot)
-	approval, request, err := controllerHandoffRequestOwned(ownedApprovalSnapshot, phase, source, started)
+	approval, request, err := controllerHandoffRequestForExpected(ownedApprovalSnapshot, phase, source, expected, started)
 	if err != nil {
 		return nil, zeroProof, err
 	}
@@ -415,7 +447,7 @@ func consumeControllerHandoffWithProof(ctx context.Context, journal *FileJournal
 		KeyID:          root.KeyID(),
 	}
 	validateAtAppend := func(appendAt time.Time) bool {
-		return controllerHandoffInputsMatch(ctx, journal, ownedApprovalSnapshot, approval, request, phase, source, receiptBytes, receipt, root, effectiveDeadline, appendAt)
+		return controllerHandoffInputsMatchExpected(ctx, journal, ownedApprovalSnapshot, approval, request, expected, phase, source, receiptBytes, receipt, root, effectiveDeadline, appendAt)
 	}
 	consumedEvent, err := journal.consumeControllerHandoffAt(ctx, approval, consumption, effectiveDeadline, now, validateAtAppend)
 	if err != nil {
@@ -455,7 +487,7 @@ func consumeControllerHandoffWithProof(ctx context.Context, journal *FileJournal
 		clear(credentials)
 		return nil, zeroProof, ErrJournal
 	}
-	finalOK := controllerHandoffInputsMatch(ctx, journal, ownedApprovalSnapshot, approval, request, phase, source, receiptBytes, receipt, root, effectiveDeadline, now())
+	finalOK := controllerHandoffInputsMatchExpected(ctx, journal, ownedApprovalSnapshot, approval, request, expected, phase, source, receiptBytes, receipt, root, effectiveDeadline, now())
 	if finalOK {
 		events := journal.Events()
 		finalOK = consumedEvent.Sequence > 0 && len(events) >= consumedEvent.Sequence && reflect.DeepEqual(events[consumedEvent.Sequence-1], consumedEvent)

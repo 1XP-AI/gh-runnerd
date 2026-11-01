@@ -72,7 +72,7 @@ func RunControllerExperiment(ctx context.Context, files PairedTerminalFiles, mod
 		return ErrApproval
 	}
 	selected, e := selectControllerExperiment(files, mode, phase, time.Now())
-	if e != nil || selected.policy.Version == 3 {
+	if e != nil {
 		return ErrApproval
 	}
 	return runControllerExperimentOwned(ctx, files, mode, phase, os.NewFile(3, "g01-control"), input, selected)
@@ -91,15 +91,19 @@ func RunControllerExperimentWithInputs(ctx context.Context, files PairedTerminal
 		return ErrApproval
 	}
 	selected, e := selectControllerExperiment(files, mode, phase, time.Now())
-	if e != nil || selected.policy.Version == 3 {
+	if e != nil {
 		return ErrApproval
 	}
 	return runControllerExperimentOwned(ctx, files, mode, phase, control, input, selected)
 }
 func runControllerExperimentOwned(parent context.Context, files PairedTerminalFiles, mode, phase string, control, input *os.File, selected controllerExperimentSelection) error {
-	// Selection alone does not authorize v2 receipt handling or effects.
-	if parent == nil || parent.Err() != nil || selected.policy.Version == 3 {
+	if parent == nil || parent.Err() != nil {
 		return ErrApproval
+	}
+	var expected *handoff.Request
+	if selected.policy.Version == 3 {
+		request := selected.grant.Request
+		expected = &request
 	}
 	owned, e := handoff.ProtectPipes(control, input)
 	if e != nil {
@@ -144,7 +148,7 @@ func runControllerExperimentOwned(parent context.Context, files PairedTerminalFi
 		return NewSDKAPI(a, c)
 	}
 	if phase == "create" {
-		return runControllerProcessHandoffCreate(ctx, j, snap.raw, owned[0], owned[1], selected.policy.Source, selected.workflow, selected.issuer, time.Now, factory)
+		return runControllerProcessHandoffCreateExpected(ctx, j, snap.raw, owned[0], owned[1], selected.policy.Source, expected, selected.workflow, selected.issuer, time.Now, factory)
 	}
 	if phase == replacementPhase || jitBoundaryPhase(phase) {
 		ctx = context.WithValue(ctx, replacementApprovalGuardKey{}, func() error {
@@ -163,7 +167,7 @@ func runControllerExperimentOwned(parent context.Context, files PairedTerminalFi
 	if mode == "paired-terminal" {
 		paired = &files
 	}
-	return runControllerProcessHandoffPhase(ctx, j, snap.raw, owned[0], owned[1], mode, phase, paired, selected.policy.Source, selected.workflow, selected.issuer, time.Now, factory)
+	return runControllerProcessHandoffPhaseExpected(ctx, j, snap.raw, owned[0], owned[1], mode, phase, paired, selected.policy.Source, expected, selected.workflow, selected.issuer, time.Now, factory)
 }
 
 // Only fixture-tag code may assign these private concrete constructors.
