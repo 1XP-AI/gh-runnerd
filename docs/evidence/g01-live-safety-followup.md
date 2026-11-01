@@ -2,6 +2,10 @@
 
 This follow-up starts from the exact PR #72 head `f5560ba950f77343e57034cc1cf85dc67f5ac922`. It addresses the five independent-review NO-GO findings recorded on G01 issue #1 and PR #72. It is an offline safety change only; it does not authorize GitHub access, workflow dispatch, runner creation, scale-set creation, credential minting, or live evidence.
 
+## Current status — 2026-11-01
+
+The historical v0.4.0 references below describe their original snapshots; `experiments/g01-scaleset/go.mod` now pins `github.com/actions/scaleset v0.5.0`. At official SDK commit `af394d86c0d5024225238b0209043c70193bcfe6`, [get by ID](https://github.com/actions/scaleset/blob/af394d86c0d5024225238b0209043c70193bcfe6/client.go#L494-L516) returns a decoded scale-set without exposing response headers, the [scale-set struct](https://github.com/actions/scaleset/blob/af394d86c0d5024225238b0209043c70193bcfe6/types.go#L81-L91) has no revision, and [delete](https://github.com/actions/scaleset/blob/af394d86c0d5024225238b0209043c70193bcfe6/client.go#L641-L659) takes an ID and constructs a nil-body DELETE. A bounded search of paths in the [official public OpenAPI description at `f9ed74230d54847b5ca00a1343e8e349e858b8fb`](https://github.com/github/rest-api-description/blob/f9ed74230d54847b5ca00a1343e8e349e858b8fb/descriptions/api.github.com/api.github.com.yaml) found no scale-set path; this does not establish that an undocumented API is impossible or describe server semantics. The existing conditional cleanup fence remains unresolved; no live operation was performed.
+
 ## Safety decisions
 
 | Finding | Decision |
