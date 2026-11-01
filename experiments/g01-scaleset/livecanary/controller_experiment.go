@@ -37,12 +37,22 @@ func selectControllerExperiment(files PairedTerminalFiles, mode, phase string, n
 	if e != nil {
 		return controllerExperimentSelection{}, ErrApproval
 	}
-	a, request, e := controllerHandoffRequest(snap.raw, phase, p.Source, now)
+	source := p.Source
+	if p.Version == 3 {
+		source = "github-rest-workflow-v1"
+	}
+	a, request, e := controllerHandoffRequest(snap.raw, phase, source, now)
 	if e != nil {
 		return controllerExperimentSelection{}, ErrApproval
 	}
-	groupDigest := a.GroupPolicy.GrantDigest(request, a.RepositoryID, int64(a.RunnerGroupID), a.ManagementScope)
-	g, e := p.SelectGroup(mode, request, groupDigest, now)
+	var g handoff.PhaseGrant
+	if p.Version == 3 {
+		request.Version, request.Source = 2, handoff.ReusableCalleeSource
+		g, e = p.SelectCallee(mode, request, a.GroupPolicy.OrganizationID, a.RepositoryID, int64(a.RunnerGroupID), a.ManagementScope, a.GroupPolicy, now)
+	} else {
+		groupDigest := a.GroupPolicy.GrantDigest(request, a.RepositoryID, int64(a.RunnerGroupID), a.ManagementScope)
+		g, e = p.SelectGroup(mode, request, groupDigest, now)
+	}
 	if e != nil || g.RepositoryID != a.RepositoryID || (a.GroupPolicy.Version == 2 && g.OrganizationID != a.GroupPolicy.OrganizationID) || g.ExpiresAt.Before(a.ExpiresAt) {
 		return controllerExperimentSelection{}, ErrApproval
 	}
@@ -62,7 +72,7 @@ func RunControllerExperiment(ctx context.Context, files PairedTerminalFiles, mod
 		return ErrApproval
 	}
 	selected, e := selectControllerExperiment(files, mode, phase, time.Now())
-	if e != nil {
+	if e != nil || selected.policy.Version == 3 {
 		return ErrApproval
 	}
 	return runControllerExperimentOwned(ctx, files, mode, phase, os.NewFile(3, "g01-control"), input, selected)
@@ -81,13 +91,14 @@ func RunControllerExperimentWithInputs(ctx context.Context, files PairedTerminal
 		return ErrApproval
 	}
 	selected, e := selectControllerExperiment(files, mode, phase, time.Now())
-	if e != nil {
+	if e != nil || selected.policy.Version == 3 {
 		return ErrApproval
 	}
 	return runControllerExperimentOwned(ctx, files, mode, phase, control, input, selected)
 }
 func runControllerExperimentOwned(parent context.Context, files PairedTerminalFiles, mode, phase string, control, input *os.File, selected controllerExperimentSelection) error {
-	if parent == nil || parent.Err() != nil {
+	// Selection alone does not authorize v2 receipt handling or effects.
+	if parent == nil || parent.Err() != nil || selected.policy.Version == 3 {
 		return ErrApproval
 	}
 	owned, e := handoff.ProtectPipes(control, input)
