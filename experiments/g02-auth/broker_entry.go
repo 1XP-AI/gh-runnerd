@@ -12,12 +12,15 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/1XP-AI/gh-runnerd/experiments/g02-auth/handoff"
 )
 
 // BrokerFiles are private paths only. Credentials are accepted exclusively from
 // the supplied owned stdin descriptor, never flags, environment or these files.
 type controllerApproval struct {
-	ManagementScope string `json:"management_scope,omitempty"`
+	GroupPolicy     handoff.GroupPolicy `json:"group_policy,omitzero"`
+	ManagementScope string              `json:"management_scope,omitempty"`
 
 	AppID          int64     `json:"app_id"`
 	InstallationID int64     `json:"installation_id"`
@@ -46,6 +49,9 @@ func (c controllerApproval) needsVerification() bool {
 	})
 }
 func (c controllerApproval) validate(a BrokerApproval, now time.Time) error {
+	if c.GroupPolicy != a.GroupPolicy || !c.GroupPolicy.Valid(c.Organization+"/"+c.Repository, c.WorkflowPath) {
+		return errBroker
+	}
 	if c.ManagementScope != a.ManagementScope || (c.ManagementScope != "" && c.ManagementScope != organizationOnlyManagementScope) {
 		return errBroker
 	}
@@ -216,6 +222,9 @@ func runBrokerWithPrivateHandoff(ctx context.Context, files BrokerFiles, input *
 	}
 	var approval BrokerApproval
 	if _, err := readBrokerPrivateJSON(files.ApprovalPath, &approval); err != nil || approval.validate(api.now()) != nil {
+		return BrokerResult{}, errBroker
+	}
+	if approval.GroupPolicy.Version == 2 && (assembly == nil || !assembly.experimental) {
 		return BrokerResult{}, errBroker
 	}
 	if approval.Mode != "paired-terminal" && (files.WorkerApproval != "" || files.WorkerStateDirectory != "") {

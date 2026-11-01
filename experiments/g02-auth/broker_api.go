@@ -172,7 +172,7 @@ func (r brokerIssued) matchesScope(a BrokerApproval) bool {
 }
 
 func (a *brokerAPI) mint(ctx context.Context, approval BrokerApproval, cred Credential) (brokerIssued, error) {
-	if approval.ManagementScope != "" && approval.ManagementScope != organizationOnlyManagementScope {
+	if !approval.GroupPolicy.Valid(approval.Organization+"/"+approval.Repository, "") || (approval.GroupPolicy.Version == 2 && approval.GroupPolicy.OrganizationID != approval.OrganizationID) || (approval.ManagementScope != "" && approval.ManagementScope != organizationOnlyManagementScope) {
 		return brokerIssued{}, errBroker
 	}
 	jwt, err := a.github.jwt(cred)
@@ -211,17 +211,23 @@ func (a *brokerAPI) preflight(ctx context.Context, approval BrokerApproval, toke
 		}
 	}
 	var group struct {
-		ID           int64  `json:"id"`
-		Name         string `json:"name"`
-		Visibility   string `json:"visibility"`
-		Default      *bool  `json:"default"`
-		Inherited    *bool  `json:"inherited"`
-		AllowsPublic *bool  `json:"allows_public_repositories"`
+		RestrictedToWorkflows json.RawMessage `json:"restricted_to_workflows"`
+		SelectedWorkflows     json.RawMessage `json:"selected_workflows"`
+		ID                    int64           `json:"id"`
+		Name                  string          `json:"name"`
+		Visibility            string          `json:"visibility"`
+		Default               *bool           `json:"default"`
+		Inherited             *bool           `json:"inherited"`
+		AllowsPublic          *bool           `json:"allows_public_repositories"`
 	}
 	prefix := "/orgs/" + approval.Organization + "/actions/runner-groups/" + strconv.FormatInt(approval.RunnerGroupID, 10)
 	if a.call(ctx, "GET", prefix, auth, nil, 200, &group) != nil || group.ID != approval.RunnerGroupID || group.Name != approval.RunnerGroupName || group.Visibility != "selected" || group.Default == nil || *group.Default || group.Inherited == nil || *group.Inherited || group.AllowsPublic == nil || *group.AllowsPublic {
 		return errBroker
 	}
+	if !approval.GroupPolicy.MatchesObserved(group.RestrictedToWorkflows, group.SelectedWorkflows) {
+		return errBroker
+	}
+
 	var selected brokerRepositories
 	if a.call(ctx, "GET", prefix+"/repositories?per_page=100", auth, nil, 200, &selected) != nil || !selected.matches(approval) {
 		return errBroker

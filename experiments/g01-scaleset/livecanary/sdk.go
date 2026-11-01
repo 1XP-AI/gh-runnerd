@@ -167,7 +167,7 @@ type repositories struct {
 }
 
 func (a *SDKAPI) Preflight(ctx context.Context, approval Approval) error {
-	if a.credentials.validate(approval, time.Now()) != nil {
+	if !approval.GroupPolicy.Valid(approval.Organization+"/"+approval.Repository, approval.WorkflowPath) || a.credentials.validate(approval, time.Now()) != nil {
 		return ErrApproval
 	}
 	if approval.ManagementScope == organizationOnlyManagementScope {
@@ -190,16 +190,22 @@ func (a *SDKAPI) Preflight(ctx context.Context, approval Approval) error {
 		return ErrApproval
 	}
 	var group struct {
-		ID           int    `json:"id"`
-		Visibility   string `json:"visibility"`
-		Default      bool   `json:"default"`
-		AllowsPublic bool   `json:"allows_public_repositories"`
-		Inherited    bool   `json:"inherited"`
+		RestrictedToWorkflows json.RawMessage `json:"restricted_to_workflows"`
+		SelectedWorkflows     json.RawMessage `json:"selected_workflows"`
+		ID                    int             `json:"id"`
+		Visibility            string          `json:"visibility"`
+		Default               *bool           `json:"default"`
+		AllowsPublic          *bool           `json:"allows_public_repositories"`
+		Inherited             *bool           `json:"inherited"`
 	}
 	prefix := "/orgs/" + approval.Organization + "/actions/runner-groups/" + strconv.Itoa(approval.RunnerGroupID)
-	if a.get(ctx, prefix, a.credentials.InstallationToken, &group) != nil || group.ID != approval.RunnerGroupID || group.Visibility != "selected" || group.Default || group.AllowsPublic || group.Inherited {
+	if a.get(ctx, prefix, a.credentials.InstallationToken, &group) != nil || group.ID != approval.RunnerGroupID || group.Visibility != "selected" || (group.Default != nil && *group.Default) || (group.AllowsPublic != nil && *group.AllowsPublic) || (group.Inherited != nil && *group.Inherited) || (approval.GroupPolicy.Version == 2 && (group.Default == nil || group.AllowsPublic == nil || group.Inherited == nil)) {
 		return ErrApproval
 	}
+	if !approval.GroupPolicy.MatchesObserved(group.RestrictedToWorkflows, group.SelectedWorkflows) {
+		return ErrApproval
+	}
+
 	var allowed repositories
 	if a.get(ctx, prefix+"/repositories?per_page=100", a.credentials.InstallationToken, &allowed) != nil || allowed.TotalCount != 1 || len(allowed.Repositories) != 1 || allowed.Repositories[0].ID != r.ID {
 		return ErrApproval

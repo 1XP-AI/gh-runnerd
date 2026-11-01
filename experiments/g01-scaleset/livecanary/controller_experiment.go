@@ -41,8 +41,9 @@ func selectControllerExperiment(files PairedTerminalFiles, mode, phase string, n
 	if e != nil {
 		return controllerExperimentSelection{}, ErrApproval
 	}
-	g, e := p.Select(mode, request, now)
-	if e != nil || g.RepositoryID != a.RepositoryID || g.ExpiresAt.Before(a.ExpiresAt) {
+	groupDigest := a.GroupPolicy.GrantDigest(request, a.RepositoryID, int64(a.RunnerGroupID), a.ManagementScope)
+	g, e := p.SelectGroup(mode, request, groupDigest, now)
+	if e != nil || g.RepositoryID != a.RepositoryID || (a.GroupPolicy.Version == 2 && g.OrganizationID != a.GroupPolicy.OrganizationID) || g.ExpiresAt.Before(a.ExpiresAt) {
 		return controllerExperimentSelection{}, ErrApproval
 	}
 	if mode == "paired-terminal" {
