@@ -257,8 +257,8 @@ func runWithPreparationContext(ctx context.Context, args []string, in io.Reader,
 		if e != nil {
 			return reject()
 		}
-		if expectedRootBinding != nil {
-			receipt.RootBinding = expectedRootBinding
+		if expectedRootBinding != nil && (receipt.RootBinding == nil || !receipt.RootBinding.Equal(*expectedRootBinding)) {
+			return reject()
 		}
 		if json.NewEncoder(out).Encode(receipt) != nil {
 			return reject()

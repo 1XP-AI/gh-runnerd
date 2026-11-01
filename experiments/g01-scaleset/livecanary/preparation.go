@@ -187,6 +187,21 @@ func PrepareJournal(directory string, a Approval, phase string) (PreparationRece
 	return prepareJournal(directory, a, phase, OpenJournal)
 }
 
+// controllerExperimentRootBinding derives the credential-free identity from
+// the independently selected controller roots. Caller-supplied bindings are
+// compared with this value, never used as the source of the receipt.
+func controllerExperimentRootBinding() (handoff.RootBinding, error) {
+	policy, workflow, issuer, err := handoff.DecodePublicPolicy([]byte(controllerExperimentPolicyJSON), "controller", time.Now())
+	if err != nil || policy.Version != 3 || policy.Source != handoff.ReusableCalleeSource {
+		return handoff.RootBinding{}, ErrApproval
+	}
+	actual, err := handoff.NewRootBinding(workflow, issuer)
+	if err != nil {
+		return handoff.RootBinding{}, ErrApproval
+	}
+	return actual, nil
+}
+
 // VerifyControllerExperimentRootBinding checks the independently compiled
 // controller policy before preparation can create or inspect local state.
 // The binding is public identity evidence only; it never carries credentials
@@ -195,11 +210,7 @@ func VerifyControllerExperimentRootBinding(expected handoff.RootBinding) error {
 	if !expected.Valid() {
 		return ErrApproval
 	}
-	policy, workflow, issuer, err := handoff.DecodePublicPolicy([]byte(controllerExperimentPolicyJSON), "controller", time.Now())
-	if err != nil || policy.Version != 3 || policy.Source != handoff.ReusableCalleeSource {
-		return ErrApproval
-	}
-	actual, err := handoff.NewRootBinding(workflow, issuer)
+	actual, err := controllerExperimentRootBinding()
 	if err != nil || !actual.Equal(expected) {
 		return ErrApproval
 	}
@@ -210,14 +221,19 @@ func VerifyControllerExperimentRootBinding(expected handoff.RootBinding) error {
 // The selected controller roots are checked before journal preparation and the
 // resulting credential-free identity is returned for broker comparison.
 func PrepareJournalWithRootBinding(directory string, a Approval, phase string, expected handoff.RootBinding) (PreparationReceipt, error) {
-	if VerifyControllerExperimentRootBinding(expected) != nil {
+	return prepareJournalWithRootBinding(directory, a, phase, expected, OpenJournal)
+}
+
+func prepareJournalWithRootBinding(directory string, a Approval, phase string, expected handoff.RootBinding, open func(string, Approval) (*FileJournal, error)) (PreparationReceipt, error) {
+	actual, err := controllerExperimentRootBinding()
+	if err != nil || !expected.Equal(actual) {
 		return PreparationReceipt{}, ErrApproval
 	}
-	receipt, err := prepareJournal(directory, a, phase, OpenJournal)
+	receipt, err := prepareJournal(directory, a, phase, open)
 	if err != nil {
 		return PreparationReceipt{}, err
 	}
-	receipt.RootBinding = &expected
+	receipt.RootBinding = &actual
 	return receipt, nil
 }
 
