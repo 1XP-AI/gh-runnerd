@@ -3410,6 +3410,16 @@ func TestToolingDefaultG02PartitionsRun(t *testing.T) {
 	const prepSentinel = "default-g02-prep-regression"
 	const heavyName = "TestPairedBrokerRealCadenceChildExceedsThirtySeconds"
 	const heavySentinel = "default-g02-heavy-regression"
+	const legacyControllerName = "TestLegacyControllerEntryRejectsMalformedInputBeforeAdmission"
+	const legacyControllerSentinel = "default-g02-legacy-controller-regression"
+	const legacyPairedName = "TestLegacyPairedEntryRejectsMalformedInputBeforeAdmission"
+	const legacyPairedSentinel = "default-g02-legacy-paired-regression"
+	const controllerClaimsName = "TestBrokerControllerClaimsAttemptBeforeProvenanceSideEffects"
+	const controllerClaimsSentinel = "default-g02-controller-claims-regression"
+	const finalName = "TestBrokerExperimentV3FinalGETFencesCalleeBeforeMintAndHandoff"
+	const finalRootMismatchName = "TestBrokerExperimentV3ControllerRootMismatchRefusesBeforeManagementInputAndMint"
+	const finalSentinel = "default-g02-final-regression"
+	const finalRootMismatchSentinel = "default-g02-final-root-mismatch-regression"
 	const pairedFamilyName = "TestPairedBrokerClaimFenceFixture"
 	const pairedFamilySentinel = "default-g02-paired-family-regression"
 	const remainderSentinel = "default-g02-remainder-regression"
@@ -3529,6 +3539,41 @@ func FuzzG02Fixture(f *testing.F) {
 			failureSource:  defaultTestSource("fixture", heavyName, heavySentinel, heavySentinel),
 		},
 		{
+			name:           "legacy controller",
+			path:           g02Base + "/default_legacy_controller_regression_test.go",
+			marker:         legacyControllerSentinel,
+			positiveSource: defaultTestSource("fixture", legacyControllerName, legacyControllerSentinel, ""),
+			failureSource:  defaultTestSource("fixture", legacyControllerName, legacyControllerSentinel, legacyControllerSentinel),
+		},
+		{
+			name:           "legacy paired",
+			path:           g02Base + "/default_legacy_paired_regression_test.go",
+			marker:         legacyPairedSentinel,
+			positiveSource: defaultTestSource("fixture", legacyPairedName, legacyPairedSentinel, ""),
+			failureSource:  defaultTestSource("fixture", legacyPairedName, legacyPairedSentinel, legacyPairedSentinel),
+		},
+		{
+			name:           "controller claims",
+			path:           g02Base + "/default_controller_claims_regression_test.go",
+			marker:         controllerClaimsSentinel,
+			positiveSource: defaultTestSource("fixture", controllerClaimsName, controllerClaimsSentinel, ""),
+			failureSource:  defaultTestSource("fixture", controllerClaimsName, controllerClaimsSentinel, controllerClaimsSentinel),
+		},
+		{
+			name:           "final fence",
+			path:           g02Base + "/default_final_regression_test.go",
+			marker:         finalSentinel,
+			positiveSource: defaultTestSource("fixture", finalName, finalSentinel, ""),
+			failureSource:  defaultTestSource("fixture", finalName, finalSentinel, finalSentinel),
+		},
+		{
+			name:           "final root mismatch",
+			path:           g02Base + "/default_final_root_mismatch_regression_test.go",
+			marker:         finalRootMismatchSentinel,
+			positiveSource: defaultTestSource("fixture", finalRootMismatchName, finalRootMismatchSentinel, ""),
+			failureSource:  defaultTestSource("fixture", finalRootMismatchName, finalRootMismatchSentinel, finalRootMismatchSentinel),
+		},
+		{
 			name:           "paired family",
 			path:           g02Base + "/default_paired_family_regression_test.go",
 			marker:         pairedFamilySentinel,
@@ -3629,8 +3674,10 @@ func FuzzG02Fixture(f *testing.F) {
 	for _, invocation := range []string{
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerPrepareReviewedG01LiveBinary$ ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
+		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
+		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint)$ ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPaired -skip ^TestPairedBroker(PrepareReviewedG01LiveBinary|RealCadenceChildExceedsThirtySeconds)$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -skip ^TestPaired ./...",
+		"go1.27.3\ttest -race -count=1 -timeout=45s -skip ^TestPaired|^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint)$|^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
 	} {
 		count := 0
 		for _, line := range lines {
