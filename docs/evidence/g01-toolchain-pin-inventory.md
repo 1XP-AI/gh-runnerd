@@ -1,4 +1,15 @@
-# G01 toolchain pin inventory — Go 1.26.9 ACTIVE vs historical
+# Historical G01 toolchain pin inventory — Go 1.26.9 snapshot
+
+## Current status — 2026-11-01
+
+This inventory is a static snapshot of source commit
+`9776562fc792e0fb76684fb7be90a7ed118ed0ec`; its Go `1.26.9`, SDK `v0.4.0`
+and runner `2.337.0` values are historical, not active pins. The merged profile
+is SDK `v0.5.0` with Go `1.27.3` and byte-verified runner `2.338.0` ARM64; see
+the [adoption ledger](g01-sdk-v05-adoption.md), [live-canary profile](g01-live-canary.md)
+and [runner checkpoint](g01-runner-release-checkpoint.md#2026-10-25-target-offer-archive-and-image-bytes).
+Do not use the catalog below for current acceptance or live preparation. G01
+remains open, and this note does not qualify runtime or authorize live work.
 
 Source: `9776562fc792e0fb76684fb7be90a7ed118ed0ec`
 (`9776562 Clarify Go 1.26.9 red evidence and review`),
@@ -17,7 +28,7 @@ merges, or live operations. No source, pin, or `go.sum` edits; no
 `git add`/`git commit` (the coordinator owns the index). Only this new
 file is added; all historical records are unaltered.
 
-## ACTIVE pin catalog (Go 1.26.9)
+## Historical active pin catalog at source snapshot `9776562`
 
 | # | Anchor | Value |
 | --- | --- | --- |
@@ -39,7 +50,7 @@ file is added; all historical records are unaltered.
 SDK `v0.4.0` and runner `2.337.0` are unchanged by the toolchain
 remediation; no Go dependency or checksum pin changed.
 
-## Stale ACTIVE pin finding: none
+## Stale active pin finding at the historical snapshot: none
 
 - `rg -n "1\.26\.8"` over the twelve active pin files (four `go.mod`,
   `Makefile`, `check-toolchain.sh`, `check-offline-experiments.sh`,

@@ -16,7 +16,7 @@ This is a product-level safety and maintenance tradeoff, not a claim that Go has
 
 ## Boundaries
 
-- SDK behind an internal adapter, pinned with contract tests. Reviewed source commit: `cb0405b2d874500e75ae34eff8d582ab75956b45`; latest release observed: `v0.4.0`. These differ; G01 selects a release/commit deliberately.
+- SDK behind an internal adapter, pinned with contract tests. This planning snapshot recorded reviewed source commit `cb0405b2d874500e75ae34eff8d582ab75956b45` and latest observed release `v0.4.0`; both are historical. The current experimental profile is SDK `v0.5.0` with Go `1.27.3`, adopted by [ADR 0002](0002-scaleset-integration.md) and [PR #107](https://github.com/1XP-AI/gh-runnerd/pull/107). G01 closure and production G01/G02 remain evidence-gated.
 - Existing Docker Engine connection is explicit and scoped. Docker Desktop and Lima are runtime choices, not daemon dependencies. No global context mutation and no surprise VM installation.
 - macOS native execution is limited to operator-approved trusted repositories; VM isolation will be a separate adapter and release gate.
 - Avoid direct embedding of Tart until its FSL terms and distribution implications have been resolved. Do not describe FSL as permissive MIT/Apache open source. An external optional integration still needs explicit license documentation.

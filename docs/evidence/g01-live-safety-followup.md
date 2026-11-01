@@ -6,6 +6,11 @@ This follow-up starts from the exact PR #72 head `f5560ba950f77343e57034cc1cf85d
 
 The historical v0.4.0 references below describe their original snapshots; `experiments/g01-scaleset/go.mod` now pins `github.com/actions/scaleset v0.5.0`. At official SDK commit `af394d86c0d5024225238b0209043c70193bcfe6`, [get by ID](https://github.com/actions/scaleset/blob/af394d86c0d5024225238b0209043c70193bcfe6/client.go#L494-L516) returns a decoded scale-set without exposing response headers, the [scale-set struct](https://github.com/actions/scaleset/blob/af394d86c0d5024225238b0209043c70193bcfe6/types.go#L81-L91) has no revision, and [delete](https://github.com/actions/scaleset/blob/af394d86c0d5024225238b0209043c70193bcfe6/client.go#L641-L659) takes an ID and constructs a nil-body DELETE. A bounded search of paths in the [official public OpenAPI description at `f9ed74230d54847b5ca00a1343e8e349e858b8fb`](https://github.com/github/rest-api-description/blob/f9ed74230d54847b5ca00a1343e8e349e858b8fb/descriptions/api.github.com/api.github.com.yaml) found no scale-set path; this does not establish that an undocumented API is impossible or describe server semantics. The existing conditional cleanup fence remains unresolved; no live operation was performed.
 
+The current v0.5.0 adapter still exposes only unconditional
+`DeleteRunnerScaleSet` and does not implement `ConditionalScaleSetDeleter`;
+the driver refuses cleanup without that capability. The v0.4.0 pin references
+later in this document are historical snapshots, not current SDK guidance.
+
 ## Safety decisions
 
 | Finding | Decision |
@@ -98,14 +103,13 @@ tagged controller or paired execution requires a reviewed production provenance
 source and trust-root handoff before credential input and API effects; those
 paths therefore remain quarantined.
 
-The cleanup gate remains blocked by the pinned `github.com/actions/scaleset
-v0.4.0` client: `SDKAPI.DeleteScaleSet` is unconditional and exposes no
-provider version, ETag, or equivalent atomic conditional-delete operation. The
-existing `ConditionalScaleSetDeleter` contract and synthetic tests are the
-minimal offline evidence; a reviewed provider adapter implementing the
-server-side owner/freshness condition in the delete operation is required
-before any live cleanup authorization. No credentials or live operation were
-used here.
+At the original v0.4.0 snapshot, `SDKAPI.DeleteScaleSet` was unconditional and
+exposed no provider version, ETag, or equivalent atomic conditional-delete
+operation. The current v0.5.0 adapter still lacks that capability, so the
+existing `ConditionalScaleSetDeleter` contract and synthetic tests remain only
+offline evidence. A reviewed provider adapter implementing the server-side
+owner/freshness condition in the delete operation is required before any live
+cleanup authorization. No credentials or live operation were used here.
 
 ## Conditional cleanup contract follow-up
 
@@ -124,12 +128,13 @@ adapter error records unresolved state, quarantines the journal and prevents
 retry. Inventory reads before and after deletion remain supporting evidence
 only, not the atomic fence.
 
-The pinned `github.com/actions/scaleset v0.4.0` adapter still exposes no
-conditional delete, version or ETag contract, so it deliberately does not
-implement `ConditionalScaleSetDeleter`; the real SDK cleanup path remains
-quarantined. Offline tests use a synthetic adapter to prove the exact-match
-path and reject replacement between fence preparation and deletion; no GitHub,
-credential, runner, Docker, Lima, Keychain or launchd operation was run.
+The v0.4.0 adapter described by this historical contract record exposed no
+conditional delete, version or ETag contract. The current v0.5.0 adapter also
+does not implement `ConditionalScaleSetDeleter`; the real SDK cleanup path
+remains quarantined. Offline tests use a synthetic adapter to prove the
+exact-match path and reject replacement between fence preparation and deletion;
+no GitHub, credential, runner, Docker, Lima, Keychain or launchd operation was
+run.
 
 The focused TDD evidence for this contract was:
 
@@ -271,10 +276,10 @@ Lima, Keychain, launchd or self-hosted-runner operations.
 
 Remaining live gaps are unchanged and explicit: the provenance adapter is only
 an offline signed fixture and has no broker-authenticated workflow-input source;
-tagged controller and paired entrypoints remain quarantined. The pinned
-`github.com/actions/scaleset v0.4.0` adapter still exposes only unconditional
-`DeleteScaleSet`, so no live conditional cleanup authorization or live
-verification is claimed.
+tagged controller and paired entrypoints remain quarantined. The current pinned
+SDK `v0.5.0` adapter still exposes only unconditional `DeleteRunnerScaleSet`
+and no server-side conditional-delete capability, so no live cleanup
+authorization or live verification is claimed.
 
 ## G01 trust-root contract slice — 2026-09-21
 

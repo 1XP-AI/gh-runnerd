@@ -1,5 +1,21 @@
 # G01 v0.5.0 adoption ledger and current evidence profile
 
+## Current status — 2026-11-01
+
+The premerge status and review checklist below are preserved as the immutable
+checkpoint for [PR #107](https://github.com/1XP-AI/gh-runnerd/pull/107). PR #107
+merged on 2026-10-25 at `0b376359ec60754e9ef074343fb8cf409727da78`; its exact
+candidate head was `92be46478389222b47e15e9451ae009d5be56c0b`. Public CI run
+[40167263192](https://github.com/1XP-AI/gh-runnerd/actions/runs/40167263192)
+completed successfully on the merge SHA with all seven jobs succeeding.
+
+The current experimental pin is SDK `v0.5.0` with Go `1.27.3`; the byte-verified
+runner profile is `2.338.0` ARM64. G01 #1 remains open and the GitHub Project
+remains In progress. Production workflow provenance/trust-root provisioning,
+provider-side conditional cleanup, runtime qualification and the separately
+authorized live canary remain unresolved. No live operation is authorized by
+this status note.
+
 Issue: [G01 #1](https://github.com/1XP-AI/gh-runnerd/issues/1). Writer: Codex,
 maintainer-selected Sol medium. Status: **local adoption candidate; independent
 base review approved, zero-identity delta and GitHub review pending**.
