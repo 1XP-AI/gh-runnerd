@@ -2,6 +2,7 @@ package enrollment
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
@@ -44,8 +45,48 @@ func (o *workflowRunObserver) observe(ctx context.Context, grant reviewedWorkflo
 	parts := strings.Split(grant.Request.Repository, "/")
 	a := BrokerApproval{Organization: parts[0], Repository: parts[1], OrganizationID: grant.OrganizationID, RepositoryID: grant.RepositoryID}
 	api := brokerAPI{client: o.client}
-	if api.call(ctx, "GET", workflowRunPath(grant.Request.Repository, grant.Request.WorkflowRunID), "Bearer "+token, nil, 200, &run) != nil || ctx.Err() != nil || !run.matches(a, grant.Request.WorkflowRunID, grant.Request.WorkflowSHA, grant.Request.WorkflowPath, grant.Request.WorkflowRef) {
+	var target any = &run
+	var raw json.RawMessage
+	if grant.Request.Version == 2 {
+		target = &raw
+	}
+	if api.call(ctx, "GET", workflowRunPath(grant.Request.Repository, grant.Request.WorkflowRunID), "Bearer "+token, nil, 200, target) != nil || ctx.Err() != nil {
+		return workflowRunObservation{}, errBroker
+	}
+	if grant.Request.Version == 2 && (decodeBrokerJSON(raw, &run, false) != nil || !matchesReusableReference(raw, grant)) {
+		return workflowRunObservation{}, errBroker
+	}
+	if !run.matches(a, grant.Request.WorkflowRunID, grant.Request.WorkflowSHA, grant.Request.WorkflowPath, grant.Request.WorkflowRef) {
 		return workflowRunObservation{}, errBroker
 	}
 	return run, nil
+}
+
+// The only reviewed referenced entry is the exact same-repository immutable callee.
+// A ref, even if apparently equivalent, has not been reviewed.
+func matchesReusableReference(raw json.RawMessage, grant reviewedWorkflowGrant) bool {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil {
+		return false
+	}
+	for key := range fields {
+		if strings.EqualFold(key, "referenced_workflows") && key != "referenced_workflows" {
+			return false
+		}
+	}
+	var entries []json.RawMessage
+	value, ok := fields["referenced_workflows"]
+	if !ok || json.Unmarshal(value, &entries) != nil || len(entries) != 1 {
+		return false
+	}
+	var entry map[string]json.RawMessage
+	if json.Unmarshal(entries[0], &entry) != nil || len(entry) != 2 {
+		return false
+	}
+	var path, sha string
+	if json.Unmarshal(entry["path"], &path) != nil || json.Unmarshal(entry["sha"], &sha) != nil {
+		return false
+	}
+	callee := grant.Request.Callee
+	return path == callee.Repository+"/"+callee.WorkflowPath+"@"+callee.SHA && sha == callee.SHA
 }

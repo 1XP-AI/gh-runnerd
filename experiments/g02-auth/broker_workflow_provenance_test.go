@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/1XP-AI/gh-runnerd/experiments/g02-auth/handoff"
 )
 
 type workflowSignerFunc func(context.Context, []byte) ([]byte, error)
@@ -509,6 +511,104 @@ func TestWorkflowProvenanceBoundsCallbacksToGrantDeadline(t *testing.T) {
 			}
 			if boundary == "token" && gets != 0 || boundary != "sign" && signs != 0 {
 				t.Fatal("expired callback crossed next boundary")
+			}
+		})
+	}
+}
+
+func TestWorkflowProvenanceReusableObservedShape(t *testing.T) {
+	grant := workflowGrantFixture()
+	grant.Request.Version = 2
+	grant.Request.Source = handoff.ReusableCalleeSource
+	grant.Request.Callee = handoff.CalleeIdentity{Repository: grant.Request.Repository, WorkflowPath: ".github/workflows/reusable.yml", SHA: strings.Repeat("d", 40)}
+	good := strings.TrimSuffix(workflowRunJSON(t, grant), "}") + `,"referenced_workflows":[{"path":"` + grant.Request.Repository + `/` + grant.Request.Callee.WorkflowPath + `@` + grant.Request.Callee.SHA + `","sha":"` + grant.Request.Callee.SHA + `"}]}`
+	entry := `{"path":"` + grant.Request.Repository + `/` + grant.Request.Callee.WorkflowPath + `@` + grant.Request.Callee.SHA + `","sha":"` + grant.Request.Callee.SHA + `"}`
+	ref := `"referenced_workflows":[` + entry + `]`
+	cases := map[string]string{
+		"missing":          strings.Replace(good, ","+ref, "", 1),
+		"null":             strings.Replace(good, ref, `"referenced_workflows":null`, 1),
+		"empty":            strings.Replace(good, ref, `"referenced_workflows":[]`, 1),
+		"null entry":       strings.Replace(good, entry, "null", 1),
+		"extra entry":      strings.Replace(good, ref, `"referenced_workflows":[`+entry+`,`+entry+`]`, 1),
+		"missing path":     strings.Replace(good, entry, `{"sha":"`+grant.Request.Callee.SHA+`"}`, 1),
+		"null sha":         strings.Replace(good, `"sha":"`+grant.Request.Callee.SHA+`"`, `"sha":null`, 1),
+		"extra field":      strings.Replace(good, entry, strings.TrimSuffix(entry, "}")+`,"extra":1}`, 1),
+		"present ref":      strings.Replace(good, entry, strings.TrimSuffix(entry, "}")+`,"ref":"refs/heads/main"}`, 1),
+		"path case":        strings.Replace(good, `"path":"`+grant.Request.Repository, `"PATH":"`+grant.Request.Repository, 1),
+		"entry duplicate":  strings.Replace(good, `"sha":"`+grant.Request.Callee.SHA+`"`, `"sha":"`+grant.Request.Callee.SHA+`","sha":"`+grant.Request.Callee.SHA+`"`, 1),
+		"root case":        strings.Replace(good, `"referenced_workflows"`, `"REFERENCED_WORKFLOWS"`, 1),
+		"root duplicate":   strings.Replace(good, ref, ref+`,`+ref, 1),
+		"wrong repository": strings.Replace(good, grant.Request.Repository+`/`+grant.Request.Callee.WorkflowPath, "other/repo/"+grant.Request.Callee.WorkflowPath, 1),
+		"wrong callee":     strings.Replace(good, "reusable.yml", "wrong.yml", 1),
+		"uppercase sha":    strings.Replace(good, `@`+grant.Request.Callee.SHA, `@`+strings.ToUpper(grant.Request.Callee.SHA), 1),
+		"sha mismatch":     strings.Replace(good, `"sha":"`+grant.Request.Callee.SHA+`"`, `"sha":"`+strings.Repeat("e", 40)+`"`, 1),
+		"caller mismatch":  strings.Replace(good, `"id":7`, `"id":8`, 1),
+		"depth":            strings.Replace(good, entry, strings.Repeat("[", 40)+entry+strings.Repeat("]", 40), 1),
+	}
+	cases["observed-shape"] = good
+	for name, body := range cases {
+		tc := struct {
+			name, body string
+			accept     bool
+		}{name, body, name == "observed-shape"}
+		t.Run(tc.name, func(t *testing.T) {
+			pub, priv, _ := ed25519.GenerateKey(nil)
+			root, _ := NewBrokerProvenanceTrustRoot("reviewed-key", pub)
+			signs := 0
+			adapter, err := newWorkflowProvenanceAdapter(grant, newWorkflowRunObserver(transportFunc(func(*http.Request) (*http.Response, error) { return response(200, tc.body), nil })), func(context.Context) (string, error) { return "synthetic-observation-token", nil }, workflowSignerFunc(func(_ context.Context, b []byte) ([]byte, error) { signs++; return ed25519.Sign(priv, b), nil }), "reviewed-key", time.Now, nil, func() error { return nil })
+			if err != nil {
+				t.Fatal("reviewed v2 grant rejected", err)
+			}
+			receipt, err := adapter.Attest(context.Background(), grant.Request)
+			if tc.accept {
+				wrong := grant.Request
+				wrong.Callee.WorkflowPath = ".github/workflows/other.yml"
+				if adapter.Source() != handoff.ReusableCalleeSource || root.Verify(wrong, receipt, time.Now()) == nil || adapter.Verify(context.Background(), wrong, receipt) == nil {
+					t.Fatal("receipt accepted against a different independent request")
+				}
+				if err != nil || signs != 1 || root.Verify(grant.Request, receipt, time.Now()) != nil || adapter.Verify(context.Background(), grant.Request, receipt) != nil || receipt.Version != 2 || receipt.Callee != grant.Request.Callee {
+					t.Fatal("valid observed shape failed")
+				}
+			} else if err == nil || signs != 0 {
+				t.Fatal("wrong callee reached signing")
+			}
+		})
+	}
+}
+
+func TestWorkflowProvenanceReusableResponseFailuresBeforeSigning(t *testing.T) {
+	grant := workflowGrantFixture()
+	grant.Request.Version, grant.Request.Source = 2, handoff.ReusableCalleeSource
+	grant.Request.Callee = handoff.CalleeIdentity{Repository: grant.Request.Repository, WorkflowPath: ".github/workflows/reusable.yml", SHA: strings.Repeat("d", 40)}
+	good := strings.TrimSuffix(workflowRunJSON(t, grant), "}") + `,"referenced_workflows":[{"path":"` + grant.Request.Repository + `/` + grant.Request.Callee.WorkflowPath + `@` + grant.Request.Callee.SHA + `","sha":"` + grant.Request.Callee.SHA + `"}]}`
+	for _, fault := range []string{"status", "read", "close", "size", "cancel"} {
+		t.Run(fault, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			body := &workflowErrorBody{Reader: strings.NewReader(good), readErr: fault == "read", closeErr: fault == "close"}
+			signs := 0
+			observer := newWorkflowRunObserver(transportFunc(func(*http.Request) (*http.Response, error) {
+				if fault == "cancel" {
+					cancel()
+				}
+				res := &http.Response{StatusCode: 200, Header: make(http.Header), Body: body}
+				if fault == "status" {
+					res.StatusCode = 403
+				}
+				if fault == "size" {
+					res.ContentLength = maxResponseBytes + 1
+				}
+				return res, nil
+			}))
+			adapter, err := newWorkflowProvenanceAdapter(grant, observer, func(context.Context) (string, error) { return "synthetic-observation-token", nil }, workflowSignerFunc(func(context.Context, []byte) ([]byte, error) {
+				signs++
+				return make([]byte, ed25519.SignatureSize), nil
+			}), "reviewed-key", time.Now, nil, func() error { return nil })
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = adapter.Attest(ctx, grant.Request); err == nil || signs != 0 || !body.closed {
+				t.Fatal("failed response reached signing or was not closed")
 			}
 		})
 	}
