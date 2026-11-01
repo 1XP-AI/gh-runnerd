@@ -56,8 +56,8 @@ func (r Request) Valid() bool {
 
 func (r Request) validVersion() bool {
 	switch r.Version {
-	case 0, 1:
-		return r.Callee == (CalleeIdentity{}) && r.Source != ReusableCalleeSource
+	case 0:
+		return r.Callee == (CalleeIdentity{})
 	case 2:
 		return r.Source == ReusableCalleeSource && r.Callee.Repository == r.Repository && repositoryFullName.MatchString(r.Callee.Repository) && workflowPath.MatchString(r.Callee.WorkflowPath) && sha40Hex.MatchString(r.Callee.SHA)
 	default:
