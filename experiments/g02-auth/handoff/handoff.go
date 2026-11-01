@@ -236,12 +236,32 @@ func exactReceiptKeys(data []byte) bool {
 		return false
 	}
 	allowed := map[string]bool{"version": true, "algorithm": true, "key_id": true, "controller_approval_sha256": true, "repository": true, "workflow_run_id": true, "workflow_ref": true, "workflow_sha": true, "workflow_path": true, "phase": true, "owner_nonce": true, "receipt_nonce": true, "source": true, "issued_at": true, "expires_at": true, "signature": true, "callee": true}
+	var receiptVersion int
+	for key, value := range fields {
+		if strings.EqualFold(key, "version") {
+			_ = json.Unmarshal(value, &receiptVersion)
+		}
+	}
 	for key := range fields {
-		if !allowed[key] {
+		known := false
+		for name := range allowed {
+			if strings.EqualFold(key, name) {
+				known = true
+				break
+			}
+		}
+		if !known || (receiptVersion == 2 && !allowed[key]) {
 			return false
 		}
 	}
-	if raw, ok := fields["callee"]; ok {
+	var raw json.RawMessage
+	var hasCallee bool
+	for key, value := range fields {
+		if strings.EqualFold(key, "callee") {
+			raw, hasCallee = value, true
+		}
+	}
+	if hasCallee {
 		var nested map[string]json.RawMessage
 		if json.Unmarshal(raw, &nested) != nil || nested == nil {
 			return false
@@ -252,7 +272,13 @@ func exactReceiptKeys(data []byte) bool {
 			}
 		}
 		var version int
-		if json.Unmarshal(fields["version"], &version) != nil || version != 2 {
+		var versionRaw json.RawMessage
+		for key, value := range fields {
+			if strings.EqualFold(key, "version") {
+				versionRaw = value
+			}
+		}
+		if json.Unmarshal(versionRaw, &version) != nil || version != 2 {
 			return false
 		}
 	}

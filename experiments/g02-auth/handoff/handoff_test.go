@@ -242,3 +242,20 @@ func TestReusableCalleeV2Contract(t *testing.T) {
 		})
 	}
 }
+
+func TestLegacyReceiptMixedCaseKeyRoundTrip(t *testing.T) {
+	request, receipt, key, now := deterministicFixture(t)
+	raw, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw = bytes.Replace(raw, []byte(`"repository"`), []byte(`"Repository"`), 1)
+	decoded, err := DecodeStrictReceipt(raw)
+	if err != nil {
+		t.Fatalf("legacy key rejected: %v", err)
+	}
+	root, _ := NewTrustRoot(receipt.KeyID, key)
+	if err := root.Verify(request, decoded, now); err != nil {
+		t.Fatalf("signed receipt rejected: %v", err)
+	}
+}
