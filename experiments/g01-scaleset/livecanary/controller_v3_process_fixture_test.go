@@ -57,6 +57,20 @@ type controllerV3ProcessFixture struct {
 	transport  *v3ProcessFixtureTransport
 }
 
+func canonicalFixtureTempRoot(root string) (string, error) {
+	if !filepath.IsAbs(root) {
+		return "", os.ErrInvalid
+	}
+	canonical, err := filepath.EvalSymlinks(filepath.Clean(root))
+	if err != nil {
+		return "", err
+	}
+	if !filepath.IsAbs(canonical) || filepath.Clean(canonical) != canonical {
+		return "", os.ErrInvalid
+	}
+	return canonical, nil
+}
+
 func newControllerV3ProcessFixture(t *testing.T) controllerV3ProcessFixture {
 	t.Helper()
 	controller := newControllerV3HandoffFixture(t, "create")
@@ -82,7 +96,11 @@ func newControllerV3ProcessFixture(t *testing.T) controllerV3ProcessFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	parent, err := os.MkdirTemp("/private/tmp", "g01-v3-process-")
+	tempRoot, err := canonicalFixtureTempRoot(os.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, err := os.MkdirTemp(tempRoot, "g01-v3-process-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,6 +207,26 @@ func controllerV3ProcessEvents(t *testing.T, fixture controllerV3ProcessFixture)
 	}
 	defer j.Close()
 	return j.Events()
+}
+
+func TestCanonicalFixtureTempRootResolvesSymlink(t *testing.T) {
+	realRoot := t.TempDir()
+	aliasParent := t.TempDir()
+	alias := filepath.Join(aliasParent, "tmp")
+	if err := os.Symlink(realRoot, alias); err != nil {
+		t.Fatal(err)
+	}
+	got, err := canonicalFixtureTempRoot(alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := filepath.EvalSymlinks(realRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("fixture temp root was not canonical: got %q want %q", got, want)
+	}
 }
 
 func TestControllerProcessHandoffV3ActualBrokerChild(t *testing.T) {
