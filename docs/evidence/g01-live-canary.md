@@ -127,6 +127,40 @@ runner or JIT operation, canary credential mint/read, Docker
 daemon/image/container operation, or Scale Set operation occurred. Live
 acceptance remains open.
 
+### Fresh Luna Max exact-head readiness review — 2026-11-01
+
+Disposition: **HOLD / NO-GO**. This fresh read-only review evaluated public
+main source SHA `f90b2d173d8ea4a39f7d3b54be15de0d900412bf`. The review itself
+performed no workflow dispatch, runner/JIT, credential, Docker/host,
+runner-group, App, or file mutation. The preceding 2026-11-01 checkpoint is
+preserved as historical; this subsection is its subsequent documentation-only
+record.
+
+The current GitHub review reports that private target runner group `#3` selects
+the target repository but has `restricted_to_workflows: false`, an empty
+`selected_workflows` list, and zero runners. The current Linux ARM64/JIT
+workflow has no run. Historical run `35095628204` was a macOS ARM64
+runner-baseline, not current Scale Set/JIT evidence. The App installation
+membership recheck returned `403`, so the last user-confirmed exclusion is not
+current verification. Private repository/workflow identity, workflow
+path/SHA, installation ID, raw responses, host paths, credentials, and tokens
+remain omitted.
+
+The five historical findings remain bounded as follows; the anchors were
+checked against the exact source SHA above:
+
+| # | Finding and current disposition | Current source anchors |
+|---|---|---|
+| 1 | Durable one-shot `inspect` consumption was corrected offline: preparation rejects a previously seen phase, and the driver records `inspect` before preflight/read. This is not live evidence. | `experiments/g01-scaleset/livecanary/preparation.go:43-57`; `experiments/g01-scaleset/livecanary/driver.go:580-592` |
+| 2 | FIFO/named-pipe shape is not authenticated caller provenance. Approved and paired execute paths remain quarantined; production broker provenance and trust-root authority remain unresolved. | `experiments/g01-scaleset/livecanary/controller_process_handoff.go:181-187`; `experiments/g01-scaleset/cmd/g01-live/main.go:67-72,231-234`; `experiments/g01-scaleset/livecanary/controller_experiment.go:11-12` |
+| 3 | The experimental FD3 controller path is not live-cleared without broker-only policy/launch authority and trust roots; its offline entry requires the compiled policy/grant and exact approval, with independent roots checked before input. | `experiments/g01-scaleset/livecanary/controller_experiment.go:23-65,68-97`; `experiments/g01-scaleset/livecanary/controller_process_handoff.go:27-28,59-66` |
+| 4 | The selected phase is bound into the derived request and signed receipt/binding, then checked before credential input. This remains offline-only evidence. | `experiments/g01-scaleset/livecanary/controller_handoff.go:250-266,386-415,452-477` |
+| 5 | The driver requires `ConditionalScaleSetDeleter` with a server-side version/ETag freshness fence, but pinned `actions/scaleset` v0.5.0 is called through ID-only `DeleteRunnerScaleSet`; atomic cleanup remains a live blocker. | `experiments/g01-scaleset/go.mod:5-8`; `experiments/g01-scaleset/livecanary/cleanup_fence.go:39-49`; `experiments/g01-scaleset/livecanary/driver.go:542-553,658-669`; `experiments/g01-scaleset/livecanary/sdk.go:383-384` |
+
+No canary was performed, and this re-review does not authorize one. The
+reviewer made no source changes, tests, GitHub writes, commit, or push. Rollback:
+revert this subsection only; it changes no source, runtime, or GitHub state.
+
 - [ ] Maintainer identifies one disposable **private** repository and one
   organization; no public fork/PR execution. Record the reviewed workflow SHA.
 - [ ] Dedicated runner group allows only that repository, and a unique canary
