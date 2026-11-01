@@ -319,19 +319,24 @@ func runBrokerWithPrivateHandoff(ctx context.Context, files BrokerFiles, input *
 	if attempt.check() != nil {
 		return BrokerResult{}, errBroker
 	}
+	// Only the controller reusable-callee v3 assembly has independently
+	// selected roots bound by preparation. Legacy controller/paired paths must
+	// consume and validate management input before persistent broker admission.
+	deferInput := approval.Mode == "controller" && assembly != nil && assembly.experimental && assembly.request.Version == 2 && assembly.request.Source == handoff.ReusableCalleeSource
 	var credentialInput brokerInput
-	if assembly != nil && assembly.experimental {
-		credentialInput, err = readBrokerExperimentalInput(ctx, input)
-	} else {
-		credentialInput, err = readBrokerInput(ctx, input)
+	if !deferInput {
+		if assembly != nil && assembly.experimental {
+			credentialInput, err = readBrokerExperimentalInput(ctx, input)
+		} else {
+			credentialInput, err = readBrokerInput(ctx, input)
+		}
+		if err != nil {
+			return BrokerResult{}, errBroker
+		}
+		if attempt.check() != nil {
+			return BrokerResult{}, errBroker
+		}
 	}
-	if err != nil || (approval.AllowVerificationAuthority && credentialInput.VerificationToken == "") {
-		return BrokerResult{}, errBroker
-	}
-	if attempt.check() != nil {
-		return BrokerResult{}, errBroker
-	}
-
 	var plan *brokerControllerPlan
 	if approval.Mode == "controller" || approval.Mode == "paired-terminal" {
 		plan, err = newBrokerControllerPlan(approval, controller, controllerData, controllerRoot, files.ControllerStateDirectory, binary.check, func(ctx context.Context, data []byte, snapshotPath string) error {
@@ -375,12 +380,27 @@ func runBrokerWithPrivateHandoff(ctx context.Context, files BrokerFiles, input *
 			}
 			plan.handoff = &selected
 			plan.receiptRaw = receiptRaw
+			if approval.Mode == "controller" && selected.experimental && selected.request.Version == 2 && selected.request.Source == handoff.ReusableCalleeSource {
+				binding, e := handoff.NewRootBinding(selected.workflow, selected.issuer)
+				if e != nil {
+					return BrokerResult{}, errBroker
+				}
+				plan.preparationRootBinding = &binding
+			}
 		}
 		plan.localPrepare = func(ctx context.Context, snapshotPath string) (brokerPreparationReceipt, error) {
 			if approval.Mode == "paired-terminal" {
 				return invokeBrokerPairedPreparation(ctx, binary, files.StateDirectory, snapshotPath, files.ControllerStateDirectory)
 			}
+			if plan.preparationRootBinding != nil {
+				return invokeBrokerPreparation(ctx, binary, files.StateDirectory, snapshotPath, files.ControllerStateDirectory, approval.Phase, plan.preparationRootBinding)
+			}
 			return invokeBrokerPreparation(ctx, binary, files.StateDirectory, snapshotPath, files.ControllerStateDirectory, approval.Phase)
+		}
+		if deferInput {
+			plan.inputSource = func(ctx context.Context) (brokerInput, error) {
+				return readBrokerExperimentalInput(ctx, input)
+			}
 		}
 		plan.worker = workerPlan
 		if approval.Mode == "paired-terminal" {

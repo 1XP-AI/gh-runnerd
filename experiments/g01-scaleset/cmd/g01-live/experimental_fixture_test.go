@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/livecanary"
+	"github.com/1XP-AI/gh-runnerd/experiments/g02-auth/handoff"
 )
 
 // This owned TEST process exercises the actual dispatcher with an explicit
@@ -54,8 +55,17 @@ func TestMain(m *testing.M) {
 		prepareReplacementJournalForCommand = func(path string, a livecanary.Approval, approvalPath string) (livecanary.PreparationReceipt, error) {
 			return livecanary.PrepareSessionReplacementJournalForExperimentFixture(path, a, approvalPath, config.AdmissionDirectory)
 		}
+		prepareReplacementJournalWithRootBindingForCommand = func(path string, a livecanary.Approval, approvalPath string, binding handoff.RootBinding) (livecanary.PreparationReceipt, error) {
+			return livecanary.PrepareSessionReplacementJournalWithRootBindingForExperimentFixture(path, a, approvalPath, config.AdmissionDirectory, binding)
+		}
 		prepareJITBoundaryJournalForCommand = func(path string, a livecanary.Approval, approvalPath, phase string) (livecanary.PreparationReceipt, error) {
 			return livecanary.PrepareJITBoundaryJournalForExperimentFixture(path, a, approvalPath, phase, config.AdmissionDirectory)
+		}
+		prepareJITBoundaryJournalWithRootBindingForCommand = func(path string, a livecanary.Approval, approvalPath, phase string, binding handoff.RootBinding) (livecanary.PreparationReceipt, error) {
+			return livecanary.PrepareJITBoundaryJournalWithRootBindingForExperimentFixture(path, a, approvalPath, phase, config.AdmissionDirectory, binding)
+		}
+		prepareRootJournalForCommand = func(path string, a livecanary.Approval, phase string, binding handoff.RootBinding) (livecanary.PreparationReceipt, error) {
+			return livecanary.PrepareJournalWithRootBindingForExperimentFixture(path, a, phase, config.AdmissionDirectory, binding)
 		}
 		if os.Args[1] == "--execute-experimental-phase" {
 			original, fixture, err := livecanary.BeginOriginalContextCommandForFixture(state, approvalPath, mode, phase)

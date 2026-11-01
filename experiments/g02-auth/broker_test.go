@@ -166,6 +166,29 @@ func TestBrokerDiscoveryUsesOneRestrictedTokenThenScopeBeforeAuth(t *testing.T) 
 	}
 	assertNoSecretFiles(t, root, string(c.PEM), f.token, "synthetic-private-registration-token", "synthetic-private-admin-token")
 }
+
+func TestBrokerMalformedPEMRefusesBeforePersistentAdmission(t *testing.T) {
+	a, _, api, f, root := newBrokerFixture(t)
+	admissionCalls := 0
+	originalAdmissionDirectory := api.admissionDirectory
+	api.admissionDirectory = func() (string, error) {
+		admissionCalls++
+		return originalAdmissionDirectory()
+	}
+	if _, err := brokerExecute(context.Background(), a, brokerInput{PEM: "not a PEM credential"}, root, api, nil); err == nil {
+		t.Fatal("malformed PEM reached broker effects")
+	}
+	if admissionCalls != 0 {
+		t.Fatalf("malformed PEM entered persistent admission: directory lookups=%d", admissionCalls)
+	}
+	if f.tokenCalls != 0 || len(f.calls) != 0 {
+		t.Fatalf("malformed PEM reached authenticated effects: tokenCalls=%d calls=%v", f.tokenCalls, f.calls)
+	}
+	if _, err := os.Stat(filepath.Join(f.admissionRoot, "broker-admission.jsonl")); !os.IsNotExist(err) {
+		t.Fatalf("malformed PEM created admission ledger: err=%v", err)
+	}
+}
+
 func TestBrokerFailedGroupNeverObtainsAuthOrHandsOff(t *testing.T) {
 	a, c, api, f, root := newBrokerFixture(t)
 	f.badGroup = true

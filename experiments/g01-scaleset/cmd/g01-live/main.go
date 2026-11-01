@@ -19,6 +19,7 @@ import (
 
 	"github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/livecanary"
 	"github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/liveworker"
+	"github.com/1XP-AI/gh-runnerd/experiments/g02-auth/handoff"
 )
 
 func buildRevision() (string, bool) {
@@ -52,6 +53,10 @@ var pairedPrepareJournalForCommand = livecanary.PreparePairedJournal
 var prepareWorkerJournalForCommand = liveworker.PrepareJournal
 var prepareReplacementJournalForCommand = livecanary.PrepareSessionReplacementJournal
 var prepareJITBoundaryJournalForCommand = livecanary.PrepareJITBoundaryJournal
+var prepareReplacementJournalWithRootBindingForCommand = livecanary.PrepareSessionReplacementJournalWithRootBinding
+var prepareJITBoundaryJournalWithRootBindingForCommand = livecanary.PrepareJITBoundaryJournalWithRootBinding
+var prepareRootJournalForCommand = livecanary.PrepareJournalWithRootBinding
+var verifyRootBindingForCommand = livecanary.VerifyControllerExperimentRootBinding
 var newSDKAPIForCommand = func(a livecanary.Approval, c livecanary.Credentials, _ string) (*livecanary.SDKAPI, error) {
 	return livecanary.NewSDKAPI(a, c)
 }
@@ -97,6 +102,7 @@ func runWithPreparationContext(ctx context.Context, args []string, in io.Reader,
 	workerApprovalPath := flags.String("worker-approval", "", "")
 	workerStatePath := flags.String("worker-state-dir", "", "")
 	pairedBinding := flags.String("paired-binding", "", "")
+	rootBinding := flags.String("root-binding", "", "")
 	reject := func() int {
 		fmt.Fprintln(out, "canary refused; approval, authority or private state requires review")
 		return 1
@@ -109,7 +115,7 @@ func runWithPreparationContext(ctx context.Context, args []string, in io.Reader,
 		if ctx == nil || ctx.Err() != nil {
 			return reject()
 		}
-		if *plan || *execute || *pairedExecute || *prepare || *pairedPrepare || *prepareWorker || *pairedBinding != "" || *approvalPath == "" || *statePath == "" || *phase == "" {
+		if *plan || *execute || *pairedExecute || *prepare || *pairedPrepare || *prepareWorker || *pairedBinding != "" || *rootBinding != "" || *approvalPath == "" || *statePath == "" || *phase == "" {
 			return reject()
 		}
 		a, e := livecanary.ReadApproval(*approvalPath)
@@ -132,6 +138,9 @@ func runWithPreparationContext(ctx context.Context, args []string, in io.Reader,
 		return 0
 	}
 	if *experimentalMode != "" {
+		return reject()
+	}
+	if *rootBinding != "" && !*prepare {
 		return reject()
 	}
 
@@ -162,15 +171,15 @@ func runWithPreparationContext(ctx context.Context, args []string, in io.Reader,
 		return reject()
 	}
 	if *prepareWorker {
-		if *phase != "" || workerInputs || *pairedBinding != "" || prepareWorkerJournalForCommand == nil {
+		if *phase != "" || workerInputs || *pairedBinding != "" || *rootBinding != "" || prepareWorkerJournalForCommand == nil {
 			return reject()
 		}
 	} else if *pairedExecute {
-		if *phase != "" || *workerApprovalPath == "" || *workerStatePath == "" || *pairedBinding == "" {
+		if *phase != "" || *workerApprovalPath == "" || *workerStatePath == "" || *pairedBinding == "" || *rootBinding != "" {
 			return reject()
 		}
 	} else if *pairedPrepare {
-		if *phase != "" || workerInputs || *pairedBinding != "" {
+		if *phase != "" || workerInputs || *pairedBinding != "" || *rootBinding != "" {
 			return reject()
 		}
 	} else if *phase == "" || workerInputs || *pairedBinding != "" {
@@ -198,6 +207,14 @@ func runWithPreparationContext(ctx context.Context, args []string, in io.Reader,
 	revision, ok := revisionForBuild()
 	if !ok || revision != a.HarnessSHA {
 		return reject()
+	}
+	var expectedRootBinding *handoff.RootBinding
+	if *rootBinding != "" {
+		binding, e := handoff.DecodeStrictRootBinding([]byte(*rootBinding))
+		if e != nil || verifyRootBindingForCommand(binding) != nil {
+			return reject()
+		}
+		expectedRootBinding = &binding
 	}
 	var worker liveworker.Approval
 	var binding livecanary.PairedTerminalBinding
@@ -228,14 +245,41 @@ func runWithPreparationContext(ctx context.Context, args []string, in io.Reader,
 		}
 		var receipt livecanary.PreparationReceipt
 		var e error
-		if *phase == "before-jit" || *phase == "jit-loss" {
+		if expectedRootBinding != nil {
+			switch {
+			case *phase == "before-jit" || *phase == "jit-loss":
+				if prepareJITBoundaryJournalWithRootBindingForCommand == nil {
+					return reject()
+				}
+				receipt, e = prepareJITBoundaryJournalWithRootBindingForCommand(*statePath, a, *approvalPath, *phase, *expectedRootBinding)
+			case *phase == "session-replacement":
+				if prepareReplacementJournalWithRootBindingForCommand == nil {
+					return reject()
+				}
+				receipt, e = prepareReplacementJournalWithRootBindingForCommand(*statePath, a, *approvalPath, *expectedRootBinding)
+			default:
+				if prepareRootJournalForCommand == nil {
+					return reject()
+				}
+				receipt, e = prepareRootJournalForCommand(*statePath, a, *phase, *expectedRootBinding)
+			}
+		} else if *phase == "before-jit" || *phase == "jit-loss" {
+			if prepareJITBoundaryJournalForCommand == nil {
+				return reject()
+			}
 			receipt, e = prepareJITBoundaryJournalForCommand(*statePath, a, *approvalPath, *phase)
 		} else if *phase == "session-replacement" {
+			if prepareReplacementJournalForCommand == nil {
+				return reject()
+			}
 			receipt, e = prepareReplacementJournalForCommand(*statePath, a, *approvalPath)
 		} else {
 			receipt, e = prepareJournal(*statePath, a, *phase)
 		}
 		if e != nil {
+			return reject()
+		}
+		if expectedRootBinding != nil && (receipt.RootBinding == nil || !receipt.RootBinding.Equal(*expectedRootBinding)) {
 			return reject()
 		}
 		if json.NewEncoder(out).Encode(receipt) != nil {

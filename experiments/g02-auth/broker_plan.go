@@ -8,6 +8,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/1XP-AI/gh-runnerd/experiments/g02-auth/handoff"
 )
 
 const pairedWorkerImage = "ghcr.io/actions/actions-runner@sha256:9644537b29b4799cb752a2f23a45a1e603cf74c3c5998241a1533f0e8c3dc649"
@@ -307,24 +309,28 @@ func openBrokerWorkerPlan(path, statePath, controllerStatePath string, a BrokerA
 // Private prepared inputs are constructed only after the front door verifies
 // source, binary, authority and private paths. Test launchers are synthetic.
 type brokerControllerPlan struct {
-	approval           BrokerApproval
-	controller         controllerApproval
-	raw                []byte
-	state              *os.Root
-	statePath          string
-	stateInfo          os.FileInfo
-	snapshot           *os.File
-	snapshotInfo       os.FileInfo
-	journal            *brokerJournal
-	binaryCheck        func() error
-	localPrepare       func(context.Context, string) (brokerPreparationReceipt, error)
-	preparationReceipt brokerPreparationReceipt
-	provenance         *BrokerProvenanceReceipt
-	prepared           *brokerPreparedState
-	worker             *brokerWorkerPlan
-	handoff            *brokerHandoffAssembly
-	receiptRaw         []byte
-	launch             func(context.Context, []byte, string) error
+	approval     BrokerApproval
+	controller   controllerApproval
+	raw          []byte
+	state        *os.Root
+	statePath    string
+	stateInfo    os.FileInfo
+	snapshot     *os.File
+	snapshotInfo os.FileInfo
+	journal      *brokerJournal
+	binaryCheck  func() error
+	localPrepare func(context.Context, string) (brokerPreparationReceipt, error)
+	inputSource  func(context.Context) (brokerInput, error)
+	// Root binding is currently scoped to the controller reusable-callee path;
+	// paired-terminal keeps its distinct preparation contract unchanged.
+	preparationRootBinding *handoff.RootBinding
+	preparationReceipt     brokerPreparationReceipt
+	provenance             *BrokerProvenanceReceipt
+	prepared               *brokerPreparedState
+	worker                 *brokerWorkerPlan
+	handoff                *brokerHandoffAssembly
+	receiptRaw             []byte
+	launch                 func(context.Context, []byte, string) error
 }
 
 func (p *brokerControllerPlan) close() {

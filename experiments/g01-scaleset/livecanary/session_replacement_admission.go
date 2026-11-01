@@ -54,6 +54,17 @@ func replacementAdmission(a Approval, j *FileJournal, raw string, events []Event
 func PrepareSessionReplacementJournal(directory string, a Approval, approvalPath string) (PreparationReceipt, error) {
 	return prepareSessionReplacementJournal(directory, a, approvalPath, OpenJournal)
 }
+
+func PrepareSessionReplacementJournalWithRootBinding(directory string, a Approval, approvalPath string, expected handoff.RootBinding) (PreparationReceipt, error) {
+	return prepareSessionReplacementJournalWithRootBinding(directory, a, approvalPath, expected, OpenJournal)
+}
+
+func prepareSessionReplacementJournalWithRootBinding(directory string, a Approval, approvalPath string, expected handoff.RootBinding, open func(string, Approval) (*FileJournal, error)) (PreparationReceipt, error) {
+	return prepareWithControllerRootBinding(expected, func() (PreparationReceipt, error) {
+		return prepareSessionReplacementJournal(directory, a, approvalPath, open)
+	})
+}
+
 func prepareSessionReplacementJournal(directory string, a Approval, path string, open func(string, Approval) (*FileJournal, error)) (PreparationReceipt, error) {
 	var current Approval
 	snap, err := readPairedApproval(path, &current, DecodeStrict)

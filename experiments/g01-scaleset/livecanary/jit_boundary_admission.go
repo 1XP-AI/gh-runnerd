@@ -61,6 +61,17 @@ func jitBoundaryAdmission(a Approval, j *FileJournal, raw, phase string, events 
 func PrepareJITBoundaryJournal(directory string, a Approval, approvalPath, phase string) (PreparationReceipt, error) {
 	return prepareJITBoundaryJournal(directory, a, approvalPath, phase, OpenJournal)
 }
+
+func PrepareJITBoundaryJournalWithRootBinding(directory string, a Approval, approvalPath, phase string, expected handoff.RootBinding) (PreparationReceipt, error) {
+	return prepareJITBoundaryJournalWithRootBinding(directory, a, approvalPath, phase, expected, OpenJournal)
+}
+
+func prepareJITBoundaryJournalWithRootBinding(directory string, a Approval, approvalPath, phase string, expected handoff.RootBinding, open func(string, Approval) (*FileJournal, error)) (PreparationReceipt, error) {
+	return prepareWithControllerRootBinding(expected, func() (PreparationReceipt, error) {
+		return prepareJITBoundaryJournal(directory, a, approvalPath, phase, open)
+	})
+}
+
 func prepareJITBoundaryJournal(directory string, a Approval, path, phase string, open func(string, Approval) (*FileJournal, error)) (PreparationReceipt, error) {
 	var current Approval
 	snap, err := readPairedApproval(path, &current, DecodeStrict)

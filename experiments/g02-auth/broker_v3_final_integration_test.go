@@ -22,7 +22,7 @@ type brokerV3RunFixture struct {
 	workflowGET *int
 }
 
-func newBrokerV3RunFixture(t *testing.T, phase string, changedCallee bool) brokerV3RunFixture {
+func newBrokerV3RunFixture(t *testing.T, phase string, changedCallee bool, rootMismatch ...bool) brokerV3RunFixture {
 	t.Helper()
 	a, candidate, _, fixture, attempt := newBrokerFixture(t)
 	a.Mode, a.Phase = "controller", phase
@@ -49,7 +49,11 @@ func newBrokerV3RunFixture(t *testing.T, phase string, changedCallee bool) broke
 	if err := os.Mkdir(attempt, 0700); err != nil {
 		t.Fatal(err)
 	}
-	controllerState := filepath.Join(parent, "controller-state")
+	controllerStateName := "controller-state"
+	if len(rootMismatch) == 1 && rootMismatch[0] {
+		controllerStateName = "root-mismatch-controller-state"
+	}
+	controllerState := filepath.Join(parent, controllerStateName)
 	if err := os.Mkdir(controllerState, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -195,5 +199,25 @@ func TestBrokerExperimentV3FinalGETFencesCalleeBeforeMintAndHandoff(t *testing.T
 				}
 			})
 		}
+	}
+}
+
+func TestBrokerExperimentV3ControllerRootMismatchRefusesBeforeManagementInputAndMint(t *testing.T) {
+	fixture := newBrokerV3RunFixture(t, "create", false, true)
+	management, err := json.Marshal(brokerInput{PEM: string(fixture.candidate.PEM), VerificationToken: "synthetic-private-workflow-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation := brokerV3Pipe(t, []byte("synthetic-private-workflow-token"))
+	workflowSeed := brokerV3Pipe(t, bytes.Repeat([]byte{1}, ed25519.SeedSize))
+	issuerSeed := brokerV3Pipe(t, bytes.Repeat([]byte{71}, ed25519.SeedSize))
+	input := brokerV3Pipe(t, management)
+	result, runErr := RunBrokerExperimentWithInputs(context.Background(), fixture.files, input, observation, workflowSeed, issuerSeed)
+	journal, readErr := os.ReadFile(filepath.Join(fixture.files.StateDirectory, "broker.jsonl"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if runErr == nil || fixture.fixture.tokenCalls != 0 || result.Status != "" || bytes.Contains(journal, []byte("token_request_started")) || bytes.Contains(journal, []byte("controller_handoff_started")) {
+		t.Fatalf("root mismatch crossed management fence: result=%+v err=%v mints=%d journal=%s", result, runErr, fixture.fixture.tokenCalls, journal)
 	}
 }

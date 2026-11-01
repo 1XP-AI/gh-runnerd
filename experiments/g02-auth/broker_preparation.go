@@ -3,6 +3,7 @@ package enrollment
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"os/exec"
@@ -10,19 +11,22 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/1XP-AI/gh-runnerd/experiments/g02-auth/handoff"
 )
 
 type brokerPreparationReceipt struct {
-	Version            int         `json:"version"`
-	Status             string      `json:"status"`
-	Phase              string      `json:"phase"`
-	ApprovalDigest     string      `json:"approval_digest"`
-	State              brokerInode `json:"state"`
-	Journal            brokerInode `json:"journal"`
-	Claim              brokerInode `json:"claim"`
-	AdmissionDirectory brokerInode `json:"admission_directory"`
-	JournalDigest      string      `json:"journal_digest"`
-	ClaimDigest        string      `json:"claim_digest"`
+	Version            int                  `json:"version"`
+	Status             string               `json:"status"`
+	Phase              string               `json:"phase"`
+	ApprovalDigest     string               `json:"approval_digest"`
+	State              brokerInode          `json:"state"`
+	Journal            brokerInode          `json:"journal"`
+	Claim              brokerInode          `json:"claim"`
+	AdmissionDirectory brokerInode          `json:"admission_directory"`
+	JournalDigest      string               `json:"journal_digest"`
+	ClaimDigest        string               `json:"claim_digest"`
+	RootBinding        *handoff.RootBinding `json:"root_binding,omitempty"`
 }
 
 func (r brokerPreparationReceipt) valid(p *brokerControllerPlan) bool {
@@ -35,14 +39,20 @@ func (r brokerPreparationReceipt) valid(p *brokerControllerPlan) bool {
 		// cleanup receipt lending cleanup authority to the full pair.
 		phase = "paired-terminal"
 	}
-	return r.Version == 1 && r.Status == "controller_journal_prepared" && r.Phase == phase && r.ApprovalDigest == brokerDigest(p.controller) && r.State.Device != 0 && r.State.Inode != 0 && r.Journal.Device != 0 && r.Journal.Inode != 0 && r.Claim.Device != 0 && r.Claim.Inode != 0 && brokerSHA256.MatchString(r.JournalDigest) && brokerSHA256.MatchString(r.ClaimDigest)
+	if r.Version != 1 || r.Status != "controller_journal_prepared" || r.Phase != phase || r.ApprovalDigest != brokerDigest(p.controller) || r.State.Device == 0 || r.State.Inode == 0 || r.Journal.Device == 0 || r.Journal.Inode == 0 || r.Claim.Device == 0 || r.Claim.Inode == 0 || !brokerSHA256.MatchString(r.JournalDigest) || !brokerSHA256.MatchString(r.ClaimDigest) {
+		return false
+	}
+	if p.preparationRootBinding == nil {
+		return r.RootBinding == nil
+	}
+	return r.RootBinding != nil && r.RootBinding.Equal(*p.preparationRootBinding)
 }
 
 func (r brokerPreparationReceipt) validWorker(p *brokerWorkerPlan) bool {
 	if p == nil || p.stateInfo == nil {
 		return false
 	}
-	return r.Version == 1 && r.Status == "worker_journal_prepared" && r.Phase == "paired-worker" && r.ApprovalDigest == brokerDigest(p.approval) && r.State == brokerFileIdentity(p.stateInfo) && r.Journal.Device != 0 && r.Journal.Inode != 0 && r.Claim.Device != 0 && r.Claim.Inode != 0 && r.AdmissionDirectory.Device != 0 && r.AdmissionDirectory.Inode != 0 && brokerSHA256.MatchString(r.JournalDigest) && brokerSHA256.MatchString(r.ClaimDigest)
+	return r.Version == 1 && r.Status == "worker_journal_prepared" && r.Phase == "paired-worker" && r.RootBinding == nil && r.ApprovalDigest == brokerDigest(p.approval) && r.State == brokerFileIdentity(p.stateInfo) && r.Journal.Device != 0 && r.Journal.Inode != 0 && r.Claim.Device != 0 && r.Claim.Inode != 0 && r.AdmissionDirectory.Device != 0 && r.AdmissionDirectory.Inode != 0 && brokerSHA256.MatchString(r.JournalDigest) && brokerSHA256.MatchString(r.ClaimDigest)
 }
 
 type brokerPreparationOutput struct {
@@ -63,13 +73,24 @@ func (o *brokerPreparationOutput) Write(p []byte) (int, error) {
 	o.data = append(o.data, p...)
 	return len(p), nil
 }
-func invokeBrokerPreparation(parent context.Context, binary *verifiedBrokerBinary, workingDirectory, approvalPath, stateDirectory, phase string) (receipt brokerPreparationReceipt, err error) {
+func invokeBrokerPreparation(parent context.Context, binary *verifiedBrokerBinary, workingDirectory, approvalPath, stateDirectory, phase string, expected ...*handoff.RootBinding) (receipt brokerPreparationReceipt, err error) {
 	if !brokerPhases[phase] || binary.check() != nil {
+		return receipt, errBroker
+	}
+	if len(expected) > 1 || len(expected) == 1 && (expected[0] == nil || !expected[0].Valid()) {
 		return receipt, errBroker
 	}
 	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
-	command := exec.CommandContext(ctx, binary.path, "--prepare-approved-journal", "--approval", approvalPath, "--state-dir", stateDirectory, "--phase", phase)
+	args := []string{"--prepare-approved-journal", "--approval", approvalPath, "--state-dir", stateDirectory, "--phase", phase}
+	if len(expected) == 1 {
+		data, e := json.Marshal(expected[0])
+		if e != nil || len(data) > handoff.MaxRootBindingBytes {
+			return receipt, errBroker
+		}
+		args = append(args, "--root-binding", string(data))
+	}
+	command := exec.CommandContext(ctx, binary.path, args...)
 	command.Dir = workingDirectory
 	command.Env = []string{"LANG=C", "LC_ALL=C"}
 	command.Stdin = bytes.NewReader(nil)
