@@ -53,7 +53,10 @@ var pairedPrepareJournalForCommand = livecanary.PreparePairedJournal
 var prepareWorkerJournalForCommand = liveworker.PrepareJournal
 var prepareReplacementJournalForCommand = livecanary.PrepareSessionReplacementJournal
 var prepareJITBoundaryJournalForCommand = livecanary.PrepareJITBoundaryJournal
+var prepareReplacementJournalWithRootBindingForCommand = livecanary.PrepareSessionReplacementJournalWithRootBinding
+var prepareJITBoundaryJournalWithRootBindingForCommand = livecanary.PrepareJITBoundaryJournalWithRootBinding
 var prepareRootJournalForCommand = livecanary.PrepareJournalWithRootBinding
+var verifyRootBindingForCommand = livecanary.VerifyControllerExperimentRootBinding
 var newSDKAPIForCommand = func(a livecanary.Approval, c livecanary.Credentials, _ string) (*livecanary.SDKAPI, error) {
 	return livecanary.NewSDKAPI(a, c)
 }
@@ -208,7 +211,7 @@ func runWithPreparationContext(ctx context.Context, args []string, in io.Reader,
 	var expectedRootBinding *handoff.RootBinding
 	if *rootBinding != "" {
 		binding, e := handoff.DecodeStrictRootBinding([]byte(*rootBinding))
-		if e != nil || livecanary.VerifyControllerExperimentRootBinding(binding) != nil {
+		if e != nil || verifyRootBindingForCommand(binding) != nil {
 			return reject()
 		}
 		expectedRootBinding = &binding
@@ -242,15 +245,34 @@ func runWithPreparationContext(ctx context.Context, args []string, in io.Reader,
 		}
 		var receipt livecanary.PreparationReceipt
 		var e error
-		if *phase == "before-jit" || *phase == "jit-loss" {
-			receipt, e = prepareJITBoundaryJournalForCommand(*statePath, a, *approvalPath, *phase)
-		} else if *phase == "session-replacement" {
-			receipt, e = prepareReplacementJournalForCommand(*statePath, a, *approvalPath)
-		} else if expectedRootBinding != nil {
-			if prepareRootJournalForCommand == nil {
+		if expectedRootBinding != nil {
+			switch {
+			case *phase == "before-jit" || *phase == "jit-loss":
+				if prepareJITBoundaryJournalWithRootBindingForCommand == nil {
+					return reject()
+				}
+				receipt, e = prepareJITBoundaryJournalWithRootBindingForCommand(*statePath, a, *approvalPath, *phase, *expectedRootBinding)
+			case *phase == "session-replacement":
+				if prepareReplacementJournalWithRootBindingForCommand == nil {
+					return reject()
+				}
+				receipt, e = prepareReplacementJournalWithRootBindingForCommand(*statePath, a, *approvalPath, *expectedRootBinding)
+			default:
+				if prepareRootJournalForCommand == nil {
+					return reject()
+				}
+				receipt, e = prepareRootJournalForCommand(*statePath, a, *phase, *expectedRootBinding)
+			}
+		} else if *phase == "before-jit" || *phase == "jit-loss" {
+			if prepareJITBoundaryJournalForCommand == nil {
 				return reject()
 			}
-			receipt, e = prepareRootJournalForCommand(*statePath, a, *phase, *expectedRootBinding)
+			receipt, e = prepareJITBoundaryJournalForCommand(*statePath, a, *approvalPath, *phase)
+		} else if *phase == "session-replacement" {
+			if prepareReplacementJournalForCommand == nil {
+				return reject()
+			}
+			receipt, e = prepareReplacementJournalForCommand(*statePath, a, *approvalPath)
 		} else {
 			receipt, e = prepareJournal(*statePath, a, *phase)
 		}

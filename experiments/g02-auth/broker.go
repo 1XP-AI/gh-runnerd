@@ -198,6 +198,27 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 		}
 		defer j.close()
 	}
+	var cred Credential
+	parseInput := func(value brokerInput) error {
+		if (a.AllowVerificationAuthority || v3ReusableCallee) && value.VerificationToken == "" || value.VerificationToken != "" && (!validBrokerToken(value.VerificationToken) || (!a.AllowVerificationAuthority && !v3ReusableCallee)) {
+			return errBroker
+		}
+		candidate := Candidate{AppID: a.AppID, PEM: []byte(value.PEM)}
+		parsed, err := parseCredential(candidate)
+		clear(candidate.PEM)
+		if err != nil {
+			return errBroker
+		}
+		cred = parsed
+		return nil
+	}
+	// Non-deferred broker input is already present at this boundary. Parse it
+	// before resolving or creating the persistent admission claim so malformed
+	// credentials cannot burn a finite slot. Deferred v3 input remains behind
+	// controller preparation and its independent root/receipt guards below.
+	if !deferredInput && parseInput(input) != nil {
+		return BrokerResult{}, errBroker
+	}
 	if api.admissionDirectory == nil {
 		return BrokerResult{}, errBroker
 	}
@@ -253,15 +274,9 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 		if err != nil {
 			return BrokerResult{}, errBroker
 		}
-	}
-	if (a.AllowVerificationAuthority || v3ReusableCallee) && input.VerificationToken == "" || input.VerificationToken != "" && (!validBrokerToken(input.VerificationToken) || (!a.AllowVerificationAuthority && !v3ReusableCallee)) {
-		return BrokerResult{}, errBroker
-	}
-	candidate := Candidate{AppID: a.AppID, PEM: []byte(input.PEM)}
-	defer clear(candidate.PEM)
-	cred, err := parseCredential(candidate)
-	if err != nil {
-		return BrokerResult{}, errBroker
+		if parseInput(input) != nil {
+			return BrokerResult{}, errBroker
+		}
 	}
 
 	// Every authenticated call revalidates the still-held durable claim.

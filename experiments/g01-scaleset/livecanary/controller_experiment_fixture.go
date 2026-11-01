@@ -64,8 +64,20 @@ func PrepareSessionReplacementJournalForExperimentFixture(path string, a Approva
 	})
 }
 
+func PrepareSessionReplacementJournalWithRootBindingForExperimentFixture(path string, a Approval, approvalPath, admission string, expected handoff.RootBinding) (PreparationReceipt, error) {
+	return prepareSessionReplacementJournalWithRootBinding(path, a, approvalPath, expected, func(path string, a Approval) (*FileJournal, error) {
+		return OpenJournalForPairedFixtureAt(path, a, admission)
+	})
+}
+
 func PrepareJITBoundaryJournalForExperimentFixture(path string, a Approval, approvalPath, phase, admission string) (PreparationReceipt, error) {
 	return prepareJITBoundaryJournal(path, a, approvalPath, phase, func(path string, a Approval) (*FileJournal, error) {
+		return OpenJournalForPairedFixtureAt(path, a, admission)
+	})
+}
+
+func PrepareJITBoundaryJournalWithRootBindingForExperimentFixture(path string, a Approval, approvalPath, phase, admission string, expected handoff.RootBinding) (PreparationReceipt, error) {
+	return prepareJITBoundaryJournalWithRootBinding(path, a, approvalPath, phase, expected, func(path string, a Approval) (*FileJournal, error) {
 		return OpenJournalForPairedFixtureAt(path, a, admission)
 	})
 }

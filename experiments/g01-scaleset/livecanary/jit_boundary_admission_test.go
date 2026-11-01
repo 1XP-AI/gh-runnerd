@@ -103,6 +103,59 @@ func TestJITBoundaryPreparationRequiresOriginalFreshCreate(t *testing.T) {
 	}
 }
 
+func TestSpecializedRootAwarePreparationReturnsControllerBinding(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		phase   string
+		prepare func(*testing.T, handoff.RootBinding) (PreparationReceipt, error)
+	}{
+		{name: "before-jit", phase: beforeJITPhase, prepare: func(t *testing.T, expected handoff.RootBinding) (PreparationReceipt, error) {
+			f := newJITBoundaryFixture(t, beforeJITPhase, "")
+			dir, admission := f.base.j.directory, f.base.j.claim.directory
+			f.base.j.Close()
+			path := f.path
+			return prepareJITBoundaryJournalWithRootBinding(dir, f.base.a, path, beforeJITPhase, expected, func(dir string, a Approval) (*FileJournal, error) {
+				return openJournalAtAdmission(dir, a, admission, func(file *os.File) error { return file.Sync() })
+			})
+		}},
+		{name: "jit-loss", phase: "jit-loss", prepare: func(t *testing.T, expected handoff.RootBinding) (PreparationReceipt, error) {
+			f := newJITBoundaryFixture(t, "jit-loss", "")
+			dir, admission := f.base.j.directory, f.base.j.claim.directory
+			f.base.j.Close()
+			return prepareJITBoundaryJournalWithRootBinding(dir, f.base.a, f.path, "jit-loss", expected, func(dir string, a Approval) (*FileJournal, error) {
+				return openJournalAtAdmission(dir, a, admission, func(file *os.File) error { return file.Sync() })
+			})
+		}},
+		{name: "session-replacement", phase: replacementPhase, prepare: func(t *testing.T, expected handoff.RootBinding) (PreparationReceipt, error) {
+			f := newReplacementFixture(t, "old41")
+			path := filepath.Join(filepath.Dir(f.base.j.directory), "root-aware-approval.json")
+			if err := os.WriteFile(path, f.handoff.snapshot, 0600); err != nil {
+				t.Fatal(err)
+			}
+			dir, admission := f.base.j.directory, f.base.j.claim.directory
+			f.base.j.Close()
+			return prepareSessionReplacementJournalWithRootBinding(dir, f.base.a, path, expected, func(dir string, a Approval) (*FileJournal, error) {
+				return openJournalAtAdmission(dir, a, admission, func(file *os.File) error { return file.Sync() })
+			})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			controller := newControllerV3HandoffFixture(t, tc.phase)
+			oldPolicy := controllerExperimentPolicyJSON
+			controllerExperimentPolicyJSON = string(controller.policyRaw)
+			t.Cleanup(func() { controllerExperimentPolicyJSON = oldPolicy })
+			expected, err := handoff.NewRootBinding(controller.workflow, controller.issuer)
+			if err != nil {
+				t.Fatal(err)
+			}
+			receipt, err := tc.prepare(t, expected)
+			if err != nil || receipt.RootBinding == nil || !receipt.RootBinding.Equal(expected) {
+				t.Fatalf("specialized root-aware preparation lost controller binding: receipt=%+v err=%v", receipt, err)
+			}
+		})
+	}
+}
+
 func TestJITBoundaryAtomicPrefixBeforeCredentialInput(t *testing.T) {
 	for _, phase := range []string{beforeJITPhase, "jit-loss"} {
 		t.Run(phase, func(t *testing.T) {

@@ -224,17 +224,23 @@ func PrepareJournalWithRootBinding(directory string, a Approval, phase string, e
 	return prepareJournalWithRootBinding(directory, a, phase, expected, OpenJournal)
 }
 
-func prepareJournalWithRootBinding(directory string, a Approval, phase string, expected handoff.RootBinding, open func(string, Approval) (*FileJournal, error)) (PreparationReceipt, error) {
+func prepareWithControllerRootBinding(expected handoff.RootBinding, prepare func() (PreparationReceipt, error)) (PreparationReceipt, error) {
 	actual, err := controllerExperimentRootBinding()
 	if err != nil || !expected.Equal(actual) {
 		return PreparationReceipt{}, ErrApproval
 	}
-	receipt, err := prepareJournal(directory, a, phase, open)
+	receipt, err := prepare()
 	if err != nil {
 		return PreparationReceipt{}, err
 	}
 	receipt.RootBinding = &actual
 	return receipt, nil
+}
+
+func prepareJournalWithRootBinding(directory string, a Approval, phase string, expected handoff.RootBinding, open func(string, Approval) (*FileJournal, error)) (PreparationReceipt, error) {
+	return prepareWithControllerRootBinding(expected, func() (PreparationReceipt, error) {
+		return prepareJournal(directory, a, phase, open)
+	})
 }
 
 // PreparePairedJournal is the paired terminal's explicit local preparation
