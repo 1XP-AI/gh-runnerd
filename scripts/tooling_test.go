@@ -3736,7 +3736,9 @@ func FuzzG02Fixture(f *testing.F) {
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPaired -skip ^TestPairedBroker(PrepareReviewedG01LiveBinary|RealCadenceChildExceedsThirtySeconds)$ ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -skip ^TestPaired|^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint)$|^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
 	}
-	if out, err := toolingRun(t, root, env, "bash", "scripts/check-offline-experiments.sh"); err != nil {
+	// This positive control intentionally runs the full default module list.
+	// The bounded G01 partitions add enough subprocesses to exceed the old limit.
+	if out, err := toolingRunWithTimeout(t, 90*time.Second, root, env, "bash", "scripts/check-offline-experiments.sh"); err != nil {
 		t.Fatalf("default G02 positive control: %s", out)
 	}
 	sentinelData, err := os.ReadFile(sentinelLogPath)
@@ -3798,6 +3800,10 @@ func FuzzG02Fixture(f *testing.F) {
 	if r1Count != 1 {
 		t.Fatalf("offline gate ran the R1 fixture invocation %d times; wrapper log:\n%s", r1Count, log)
 	}
+	// The full default module list was proven above. Keep negative fixtures
+	// scoped to G02 so unrelated suites cannot consume their failure-path budget.
+	g02Env := append([]string(nil), env...)
+	g02Env = append(g02Env, "OFFLINE_EXPERIMENT_MODULE=experiments/g02-auth")
 	for partition, invocation := range g02Invocations {
 		var group []fixture
 		for _, tc := range fixtures {
@@ -3817,7 +3823,7 @@ func FuzzG02Fixture(f *testing.F) {
 		if err := os.WriteFile(sentinelLogPath, nil, 0600); err != nil {
 			t.Fatal(err)
 		}
-		out, runErr := toolingRun(t, root, env, "bash", "scripts/check-offline-experiments.sh")
+		out, runErr := toolingRun(t, root, g02Env, "bash", "scripts/check-offline-experiments.sh")
 		if errors.Is(runErr, context.DeadlineExceeded) {
 			t.Fatalf("default G02 partition %d timed out before reporting its fixture failure: %s", partition, out)
 		}
@@ -3939,6 +3945,7 @@ func TestPairedBrokerRealCadenceChildExceedsThirtySeconds(t *testing.T) {
 		"TOOLING_GO_LOG=" + logPath,
 		"TOOLING_SENTINEL_LOG=" + sentinelLogPath,
 		"TMPDIR=" + tmp,
+		"OFFLINE_EXPERIMENT_MODULE=experiments/g02-auth",
 	}
 	out, runErr := toolingRun(t, root, env, "bash", "scripts/check-offline-experiments.sh")
 	if runErr == nil {
@@ -4128,6 +4135,7 @@ func toolingG02CleanupEnv(t *testing.T, wrapperBody string) (root, tmp string, e
 			"TOOLING_WRAPPER_PID_FILE=" + wrapperPIDFile,
 			"TOOLING_HOLD_RELEASE=" + holdRelease,
 			"TMPDIR=" + tmp,
+			"OFFLINE_EXPERIMENT_MODULE=experiments/g02-auth",
 		}
 		return root, tmp, env
 	}
@@ -4141,6 +4149,7 @@ func toolingG02CleanupEnv(t *testing.T, wrapperBody string) (root, tmp string, e
 		"TOOLING_WRAPPER_PID_FILE=" + wrapperPIDFile,
 		"TOOLING_HOLD_RELEASE=" + holdRelease,
 		"TMPDIR=" + tmp,
+		"OFFLINE_EXPERIMENT_MODULE=experiments/g02-auth",
 	}
 	return root, tmp, env
 }
@@ -4374,7 +4383,7 @@ case "$*" in
   test -x "$G01_PHASE_BROKER_TEST_BINARY"
   printf 'jit-boundary %s\n' "$G01_PHASE_HELPER_DIR" >> "$PHASE_ROUTE_LOG"
   ;;
- *'-tags=g01_pair_fixture -skip ^Test(Paired|SessionReplacement|JITBoundary|ExperimentalAcquireLossCommand$|ExperimentalDrainCommand$|ExperimentalACKBoundaryCommand$) ./livecanary'*)
+ *'-tags=g01_pair_fixture -run ^Test[D-F] -skip ^Test(Paired|SessionReplacement|JITBoundary|ExperimentalAcquireLossCommand$|ExperimentalDrainCommand$|ExperimentalACKBoundaryCommand$) ./livecanary'*)
   if [ ! -x "${G01_PHASE_CONTROLLER_TEST_BINARY:-}" ] || [ ! -x "${G01_PHASE_BROKER_TEST_BINARY:-}" ]; then
    printf 'missing-current-source-command-helpers\n' >&2
    exit 31
