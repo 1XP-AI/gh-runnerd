@@ -516,6 +516,23 @@ delete fallback is enabled. The canary remains unrun and unauthorized. Issue
 the remaining live-readiness evidence, concrete canary authorization, and a
 safe conditional cleanup path.
 
+### Independent offline review triage — 2026-11-03
+
+The exact-head Luna Max review at `f88f0c8d4eb3365f7d52d9267e59ec4801f778b2`
+approved the offline/static v3 broker implementation and held live qualification.
+Three P2 implementation gaps were fixed in subsequent local commits
+`d5859f5093893fd7aa22a7d3a45a4f0e9ac6c3e1` and
+`432f0ce6ecce886eed2857e2c189e22d1ecb9d87`: reject legacy controller policy
+selection, repeat the final workflow-run read after write-token provider
+preflight, and verify the pinned SDK checksum in both broker and child build
+admission. The remaining token lifetime and non-atomic provider race are recorded
+as live limitations; no live token, provider, runner, or host operation occurred.
+
+The issue remains OPEN and Project #2 remains In progress. Conditional Scale Set
+cleanup, exact-final-head review/quick check, trusted runtime and custody evidence,
+and concrete separately authorized canary execution are still gates. The offline
+tests do not satisfy any live acceptance criterion.
+
 ## Minimal execution phases
 
 Run phases serially. Each phase begins by verifying that only its owned resources

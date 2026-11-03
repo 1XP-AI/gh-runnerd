@@ -4,6 +4,11 @@ Status: implemented and tested with **synthetic HTTP and subprocess fixtures onl
 
 The current public CLI has one executable broker route: `--execute-experimental-broker`, which selects only a sealed PublicPolicy v3 reusable-callee grant and a nonzero GroupPolicy v2 before credential input, API construction, token mint or child launch. The former `--execute-approved-broker` CLI flag is rejected, and `RunBroker` remains only as an inert fail-closed compatibility stub. `discover-actions-host` is not available through the public CLI. These local gates do not authorize live use.
 
+The `g01-live` controller selector also requires the sealed v3 reusable-callee
+policy and nonzero GroupPolicy v2. It rejects legacy v1/v2 grants, including a
+zero-GroupPolicy v1 grant, before reading approval/state or opening a journal;
+there is no controller `SelectGroup` fallback.
+
 ## Causal order and authority
 
 The current experimental broker additionally supports explicit
@@ -25,8 +30,8 @@ Runner-group and private repository inspection require an installation/user auth
 2. Flush a non-secret token issuance intent.
 3. Flush the non-secret read-token intent, then request an installation token with repository access restricted to `repository_ids: [exact_canary_id]` and exactly `organization_self_hosted_runners: read` plus `metadata: read`. The organization-only scope requests only `organization_self_hosted_runners: read` and no repository IDs.
 4. Validate the returned read-token scope and expiry, then use it to verify the exact private non-fork repository (for repository scope), the named nondefault/noninherited runner group, public repositories explicitly disallowed, selected-only visibility, exact workflow restriction and the one selected repository. A failed check stops before any write token is requested. This first preflight is read-only.
-5. After read-only preflight succeeds, repeat the final reusable-callee workflow GET. Only then request the management installation token with the exact existing write scope. Validate its returned permission/repository scope and repeat provider-state preflight with that token before any handoff or child effect. A mismatch at this second preflight still refuses handoff, but the already-issued write token may remain valid until expiry.
-6. Only after both provider-state checks, hand credentials to the exact reviewed controller child. No authentication-discovery route is supported.
+5. After read-only preflight succeeds, repeat the final reusable-callee workflow GET. Only then request the management installation token with the exact existing write scope. Validate its returned permission/repository scope and repeat provider-state preflight with that token. Then repeat the same workflow GET immediately before handoff. A mismatch at either later check refuses child handoff, but any already-issued token may remain valid until expiry.
+6. Only after both provider-state checks and the final workflow check, hand credentials to the exact reviewed controller child. No authentication-discovery route is supported.
 
 Repository restriction does **not** cryptographically restrict the organization-level self-hosted-runners permission to one runner group. The broker and reviewed controller enforce the selected canary policy, under the trusted-controller assumption. This boundary assumes a trusted controller UID and host administrators; file modes and a stdin pipe do not isolate either. The read-only preflight token is issued by the existing App; no separate user or organization credential is requested. The broker never adds Actions permission to the G02 App or mints the separate workflow authority.
 
