@@ -664,25 +664,44 @@ func (f *acquireLossCommandFixture) guardControlsForPhase(events []Event, phase 
 	if e != nil || !bytes.Contains(claim, []byte(`"slot":"`+phase+`"`)) {
 		t.Fatal("original occupied broker claim missing")
 	}
-	// Fresh valid inputs may be consumed. Require valid observation plus the
-	// exact synced approval snapshot and unchanged occupied claim, establishing
-	// admission-stage refusal rather than a bad seed/payload/setup rejection.
+	// A confirmed account-ledger workflow GET permanently occupies this phase.
+	// Older source without account-level GET accounting reaches the existing
+	// broker admission fence after observation; both paths must avoid reminting.
 	fresh := f.attempt + "-fresh"
+	workflowGETAccounted := bytes.Contains(claim, []byte(`"kind":"workflow_provenance_get_confirmed"`))
 	f.brokerMu.Lock()
 	callCount := len(f.transport.calls)
+	mintsBefore := f.transport.mints
+	readOnlyMintsBefore := f.transport.readOnlyMints
+	managementMintsBefore := f.transport.managementMints
+	revocationsBefore := f.transport.revocations
 	f.transport.attempt = fresh
 	f.brokerMu.Unlock()
 	f.run(f.broker, f.brokerArgs(fresh), inputs...)
 	f.brokerMu.Lock()
-	calls, mints := append([]string(nil), f.transport.calls[callCount:]...), f.transport.mints
-	readOnlyMints, managementMints, revocations := f.transport.readOnlyMints, f.transport.managementMints, f.transport.revocations
+	calls := append([]string(nil), f.transport.calls[callCount:]...)
+	mintsAfter := f.transport.mints
+	readOnlyMintsAfter := f.transport.readOnlyMints
+	managementMintsAfter := f.transport.managementMints
+	revocationsAfter := f.transport.revocations
 	f.brokerMu.Unlock()
-	if !reflect.DeepEqual(calls, []string{"GET " + workflowRunFixturePath(f.transport)}) || mints != 2 || readOnlyMints != 1 || managementMints != 1 || revocations != 1 {
-		t.Error("fresh valid broker attempt did not reach observation/admission without remint")
+	wantCalls := []string{"GET " + workflowRunFixturePath(f.transport)}
+	if workflowGETAccounted {
+		wantCalls = nil
 	}
-	snapshot, e := os.ReadFile(filepath.Join(fresh, "controller-approval.json"))
-	if e != nil || !bytes.Equal(snapshot, f.raw) {
-		t.Error("fresh broker admission exact approval snapshot absent")
+	if !reflect.DeepEqual(calls, wantCalls) || mintsAfter != mintsBefore || readOnlyMintsAfter != readOnlyMintsBefore || managementMintsAfter != managementMintsBefore || revocationsAfter != revocationsBefore {
+		t.Error("fresh occupied-phase broker attempt crossed the expected provider or token boundary")
+	}
+	snapshotPath := filepath.Join(fresh, "controller-approval.json")
+	if workflowGETAccounted {
+		if _, e := os.Lstat(snapshotPath); !os.IsNotExist(e) {
+			t.Error("fresh account-ledger occupied-phase attempt created an approval snapshot")
+		}
+	} else {
+		snapshot, e := os.ReadFile(snapshotPath)
+		if e != nil || !bytes.Equal(snapshot, f.raw) {
+			t.Error("fresh legacy attempt did not reach the existing admission fence")
+		}
 	}
 	claimAfter, _ := os.ReadFile(claimPath)
 	after, _ := os.ReadFile(journal)

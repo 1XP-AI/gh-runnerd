@@ -647,25 +647,61 @@ func (f *ackCommandFixture) assertBroker() {
 	}
 	// Completion preserves the permanent occupied claim and all its provenance.
 	ledger := bytes.Split(bytes.TrimSpace(f.read(filepath.Join(f.admission, "broker-admission.jsonl"))), []byte{'\n'})
-	wantLedger := 2 + wantComplete
+	workflowEvents := 0
+	claimIndex := 1
+	for claimIndex < len(ledger) {
+		var event struct {
+			Kind string `json:"kind"`
+		}
+		if json.Unmarshal(ledger[claimIndex], &event) != nil {
+			f.t.Error("ACK admission event decode differs")
+			break
+		}
+		if event.Kind == "claim" {
+			break
+		}
+		if strings.HasPrefix(event.Kind, "workflow_provenance_get_") {
+			workflowEvents++
+		}
+		claimIndex++
+	}
+	wantLedger := 2 + workflowEvents + wantComplete
+	if workflowEvents != 0 && workflowEvents != 2 {
+		f.t.Errorf("ACK workflow provenance lifecycle events=%d, want none or a start/confirmation pair", workflowEvents)
+	}
 	if v3 {
 		wantLedger += 2 // read-token lifecycle start and confirmation surround completion.
 	}
-	claimIndex, completionIndex := 1, 2
+	completionIndex := claimIndex + 1
 	if v3 {
-		completionIndex = 4
+		completionIndex += 2
 	}
-	if len(ledger) != wantLedger {
-		f.t.Error("ACK exact broker claim/completion count differs")
+	if len(ledger) != wantLedger || claimIndex >= len(ledger) {
+		f.t.Errorf("ACK exact broker claim/completion count differs: events=%d want=%d claim-index=%d", len(ledger), wantLedger, claimIndex)
 	} else {
 		var claimIdentity struct {
-			Kind    string          `json:"kind"`
-			Slot    string          `json:"slot"`
-			Attempt json.RawMessage `json:"attempt"`
-			Journal json.RawMessage `json:"journal"`
+			Kind       string          `json:"kind"`
+			Slot       string          `json:"slot"`
+			Attempt    json.RawMessage `json:"attempt"`
+			Journal    json.RawMessage `json:"journal"`
+			Provenance struct {
+				Source string `json:"source"`
+			} `json:"provenance"`
 		}
 		if json.Unmarshal(ledger[claimIndex], &claimIdentity) != nil || claimIdentity.Kind != "claim" {
 			f.t.Error("ACK durable broker claim unavailable")
+		}
+		if workflowEvents == 2 {
+			var started, confirmed struct {
+				Kind    string          `json:"kind"`
+				Slot    string          `json:"slot"`
+				Attempt json.RawMessage `json:"attempt"`
+				Journal json.RawMessage `json:"journal"`
+				Source  string          `json:"source"`
+			}
+			if json.Unmarshal(ledger[1], &started) != nil || json.Unmarshal(ledger[2], &confirmed) != nil || started.Kind != "workflow_provenance_get_started" || confirmed.Kind != "workflow_provenance_get_confirmed" || started.Slot != claimIdentity.Slot || confirmed.Slot != claimIdentity.Slot || !bytes.Equal(started.Attempt, claimIdentity.Attempt) || !bytes.Equal(started.Journal, claimIdentity.Journal) || !bytes.Equal(confirmed.Attempt, claimIdentity.Attempt) || !bytes.Equal(confirmed.Journal, claimIdentity.Journal) || started.Source != claimIdentity.Provenance.Source || confirmed.Source != claimIdentity.Provenance.Source {
+				f.t.Error("ACK workflow provenance lifecycle claim identity differs")
+			}
 		}
 		if v3 {
 			var started, confirmed struct {
@@ -674,7 +710,8 @@ func (f *ackCommandFixture) assertBroker() {
 				Attempt json.RawMessage `json:"attempt"`
 				Journal json.RawMessage `json:"journal"`
 			}
-			if json.Unmarshal(ledger[2], &started) != nil || json.Unmarshal(ledger[3], &confirmed) != nil || started.Kind != "read_token_lifecycle_started" || confirmed.Kind != "read_token_lifecycle_confirmed" || started.Slot != claimIdentity.Slot || confirmed.Slot != claimIdentity.Slot || !bytes.Equal(started.Attempt, claimIdentity.Attempt) || !bytes.Equal(started.Journal, claimIdentity.Journal) || !bytes.Equal(confirmed.Attempt, claimIdentity.Attempt) || !bytes.Equal(confirmed.Journal, claimIdentity.Journal) {
+			readTokenStartIndex := claimIndex + 1
+			if json.Unmarshal(ledger[readTokenStartIndex], &started) != nil || json.Unmarshal(ledger[readTokenStartIndex+1], &confirmed) != nil || started.Kind != "read_token_lifecycle_started" || confirmed.Kind != "read_token_lifecycle_confirmed" || started.Slot != claimIdentity.Slot || confirmed.Slot != claimIdentity.Slot || !bytes.Equal(started.Attempt, claimIdentity.Attempt) || !bytes.Equal(started.Journal, claimIdentity.Journal) || !bytes.Equal(confirmed.Attempt, claimIdentity.Attempt) || !bytes.Equal(confirmed.Journal, claimIdentity.Journal) {
 				f.t.Error("ACK read-token lifecycle claim identity differs")
 			}
 		}
