@@ -17,7 +17,7 @@ func groupPolicyFixture() handoff.GroupPolicy {
 	return handoff.GroupPolicy{Version: 2, OrganizationID: 101, Workflow: "org-a/canary/.github/workflows/runner.yml@" + strings.Repeat("d", 40)}
 }
 
-func TestBrokerGroupApprovalCannotUseV1Selection(t *testing.T) {
+func TestBrokerGroupApprovalRequiresReusableCalleeBinding(t *testing.T) {
 	a := brokerApprovalFixture()
 	a.Mode = "controller"
 	a.Phase = "create"
@@ -52,8 +52,8 @@ func TestBrokerGroupApprovalCannotUseV1Selection(t *testing.T) {
 	p.Grants[0].GroupPolicySHA256 = a.GroupPolicy.GrantDigest(req, a.RepositoryID, a.RunnerGroupID, a.ManagementScope)
 	policy, _ = json.Marshal(p)
 	brokerExperimentPolicyJSON = string(policy)
-	if _, e = selectBrokerExperiment(files, time.Now()); e != nil {
-		t.Fatal("explicit group approval rejected", e)
+	if _, e = selectBrokerExperiment(files, time.Now()); e == nil {
+		t.Fatal("caller-only v2 policy selected a reusable-workflow group")
 	}
 	for _, fault := range []string{"literal", "group", "organization-id", "scope", "raw-bytes", "missing", "version", "grant", "default"} {
 		t.Run(fault, func(t *testing.T) {

@@ -21,15 +21,16 @@ records exact group-policy checks and compatibility limits. Omitted/empty scope
 retains the existing selected-repository/metadata-read contract. Scope changes
 cannot renew or reuse an existing experiment's authority.
 
-The offline group-only v2 contract requires matching independently approved
+The offline `GroupPolicy` v2 input requires matching independently approved
 organization ID and exact same-repository reusable-workflow literal in broker
-and controller approvals, plus independently compiled role/phase grants bound
-to the approval bytes, target group and management scope. Both preflights require
-the selected group to restrict workflows to that one literal. The broker group
-read occurs after its existing management-token mint. V1 receipt provenance still
-covers the caller only; this contract does not establish provider callee metadata,
-scheduler enforcement, private runtime behavior or live authorization. Empty
-compiled policies grant no authority; v2 has no legacy selection fallback.
+and controller approvals. Both preflights require the selected group to restrict
+workflows to that one literal. Whenever an approval carries a nonempty
+`GroupPolicy`, the independently compiled `PublicPolicy` must be v3 and bind the
+provider-reported reusable callee; caller-only v1/v2 grants are refused. The
+broker group read occurs after its existing management-token mint. V1 receipt
+provenance still covers the caller only; group policy alone does not establish
+provider callee metadata, scheduler enforcement, private runtime behavior or
+live authorization. Empty compiled policies grant no authority.
 
 ## Executable scope
 

@@ -37,6 +37,9 @@ func selectControllerExperiment(files PairedTerminalFiles, mode, phase string, n
 	if e != nil {
 		return controllerExperimentSelection{}, ErrApproval
 	}
+	if a.GroupPolicy != (handoff.GroupPolicy{}) && p.Version != 3 {
+		return controllerExperimentSelection{}, ErrApproval
+	}
 	source := p.Source
 	if p.Version == 3 {
 		source = "github-rest-workflow-v1"

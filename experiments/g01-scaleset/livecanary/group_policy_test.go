@@ -45,7 +45,10 @@ func TestControllerGroupPolicySelectionAndSignedApprovalBinding(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	p := handoff.PublicPolicy{Version: 2, Role: "controller", Source: request.Source, WorkflowKeyID: "workflow-v1", WorkflowPublicKey: "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8", IssuerKeyID: "issuer-v1", IssuerPublicKey: "e28a8970753332bd72fef413e6b0b2ef1b4aadda7aa2c141f233712a6876b351", Grants: []handoff.PhaseGrant{{Request: request, Mode: "controller", OrganizationID: 101, RepositoryID: a.RepositoryID, ExpiresAt: a.ExpiresAt, GroupPolicySHA256: a.GroupPolicy.GrantDigest(request, a.RepositoryID, int64(a.RunnerGroupID), a.ManagementScope)}}}
+	request.Version = 2
+	request.Source = handoff.ReusableCalleeSource
+	request.Callee = handoff.CalleeIdentity{Repository: request.Repository, WorkflowPath: ".github/workflows/runner.yml", SHA: strings.Repeat("d", 40)}
+	p := handoff.PublicPolicy{Version: 3, Role: "controller", Source: handoff.ReusableCalleeSource, WorkflowKeyID: "workflow-v1", WorkflowPublicKey: "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8", IssuerKeyID: "issuer-v1", IssuerPublicKey: "e28a8970753332bd72fef413e6b0b2ef1b4aadda7aa2c141f233712a6876b351", Grants: []handoff.PhaseGrant{{Request: request, Mode: "controller", OrganizationID: 101, RepositoryID: a.RepositoryID, ExpiresAt: a.ExpiresAt, GroupPolicySHA256: a.GroupPolicy.GrantDigest(request, a.RepositoryID, int64(a.RunnerGroupID), a.ManagementScope)}}}
 	dir := privateDir(t)
 	files := PairedTerminalFiles{ControllerApprovalPath: filepath.Join(dir, "approval.json")}
 	old := controllerExperimentPolicyJSON

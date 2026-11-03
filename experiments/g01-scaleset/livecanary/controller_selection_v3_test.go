@@ -90,3 +90,33 @@ func TestControllerExperimentSelectsReusableCalleeIndependently(t *testing.T) {
 		}
 	}
 }
+
+func TestControllerExperimentRejectsCallerOnlyPolicyForReusableGroup(t *testing.T) {
+	now := time.Now()
+	a := controllerHandoffApprovalAt(now)
+	a.Phases = []string{"create"}
+	a.GroupPolicy = controllerGroupPolicy()
+	a.GroupPolicy.Workflow = a.Organization + "/" + a.Repository + "/.github/workflows/runner.yml@" + strings.Repeat("d", 40)
+	raw, _ := json.Marshal(a)
+	files := PairedTerminalFiles{ControllerApprovalPath: filepath.Join(privateDir(t), "approval.json")}
+	if err := os.WriteFile(files.ControllerApprovalPath, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, request, err := controllerHandoffRequest(raw, "create", "github-rest-workflow-v1", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant := handoff.PhaseGrant{Request: request, Mode: "controller", OrganizationID: a.GroupPolicy.OrganizationID, RepositoryID: a.RepositoryID, ExpiresAt: a.ExpiresAt}
+	grant.GroupPolicySHA256 = a.GroupPolicy.GrantDigest(request, a.RepositoryID, int64(a.RunnerGroupID), a.ManagementScope)
+	policy := handoff.PublicPolicy{Version: 2, Role: "controller", Source: "github-rest-workflow-v1", WorkflowKeyID: "workflow-v1", WorkflowPublicKey: "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8", IssuerKeyID: "issuer-v1", IssuerPublicKey: "e28a8970753332bd72fef413e6b0b2ef1b4aadda7aa2c141f233712a6876b351", Grants: []handoff.PhaseGrant{grant}}
+	encoded, err := json.Marshal(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := controllerExperimentPolicyJSON
+	controllerExperimentPolicyJSON = string(encoded)
+	defer func() { controllerExperimentPolicyJSON = old }()
+	if _, err := selectControllerExperiment(files, "controller", "create", now); err == nil {
+		t.Fatal("caller-only v2 policy selected a reusable-workflow group")
+	}
+}
