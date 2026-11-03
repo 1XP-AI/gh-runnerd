@@ -589,6 +589,30 @@ review, runtime/isolation/resource qualification, conditional cleanup, separate
 canary authorization, and all live execution evidence remain open. This
 configuration read does not authorize the experiment.
 
+### Private branch-protection entitlement — 2026-11-03
+
+Read-only `gh api orgs/1XP-AI` reports the organization plan as `free`, and the
+canary repository's `main` branch reports `protected: false`. The branch
+protection and repository-rulesets GET endpoints each return HTTP 403 with the
+message that GitHub Pro or a public repository is required. The organization
+rulesets endpoint returns HTTP 403 stating that GitHub Team is required. GitHub's
+current documentation likewise lists protected branches and repository rulesets
+for private repositories on Pro, Team, or Enterprise plans, and organization
+rulesets on Team or Enterprise
+([protected branches](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches),
+[repository rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets),
+[organization rulesets](https://docs.github.com/en/organizations/managing-organization-settings/creating-rulesets-for-repositories-in-your-organization)).
+
+The current private-repository plan therefore cannot provide the protection
+required by the canary job's `github.ref_protected` guard. No plan, repository
+visibility, branch, ruleset, or workflow setting changed. Making the repository
+public is not an approved workaround. Even after a maintainer-authorized plan
+and branch-policy change, the live canary still requires its separate concrete
+execution authorization.
+
+The current `gh auth status` scope list omits `read:user`; no scope was added.
+The GitHub App installation's selected-repository access remains unverified.
+
 ## Minimal execution phases
 
 Run phases serially. Each phase begins by verifying that only its owned resources
