@@ -207,6 +207,26 @@ operations. Full G01 remains HOLD / NO-GO. Rollback to the previous
 workflow-access setting requires explicit maintainer authorization; no canary
 execution state was created.
 
+### Read-only Colima storage recheck — 2026-11-03 02:27 UTC
+
+From the existing test-host SSH shell, `colima status` reported a running
+macOS Virtualization.Framework VM with a Docker runtime on `aarch64` using
+`virtiofs`. `colima list` reported 4 CPUs, 8 GiB configured memory and a
+60 GiB configured disk. Docker reported Linux/aarch64, 4 CPUs,
+`MemTotal` 8307113984 bytes, Engine 29.5.2, and Docker root `/var/lib/docker`.
+Inside that VM, `df -h /var/lib/docker` reported 59G total, 17G used and 40G
+available. Host-root `df -h /` reported 460 GiB total, 12 GiB used and 222 GiB
+available. Inspecting the pinned runner image still returned “No such image”;
+inspection did not pull it.
+
+No image pull, container start, runner/JIT operation, workflow dispatch, Scale
+Set operation or host/Docker configuration change occurred. This is a
+point-in-time storage/capacity observation only; it does not prove worker
+isolation, enforcement of the intended per-job resource limit, trusted runtime
+readiness or live Scale Set behavior. The runner image remains absent. Full G01
+is still HOLD / NO-GO; execution needs separate authorization. Rollback: remove
+this subsection only; it is documentation-only.
+
 - [ ] Maintainer identifies one disposable **private** repository and one
   organization; no public fork/PR execution. Record the reviewed workflow SHA.
 - [ ] Dedicated runner group allows only that repository, and a unique canary
