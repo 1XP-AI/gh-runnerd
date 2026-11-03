@@ -3416,7 +3416,7 @@ func FuzzDefaultG01Fixture(f *testing.F) {
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint|CredentialInputFailureConsumesAttempt|WorkflowProvenanceTimeoutBlocksLaterInspect)$ ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(ManagementTokenRevokedBeforeClaimCompletion|RevokesKnownRejectedManagementTokens|LostManagementTokenResponseBlocksLaterInspection|ManagementRequestJournalFailureRecordsNoDispatch|UncertainManagementTokenRevocationBlocksLaterInspection|DoesNotRevokeCallerVerificationTokenCollision)$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(ReadOnlyPreflightRejectsBeforeWriteMint|StopsWhenReadOnlyTokenRevocationIsUncertain|RevokedRecordSyncFailureStopsBeforeWriteMint|DoubleRevocationJournalSyncFailureBlocksLaterInspect|LostReadTokenMintResponseBlocksLaterInspect|RevokesTokenFromRejectedReadIssuance|DoesNotRevokeVerificationTokenCollision)$ ./...",
+		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(ReadOnlyPreflightRejectsBeforeWriteMint|StopsWhenReadOnlyTokenRevocationIsUncertain|RevokedRecordSyncFailureStopsBeforeWriteMint|DoubleRevocationJournalSyncFailureBlocksLaterInspect|LostReadTokenMintResponseBlocksLaterInspect|RevokesTokenFromRejectedReadIssuance|DoesNotRevokeVerificationTokenCollision|SelectionRejectsMissingStateBeforePipeOwnership)$ ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(LostWorkflowProvenanceResponseBlocksLaterInspect|WorkflowProvenancePreRequestFailureRecordsNoDispatchForLaterInspect|HistoricalWorkflowProvenanceClaimReplayBinding|LegacyIncompleteClaimWithoutManagementLifecycleBlocksLaterInspect|PreRequestFailureRecordsNoDispatchForLaterInspect|RepeatsCalleeFenceAfterWritePreflight)$ ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerPaired ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPaired -skip ^TestPairedBroker(PrepareReviewedG01LiveBinary|RealCadenceChildExceedsThirtySeconds)$ ./...",
@@ -3502,6 +3502,7 @@ func TestToolingDefaultG02PartitionsRun(t *testing.T) {
 	const pairedBinaryPrefixName = "TestBrokerPairedTerminalRealDigestPrefixDoesNotTriggerFixtureSleep"
 	const v3ManagementName = "TestBrokerExperimentV3ManagementTokenRevokedBeforeClaimCompletion"
 	const v3ReadOnlyName = "TestBrokerExperimentV3ReadOnlyPreflightRejectsBeforeWriteMint"
+	const v3SelectionName = "TestBrokerExperimentV3SelectionRejectsMissingStateBeforePipeOwnership"
 	const v3ProvenanceName = "TestBrokerExperimentV3LostWorkflowProvenanceResponseBlocksLaterInspect"
 	const finalSentinel = "default-g02-final-regression"
 	const finalRootMismatchSentinel = "default-g02-final-root-mismatch-regression"
@@ -3510,6 +3511,7 @@ func TestToolingDefaultG02PartitionsRun(t *testing.T) {
 	const pairedBinaryPrefixSentinel = "default-g02-paired-binary-prefix-regression"
 	const v3ManagementSentinel = "default-g02-v3-management-regression"
 	const v3ReadOnlySentinel = "default-g02-v3-read-only-regression"
+	const v3SelectionSentinel = "default-g02-v3-selection-regression"
 	const v3ProvenanceSentinel = "default-g02-v3-provenance-regression"
 	const pairedFamilyName = "TestPairedBrokerClaimFenceFixture"
 	const pairedFamilySentinel = "default-g02-paired-family-regression"
@@ -3717,6 +3719,14 @@ func FuzzG02Fixture(f *testing.F) {
 			partition:      5,
 		},
 		{
+			name:           "v3 selection before pipe ownership",
+			path:           g02Base + "/default_v3_selection_regression_test.go",
+			marker:         v3SelectionSentinel,
+			positiveSource: defaultTestSource("fixture", v3SelectionName, v3SelectionSentinel, ""),
+			failureSource:  defaultTestSource("fixture", v3SelectionName, v3SelectionSentinel, v3SelectionSentinel),
+			partition:      5,
+		},
+		{
 			name:           "v3 provenance recovery",
 			path:           g02Base + "/default_v3_provenance_regression_test.go",
 			marker:         v3ProvenanceSentinel,
@@ -3819,7 +3829,7 @@ func FuzzG02Fixture(f *testing.F) {
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint|CredentialInputFailureConsumesAttempt|WorkflowProvenanceTimeoutBlocksLaterInspect)$ ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(ManagementTokenRevokedBeforeClaimCompletion|RevokesKnownRejectedManagementTokens|LostManagementTokenResponseBlocksLaterInspection|ManagementRequestJournalFailureRecordsNoDispatch|UncertainManagementTokenRevocationBlocksLaterInspection|DoesNotRevokeCallerVerificationTokenCollision)$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(ReadOnlyPreflightRejectsBeforeWriteMint|StopsWhenReadOnlyTokenRevocationIsUncertain|RevokedRecordSyncFailureStopsBeforeWriteMint|DoubleRevocationJournalSyncFailureBlocksLaterInspect|LostReadTokenMintResponseBlocksLaterInspect|RevokesTokenFromRejectedReadIssuance|DoesNotRevokeVerificationTokenCollision)$ ./...",
+		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(ReadOnlyPreflightRejectsBeforeWriteMint|StopsWhenReadOnlyTokenRevocationIsUncertain|RevokedRecordSyncFailureStopsBeforeWriteMint|DoubleRevocationJournalSyncFailureBlocksLaterInspect|LostReadTokenMintResponseBlocksLaterInspect|RevokesTokenFromRejectedReadIssuance|DoesNotRevokeVerificationTokenCollision|SelectionRejectsMissingStateBeforePipeOwnership)$ ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(LostWorkflowProvenanceResponseBlocksLaterInspect|WorkflowProvenancePreRequestFailureRecordsNoDispatchForLaterInspect|HistoricalWorkflowProvenanceClaimReplayBinding|LegacyIncompleteClaimWithoutManagementLifecycleBlocksLaterInspect|PreRequestFailureRecordsNoDispatchForLaterInspect|RepeatsCalleeFenceAfterWritePreflight)$ ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerPaired ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPaired -skip ^TestPairedBroker(PrepareReviewedG01LiveBinary|RealCadenceChildExceedsThirtySeconds)$ ./...",

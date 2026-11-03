@@ -49,7 +49,7 @@ paired_broker_regex='^TestPaired'
 non_paired_heavy_regex='^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$'
 final_fence_regex='^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint|CredentialInputFailureConsumesAttempt|WorkflowProvenanceTimeoutBlocksLaterInspect)$'
 v3_management_regex='^TestBrokerExperimentV3(ManagementTokenRevokedBeforeClaimCompletion|RevokesKnownRejectedManagementTokens|LostManagementTokenResponseBlocksLaterInspection|ManagementRequestJournalFailureRecordsNoDispatch|UncertainManagementTokenRevocationBlocksLaterInspection|DoesNotRevokeCallerVerificationTokenCollision)$'
-v3_read_only_regex='^TestBrokerExperimentV3(ReadOnlyPreflightRejectsBeforeWriteMint|StopsWhenReadOnlyTokenRevocationIsUncertain|RevokedRecordSyncFailureStopsBeforeWriteMint|DoubleRevocationJournalSyncFailureBlocksLaterInspect|LostReadTokenMintResponseBlocksLaterInspect|RevokesTokenFromRejectedReadIssuance|DoesNotRevokeVerificationTokenCollision)$'
+v3_read_only_regex='^TestBrokerExperimentV3(ReadOnlyPreflightRejectsBeforeWriteMint|StopsWhenReadOnlyTokenRevocationIsUncertain|RevokedRecordSyncFailureStopsBeforeWriteMint|DoubleRevocationJournalSyncFailureBlocksLaterInspect|LostReadTokenMintResponseBlocksLaterInspect|RevokesTokenFromRejectedReadIssuance|DoesNotRevokeVerificationTokenCollision|SelectionRejectsMissingStateBeforePipeOwnership)$'
 v3_provenance_regex='^TestBrokerExperimentV3(LostWorkflowProvenanceResponseBlocksLaterInspect|WorkflowProvenancePreRequestFailureRecordsNoDispatchForLaterInspect|HistoricalWorkflowProvenanceClaimReplayBinding|LegacyIncompleteClaimWithoutManagementLifecycleBlocksLaterInspect|PreRequestFailureRecordsNoDispatchForLaterInspect|RepeatsCalleeFenceAfterWritePreflight)$'
 paired_process_regex='^TestBrokerPaired'
 g02_non_paired_skip_regex='^TestPaired|^TestBrokerPaired|^TestBrokerExperimentV3|^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$'
@@ -122,7 +122,7 @@ for module_dir in "${selected_modules[@]}"; do
 			# cadence partition keeps the production seven-times-five-second wait
 			# without hiding preparation in an unbounded helper. Then isolate the
 			# exact cadence name, bounded non-paired heavy family, final fences, and
-			# the v3 management, read-only, and provenance recovery families. Keep
+			# the v3 management, read-only/pre-effect selection, and provenance families. Keep
 			# paired broker-child binary checks separate from paired fixtures too.
 			# The remaining complements still discover tests, examples, and fuzz seeds.
 			# Package discovery stays on ./... in every command.
