@@ -298,6 +298,46 @@ would require separately rechecking its owner plan, App access and runner-group
 scope. No canary workflow was dispatched; execution still requires its own
 concrete maintainer authorization.
 
+### Independent Luna Max static harness review — 2026-11-03
+
+Disposition: **HOLD** at exact public source HEAD
+`686df326b911184b9c3df2c9bd2a9f7ba65b5b49`. The review performed no tests,
+program execution, file mutation, GitHub write, credential, runner, host or
+Scale Set operation.
+
+Finding F1 was the mismatch between legacy broker launch flags and the
+`g01-live` command's unconditional rejection of direct execution. This is not
+an executable G01 bypass: the selected GroupPolicy v2 broker admission rejects
+missing or nonexperimental signed assemblies, the supported reusable-callee
+path sets an explicit experimental mode, and the command rejects the legacy
+direct flag before reading its input. The old non-v2 path remains unavailable
+for canary execution and is outside the selected G01 path; this disposition
+does not authorize it. This is rebutted for the selected G01 path based on
+`runBrokerWithPrivateHandoff`, the signed handoff launcher, the direct-flag
+rejection in `g01-live`, and the passing
+`TestBrokerGroupApprovalRequiresReusableCalleeBinding` regression. The legacy
+broker/CLI mismatch remains fail-closed and is not claimed fixed here.
+
+Finding F2 was the absence of a production caller for the public evidence
+allowlist. The candidate adds the tagged `--sanitize-public-evidence` output
+mode described below. At the reviewed parent, the new focused CLI test failed
+because this mode was not recognized; after the change,
+the focused test passed under Go 1.27.3:
+
+```sh
+GOTOOLCHAIN=auto go test -tags g01_live ./cmd/g01-live -run 'TestPublicEvidenceSanitizer' -count=1
+```
+
+The sanitizer closes the output-path gap for manually verified observations
+but does not establish their truth or close the live checklist.
+
+The review could not close checklist items 353–356 offline: the rendered
+private workflow and worker/executor are not in this checkout, and current
+runtime, isolation, resource enforcement, live fault outcomes, actual sanitized
+timeline, authorization and owned cleanup remain unqualified. Preserve the
+checklist as open. Re-review the final immutable candidate after its changes are
+committed.
+
 - [x] Maintainer identified one disposable **private** repository in the
   organization. The reviewed workflow identity and full SHA are recorded in
   the private repository and group configuration; no public fork/PR execution
@@ -375,6 +415,17 @@ input size and counters, aliases resource IDs within the report, and reduces HTT
 status to its class. Their input fields are excluded from direct JSON output.
 Rejected input returns a generic error without echoing values. This offline
 serializer does not execute a canary or establish that an observation occurred.
+The tagged `g01-live --sanitize-public-evidence` mode is the output boundary for
+manually assembled, independently verified observations. It accepts one JSON
+array from stdin, limits the input to 1 MiB, rejects unknown fields, trailing
+documents and mixed execution flags, then writes only the serializer's
+allowlisted document. It does not open the private journal, credentials or a
+network connection, and it does not attest that the supplied observations
+occurred. Use it only after the observations have been independently verified;
+sanitized output alone is not canary evidence. Each input item can provide
+`elapsed_ms`, `attempt`, `session_generation`, `phase`, `operation`, `outcome`,
+`resources` (`kind` and private `id`), `http_status`, `succeeded`, and bounded
+`counts`; private resource IDs are replaced by stable aliases in the output.
 
 ## Minimal execution phases
 

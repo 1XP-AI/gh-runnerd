@@ -5,6 +5,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -21,6 +22,92 @@ import (
 	"github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/liveworker"
 	"github.com/1XP-AI/gh-runnerd/experiments/g02-auth/handoff"
 )
+
+const maxPublicEvidenceInputBytes = 1 << 20
+
+type publicEvidenceInput struct {
+	ElapsedMS         int64                         `json:"elapsed_ms"`
+	Attempt           int                           `json:"attempt"`
+	SessionGeneration int                           `json:"session_generation"`
+	Phase             string                        `json:"phase"`
+	Operation         string                        `json:"operation"`
+	Outcome           string                        `json:"outcome"`
+	Resources         []publicEvidenceResourceInput `json:"resources"`
+	HTTPStatus        int                           `json:"http_status"`
+	Succeeded         *bool                         `json:"succeeded"`
+	Counts            *publicEvidenceCountsInput    `json:"counts"`
+}
+
+type publicEvidenceResourceInput struct {
+	Kind string `json:"kind"`
+	ID   string `json:"id"`
+}
+
+type publicEvidenceCountsInput struct {
+	Available  *int `json:"available"`
+	Acquired   *int `json:"acquired"`
+	Assigned   *int `json:"assigned"`
+	Running    *int `json:"running"`
+	Registered *int `json:"registered"`
+	Busy       *int `json:"busy"`
+	Idle       *int `json:"idle"`
+}
+
+func decodePublicEvidenceInput(input io.Reader) ([]livecanary.PublicEvidenceObservation, error) {
+	if input == nil {
+		return nil, livecanary.ErrPublicEvidence
+	}
+	raw, err := io.ReadAll(io.LimitReader(input, maxPublicEvidenceInputBytes+1))
+	if err != nil || len(raw) == 0 || len(raw) > maxPublicEvidenceInputBytes {
+		return nil, livecanary.ErrPublicEvidence
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var encoded []publicEvidenceInput
+	if decoder.Decode(&encoded) != nil {
+		return nil, livecanary.ErrPublicEvidence
+	}
+	var trailing any
+	if decoder.Decode(&trailing) != io.EOF || len(encoded) == 0 {
+		return nil, livecanary.ErrPublicEvidence
+	}
+
+	observations := make([]livecanary.PublicEvidenceObservation, len(encoded))
+	for index, event := range encoded {
+		if event.ElapsedMS < 0 || event.ElapsedMS > int64((24*time.Hour)/time.Millisecond) {
+			return nil, livecanary.ErrPublicEvidence
+		}
+		observation := livecanary.PublicEvidenceObservation{
+			Elapsed:           time.Duration(event.ElapsedMS) * time.Millisecond,
+			Attempt:           event.Attempt,
+			SessionGeneration: event.SessionGeneration,
+			Phase:             event.Phase,
+			Operation:         event.Operation,
+			Outcome:           event.Outcome,
+			HTTPStatus:        event.HTTPStatus,
+			Succeeded:         event.Succeeded,
+		}
+		if len(event.Resources) != 0 {
+			observation.Resources = make([]livecanary.PublicEvidenceResource, len(event.Resources))
+			for resourceIndex, resource := range event.Resources {
+				observation.Resources[resourceIndex] = livecanary.PublicEvidenceResource{Kind: resource.Kind, ID: resource.ID}
+			}
+		}
+		if event.Counts != nil {
+			observation.Counts = &livecanary.PublicEvidenceCounts{
+				Available:  event.Counts.Available,
+				Acquired:   event.Counts.Acquired,
+				Assigned:   event.Counts.Assigned,
+				Running:    event.Counts.Running,
+				Registered: event.Counts.Registered,
+				Busy:       event.Counts.Busy,
+				Idle:       event.Counts.Idle,
+			}
+		}
+		observations[index] = observation
+	}
+	return observations, nil
+}
 
 func buildRevision() (string, bool) {
 	info, ok := debug.ReadBuildInfo()
@@ -80,6 +167,7 @@ func runWithPreparationContext(ctx context.Context, args []string, in io.Reader,
 	flags := flag.NewFlagSet("g01-live", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	plan := flags.Bool("plan", false, "")
+	sanitizePublicEvidence := flags.Bool("sanitize-public-evidence", false, "")
 	execute := flags.Bool("execute-approved-canary", false, "")
 	experimental := flags.Bool("execute-experimental-phase", false, "")
 	experimentalMode := flags.String("mode", "", "")
@@ -100,6 +188,26 @@ func runWithPreparationContext(ctx context.Context, args []string, in io.Reader,
 	}
 	if flags.Parse(args) != nil || flags.NArg() != 0 {
 		return reject()
+	}
+	if *sanitizePublicEvidence {
+		if *plan || *execute || *experimental || *pairedExecute || *prepare || *pairedPrepare || *prepareWorker || *experimentalMode != "" || *approvalPath != "" || *statePath != "" || *phase != "" || *workerApprovalPath != "" || *workerStatePath != "" || *pairedBinding != "" || *rootBinding != "" {
+			return reject()
+		}
+		observations, err := decodePublicEvidenceInput(in)
+		if err != nil {
+			fmt.Fprintln(out, "public evidence refused")
+			return 1
+		}
+		encoded, err := livecanary.MarshalPublicEvidence(observations)
+		if err != nil {
+			fmt.Fprintln(out, "public evidence refused")
+			return 1
+		}
+		encoded = append(encoded, '\n')
+		if n, err := out.Write(encoded); err != nil || n != len(encoded) {
+			return 1
+		}
+		return 0
 	}
 	if *execute || *pairedExecute {
 		fmt.Fprintln(out, controllerExecutionQuarantineMessage)

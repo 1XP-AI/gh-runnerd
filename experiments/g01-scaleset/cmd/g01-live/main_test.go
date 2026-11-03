@@ -146,6 +146,57 @@ func TestPlanAndRefusalsNeverReadCredentialsOrEchoInputs(t *testing.T) {
 	}
 }
 
+func TestPublicEvidenceSanitizerPublishesOnlyAllowlistedFields(t *testing.T) {
+	input := `[{"elapsed_ms":1250,"attempt":1,"session_generation":2,"phase":"after-ack","operation":"ack","outcome":"unknown","resources":[{"kind":"session","id":"private-session-identifier"},{"kind":"message","id":"private-message-identifier"}],"http_status":503,"succeeded":false,"counts":{"available":0,"assigned":1}}]`
+	var out bytes.Buffer
+	code := runWithPreparation([]string{"--sanitize-public-evidence"}, strings.NewReader(input), &out, func() (string, bool) {
+		t.Fatal("sanitization must not inspect live build provenance")
+		return "", false
+	}, nil)
+	if code != 0 {
+		t.Fatalf("sanitization failed: output=%q", out.String())
+	}
+	for _, forbidden := range []string{"private-session-identifier", "private-message-identifier", "http_status\":503", "authorization"} {
+		if strings.Contains(out.String(), forbidden) {
+			t.Fatalf("sanitizer emitted private input %q: %s", forbidden, out.String())
+		}
+	}
+	for _, required := range []string{`"schema":"gh-runnerd/g01-public-evidence/v1"`, `"elapsed_ms":1250`, `"http_status_class":"5xx"`, `"succeeded":false`, `"session-001"`, `"message-001"`, `"available":0`, `"assigned":1`} {
+		if !strings.Contains(out.String(), required) {
+			t.Fatalf("sanitizer omitted %s: %s", required, out.String())
+		}
+	}
+}
+
+func TestPublicEvidenceSanitizerRejectsInvalidOrMixedInputWithoutPublishing(t *testing.T) {
+	valid := `[{"elapsed_ms":1,"phase":"baseline","operation":"inspect","outcome":"observed"}]`
+	oversized := valid + strings.Repeat(" ", maxPublicEvidenceInputBytes+1-len(valid))
+	for _, tc := range []struct {
+		name  string
+		args  []string
+		input string
+	}{
+		{name: "unknown private field", args: []string{"--sanitize-public-evidence"}, input: `[{"elapsed_ms":1,"phase":"baseline","operation":"inspect","outcome":"observed","private":"synthetic-secret"}]`},
+		{name: "trailing document", args: []string{"--sanitize-public-evidence"}, input: valid + ` {"private":"synthetic-secret"}`},
+		{name: "malformed input", args: []string{"--sanitize-public-evidence"}, input: `[{"phase":`},
+		{name: "oversized input", args: []string{"--sanitize-public-evidence"}, input: oversized},
+		{name: "elapsed exceeds bound", args: []string{"--sanitize-public-evidence"}, input: `[{"elapsed_ms":86400001,"phase":"baseline","operation":"inspect","outcome":"observed"}]`},
+		{name: "mixed plan", args: []string{"--sanitize-public-evidence", "--plan"}, input: valid},
+		{name: "approval path", args: []string{"--sanitize-public-evidence", "--approval", "/private/approval.json"}, input: valid},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			code := runWithPreparation(tc.args, strings.NewReader(tc.input), &out, func() (string, bool) {
+				t.Fatal("sanitization refusal must not inspect live build provenance")
+				return "", false
+			}, nil)
+			if code == 0 || strings.Contains(out.String(), "synthetic-secret") || strings.Contains(out.String(), "g01-public-evidence/v1") {
+				t.Fatalf("invalid input was published: code=%d output=%q", code, out.String())
+			}
+		})
+	}
+}
+
 func TestPreparationCommandNeverReadsCredentialsOrRunsRemotePhase(t *testing.T) {
 	a := livecanary.Approval{AppID: 11, InstallationID: 12, Organization: "fixture-org", Repository: "canary", RepositoryID: 42, RunnerGroupID: 3, OwnerNonce: strings.Repeat("a", 32), HarnessSHA: strings.Repeat("b", 40), WorkflowSHA: strings.Repeat("c", 40), WorkflowPath: ".github/workflows/canary.yml", Controller: "fixture-controller", ExpiresAt: time.Now().Add(time.Hour), ActionsHosts: []string{"fixture.actions.githubusercontent.com"}, Phases: []string{"create"}}
 	parent := t.TempDir()
