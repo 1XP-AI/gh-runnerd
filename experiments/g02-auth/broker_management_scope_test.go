@@ -90,6 +90,100 @@ func TestBrokerOrganizationOnlyMintUsesExactPermission(t *testing.T) {
 	}
 }
 
+func TestBrokerReadOnlyMintRequiresExactScope(t *testing.T) {
+	for _, fault := range []string{"", "write", "extra-permission", "missing-metadata", "wrong-repository", "all-repositories", "expired"} {
+		t.Run(fault, func(t *testing.T) {
+			a, candidate, api, fixture, _ := newBrokerFixture(t)
+			a.Mode, a.Phase = "controller", "inspect"
+			a.GroupPolicy = groupPolicyFixture()
+			credential, err := parseCredential(candidate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			api.client.Transport = brokerTransport{transportFunc(func(r *http.Request) (*http.Response, error) {
+				if r.URL.Path != "/app/installations/201/access_tokens" {
+					t.Fatalf("unexpected read-only mint request: %s %s", r.Method, r.URL.Path)
+				}
+				fixture.tokenCalls++
+				body, err := io.ReadAll(r.Body)
+				var request struct {
+					RepositoryIDs []int64           `json:"repository_ids"`
+					Permissions   map[string]string `json:"permissions"`
+				}
+				if err != nil || json.Unmarshal(body, &request) != nil || !reflect.DeepEqual(request.RepositoryIDs, []int64{501}) || !reflect.DeepEqual(request.Permissions, map[string]string{"metadata": "read", "organization_self_hosted_runners": "read"}) {
+					t.Error("read-only token request was not exact and repository-scoped")
+				}
+				payload := map[string]any{
+					"token":                "synthetic-private-read-installation-token",
+					"expires_at":           time.Now().Add(time.Hour),
+					"permissions":          map[string]any{"metadata": "read", "organization_self_hosted_runners": "read"},
+					"repository_selection": "selected",
+					"repositories": []any{map[string]any{
+						"id": 501, "full_name": "org-a/canary", "private": true, "fork": false,
+						"owner": map[string]any{"id": 101, "login": "org-a"},
+					}},
+				}
+				switch fault {
+				case "write":
+					payload["permissions"].(map[string]any)["organization_self_hosted_runners"] = "write"
+				case "extra-permission":
+					payload["permissions"].(map[string]any)["contents"] = "read"
+				case "missing-metadata":
+					delete(payload["permissions"].(map[string]any), "metadata")
+				case "wrong-repository":
+					payload["repositories"].([]any)[0].(map[string]any)["id"] = 502
+				case "all-repositories":
+					payload["repository_selection"] = "all"
+				case "expired":
+					payload["expires_at"] = time.Now().Add(-time.Minute)
+				}
+				data, err := json.Marshal(payload)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return response(http.StatusCreated, string(data)), nil
+			})}
+			_, err = api.mintReadOnly(context.Background(), a, credential)
+			if (err == nil) != (fault == "") || fixture.tokenCalls != 1 {
+				t.Fatalf("read-only mint accepted=%v fault=%s requests=%d", err == nil, fault, fixture.tokenCalls)
+			}
+		})
+	}
+}
+
+func TestBrokerReadOnlyOrganizationScopeOmitsRepositoryAccess(t *testing.T) {
+	a, candidate, api, fixture, _ := newBrokerFixture(t)
+	a.Mode, a.Phase, a.ManagementScope = "controller", "inspect", organizationOnlyManagementScope
+	a.GroupPolicy = groupPolicyFixture()
+	credential, err := parseCredential(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.client.Transport = brokerTransport{transportFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != "/app/installations/201/access_tokens" {
+			t.Fatalf("unexpected organization-only read mint request: %s %s", r.Method, r.URL.Path)
+		}
+		fixture.tokenCalls++
+		body, err := io.ReadAll(r.Body)
+		var request map[string]any
+		want := map[string]any{"permissions": map[string]any{"organization_self_hosted_runners": "read"}}
+		if err != nil || json.Unmarshal(body, &request) != nil || !reflect.DeepEqual(request, want) {
+			t.Error("organization-only read token included repository access or extra permissions")
+		}
+		payload, err := json.Marshal(map[string]any{
+			"token": "synthetic-private-read-installation-token", "expires_at": time.Now().Add(time.Hour),
+			"permissions": map[string]string{"organization_self_hosted_runners": "read"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return response(http.StatusCreated, string(payload)), nil
+	})}
+	if _, err := api.mintReadOnly(context.Background(), a, credential); err != nil || fixture.tokenCalls != 1 {
+		t.Fatalf("valid organization-only read token was refused: err=%v requests=%d", err, fixture.tokenCalls)
+	}
+}
+
 func TestBrokerOrganizationOnlyDiscoveryKeepsGroupBoundary(t *testing.T) {
 	for _, badGroup := range []bool{false, true} {
 		t.Run(map[bool]string{false: "selected-private-group", true: "public-group"}[badGroup], func(t *testing.T) {

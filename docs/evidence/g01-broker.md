@@ -2,6 +2,13 @@
 
 Status: implemented and tested with **synthetic HTTP and subprocess fixtures only**. No live token mint, registration/admin credential request, tenant request, controller phase, App/installation mutation, workflow dispatch, runner or worker operation has run. The broker is a bounded G01 prerequisite, not G08 credential storage or completion of G01/G02. All future live use needs independent code review and separate exact resource/permission approval.
 
+The current public CLI has one executable broker route: `--execute-experimental-broker`, which selects only a sealed PublicPolicy v3 reusable-callee grant and a nonzero GroupPolicy v2 before credential input, API construction, token mint or child launch. The former `--execute-approved-broker` CLI flag is rejected, and `RunBroker` remains only as an inert fail-closed compatibility stub. `discover-actions-host` is not available through the public CLI. These local gates do not authorize live use.
+
+The `g01-live` controller selector also requires the sealed v3 reusable-callee
+policy and nonzero GroupPolicy v2. It rejects legacy v1/v2 grants, including a
+zero-GroupPolicy v1 grant, before reading approval/state or opening a journal;
+there is no controller `SelectGroup` fallback.
+
 ## Causal order and authority
 
 The current experimental broker additionally supports explicit
@@ -14,25 +21,25 @@ organization-only App. Current builds use the adopted SDK v0.5.0/Go 1.27.3
 [profile](g01-sdk-v05-adoption.md); older build observations below retain their
 historical inputs. This addition does not enable the quarantined live entrypoint.
 
-The broker has two explicit modes in its private approval: `discover-actions-host` and `controller`. Both authenticate the existing App using the audited G02 RSA/JWT and App/installation identity utilities. App ID, exact App slug, owner login/ID/type, organization login/ID, installation/App/account/target identities, explicit known suspension status and minimal installation permissions must match before any token request. The small shared API extension exposes whether `suspended_at` was supplied; the broker refuses an unknown suspension state.
+The historical unversioned broker approval schema included `discover-actions-host` and `controller`. Neither mode is a public execution route now. The active experimental broker accepts only `controller` or `paired-terminal`, selected by the sealed v3 reusable-callee grant and exact GroupPolicy v2. Those modes authenticate the existing App using the audited G02 RSA/JWT and App/installation identity utilities. App ID, exact App slug, owner login/ID/type, organization login/ID, installation/App/account/target identities, explicit known suspension status and minimal installation permissions must match before any token request. The small shared API extension exposes whether `suspended_at` was supplied; the broker refuses an unknown suspension state.
 
 Runner-group and private repository inspection require an installation/user authority; App JWT alone cannot perform those checks. The agreed executable sequence is therefore:
 
 0. Validate private inputs and the supported native controller build; reserve, write and sync the exact non-secret controller snapshot when applicable. Acquire the fixed account ledger, pin resources/controller state, consume this phase slot durably, and check compatible existing controller inventory. For controller mode, run the credential-free canonical local-state preparation and validate its exact receipt before any authenticated request. These local checks precede every API call.
 1. Verify App, owner and organization installation with the App JWT.
 2. Flush a non-secret token issuance intent.
-3. Request **one** installation token with `repository_ids: [exact_canary_id]` and exactly organization self-hosted runners write plus metadata read.
-4. Validate the actual token response: token syntax, expiry between one and 65 minutes, exact permissions, selected repository selection and the one matching private non-fork repository. App/installation facts come from authenticated identity reads; expiry/permissions come from this issuance response, not operator-supplied token metadata.
-5. Use that token to independently verify exactly one installation-accessible repository, its current owner/name/ID/private/non-fork identity, the exact nondefault/noninherited named runner group, public repositories explicitly disallowed, selected-only visibility and that one repository selected.
-6. Only after those checks, perform the separately approved temporary authentication discovery or hand credentials to the exact reviewed controller child.
+3. Flush the non-secret read-token intent, then request an installation token with repository access restricted to `repository_ids: [exact_canary_id]` and exactly `organization_self_hosted_runners: read` plus `metadata: read`. The organization-only scope requests only `organization_self_hosted_runners: read` and no repository IDs.
+4. Validate the returned read-token scope and expiry, then use it to verify the exact private non-fork repository (for repository scope), the named nondefault/noninherited runner group, public repositories explicitly disallowed, selected-only visibility, exact workflow restriction and the one selected repository. A failed check stops before any write token is requested. This first preflight is read-only.
+5. After read-only preflight succeeds, repeat the final reusable-callee workflow GET. Only then request the management installation token with the exact existing write scope. Validate its returned permission/repository scope and repeat provider-state preflight with that token. Then repeat the same workflow GET immediately before handoff. A mismatch at either later check refuses child handoff, but any already-issued token may remain valid until expiry.
+6. Only after both provider-state checks and the final workflow check, hand credentials to the exact reviewed controller child. No authentication-discovery route is supported.
 
-Repository restriction does **not** cryptographically restrict the organization-level self-hosted-runners permission to one runner group. The broker and reviewed controller enforce the selected canary policy, under the trusted-controller assumption. This boundary assumes a trusted controller UID and host administrators; file modes and a stdin pipe do not isolate either. No second organization-read credential is required. The broker never adds Actions permission to the G02 App or mints the separate workflow authority.
+Repository restriction does **not** cryptographically restrict the organization-level self-hosted-runners permission to one runner group. The broker and reviewed controller enforce the selected canary policy, under the trusted-controller assumption. This boundary assumes a trusted controller UID and host administrators; file modes and a stdin pipe do not isolate either. The read-only preflight token is issued by the existing App; no separate user or organization credential is requested. The broker never adds Actions permission to the G02 App or mints the separate workflow authority.
 
-A failed/ambiguous token request, failed policy check, expired credential, uncertain handoff or error leaves the intent and stops. There is no automatic retry, token refresh, token replacement or automatic revocation. An issued token may remain valid until GitHub expires it even if no handoff occurs. A future operator approval must include that issuance, not just the eventual read/phase. The maximum remaining operation lifetime is ten minutes, approval expiry, or one minute before the actual installation-token expiry, whichever occurs first.
+A failed/ambiguous token request, failed policy check, expired credential, uncertain handoff or error leaves the intent and stops. There is no automatic retry, token refresh, token replacement or automatic revocation. Either issued token may remain valid until GitHub expires it even if no handoff occurs. A future operator approval must include both potential issuances, not just the eventual read/phase. The maximum remaining operation lifetime is ten minutes, approval expiry, or one minute before the management installation-token expiry, whichever occurs first.
 
-## Discovery is an authentication effect
+## Historical discovery is an authentication effect
 
-The following source observation comes from the historical SDK `v0.4.0` review;
+There is no public discovery entrypoint in the current CLI. The following source observation comes from the historical SDK `v0.4.0` review;
 it is not a claim of current source requalification or a successful live test.
 `discover-actions-host` followed the credential exchange observed in that pinned
 official Scale Set SDK source:
@@ -44,7 +51,7 @@ The authenticated response supplies a tenant URL and admin credential. The broke
 
 ## Controller handoff
 
-`controller` requires a separate digest-pinned G01 controller approval, the exact binary SHA-256 and matching reviewed `harness_sha`. The Go `1.26.8`/SDK `v0.4.0` controller-admission values below describe the historical broker profile. Current source admission requires Go `1.27.3` and the un-replaced SDK `v0.5.0` (`experiments/g02-auth/broker_process.go` and `experiments/g01-scaleset/cmd/g01-live/main.go`); this is static pin evidence, not a live run. The broker also verifies the command import path, native host `GOOS`/`GOARCH`, `CGO_ENABLED=1`, absence of the exact `osusergo` build tag and clean embedded VCS revision. It requires a current-UID private source directory and an owned singly-linked regular binary of mode `0500`, capped at 128 MiB; symlinks are refused. It keeps the opened descriptor and checks the named inode and content hash again immediately before execution. This catches accidental replacement; it does not isolate a hostile process with the same controlling UID.
+`controller` requires a separate digest-pinned G01 controller approval, the exact binary SHA-256 and matching reviewed `harness_sha`. The Go `1.26.8`/SDK `v0.4.0` controller-admission values below describe the historical broker profile. Current source admission requires Go `1.27.3` and the un-replaced SDK `v0.5.0` (`experiments/g02-auth/broker_process.go` and `experiments/g01-scaleset/cmd/g01-live/main.go`); this is static pin evidence, not a live run. Both the direct `g01-live` experimental front door and broker verify the command import path, native host `GOOS`/`GOARCH`, `CGO_ENABLED=1`, exact `g01_live` tag set and clean embedded VCS revision. The broker additionally requires a current-UID private source directory and an owned singly-linked regular binary of mode `0500`, capped at 128 MiB; symlinks are refused. It keeps the opened descriptor and checks the named inode and content hash again immediately before execution. This catches accidental replacement; it does not isolate a hostile process with the same controlling UID.
 
 The controller approval is bounded, strict JSON with no duplicate/unknown keys. Its raw SHA-256 must match the broker approval; its App/installation/repo/group identity, exact phase, harness SHA, workflow facts, expiry and exact Actions hosts must agree. Before issuance, the broker exclusively reserves, writes and syncs only a non-secret snapshot of the digest-verified bytes into its private attempt directory. A pre-existing file or symlink refuses before any API call. The owned snapshot inode and digest are checked before authenticated calls and again before handoff; local replacement stops the attempt. The child's persistent state directory must already be owned and mode `0700`; the broker verifies the captured directory identity again before execution. The existing G01 controller independently validates approval/build metadata and its own journal during both local preparation and later execution.
 
@@ -70,8 +77,11 @@ If the controller approval includes an ACK/acquisition workflow-verification pha
 
 ## Private inputs and durable inventory
 
-The command requires `--execute-approved-broker`; `--plan` is an offline,
-no-input/no-network plan check only, not a live entrypoint or authorization.
+The public command accepts `--plan` or `--execute-experimental-broker`; the
+former legacy `--execute-approved-broker` flag is rejected. `--plan` is an
+offline, no-input/no-network plan check only, not a live entrypoint or
+authorization. The executable route requires the sealed v3 reusable-callee
+grant and nonzero v2 runner-group policy described above.
 The tagged `--execute-approved-canary` path remains quarantined until its
 external provenance and cleanup gates close. Approval files are current-UID, regular, singly linked, mode `0600`, in current-UID `0700` directories. Inputs are limited to 16 KiB for each approval, 64 KiB for the stdin JSON, 32 KiB for PEM and 1 KiB for the optional verification token. Stdin must be an owned protected regular descriptor or private pipe; terminals and group/other-accessible inputs are refused. Inherited pipes use the reviewed owned duplicate, close-on-exec, nonblocking Go-poller handle and bounded deadline probes, covering cancellation and delayed FIFO EOF. The input deadline is thirty seconds. Protected regular files retain their byte/ownership bounds; no wall-clock guarantee is claimed for an uninterruptible filesystem read. Deadlines bound cancellable pipe/network/child work; local regular-file/hash/fsync operations do not promise completion through a filesystem stall. A redirected descriptor cannot establish the already-resolved original filename; no original-path symlink guarantee is claimed for stdin.
 
@@ -89,9 +99,9 @@ Before issuance and handoff, the bridge first acquires the same short nonblockin
 
 All requests pin HTTP/1.1 in both protocol configuration and TLS ALPN, avoiding HTTP/2 debug credential logging. They use direct TLS only to exact `api.github.com`; inherited proxies, redirects, other origins/ports and unexpected compressed encodings are refused. Every response, including errors and reused G02 identity calls, has a 1 MiB body budget plus one detection byte; known oversize lengths are rejected without reading. Successful JSON rejects duplicate keys and nesting beyond 32 levels. Application-level HTTP retries are absent. Error bodies are never returned or printed. Token/API responses that omit required policy facts fail closed.
 
-## Future approval and commands
+## Historical discovery approval example (retired)
 
-No live broker approval is granted by this document. The nominated existing-App proposal is `gh-runnerd-gate-deab34`, owner `1XP-AI` / `258160258`; the canary proposal is private `1XP-AI/gh-runnerd-canary` with runner group `gh-runnerd-canary-deab34`. Actual App, installation, repository and group IDs must be independently confirmed after their separate approval/creation. Zero values below are intentionally invalid:
+No live broker approval is granted by this document. The formerly nominated existing-App proposal is `gh-runnerd-gate-deab34`, owner `1XP-AI` / `258160258`; the canary proposal is private `1XP-AI/gh-runnerd-canary` with runner group `gh-runnerd-canary-deab34`. Actual App, installation, repository and group IDs must be independently confirmed after their separate approval/creation. The zero-valued discovery approval below is historical input-shape evidence only; current public entrypoints reject discovery. Zero values are intentionally invalid:
 
 ```json
 {
@@ -121,27 +131,19 @@ GOEXPERIMENT= CGO_ENABLED=1 GOTOOLCHAIN=go1.27.3 go build -trimpath -o "$G01_BRO
 "$G01_BROKER_BINARY" --plan  # offline plan check; no live authorization
 ```
 
-After separate explicit approval of one token mint and the two discovery authentication requests:
-
-```sh
-"$G01_BROKER_BINARY" --execute-approved-broker \
-  --approval "$G01_BROKER_APPROVAL" --state-dir "$G01_BROKER_ATTEMPT" \
-  < "$G01_PRIVATE_BROKER_INPUT"
-```
-
-The output may contain the validated hostname only alongside a fixed status. Include that exact hostname in a separately reviewed controller approval; discovery never automatically edits or approves that file.
+The former discovery command and token-mint example were retired with the legacy
+`RunBroker` execution route. Do not run or reuse the old `--execute-approved-broker`
+examples. No current discovery command is supplied; hostname discovery and any
+associated credential mint remain unqualified and unauthorized.
 
 The first controller approval must already authorize every intended mutating phase. Later broker approvals select individual unused slots while reusing that exact controller authority. A changed controller expiry/phase list is allowed only for a strictly later expiry authorizing inspection/cleanup; it cannot authorize later new work. The same required `owner_nonce` must appear in both approvals.
 
 For one controller phase, use `mode: "controller"`, add the one `phase`, the lowercase `controller_binary_sha256`, `controller_approval_sha256`, and reviewed 40-hex `controller_harness_sha`, and explicitly authorize workflow verification only when required by the controller approval. Follow the existing [controller build/approval procedure](g01-live-driver.md); its clean standalone clone stamping requirement remains. After building its reviewed binary outside the checkout, restrict that owned binary to `0500` before recording its digest. The broker will refuse a broadly accessible executable.
 
-```sh
-"$G01_BROKER_BINARY" --execute-approved-broker \
-  --approval "$G01_BROKER_APPROVAL" --state-dir "$G01_BROKER_ATTEMPT" \
-  --controller-binary "$G01_CONTROLLER_BINARY" \
-  --controller-approval "$G01_CONTROLLER_APPROVAL" \
-  --controller-state-dir "$G01_CONTROLLER_STATE" < "$G01_PRIVATE_BROKER_INPUT"
-```
+The former controller command sample used the retired `--execute-approved-broker`
+route. The current experimental command requires an independently reviewed sealed
+v3 policy and nonzero v2 group policy; it remains quarantined from live use until
+its exact authorization and outstanding G01 gates are satisfied.
 
 Root coordination must select the actual paths, IDs, exact reviewed source/binary digests, phase, expiry and separate workflow authority before final user approval. The command does not establish target-host/controller identity, install a service, modify the G02 App or create the canary repository/group. Controller actions are exactly those in its separate approved phase; no broker permission authorizes a worker or workflow dispatch.
 
@@ -167,4 +169,4 @@ After integrating main `f1fe70c`, one final combined `make check` passed, includ
 
 No test proves live GitHub acceptance of the selected token response fields or registration/admin exchange, physical power-loss durability, exact target/controller identity, a production credential store, worker isolation, workflow execution or completion of any G01/G02 live gate. Review and future explicit authorization remain required.
 
-Primary contracts: GitHub [installation-token issuance](https://docs.github.com/en/rest/apps/apps#create-an-installation-access-token-for-an-app) supports repository/permission narrowing and returns expiry/permissions; [runner-group GET](https://docs.github.com/en/rest/actions/self-hosted-runner-groups#get-a-self-hosted-runner-group-for-an-organization) requires a suitable organization authority; the historical [SDK v0.4.0 authentication source](https://github.com/actions/scaleset/blob/v0.4.0/client.go) was used for the discovery exchange described above. These sources establish the proposed protocol, not a current source requalification or live result.
+Primary contracts: GitHub [installation-token issuance](https://docs.github.com/en/rest/apps/apps#create-an-installation-access-token-for-an-app) supports repository/permission narrowing and returns expiry/permissions; [runner-group GET](https://docs.github.com/en/rest/actions/self-hosted-runner-groups#get-a-self-hosted-runner-group-for-an-organization) and [selected-repository listing](https://docs.github.com/en/rest/actions/self-hosted-runner-groups#list-repository-access-to-a-self-hosted-runner-group-in-an-organization) allow GitHub App installation tokens with `Self-hosted runners: read`; repository identity GET uses `Metadata: read`. The historical [SDK v0.4.0 authentication source](https://github.com/actions/scaleset/blob/v0.4.0/client.go) was used for the discovery exchange described above. These sources establish the proposed protocol, not a live result.

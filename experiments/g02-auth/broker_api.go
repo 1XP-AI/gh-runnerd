@@ -171,7 +171,25 @@ func (r brokerIssued) matchesScope(a BrokerApproval) bool {
 	return a.ManagementScope == "" && len(r.Permissions) == 2 && r.Permissions["metadata"] == "read" && minimalPermissions(r.Permissions) && r.RepositorySelection == "selected" && len(r.Repositories) == 1 && r.Repositories[0].matches(a)
 }
 
+func (r brokerIssued) matchesReadOnlyScope(a BrokerApproval) bool {
+	if a.ManagementScope == organizationOnlyManagementScope {
+		return len(r.Permissions) == 1 && r.Permissions["organization_self_hosted_runners"] == "read" && len(r.Repositories) == 0 && (r.RepositorySelection == "" || r.RepositorySelection == "all" || r.RepositorySelection == "selected")
+	}
+	return a.ManagementScope == "" && len(r.Permissions) == 2 && r.Permissions["organization_self_hosted_runners"] == "read" && r.Permissions["metadata"] == "read" && r.RepositorySelection == "selected" && len(r.Repositories) == 1 && r.Repositories[0].matches(a)
+}
+
 func (a *brokerAPI) mint(ctx context.Context, approval BrokerApproval, cred Credential) (brokerIssued, error) {
+	return a.mintWithPermissions(ctx, approval, cred, false)
+}
+
+func (a *brokerAPI) mintReadOnly(ctx context.Context, approval BrokerApproval, cred Credential) (brokerIssued, error) {
+	if approval.GroupPolicy.Version != 2 || !approval.GroupPolicy.Valid(approval.Organization+"/"+approval.Repository, "") || approval.GroupPolicy.OrganizationID != approval.OrganizationID {
+		return brokerIssued{}, errBroker
+	}
+	return a.mintWithPermissions(ctx, approval, cred, true)
+}
+
+func (a *brokerAPI) mintWithPermissions(ctx context.Context, approval BrokerApproval, cred Credential, readOnly bool) (brokerIssued, error) {
 	if !approval.GroupPolicy.Valid(approval.Organization+"/"+approval.Repository, "") || (approval.GroupPolicy.Version == 2 && approval.GroupPolicy.OrganizationID != approval.OrganizationID) || (approval.ManagementScope != "" && approval.ManagementScope != organizationOnlyManagementScope) {
 		return brokerIssued{}, errBroker
 	}
@@ -179,10 +197,14 @@ func (a *brokerAPI) mint(ctx context.Context, approval BrokerApproval, cred Cred
 	if err != nil {
 		return brokerIssued{}, errBroker
 	}
-	permissions := map[string]string{"organization_self_hosted_runners": "write", "metadata": "read"}
+	runnerPermission := "write"
+	if readOnly {
+		runnerPermission = "read"
+	}
+	permissions := map[string]string{"organization_self_hosted_runners": runnerPermission, "metadata": "read"}
 	repositories := []int64{approval.RepositoryID}
 	if approval.ManagementScope == organizationOnlyManagementScope {
-		permissions = map[string]string{"organization_self_hosted_runners": "write"}
+		permissions = map[string]string{"organization_self_hosted_runners": runnerPermission}
 		repositories = nil
 	}
 	body := struct {
@@ -190,7 +212,10 @@ func (a *brokerAPI) mint(ctx context.Context, approval BrokerApproval, cred Cred
 		Permissions   map[string]string `json:"permissions"`
 	}{repositories, permissions}
 	var result brokerIssued
-	if a.call(ctx, "POST", "/app/installations/"+strconv.FormatInt(approval.InstallationID, 10)+"/access_tokens", "Bearer "+jwt, body, 201, &result) != nil || !validBrokerToken(result.Token) || len(result.Token) > 1024 || !result.ExpiresAt.After(a.now().Add(time.Minute)) || result.ExpiresAt.After(a.now().Add(65*time.Minute)) || !result.matchesScope(approval) {
+	if a.call(ctx, "POST", "/app/installations/"+strconv.FormatInt(approval.InstallationID, 10)+"/access_tokens", "Bearer "+jwt, body, 201, &result) != nil || !validBrokerToken(result.Token) || len(result.Token) > 1024 || !result.ExpiresAt.After(a.now().Add(time.Minute)) || result.ExpiresAt.After(a.now().Add(65*time.Minute)) {
+		return brokerIssued{}, errBroker
+	}
+	if (readOnly && !result.matchesReadOnlyScope(approval)) || (!readOnly && !result.matchesScope(approval)) {
 		return brokerIssued{}, errBroker
 	}
 	return result, nil

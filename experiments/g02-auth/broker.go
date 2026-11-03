@@ -282,9 +282,10 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 	// Every authenticated call revalidates the still-held durable claim.
 	scoped := newBrokerAPI(api.now, brokerGuardTransport{api.client.Transport, guardLive})
 	api = scoped
-	// JWT identity verification precedes the one token mint. Private repository
-	// and runner-group APIs require that installation token, so scope preflight
-	// necessarily follows minting and precedes every subsequent auth/child effect.
+	// JWT identity verification precedes token issuance. The v3 reusable-callee
+	// route first uses an exact read-only installation token for provider-state
+	// preflight, then repeats the final callee GET immediately before write-token
+	// issuance. Other internal fixture routes retain their historical sequence.
 	identity, err := api.github.DescribeApp(ctx, cred)
 	if err != nil || identity.ID != a.AppID || identity.Slug != a.AppName || identity.OwnerID != a.AppOwnerID || !strings.EqualFold(identity.OwnerLogin, a.AppOwner) || identity.OwnerType != "Organization" {
 		return BrokerResult{}, errBroker
@@ -293,28 +294,46 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 	if err != nil || install.ID != a.InstallationID || install.AppID != identity.ID || install.AccountID != a.OrganizationID || install.TargetID != a.OrganizationID || install.Login != a.Organization || install.AccountType != "Organization" || install.TargetType != "Organization" || !install.SuspensionKnown || install.Suspended || !minimalPermissions(install.Permissions) {
 		return BrokerResult{}, errBroker
 	}
-	// Workflow identity is the final controller-authority check. It uses the
-	// already supplied verification credential, but must precede token minting
-	// and every later authenticated effect. A provenance receipt additionally
-	// binds the API result to the signed workflow ref and selected outer phase.
-	// Reusable-callee grants require a second exact observation here: the first
-	// v3 observation signs the receipt, while this final GET fences the selected
-	// callee immediately before management issuance and handoff.
 	if v3ReusableCallee {
+		if j.append("token_request_started", nil) != nil {
+			return BrokerResult{}, errBroker
+		}
+		readOnly, err := api.mintReadOnly(ctx, a, cred)
+		if err != nil {
+			return BrokerResult{}, errBroker
+		}
+		readCtx, stopRead := context.WithDeadline(ctx, readOnly.ExpiresAt.Add(-time.Minute))
+		preflightErr := api.preflight(readCtx, a, readOnly.Token)
+		stopRead()
+		if input.VerificationToken == readOnly.Token || preflightErr != nil {
+			return BrokerResult{}, errBroker
+		}
+		if j.append("read_only_token_verified", map[string]any{"expires_at": readOnly.ExpiresAt, "app_id": identity.ID, "installation_id": install.ID}) != nil {
+			return BrokerResult{}, errBroker
+		}
+		// The final workflow GET is deliberately after read-only provider
+		// inspection and immediately before the management write-token request.
 		if api.verifyFinalReusableWorkflow(ctx, a, plan.controller, input.VerificationToken, plan.handoff.grant) != nil {
 			return BrokerResult{}, errBroker
 		}
-	} else if a.Mode == "paired-terminal" || (plan != nil && plan.controller.needsVerification()) {
-		if provenance != nil {
-			if api.verifyWorkflowWithReceipt(ctx, a, plan.controller, input.VerificationToken, provenance) != nil {
-				return BrokerResult{}, errBroker
-			}
-		} else if api.verifyWorkflow(ctx, a, plan.controller, input.VerificationToken) != nil {
+		if j.append("management_token_request_started", nil) != nil {
 			return BrokerResult{}, errBroker
 		}
-	}
-	if j.append("token_request_started", nil) != nil {
-		return BrokerResult{}, errBroker
+	} else {
+		// Workflow identity is the final controller-authority check for the
+		// internal fixture routes, using the supplied verification credential.
+		if a.Mode == "paired-terminal" || (plan != nil && plan.controller.needsVerification()) {
+			if provenance != nil {
+				if api.verifyWorkflowWithReceipt(ctx, a, plan.controller, input.VerificationToken, provenance) != nil {
+					return BrokerResult{}, errBroker
+				}
+			} else if api.verifyWorkflow(ctx, a, plan.controller, input.VerificationToken) != nil {
+				return BrokerResult{}, errBroker
+			}
+		}
+		if j.append("token_request_started", nil) != nil {
+			return BrokerResult{}, errBroker
+		}
 	}
 	issued, err := api.mint(ctx, a, cred)
 	if err != nil {
@@ -330,6 +349,9 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 		return BrokerResult{}, errBroker
 	}
 	if j.append("token_verified", map[string]any{"expires_at": issued.ExpiresAt, "app_id": identity.ID, "installation_id": install.ID}) != nil {
+		return BrokerResult{}, errBroker
+	}
+	if v3ReusableCallee && api.verifyFinalReusableWorkflow(ctx, a, plan.controller, input.VerificationToken, plan.handoff.grant) != nil {
 		return BrokerResult{}, errBroker
 	}
 	if a.Mode == "discover-actions-host" {

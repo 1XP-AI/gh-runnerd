@@ -218,16 +218,21 @@ func brokerWorkflowReceiptForRequest(ctx context.Context, api *brokerAPI, a Brok
 	return &receipt, nil
 }
 
-// RunBroker is network-lazy until all private approval/input checks succeed.
-// Calling this function with live credentials requires separate exact approval.
+// runBrokerWithAPI is a test seam for the shared broker phases. The public
+// command entrypoint uses RunBrokerExperiment and its sealed v3 grant selection.
+// RunBroker is an inert compatibility stub. Live-capable G01 issuance must
+// enter through RunBrokerExperiment, which requires the sealed v3 reusable-
+// callee grant and nonzero GroupPolicy v2 before effects.
 func RunBroker(ctx context.Context, files BrokerFiles, input *os.File) (BrokerResult, error) {
-	return runBrokerWithAPI(ctx, files, input, newBrokerAPI(time.Now, nil))
+	return BrokerResult{}, errBroker
 }
+
 func runBrokerWithAPI(ctx context.Context, files BrokerFiles, input *os.File, api *brokerAPI) (BrokerResult, error) {
 	return runBrokerWithPrivateHandoff(ctx, files, input, api, nil)
 }
 
-// Private injection only; ordinary RunBroker never selects this assembly.
+// runBrokerWithPrivateHandoff is internal; public execution supplies the exact
+// selected experimental assembly before reaching this shared implementation.
 func runBrokerWithPrivateHandoff(ctx context.Context, files BrokerFiles, input *os.File, api *brokerAPI, assembly *brokerHandoffAssembly) (BrokerResult, error) {
 	if ctx == nil || api == nil || !brokerCanonicalPath(files.StateDirectory) {
 		return BrokerResult{}, errBroker

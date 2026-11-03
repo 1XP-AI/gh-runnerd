@@ -13,10 +13,13 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"runtime"
 	"runtime/debug"
 	"slices"
+	"strings"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/livecanary"
 	"github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/liveworker"
@@ -26,6 +29,7 @@ import (
 const (
 	maxPublicEvidenceInputBytes = 1 << 20
 	maxPublicEvidenceJSONDepth  = 16
+	supportedScaleSetSDKSum     = "h1:IoE2xjt9cXyTndIrpz5pMoKpzV/fW2ECIEJc5xuHRbM="
 )
 
 type publicEvidenceInput struct {
@@ -248,24 +252,46 @@ func buildRevision() (string, bool) {
 }
 
 func buildRevisionFromInfo(info *debug.BuildInfo, ok bool) (string, bool) {
-	if !ok || info == nil || info.GoVersion != "go1.27.3" {
+	if !ok || info == nil || info.GoVersion != "go1.27.3" || info.Path != "github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/cmd/g01-live" {
 		return "", false
 	}
-	version, clean, sdk := "", false, false
+	version, clean, sdkFound, sdk := "", false, false, false
+	goos, goarch, cgo, tags := "", "", "", ""
 	for _, setting := range info.Settings {
-		if setting.Key == "vcs.revision" {
+		switch setting.Key {
+		case "GOOS":
+			goos = setting.Value
+		case "GOARCH":
+			goarch = setting.Value
+		case "CGO_ENABLED":
+			cgo = setting.Value
+		case "-tags":
+			tags = setting.Value
+		case "vcs.revision":
 			version = setting.Value
-		}
-		if setting.Key == "vcs.modified" {
+		case "vcs.modified":
 			clean = setting.Value == "false"
+		}
+	}
+	for _, tag := range strings.FieldsFunc(tags, func(r rune) bool { return r == ',' || unicode.IsSpace(r) }) {
+		if tag != "g01_live" {
+			return "", false
 		}
 	}
 	for _, dep := range info.Deps {
 		if dep.Path == "github.com/actions/scaleset" {
-			sdk = dep.Version == "v0.5.0" && dep.Replace == nil
+			if sdkFound {
+				return "", false
+			}
+			sdkFound = true
+			sdk = dep.Version == "v0.5.0" && dep.Sum == supportedScaleSetSDKSum && dep.Replace == nil
 		}
 	}
-	return version, clean && sdk && len(version) == 40
+	validRevision := len(version) == 40
+	for _, c := range version {
+		validRevision = validRevision && (c >= '0' && c <= '9' || c >= 'a' && c <= 'f')
+	}
+	return version, validRevision && clean && sdkFound && sdk && goos == runtime.GOOS && goarch == runtime.GOARCH && cgo == "1" && tags == "g01_live"
 }
 
 var pairedPrepareJournalForCommand = livecanary.PreparePairedJournal

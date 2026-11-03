@@ -22,7 +22,7 @@ type controllerExperimentSelection struct {
 
 func selectControllerExperiment(files PairedTerminalFiles, mode, phase string, now time.Time) (controllerExperimentSelection, error) {
 	p, w, i, e := handoff.DecodePublicPolicy([]byte(controllerExperimentPolicyJSON), "controller", now)
-	if e != nil || phase == "cleanup" {
+	if e != nil || p.Version != 3 || p.Source != handoff.ReusableCalleeSource || phase == "cleanup" {
 		return controllerExperimentSelection{}, ErrApproval
 	}
 	if mode == "controller" {
@@ -37,25 +37,12 @@ func selectControllerExperiment(files PairedTerminalFiles, mode, phase string, n
 	if e != nil {
 		return controllerExperimentSelection{}, ErrApproval
 	}
-	if a.GroupPolicy != (handoff.GroupPolicy{}) && p.Version != 3 {
-		return controllerExperimentSelection{}, ErrApproval
-	}
-	source := p.Source
-	if p.Version == 3 {
-		source = "github-rest-workflow-v1"
-	}
-	a, request, e := controllerHandoffRequest(snap.raw, phase, source, now)
+	a, request, e := controllerHandoffRequest(snap.raw, phase, "github-rest-workflow-v1", now)
 	if e != nil {
 		return controllerExperimentSelection{}, ErrApproval
 	}
-	var g handoff.PhaseGrant
-	if p.Version == 3 {
-		request.Version, request.Source = 2, handoff.ReusableCalleeSource
-		g, e = p.SelectCallee(mode, request, a.GroupPolicy.OrganizationID, a.RepositoryID, int64(a.RunnerGroupID), a.ManagementScope, a.GroupPolicy, now)
-	} else {
-		groupDigest := a.GroupPolicy.GrantDigest(request, a.RepositoryID, int64(a.RunnerGroupID), a.ManagementScope)
-		g, e = p.SelectGroup(mode, request, groupDigest, now)
-	}
+	request.Version, request.Source = 2, handoff.ReusableCalleeSource
+	g, e := p.SelectCallee(mode, request, a.GroupPolicy.OrganizationID, a.RepositoryID, int64(a.RunnerGroupID), a.ManagementScope, a.GroupPolicy, now)
 	if e != nil || g.RepositoryID != a.RepositoryID || (a.GroupPolicy.Version == 2 && g.OrganizationID != a.GroupPolicy.OrganizationID) || g.ExpiresAt.Before(a.ExpiresAt) {
 		return controllerExperimentSelection{}, ErrApproval
 	}
@@ -103,11 +90,8 @@ func runControllerExperimentOwned(parent context.Context, files PairedTerminalFi
 	if parent == nil || parent.Err() != nil {
 		return ErrApproval
 	}
-	var expected *handoff.Request
-	if selected.policy.Version == 3 {
-		request := selected.grant.Request
-		expected = &request
-	}
+	request := selected.grant.Request
+	expected := &request
 	owned, e := handoff.ProtectPipes(control, input)
 	if e != nil {
 		return ErrApproval

@@ -91,6 +91,48 @@ func TestControllerExperimentSelectsReusableCalleeIndependently(t *testing.T) {
 	}
 }
 
+func TestControllerExperimentRejectsLegacyZeroGroupPolicy(t *testing.T) {
+	now := time.Now()
+	a := controllerHandoffApprovalAt(now)
+	a.Phases = []string{"create"}
+	a.GroupPolicy = handoff.GroupPolicy{}
+	raw, err := json.Marshal(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, request, err := controllerHandoffRequest(raw, "create", "github-rest-workflow-v1", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := handoff.PublicPolicy{
+		Version:           1,
+		Role:              "controller",
+		Source:            request.Source,
+		WorkflowKeyID:     "workflow-v1",
+		WorkflowPublicKey: "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8",
+		IssuerKeyID:       "issuer-v1",
+		IssuerPublicKey:   "e28a8970753332bd72fef413e6b0b2ef1b4aadda7aa2c141f233712a6876b351",
+		Grants: []handoff.PhaseGrant{{
+			Request: request, Mode: "controller", OrganizationID: 101,
+			RepositoryID: a.RepositoryID, ExpiresAt: a.ExpiresAt,
+		}},
+	}
+	policyJSON, err := json.Marshal(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := PairedTerminalFiles{ControllerApprovalPath: filepath.Join(privateDir(t), "legacy-approval.json")}
+	if err := os.WriteFile(files.ControllerApprovalPath, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	old := controllerExperimentPolicyJSON
+	controllerExperimentPolicyJSON = string(policyJSON)
+	defer func() { controllerExperimentPolicyJSON = old }()
+	if _, err := selectControllerExperiment(files, "controller", "create", now); err == nil {
+		t.Fatal("legacy v1 grant with omitted group policy selected controller authority")
+	}
+}
+
 func TestControllerExperimentRejectsCallerOnlyPolicyForReusableGroup(t *testing.T) {
 	now := time.Now()
 	a := controllerHandoffApprovalAt(now)

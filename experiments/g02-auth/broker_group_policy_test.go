@@ -186,16 +186,13 @@ func groupPolicyResponse(fault string, p handoff.GroupPolicy) (int, string) {
 
 func TestBrokerExactGroupPolicyPreflight(t *testing.T) {
 	for _, scope := range []string{"", "organization-only"} {
-		for _, fault := range []string{"", "legacy", "missing", "null", "false", "empty", "null-list", "missing-list", "extra", "wrong", "caller", "branch", "tag", "group", "403"} {
+		for _, fault := range []string{"", "missing", "null", "false", "empty", "null-list", "missing-list", "extra", "wrong", "caller", "branch", "tag", "group", "403"} {
 			t.Run(scope+"/"+fault, func(t *testing.T) {
 				a, candidate, api, f, root := newBrokerFixture(t)
 				if scope != "" {
 					a, candidate, api, f, root = organizationScopeFixture(t, nil)
 				}
 				a.GroupPolicy = groupPolicyFixture()
-				if fault == "legacy" {
-					a.GroupPolicy = handoff.GroupPolicy{}
-				}
 				a.Mode = "controller"
 				a.Phase = "create"
 				launches := 0
@@ -210,21 +207,21 @@ func TestBrokerExactGroupPolicyPreflight(t *testing.T) {
 					return base.RoundTrip(r)
 				})
 				_, err := brokerExecute(context.Background(), a, brokerInput{PEM: string(candidate.PEM)}, root, api, plan)
-				if (err == nil) != (fault == "" || fault == "legacy") {
+				if (err == nil) != (fault == "") {
 					t.Fatalf("group policy accepted=%v fault=%s", err == nil, fault)
 				}
-				if fault != "" && fault != "legacy" && launches != 0 {
+				if fault != "" && launches != 0 {
 					t.Fatal("child launch after rejected group")
 				}
 				if f.tokenCalls != 1 {
 					t.Fatalf("mint calls=%d; group preflight is post-mint", f.tokenCalls)
 				}
 				for _, call := range f.calls {
-					if fault != "" && fault != "legacy" && (strings.Contains(call, "registration-token") || strings.Contains(call, "runner-registration")) {
+					if fault != "" && (strings.Contains(call, "registration-token") || strings.Contains(call, "runner-registration")) {
 						t.Fatal("registration after rejected policy")
 					}
 				}
-				if fault != "" && fault != "legacy" {
+				if fault != "" {
 					_, err = brokerExecute(context.Background(), a, brokerInput{PEM: string(candidate.PEM)}, root, api, plan)
 					if err == nil || f.tokenCalls != 1 {
 						t.Fatal("failed policy claim retried mint")
