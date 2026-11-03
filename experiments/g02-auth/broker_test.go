@@ -35,6 +35,7 @@ type brokerHTTPFixture struct {
 	badGroup       bool
 	badGroupPolicy bool
 	mintError      bool
+	revokeError    bool
 	token          string
 	root           string
 	admissionRoot  string
@@ -91,6 +92,20 @@ func (f *brokerHTTPFixture) RoundTrip(r *http.Request) (*http.Response, error) {
 			token = "synthetic-private-read-installation-token"
 		}
 		payload = map[string]any{"token": token, "expires_at": time.Now().Add(time.Hour), "permissions": request.Permissions, "repository_selection": "selected", "repositories": []any{repo}}
+	case "/installation/token":
+		if r.Method != http.MethodDelete || r.Header.Get("Authorization") != "Bearer synthetic-private-read-installation-token" {
+			f.t.Error("installation-token revocation used the wrong method or authority")
+		}
+		data, err := os.ReadFile(filepath.Join(f.root, "broker.jsonl"))
+		if err != nil || !strings.Contains(string(data), "read_only_token_revocation_started") {
+			f.t.Error("installation-token revocation preceded its durable journal intent")
+		}
+		if f.revokeError {
+			status = http.StatusBadGateway
+			payload = map[string]string{"message": "synthetic revocation failure"}
+		} else {
+			status = http.StatusNoContent
+		}
 	case "/installation/repositories":
 		payload = map[string]any{"total_count": 1, "repositories": []any{repo}}
 	case "/repos/org-a/canary":
@@ -111,6 +126,9 @@ func (f *brokerHTTPFixture) RoundTrip(r *http.Request) (*http.Response, error) {
 		payload = map[string]any{"url": "https://fixture.actions.githubusercontent.com/tenant/synthetic/", "token": "synthetic-private-admin-token"}
 	default:
 		f.t.Fatal("unapproved API call")
+	}
+	if status == http.StatusNoContent {
+		return response(status, ""), nil
 	}
 	data, _ := json.Marshal(payload)
 	return response(status, string(data)), nil

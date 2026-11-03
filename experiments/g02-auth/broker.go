@@ -305,10 +305,20 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 		readCtx, stopRead := context.WithDeadline(ctx, readOnly.ExpiresAt.Add(-time.Minute))
 		preflightErr := api.preflight(readCtx, a, readOnly.Token)
 		stopRead()
-		if input.VerificationToken == readOnly.Token || preflightErr != nil {
+		readOnlyVerified := input.VerificationToken != readOnly.Token && preflightErr == nil
+		if readOnlyVerified && j.append("read_only_token_verified", map[string]any{"expires_at": readOnly.ExpiresAt, "app_id": identity.ID, "installation_id": install.ID}) != nil {
 			return BrokerResult{}, errBroker
 		}
-		if j.append("read_only_token_verified", map[string]any{"expires_at": readOnly.ExpiresAt, "app_id": identity.ID, "installation_id": install.ID}) != nil {
+		if j.append("read_only_token_revocation_started", nil) != nil {
+			return BrokerResult{}, errBroker
+		}
+		if api.revokeInstallationToken(ctx, readOnly.Token) != nil {
+			if j.append("read_only_token_revocation_uncertain", nil) != nil {
+				return BrokerResult{}, errBroker
+			}
+			return BrokerResult{}, errBroker
+		}
+		if j.append("read_only_token_revoked", nil) != nil || !readOnlyVerified {
 			return BrokerResult{}, errBroker
 		}
 		// The final workflow GET is deliberately after read-only provider

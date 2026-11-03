@@ -52,7 +52,7 @@ func (t brokerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		return nil, errBroker
 	}
 	// Apply duplicate-key/depth checks to identity responses reused from G02 too.
-	if res.StatusCode >= 200 && res.StatusCode < 300 {
+	if res.StatusCode >= 200 && res.StatusCode < 300 && !(res.StatusCode == http.StatusNoContent && len(data) == 0) {
 		var value any
 		if decodeBrokerJSON(data, &value, false) != nil {
 			return nil, errBroker
@@ -123,7 +123,16 @@ func (a *brokerAPI) call(ctx context.Context, method, path, authorization string
 		return errBroker
 	}
 	data, err = io.ReadAll(io.LimitReader(res.Body, maxResponseBytes+1))
-	if err != nil || len(data) > maxResponseBytes || res.StatusCode != status || decodeBrokerJSON(data, out, false) != nil {
+	if err != nil || len(data) > maxResponseBytes || res.StatusCode != status {
+		return errBroker
+	}
+	if out == nil {
+		if len(data) != 0 {
+			return errBroker
+		}
+		return nil
+	}
+	if decodeBrokerJSON(data, out, false) != nil {
 		return errBroker
 	}
 	return nil
@@ -187,6 +196,13 @@ func (a *brokerAPI) mintReadOnly(ctx context.Context, approval BrokerApproval, c
 		return brokerIssued{}, errBroker
 	}
 	return a.mintWithPermissions(ctx, approval, cred, true)
+}
+
+func (a *brokerAPI) revokeInstallationToken(ctx context.Context, token string) error {
+	if !validBrokerToken(token) || len(token) > 1024 {
+		return errBroker
+	}
+	return a.call(ctx, http.MethodDelete, "/installation/token", "Bearer "+token, nil, http.StatusNoContent, nil)
 }
 
 func (a *brokerAPI) mintWithPermissions(ctx context.Context, approval BrokerApproval, cred Credential, readOnly bool) (brokerIssued, error) {

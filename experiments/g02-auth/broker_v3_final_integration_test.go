@@ -179,12 +179,42 @@ func TestBrokerExperimentV3ReadOnlyPreflightRejectsBeforeWriteMint(t *testing.T)
 	if len(fixture.fixture.mintRequests) != 1 || !reflect.DeepEqual(fixture.fixture.mintRequests[0].RepositoryIDs, []int64{501}) || !reflect.DeepEqual(fixture.fixture.mintRequests[0].Permissions, wantPermissions) {
 		t.Fatalf("ineligible group did not stop after an exact read-only token: requests=%+v", fixture.fixture.mintRequests)
 	}
+	if !reflect.DeepEqual(fixture.fixture.calls[len(fixture.fixture.calls)-1:], []string{"DELETE /installation/token"}) {
+		t.Fatalf("read-only token was not revoked after rejected provider preflight: %v", fixture.fixture.calls)
+	}
 	journal, err := os.ReadFile(filepath.Join(fixture.files.StateDirectory, "broker.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if bytes.Contains(journal, []byte("management_token_request_started")) || bytes.Contains(journal, []byte("controller_handoff_started")) {
 		t.Fatalf("ineligible group crossed write-token or handoff journal boundary: %s", journal)
+	}
+}
+
+func TestBrokerExperimentV3StopsWhenReadOnlyTokenRevocationIsUncertain(t *testing.T) {
+	fixture := newBrokerV3RunFixture(t, "create", false)
+	fixture.fixture.revokeError = true
+	management, err := json.Marshal(brokerInput{PEM: string(fixture.candidate.PEM), VerificationToken: "synthetic-private-workflow-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := brokerV3Pipe(t, management)
+	observation := brokerV3Pipe(t, []byte("synthetic-private-workflow-token"))
+	workflowSeed := brokerV3Pipe(t, bytes.Repeat([]byte{1}, ed25519.SeedSize))
+	issuerSeed := brokerV3Pipe(t, bytes.Repeat([]byte{71}, ed25519.SeedSize))
+	result, runErr := RunBrokerExperimentWithInputs(context.Background(), fixture.files, input, observation, workflowSeed, issuerSeed)
+	if runErr == nil || result.Status != "" || fixture.fixture.tokenCalls != 1 || *fixture.workflowGET != 1 {
+		t.Fatalf("uncertain read-only-token revocation crossed the write boundary: result=%+v err=%v mints=%d workflow_gets=%d calls=%v", result, runErr, fixture.fixture.tokenCalls, *fixture.workflowGET, fixture.fixture.calls)
+	}
+	if !reflect.DeepEqual(fixture.fixture.calls[len(fixture.fixture.calls)-1:], []string{"DELETE /installation/token"}) {
+		t.Fatalf("read-only installation token was not revoked as the final API operation: %v", fixture.fixture.calls)
+	}
+	journal, err := os.ReadFile(filepath.Join(fixture.files.StateDirectory, "broker.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(journal, []byte("read_only_token_revocation_uncertain")) || bytes.Contains(journal, []byte("management_token_request_started")) || bytes.Contains(journal, []byte("controller_handoff_started")) {
+		t.Fatalf("uncertain revocation was not durably fenced before write mint: %s", journal)
 	}
 }
 
@@ -283,6 +313,7 @@ func TestBrokerExperimentV3FinalGETFencesCalleeBeforeMintAndHandoff(t *testing.T
 					"GET /repos/org-a/canary",
 					"GET /orgs/org-a/actions/runner-groups/3",
 					"GET /orgs/org-a/actions/runner-groups/3/repositories",
+					"DELETE /installation/token",
 					"GET /repos/org-a/canary/actions/runs/7",
 					"POST /app/installations/201/access_tokens",
 					"GET /installation/repositories",
