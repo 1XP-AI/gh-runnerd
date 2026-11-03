@@ -409,22 +409,31 @@ live authorization unless explicitly excluded or separately disabled.
   maintainer-supplied existing organization App installation has
   `organization_self_hosted_runners: write`. No App permission, installation or
   repository setting was changed. Private App identifiers are omitted here.
-- [ ] Verify that the separate secret broker keeps management credentials on the
-  controller. The organization-only App does not need repository access. Broker
-  and controller approvals must explicitly select the reviewed
-  [organization-only management scope](g01-organization-management-scope.md),
-  with separate workflow verification authority where required. Scope support
-  alone does not qualify issuance, provenance or execution.
+- [x] Offline source/fixture evidence verifies the v3 broker builds the management
+  credential payload from authenticated issuance and sends it through the bounded
+  handoff to the selected controller child; the controller validates the signed
+  receipt/binding before reading credentials. The controller validates the
+  approved organization-only scope and keeps the workflow-verification token
+  distinct where a phase requires it. See the [broker evidence](g01-broker.md),
+  [organization-only scope ledger](g01-organization-management-scope.md), and
+  passing separate-process fixtures
+  TestControllerProcessHandoffActualBrokerSeparateProcess and
+  TestControllerProcessHandoffV3ActualBrokerChild. This closes source-level
+  custody evidence only. The current controller launches no worker child, so
+  actual worker credential inheritance, deployed identity, runtime isolation,
+  live issuance and production provenance remain unqualified.
 - [ ] Dedicated trusted controller and disposable worker environment is named.
   Prefer one Linux ARM64 worker on an explicitly chosen Docker endpoint/runtime;
   Docker Desktop presence alone is not authorization to use it. Native macOS
   requires a separately approved trusted execution identity. Do not share the
   management credential context with job code.
-- [ ] Resource budget: **one active worker maximum**, one scale set, one session
+- [x] Plan a maximum budget of **one active worker**, one scale set, one session
   owner, at most two small queued canary jobs per phase, 1 vCPU / 1 GiB worker
-  target after host headroom is checked, 10-minute job deadline. Increase any
-  limit only with new concrete authorization. No service-container workloads in
-  this protocol canary.
+  target, and a 10-minute job deadline; no service-container workloads. Raise
+  any limit only with new concrete authorization.
+- [ ] Measure available host headroom and verify effective resource enforcement
+  on the selected trusted environment before execution; the budget above is a
+  target and does not establish current capacity.
 - [x] The offline adoption profile selects SDK `v0.5.0`/Go `1.27.3` and the
   byte-verified runner `2.338.0` ARM64 image. The archive, manifest and config
   digests are in the [runner checkpoint](g01-runner-release-checkpoint.md#2026-10-25-target-offer-archive-and-image-bytes);
