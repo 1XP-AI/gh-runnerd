@@ -622,7 +622,8 @@ preflight attempt. The broker durably records the revocation intent before
 `DELETE /installation/token`; only an empty `204` response is confirmed. An
 ambiguous result is journaled and stops before the final workflow check and
 management-token mint. The G01 separate-process fixture now covers the read and
-write mint scopes and verifies one read-token revocation.
+write mint scopes and verifies one read-token revocation. The broker journal
+fixture also rejects persistence of the synthetic read token.
 
 The meaningful RED was
 `go test -run '^TestBrokerExperimentV3StopsWhenReadOnlyTokenRevocationIsUncertain$' -count=1 .`
@@ -636,6 +637,7 @@ on the external worktree volume:
 |---|---|
 | G02 `go test -run '^TestBrokerExperimentV3StopsWhenReadOnlyTokenRevocationIsUncertain$' -count=1 .` | PASS |
 | G02 `go test -run '^TestBrokerExperimentV3' -count=1 .` | PASS (5.798s) |
+| G02 v3 suite rerun after the journal redaction assertion | PASS (5.344s) |
 | G02 `go test -count=1 -timeout=120s ./...` | PASS (all packages; library 48.110s) |
 | G02 `go test -race -run '^TestBrokerExperimentV3(ReadOnlyPreflightRejectsBeforeWriteMint|StopsWhenReadOnlyTokenRevocationIsUncertain|FinalGETFencesCalleeBeforeMintAndHandoff)$' -count=1 -timeout=60s .` | PASS (17.057s) |
 | G02 `go test -race -count=1 -timeout=120s ./...` | PASS (all packages; library 120.491s) |

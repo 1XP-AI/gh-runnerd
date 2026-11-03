@@ -216,6 +216,9 @@ func TestBrokerExperimentV3StopsWhenReadOnlyTokenRevocationIsUncertain(t *testin
 	if !bytes.Contains(journal, []byte("read_only_token_revocation_uncertain")) || bytes.Contains(journal, []byte("management_token_request_started")) || bytes.Contains(journal, []byte("controller_handoff_started")) {
 		t.Fatalf("uncertain revocation was not durably fenced before write mint: %s", journal)
 	}
+	if bytes.Contains(journal, []byte("synthetic-private-read-installation-token")) {
+		t.Fatal("read-only installation token was persisted in the broker journal")
+	}
 }
 
 func brokerV3Pipe(t *testing.T, data []byte) *os.File {
