@@ -195,14 +195,21 @@ func (r brokerIssued) matchesReadOnlyScope(a BrokerApproval) bool {
 }
 
 func (a *brokerAPI) mint(ctx context.Context, approval BrokerApproval, cred Credential) (brokerIssued, error) {
-	return a.mintWithPermissions(ctx, approval, cred, false, nil)
+	return a.mintWithPermissions(ctx, approval, cred, false, nil, false)
 }
 
 func (a *brokerAPI) mintReadOnlyWithIntent(ctx context.Context, approval BrokerApproval, cred Credential, beforeRequest func() error) (brokerIssued, error) {
 	if beforeRequest == nil || approval.GroupPolicy.Version != 2 || !approval.GroupPolicy.Valid(approval.Organization+"/"+approval.Repository, "") || approval.GroupPolicy.OrganizationID != approval.OrganizationID {
 		return brokerIssued{}, errBroker
 	}
-	return a.mintWithPermissions(ctx, approval, cred, true, beforeRequest)
+	return a.mintWithPermissions(ctx, approval, cred, true, beforeRequest, true)
+}
+
+func (a *brokerAPI) mintManagementWithIntent(ctx context.Context, approval BrokerApproval, cred Credential, beforeRequest func() error) (brokerIssued, error) {
+	if beforeRequest == nil {
+		return brokerIssued{}, errBroker
+	}
+	return a.mintWithPermissions(ctx, approval, cred, false, beforeRequest, true)
 }
 
 func (a *brokerAPI) revokeInstallationToken(ctx context.Context, token string) error {
@@ -212,7 +219,7 @@ func (a *brokerAPI) revokeInstallationToken(ctx context.Context, token string) e
 	return a.call(ctx, http.MethodDelete, "/installation/token", "Bearer "+token, nil, http.StatusNoContent, nil)
 }
 
-func (a *brokerAPI) mintWithPermissions(ctx context.Context, approval BrokerApproval, cred Credential, readOnly bool, beforeRequest func() error) (brokerIssued, error) {
+func (a *brokerAPI) mintWithPermissions(ctx context.Context, approval BrokerApproval, cred Credential, readOnly bool, beforeRequest func() error, retainRevocationCandidate bool) (brokerIssued, error) {
 	if !approval.GroupPolicy.Valid(approval.Organization+"/"+approval.Repository, "") || (approval.GroupPolicy.Version == 2 && approval.GroupPolicy.OrganizationID != approval.OrganizationID) || (approval.ManagementScope != "" && approval.ManagementScope != organizationOnlyManagementScope) {
 		return brokerIssued{}, errBroker
 	}
@@ -236,30 +243,29 @@ func (a *brokerAPI) mintWithPermissions(ctx context.Context, approval BrokerAppr
 	}{repositories, permissions}
 	var result brokerIssued
 	path := "/app/installations/" + strconv.FormatInt(approval.InstallationID, 10) + "/access_tokens"
-	if readOnly {
+	if beforeRequest != nil {
 		err = a.callWithBeforeRequest(ctx, "POST", path, "Bearer "+jwt, body, 201, &result, beforeRequest)
 	} else {
 		err = a.call(ctx, "POST", path, "Bearer "+jwt, body, 201, &result)
 	}
 	if err != nil {
-		return readOnlyRevocationCandidate(result, readOnly), errBroker
+		return brokerTokenRevocationCandidate(result, retainRevocationCandidate), errBroker
 	}
 	if !validBrokerToken(result.Token) || len(result.Token) > 1024 {
 		return brokerIssued{}, errBroker
 	}
 	if !result.ExpiresAt.After(a.now().Add(time.Minute)) || result.ExpiresAt.After(a.now().Add(65*time.Minute)) ||
 		(readOnly && !result.matchesReadOnlyScope(approval)) || (!readOnly && !result.matchesScope(approval)) {
-		return readOnlyRevocationCandidate(result, readOnly), errBroker
+		return brokerTokenRevocationCandidate(result, retainRevocationCandidate), errBroker
 	}
 	return result, nil
 }
 
-// A syntactically valid token returned by the read-only endpoint must remain
-// available to the caller for cleanup even when the response fails a later
-// expiry or scope check. Management-token validation never exposes a cleanup
-// candidate because that credential has a different authority boundary.
-func readOnlyRevocationCandidate(result brokerIssued, readOnly bool) brokerIssued {
-	if !readOnly || !validBrokerToken(result.Token) || len(result.Token) > 1024 {
+// Only broker paths with a durable lifecycle intent retain a bounded token
+// candidate for in-memory self-revocation after response or scope validation
+// fails. The candidate is never serialized or returned to callers.
+func brokerTokenRevocationCandidate(result brokerIssued, retain bool) brokerIssued {
+	if !retain || !validBrokerToken(result.Token) || len(result.Token) > 1024 {
 		return brokerIssued{}
 	}
 	return brokerIssued{Token: result.Token}

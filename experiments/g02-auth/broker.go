@@ -62,11 +62,10 @@ const organizationOnlyManagementScope = "organization-only"
 
 func brokerSlotAllowed(slot string) bool { return brokerPhases[slot] || brokerSpecialSlots[slot] }
 
-// One header, one claim and one completion for every finite schema slot, up to
-// one workflow-provenance GET start/confirmation pair and one read-token
-// revocation start/confirmation pair per slot, plus the final empty split
-// element from the required trailing newline.
-func brokerLedgerMaxLines() int { return 1 + 6*(len(brokerPhases)+len(brokerSpecialSlots)) + 1 }
+// One header, claim and completion per finite slot, one workflow-provenance
+// pair, one read-token lifecycle pair and one management-token lifecycle pair
+// or start/no-dispatch pair, plus the trailing empty split element.
+func brokerLedgerMaxLines() int { return 1 + 8*(len(brokerPhases)+len(brokerSpecialSlots)) + 1 }
 
 const (
 	// Terminal collection has seven five-second cadence gaps in production.
@@ -151,7 +150,7 @@ func brokerPairedAuthorityDeadline(parent context.Context, a BrokerApproval, pla
 }
 
 func revokeBrokerReadOnlyToken(ctx context.Context, api *brokerAPI, j *brokerJournal, claim *brokerAdmission, token, verificationToken string) error {
-	if !validBrokerToken(token) || len(token) > 1024 || claim == nil || !claim.readTokenLifecyclePending || claim.check() != nil {
+	if !validBrokerToken(token) || len(token) > 1024 || claim == nil || !claim.tokenLifecyclePending || claim.tokenLifecycleKind != "read" || claim.check() != nil {
 		return errBroker
 	}
 	if token == verificationToken {
@@ -175,6 +174,38 @@ func revokeBrokerReadOnlyToken(ctx context.Context, api *brokerAPI, j *brokerJou
 	}
 	if claim.confirmReadTokenLifecycle() != nil {
 		_ = j.append("read_only_token_revocation_uncertain", map[string]any{"reason": "admission_lifecycle_confirmation_failed"})
+		return errBroker
+	}
+	return nil
+}
+
+const brokerManagementTokenRevocationTimeout = 5 * time.Second
+
+func revokeBrokerManagementToken(ctx context.Context, api *brokerAPI, j *brokerJournal, claim *brokerAdmission, token, verificationToken string) error {
+	if ctx == nil || api == nil || j == nil || !validBrokerToken(token) || len(token) > 1024 || claim == nil || !claim.tokenLifecyclePending || claim.tokenLifecycleKind != "management" || claim.check() != nil {
+		return errBroker
+	}
+	if token == verificationToken {
+		if j.append("management_token_revocation_skipped", map[string]any{"reason": "verification_token_collision"}) != nil {
+			return errBroker
+		}
+		return errBroker
+	}
+	if j.append("management_token_revocation_started", nil) != nil {
+		return errBroker
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), brokerManagementTokenRevocationTimeout)
+	defer cancel()
+	if api.revokeInstallationToken(cleanupCtx, token) != nil {
+		_ = j.append("management_token_revocation_uncertain", map[string]any{"reason": "revoke_request_failed_or_ambiguous"})
+		return errBroker
+	}
+	if j.append("management_token_revoked", nil) != nil {
+		_ = j.append("management_token_revocation_uncertain", map[string]any{"reason": "revocation_result_persistence_failed"})
+		return errBroker
+	}
+	if claim.confirmManagementTokenLifecycle() != nil {
+		_ = j.append("management_token_revocation_uncertain", map[string]any{"reason": "admission_lifecycle_confirmation_failed"})
 		return errBroker
 	}
 	return nil
@@ -268,6 +299,12 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 		return BrokerResult{}, errBroker
 	}
 	defer claim.close()
+	managementTokenLifecycleStarted := false
+	defer func() {
+		if !managementTokenLifecycleStarted {
+			_ = claim.recordManagementTokenRequestNotDispatched()
+		}
+	}()
 	readTokenLifecycleStarted := false
 	if v3ReusableCallee {
 		defer func() {
@@ -287,6 +324,12 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 	}
 	guardLive := func() error { return guard(true) }
 	guardPostChild := func() error { return guard(false) }
+	guardTokenCleanup := func() error {
+		if claim.check() != nil || j.check() != nil {
+			return errBroker
+		}
+		return nil
+	}
 	if guardLive() != nil {
 		return BrokerResult{}, errBroker
 	}
@@ -319,8 +362,10 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 	}
 
 	// Every authenticated call revalidates the still-held durable claim.
-	scoped := newBrokerAPI(api.now, brokerGuardTransport{api.client.Transport, guardLive})
+	baseTransport := api.client.Transport
+	scoped := newBrokerAPIWithProvenanceRoot(api.now, brokerGuardTransport{baseTransport, guardLive}, api.provenanceRoot)
 	api = scoped
+	managementCleanupAPI := newBrokerAPIWithProvenanceRoot(api.now, brokerGuardTransport{baseTransport, guardTokenCleanup}, api.provenanceRoot)
 	// JWT identity verification precedes token issuance. The v3 reusable-callee
 	// route first uses an exact read-only installation token for provider-state
 	// preflight, then repeats the final callee GET immediately before write-token
@@ -365,12 +410,9 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 		if revokeBrokerReadOnlyToken(ctx, api, j, claim, readOnly.Token, input.VerificationToken) != nil || !readOnlyVerified || !verifiedJournaled {
 			return BrokerResult{}, errBroker
 		}
-		// The final workflow GET is deliberately after read-only provider
-		// inspection and immediately before the management write-token request.
+		// Recheck after read-only provider inspection before requesting the
+		// management write token; a second check fences the eventual handoff.
 		if api.verifyFinalReusableWorkflow(ctx, a, plan.controller, input.VerificationToken, plan.handoff.grant) != nil {
-			return BrokerResult{}, errBroker
-		}
-		if j.append("management_token_request_started", nil) != nil {
 			return BrokerResult{}, errBroker
 		}
 	} else {
@@ -389,7 +431,35 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 			return BrokerResult{}, errBroker
 		}
 	}
-	issued, err := api.mint(ctx, a, cred)
+	issued, err := api.mintManagementWithIntent(ctx, a, cred, func() error {
+		if claim.beginManagementTokenLifecycle() != nil {
+			return errBroker
+		}
+		managementTokenLifecycleStarted = true
+		if j.append("management_token_request_started", nil) != nil {
+			// callWithBeforeRequest will not dispatch the POST when this
+			// callback fails. Close the account intent only with that explicit
+			// pre-dispatch record; failure to persist it remains fail-stopped.
+			_ = claim.recordManagementTokenRequestNotDispatched()
+			return errBroker
+		}
+		return nil
+	})
+	managementTokenRevocationAttempted := false
+	revokeManagementToken := func() error {
+		if managementTokenRevocationAttempted || issued.Token == "" {
+			return errBroker
+		}
+		managementTokenRevocationAttempted = true
+		return revokeBrokerManagementToken(ctx, managementCleanupAPI, j, claim, issued.Token, input.VerificationToken)
+	}
+	if issued.Token != "" {
+		defer func() {
+			if !managementTokenRevocationAttempted {
+				_ = revokeManagementToken()
+			}
+		}()
+	}
 	if err != nil {
 		return BrokerResult{}, errBroker
 	}
@@ -405,12 +475,9 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 	if j.append("token_verified", map[string]any{"expires_at": issued.ExpiresAt, "app_id": identity.ID, "installation_id": install.ID}) != nil {
 		return BrokerResult{}, errBroker
 	}
-	if v3ReusableCallee && api.verifyFinalReusableWorkflow(ctx, a, plan.controller, input.VerificationToken, plan.handoff.grant) != nil {
-		return BrokerResult{}, errBroker
-	}
 	if a.Mode == "discover-actions-host" {
 		host, err := api.discover(ctx, a, issued.Token, j)
-		if err != nil || j.append("actions_host_observed", map[string]any{"actions_host": host}) != nil || claim.complete() != nil {
+		if err != nil || revokeManagementToken() != nil || j.append("actions_host_observed", map[string]any{"actions_host": host}) != nil || claim.complete() != nil {
 			return BrokerResult{}, errBroker
 		}
 		return BrokerResult{Status: "actions_host_observed", ActionsHost: host}, nil
@@ -438,7 +505,7 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 	}
 	data, _ := json.Marshal(payload)
 	defer clear(data)
-	if len(data) > 16384 || j.append("controller_handoff_started", nil) != nil {
+	if len(data) > 16384 {
 		return BrokerResult{}, errBroker
 	}
 	var launchErr error
@@ -523,14 +590,26 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 		if guardLive() != nil || ctx.Err() != nil {
 			return BrokerResult{}, errBroker
 		}
+		if v3ReusableCallee && (api.verifyFinalReusableWorkflow(ctx, a, plan.controller, input.VerificationToken, assembly.grant) != nil || assembly.workflow.Verify(request, rawReceipt, api.now()) != nil) {
+			return BrokerResult{}, errBroker
+		}
+		if guardLive() != nil || ctx.Err() != nil || j.append("controller_handoff_started", nil) != nil {
+			return BrokerResult{}, errBroker
+		}
 		launchErr = assembly.launch(ctx, owned, filepath.Join(path, "controller-approval.json"))
 	} else {
-		if guardLive() != nil {
+		if guardLive() != nil || ctx.Err() != nil {
+			return BrokerResult{}, errBroker
+		}
+		if v3ReusableCallee && api.verifyFinalReusableWorkflow(ctx, a, plan.controller, input.VerificationToken, plan.handoff.grant) != nil {
+			return BrokerResult{}, errBroker
+		}
+		if guardLive() != nil || ctx.Err() != nil || j.append("controller_handoff_started", nil) != nil {
 			return BrokerResult{}, errBroker
 		}
 		launchErr = plan.launch(ctx, data, filepath.Join(path, "controller-approval.json"))
 	}
-	if launchErr != nil || guardPostChild() != nil || j.append("controller_completed", nil) != nil || claim.complete() != nil || guardPostChild() != nil {
+	if launchErr != nil || guardPostChild() != nil || revokeManagementToken() != nil || j.append("controller_completed", nil) != nil || claim.complete() != nil || guardPostChild() != nil {
 		return BrokerResult{}, errBroker
 	}
 	if a.Mode == "paired-terminal" {

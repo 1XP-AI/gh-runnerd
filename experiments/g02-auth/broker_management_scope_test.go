@@ -197,6 +197,7 @@ func TestBrokerOrganizationOnlyDiscoveryKeepsGroupBoundary(t *testing.T) {
 			if !badGroup {
 				want = append(want, "GET /orgs/org-a/actions/runner-groups/3/repositories", "POST /orgs/org-a/actions/runners/registration-token", "POST /actions/runner-registration")
 			}
+			want = append(want, "DELETE /installation/token")
 			if !reflect.DeepEqual(fixture.calls, want) || fixture.tokenCalls != 1 {
 				t.Fatalf("wrong management operation order: %v", fixture.calls)
 			}

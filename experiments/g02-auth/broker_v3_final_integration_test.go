@@ -503,7 +503,7 @@ func TestBrokerExperimentV3HistoricalWorkflowProvenanceClaimReplayBinding(t *tes
 	})
 }
 
-func TestBrokerExperimentV3LegacyIncompleteClaimWithoutLifecycleBlocksLaterInspect(t *testing.T) {
+func TestBrokerExperimentV3LegacyIncompleteClaimWithoutManagementLifecycleBlocksLaterInspect(t *testing.T) {
 	create := newBrokerV3RunFixture(t, "create", false)
 	if _, err := executeBrokerV3Fixture(t, context.Background(), create); err != nil {
 		t.Fatalf("complete synthetic v3 create: %v", err)
@@ -515,13 +515,14 @@ func TestBrokerExperimentV3LegacyIncompleteClaimWithoutLifecycleBlocksLaterInspe
 	}
 	var legacyLines []string
 	for _, line := range strings.Split(strings.TrimSuffix(string(ledger), "\n"), "\n") {
-		if strings.Contains(line, `"kind":"read_token_lifecycle_`) || strings.Contains(line, `"kind":"workflow_provenance_get_`) || strings.Contains(line, `"kind":"complete"`) {
+		if strings.Contains(line, `"kind":"management_token_lifecycle_`) || strings.Contains(line, `"kind":"complete"`) {
 			continue
 		}
 		legacyLines = append(legacyLines, line)
 	}
-	if len(legacyLines) != 2 {
-		t.Fatalf("expected a legacy header plus one incomplete claim, got %d ledger lines", len(legacyLines))
+	legacyText := strings.Join(legacyLines, "\n")
+	if len(legacyLines) != 6 || !strings.Contains(legacyText, `"kind":"read_token_lifecycle_confirmed"`) || !strings.Contains(legacyText, `"kind":"workflow_provenance_get_confirmed"`) {
+		t.Fatalf("expected workflow and read-token confirmations with no management lifecycle, got %d ledger lines", len(legacyLines))
 	}
 	if err := os.WriteFile(ledgerPath, []byte(strings.Join(legacyLines, "\n")+"\n"), 0600); err != nil {
 		t.Fatalf("write synthetic legacy incomplete ledger: %v", err)
@@ -532,7 +533,7 @@ func TestBrokerExperimentV3LegacyIncompleteClaimWithoutLifecycleBlocksLaterInspe
 	inspect.files.ControllerStateDirectory = create.files.ControllerStateDirectory
 	result, inspectErr := executeBrokerV3Fixture(t, context.Background(), inspect)
 	if inspectErr == nil || result.Status != "" || inspect.fixture.tokenCalls != 0 || len(inspect.fixture.calls) != 0 {
-		t.Fatalf("legacy incomplete reusable-callee claim without lifecycle proof was recovered: result=%+v err=%v mints=%d calls=%v", result, inspectErr, inspect.fixture.tokenCalls, inspect.fixture.calls)
+		t.Fatalf("legacy incomplete reusable-callee claim without management lifecycle proof was recovered: result=%+v err=%v mints=%d calls=%v", result, inspectErr, inspect.fixture.tokenCalls, inspect.fixture.calls)
 	}
 }
 
@@ -543,7 +544,7 @@ func TestBrokerExperimentV3PreRequestFailureRecordsNoDispatchForLaterInspect(t *
 		t.Fatalf("token-request journal failure reached issuance: err=%v mints=%d calls=%v", createErr, create.fixture.tokenCalls, create.fixture.calls)
 	}
 	admission, err := os.ReadFile(filepath.Join(create.fixture.admissionRoot, "broker-admission.jsonl"))
-	if err != nil || !bytes.Contains(admission, []byte(`"kind":"read_token_request_not_dispatched"`)) {
+	if err != nil || !bytes.Contains(admission, []byte(`"kind":"read_token_request_not_dispatched"`)) || !bytes.Contains(admission, []byte(`"kind":"management_token_request_not_dispatched"`)) {
 		t.Fatalf("pre-request failure lacks durable no-dispatch proof: err=%v", err)
 	}
 

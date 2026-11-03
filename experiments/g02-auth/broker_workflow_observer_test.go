@@ -152,6 +152,38 @@ func TestWorkflowObserverRequiresExactRunAndPrivateNumericIdentities(t *testing.
 	}
 }
 
+func TestWorkflowObserverRequiresRunInProgress(t *testing.T) {
+	grant := workflowGrantFixture()
+	good := workflowRunJSON(t, grant)
+	for _, status := range []string{"queued", "completed", "cancelled", "unknown", ""} {
+		name := status
+		if name == "" {
+			name = "missing"
+		}
+		t.Run(name, func(t *testing.T) {
+			var run map[string]any
+			if json.Unmarshal([]byte(good), &run) != nil {
+				t.Fatal("invalid workflow fixture")
+			}
+			if status == "" {
+				delete(run, "status")
+			} else {
+				run["status"] = status
+			}
+			body, err := json.Marshal(run)
+			if err != nil {
+				t.Fatal(err)
+			}
+			observer := newWorkflowRunObserver(transportFunc(func(*http.Request) (*http.Response, error) {
+				return response(http.StatusOK, string(body)), nil
+			}))
+			if _, err := observer.observe(context.Background(), grant, "synthetic-observation-token"); err == nil {
+				t.Fatalf("accepted workflow run status %q", status)
+			}
+		})
+	}
+}
+
 func TestWorkflowObserverRejectsAlreadyDecompressedResponse(t *testing.T) {
 	grant := workflowGrantFixture()
 	observer := newWorkflowRunObserver(transportFunc(func(*http.Request) (*http.Response, error) {

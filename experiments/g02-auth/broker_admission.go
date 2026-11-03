@@ -150,7 +150,7 @@ type brokerClaimEvent struct {
 	Snapshot       brokerInode                `json:"snapshot"`
 	SnapshotDigest string                     `json:"snapshot_digest,omitempty"`
 }
-type brokerReadTokenLifecycleEvent struct {
+type brokerTokenLifecycleEvent struct {
 	Kind    string      `json:"kind"`
 	Slot    string      `json:"slot"`
 	Attempt brokerInode `json:"attempt"`
@@ -189,7 +189,8 @@ type brokerAdmission struct {
 	rootInfo, parentInfo, fileInfo os.FileInfo
 	data                           []byte
 	event                          brokerClaimEvent
-	readTokenLifecyclePending      bool
+	tokenLifecyclePending          bool
+	tokenLifecycleKind             string
 	workflowProvenancePending      *brokerWorkflowProvenanceEvent
 	workflowProvenanceConfirmed    map[string]brokerWorkflowProvenanceEvent
 	workflowProvenanceNoDispatch   map[string]bool
@@ -252,7 +253,7 @@ func (c *brokerAdmission) append(value any) error {
 	return nil
 }
 func (c *brokerAdmission) complete() error {
-	if c == nil || c.readTokenLifecyclePending || c.check() != nil {
+	if c == nil || c.tokenLifecyclePending || c.check() != nil {
 		return errBroker
 	}
 	e := c.event
@@ -263,34 +264,62 @@ func (c *brokerAdmission) complete() error {
 	return c.check()
 }
 func (c *brokerAdmission) beginReadTokenLifecycle() error {
-	if c == nil || c.readTokenLifecyclePending || c.check() != nil {
+	return c.beginTokenLifecycle("read_token_lifecycle_started", "read")
+}
+func (c *brokerAdmission) beginManagementTokenLifecycle() error {
+	return c.beginTokenLifecycle("management_token_lifecycle_started", "management")
+}
+func (c *brokerAdmission) beginTokenLifecycle(eventKind, lifecycleKind string) error {
+	if c == nil || c.tokenLifecyclePending || c.check() != nil {
 		return errBroker
 	}
-	event := brokerReadTokenLifecycleEvent{Kind: "read_token_lifecycle_started", Slot: c.event.Slot, Attempt: c.event.Attempt, Journal: c.event.Journal}
+	event := brokerTokenLifecycleEvent{Kind: eventKind, Slot: c.event.Slot, Attempt: c.event.Attempt, Journal: c.event.Journal}
 	if c.append(event) != nil || c.check() != nil {
 		return errBroker
 	}
-	c.readTokenLifecyclePending = true
+	c.tokenLifecyclePending = true
+	c.tokenLifecycleKind = lifecycleKind
 	return nil
 }
 func (c *brokerAdmission) confirmReadTokenLifecycle() error {
-	if c == nil || !c.readTokenLifecyclePending || c.check() != nil {
+	return c.confirmTokenLifecycle("read_token_lifecycle_confirmed", "read")
+}
+func (c *brokerAdmission) confirmManagementTokenLifecycle() error {
+	return c.confirmTokenLifecycle("management_token_lifecycle_confirmed", "management")
+}
+func (c *brokerAdmission) confirmTokenLifecycle(eventKind, lifecycleKind string) error {
+	if c == nil || !c.tokenLifecyclePending || c.tokenLifecycleKind != lifecycleKind || c.check() != nil {
 		return errBroker
 	}
-	event := brokerReadTokenLifecycleEvent{Kind: "read_token_lifecycle_confirmed", Slot: c.event.Slot, Attempt: c.event.Attempt, Journal: c.event.Journal}
+	event := brokerTokenLifecycleEvent{Kind: eventKind, Slot: c.event.Slot, Attempt: c.event.Attempt, Journal: c.event.Journal}
 	if c.append(event) != nil || c.check() != nil {
 		return errBroker
 	}
-	c.readTokenLifecyclePending = false
+	c.tokenLifecyclePending = false
+	c.tokenLifecycleKind = ""
 	return nil
 }
 func (c *brokerAdmission) recordReadTokenRequestNotDispatched() error {
-	if c == nil || c.readTokenLifecyclePending || c.event.Provenance == nil || c.event.Provenance.Source != handoff.ReusableCalleeSource || c.check() != nil {
+	if c == nil || c.tokenLifecyclePending || c.event.Provenance == nil || c.event.Provenance.Source != handoff.ReusableCalleeSource || c.check() != nil {
 		return errBroker
 	}
-	event := brokerReadTokenLifecycleEvent{Kind: "read_token_request_not_dispatched", Slot: c.event.Slot, Attempt: c.event.Attempt, Journal: c.event.Journal}
+	event := brokerTokenLifecycleEvent{Kind: "read_token_request_not_dispatched", Slot: c.event.Slot, Attempt: c.event.Attempt, Journal: c.event.Journal}
 	if c.append(event) != nil || c.check() != nil {
 		return errBroker
+	}
+	return nil
+}
+func (c *brokerAdmission) recordManagementTokenRequestNotDispatched() error {
+	if c == nil || c.check() != nil || (c.tokenLifecyclePending && c.tokenLifecycleKind != "management") {
+		return errBroker
+	}
+	event := brokerTokenLifecycleEvent{Kind: "management_token_request_not_dispatched", Slot: c.event.Slot, Attempt: c.event.Attempt, Journal: c.event.Journal}
+	if c.append(event) != nil || c.check() != nil {
+		return errBroker
+	}
+	if c.tokenLifecyclePending {
+		c.tokenLifecyclePending = false
+		c.tokenLifecycleKind = ""
 	}
 	return nil
 }
@@ -434,11 +463,13 @@ func openBrokerAdmissionMode(directory string, a BrokerApproval, j *brokerJourna
 	var authority *brokerControllerAuthority
 	provenanceNonces := map[string]bool{}
 	readTokenLifecycleSlots := map[string]bool{}
+	managementTokenLifecycleSlots := map[string]bool{}
 	readTokenRequestNotDispatchedSlots := map[string]bool{}
+	managementTokenRequestNotDispatchedSlots := map[string]bool{}
 	workflowProvenanceConfirmed := map[string]brokerWorkflowProvenanceEvent{}
 	workflowProvenanceNoDispatch := map[string]bool{}
 	latestSlot := ""
-	var pendingReadTokenLifecycle *brokerReadTokenLifecycleEvent
+	var pendingTokenLifecycle *brokerTokenLifecycleEvent
 	var pendingWorkflowProvenance *brokerWorkflowProvenanceEvent
 	for _, line := range lines[1 : len(lines)-1] {
 		var kind struct {
@@ -486,42 +517,65 @@ func openBrokerAdmissionMode(directory string, a BrokerApproval, j *brokerJourna
 				workflowProvenanceNoDispatch[event.Slot] = true
 				pendingWorkflowProvenance = nil
 			}
-		case "read_token_lifecycle_started", "read_token_lifecycle_confirmed", "read_token_revocation_started", "read_token_revocation_confirmed", "read_token_request_not_dispatched":
-			var event brokerReadTokenLifecycleEvent
-			if decodeBrokerJSON(line, &event, true) != nil || !validBrokerReadTokenLifecycleEvent(event) {
+		case "read_token_lifecycle_started", "read_token_lifecycle_confirmed", "read_token_revocation_started", "read_token_revocation_confirmed", "management_token_lifecycle_started", "management_token_lifecycle_confirmed", "read_token_request_not_dispatched", "management_token_request_not_dispatched":
+			var event brokerTokenLifecycleEvent
+			if decodeBrokerJSON(line, &event, true) != nil || !validBrokerTokenLifecycleEvent(event) {
 				return nil, errBroker
 			}
 			switch event.Kind {
-			case "read_token_lifecycle_started", "read_token_revocation_started":
+			case "read_token_lifecycle_started", "read_token_revocation_started", "management_token_lifecycle_started":
 				old, ok := slots[event.Slot]
-				if pendingReadTokenLifecycle != nil || readTokenLifecycleSlots[event.Slot] || latestSlot != event.Slot || !ok || done[event.Slot] || old.Attempt != event.Attempt || old.Journal != event.Journal {
+				purpose := brokerTokenLifecyclePurpose(event.Kind)
+				recorded := readTokenLifecycleSlots[event.Slot] || managementTokenRequestNotDispatchedSlots[event.Slot]
+				if purpose == "management" {
+					recorded = managementTokenLifecycleSlots[event.Slot] || managementTokenRequestNotDispatchedSlots[event.Slot]
+				}
+				if pendingTokenLifecycle != nil || recorded || latestSlot != event.Slot || !ok || done[event.Slot] || old.Attempt != event.Attempt || old.Journal != event.Journal {
 					return nil, errBroker
 				}
-				readTokenLifecycleSlots[event.Slot] = true
-				pendingReadTokenLifecycle = &event
-			case "read_token_lifecycle_confirmed", "read_token_revocation_confirmed":
-				if pendingReadTokenLifecycle == nil || !sameBrokerReadTokenLifecycle(*pendingReadTokenLifecycle, event) {
+				if purpose == "management" {
+					managementTokenLifecycleSlots[event.Slot] = true
+				} else {
+					readTokenLifecycleSlots[event.Slot] = true
+				}
+				pendingTokenLifecycle = &event
+			case "read_token_lifecycle_confirmed", "read_token_revocation_confirmed", "management_token_lifecycle_confirmed":
+				if pendingTokenLifecycle == nil || !sameBrokerTokenLifecycle(*pendingTokenLifecycle, event) {
 					return nil, errBroker
 				}
-				pendingReadTokenLifecycle = nil
+				pendingTokenLifecycle = nil
 			case "read_token_request_not_dispatched":
 				old, ok := slots[event.Slot]
-				if latestSlot != event.Slot || !ok || done[event.Slot] || readTokenRequestNotDispatchedSlots[event.Slot] || old.Attempt != event.Attempt || old.Journal != event.Journal || old.Provenance == nil || old.Provenance.Source != handoff.ReusableCalleeSource {
+				if latestSlot != event.Slot || !ok || done[event.Slot] || readTokenRequestNotDispatchedSlots[event.Slot] || managementTokenRequestNotDispatchedSlots[event.Slot] || old.Attempt != event.Attempt || old.Journal != event.Journal || old.Provenance == nil || old.Provenance.Source != handoff.ReusableCalleeSource {
 					return nil, errBroker
 				}
-				if pendingReadTokenLifecycle != nil {
-					if pendingReadTokenLifecycle.Kind != "read_token_lifecycle_started" || !sameBrokerReadTokenIdentity(*pendingReadTokenLifecycle, event) {
+				if pendingTokenLifecycle != nil {
+					if pendingTokenLifecycle.Kind != "read_token_lifecycle_started" || !sameBrokerTokenIdentity(*pendingTokenLifecycle, event) {
 						return nil, errBroker
 					}
-					pendingReadTokenLifecycle = nil
+					pendingTokenLifecycle = nil
 				} else if readTokenLifecycleSlots[event.Slot] {
 					return nil, errBroker
 				}
 				readTokenLifecycleSlots[event.Slot] = true
 				readTokenRequestNotDispatchedSlots[event.Slot] = true
+			case "management_token_request_not_dispatched":
+				old, ok := slots[event.Slot]
+				if latestSlot != event.Slot || !ok || done[event.Slot] || managementTokenRequestNotDispatchedSlots[event.Slot] || old.Attempt != event.Attempt || old.Journal != event.Journal {
+					return nil, errBroker
+				}
+				if pendingTokenLifecycle != nil {
+					if pendingTokenLifecycle.Kind != "management_token_lifecycle_started" || !sameBrokerTokenIdentity(*pendingTokenLifecycle, event) {
+						return nil, errBroker
+					}
+					pendingTokenLifecycle = nil
+				} else if managementTokenLifecycleSlots[event.Slot] {
+					return nil, errBroker
+				}
+				managementTokenRequestNotDispatchedSlots[event.Slot] = true
 			}
 		case "claim", "complete":
-			if pendingReadTokenLifecycle != nil || pendingWorkflowProvenance != nil {
+			if pendingTokenLifecycle != nil || pendingWorkflowProvenance != nil {
 				return nil, errBroker
 			}
 			var event brokerClaimEvent
@@ -569,7 +623,7 @@ func openBrokerAdmissionMode(directory string, a BrokerApproval, j *brokerJourna
 			case "complete":
 				old, ok := slots[event.Slot]
 				event.Kind = "claim"
-				if !ok || latestSlot != event.Slot || done[event.Slot] || readTokenRequestNotDispatchedSlots[event.Slot] || brokerDigest(old) != brokerDigest(event) {
+				if !ok || latestSlot != event.Slot || done[event.Slot] || readTokenRequestNotDispatchedSlots[event.Slot] || managementTokenRequestNotDispatchedSlots[event.Slot] || brokerDigest(old) != brokerDigest(event) {
 					return nil, errBroker
 				}
 				done[event.Slot] = true
@@ -578,10 +632,15 @@ func openBrokerAdmissionMode(directory string, a BrokerApproval, j *brokerJourna
 			return nil, errBroker
 		}
 	}
-	if pendingReadTokenLifecycle != nil || pendingWorkflowProvenance != nil {
+	if pendingTokenLifecycle != nil || pendingWorkflowProvenance != nil {
 		return nil, errBroker
 	}
 	for slot, event := range slots {
+		if !done[slot] && !managementTokenLifecycleSlots[slot] && !managementTokenRequestNotDispatchedSlots[slot] {
+			// Older incomplete claims do not prove whether a management-token
+			// request was accepted. Keep them fail-stopped across upgrades.
+			return nil, errBroker
+		}
 		if !done[slot] && event.Provenance != nil && event.Provenance.Source == handoff.ReusableCalleeSource && !readTokenLifecycleSlots[slot] {
 			// Older reusable-callee claims may predate account-wide token
 			// lifecycle intents. Their incomplete state cannot prove whether a
@@ -752,20 +811,30 @@ func validBrokerClaimEvent(a BrokerApproval, e brokerClaimEvent) bool {
 	return e.Controller.Ownership == brokerDigest(c)
 }
 
-func validBrokerReadTokenLifecycleEvent(e brokerReadTokenLifecycleEvent) bool {
-	return (e.Kind == "read_token_lifecycle_started" || e.Kind == "read_token_lifecycle_confirmed" || e.Kind == "read_token_revocation_started" || e.Kind == "read_token_revocation_confirmed" || e.Kind == "read_token_request_not_dispatched") &&
-		brokerSlotAllowed(e.Slot) && e.Slot != "discover-actions-host" &&
+func validBrokerTokenLifecycleEvent(e brokerTokenLifecycleEvent) bool {
+	readTokenEvent := e.Kind == "read_token_lifecycle_started" || e.Kind == "read_token_lifecycle_confirmed" || e.Kind == "read_token_revocation_started" || e.Kind == "read_token_revocation_confirmed" || e.Kind == "read_token_request_not_dispatched"
+	managementTokenEvent := e.Kind == "management_token_lifecycle_started" || e.Kind == "management_token_lifecycle_confirmed" || e.Kind == "management_token_request_not_dispatched"
+	return (readTokenEvent || managementTokenEvent) && brokerSlotAllowed(e.Slot) &&
+		(!readTokenEvent || e.Slot != "discover-actions-host") &&
 		e.Attempt.Device != 0 && e.Attempt.Inode != 0 && e.Journal.Device != 0 && e.Journal.Inode != 0
 }
 
-func sameBrokerReadTokenIdentity(started, event brokerReadTokenLifecycleEvent) bool {
+func brokerTokenLifecyclePurpose(kind string) string {
+	if kind == "management_token_lifecycle_started" || kind == "management_token_lifecycle_confirmed" || kind == "management_token_request_not_dispatched" {
+		return "management"
+	}
+	return "read"
+}
+
+func sameBrokerTokenIdentity(started, event brokerTokenLifecycleEvent) bool {
 	return started.Slot == event.Slot && started.Attempt == event.Attempt && started.Journal == event.Journal
 }
 
-func sameBrokerReadTokenLifecycle(started, confirmed brokerReadTokenLifecycleEvent) bool {
+func sameBrokerTokenLifecycle(started, confirmed brokerTokenLifecycleEvent) bool {
 	legacyPair := started.Kind == "read_token_revocation_started" && confirmed.Kind == "read_token_revocation_confirmed"
 	lifecyclePair := started.Kind == "read_token_lifecycle_started" && confirmed.Kind == "read_token_lifecycle_confirmed"
-	return (legacyPair || lifecyclePair) && sameBrokerReadTokenIdentity(started, confirmed)
+	managementPair := started.Kind == "management_token_lifecycle_started" && confirmed.Kind == "management_token_lifecycle_confirmed"
+	return (legacyPair || lifecyclePair || managementPair) && sameBrokerTokenIdentity(started, confirmed)
 }
 
 func brokerWorkflowProvenanceEventFor(a BrokerApproval, c controllerApproval, j *brokerJournal, source string) (brokerWorkflowProvenanceEvent, error) {

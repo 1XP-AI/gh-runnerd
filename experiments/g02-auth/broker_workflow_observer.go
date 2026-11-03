@@ -21,6 +21,7 @@ type workflowRunObservation struct {
 	HeadSHA        string           `json:"head_sha"`
 	HeadBranch     string           `json:"head_branch"`
 	Event          string           `json:"event"`
+	Status         string           `json:"status"`
 	Path           string           `json:"path"`
 	RunAttempt     int              `json:"run_attempt"`
 	Repository     brokerRepository `json:"repository"`
@@ -34,7 +35,7 @@ func workflowRunPath(repository string, runID int64) string {
 // An empty ref retains the pre-existing unattested verification behavior.
 // Observation and attested corroboration always supply an exact branch ref.
 func (r workflowRunObservation) matches(a BrokerApproval, runID int64, sha, path, ref string) bool {
-	return r.ID == runID && r.HeadSHA == sha && r.Path == path && r.Event == "workflow_dispatch" && r.RunAttempt == 1 && r.Repository.matches(a) && r.HeadRepository.matches(a) && (ref == "" || brokerWorkflowRunHeadBranchMatchesRef(r.HeadBranch, ref))
+	return r.ID == runID && r.HeadSHA == sha && r.Path == path && r.Event == "workflow_dispatch" && r.Status == "in_progress" && r.RunAttempt == 1 && r.Repository.matches(a) && r.HeadRepository.matches(a) && (ref == "" || brokerWorkflowRunHeadBranchMatchesRef(r.HeadBranch, ref))
 }
 
 func (o *workflowRunObserver) observe(ctx context.Context, grant reviewedWorkflowGrant, token string) (workflowRunObservation, error) {
@@ -79,7 +80,7 @@ func exactWorkflowAuthorityKeys(raw json.RawMessage) bool {
 		}
 		return fields, true
 	}
-	run, ok := object(raw, "id", "head_sha", "head_branch", "event", "path", "run_attempt", "repository", "head_repository")
+	run, ok := object(raw, "id", "head_sha", "head_branch", "event", "status", "path", "run_attempt", "repository", "head_repository")
 	if !ok {
 		return false
 	}
