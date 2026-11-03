@@ -851,7 +851,7 @@ failure records `workflow_provenance_get_not_dispatched` and permits a later
 inspect; ambiguous GET outcomes leave `workflow_provenance_get_started` without
 confirmation and block the inspect before any API call.
 
-Local offline verification at exact candidate head
+Historical local offline verification at exact candidate head
 `6950a80639931e497b55e665049af4d4956eacdf` used the cached Go 1.27.3 toolchain
 with external GOCACHE/GOMODCACHE/GOTMPDIR and downloads disabled:
 
@@ -872,8 +872,10 @@ completed and minted twice.
 
 These are synthetic offline fixture results only. No provider credential or
 installation token was minted, no workflow or runner was invoked, and no live
-canary operation was attempted. Independent exact-head review, hosted quick
-checks and all live authorization gates remain pending.
+canary operation was attempted. At this historical `6950a80` candidate,
+independent exact-head review and hosted quick checks were still pending; the
+later PR #161 status is recorded below. All live authorization gates remain
+unresolved.
 
 ### Historical workflow-provenance claim replay binding — 2026-11-04
 
@@ -911,9 +913,16 @@ field except slot (which already failed closed); the matching-history control
 passed. The same focused race selector passes on the corrected local source,
 covering all nine mismatch cases and the positive control in 7.673s.
 
-This test refinement and its evidence update are local and still need a commit
-and push, then a fresh hosted quick check and exact-head Codex and Luna Max
-reviews. No live GitHub provider, credential, runner, Scale Set, Docker or host
-operation was performed. Issue #160 and parent issue #1 remain OPEN / Project #2
-In progress; all live canary and production qualification gates remain
-unresolved.
+The test refinement was committed and pushed in PR head
+`f0b4e97d323a0dc637dfe6cff9c74fa62ca1d922`; hosted Go checks passed. At the
+time of the independent Luna Max re-review, the exact-head Codex review was
+still running. Luna Max confirmed the P2 binding-test gap was resolved and no
+source P0/P1/P2 finding remained, but held overall because this section still
+described the pushed candidate as local and pending. The historical `6950a80`
+pending-review statements above are now explicitly labeled as such. At the time
+this review result arrived, the documentation correction was committed locally
+but not pushed; the follow-up PR head still required a hosted check
+and fresh exact-head Codex/Luna Max reviews. No live GitHub provider,
+credential, runner, Scale Set, Docker or host operation was performed. Issue
+#160 and parent issue #1 remain OPEN / Project #2 In progress; all live canary
+and production qualification gates remain unresolved.
