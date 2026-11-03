@@ -161,23 +161,13 @@ func newBrokerV3RunFixture(t *testing.T, phase string, changedCallee bool, rootM
 	return brokerV3RunFixture{files: BrokerFiles{ApprovalPath: approvalPath, StateDirectory: attempt, ControllerBinary: binary.path, ControllerApproval: controllerPath, ControllerStateDirectory: controllerState}, candidate: candidate, fixture: fixture, workflowGET: workflowGET, changeCalleeAt: changeCalleeAt}
 }
 
-func injectBrokerJournalSyncFailure(t *testing.T, failedPhase string) {
-	t.Helper()
-	oldOpener := openBrokerJournalForExecution
-	openBrokerJournalForExecution = func(path string, approval BrokerApproval) (*brokerJournal, error) {
-		journal, err := openBrokerJournal(path, approval)
-		if err != nil {
-			return nil, err
+func brokerJournalSyncFailureContext(ctx context.Context, failedPhase string) context.Context {
+	return context.WithValue(ctx, brokerJournalSyncFailureHookKey{}, brokerJournalSyncFailureHook(func(journal *brokerJournal, phase string) error {
+		if phase == failedPhase {
+			return errors.New("synthetic fsync failure")
 		}
-		journal.syncFile = func(phase string) error {
-			if phase == failedPhase {
-				return errors.New("synthetic fsync failure")
-			}
-			return journal.file.Sync()
-		}
-		return journal, nil
-	}
-	t.Cleanup(func() { openBrokerJournalForExecution = oldOpener })
+		return journal.file.Sync()
+	}))
 }
 
 func brokerFixtureCallCount(calls []string, want string) int {
@@ -259,13 +249,13 @@ func TestBrokerExperimentV3StopsWhenReadOnlyTokenRevocationIsUncertain(t *testin
 
 func TestBrokerExperimentV3RevokedRecordSyncFailureStopsBeforeWriteMint(t *testing.T) {
 	fixture := newBrokerV3RunFixture(t, "create", false)
-	injectBrokerJournalSyncFailure(t, "read_only_token_revoked")
 	management, err := json.Marshal(brokerInput{PEM: string(fixture.candidate.PEM), VerificationToken: "synthetic-private-workflow-token"})
 	if err != nil {
 		t.Fatal(err)
 	}
+	ctx := brokerJournalSyncFailureContext(context.Background(), "read_only_token_revoked")
 	result, runErr := RunBrokerExperimentWithInputs(
-		context.Background(), fixture.files,
+		ctx, fixture.files,
 		brokerV3Pipe(t, management),
 		brokerV3Pipe(t, []byte("synthetic-private-workflow-token")),
 		brokerV3Pipe(t, bytes.Repeat([]byte{1}, ed25519.SeedSize)),

@@ -218,7 +218,7 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 		j = claimed[0]
 	} else {
 		var err error
-		j, err = openBrokerJournalForExecution(path, a)
+		j, err = openBrokerJournalForExecution(parent, path, a)
 		if err != nil {
 			return BrokerResult{}, errBroker
 		}

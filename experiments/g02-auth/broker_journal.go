@@ -1,6 +1,7 @@
 package enrollment
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -77,10 +78,26 @@ func openBrokerJournal(path string, a BrokerApproval) (j *brokerJournal, err err
 	return j, nil
 }
 
-// openBrokerJournalForExecution is replaceable by package tests to inject a
-// specific sync failure into the full broker path. Production keeps the
-// canonical opener above.
-var openBrokerJournalForExecution = openBrokerJournal
+type brokerJournalSyncFailureHookKey struct{}
+
+type brokerJournalSyncFailureHook func(*brokerJournal, string) error
+
+// openBrokerJournalForExecution keeps test-only sync fault injection scoped to
+// one execution context. Production contexts carry no hook and use the
+// canonical journal opener.
+func openBrokerJournalForExecution(ctx context.Context, path string, a BrokerApproval) (*brokerJournal, error) {
+	if ctx == nil {
+		return nil, errBroker
+	}
+	journal, err := openBrokerJournal(path, a)
+	if err != nil {
+		return nil, err
+	}
+	if hook, ok := ctx.Value(brokerJournalSyncFailureHookKey{}).(brokerJournalSyncFailureHook); ok && hook != nil {
+		journal.syncFile = func(phase string) error { return hook(journal, phase) }
+	}
+	return journal, nil
+}
 
 func (j *brokerJournal) append(phase string, metadata map[string]any) error {
 	record := struct {
