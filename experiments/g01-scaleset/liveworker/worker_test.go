@@ -91,12 +91,28 @@ func approval() Approval {
 	return Approval{RunnerUpdatesDisabled: true, HarnessSHA: strings.Repeat("1", 40), WorkflowSHA: strings.Repeat("2", 40), OwnerNonce: strings.Repeat("3", 32), Controller: "fixture-controller", Endpoint: "/fixture/docker.sock", DaemonID: "fixture-daemon-1", ImageID: "sha256:" + strings.Repeat("4", 64), Image: ImageReference, ExpiresAt: time.Now().Add(time.Hour), Phases: []string{"create", "start", "inspect", "cleanup"}}
 }
 
+func (d *Driver) runForTest(ctx context.Context, phase, jit string) error {
+	return d.run(ctx, phase, jit)
+}
+
 const syntheticJIT = "c3ludGhldGljLWppdC1zZWNyZXQ="
+
+func TestExportedWorkerRunRejectsLocalApprovalAndJITBeforeRuntime(t *testing.T) {
+	runtime := &fakeRuntime{}
+	journal := &memoryJournal{}
+	d := Driver{approval(), journal, runtime}
+	if err := d.Run(context.Background(), "create", syntheticJIT); !errors.Is(err, ErrApproval) {
+		t.Fatalf("unproven exported worker execution returned %v, want ErrApproval", err)
+	}
+	if runtime.creates.Load() != 0 || len(journal.Events()) != 0 {
+		t.Fatalf("unproven exported worker execution crossed effects: creates=%d journal=%d", runtime.creates.Load(), len(journal.Events()))
+	}
+}
 
 func TestNoCreateBeforeDurableIntent(t *testing.T) {
 	f := &fakeRuntime{}
 	d := Driver{approval(), &memoryJournal{fail: true}, f}
-	if d.Run(context.Background(), "create", syntheticJIT) == nil || f.creates.Load() != 0 {
+	if d.runForTest(context.Background(), "create", syntheticJIT) == nil || f.creates.Load() != 0 {
 		t.Fatal("worker created without durable reservation")
 	}
 }
@@ -104,16 +120,16 @@ func TestUnknownCreateNeverRetriesAfterRestart(t *testing.T) {
 	j := &memoryJournal{}
 	f := &fakeRuntime{createErr: errors.New("synthetic-secret-response")}
 	d := Driver{approval(), j, f}
-	_ = d.Run(context.Background(), "create", syntheticJIT)
+	_ = d.runForTest(context.Background(), "create", syntheticJIT)
 	restarted := Driver{d.Approval, j, f}
-	if !errors.Is(restarted.Run(context.Background(), "create", syntheticJIT), ErrUncertain) || f.creates.Load() != 1 {
+	if !errors.Is(restarted.runForTest(context.Background(), "create", syntheticJIT), ErrUncertain) || f.creates.Load() != 1 {
 		t.Fatal("ambiguous create repeated across restart")
 	}
 }
 func TestChangedDaemonCannotCreate(t *testing.T) {
 	f := &fakeRuntime{preflightErr: errors.New("changed daemon")}
 	d := Driver{approval(), &memoryJournal{}, f}
-	if d.Run(context.Background(), "create", syntheticJIT) == nil || f.creates.Load() != 0 {
+	if d.runForTest(context.Background(), "create", syntheticJIT) == nil || f.creates.Load() != 0 {
 		t.Fatal("wrong runtime identity accepted")
 	}
 }

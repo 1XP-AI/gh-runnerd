@@ -519,17 +519,22 @@ func (d *Driver) owned(ctx context.Context, id int) (*scaleset.RunnerScaleSet, e
 	return s, nil
 }
 
-// Run executes one reviewed controller phase. All errors are fixed categories.
-// A second process uses the durable journal to retain unknown reservations;
-// session credentials cannot be rehydrated using the supported SDK API.
+// Run is disabled because this API has no verified controller handoff input.
+// Production execution enters through controllerHandoffEntry instead.
 func (d *Driver) Run(ctx context.Context, phase string) error {
-	return d.runWithHandoff(ctx, phase, nil)
+	return ErrApproval
 }
 
 func (d *Driver) runWithHandoff(ctx context.Context, phase string, proof *controllerHandoffProof) error {
-	if d != nil && d.Approval.GroupPolicy.Version == 2 && proof == nil {
+	if d == nil || proof == nil {
 		return ErrApproval
 	}
+	return d.run(ctx, phase, proof)
+}
+
+// run is the journal/API implementation. Production callers must pass through
+// runWithHandoff; package tests exercise this core with synthetic adapters.
+func (d *Driver) run(ctx context.Context, phase string, proof *controllerHandoffProof) error {
 	if phase == beforeJITPhase || phase == "jit-loss" && proof != nil {
 		return d.runJITBoundary(ctx, phase, proof)
 	}
@@ -540,9 +545,8 @@ func (d *Driver) runWithHandoff(ctx context.Context, phase string, proof *contro
 		return ErrApproval
 	}
 	// Cleanup is never allowed to reach the journal or API unless the concrete
-	// adapter advertises the conditional-delete contract. SDKAPI retains its
-	// legacy DeleteScaleSet method for the paired baseline, but that method is
-	// intentionally absent from this driver's API contract.
+	// adapter advertises the conditional-delete contract. The pinned SDK's
+	// unfenced ID-only delete is intentionally absent from the driver's API.
 	if phase == "cleanup" {
 		if d == nil || d.API == nil {
 			return ErrQuarantine

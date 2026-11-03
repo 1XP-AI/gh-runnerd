@@ -50,7 +50,17 @@ func (f *processBrokerHTTP) RoundTrip(r *http.Request) (*http.Response, error) {
 			runID = f.approval.WorkflowRunID
 			sha = f.approval.WorkflowSHA
 		}
-		payload = map[string]any{"id": runID, "head_sha": sha, "head_branch": "main", "event": "workflow_dispatch", "path": ".github/workflows/canary.yml", "run_attempt": 1, "repository": repo, "head_repository": repo}
+		run := map[string]any{"id": runID, "head_sha": sha, "head_branch": "main", "event": "workflow_dispatch", "path": ".github/workflows/canary.yml", "run_attempt": 1, "repository": repo, "head_repository": repo}
+		if f.approval != nil && f.approval.GroupPolicy != (handoff.GroupPolicy{}) {
+			workflow := f.approval.GroupPolicy.Workflow
+			at := strings.LastIndexByte(workflow, '@')
+			if at <= 0 || at == len(workflow)-1 {
+				f.t.Error("fixture reusable workflow pin is malformed")
+			} else {
+				run["referenced_workflows"] = []any{map[string]any{"path": workflow, "sha": workflow[at+1:]}}
+			}
+		}
+		payload = run
 	case "/app/installations/12/access_tokens":
 		f.mints++
 		stored, _ := os.ReadFile(filepath.Join(f.attempt, "broker.jsonl"))

@@ -98,6 +98,7 @@ func newBaselineFixtureWithCreate(t *testing.T, change func(string, any) any, in
 		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/runnerscalesets/7"):
 			stage = "set"
 			f.sets.Add(1)
+			w.Header().Set("ETag", `"fixture-v1"`)
 			body = scaleset.RunnerScaleSet{ID: 7, Name: f.a.setName(), RunnerGroupID: f.a.RunnerGroupID, Labels: []scaleset.Label{{Name: f.a.setName()}}, RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true}, Statistics: &scaleset.RunnerScaleSetStatistic{}}
 		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/sessions"):
 			stage = "session"

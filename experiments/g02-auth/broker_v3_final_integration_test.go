@@ -5,10 +5,12 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -164,6 +166,39 @@ func brokerV3Pipe(t *testing.T, data []byte) *os.File {
 	return r
 }
 
+func brokerV3PipeWithCopy(t *testing.T, data []byte) (*os.File, *os.File) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fd, err := syscall.Dup(int(r.Fd()))
+	if err != nil {
+		r.Close()
+		w.Close()
+		t.Fatal(err)
+	}
+	copy := os.NewFile(uintptr(fd), "broker-v3-input-probe")
+	if copy == nil {
+		r.Close()
+		w.Close()
+		syscall.Close(fd)
+		t.Fatal("duplicate input pipe")
+	}
+	if _, err := w.Write(data); err != nil {
+		r.Close()
+		copy.Close()
+		w.Close()
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		r.Close()
+		copy.Close()
+		t.Fatal(err)
+	}
+	return r, copy
+}
+
 func TestBrokerExperimentV3FinalGETFencesCalleeBeforeMintAndHandoff(t *testing.T) {
 	for _, phase := range []string{"create", "inspect", "after-ack"} {
 		for _, changedCallee := range []bool{true, false} {
@@ -219,5 +254,102 @@ func TestBrokerExperimentV3ControllerRootMismatchRefusesBeforeManagementInputAnd
 	}
 	if runErr == nil || fixture.fixture.tokenCalls != 0 || result.Status != "" || bytes.Contains(journal, []byte("token_request_started")) || bytes.Contains(journal, []byte("controller_handoff_started")) {
 		t.Fatalf("root mismatch crossed management fence: result=%+v err=%v mints=%d journal=%s", result, runErr, fixture.fixture.tokenCalls, journal)
+	}
+}
+
+func TestBrokerExperimentV3CredentialInputFailureConsumesAttempt(t *testing.T) {
+	cases := []struct {
+		name  string
+		input func(t *testing.T, candidate Candidate) []byte
+	}{
+		{
+			name: "malformed-json",
+			input: func(*testing.T, Candidate) []byte {
+				return []byte(`{"pem":`)
+			},
+		},
+		{
+			name: "oversized-pem",
+			input: func(t *testing.T, candidate Candidate) []byte {
+				data, err := json.Marshal(brokerInput{PEM: strings.Repeat("x", 32769), VerificationToken: "synthetic-private-workflow-token"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return data
+			},
+		},
+		{
+			name: "malformed-pem",
+			input: func(t *testing.T, _ Candidate) []byte {
+				data, err := json.Marshal(brokerInput{PEM: "not a private key", VerificationToken: "synthetic-private-workflow-token"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return data
+			},
+		},
+		{
+			name: "missing-verification-token",
+			input: func(t *testing.T, candidate Candidate) []byte {
+				data, err := json.Marshal(brokerInput{PEM: string(candidate.PEM)})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return data
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newBrokerV3RunFixture(t, "create", false)
+			observation := brokerV3Pipe(t, []byte("synthetic-private-workflow-token"))
+			workflowSeed := brokerV3Pipe(t, bytes.Repeat([]byte{1}, ed25519.SeedSize))
+			issuerSeed := brokerV3Pipe(t, bytes.Repeat([]byte{71}, ed25519.SeedSize))
+			input := brokerV3Pipe(t, tc.input(t, fixture.candidate))
+			result, runErr := RunBrokerExperimentWithInputs(context.Background(), fixture.files, input, observation, workflowSeed, issuerSeed)
+			journalPath := filepath.Join(fixture.files.StateDirectory, "broker.jsonl")
+			journal, readErr := os.ReadFile(journalPath)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if runErr == nil || result.Status != "" || fixture.fixture.tokenCalls != 0 || *fixture.workflowGET != 1 {
+				t.Fatalf("invalid v3 management input crossed effects: result=%+v err=%v mints=%d workflow_gets=%d", result, runErr, fixture.fixture.tokenCalls, *fixture.workflowGET)
+			}
+			for _, phase := range [][]byte{
+				[]byte(`"controller_preparation_started"`),
+				[]byte(`"controller_state_prepared"`),
+				[]byte(`"management_input_rejected"`),
+			} {
+				if !bytes.Contains(journal, phase) {
+					t.Fatalf("failed attempt journal lacks %s: %s", phase, journal)
+				}
+			}
+			if bytes.Contains(journal, []byte(`"token_request_started"`)) || bytes.Contains(journal, []byte(`"controller_handoff_started"`)) {
+				t.Fatalf("invalid v3 management input crossed mint/handoff: %s", journal)
+			}
+			ledger, readErr := os.ReadFile(filepath.Join(fixture.fixture.admissionRoot, "broker-admission.jsonl"))
+			if readErr != nil || !bytes.Contains(ledger, []byte(`"kind":"claim"`)) {
+				t.Fatalf("trusted input failure did not consume the durable phase slot: err=%v ledger=%s", readErr, ledger)
+			}
+
+			validInput, err := json.Marshal(brokerInput{PEM: string(fixture.candidate.PEM), VerificationToken: "synthetic-private-workflow-token"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			retryInput, retryInputCopy := brokerV3PipeWithCopy(t, validInput)
+			retryObservation := brokerV3Pipe(t, []byte("synthetic-private-workflow-token"))
+			retryWorkflowSeed := brokerV3Pipe(t, bytes.Repeat([]byte{1}, ed25519.SeedSize))
+			retryIssuerSeed := brokerV3Pipe(t, bytes.Repeat([]byte{71}, ed25519.SeedSize))
+			retryResult, retryErr := RunBrokerExperimentWithInputs(context.Background(), fixture.files, retryInput, retryObservation, retryWorkflowSeed, retryIssuerSeed)
+			defer retryInputCopy.Close()
+			journalAfterRetry, readErr := os.ReadFile(journalPath)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			unconsumed, readErr := io.ReadAll(retryInputCopy)
+			if retryErr == nil || retryResult.Status != "" || fixture.fixture.tokenCalls != 0 || *fixture.workflowGET != 1 || !bytes.Equal(journal, journalAfterRetry) || readErr != nil || !bytes.Equal(unconsumed, validInput) {
+				t.Fatalf("consumed v3 attempt was retried: result=%+v err=%v mints=%d workflow_gets=%d input_read_err=%v unconsumed=%d journal_changed=%t", retryResult, retryErr, fixture.fixture.tokenCalls, *fixture.workflowGET, readErr, len(unconsumed), !bytes.Equal(journal, journalAfterRetry))
+			}
+		})
 	}
 }

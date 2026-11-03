@@ -317,7 +317,9 @@ func TestPairedTerminalCollectionWithoutControllerCleanup(t *testing.T) {
 
 func TestPairedTerminalOriginalDeadlineAtClose(t *testing.T) {
 	f := newTerminalFixture(t, true)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Give the race-instrumented tagged suite time to reach the final close
+	// intent before expiring the original parent deadline there.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	reached := false
 	f.c.j.syncFile = func(file *os.File) error {
@@ -330,7 +332,7 @@ func TestPairedTerminalOriginalDeadlineAtClose(t *testing.T) {
 	}
 	out, err := terminalRunContext(f, ctx)
 	if !reached || ctx.Err() != context.DeadlineExceeded || err == nil || out.Terminal != terminalUnresolved || f.sessionDeletes.Load() != 0 || out.Collection.Terminal == nil || out.Collection.Terminal.Measurement != collectionCollected {
-		t.Fatal("original deadline did not bound terminal effect")
+		t.Fatalf("original deadline did not bound terminal effect: reached=%t context_error=%v run_error=%v terminal=%q session_deletes=%d collection_terminal=%+v", reached, ctx.Err(), err, out.Terminal, f.sessionDeletes.Load(), out.Collection.Terminal)
 	}
 }
 func TestPairedTerminalCollectionOnlyRemainsEffectFree(t *testing.T) {

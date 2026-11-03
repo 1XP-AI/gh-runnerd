@@ -102,7 +102,7 @@ Individual commands are available when iterating:
 | `make fuzz-smoke` | Run each discovered fuzz target for a fixed one-second smoke window, or print an explicit `SKIPPED` result when no target exists. |
 | `make deps` | Require a clean `go mod tidy -diff`, verified module sums and a read-only dependency load. |
 | `make licenses` | Compare the exact runtime module/version/replacement graph with its inventory and require a top-level license file. |
-| `make experiments` | Require both established G01/G02 modules, run their static-partitioned default race/vet suites, then exercise the two explicitly reviewed G01 CLI packages with `g01_live,g01_worker` tags and the reviewed `g01_pair_fixture` livecanary collection/listener and terminal partitions with tagged vet. Set `OFFLINE_EXPERIMENT_MODULE` to run one allowlisted module for the parallel Public CI matrix; omit it to run all modules. |
+| `make experiments` | Require both established G01/G02 modules, run their static-partitioned default race/vet suites, then exercise the two explicitly reviewed G01 CLI packages with `g01_live,g01_worker,g01_pair_fixture` tags and the reviewed `g01_pair_fixture` livecanary collection/listener and terminal partitions with tagged vet. Set `OFFLINE_EXPERIMENT_MODULE` to run one allowlisted module for the parallel Public CI matrix; omit it to run all modules. |
 | `make vuln` | Run the exact `golang.org/x/vuln/cmd/govulncheck@v1.7.0` tool. |
 | `make fast FAST_MODULE=... FAST_PACKAGE=... FAST_TEST=...` | Run one explicit test selector in one selected module/package. All three selectors are required and invalid/no-match selectors fail closed; this is focused evidence only, never the complete gate. |
 

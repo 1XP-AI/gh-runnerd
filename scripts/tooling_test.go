@@ -2583,6 +2583,27 @@ func TestToolingTaggedCLIRegressionRuns(t *testing.T) {
 	}
 }
 
+func TestToolingTaggedPairCLIRegressionsRun(t *testing.T) {
+	root := toolingFixture(t)
+	for _, tc := range []struct {
+		command string
+		tag     string
+	}{
+		{command: "g01-live", tag: "g01_live && g01_pair_fixture"},
+		{command: "g01-worker", tag: "g01_worker && g01_pair_fixture"},
+	} {
+		name := "experiments/g01-scaleset/cmd/" + tc.command + "/pair_regression_test.go"
+		source := "//go:build " + tc.tag + "\n\npackage main\n\nimport \"testing\"\n\nfunc TestTaggedPairFailure(t *testing.T) { t.Fatal(\"tagged-pair-CLI-regression\") }\n"
+		toolingFile(t, root, name, source, 0600)
+		if out, err := toolingRun(t, root, nil, "bash", "scripts/check-offline-experiments.sh"); err == nil || !strings.Contains(out, "tagged-pair-CLI-regression") {
+			t.Fatalf("tagged pair %s failure was skipped: %s", tc.command, out)
+		}
+		if err := os.Remove(filepath.Join(root, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestToolingTaggedPairFixturePartitionsRun(t *testing.T) {
 	root := toolingFixture(t)
 	const pairedCollectionSentinel = "tagged-pair-fixture-paired-collection-regression"
@@ -3393,9 +3414,9 @@ func FuzzDefaultG01Fixture(f *testing.F) {
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerPrepareReviewedG01LiveBinary$ ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint)$ ./...",
+		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint|CredentialInputFailureConsumesAttempt)$ ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPaired -skip ^TestPairedBroker(PrepareReviewedG01LiveBinary|RealCadenceChildExceedsThirtySeconds)$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -skip ^TestPaired|^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint)$|^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
+		"go1.27.3\ttest -race -count=1 -timeout=45s -skip ^TestPaired|^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint|CredentialInputFailureConsumesAttempt)$|^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
 	} {
 		count := 0
 		for _, line := range lines {
@@ -3472,8 +3493,10 @@ func TestToolingDefaultG02PartitionsRun(t *testing.T) {
 	const controllerClaimsSentinel = "default-g02-controller-claims-regression"
 	const finalName = "TestBrokerExperimentV3FinalGETFencesCalleeBeforeMintAndHandoff"
 	const finalRootMismatchName = "TestBrokerExperimentV3ControllerRootMismatchRefusesBeforeManagementInputAndMint"
+	const finalInputFailureName = "TestBrokerExperimentV3CredentialInputFailureConsumesAttempt"
 	const finalSentinel = "default-g02-final-regression"
 	const finalRootMismatchSentinel = "default-g02-final-root-mismatch-regression"
+	const finalInputFailureSentinel = "default-g02-final-input-failure-regression"
 	const pairedFamilyName = "TestPairedBrokerClaimFenceFixture"
 	const pairedFamilySentinel = "default-g02-paired-family-regression"
 	const remainderSentinel = "default-g02-remainder-regression"
@@ -3648,6 +3671,14 @@ func FuzzG02Fixture(f *testing.F) {
 			partition:      3,
 		},
 		{
+			name:           "final input failure",
+			path:           g02Base + "/default_final_input_failure_regression_test.go",
+			marker:         finalInputFailureSentinel,
+			positiveSource: defaultTestSource("fixture", finalInputFailureName, finalInputFailureSentinel, ""),
+			failureSource:  defaultTestSource("fixture", finalInputFailureName, finalInputFailureSentinel, finalInputFailureSentinel),
+			partition:      3,
+		},
+		{
 			name:           "paired family",
 			path:           g02Base + "/default_paired_family_regression_test.go",
 			marker:         pairedFamilySentinel,
@@ -3732,9 +3763,9 @@ func FuzzG02Fixture(f *testing.F) {
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerPrepareReviewedG01LiveBinary$ ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint)$ ./...",
+		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint|CredentialInputFailureConsumesAttempt)$ ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPaired -skip ^TestPairedBroker(PrepareReviewedG01LiveBinary|RealCadenceChildExceedsThirtySeconds)$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -skip ^TestPaired|^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint)$|^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
+		"go1.27.3\ttest -race -count=1 -timeout=45s -skip ^TestPaired|^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint|CredentialInputFailureConsumesAttempt)$|^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
 	}
 	// This positive control intentionally runs the full default module list.
 	// The bounded G01 partitions add enough subprocesses to exceed the old limit.

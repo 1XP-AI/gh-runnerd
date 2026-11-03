@@ -165,12 +165,12 @@ func TestDriverBarriersThroughPinnedSDK(t *testing.T) {
 			}
 			api := fixtureSDK{&SDKAPI{client: client, options: options}}
 			d := Driver{a, j, api}
-			createErr := d.Run(context.Background(), "create")
+			createErr := d.runForTest(context.Background(), "create")
 			if strings.HasPrefix(scenario, "create-") {
 				if !errors.Is(createErr, ErrQuarantine) || creates != 1 || !replay(j.Events()).uncertain {
 					t.Fatal("oversize SDK effect did not quarantine")
 				}
-				if d.Run(context.Background(), "create") == nil || creates != 1 {
+				if d.runForTest(context.Background(), "create") == nil || creates != 1 {
 					t.Fatal("oversize response caused side effect retry")
 				}
 				data, _ := json.Marshal(j.Events())
@@ -182,7 +182,7 @@ func TestDriverBarriersThroughPinnedSDK(t *testing.T) {
 			if createErr != nil {
 				t.Fatal("SDK create failed")
 			}
-			err = d.Run(context.Background(), phase)
+			err = d.runForTest(context.Background(), phase)
 			if invalidMessage {
 				if !errors.Is(err, ErrQuarantine) || acks != 0 || acquires != 0 || closes != 0 || !replay(j.Events()).uncertain {
 					t.Fatal("invalid wire message identity reached effects or escaped quarantine")
@@ -345,7 +345,7 @@ func TestDriverDrainThroughPinnedSDKAndPollHook(t *testing.T) {
 		}
 	}
 	d := Driver{Approval: a, Journal: j, API: api}
-	if err := d.Run(context.Background(), "drain"); err != nil {
+	if err := d.runForTest(context.Background(), "drain"); err != nil {
 		t.Fatalf("pinned SDK drain: %v", err)
 	}
 	if polls != 2 || acks != 1 || acquires != 1 || closes != 1 || snapshotReads != 2 {
@@ -413,7 +413,7 @@ func TestPinnedSDKDrainRejectsSnapshotOriginMismatchBeforeEffects(t *testing.T) 
 		}
 	}
 	d := &Driver{Approval: a, Journal: j, API: fixtureSDK{base}}
-	runErr := d.Run(context.Background(), "drain")
+	runErr := d.runForTest(context.Background(), "drain")
 	if !errors.Is(runErr, ErrQuarantine) {
 		t.Fatalf("snapshot origin mismatch = %v, want quarantine", runErr)
 	}
@@ -447,7 +447,7 @@ func TestPinnedSDKDrainRejectsSnapshotTenantPrefixMismatchBeforeEffects(t *testi
 		}
 	}
 	d := &Driver{Approval: a, Journal: j, API: fixtureSDK{base}}
-	if err := d.Run(context.Background(), "drain"); !errors.Is(err, ErrQuarantine) {
+	if err := d.runForTest(context.Background(), "drain"); !errors.Is(err, ErrQuarantine) {
 		t.Fatalf("snapshot tenant-prefix mismatch = %v, want quarantine", err)
 	}
 	if got := fixture.snapshotReads.Load(); got != 1 {
@@ -475,7 +475,7 @@ func TestPinnedSDKDrainRejectsSessionOriginMismatchBeforeListener(t *testing.T) 
 		}
 	}
 	d := &Driver{Approval: a, Journal: j, API: fixtureSDK{base}}
-	if err := d.Run(context.Background(), "drain"); !errors.Is(err, ErrQuarantine) {
+	if err := d.runForTest(context.Background(), "drain"); !errors.Is(err, ErrQuarantine) {
 		t.Fatalf("session-open origin mismatch = %v, want quarantine", err)
 	}
 	if got := fixture.polls.Load(); got != 0 {
@@ -511,7 +511,7 @@ func TestPinnedSDKDrainRejectsSessionTenantPrefixMismatchBeforeListener(t *testi
 		}
 	}
 	d := &Driver{Approval: a, Journal: j, API: fixtureSDK{base}}
-	if err := d.Run(context.Background(), "drain"); !errors.Is(err, ErrQuarantine) {
+	if err := d.runForTest(context.Background(), "drain"); !errors.Is(err, ErrQuarantine) {
 		t.Fatalf("session tenant-prefix mismatch = %v, want quarantine", err)
 	}
 	if got := fixture.sessionOpens.Load(); got != 0 {
@@ -542,7 +542,7 @@ func TestPinnedSDKDrainRejectsRunnerSnapshotOriginMismatchBeforeListener(t *test
 		}
 	}
 	d := &Driver{Approval: a, Journal: j, API: fixtureSDK{base}}
-	if err := d.Run(context.Background(), "drain"); !errors.Is(err, ErrQuarantine) {
+	if err := d.runForTest(context.Background(), "drain"); !errors.Is(err, ErrQuarantine) {
 		t.Fatalf("runner snapshot origin mismatch = %v, want quarantine", err)
 	}
 	if got := fixture.polls.Load(); got != 0 {
@@ -781,7 +781,7 @@ func TestPinnedSDKDrainRejectsSubstitutedSessionCloseAuthorizationBeforeEffects(
 		}
 	}
 	d := &Driver{Approval: a, Journal: j, API: fixtureSDK{base}}
-	err := d.Run(context.Background(), "drain")
+	err := d.runForTest(context.Background(), "drain")
 	if !errors.Is(err, ErrQuarantine) {
 		t.Fatalf("substituted session-close authorization = %v, want quarantine", err)
 	}
@@ -989,7 +989,7 @@ func TestPinnedSDKDrainBindsSessionCloseToPhysicalDelete(t *testing.T) {
 				}
 			}
 			d := &Driver{Approval: a, Journal: journal, API: fixtureSDK{base}}
-			if err := d.Run(context.Background(), "drain"); !errors.Is(err, ErrQuarantine) {
+			if err := d.runForTest(context.Background(), "drain"); !errors.Is(err, ErrQuarantine) {
 				t.Fatalf("wrong session-close target = %v, want quarantine", err)
 			}
 			if fixture.closeRequests.Load() != 0 {
@@ -1022,7 +1022,7 @@ func TestPinnedSDKDrainBindsSessionCloseToSessionOpenOrigin(t *testing.T) {
 		}
 	}
 	d := &Driver{Approval: a, Journal: j, API: fixtureSDK{base}}
-	if err := d.Run(context.Background(), "drain"); !errors.Is(err, ErrQuarantine) {
+	if err := d.runForTest(context.Background(), "drain"); !errors.Is(err, ErrQuarantine) {
 		t.Fatalf("wrong session-close origin = %v, want quarantine", err)
 	}
 	if fixture.closeRequests.Load() != 0 {

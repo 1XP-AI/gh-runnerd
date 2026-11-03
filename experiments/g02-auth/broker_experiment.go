@@ -30,6 +30,9 @@ func selectBrokerExperiment(files BrokerFiles, now time.Time) (brokerExperimentS
 	if _, e = readBrokerPrivateJSON(files.ApprovalPath, &a); e != nil || a.validate(now) != nil || a.Mode != "controller" && a.Mode != "paired-terminal" || a.Phase == "cleanup" {
 		return brokerExperimentSelection{}, errBroker
 	}
+	if a.GroupPolicy != (handoff.GroupPolicy{}) && p.Version != 3 {
+		return brokerExperimentSelection{}, errBroker
+	}
 	var c controllerApproval
 	raw, e := readBrokerPrivateJSON(files.ControllerApproval, &c)
 	if e != nil || handoff.Digest(raw) != a.ControllerApprovalSHA256 || c.validate(a, now) != nil {

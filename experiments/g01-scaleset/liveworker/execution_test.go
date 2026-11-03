@@ -153,7 +153,7 @@ func TestPairedActualFileBoundStateCannotBeAdoptedAfterReturn(t *testing.T) {
 	if _, err := retained.Create(handoff, syntheticJIT); err == nil || runtime.creates.Load() != 0 {
 		t.Fatal("copied receiver outlived its released lease")
 	}
-	if d.Run(context.Background(), "create", syntheticJIT) == nil || runtime.creates.Load() != 0 {
+	if d.runForTest(context.Background(), "create", syntheticJIT) == nil || runtime.creates.Load() != 0 {
 		t.Fatal("standalone create bypassed the recorded pair")
 	}
 	if err := j.Close(); err != nil {

@@ -47,8 +47,8 @@ paired_prep_regex='^TestPairedBrokerPrepareReviewedG01LiveBinary$'
 paired_prep_or_cadence_regex='^TestPairedBroker(PrepareReviewedG01LiveBinary|RealCadenceChildExceedsThirtySeconds)$'
 paired_broker_regex='^TestPaired'
 non_paired_heavy_regex='^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$'
-final_fence_regex='^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint)$'
-g02_non_paired_skip_regex='^TestPaired|^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint)$|^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$'
+final_fence_regex='^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint|CredentialInputFailureConsumesAttempt)$'
+g02_non_paired_skip_regex='^TestPaired|^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint|CredentialInputFailureConsumesAttempt)$|^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$'
 
 # These are the established offline gate modules. Keep this list explicit so
 # a new or unreviewed experiment cannot enter public CI by directory naming.
@@ -152,8 +152,8 @@ for module_dir in "${selected_modules[@]}"; do
 			if [[ "${profile}" != jit ]]; then
 				# These reviewed command tests use synthetic fixtures and refusal/plan
 				# paths only. Do not discover arbitrary opt-in tags or platform probes.
-				GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -tags=g01_live,g01_worker ./cmd/g01-live ./cmd/g01-worker
-				GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" vet -tags=g01_live,g01_worker ./cmd/g01-live ./cmd/g01-worker
+				GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -tags=g01_live,g01_worker,g01_pair_fixture ./cmd/g01-live ./cmd/g01-worker
+				GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" vet -tags=g01_live,g01_worker,g01_pair_fixture ./cmd/g01-live ./cmd/g01-worker
 			fi
 			# Keep the non-terminal collection/listener tests exhaustive and disjoint:
 			# paired collection, replacement, JIT boundary, then fixed non-paired name ranges. Terminal coverage

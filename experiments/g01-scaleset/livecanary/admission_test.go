@@ -190,7 +190,7 @@ func TestAuditPR25DistinctStateDirectoriesMustShareCap(t *testing.T) {
 		}
 		defer j.Close()
 		d := Driver{a, j, f}
-		err = d.Run(context.Background(), "create")
+		err = d.runForTest(context.Background(), "create")
 		if i == 0 && err != nil {
 			t.Fatal("first fixture creation refused")
 		}
@@ -263,7 +263,7 @@ func TestAdmissionConcurrentFirstStartsHaveOneWinner(t *testing.T) {
 			}
 			defer j.Close()
 			d := Driver{candidate, j, api}
-			if err := d.Run(context.Background(), "create"); err != nil {
+			if err := d.runForTest(context.Background(), "create"); err != nil {
 				t.Errorf("admitted positive control: %v", err)
 			}
 		}(i)

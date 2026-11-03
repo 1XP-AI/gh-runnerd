@@ -153,10 +153,10 @@ func fixtureFastPairCadence() pairedBaselineCadence {
 	}
 }
 
-// RunPairedTerminalForFixture calls the exported production entrypoint with
-// only generated private roots and a loopback TLS endpoint. The fast cadence
-// is a test-only clock seam; it still retains every production HTTP, journal,
-// binding, and effect ordering check.
+// RunPairedTerminalForFixture calls the private fixture path with generated
+// private roots and a loopback TLS endpoint. It is compiled only with the
+// explicit offline fixture tag; the exported production entry rejects local
+// files and credentials without a signed controller handoff.
 func RunPairedTerminalForFixture(ctx context.Context, files PairedTerminalFiles, c Credentials, baseURL string, caPEM []byte, controllerAdmissionDirectory string) error {
 	if ctx == nil || filepath.Clean(files.ControllerStateDirectory) != files.ControllerStateDirectory || filepath.Clean(files.WorkerStateDirectory) != files.WorkerStateDirectory {
 		return ErrApproval
@@ -198,5 +198,5 @@ func RunPairedTerminalForFixture(ctx context.Context, files PairedTerminalFiles,
 	defer func() {
 		pairedTerminalFixtureAdapters, pairedTerminalFixtureCadence = oldAdapters, oldCadence
 	}()
-	return RunPairedTerminal(ctx, files, c)
+	return runPairedTerminalOwned(ctx, files, c, nil, nil)
 }

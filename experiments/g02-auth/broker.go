@@ -271,10 +271,10 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 	}
 	if deferredInput {
 		input, err = plan.inputSource(ctx)
-		if err != nil {
-			return BrokerResult{}, errBroker
-		}
-		if parseInput(input) != nil {
+		if err != nil || parseInput(input) != nil {
+			if guardLive() != nil || j.append("management_input_rejected", nil) != nil || guardLive() != nil {
+				return BrokerResult{}, errBroker
+			}
 			return BrokerResult{}, errBroker
 		}
 	}

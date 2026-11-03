@@ -3,13 +3,15 @@
 Status: **implemented and tested offline; no live authorization or live result**.
 This is a controller slice of the [live-canary plan](g01-live-canary.md), not
 completion of G01. The original fixture remains permanently loopback-only. The
-separate command requires `-tags=g01_live` at build time, an explicit execution
-flag, an exact private approval and controller-side broker input. Public CI has
-no credentials. The adopted profile selects SDK `v0.5.0` and Go `1.27.3`;
-see the [changed-boundary evidence and review status](g01-sdk-v05-adoption.md).
-The `--execute-approved-canary` entrypoint remains quarantined because
-broker-authenticated workflow-input provenance and conditional cleanup are
-still unresolved; the offline `--plan` check does not authorize it.
+separate command is compiled only with `-tags=g01_live`. Public CI has no
+credentials. The adopted profile selects SDK `v0.5.0` and Go `1.27.3`; see the
+[changed-boundary evidence and review status](g01-sdk-v05-adoption.md). Legacy
+`--execute-approved-canary` and `--execute-approved-paired-terminal` flags are
+hard refusals before approval/state reads, credential stdin, journal access, SDK
+construction or Docker. `--plan` is informational only. The separate signed
+experimental handoff remains disabled by empty compiled policy unless reviewed
+build authority is supplied; unresolved provenance, trust-root and conditional
+cleanup gates still prohibit live execution.
 
 For an App with organization runner-management permission and no repository
 access, the controller and broker approvals must explicitly select matching
@@ -19,15 +21,17 @@ records exact group-policy checks and compatibility limits. Omitted/empty scope
 retains the existing selected-repository/metadata-read contract. Scope changes
 cannot renew or reuse an existing experiment's authority.
 
-The offline group-only v2 contract requires matching independently approved
+The offline `GroupPolicy` v2 input requires matching independently approved
 organization ID and exact same-repository reusable-workflow literal in broker
-and controller approvals, plus independently compiled role/phase grants bound
-to the approval bytes, target group and management scope. Both preflights require
-the selected group to restrict workflows to that one literal. The broker group
-read occurs after its existing management-token mint. V1 receipt provenance still
-covers the caller only; this contract does not establish provider callee metadata,
-scheduler enforcement, private runtime behavior or live authorization. Empty
-compiled policies grant no authority; v2 has no legacy selection fallback.
+and controller approvals. Both preflights require the selected group to restrict
+workflows to that one literal. Whenever an approval carries a nonempty
+`GroupPolicy`, the independently compiled `PublicPolicy` must be v3 and bind the
+provider-reported reusable callee; caller-only v1/v2 grants are refused. The
+empty `GroupPolicy` retains only the legacy caller-only v1 selection path; a v2
+grant without a nonempty group policy fails closed. The broker group read occurs
+after its existing management-token mint. Group policy alone does not establish
+provider callee metadata, scheduler enforcement, private runtime behavior or
+live authorization. Empty compiled policies grant no authority.
 
 ## Executable scope
 
@@ -238,55 +242,82 @@ GOEXPERIMENT= CGO_ENABLED=1 GOTOOLCHAIN=go1.27.3 go build -buildvcs=true -trimpa
 go version -m "$G01_PRIVATE_BINARY"
 ```
 
-The controller approval schema also accepts the broker's optional
-`workflow_ref` field; strict decoding must preserve this field for the
-broker's approval digest and handoff binding. A missing conditional-deleter
-capability is rejected before journal authorization, while failures after
-durable cleanup preparation remain journaled as unresolved quarantine.
-
 Live execution rejects a mismatched Go version, SDK pin, dirty build or embedded
 VCS revision. Building, merging or running `--plan` is not authorization, and
-`--plan` performs no credential read or remote operation. The
-`--execute-approved-canary` shape below remains quarantined and must not be run
-until the external provenance and cleanup gates are closed. The build metadata
-must show the reviewed `vcs.revision` and `vcs.modified=false`.
-After local approval validation (and paired state validation where applicable),
-the currently quarantined controller and paired execution flags return the
-fixed result
-`canary quarantined; broker provenance is required` before reading credential
-stdin. Other malformed-input refusals retain the separate generic refusal
-result; this distinction is used only to classify offline bridge evidence.
-This was verified offline in a clean local clone at `17a63ffc4604fbec4cc043abd5602a230d35fa8b`;
-the linked-worktree build was correctly missing a usable revision stamp. The
-reviewed controller broker (not implemented here) must provide this private JSON
-on stdin without shell tracing, terminal echo, argv credentials or env dumps:
+`--plan` performs no credential read or remote operation. The legacy direct
+controller and paired flags now return
+`canary quarantined; broker provenance is required` immediately after argument
+parsing, before opening approval/state files, reading credential stdin, touching
+the journal, constructing an SDK client or creating Docker. The standalone
+`g01-worker --execute-approved-worker` flag similarly refuses before approval,
+JIT stdin, journal or Docker access. `Driver.Run` and public
+`RunPairedTerminal` reject direct local calls; package tests reach their private
+cores only through `_test.go` helpers with synthetic adapters. The only
+controller execution path is the signed handoff entry, whose compiled policy is
+empty by default and whose production authority, trust roots and live operation
+remain unresolved. There is no supported direct-execution invocation to run.
 
-```json
-{
-  "installation_token": "PRIVATE_TEMPORARY_VALUE",
-  "verification_token": "DISTINCT_PRIVATE_ACTIONS_READ_VALUE_IF_PROBING",
-  "app_id": 0,
-  "installation_id": 0,
-  "organization": "APPROVED_ORGANIZATION",
-  "expires_at": "2000-01-01T00:00:00Z",
-  "organization_self_hosted_runners": "write",
-  "metadata": "read"
-}
-```
+The pinned `actions/scaleset` v0.5.0 client exposes only ID-based
+`DeleteRunnerScaleSet`; `SDKAPI` no longer exposes that unfenced operation.
+Generic cleanup requires `ConditionalScaleSetDeleter`, and the paired production
+path refuses before Docker because the pinned adapter does not implement it.
+The `g01_pair_fixture && !g01_worker` adapter is loopback-only and exercises an
+`If-Match` contract against a synthetic HTTPS provider. Its passing replacement
+test proves the fixture rejects a changed ETag; it does not prove GitHub provides
+the required server-side version semantics or bind a runner inventory update to
+that version. No live delete or API call was made.
 
-After exact authorization and closure of the external gates, with broker stdin
-supplied, the reviewed invocation shape for one phase would be:
+## Offline execution-boundary checkpoint — 2026-11-03
+
+At implementation commit `f854496`, with only the two evidence documents
+modified in the worktree, the official G01 checker passed both reviewed
+profiles using the pinned local Go 1.27.3 darwin/arm64 toolchain, with
+`GOTOOLCHAIN=local`, `GOPROXY=off`, `GOSUMDB=off`, and task-scoped temporary/build
+storage on the external worktree volume. The machine-specific absolute paths are
+omitted from this committed evidence. These are the sanitized invocations; `GO`
+selected the pinned Go 1.27.3 binary, and `TMPDIR`/`GOCACHE` pointed to the
+task-scoped external-volume directory for each run. `GOMODCACHE` selected the
+pre-populated local module source cache, so the checks required no downloads:
 
 ```sh
-"$G01_PRIVATE_BINARY" --execute-approved-canary \
-  --approval "$G01_PRIVATE_APPROVAL" --state-dir "$G01_PRIVATE_STATE" \
-  --phase before-ack
+GO=/path/to/go1.27.3/bin/go \
+TMPDIR=/path/on/external-volume/g01-check \
+GOCACHE=/path/on/external-volume/g01-check/gocache \
+GOMODCACHE=/path/to/prepopulated/module-cache \
+GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off \
+OFFLINE_EXPERIMENT_MODULE=experiments/g01-scaleset \
+OFFLINE_EXPERIMENT_PROFILE=core \
+bash scripts/check-offline-experiments.sh
+# exit 0: offline experiment checks passed: 1 module(s)
+
+GO=/path/to/go1.27.3/bin/go \
+TMPDIR=/path/on/external-volume/g01-check \
+GOCACHE=/path/on/external-volume/g01-check/gocache \
+GOMODCACHE=/path/to/prepopulated/module-cache \
+GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off \
+OFFLINE_EXPERIMENT_MODULE=experiments/g01-scaleset \
+OFFLINE_EXPERIMENT_PROFILE=jit \
+bash scripts/check-offline-experiments.sh
+# exit 0: offline experiment checks passed: 1 module(s)
 ```
 
-Those variables contain paths, never tokens. Credential strings remain in Go/SDK
-memory; clearing one buffer does not erase every copy. This slice has no worker
-environment. The runner JIT transport and residual exposure remain as described
-in ADR 0002 for later worker implementation.
+The `core` profile includes default package race tests, tagged CLI race/vet,
+paired fixture partitions and final vet. The `jit` profile includes the bounded
+JIT-boundary storage, expiry, admission and physical partitions. No hosted CI,
+GitHub write, Scale Set, runner, credential, Docker or host-service operation
+was performed. Issue #1 remains OPEN and Project #2 remains In progress.
+
+Requalification notes: an initial attempt with `GOPROXY=off` and an empty
+configured external `GOMODCACHE` stopped during module setup before the affected
+tests ran. It was rerun with the pre-populated local module cache and downloads
+still disabled. The existing one-second `close-2` expiry fixture missed its
+injection point in 2 of 10 race repetitions; only that final intent's fixture
+deadline was extended to five seconds, then it passed three focused repetitions.
+The paired original-deadline fixture also failed once at its five-second setup
+bound in the full partition; its diagnostic now reports each assertion, its
+test-only bound is ten seconds, and the final full core profile passed. These
+changes address fixture scheduling; they do not relax runtime deadlines or
+authorize a live operation.
 
 ## Journal and evidence
 

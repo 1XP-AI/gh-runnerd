@@ -1500,7 +1500,7 @@ func TestPinnedSDKDrainSnapshotsRequireStrictWireFacts(t *testing.T) {
 				{Kind: "result", Operation: "create", ID: 7},
 			}}
 			d := Driver{Approval: a, Journal: j, API: api}
-			if err := d.Run(context.Background(), "drain"); !errors.Is(err, ErrQuarantine) {
+			if err := d.runForTest(context.Background(), "drain"); !errors.Is(err, ErrQuarantine) {
 				t.Fatalf("ambiguous snapshot = %v, want quarantine", err)
 			}
 			if fixture.polls.Load() != 0 || fixture.acquires.Load() != 0 {

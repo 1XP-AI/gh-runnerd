@@ -65,7 +65,7 @@ func TestInvalidOwnedProofCannotBeClearedBeforeFirstCleanup(t *testing.T) {
 						d.Journal = file
 					}
 					d.API = invalidOwnedAPI{baseAPI, fault}
-					if err := d.Run(context.Background(), phase); !errors.Is(err, ErrQuarantine) || f.jitCalls != 0 || f.session.ack != 0 || f.session.acquire != 0 || f.session.close != 0 {
+					if err := d.runForTest(context.Background(), phase); !errors.Is(err, ErrQuarantine) || f.jitCalls != 0 || f.session.ack != 0 || f.session.acquire != 0 || f.session.close != 0 {
 						t.Fatalf("invalid owned proof allowed a phase: %v", err)
 					}
 					if file != nil {
@@ -80,7 +80,7 @@ func TestInvalidOwnedProofCannotBeClearedBeforeFirstCleanup(t *testing.T) {
 						d.Journal = file
 					}
 					restarted := Driver{d.Approval, d.Journal, baseAPI}
-					inspectionErr := restarted.Run(context.Background(), "inspect")
+					inspectionErr := restarted.runForTest(context.Background(), "inspect")
 					if phase == "inspect" {
 						if !errors.Is(inspectionErr, ErrQuarantine) {
 							t.Fatalf("second inspection did not retain the one-slot quarantine: %v", inspectionErr)
@@ -88,7 +88,7 @@ func TestInvalidOwnedProofCannotBeClearedBeforeFirstCleanup(t *testing.T) {
 					} else if inspectionErr != nil {
 						t.Fatalf("first inspection after a non-inspect failure refused: %v", inspectionErr)
 					}
-					err := restarted.Run(context.Background(), "cleanup") // First cleanup attempt.
+					err := restarted.runForTest(context.Background(), "cleanup") // First cleanup attempt.
 					if !errors.Is(err, ErrQuarantine) || f.deleteCalls != 0 || !replay(d.Journal.Events()).uncertain {
 						t.Fatalf("invalid proof forgotten after matching data: cleanup=%v deletes=%d uncertain=%t", err, f.deleteCalls, replay(d.Journal.Events()).uncertain)
 					}

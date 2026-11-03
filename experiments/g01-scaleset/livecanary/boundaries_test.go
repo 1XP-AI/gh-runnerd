@@ -72,7 +72,7 @@ func created(t *testing.T) (*Driver, *fakeAPI, *memoryJournal) {
 	f := &fakeAPI{}
 	f.session = &fakeSession{journal: j, session: scaleset.RunnerScaleSetSession{SessionID: uuid.New(), Statistics: &scaleset.RunnerScaleSetStatistic{}}, message: &scaleset.RunnerScaleSetMessage{MessageID: 9, Statistics: &scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: 1}, JobAvailableMessages: []*scaleset.JobAvailable{{JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: 42, WorkflowRunID: a.WorkflowRunID, OwnerName: a.Organization, RepositoryName: a.Repository}}}}}
 	d := &Driver{a, j, f}
-	if err := d.Run(context.Background(), "create"); err != nil {
+	if err := d.runForTest(context.Background(), "create"); err != nil {
 		t.Fatal(err)
 	}
 	return d, f, j
@@ -82,7 +82,7 @@ func TestSupportedListenerBarriersAndReservation(t *testing.T) {
 	for _, phase := range []string{"before-ack", "after-ack", "before-acquire", "acquire-loss"} {
 		t.Run(phase, func(t *testing.T) {
 			d, f, j := created(t)
-			err := d.Run(context.Background(), phase)
+			err := d.runForTest(context.Background(), phase)
 			wantACK := 1
 			if phase == "before-ack" {
 				wantACK = 0
@@ -103,7 +103,7 @@ func TestSupportedListenerBarriersAndReservation(t *testing.T) {
 				if !replay(j.Events()).reserved {
 					t.Fatal("unknown reservation released")
 				}
-				if d.Run(context.Background(), "jit-loss") == nil || f.jitCalls != 0 {
+				if d.runForTest(context.Background(), "jit-loss") == nil || f.jitCalls != 0 {
 					t.Fatal("second worker admitted after acquisition ambiguity")
 				}
 			}
@@ -114,7 +114,7 @@ func TestSupportedListenerBarriersAndReservation(t *testing.T) {
 func TestNoMessageDoesNotCountAsCompletedBarrier(t *testing.T) {
 	d, f, _ := created(t)
 	f.session.message = nil
-	if d.Run(context.Background(), "before-ack") == nil {
+	if d.runForTest(context.Background(), "before-ack") == nil {
 		t.Fatal("no controlled message falsely counted as exercised barrier")
 	}
 	if f.session.ack != 0 || f.session.close != 1 {
@@ -124,11 +124,11 @@ func TestNoMessageDoesNotCountAsCompletedBarrier(t *testing.T) {
 
 func TestJITLostResponseIsSecretSafeAndNeverReissued(t *testing.T) {
 	d, f, j := created(t)
-	err := d.Run(context.Background(), "jit-loss")
+	err := d.runForTest(context.Background(), "jit-loss")
 	if !errors.Is(err, ErrQuarantine) || f.jitCalls != 1 {
 		t.Fatal("JIT suppression not quarantined")
 	}
-	if d.Run(context.Background(), "jit-loss") == nil || d.Run(context.Background(), "cleanup") == nil || f.jitCalls != 1 || f.deleteCalls != 0 {
+	if d.runForTest(context.Background(), "jit-loss") == nil || d.runForTest(context.Background(), "cleanup") == nil || f.jitCalls != 1 || f.deleteCalls != 0 {
 		t.Fatal("unknown JIT reservation permitted retry or cleanup")
 	}
 	data, _ := json.Marshal(j.Events())
@@ -169,7 +169,7 @@ func TestForeignIdentityAndUnreviewedWorkNeverACKOrDelete(t *testing.T) {
 			case "session":
 				f.session.replace = true
 			}
-			if d.Run(context.Background(), phase) == nil {
+			if d.runForTest(context.Background(), phase) == nil {
 				t.Fatal("ownership/authority boundary accepted")
 			}
 			if f.deleteCalls != 0 || f.session.acquire != 0 {
@@ -187,7 +187,7 @@ func TestForeignIdentityAndUnreviewedWorkNeverACKOrDelete(t *testing.T) {
 
 func TestCleanupOnlyForNeverIssuedWorkerWithExactReceiptRemainsQuarantined(t *testing.T) {
 	d, f, _ := created(t)
-	if err := d.Run(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) || f.deleteCalls != 0 {
+	if err := d.runForTest(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) || f.deleteCalls != 0 {
 		t.Fatal("unfenced cleanup was not quarantined")
 	}
 }

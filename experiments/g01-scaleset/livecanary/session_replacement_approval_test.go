@@ -31,7 +31,7 @@ func TestSessionReplacementCredentialVerificationRequired(t *testing.T) {
 
 func TestSessionReplacementLegacyRunHasNoAuthority(t *testing.T) {
 	var d *Driver
-	if d.Run(context.Background(), replacementPhase) == nil {
+	if d.runForTest(context.Background(), replacementPhase) == nil {
 		t.Fatal("legacy Run minted replacement authority")
 	}
 }

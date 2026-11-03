@@ -19,12 +19,12 @@ func TestFileJournalRejectsUnrecordedAuthorityBeforeRawDriverEffect(t *testing.T
 	defer j.Close()
 	f := &fakeRuntime{}
 	d := Driver{a, j, f}
-	if d.Run(context.Background(), "create", syntheticJIT) != nil {
+	if d.runForTest(context.Background(), "create", syntheticJIT) != nil {
 		t.Fatal("fixture creation")
 	}
 	d.Approval.Phases = []string{"start"}
 	d.Approval.ExpiresAt = a.ExpiresAt.Add(time.Hour)
-	if err := d.Run(context.Background(), "start", ""); err == nil || f.starts.Load() != 0 {
+	if err := d.runForTest(context.Background(), "start", ""); err == nil || f.starts.Load() != 0 {
 		t.Fatal("mutable Driver approval bypassed recorded authority before start")
 	}
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 
+	"github.com/actions/scaleset"
+
 	"github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/liveworker"
 )
 
@@ -177,17 +179,46 @@ func (s *pairedBaselineScope) terminalStepCall(stage string) error {
 		}
 		known = e == nil && r.Terminal.Deletion != nil && receipt.AbsenceResult != nil
 	case stage == "terminal-set-delete":
-		origin := s.listener.capturedOrigin()
-		runtimePathPrefix, runtimePathPrefixSet := s.listener.capturedRuntimePathPrefix()
-		if origin == "" || !runtimePathPrefixSet {
+		deleter, ok := any(&s.captured).(ConditionalScaleSetDeleter)
+		if !ok {
 			return ErrQuarantine
 		}
-		capture := &baselineWireCapture{stage: stage, setID: s.setID, organization: s.approval.Organization, origin: origin, runtimePathPrefix: runtimePathPrefix, runtimePathPrefixSet: runtimePathPrefixSet, allowedHosts: baselineWireAllowedHosts(s.approval, s.captured.drainEndpointHost())}
+		rosterEvent := s.event(workerRef(state.terminalLast))
+		if rosterEvent == nil || rosterEvent.Baseline == nil || rosterEvent.Baseline.Stage != "terminal-roster-recheck" || rosterEvent.Baseline.Terminal == nil || rosterEvent.Baseline.Terminal.Roster == nil {
+			return ErrQuarantine
+		}
+		setEvent := s.event(workerRef(rosterEvent.Baseline.Terminal.Previous))
+		if setEvent == nil || setEvent.Baseline == nil || setEvent.Baseline.Stage != "terminal-set-recheck" || setEvent.Baseline.Terminal == nil || !terminalZeroSet(setEvent.Baseline.Terminal.Set, s.approval, s.setID) {
+			return ErrQuarantine
+		}
+		expectation := ScaleSetDeletionExpectation{
+			ScaleSetID: s.setID, ScaleSetName: setEvent.Baseline.Terminal.Set.Name,
+			RunnerGroupID: setEvent.Baseline.Terminal.Set.GroupID, OwnerNonce: s.approval.OwnerNonce,
+			OwnershipLabel: s.approval.setName(), Statistics: scaleset.RunnerScaleSetStatistic{},
+			InventoryDigest: rosterEvent.Baseline.Terminal.Roster.Digest,
+		}
+		if !expectation.matches(s.approval, &scaleset.RunnerScaleSet{
+			ID: expectation.ScaleSetID, Name: expectation.ScaleSetName, RunnerGroupID: expectation.RunnerGroupID,
+			Labels:        setEvent.Baseline.Terminal.Set.Labels,
+			RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true},
+			Statistics:    &expectation.Statistics,
+		}) {
+			return ErrQuarantine
+		}
 		ctx, cancel := context.WithTimeout(s.ctx, operationTimeout)
-		callErr = s.captured.DeleteScaleSet(capture.context(ctx), s.setID)
+		fence, fenceErr := deleter.PrepareScaleSetDeletion(ctx, expectation)
+		if fenceErr != nil || !fence.matches(expectation) || ctx.Err() != nil {
+			callErr = ErrQuarantine
+		} else {
+			callErr = deleter.DeleteScaleSetIfOwned(ctx, fence)
+		}
 		cancel()
-		_, _, _, r.HTTPStatus = capture.facts()
-		known = capture.observed() && r.HTTPStatus == 204
+		known = callErr == nil
+		if known {
+			// The adapter contract returns nil only for an acknowledged conditional
+			// delete; the journal records that response as the 204 success.
+			r.HTTPStatus = 204
+		}
 	default:
 		return ErrQuarantine
 	}

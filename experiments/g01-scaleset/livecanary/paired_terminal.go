@@ -265,16 +265,14 @@ var pairedTerminalFixtureAdapters *pairedTerminalAdapters
 // terminal timing and all API/journal/lease behavior.
 var pairedTerminalFixtureCadence func() pairedBaselineCadence
 
-// RunPairedTerminal opens both existing journals, constructs the pinned SDK and
-// direct Unix-socket runtime, and runs the reviewed terminal sequence in this
-// process. It returns only fixed error categories; no private SDK/Docker error
-// or path is part of the result boundary.
-func RunPairedTerminal(ctx context.Context, files PairedTerminalFiles, credentials Credentials) error {
-	return runPairedTerminalOwned(ctx, files, credentials, nil, nil)
+// RunPairedTerminal is disabled because local files and credentials do not
+// establish a signed controller handoff. Production entry is controller-owned.
+func RunPairedTerminal(context.Context, PairedTerminalFiles, Credentials) error {
+	return ErrApproval
 }
 
 func runPairedTerminalOwned(ctx context.Context, files PairedTerminalFiles, credentials Credentials, owned *FileJournal, proof *controllerHandoffProof) error {
-	if ctx == nil || ctx.Err() != nil {
+	if ctx == nil || ctx.Err() != nil || pairedTerminalFixtureAdapters == nil && (owned == nil || proof == nil) {
 		return ErrApproval
 	}
 	if credentials.PairedBinding == nil {
@@ -317,6 +315,11 @@ func runPairedTerminalOwned(ctx context.Context, files PairedTerminalFiles, cred
 	api, err := adapters.newAPI(controller, credentials)
 	if err != nil {
 		return ErrApproval
+	}
+	if pairedTerminalFixtureAdapters == nil {
+		if _, ok := any(api).(ConditionalScaleSetDeleter); !ok {
+			return ErrQuarantine
+		}
 	}
 	docker, err := adapters.newDocker(worker)
 	if err != nil {

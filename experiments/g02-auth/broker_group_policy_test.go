@@ -3,10 +3,12 @@ package enrollment
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -17,7 +19,7 @@ func groupPolicyFixture() handoff.GroupPolicy {
 	return handoff.GroupPolicy{Version: 2, OrganizationID: 101, Workflow: "org-a/canary/.github/workflows/runner.yml@" + strings.Repeat("d", 40)}
 }
 
-func TestBrokerGroupApprovalCannotUseV1Selection(t *testing.T) {
+func TestBrokerGroupApprovalRequiresReusableCalleeBinding(t *testing.T) {
 	a := brokerApprovalFixture()
 	a.Mode = "controller"
 	a.Phase = "create"
@@ -52,8 +54,51 @@ func TestBrokerGroupApprovalCannotUseV1Selection(t *testing.T) {
 	p.Grants[0].GroupPolicySHA256 = a.GroupPolicy.GrantDigest(req, a.RepositoryID, a.RunnerGroupID, a.ManagementScope)
 	policy, _ = json.Marshal(p)
 	brokerExperimentPolicyJSON = string(policy)
-	if _, e = selectBrokerExperiment(files, time.Now()); e != nil {
-		t.Fatal("explicit group approval rejected", e)
+	if _, e = selectBrokerExperiment(files, time.Now()); e == nil {
+		t.Fatal("caller-only v2 policy selected a reusable-workflow group")
+	}
+	oldAPI := brokerExperimentFixtureAPI
+	var apiBuilds, httpCalls int
+	brokerExperimentFixtureAPI = func(handoff.TrustRoot) *brokerAPI {
+		apiBuilds++
+		return newBrokerAPI(time.Now, transportFunc(func(*http.Request) (*http.Response, error) {
+			httpCalls++
+			return nil, errBroker
+		}))
+	}
+	defer func() { brokerExperimentFixtureAPI = oldAPI }()
+	var inputs [4]*os.File
+	var copies [4]*os.File
+	for i := range inputs {
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		fd, err := syscall.Dup(int(r.Fd()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		inputs[i], copies[i] = r, os.NewFile(uintptr(fd), "caller-only-policy-inspection")
+		defer copies[i].Close()
+		if _, err = w.Write([]byte("unconsumed")); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := RunBrokerExperimentWithInputs(context.Background(), files, inputs[0], inputs[1], inputs[2], inputs[3])
+	if err == nil || result.Status != "" {
+		t.Fatalf("caller-only v2 entrypoint result=%+v error=%v, want refusal", result, err)
+	}
+	if apiBuilds != 0 || httpCalls != 0 {
+		t.Fatalf("caller-only v2 crossed broker pre-effect boundary: API builds=%d HTTP calls=%d", apiBuilds, httpCalls)
+	}
+	for _, file := range copies {
+		data, err := io.ReadAll(file)
+		if err != nil || string(data) != "unconsumed" {
+			t.Fatal("caller-only v2 consumed inherited input")
+		}
 	}
 	for _, fault := range []string{"literal", "group", "organization-id", "scope", "raw-bytes", "missing", "version", "grant", "default"} {
 		t.Run(fault, func(t *testing.T) {

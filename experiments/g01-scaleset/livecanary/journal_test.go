@@ -98,7 +98,7 @@ func TestRealJournalCreateFailureBlocksRetryAndContainsNoErrorBody(t *testing.T)
 	// Use a valid synthetic inventory digest with the real journal schema.
 	fake := &inventoryAPI{fakeAPI: f}
 	d.API = fake
-	if d.Run(context.Background(), "create") == nil {
+	if d.runForTest(context.Background(), "create") == nil {
 		t.Fatal("remote failure accepted")
 	}
 	j.Close()
@@ -108,7 +108,7 @@ func TestRealJournalCreateFailureBlocksRetryAndContainsNoErrorBody(t *testing.T)
 	}
 	defer j.Close()
 	d.Journal = j
-	if d.Run(context.Background(), "create") == nil || f.createCalls != 1 {
+	if d.runForTest(context.Background(), "create") == nil || f.createCalls != 1 {
 		t.Fatal("durable ambiguity fence lost")
 	}
 }
@@ -146,7 +146,7 @@ func TestFailedConcurrentAppendStopsBeforeRealJournalCreate(t *testing.T) {
 	}
 	f := &inventoryAPI{fakeAPI: &fakeAPI{}}
 	d := Driver{a, &failAppendBeforeCreateHistoryJournal{FileJournal: j, failNextWrite: &failNextWrite}, f}
-	if err := d.Run(context.Background(), "create"); err == nil {
+	if err := d.runForTest(context.Background(), "create"); err == nil {
 		t.Fatal("create accepted after a journal append failed")
 	}
 	if !writeFailed || !j.writeFailed || f.createCalls != 0 {

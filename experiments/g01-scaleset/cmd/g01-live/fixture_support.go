@@ -3,7 +3,6 @@
 package main
 
 import (
-	"context"
 	"io"
 	"os"
 	"path/filepath"
@@ -43,13 +42,6 @@ func readFixtureEndpointConfig(stateDirectory string) (fixtureEndpointConfig, er
 }
 
 func init() {
-	openJournalForCommand = func(stateDirectory string, a livecanary.Approval) (*livecanary.FileJournal, error) {
-		config, err := readFixtureEndpointConfig(stateDirectory)
-		if err != nil {
-			return nil, err
-		}
-		return livecanary.OpenJournalForPairedFixtureAt(stateDirectory, a, config.AdmissionDirectory)
-	}
 	pairedPrepareJournalForCommand = func(stateDirectory string, a livecanary.Approval) (livecanary.PreparationReceipt, error) {
 		config, err := readFixtureEndpointConfig(stateDirectory)
 		if err != nil {
@@ -73,19 +65,5 @@ func init() {
 			return liveworker.PreparationReceipt{}, liveworker.ErrState
 		}
 		return livecanary.PrepareWorkerJournalForPairedFixtureAt(stateDirectory, a, admissionDirectory)
-	}
-	newSDKAPIForCommand = func(a livecanary.Approval, c livecanary.Credentials, stateDirectory string) (*livecanary.SDKAPI, error) {
-		config, err := readFixtureEndpointConfig(stateDirectory)
-		if err != nil {
-			return nil, err
-		}
-		return livecanary.NewSDKAPIForPairedFixture(a, c, config.BaseURL, []byte(config.CAPEM))
-	}
-	runPairedTerminalForCommand = func(ctx context.Context, files livecanary.PairedTerminalFiles, c livecanary.Credentials) error {
-		config, err := readFixtureEndpointConfig(files.ControllerStateDirectory)
-		if err != nil {
-			return err
-		}
-		return livecanary.RunPairedTerminalForFixture(ctx, files, c, config.BaseURL, []byte(config.CAPEM), config.AdmissionDirectory)
 	}
 }

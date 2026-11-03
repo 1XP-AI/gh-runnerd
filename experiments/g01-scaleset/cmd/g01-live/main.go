@@ -48,7 +48,6 @@ func buildRevisionFromInfo(info *debug.BuildInfo, ok bool) (string, bool) {
 	return version, clean && sdk && len(version) == 40
 }
 
-var openJournalForCommand = livecanary.OpenJournal
 var pairedPrepareJournalForCommand = livecanary.PreparePairedJournal
 var prepareWorkerJournalForCommand = liveworker.PrepareJournal
 var prepareReplacementJournalForCommand = livecanary.PrepareSessionReplacementJournal
@@ -57,18 +56,10 @@ var prepareReplacementJournalWithRootBindingForCommand = livecanary.PrepareSessi
 var prepareJITBoundaryJournalWithRootBindingForCommand = livecanary.PrepareJITBoundaryJournalWithRootBinding
 var prepareRootJournalForCommand = livecanary.PrepareJournalWithRootBinding
 var verifyRootBindingForCommand = livecanary.VerifyControllerExperimentRootBinding
-var newSDKAPIForCommand = func(a livecanary.Approval, c livecanary.Credentials, _ string) (*livecanary.SDKAPI, error) {
-	return livecanary.NewSDKAPI(a, c)
-}
-var runPairedTerminalForCommand = func(ctx context.Context, files livecanary.PairedTerminalFiles, c livecanary.Credentials) error {
-	return livecanary.RunPairedTerminal(ctx, files, c)
-}
 
-// Controller execution is quarantined until the broker can provide an
-// authenticated, broker-only input channel. The tagged binary's stdin is not
-// itself evidence of broker provenance, so accepting it here would preserve
-// both the direct FIFO and tagged-entry bypasses under review.
-const controllerExecutionQuarantined = true
+// These legacy direct-execution flags stay rejected. The signed controller
+// handoff is the only executable path; a local approval or stdin stream cannot
+// select credentials, caller, phase or paired execution.
 const controllerExecutionQuarantineMessage = "canary quarantined; broker provenance is required"
 
 func run(args []string, in io.Reader, out io.Writer) int {
@@ -110,6 +101,10 @@ func runWithPreparationContext(ctx context.Context, args []string, in io.Reader,
 	if flags.Parse(args) != nil || flags.NArg() != 0 {
 		return reject()
 	}
+	if *execute || *pairedExecute {
+		fmt.Fprintln(out, controllerExecutionQuarantineMessage)
+		return 1
+	}
 	workerInputs := *workerApprovalPath != "" || *workerStatePath != ""
 	if *experimental {
 		if ctx == nil || ctx.Err() != nil {
@@ -144,7 +139,7 @@ func runWithPreparationContext(ctx context.Context, args []string, in io.Reader,
 		return reject()
 	}
 
-	if *plan && !*experimental && !*execute && !*pairedExecute && !*prepare && !*pairedPrepare && !*prepareWorker {
+	if *plan && !*experimental && !*prepare && !*pairedPrepare && !*prepareWorker {
 		if *approvalPath != "" || *statePath != "" || *phase != "" || workerInputs || *pairedBinding != "" {
 			return reject()
 		}
@@ -152,12 +147,6 @@ func runWithPreparationContext(ctx context.Context, args []string, in io.Reader,
 		return 0
 	}
 	modeCount := 0
-	if *execute {
-		modeCount++
-	}
-	if *pairedExecute {
-		modeCount++
-	}
 	if *prepare {
 		modeCount++
 	}
@@ -172,10 +161,6 @@ func runWithPreparationContext(ctx context.Context, args []string, in io.Reader,
 	}
 	if *prepareWorker {
 		if *phase != "" || workerInputs || *pairedBinding != "" || *rootBinding != "" || prepareWorkerJournalForCommand == nil {
-			return reject()
-		}
-	} else if *pairedExecute {
-		if *phase != "" || *workerApprovalPath == "" || *workerStatePath == "" || *pairedBinding == "" || *rootBinding != "" {
 			return reject()
 		}
 	} else if *pairedPrepare {
@@ -201,7 +186,7 @@ func runWithPreparationContext(ctx context.Context, args []string, in io.Reader,
 		return 0
 	}
 	a, err := livecanary.ReadApproval(*approvalPath)
-	if err != nil || a.Validate(time.Now()) != nil || (!*pairedExecute && !*pairedPrepare && !slices.Contains(a.Phases, *phase)) {
+	if err != nil || a.Validate(time.Now()) != nil || (!*pairedPrepare && !slices.Contains(a.Phases, *phase)) {
 		return reject()
 	}
 	revision, ok := revisionForBuild()
@@ -215,22 +200,6 @@ func runWithPreparationContext(ctx context.Context, args []string, in io.Reader,
 			return reject()
 		}
 		expectedRootBinding = &binding
-	}
-	var worker liveworker.Approval
-	var binding livecanary.PairedTerminalBinding
-	if *pairedExecute {
-		var workerErr error
-		worker, workerErr = liveworker.ReadApproval(*workerApprovalPath)
-		if workerErr != nil || livecanary.ValidatePairedApprovals(a, worker) != nil || livecanary.ValidatePairedStatePaths(*statePath, *workerStatePath) != nil {
-			return reject()
-		}
-		if livecanary.DecodeStrict([]byte(*pairedBinding), &binding) != nil || livecanary.ValidatePairedTerminalBinding(livecanary.PairedTerminalFiles{ControllerApprovalPath: *approvalPath, ControllerStateDirectory: *statePath, WorkerApprovalPath: *workerApprovalPath, WorkerStateDirectory: *workerStatePath}, binding) != nil {
-			return reject()
-		}
-	}
-	if controllerExecutionQuarantined && (*execute || *pairedExecute) {
-		fmt.Fprintln(out, controllerExecutionQuarantineMessage)
-		return 1
 	}
 	if *pairedPrepare {
 		receipt, e := pairedPrepareJournalForCommand(*statePath, a)
@@ -287,55 +256,7 @@ func runWithPreparationContext(ctx context.Context, args []string, in io.Reader,
 		}
 		return 0
 	}
-	var j *livecanary.FileJournal
-	if !*pairedExecute {
-		j, err = openJournalForCommand(*statePath, a)
-		if err != nil {
-			return reject()
-		}
-		defer j.Close()
-	}
-	closable, ok := in.(io.ReadCloser)
-	if !ok {
-		return reject()
-	}
-	inputDeadline := time.Now().Add(30 * time.Second)
-	if a.ExpiresAt.Before(inputDeadline) {
-		inputDeadline = a.ExpiresAt
-	}
-	inputContext, cancelInput := context.WithDeadline(context.Background(), inputDeadline)
-	data, err := readCredentialInput(inputContext, closable)
-	cancelInput()
-	if err != nil {
-		return reject()
-	}
-	defer clear(data) // Best effort; Go/SDK strings and memory retain copies.
-	var credentials livecanary.Credentials
-	if livecanary.DecodeStrict(data, &credentials) != nil {
-		return reject()
-	}
-	if *pairedExecute {
-		if credentials.PairedBinding == nil || *credentials.PairedBinding != binding {
-			return reject()
-		}
-		if runPairedTerminalForCommand(context.Background(), livecanary.PairedTerminalFiles{ControllerApprovalPath: *approvalPath, ControllerStateDirectory: *statePath, WorkerApprovalPath: *workerApprovalPath, WorkerStateDirectory: *workerStatePath}, credentials) != nil {
-			fmt.Fprintln(out, "paired terminal stopped; retain private state and all uncertain resources; no automatic retry")
-			return 1
-		}
-		fmt.Fprintln(out, "paired terminal completed; inspect private evidence")
-		return 0
-	}
-	api, err := newSDKAPIForCommand(a, credentials, *statePath)
-	if err != nil {
-		return reject()
-	}
-	driver := livecanary.Driver{Approval: a, Journal: j, API: api}
-	if driver.Run(context.Background(), *phase) != nil {
-		fmt.Fprintln(out, "canary stopped; retain the private journal and all uncertain resources; no automatic retry")
-		return 1
-	}
-	fmt.Fprintln(out, "controller phase completed; live gate remains unresolved; inspect private evidence")
-	return 0
+	return reject()
 }
 
 func main() {

@@ -44,7 +44,7 @@ func TestUnixInspectRequiresStateFlagsBeforeMutation(t *testing.T) {
 			for _, shape := range []string{"complete", "missing", "null"} {
 				t.Run(action.phase+"/"+action.status+"/"+field+"/"+shape, func(t *testing.T) {
 					f := unixFixture(t)
-					if f.driver.Run(context.Background(), "create", syntheticJIT) != nil {
+					if f.driver.runForTest(context.Background(), "create", syntheticJIT) != nil {
 						t.Fatal("synthetic create failed")
 					}
 					data := inspectFixtureBody(t, f, func(body map[string]json.RawMessage) {
@@ -61,7 +61,7 @@ func TestUnixInspectRequiresStateFlagsBeforeMutation(t *testing.T) {
 						body["State"], _ = json.Marshal(state)
 					})
 					f.inspectResponse.Store(&inspectFixtureResponse{status: http.StatusOK, body: data})
-					err := f.driver.Run(context.Background(), action.phase, "")
+					err := f.driver.runForTest(context.Background(), action.phase, "")
 					mutations := f.runtime.starts.Load() + f.runtime.deletes.Load()
 					if shape == "complete" {
 						if err != nil || mutations != 1 {
@@ -79,7 +79,7 @@ func TestUnixInspectRequiresStateFlagsBeforeMutation(t *testing.T) {
 func createdInspectFixture(t *testing.T) (*dockerFixture, *Docker) {
 	t.Helper()
 	f := unixFixture(t)
-	if f.driver.Run(context.Background(), "create", syntheticJIT) != nil {
+	if f.driver.runForTest(context.Background(), "create", syntheticJIT) != nil {
 		t.Fatal("synthetic create failed")
 	}
 	return f, f.driver.Runtime.(*Docker)
@@ -199,7 +199,7 @@ func TestDockerInspectLegacyCleanupKeepsSignedAndAbsentExitPolicy(t *testing.T) 
 						t.Fatal("signed exit changed")
 					}
 				}
-				if f.driver.Run(context.Background(), "cleanup", "") != nil || f.runtime.deletes.Load() != 1 {
+				if f.driver.runForTest(context.Background(), "cleanup", "") != nil || f.runtime.deletes.Load() != 1 {
 					t.Fatal("legacy created/exited cleanup gained an exit-zero requirement")
 				}
 			})
@@ -309,7 +309,7 @@ func TestDockerInspectExactRejectsMalformedOrAmbiguousBodiesBeforeMutation(t *te
 				if observation.HTTPStatus != http.StatusOK {
 					t.Fatal("received HTTP status was lost")
 				}
-				if !errors.Is(f.driver.Run(context.Background(), action, ""), ErrUncertain) || f.runtime.starts.Load()+f.runtime.deletes.Load() != 0 {
+				if !errors.Is(f.driver.runForTest(context.Background(), action, ""), ErrUncertain) || f.runtime.starts.Load()+f.runtime.deletes.Load() != 0 {
 					t.Fatal("rejected observation authorized a mutating request")
 				}
 			})
@@ -354,7 +354,7 @@ func TestDockerInspectUnknownOrAbsentStatusCannotAuthorizeMutation(t *testing.T)
 				if strings.Contains(string(serialized), "synthetic-private") {
 					t.Fatal("raw unknown status leaked")
 				}
-				if !errors.Is(f.driver.Run(context.Background(), action, ""), ErrUncertain) || f.runtime.starts.Load()+f.runtime.deletes.Load() != 0 {
+				if !errors.Is(f.driver.runForTest(context.Background(), action, ""), ErrUncertain) || f.runtime.starts.Load()+f.runtime.deletes.Load() != 0 {
 					t.Fatal("unknown/missing status authorized mutation")
 				}
 			})
@@ -365,7 +365,7 @@ func TestDockerInspectUnknownOrAbsentStatusCannotAuthorizeMutation(t *testing.T)
 func TestDockerInspectMapsPreserveCaseSensitiveKeysAndProfile(t *testing.T) {
 	f := unixFixture(t)
 	f.runtime.image.Labels = map[string]string{"Owner": "one", "owner": "two", "S": "three", "ſ": "four"}
-	if f.driver.Run(context.Background(), "create", syntheticJIT) != nil {
+	if f.driver.runForTest(context.Background(), "create", syntheticJIT) != nil {
 		t.Fatal("case-sensitive image-label setup failed")
 	}
 	data := inspectFixtureBody(t, f, func(body map[string]json.RawMessage) {
@@ -375,7 +375,7 @@ func TestDockerInspectMapsPreserveCaseSensitiveKeysAndProfile(t *testing.T) {
 		body["Config"], _ = json.Marshal(config)
 	})
 	f.inspectResponse.Store(&inspectFixtureResponse{status: http.StatusOK, body: data})
-	if f.driver.Run(context.Background(), "start", "") != nil || f.runtime.starts.Load() != 1 {
+	if f.driver.runForTest(context.Background(), "start", "") != nil || f.runtime.starts.Load() != 1 {
 		t.Fatal("case-sensitive map keys incorrectly folded or complete profile changed")
 	}
 }
@@ -418,7 +418,7 @@ func TestDockerInspectExactRejectsOtherResponsesAndInvalidTargets(t *testing.T) 
 			if observation.HTTPStatus != status || f.requests.Load() != before+1 {
 				t.Fatal("unsupported status lost or redirect followed")
 			}
-			if f.driver.Run(context.Background(), "cleanup", "") == nil || f.runtime.deletes.Load() != 0 {
+			if f.driver.runForTest(context.Background(), "cleanup", "") == nil || f.runtime.deletes.Load() != 0 {
 				t.Fatal("unsupported response authorized deletion")
 			}
 		})
@@ -446,7 +446,7 @@ func TestDockerInspectExactRequiresSupported404Body(t *testing.T) {
 			if observation.HTTPStatus != http.StatusNotFound {
 				t.Fatal("received 404 provenance lost")
 			}
-			if f.driver.Run(context.Background(), "cleanup", "") == nil || f.runtime.deletes.Load() != 0 {
+			if f.driver.runForTest(context.Background(), "cleanup", "") == nil || f.runtime.deletes.Load() != 0 {
 				t.Fatal("unsupported 404 body authorized deletion")
 			}
 		})
@@ -548,7 +548,7 @@ func TestDockerCompletedMutationResponseSurvivesEOFCancellation(t *testing.T) {
 		t.Run(phase, func(t *testing.T) {
 			f := unixFixture(t)
 			client := f.driver.Runtime.(*Docker)
-			if phase != "create" && f.driver.Run(context.Background(), "create", syntheticJIT) != nil {
+			if phase != "create" && f.driver.runForTest(context.Background(), "create", syntheticJIT) != nil {
 				t.Fatal("synthetic create failed")
 			}
 			path := "/v1.45/containers/create"
@@ -563,7 +563,7 @@ func TestDockerCompletedMutationResponseSurvivesEOFCancellation(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			client.client.Transport = cancelAtEOFTransport{client.client.Transport, path, cancel}
-			err := f.driver.Run(ctx, phase, jit)
+			err := f.driver.runForTest(ctx, phase, jit)
 			state := replay(f.driver.Journal.Events())
 			if ctx.Err() == nil {
 				t.Fatal("EOF cancellation boundary was not reached")

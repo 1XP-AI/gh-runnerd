@@ -388,7 +388,7 @@ func TestDrainRejectedIdlePrerequisiteRetainsFence(t *testing.T) {
 	}}
 	api := &drainDriverAPI{fakeAPI: &fakeAPI{}, approval: a, snapshotStats: &scaleset.RunnerScaleSetStatistic{TotalRegisteredRunners: 1, TotalBusyRunners: 1}}
 	d := Driver{Approval: a, Journal: j, API: api}
-	if err := d.Run(context.Background(), "drain"); !errors.Is(err, ErrQuarantine) {
+	if err := d.runForTest(context.Background(), "drain"); !errors.Is(err, ErrQuarantine) {
 		t.Fatalf("busy idle prerequisite = %v, want quarantine", err)
 	}
 	state := replay(j.Events())
@@ -413,7 +413,7 @@ func TestDrainRejectsEmbeddedSessionStatisticsMismatch(t *testing.T) {
 	}}
 	api := &drainDriverAPI{fakeAPI: &fakeAPI{}, approval: a, sessionStats: &scaleset.RunnerScaleSetStatistic{TotalRegisteredRunners: 1, TotalIdleRunners: 1, TotalAssignedJobs: 1}}
 	d := Driver{Approval: a, Journal: j, API: api}
-	if err := d.Run(context.Background(), "drain"); !errors.Is(err, ErrQuarantine) {
+	if err := d.runForTest(context.Background(), "drain"); !errors.Is(err, ErrQuarantine) {
 		t.Fatalf("embedded session mismatch = %v, want quarantine", err)
 	}
 	if replay(j.Events()).uncertain == false {
@@ -434,7 +434,7 @@ func TestDrainRejectsEffectsAfterCancellationAndRecordsMarker(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- d.Run(ctx, "drain") }()
+	go func() { done <- d.runForTest(ctx, "drain") }()
 	select {
 	case <-api.opened:
 		cancel()
@@ -643,7 +643,7 @@ func TestDrainCancellationBeforeSnapshotRecordsMarker(t *testing.T) {
 		cancel:         cancel,
 	}
 	d := &Driver{Approval: a, Journal: j, API: api}
-	if err := d.Run(ctx, "drain"); !errors.Is(err, ErrQuarantine) {
+	if err := d.runForTest(ctx, "drain"); !errors.Is(err, ErrQuarantine) {
 		t.Fatalf("before-snapshot cancellation = %v, want quarantine", err)
 	}
 	for _, event := range j.Events() {
@@ -963,7 +963,7 @@ func TestDriverRoutesDrainBeforeNoWorkerStatisticsQuarantine(t *testing.T) {
 	}}
 	api := &drainDriverAPI{fakeAPI: &fakeAPI{}, approval: a}
 	d := Driver{Approval: a, Journal: j, API: api}
-	err := d.Run(context.Background(), "drain")
+	err := d.runForTest(context.Background(), "drain")
 	if !errors.Is(err, ErrNoMessage) {
 		t.Fatalf("drain result = %v, want bounded unresolved result", err)
 	}

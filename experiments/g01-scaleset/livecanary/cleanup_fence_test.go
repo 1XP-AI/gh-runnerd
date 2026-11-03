@@ -91,7 +91,7 @@ func TestCleanupConditionalFenceAcceptsExactOwnerAndFreshnessMatch(t *testing.T)
 	adapter := &cleanupFenceAPI{fakeAPI: f, approval: d.Approval, currentVersion: "v1"}
 	d.API = adapter
 
-	if err := d.Run(context.Background(), "cleanup"); err != nil {
+	if err := d.runForTest(context.Background(), "cleanup"); err != nil {
 		t.Fatalf("exact conditional cleanup: %v", err)
 	}
 	if adapter.prepareCalls != 1 || adapter.conditionalCalls != 1 {
@@ -108,7 +108,6 @@ func TestCleanupConditionalFenceAcceptsExactOwnerAndFreshnessMatch(t *testing.T)
 		t.Fatal("successful conditional delete was not durably recorded")
 	}
 }
-
 func TestCleanupPreparationRereadsFinalOwnershipAndZeroStatistics(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -124,7 +123,7 @@ func TestCleanupPreparationRereadsFinalOwnershipAndZeroStatistics(t *testing.T) 
 			adapter := &cleanupFenceAPI{fakeAPI: f, approval: d.Approval, currentVersion: "v1", mutateBeforePrepare: tc.mutate}
 			d.API = adapter
 
-			if err := d.Run(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) {
+			if err := d.runForTest(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) {
 				t.Fatalf("cleanup after final predicate changed = %v, want quarantine", err)
 			}
 			if adapter.prepareCalls != 1 || adapter.conditionalCalls != 0 || f.deleteCalls != 0 || !replay(j.Events()).uncertain {
@@ -140,7 +139,7 @@ func TestCleanupMissingConditionalDeleterStopsBeforeJournalAuthorization(t *test
 	d.Journal = counting
 	before := len(j.Events())
 
-	if err := d.Run(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) {
+	if err := d.runForTest(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) {
 		t.Fatalf("missing conditional deleter cleanup = %v, want quarantine", err)
 	}
 	if counting.authorizeCalls != 0 || len(j.Events()) != before || f.deleteCalls != 0 {
@@ -153,7 +152,7 @@ func TestCleanupConditionalFenceRejectsConcurrentReplacement(t *testing.T) {
 	adapter := &cleanupFenceAPI{fakeAPI: f, approval: d.Approval, currentVersion: "v1", replaceBeforeDelete: true}
 	d.API = adapter
 
-	if err := d.Run(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) {
+	if err := d.runForTest(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) {
 		t.Fatalf("concurrent replacement cleanup = %v, want quarantine", err)
 	}
 	if adapter.prepareCalls != 1 || adapter.conditionalCalls != 1 || f.deleteCalls != 0 {
@@ -166,7 +165,7 @@ func TestCleanupConditionalFenceAcceptsETagFreshness(t *testing.T) {
 	adapter := &cleanupFenceAPI{fakeAPI: f, approval: d.Approval, currentETag: "etag-v1"}
 	d.API = adapter
 
-	if err := d.Run(context.Background(), "cleanup"); err != nil {
+	if err := d.runForTest(context.Background(), "cleanup"); err != nil {
 		t.Fatalf("exact ETag conditional cleanup: %v", err)
 	}
 	if adapter.prepareCalls != 1 || adapter.conditionalCalls != 1 || adapter.gotFence.Version != "" || adapter.gotFence.ETag != "etag-v1" || f.deleteCalls != 0 {
@@ -179,13 +178,13 @@ func TestCleanupConditionalFenceRejectsMissingFreshness(t *testing.T) {
 	adapter := &cleanupFenceAPI{fakeAPI: f, approval: d.Approval}
 	d.API = adapter
 
-	if err := d.Run(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) {
+	if err := d.runForTest(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) {
 		t.Fatalf("missing freshness cleanup = %v, want quarantine", err)
 	}
 	if adapter.prepareCalls != 1 || adapter.conditionalCalls != 0 || f.deleteCalls != 0 || !replay(j.Events()).uncertain {
 		t.Fatalf("missing freshness state = prepare %d conditional %d unconditional %d uncertain %t, want 1/0/0/true", adapter.prepareCalls, adapter.conditionalCalls, f.deleteCalls, replay(j.Events()).uncertain)
 	}
-	if err := d.Run(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) || adapter.prepareCalls != 1 || f.deleteCalls != 0 {
+	if err := d.runForTest(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) || adapter.prepareCalls != 1 || f.deleteCalls != 0 {
 		t.Fatalf("missing freshness cleanup retried: error=%v prepare=%d unconditional=%d", err, adapter.prepareCalls, f.deleteCalls)
 	}
 }
@@ -197,7 +196,7 @@ func TestCleanupConditionalFenceRejectsMismatchedOwnerFence(t *testing.T) {
 	}}
 	d.API = adapter
 
-	if err := d.Run(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) {
+	if err := d.runForTest(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) {
 		t.Fatalf("mismatched owner cleanup = %v, want quarantine", err)
 	}
 	if adapter.prepareCalls != 1 || adapter.conditionalCalls != 0 || f.deleteCalls != 0 || !replay(j.Events()).uncertain {
@@ -210,13 +209,13 @@ func TestCleanupConditionalFenceFailureRetainsUnknownAndCannotRetry(t *testing.T
 	adapter := &cleanupFenceAPI{fakeAPI: f, approval: d.Approval, currentVersion: "v1", deleteErr: errors.New("synthetic conditional refusal")}
 	d.API = adapter
 
-	if err := d.Run(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) {
+	if err := d.runForTest(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) {
 		t.Fatalf("conditional failure cleanup = %v, want quarantine", err)
 	}
 	if adapter.prepareCalls != 1 || adapter.conditionalCalls != 1 || f.deleteCalls != 0 || !replay(j.Events()).uncertain {
 		t.Fatalf("conditional failure state = prepare %d conditional %d unconditional %d uncertain %t, want 1/1/0/true", adapter.prepareCalls, adapter.conditionalCalls, f.deleteCalls, replay(j.Events()).uncertain)
 	}
-	if err := d.Run(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) || adapter.prepareCalls != 1 || adapter.conditionalCalls != 1 || f.deleteCalls != 0 {
+	if err := d.runForTest(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) || adapter.prepareCalls != 1 || adapter.conditionalCalls != 1 || f.deleteCalls != 0 {
 		t.Fatalf("conditional failure cleanup retried: error=%v prepare=%d conditional=%d unconditional=%d", err, adapter.prepareCalls, adapter.conditionalCalls, f.deleteCalls)
 	}
 }
@@ -228,20 +227,13 @@ func TestCleanupCancellationDuringPrepareDoesNotDeleteAndRetainsUncertainty(t *t
 	adapter := &cleanupFenceAPI{fakeAPI: f, approval: d.Approval, currentVersion: "v1", cancelDuringPrepare: cancel}
 	d.API = adapter
 
-	if err := d.Run(ctx, "cleanup"); !errors.Is(err, ErrQuarantine) {
+	if err := d.runForTest(ctx, "cleanup"); !errors.Is(err, ErrQuarantine) {
 		t.Fatalf("canceled prepare cleanup = %v, want quarantine", err)
 	}
 	if adapter.prepareCalls != 1 || adapter.conditionalCalls != 0 || f.deleteCalls != 0 || !replay(j.Events()).uncertain {
 		t.Fatalf("canceled prepare state = prepare %d conditional %d unconditional %d uncertain %t, want 1/0/0/true", adapter.prepareCalls, adapter.conditionalCalls, f.deleteCalls, replay(j.Events()).uncertain)
 	}
-	if err := d.Run(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) || adapter.prepareCalls != 1 || adapter.conditionalCalls != 0 || f.deleteCalls != 0 || !replay(j.Events()).uncertain {
+	if err := d.runForTest(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) || adapter.prepareCalls != 1 || adapter.conditionalCalls != 0 || f.deleteCalls != 0 || !replay(j.Events()).uncertain {
 		t.Fatalf("canceled prepare cleanup retried or lost uncertainty: error=%v prepare=%d conditional=%d unconditional=%d uncertain=%t", err, adapter.prepareCalls, adapter.conditionalCalls, f.deleteCalls, replay(j.Events()).uncertain)
-	}
-}
-
-func TestPinnedSDKDoesNotAdvertiseConditionalCleanupWithoutFence(t *testing.T) {
-	var api API = &SDKAPI{}
-	if _, ok := api.(ConditionalScaleSetDeleter); ok {
-		t.Fatal("pinned SDK advertised conditional cleanup without a version/ETag API")
 	}
 }

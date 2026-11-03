@@ -185,9 +185,16 @@ func bounded[T any](ctx context.Context, call func(context.Context) (T, error)) 
 	return value, nil
 }
 
-// Run performs one explicitly requested phase. Unknown effects retain the slot;
-// local deletion never releases a GitHub reservation or permits another create.
+// Run is disabled because a local worker approval and caller-provided JIT do
+// not prove controller/workflow provenance. Paired execution uses the signed
+// controller handoff path instead.
 func (d *Driver) Run(ctx context.Context, phase, jit string) error {
+	return ErrApproval
+}
+
+// run is the journal/runtime implementation used only by package tests for
+// synthetic runtimes. Production execution does not call this unbound path.
+func (d *Driver) run(ctx context.Context, phase, jit string) error {
 	if d.Approval.Validate(time.Now()) != nil || !slices.Contains(d.Approval.Phases, phase) {
 		return ErrApproval
 	}

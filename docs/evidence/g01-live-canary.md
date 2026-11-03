@@ -266,6 +266,16 @@ environment, workflow, secret or repository setting. A protected approval
 environment remains an open pre-execution gate; configuring one requires its
 own explicit authorization and does not qualify the live harness or runtime.
 
+The caller's `main` ref does not currently meet the reusable callee's required
+`github.ref_protected == true` condition, so the caller remains fail-closed. The
+candidate identity mapping described below is static preparation only:
+the controller approval is still an invalid placeholder, no workflow run ID or
+experiment approval exists, and no Scale Set, session, runner, credential or
+host resource was created or changed. The driver permanently pins the first
+experiment's ownership and journal; the candidate identity must not be reused
+for a later experiment without the separately reviewed reconciliation described
+in the [driver record](g01-live-driver.md#private-approval-and-invocation).
+
 - [x] Maintainer identified one disposable **private** repository in the
   organization. The reviewed workflow identity and full SHA are recorded in
   the private repository and group configuration; no public fork/PR execution
@@ -273,8 +283,21 @@ own explicit authorization and does not qualify the live harness or runtime.
 - [x] Runner group `#3` selects only that private repository, disables public
   repository access, and restricts execution to exactly one full-SHA reusable
   workflow. The private identifiers are omitted from this public record.
-- [ ] Before creating resources, assign a unique canary scale-set name, runner
-  label and owner nonce, then prove they cannot target existing manual runners.
+- [x] A fresh read-only `gh` recheck confirmed the runner-group repository ID
+  matches the private caller repository, the group selects only that
+  repository and the exact pinned reusable workflow, public repositories are
+  disabled, and the group currently has zero runners. The callee names both
+  this group and the nonce-bound label, so runners in other groups cannot
+  receive its jobs; there are no existing runners in the selected group at this
+  checkpoint. Recheck inventory immediately before any separately authorized
+  dispatch because group membership can change.
+- [x] Assign and statically verify the candidate canary identity before creating
+  resources. The private manual caller's fixed 32-lowercase-hex `run-name`
+  suffix is the reusable callee's runner-label suffix; `Approval.setName()`
+  derives the scale-set and session-owner name as `g01-<owner_nonce>`. The
+  controller approval must use that same suffix as `owner_nonce`, making its
+  scale-set name equal to the workflow's required runner label. Private names,
+  suffix and immutable workflow SHA remain in the private record.
 - [ ] Maintainer supplies an existing user-owned App installation with
   organization self-hosted runners write permission. G01 does not create an App,
   change its permissions or borrow credentials from existing runner installs.
@@ -320,6 +343,15 @@ HTTP bodies/URLs, auth headers, JIT values, environment dumps, full runner logs,
 private names or personal paths into the public report. Suppression barriers must
 operate inside the controller adapter after receipt of a response; do not use a
 credential-recording HTTPS interception proxy.
+
+The private `Event` journal is not a public report format. Convert independently
+verified observations to `livecanary.PublicEvidenceObservation` and serialize
+them only with `livecanary.MarshalPublicEvidence`. The serializer emits the
+versioned allowlist, requires fixed phase/operation/category values, bounds time,
+input size and counters, aliases resource IDs within the report, and reduces HTTP
+status to its class. Their input fields are excluded from direct JSON output.
+Rejected input returns a generic error without echoing values. This offline
+serializer does not execute a canary or establish that an observation occurred.
 
 ## Minimal execution phases
 

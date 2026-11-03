@@ -47,7 +47,7 @@ func TestWorkerAdmissionCapsIndependentDirectories(t *testing.T) {
 			}
 			defer j.Close()
 			d := Driver{candidate, j, runtimes[i]}
-			if err := d.Run(context.Background(), "create", syntheticJIT); err != nil {
+			if err := d.runForTest(context.Background(), "create", syntheticJIT); err != nil {
 				t.Errorf("admitted positive control: %v", err)
 			}
 		}(i)
@@ -75,11 +75,11 @@ func TestWorkerAdmissionRetainsSlotAfterOutcomeAndClose(t *testing.T) {
 				runtime.createErr = errors.New("synthetic lost create response")
 			}
 			d := Driver{a, j, runtime}
-			err = d.Run(context.Background(), "create", syntheticJIT)
+			err = d.runForTest(context.Background(), "create", syntheticJIT)
 			if (outcome == "unknown") != (err != nil) {
 				t.Fatal("initial effect fixture")
 			}
-			if outcome == "deleted" && d.Run(context.Background(), "cleanup", "") != nil {
+			if outcome == "deleted" && d.runForTest(context.Background(), "cleanup", "") != nil {
 				t.Fatal("empty owned cleanup control")
 			}
 			if j.Close() != nil {
@@ -97,7 +97,7 @@ func TestWorkerAdmissionRetainsSlotAfterOutcomeAndClose(t *testing.T) {
 			}
 			defer reopened.Close()
 			d.Journal = reopened
-			if d.Run(context.Background(), "create", syntheticJIT) == nil || runtime.creates.Load() != 1 {
+			if d.runForTest(context.Background(), "create", syntheticJIT) == nil || runtime.creates.Load() != 1 {
 				t.Fatal("restart retried original worker creation")
 			}
 		})

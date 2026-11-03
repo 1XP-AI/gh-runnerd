@@ -10,10 +10,10 @@ import (
 
 func TestInspectConsumesSingleDurablePhaseSlot(t *testing.T) {
 	d, _, j := created(t)
-	if err := d.Run(context.Background(), "inspect"); err != nil {
+	if err := d.runForTest(context.Background(), "inspect"); err != nil {
 		t.Fatalf("first inspect: %v", err)
 	}
-	if err := d.Run(context.Background(), "inspect"); !errors.Is(err, ErrQuarantine) {
+	if err := d.runForTest(context.Background(), "inspect"); !errors.Is(err, ErrQuarantine) {
 		t.Fatalf("repeated inspect was not quarantined: %v", err)
 	}
 	count := 0
@@ -30,11 +30,11 @@ func TestInspectConsumesSingleDurablePhaseSlot(t *testing.T) {
 func TestInspectSlotIsConsumedBeforeFailedPreflight(t *testing.T) {
 	d, f, j := created(t)
 	f.preflightErr = errors.New("synthetic preflight refusal")
-	if err := d.Run(context.Background(), "inspect"); !errors.Is(err, ErrApproval) {
+	if err := d.runForTest(context.Background(), "inspect"); !errors.Is(err, ErrApproval) {
 		t.Fatalf("failed inspect preflight returned %v", err)
 	}
 	f.preflightErr = nil
-	if err := d.Run(context.Background(), "inspect"); !errors.Is(err, ErrQuarantine) {
+	if err := d.runForTest(context.Background(), "inspect"); !errors.Is(err, ErrQuarantine) {
 		t.Fatalf("inspect retried after failed preflight: %v", err)
 	}
 	count := 0
@@ -59,7 +59,7 @@ func TestInspectAllowsOneRecoveryReadAfterDurableDelete(t *testing.T) {
 	// The remote set is absent, so recovery must perform the read and retain
 	// the unresolved result rather than treating durable deletion as proof.
 	f.set = nil
-	if err := d.Run(context.Background(), "inspect"); !errors.Is(err, ErrQuarantine) {
+	if err := d.runForTest(context.Background(), "inspect"); !errors.Is(err, ErrQuarantine) {
 		t.Fatalf("post-delete recovery inspect returned %v, want quarantine after read", err)
 	}
 	events := j.Events()
@@ -76,7 +76,7 @@ func TestInspectAllowsOneRecoveryReadAfterDurableDelete(t *testing.T) {
 		t.Fatalf("post-delete recovery did not consume one inspect/read slot: phases=%d reads=%d events=%+v", inspectPhases, ownedReads, events)
 	}
 	got := len(events)
-	if err := d.Run(context.Background(), "inspect"); !errors.Is(err, ErrQuarantine) {
+	if err := d.runForTest(context.Background(), "inspect"); !errors.Is(err, ErrQuarantine) {
 		t.Fatalf("repeated post-delete inspect returned %v, want quarantine", err)
 	}
 	if len(j.Events()) != got {
@@ -88,7 +88,7 @@ func TestInspectQuarantinesSurvivingSetAfterDurableDelete(t *testing.T) {
 	d, f, j := created(t)
 	adapter := &cleanupFenceAPI{fakeAPI: f, approval: d.Approval, currentVersion: "v1"}
 	d.API = adapter
-	if err := d.Run(context.Background(), "cleanup"); err != nil {
+	if err := d.runForTest(context.Background(), "cleanup"); err != nil {
 		t.Fatalf("fenced cleanup: %v", err)
 	}
 	if f.set == nil || f.set.Statistics == nil || *f.set.Statistics != (scaleset.RunnerScaleSetStatistic{}) {
@@ -101,7 +101,7 @@ func TestInspectQuarantinesSurvivingSetAfterDurableDelete(t *testing.T) {
 		}
 	}
 
-	if err := d.Run(context.Background(), "inspect"); !errors.Is(err, ErrQuarantine) {
+	if err := d.runForTest(context.Background(), "inspect"); !errors.Is(err, ErrQuarantine) {
 		t.Fatalf("inspect accepted a surviving set after durable delete: %v", err)
 	}
 
@@ -124,7 +124,7 @@ func TestInspectQuarantinesSurvivingSetAfterDurableDelete(t *testing.T) {
 
 func TestCleanupRequiresAtomicOwnershipFreshnessFence(t *testing.T) {
 	d, f, _ := created(t)
-	if err := d.Run(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) {
+	if err := d.runForTest(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) {
 		t.Fatalf("cleanup without conditional fence was not quarantined: %v", err)
 	}
 	if f.deleteCalls != 0 {
