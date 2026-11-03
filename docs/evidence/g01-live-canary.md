@@ -6,6 +6,10 @@ running workflows require explicit authorization for the named environment and
 reviewed immutable harness/workflow commit. Do not mark these checkboxes passed
 because the offline fixture supplied the desired behavior.
 
+Current follow-up: the caller-bound workflow review and runner-group readback
+are recorded below. No runner is registered and no post-policy canary run
+exists; this document does not authorize execution.
+
 A separate [tagged controller phase driver](g01-live-driver.md) now provides a
 reviewable executable for bounded controller operations. It has not run live and
 does not launch workers or complete the phases below. The original fixture
@@ -199,11 +203,12 @@ one full-SHA workflow entry, and zero runners. A read-only workflow-run listing
 at 2026-11-03 02:22 UTC showed only historical run `35095628204` from the
 2026-09-16 macOS runner baseline; no post-policy canary run was present.
 
-This is a permission-policy result only. The pinned reusable workflow remains a
-static proposal; this change did not review its runtime, broker provenance,
-trust roots, worker isolation/resource limits, or cleanup safety. It does not
-authorize workflow dispatch, runner registration, JIT issuance, or host/Docker
-operations. Full G01 remains HOLD / NO-GO. Rollback to the previous
+This is a permission-policy result only. At the time of this policy update, the
+pinned reusable workflow was still a static proposal without the caller guard
+recorded below. This policy change did not qualify its runtime, broker
+provenance, trust roots, worker isolation/resource limits, or cleanup safety.
+It does not authorize workflow dispatch, runner registration, JIT issuance, or
+host/Docker operations. Full G01 remains HOLD / NO-GO. Rollback to the previous
 workflow-access setting requires explicit maintainer authorization; no canary
 execution state was created.
 
@@ -227,10 +232,40 @@ readiness or live Scale Set behavior. The runner image remains absent. Full G01
 is still HOLD / NO-GO; execution needs separate authorization. Rollback: remove
 this subsection only; it is documentation-only.
 
-- [ ] Maintainer identifies one disposable **private** repository and one
-  organization; no public fork/PR execution. Record the reviewed workflow SHA.
-- [ ] Dedicated runner group allows only that repository, and a unique canary
-  scale-set name/label and owner nonce cannot target existing manual runners.
+### Caller-bound workflow and policy recheck — 2026-11-03
+
+The coordinator directly rechecked the private workflow and runner-group state
+with `gh` after the policy update. A private companion workflow change binds the
+reusable job to a manual caller from the intended repository on its `main`
+branch and pins the guarded callee by full commit SHA. The repository, workflow
+path, immutable SHA and private PR identity are intentionally omitted here. The
+contract suite (five tests), standalone contract check, `actionlint`, and PR
+quick-check passed. GitHub Codex completed review of the exact PR head without
+findings, and the change was merged. This review covers the caller guard and
+static workflow contract; it is not a fresh review of every live harness phase,
+authority handoff, cleanup barrier or fault-injection step.
+
+Read-after-merge confirms runner group `#3` is selected-only, public repository
+access is disabled, workflow restriction is enabled, exactly one full-SHA
+workflow is selected, exactly one private repository is selected, and zero
+runners are registered. A read-only workflow-run query found only historical
+run `35095628204` from the 2026-09-16 macOS ARM64 baseline; no post-policy
+canary run exists. This closes the static caller-binding and workflow-selection
+checks only. It does not qualify the host/runtime, authenticated production
+provenance or trust roots, worker isolation/resource enforcement, provider-side
+conditional cleanup, or the Linux ARM64/JIT behavior. No workflow was
+dispatched and no runner, JIT, credential, Scale Set, Docker or host operation
+was performed.
+
+- [x] Maintainer identified one disposable **private** repository in the
+  organization. The reviewed workflow identity and full SHA are recorded in
+  the private repository and group configuration; no public fork/PR execution
+  is allowed.
+- [x] Runner group `#3` selects only that private repository, disables public
+  repository access, and restricts execution to exactly one full-SHA reusable
+  workflow. The private identifiers are omitted from this public record.
+- [ ] Before creating resources, assign a unique canary scale-set name, runner
+  label and owner nonce, then prove they cannot target existing manual runners.
 - [ ] Maintainer supplies an existing user-owned App installation with
   organization self-hosted runners write permission. G01 does not create an App,
   change its permissions or borrow credentials from existing runner installs.
@@ -250,15 +285,16 @@ this subsection only; it is documentation-only.
   target after host headroom is checked, 10-minute job deadline. Increase any
   limit only with new concrete authorization. No service-container workloads in
   this protocol canary.
-- [ ] Use the reviewed SDK `v0.5.0`/Go `1.27.3` adoption profile and the byte-verified
-  runner `2.338.0` ARM64 image. The archive, manifest and config digests are in the
-  [runner checkpoint](g01-runner-release-checkpoint.md#2026-10-25-target-offer-archive-and-image-bytes);
-  qualify the approved daemon/runtime and recheck support/security before execution.
-  See the [adoption ledger](g01-sdk-v05-adoption.md) and PR #107 for SDK review and
-  verification. The frozen v0.4 recovery packet (Go 1.26.9 wrapper and older
+- [x] The offline adoption profile selects SDK `v0.5.0`/Go `1.27.3` and the
+  byte-verified runner `2.338.0` ARM64 image. The archive, manifest and config
+  digests are in the [runner checkpoint](g01-runner-release-checkpoint.md#2026-10-25-target-offer-archive-and-image-bytes);
+  see the [adoption ledger](g01-sdk-v05-adoption.md) and PR #107 for SDK review
+  and verification. The frozen v0.4 recovery packet (Go 1.26.9 wrapper and older
   Go 1.26.8 historical/specimen text) is not the current execution profile and
-  must not be relabeled by replacing version strings. This checklist does not authorize a
-  canary or live runner operation.
+  must not be relabeled by replacing version strings.
+- [ ] Approve and qualify the actual daemon/runtime, recheck support/security,
+  and verify effective isolation and resource enforcement before execution.
+  This checklist does not authorize a canary or live runner operation.
 - [ ] Independent Luna max reviews the immutable live harness, authority
   checks, cleanup, fault barriers and sanitized telemetry. The offline fixture
   must not be pointed at GitHub by replacing its URL. The separate tagged driver
