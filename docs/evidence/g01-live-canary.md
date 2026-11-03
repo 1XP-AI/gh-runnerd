@@ -874,3 +874,33 @@ These are synthetic offline fixture results only. No provider credential or
 installation token was minted, no workflow or runner was invoked, and no live
 canary operation was attempted. Independent exact-head review, hosted quick
 checks and all live authorization gates remain pending.
+
+### Historical workflow-provenance claim replay binding — 2026-11-04
+
+Independent Luna Max review of PR #161 at exact head
+`b9ca7c96c7881391a1cc9ed6f06b6a7848e9f1b4` found a P2 replay-binding gap:
+historical reusable-callee claims required a confirmed workflow GET record to
+exist, but did not require that record to match the claim's authority and
+workflow identity. A test-only overlay on a clean archive of that exact source
+reproduced the issue: after changing the historical event's attempt/journal,
+approval digest and workflow identity while retaining the claim, `inspect`
+completed and minted twice.
+
+Commit `eefe8dfde5134b014b54ca45277640c6401c0395` fixes replay by matching the
+claim to the confirmed record across slot, attempt and journal identities,
+controller-approval digest, provenance source, workflow run ID, ref, SHA and
+path. The regression test verifies a mismatched historical pair is rejected
+before API calls or token minting. The exact-base RED was reproduced twice;
+the corrected focused race test passed in 4.498s, the full G02 race suite passed
+all packages (root package 143.977s), and `go vet -p=1 ./...` passed. These
+checks were offline and used the cached Go 1.27.3 toolchain with caches and
+temporary files configured on an external volume.
+
+On the prior PR head `b9ca7c96c7881391a1cc9ed6f06b6a7848e9f1b4`, hosted Go
+checks and GitHub Codex review completed with no findings. The independent P2
+was found afterward, so those results do not review or qualify the corrected
+head. The correction is committed locally and still needs a fresh push, hosted
+quick check, exact-head Codex review and independent Luna Max review. No live
+GitHub provider, credential, runner, Scale Set, Docker or host operation was
+performed. Issue #160 and parent issue #1 remain OPEN / Project #2 In progress;
+all live canary and production qualification gates remain unresolved.

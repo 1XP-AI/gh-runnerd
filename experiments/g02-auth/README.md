@@ -66,6 +66,11 @@ validated observation and journal record are durable. The ledger retains the
 receipt digest, receipt nonce, and source so a completed receipt cannot be
 replayed for another claim; direct regular-file, FIFO, or tagged-entry paths
 without a receipt stop before credential input or GitHub API effects.
+During account-ledger replay, every historical reusable-callee claim must
+match its confirmed GET event by slot, attempt and journal identities,
+controller-approval digest, source, workflow run ID, ref, SHA and path. A
+present confirmation with mismatched claim identity is rejected before API
+calls or token minting.
 
 Timeout, transport failure, lost response, crash-visible start, or failed
 confirmation leaves the workflow GET intent pending and blocks later replay
