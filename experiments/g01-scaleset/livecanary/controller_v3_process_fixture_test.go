@@ -170,7 +170,14 @@ func newControllerV3ProcessFixture(t *testing.T) controllerV3ProcessFixture {
 	if err := os.WriteFile(brokerApprovalPath, brokerRaw, 0600); err != nil {
 		t.Fatal(err)
 	}
-	base := &processBrokerHTTP{t: t, attempt: attempt, approval: &approval}
+	base := &processBrokerHTTP{
+		t: t, attempt: attempt, approval: &approval,
+		expectedWorkflowAuthorizations: []string{
+			"Bearer synthetic-observation-token",
+			"Bearer synthetic-process-verification-token",
+			"Bearer synthetic-process-verification-token",
+		},
+	}
 	return controllerV3ProcessFixture{
 		controller: controller,
 		files: enrollment.BrokerFiles{
@@ -276,6 +283,8 @@ func TestControllerProcessHandoffV3ActualBrokerChild(t *testing.T) {
 			result, effects, err := enrollment.RunProcessHandoffForFixtureWithOptions(context.Background(), fixture.files, fixture.transport, fixture.grant, options)
 			controllerEffects := controllerV3ProcessEffects(t, fixture)
 			events := controllerV3ProcessEvents(t, fixture)
+			assertProcessBrokerTrace(t, fixture.transport.base, expectedProcessBrokerV3Trace(*fixture.transport.base.approval, false))
+			assertProcessBrokerTokenLifecycle(t, fixture.files.StateDirectory, filepath.Join(filepath.Dir(fixture.files.StateDirectory), "admission"), true, true)
 			if tc.wantSuccess {
 				receipt, receiptErr := handoff.DecodeStrictReceipt(observedReceipt)
 				binding, bindingErr := handoff.DecodeStrictBinding(observedBinding)

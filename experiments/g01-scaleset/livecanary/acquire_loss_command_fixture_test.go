@@ -464,7 +464,11 @@ func newCommandQualificationFixture(t *testing.T, controller, broker, variant, p
 	if os.WriteFile(f.brokerApprovalPath, raw, 0600) != nil {
 		t.Fatal("broker approval write")
 	}
-	f.transport = &processBrokerHTTP{t: t, attempt: f.attempt, approval: &f.base.a}
+	verificationAuthorization := "Bearer " + f.base.api.credentials.VerificationToken
+	f.transport = &processBrokerHTTP{
+		t: t, attempt: f.attempt, approval: &f.base.a,
+		expectedWorkflowAuthorizations: []string{"Bearer synthetic-observation-credential", verificationAuthorization, verificationAuthorization},
+	}
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.brokerMu.Lock()
 		defer f.brokerMu.Unlock()

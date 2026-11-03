@@ -311,7 +311,12 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 				t.Fatal("broker approval")
 			}
 			brokerFiles := enrollment.BrokerFiles{ApprovalPath: approvalPath, StateDirectory: filepath.Join(parent, "attempt-"+mode), ControllerBinary: binPath, ControllerApproval: files.ControllerApprovalPath, ControllerStateDirectory: files.ControllerStateDirectory, WorkerApproval: files.WorkerApprovalPath, WorkerStateDirectory: files.WorkerStateDirectory}
-			transport := &processBrokerHTTP{t: t, attempt: brokerFiles.StateDirectory, approval: &a, groupFault: caseName == "group-policy-broker-wrong"}
+			verificationAuthorization := "Bearer " + base.api.credentials.VerificationToken
+			transport := &processBrokerHTTP{
+				t: t, attempt: brokerFiles.StateDirectory, approval: &a,
+				expectedWorkflowAuthorizations: []string{"Bearer synthetic-observation-credential", verificationAuthorization, verificationAuthorization},
+				groupFault:                     caseName == "group-policy-broker-wrong",
+			}
 			if e := enrollment.ConfigureBrokerExperimentForFixture(experimentalPolicy(t, a, raw, brokerMode, phase, "broker"), transport, admission, workerAdmission); e != nil {
 				t.Fatal(e)
 			}
@@ -434,6 +439,8 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 				if e == nil || transport.mints != 1 || transport.readOnlyMints != 1 || transport.managementMints != 0 || transport.revocations != 1 || transport.readOnlyRevocations != 1 || transport.managementRevocations != 0 || base.acks.Load() != 0 || base.acquires.Load() != 0 {
 					t.Fatal("wrong group crossed actual command boundary", e, transport.mints)
 				}
+				assertProcessBrokerTrace(t, transport, expectedProcessBrokerV3Trace(a, true))
+				assertProcessBrokerTokenLifecycle(t, brokerFiles.StateDirectory, admission, true, false)
 				for _, event := range base.readEvents() {
 					if event.ControllerHandoff != nil && event.ControllerHandoff.Phase == phase {
 						t.Fatal("broker-side group rejection consumed the signed handoff")
@@ -445,6 +452,8 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 				if e == nil || transport.mints != 2 || transport.readOnlyMints != 1 || transport.managementMints != 1 || transport.revocations != 2 || transport.readOnlyRevocations != 1 || transport.managementRevocations != 1 || base.acks.Load() != 0 || base.acquires.Load() != 0 {
 					t.Fatal("wrong controller group crossed actual command boundary", e, transport.mints)
 				}
+				assertProcessBrokerTrace(t, transport, expectedProcessBrokerV3Trace(a, false))
+				assertProcessBrokerTokenLifecycle(t, brokerFiles.StateDirectory, admission, true, true)
 				consumed := false
 				for _, event := range base.readEvents() {
 					if event.ControllerHandoff != nil && event.ControllerHandoff.Phase == phase {
@@ -469,6 +478,8 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 				t.Logf("safe counts: requests=%d forbidden=%d", base.requests.Load(), base.forbidden.Load())
 				t.Fatalf("actual %s command failed: %v result=%+v mints=%d read-only=%d management=%d revocations=%d read-only-revocations=%d management-revocations=%d calls=%v", mode, e, result, transport.mints, transport.readOnlyMints, transport.managementMints, transport.revocations, transport.readOnlyRevocations, transport.managementRevocations, transport.calls)
 			}
+			assertProcessBrokerTrace(t, transport, expectedProcessBrokerV3Trace(a, false))
+			assertProcessBrokerTokenLifecycle(t, brokerFiles.StateDirectory, admission, true, true)
 			data, e := os.ReadFile(filepath.Join(files.ControllerStateDirectory, "journal.jsonl"))
 			if e != nil {
 				t.Fatal(e)
