@@ -745,3 +745,45 @@ retaining uncertain resources for diagnosis and removing only verified disposabl
 resources. Existing manual runners remain the operational fallback. This plan
 does not implement production providers or adopt the upstream demo's forced
 busy-runner shutdown.
+
+### Account-wide read-token revocation uncertainty fence — 2026-11-03
+
+The Luna Max review of PR #159 identified a compound journal failure: GitHub
+DELETE succeeds, then both the per-attempt `read_only_token_revoked` record and
+its uncertainty record fail to sync. The per-attempt durable intent stopped the
+same invocation, but an approved later `inspect` could open a new attempt and
+mint a management token. A regression run against base `1ea35587f5df5fa6`
+reproduced the gap: the later inspect returned `controller_completed` after two
+token mints.
+
+The correction adds a second intent/confirmation pair to the fixed account
+admission ledger. It binds only phase plus attempt and journal device/inode,
+contains no credential, and is synced before DELETE. Confirmation is written
+only after the exact successful DELETE response and the per-attempt success
+record are durable. Admission replay requires a unique start for the current
+claim, no intervening event, and a matching confirmation. An unmatched start
+refuses every later phase, including `inspect` and `cleanup`, before management
+token issuance or child handoff. A visible confirmation is re-synced before the
+next invocation may rely on it. The finite admission-ledger line bound now
+includes this event pair for every allowed slot.
+
+Verification on the corrected local candidate, with Go 1.27.3 and the
+gh-runnerd Go cache, module cache and temporary directory on the external
+worktree volume:
+
+| Check | Result |
+|---|---|
+| RED at base `1ea3558`: double per-attempt sync failure followed by inspect | FAIL as expected; inspect completed after two token mints |
+| Focused revocation, confirmed-history replay, inspect-fence and ledger-bound tests | PASS |
+| G02 `go test -count=1 -timeout=120s ./...` | PASS (all packages; library 46.635s) |
+| G02 `go vet ./...` | PASS |
+| G02 focused `go test -race` for compound failure, confirmed-history replay and revocation-sync failure | PASS (4.635s) |
+| `git diff --check` | PASS |
+
+These are synthetic offline results; no real GitHub token was minted or
+revoked, and no provider, runner, Scale Set, Docker or host operation occurred.
+This closes the identified offline admission-fence gap. The read-to-handoff
+race, management-token expiry/revocation, conditional Scale Set deletion,
+trusted runtime and custody, production provenance, live readiness, and
+separately authorized canary remain unresolved. Issue #1 and Project #2 remain
+OPEN / In progress.

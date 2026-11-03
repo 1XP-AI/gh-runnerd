@@ -160,17 +160,22 @@ func TestBrokerWorkflowVerificationUsesHeadBranchForAttestedBranchRef(t *testing
 }
 
 func TestBrokerReadOnlyRevocationRecordsUncertainWhenRevokedSyncFails(t *testing.T) {
-	journalFile, err := os.CreateTemp(t.TempDir(), "broker-journal-*.jsonl")
+	a, _, fixtureAPI, fixture, root := newBrokerFixture(t)
+	journal, err := openBrokerJournal(root, a)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("open attempt journal: %v", err)
 	}
-	t.Cleanup(func() { _ = journalFile.Close() })
-	journal := &brokerJournal{file: journalFile}
+	t.Cleanup(journal.close)
+	claim, err := openBrokerAdmission(fixture.admissionRoot, a, journal, nil, fixtureAPI.syncDirectory)
+	if err != nil {
+		t.Fatalf("open admission claim: %v", err)
+	}
+	t.Cleanup(claim.close)
 	journal.syncFile = func(phase string) error {
 		if phase == "read_only_token_revoked" {
 			return errors.New("synthetic fsync failure")
 		}
-		return journalFile.Sync()
+		return journal.file.Sync()
 	}
 	deleteCalls := 0
 	api := newBrokerAPI(time.Now, transportFunc(func(r *http.Request) (*http.Response, error) {
@@ -180,13 +185,13 @@ func TestBrokerReadOnlyRevocationRecordsUncertainWhenRevokedSyncFails(t *testing
 		}
 		return response(http.StatusNoContent, ""), nil
 	}))
-	if err := revokeBrokerReadOnlyToken(context.Background(), api, journal, "synthetic-private-read-installation-token", "synthetic-private-workflow-token"); err == nil {
+	if err := revokeBrokerReadOnlyToken(context.Background(), api, journal, claim, "synthetic-private-read-installation-token", "synthetic-private-workflow-token"); err == nil {
 		t.Fatal("revocation succeeded despite a failed durable success record")
 	}
 	if deleteCalls != 1 {
 		t.Fatalf("revocation requests=%d, want exactly one", deleteCalls)
 	}
-	data, err := os.ReadFile(journalFile.Name())
+	data, err := os.ReadFile(filepath.Join(root, "broker.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}

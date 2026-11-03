@@ -62,10 +62,10 @@ const organizationOnlyManagementScope = "organization-only"
 
 func brokerSlotAllowed(slot string) bool { return brokerPhases[slot] || brokerSpecialSlots[slot] }
 
-// One header, one claim and one completion for every finite schema slot, and
-// the final empty split element from the required trailing newline. This is a
-// structural bound derived from the actual slot schema, not an unbounded log.
-func brokerLedgerMaxLines() int { return 1 + 2*(len(brokerPhases)+len(brokerSpecialSlots)) + 1 }
+// One header, one claim and one completion for every finite schema slot, up to
+// one read-token revocation start/confirmation pair per slot, and the final
+// empty split element from the required trailing newline.
+func brokerLedgerMaxLines() int { return 1 + 4*(len(brokerPhases)+len(brokerSpecialSlots)) + 1 }
 
 const (
 	// Terminal collection has seven five-second cadence gaps in production.
@@ -149,8 +149,8 @@ func brokerPairedAuthorityDeadline(parent context.Context, a BrokerApproval, pla
 	return deadline, nil
 }
 
-func revokeBrokerReadOnlyToken(ctx context.Context, api *brokerAPI, j *brokerJournal, token, verificationToken string) error {
-	if !validBrokerToken(token) || len(token) > 1024 {
+func revokeBrokerReadOnlyToken(ctx context.Context, api *brokerAPI, j *brokerJournal, claim *brokerAdmission, token, verificationToken string) error {
+	if !validBrokerToken(token) || len(token) > 1024 || claim == nil {
 		return errBroker
 	}
 	if token == verificationToken {
@@ -162,6 +162,10 @@ func revokeBrokerReadOnlyToken(ctx context.Context, api *brokerAPI, j *brokerJou
 	if j.append("read_only_token_revocation_started", nil) != nil {
 		return errBroker
 	}
+	if claim.beginReadTokenRevocation() != nil {
+		_ = j.append("read_only_token_revocation_uncertain", map[string]any{"reason": "admission_revocation_intent_failed"})
+		return errBroker
+	}
 	if api.revokeInstallationToken(ctx, token) != nil {
 		_ = j.append("read_only_token_revocation_uncertain", map[string]any{"reason": "revoke_request_failed_or_ambiguous"})
 		return errBroker
@@ -170,6 +174,10 @@ func revokeBrokerReadOnlyToken(ctx context.Context, api *brokerAPI, j *brokerJou
 		// The revoked record may have reached disk without a durable sync. A
 		// later uncertainty record is terminal and overrides that observation.
 		_ = j.append("read_only_token_revocation_uncertain", map[string]any{"reason": "revocation_result_persistence_failed"})
+		return errBroker
+	}
+	if claim.confirmReadTokenRevocation() != nil {
+		_ = j.append("read_only_token_revocation_uncertain", map[string]any{"reason": "admission_revocation_confirmation_failed"})
 		return errBroker
 	}
 	return nil
@@ -327,12 +335,12 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 		readOnly, err := api.mintReadOnly(ctx, a, cred)
 		if err != nil {
 			if readOnly.Token != "" {
-				_ = revokeBrokerReadOnlyToken(ctx, api, j, readOnly.Token, input.VerificationToken)
+				_ = revokeBrokerReadOnlyToken(ctx, api, j, claim, readOnly.Token, input.VerificationToken)
 			}
 			return BrokerResult{}, errBroker
 		}
 		if readOnly.Token != "" && readOnly.Token == input.VerificationToken {
-			_ = revokeBrokerReadOnlyToken(ctx, api, j, readOnly.Token, input.VerificationToken)
+			_ = revokeBrokerReadOnlyToken(ctx, api, j, claim, readOnly.Token, input.VerificationToken)
 			return BrokerResult{}, errBroker
 		}
 		readCtx, stopRead := context.WithDeadline(ctx, readOnly.ExpiresAt.Add(-time.Minute))
@@ -343,7 +351,7 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 		if readOnlyVerified {
 			verifiedJournaled = j.append("read_only_token_verified", map[string]any{"expires_at": readOnly.ExpiresAt, "app_id": identity.ID, "installation_id": install.ID}) == nil
 		}
-		if revokeBrokerReadOnlyToken(ctx, api, j, readOnly.Token, input.VerificationToken) != nil || !readOnlyVerified || !verifiedJournaled {
+		if revokeBrokerReadOnlyToken(ctx, api, j, claim, readOnly.Token, input.VerificationToken) != nil || !readOnlyVerified || !verifiedJournaled {
 			return BrokerResult{}, errBroker
 		}
 		// The final workflow GET is deliberately after read-only provider
