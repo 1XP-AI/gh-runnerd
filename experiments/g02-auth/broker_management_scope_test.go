@@ -143,7 +143,7 @@ func TestBrokerReadOnlyMintRequiresExactScope(t *testing.T) {
 				}
 				return response(http.StatusCreated, string(data)), nil
 			})}
-			_, err = api.mintReadOnly(context.Background(), a, credential)
+			_, err = api.mintReadOnlyWithIntent(context.Background(), a, credential, func() error { return nil })
 			if (err == nil) != (fault == "") || fixture.tokenCalls != 1 {
 				t.Fatalf("read-only mint accepted=%v fault=%s requests=%d", err == nil, fault, fixture.tokenCalls)
 			}
@@ -179,7 +179,7 @@ func TestBrokerReadOnlyOrganizationScopeOmitsRepositoryAccess(t *testing.T) {
 		}
 		return response(http.StatusCreated, string(payload)), nil
 	})}
-	if _, err := api.mintReadOnly(context.Background(), a, credential); err != nil || fixture.tokenCalls != 1 {
+	if _, err := api.mintReadOnlyWithIntent(context.Background(), a, credential, func() error { return nil }); err != nil || fixture.tokenCalls != 1 {
 		t.Fatalf("valid organization-only read token was refused: err=%v requests=%d", err, fixture.tokenCalls)
 	}
 }

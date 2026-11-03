@@ -96,6 +96,10 @@ func newBrokerHTTPClient(fixture http.RoundTripper) *http.Client {
 	return &http.Client{Transport: transport, Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 }
 func (a *brokerAPI) call(ctx context.Context, method, path, authorization string, body any, status int, out any) error {
+	return a.callWithBeforeRequest(ctx, method, path, authorization, body, status, out, nil)
+}
+
+func (a *brokerAPI) callWithBeforeRequest(ctx context.Context, method, path, authorization string, body any, status int, out any, beforeRequest func() error) error {
 	var data []byte
 	var err error
 	if body != nil {
@@ -114,6 +118,9 @@ func (a *brokerAPI) call(ctx context.Context, method, path, authorization string
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Accept-Encoding", "identity")
 	r.Header.Set("User-Agent", "gh-runnerd-g01-broker-evidence")
+	if beforeRequest != nil && beforeRequest() != nil {
+		return errBroker
+	}
 	res, err := a.client.Do(r)
 	if err != nil {
 		return errBroker
@@ -188,14 +195,14 @@ func (r brokerIssued) matchesReadOnlyScope(a BrokerApproval) bool {
 }
 
 func (a *brokerAPI) mint(ctx context.Context, approval BrokerApproval, cred Credential) (brokerIssued, error) {
-	return a.mintWithPermissions(ctx, approval, cred, false)
+	return a.mintWithPermissions(ctx, approval, cred, false, nil)
 }
 
-func (a *brokerAPI) mintReadOnly(ctx context.Context, approval BrokerApproval, cred Credential) (brokerIssued, error) {
-	if approval.GroupPolicy.Version != 2 || !approval.GroupPolicy.Valid(approval.Organization+"/"+approval.Repository, "") || approval.GroupPolicy.OrganizationID != approval.OrganizationID {
+func (a *brokerAPI) mintReadOnlyWithIntent(ctx context.Context, approval BrokerApproval, cred Credential, beforeRequest func() error) (brokerIssued, error) {
+	if beforeRequest == nil || approval.GroupPolicy.Version != 2 || !approval.GroupPolicy.Valid(approval.Organization+"/"+approval.Repository, "") || approval.GroupPolicy.OrganizationID != approval.OrganizationID {
 		return brokerIssued{}, errBroker
 	}
-	return a.mintWithPermissions(ctx, approval, cred, true)
+	return a.mintWithPermissions(ctx, approval, cred, true, beforeRequest)
 }
 
 func (a *brokerAPI) revokeInstallationToken(ctx context.Context, token string) error {
@@ -205,7 +212,7 @@ func (a *brokerAPI) revokeInstallationToken(ctx context.Context, token string) e
 	return a.call(ctx, http.MethodDelete, "/installation/token", "Bearer "+token, nil, http.StatusNoContent, nil)
 }
 
-func (a *brokerAPI) mintWithPermissions(ctx context.Context, approval BrokerApproval, cred Credential, readOnly bool) (brokerIssued, error) {
+func (a *brokerAPI) mintWithPermissions(ctx context.Context, approval BrokerApproval, cred Credential, readOnly bool, beforeRequest func() error) (brokerIssued, error) {
 	if !approval.GroupPolicy.Valid(approval.Organization+"/"+approval.Repository, "") || (approval.GroupPolicy.Version == 2 && approval.GroupPolicy.OrganizationID != approval.OrganizationID) || (approval.ManagementScope != "" && approval.ManagementScope != organizationOnlyManagementScope) {
 		return brokerIssued{}, errBroker
 	}
@@ -228,7 +235,12 @@ func (a *brokerAPI) mintWithPermissions(ctx context.Context, approval BrokerAppr
 		Permissions   map[string]string `json:"permissions"`
 	}{repositories, permissions}
 	var result brokerIssued
-	err = a.call(ctx, "POST", "/app/installations/"+strconv.FormatInt(approval.InstallationID, 10)+"/access_tokens", "Bearer "+jwt, body, 201, &result)
+	path := "/app/installations/" + strconv.FormatInt(approval.InstallationID, 10) + "/access_tokens"
+	if readOnly {
+		err = a.callWithBeforeRequest(ctx, "POST", path, "Bearer "+jwt, body, 201, &result, beforeRequest)
+	} else {
+		err = a.call(ctx, "POST", path, "Bearer "+jwt, body, 201, &result)
+	}
 	if err != nil {
 		return readOnlyRevocationCandidate(result, readOnly), errBroker
 	}

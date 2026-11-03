@@ -787,3 +787,45 @@ race, management-token expiry/revocation, conditional Scale Set deletion,
 trusted runtime and custody, production provenance, live readiness, and
 separately authorized canary remain unresolved. Issue #1 and Project #2 remain
 OPEN / In progress.
+
+### Read-token issuance response-loss fence — 2026-11-03
+
+The independent Luna Max review of PR #159 at `a35220b089d3a3bd79ab1575620892f138739a42`
+identified a separate P1: the account admission ledger did not record the
+read-token lifecycle until after a usable token response existed. If GitHub
+accepted the POST but its response was lost, no token candidate was available
+for DELETE and a later `inspect` could mint management authority over an
+unresolved read-token issuance. The synthetic regression reproduced that
+sequence: no account-level intent was present and the later inspect completed.
+
+The local correction syncs `read_token_lifecycle_started` immediately before
+the read-token HTTP request is dispatched. A lost response therefore leaves a
+durable account-wide barrier. If a v3 attempt ends before the dispatch boundary,
+it records `read_token_request_not_dispatched`, allowing safe later recovery.
+An incomplete historical reusable-callee claim with neither lifecycle nor
+no-dispatch evidence now fails closed. Correctly paired historical
+`read_token_revocation_started` / `read_token_revocation_confirmed` records
+remain valid. The finding has a causal regression for accepted-POST/response
+loss, sync failure before request dispatch, no-dispatch recovery, legacy
+incomplete claims and both current and historical confirmed-pair replay.
+
+Local verification on the candidate based on `a35220b` used Go 1.27.3 and
+external-volume Go caches:
+
+| Check | Result |
+|---|---|
+| RED at `a35220b`: accepted read-token POST with lost response, then inspect | FAIL as expected; no account intent, inspect completed and minted again |
+| Focused lifecycle, failure-boundary, replay and recovery tests | PASS (3.113s) |
+| G02 `go test -race -count=1 -timeout=210s ./...` | PASS (all packages; library 129.994s) |
+| G02 `go vet ./...` | PASS |
+| `git diff --check` | PASS |
+
+The source and docs are still a local candidate; fresh independent and
+GitHub Codex review of its exact head and hosted PR quick checks remain pending.
+GitHub issue, PR and Project metadata were read through `gh`; no provider
+credential/token, runner, Scale Set, Docker or host operation was used. The
+selected SDK path is unchanged. Production provenance and trust
+roots, broker-only execution, management-token lifecycle, conditional Scale Set
+deletion, trusted runtime/isolation/resource qualification, the authorized
+Linux ARM64/JIT canary and sanitized live exit evidence remain open. Issue #1
+stays OPEN and Project #2 stays In progress.

@@ -150,7 +150,7 @@ func brokerPairedAuthorityDeadline(parent context.Context, a BrokerApproval, pla
 }
 
 func revokeBrokerReadOnlyToken(ctx context.Context, api *brokerAPI, j *brokerJournal, claim *brokerAdmission, token, verificationToken string) error {
-	if !validBrokerToken(token) || len(token) > 1024 || claim == nil {
+	if !validBrokerToken(token) || len(token) > 1024 || claim == nil || !claim.readTokenLifecyclePending || claim.check() != nil {
 		return errBroker
 	}
 	if token == verificationToken {
@@ -160,10 +160,6 @@ func revokeBrokerReadOnlyToken(ctx context.Context, api *brokerAPI, j *brokerJou
 		return errBroker
 	}
 	if j.append("read_only_token_revocation_started", nil) != nil {
-		return errBroker
-	}
-	if claim.beginReadTokenRevocation() != nil {
-		_ = j.append("read_only_token_revocation_uncertain", map[string]any{"reason": "admission_revocation_intent_failed"})
 		return errBroker
 	}
 	if api.revokeInstallationToken(ctx, token) != nil {
@@ -176,8 +172,8 @@ func revokeBrokerReadOnlyToken(ctx context.Context, api *brokerAPI, j *brokerJou
 		_ = j.append("read_only_token_revocation_uncertain", map[string]any{"reason": "revocation_result_persistence_failed"})
 		return errBroker
 	}
-	if claim.confirmReadTokenRevocation() != nil {
-		_ = j.append("read_only_token_revocation_uncertain", map[string]any{"reason": "admission_revocation_confirmation_failed"})
+	if claim.confirmReadTokenLifecycle() != nil {
+		_ = j.append("read_only_token_revocation_uncertain", map[string]any{"reason": "admission_lifecycle_confirmation_failed"})
 		return errBroker
 	}
 	return nil
@@ -271,6 +267,14 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 		return BrokerResult{}, errBroker
 	}
 	defer claim.close()
+	readTokenLifecycleStarted := false
+	if v3ReusableCallee {
+		defer func() {
+			if !readTokenLifecycleStarted {
+				_ = claim.recordReadTokenRequestNotDispatched()
+			}
+		}()
+	}
 	guard := func(checkPrepared bool) error {
 		if claim.check() != nil || j.check() != nil {
 			return errBroker
@@ -332,7 +336,13 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 		if j.append("token_request_started", nil) != nil {
 			return BrokerResult{}, errBroker
 		}
-		readOnly, err := api.mintReadOnly(ctx, a, cred)
+		readOnly, err := api.mintReadOnlyWithIntent(ctx, a, cred, func() error {
+			if err := claim.beginReadTokenLifecycle(); err != nil {
+				return err
+			}
+			readTokenLifecycleStarted = true
+			return nil
+		})
 		if err != nil {
 			if readOnly.Token != "" {
 				_ = revokeBrokerReadOnlyToken(ctx, api, j, claim, readOnly.Token, input.VerificationToken)

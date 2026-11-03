@@ -32,6 +32,7 @@ func newBrokerV3RunFixture(t *testing.T, phase string, changedCallee bool, rootM
 	a, candidate, _, fixture, attempt := newBrokerFixture(t)
 	a.Mode, a.Phase = "controller", phase
 	a.GroupPolicy = groupPolicyFixture()
+	fixture.requireReadTokenLifecycle = true
 	a.AllowVerificationAuthority = phase == "after-ack"
 	now := time.Now()
 	a.ExpiresAt = now.Add(time.Hour)
@@ -300,8 +301,8 @@ func TestBrokerExperimentV3DoubleRevocationJournalSyncFailureBlocksLaterInspect(
 		t.Fatalf("compound journal fault did not stop after one read-token DELETE: err=%v mints=%d calls=%v", runErr, create.fixture.tokenCalls, create.fixture.calls)
 	}
 	admission, err := os.ReadFile(filepath.Join(create.fixture.admissionRoot, "broker-admission.jsonl"))
-	if err != nil || !bytes.Contains(admission, []byte(`"kind":"read_token_revocation_started"`)) || bytes.Contains(admission, []byte(`"kind":"read_token_revocation_confirmed"`)) {
-		t.Fatalf("compound journal fault did not leave an unresolved account-level revocation intent: err=%v", err)
+	if err != nil || !bytes.Contains(admission, []byte(`"kind":"read_token_lifecycle_started"`)) || bytes.Contains(admission, []byte(`"kind":"read_token_lifecycle_confirmed"`)) {
+		t.Fatalf("compound journal fault did not leave an unresolved account-level lifecycle intent: err=%v", err)
 	}
 
 	inspect := newBrokerV3RunFixture(t, "inspect", false)
@@ -315,6 +316,82 @@ func TestBrokerExperimentV3DoubleRevocationJournalSyncFailureBlocksLaterInspect(
 		if strings.HasPrefix(call, "POST /app/installations/") {
 			t.Fatalf("later inspect minted a token after unresolved revocation: %v", inspect.fixture.calls)
 		}
+	}
+}
+
+func TestBrokerExperimentV3LostReadTokenMintResponseBlocksLaterInspect(t *testing.T) {
+	create := newBrokerV3RunFixture(t, "create", false)
+	create.fixture.loseReadTokenResponse = true
+	_, createErr := executeBrokerV3Fixture(t, context.Background(), create)
+	if createErr == nil || create.fixture.tokenCalls != 1 || !create.fixture.readTokenAccepted || brokerFixtureCallCount(create.fixture.calls, "DELETE /installation/token") != 0 {
+		t.Fatalf("fixture did not model an accepted read-token mint with a lost response: err=%v mints=%d accepted=%t calls=%v", createErr, create.fixture.tokenCalls, create.fixture.readTokenAccepted, create.fixture.calls)
+	}
+	admission, err := os.ReadFile(filepath.Join(create.fixture.admissionRoot, "broker-admission.jsonl"))
+	started := bytes.Contains(admission, []byte(`"kind":"read_token_lifecycle_started"`))
+	confirmed := bytes.Contains(admission, []byte(`"kind":"read_token_lifecycle_confirmed"`))
+	if err != nil || !started || confirmed {
+		t.Errorf("lost response account-level lifecycle state: err=%v started=%t confirmed=%t", err, started, confirmed)
+	}
+
+	inspect := newBrokerV3RunFixture(t, "inspect", false)
+	inspect.fixture.admissionRoot = create.fixture.admissionRoot
+	inspect.files.ControllerStateDirectory = create.files.ControllerStateDirectory
+	result, inspectErr := executeBrokerV3Fixture(t, context.Background(), inspect)
+	if inspectErr == nil || result.Status != "" || inspect.fixture.tokenCalls != 0 || len(inspect.fixture.calls) != 0 {
+		t.Fatalf("later inspect crossed an unresolved read-token issuance: result=%+v err=%v mints=%d calls=%v", result, inspectErr, inspect.fixture.tokenCalls, inspect.fixture.calls)
+	}
+}
+
+func TestBrokerExperimentV3LegacyIncompleteClaimWithoutLifecycleBlocksLaterInspect(t *testing.T) {
+	create := newBrokerV3RunFixture(t, "create", false)
+	if _, err := executeBrokerV3Fixture(t, context.Background(), create); err != nil {
+		t.Fatalf("complete synthetic v3 create: %v", err)
+	}
+	ledgerPath := filepath.Join(create.fixture.admissionRoot, "broker-admission.jsonl")
+	ledger, err := os.ReadFile(ledgerPath)
+	if err != nil {
+		t.Fatalf("read synthetic admission ledger: %v", err)
+	}
+	var legacyLines []string
+	for _, line := range strings.Split(strings.TrimSuffix(string(ledger), "\n"), "\n") {
+		if strings.Contains(line, `"kind":"read_token_lifecycle_`) || strings.Contains(line, `"kind":"complete"`) {
+			continue
+		}
+		legacyLines = append(legacyLines, line)
+	}
+	if len(legacyLines) != 2 {
+		t.Fatalf("expected a legacy header plus one incomplete claim, got %d ledger lines", len(legacyLines))
+	}
+	if err := os.WriteFile(ledgerPath, []byte(strings.Join(legacyLines, "\n")+"\n"), 0600); err != nil {
+		t.Fatalf("write synthetic legacy incomplete ledger: %v", err)
+	}
+
+	inspect := newBrokerV3RunFixture(t, "inspect", false)
+	inspect.fixture.admissionRoot = create.fixture.admissionRoot
+	inspect.files.ControllerStateDirectory = create.files.ControllerStateDirectory
+	result, inspectErr := executeBrokerV3Fixture(t, context.Background(), inspect)
+	if inspectErr == nil || result.Status != "" || inspect.fixture.tokenCalls != 0 || len(inspect.fixture.calls) != 0 {
+		t.Fatalf("legacy incomplete reusable-callee claim without lifecycle proof was recovered: result=%+v err=%v mints=%d calls=%v", result, inspectErr, inspect.fixture.tokenCalls, inspect.fixture.calls)
+	}
+}
+
+func TestBrokerExperimentV3PreRequestFailureRecordsNoDispatchForLaterInspect(t *testing.T) {
+	create := newBrokerV3RunFixture(t, "create", false)
+	_, createErr := executeBrokerV3Fixture(t, brokerJournalSyncFailureContext(context.Background(), "token_request_started"), create)
+	if createErr == nil || create.fixture.tokenCalls != 0 || brokerFixtureCallCount(create.fixture.calls, "POST /app/installations/201/access_tokens") != 0 {
+		t.Fatalf("token-request journal failure reached issuance: err=%v mints=%d calls=%v", createErr, create.fixture.tokenCalls, create.fixture.calls)
+	}
+	admission, err := os.ReadFile(filepath.Join(create.fixture.admissionRoot, "broker-admission.jsonl"))
+	if err != nil || !bytes.Contains(admission, []byte(`"kind":"read_token_request_not_dispatched"`)) {
+		t.Fatalf("pre-request failure lacks durable no-dispatch proof: err=%v", err)
+	}
+
+	inspect := newBrokerV3RunFixture(t, "inspect", false)
+	inspect.fixture.admissionRoot = create.fixture.admissionRoot
+	inspect.files.ControllerStateDirectory = create.files.ControllerStateDirectory
+	result, inspectErr := executeBrokerV3Fixture(t, context.Background(), inspect)
+	if inspectErr != nil || result.Status != "controller_completed" || inspect.fixture.tokenCalls != 2 {
+		t.Fatalf("durable no-dispatch proof failed to permit later inspect: result=%+v err=%v mints=%d calls=%v", result, inspectErr, inspect.fixture.tokenCalls, inspect.fixture.calls)
 	}
 }
 
