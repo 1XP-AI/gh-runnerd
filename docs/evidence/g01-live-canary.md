@@ -613,6 +613,51 @@ execution authorization.
 The current `gh auth status` scope list omits `read:user`; no scope was added.
 The GitHub App installation's selected-repository access remains unverified.
 
+### Broker read-token revocation offline follow-up — 2026-11-03
+
+On base `8537b8ba93ced1cea995dbd4d0402b98ef85897b`, local implementation
+commit `47182b560b57ae6e9340e013c4a964a71ba6715c` adds a single revocation of the
+v3 broker's narrowly scoped read-only installation token after its provider
+preflight attempt. The broker durably records the revocation intent before
+`DELETE /installation/token`; only an empty `204` response is confirmed. An
+ambiguous result is journaled and stops before the final workflow check and
+management-token mint. The G01 separate-process fixture now covers the read and
+write mint scopes and verifies one read-token revocation.
+
+The meaningful RED was
+`go test -run '^TestBrokerExperimentV3StopsWhenReadOnlyTokenRevocationIsUncertain$' -count=1 .`
+against the parent source. It failed because the synthetic revocation failure
+still returned `controller_completed` after two mints and three workflow reads.
+After the fix, the same case passes and the broker stops before the write
+boundary. Go 1.27.3 results, with build/module caches and temporary build files
+on the external worktree volume:
+
+| Check | Result |
+|---|---|
+| G02 `go test -run '^TestBrokerExperimentV3StopsWhenReadOnlyTokenRevocationIsUncertain$' -count=1 .` | PASS |
+| G02 `go test -run '^TestBrokerExperimentV3' -count=1 .` | PASS (5.798s) |
+| G02 `go test -count=1 -timeout=120s ./...` | PASS (all packages; library 48.110s) |
+| G02 `go test -race -run '^TestBrokerExperimentV3(ReadOnlyPreflightRejectsBeforeWriteMint|StopsWhenReadOnlyTokenRevocationIsUncertain|FinalGETFencesCalleeBeforeMintAndHandoff)$' -count=1 -timeout=60s .` | PASS (17.057s) |
+| G02 `go test -race -count=1 -timeout=120s ./...` | PASS (all packages; library 120.491s) |
+| G02 `go vet ./...` | PASS |
+| G01 `go test -tags=g01_pair_fixture -run '^(TestControllerProcessHandoffActualBrokerSeparateProcess|TestControllerProcessHandoffV3ActualBrokerChild)$' -count=1 -timeout=120s ./livecanary` | PASS (3.001s) |
+| `git diff --check` | PASS |
+| `git diff --unified=0 | rg -n 'BEGIN (RSA|OPENSSH|EC|PRIVATE)|ghs_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|/Users/|/private/var|/tmp/'` | No matches (rg exit 1) |
+
+The initial G02 full-race attempt at a 45-second timeout expired while the
+standalone compile test was running; the same full suite passed with a
+120-second timeout. The first G01 process-fixture run exposed that its synthetic
+server only modeled the previous single write-token flow; the fixture was
+updated and both v1 and v3 process-handoff cases then passed.
+
+This is synthetic offline evidence only. No real GitHub token was minted or revoked,
+and no provider, runner, Scale Set, Docker or host operation occurred. An
+uncertain read-token revocation may still leave that token valid until expiry;
+the later management token is not automatically revoked. The provider-read to
+handoff race, trust-root/custody, runtime/isolation, conditional deletion and
+separately authorized live canary gates remain open. Issue #1 and Project #2
+remain OPEN / In progress.
+
 ## Minimal execution phases
 
 Run phases serially. Each phase begins by verifying that only its owned resources
