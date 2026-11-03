@@ -926,3 +926,26 @@ and fresh exact-head Codex/Luna Max reviews. No live GitHub provider,
 credential, runner, Scale Set, Docker or host operation was performed. Issue
 #160 and parent issue #1 remain OPEN / Project #2 In progress; all live canary
 and production qualification gates remain unresolved.
+
+### Workflow status, final handoff check, and management-token lifecycle — 2026-11-04
+
+The current selected Scale Set path remains the released `github.com/actions/scaleset v0.5.0` at source `af394d86c0d5024225238b0209043c70193bcfe6`, with Go `1.27.3`, the high-level listener and independent reconciliation. See the current [ADR decision](../decisions/0002-scaleset-integration.md#decision) and [adoption ledger](g01-sdk-v05-adoption.md#current-status--2026-11-01). No production provider or Scale Set implementation was added.
+
+At source candidate `1f4e25bd73d4cbf34dfc8d6b36a211a186060c56`, two additional broker gaps now have causal offline coverage:
+
+- The workflow observer requires the exact run to remain `in_progress` in addition to the manual event, first attempt, repository identities, ref, SHA, path and pinned reusable callee. The v3 exact-key check also requires the `status` field. A new regression first failed because `queued`, `completed`, `cancelled`, unknown and missing status were accepted; those cases now refuse.
+- The final reusable-callee GET now runs after bounded payload and binding-signature construction, then rechecks receipt expiry and local guards before recording `controller_handoff_started` and launching the child. A new event-order assertion first failed with the final GET before signing (`final_get=13`, `sign=14`); it now proves signing precedes the final GET and the launch follows it without another remote request. A mismatching final observation refuses before the durable handoff event.
+- The management token now has an account-ledger lifecycle intent before POST dispatch. A known returned token gets one revocation attempt after child completion, or on earlier failure. Only `204` with an empty body plus durable journal and ledger confirmations closes the lifecycle. Ambiguous mint responses, caller-token collisions and uncertain deletion/confirmation remain fail-closed and can leave a token valid until expiry.
+
+Verification used Go `1.27.3`, with build/module caches and temporary files on the external worktree volume and module downloads disabled:
+
+| Check | Result |
+|---|---|
+| Workflow status RED regression before source fix | FAIL as expected; all five invalid/missing status cases were accepted |
+| Final GET ordering RED regression before source fix | FAIL as expected; final GET occurred before binding signing |
+| Focused workflow observer, final GET and handoff race selectors | PASS |
+| G02 `go test -race -p=1 -count=1 -timeout=300s ./...` | PASS; library 160.023s and all command/handoff packages |
+| G02 `go vet -p=1 ./...` | PASS |
+| `gofmt` and `git diff --check` | PASS |
+
+These checks use synthetic HTTP/subprocess fixtures only. They do not prove live GitHub status freshness or atomicity: a run may change after the final GET and during child execution, and the API supplies no conditional handoff primitive. An accepted management-token POST whose response is lost cannot be self-revoked without a token value; uncertain DELETE or ledger confirmation likewise retains a pending barrier. Server-side conditional Scale Set deletion, production workflow provenance/trust-root custody, broker-only execution, runtime/isolation/resource qualification, current canary repository protection and the separately authorized Linux ARM64/JIT run remain open. No live provider write, credential request, runner, Scale Set, Docker or host operation occurred. Issue #1 remains OPEN and Project #2 remains In progress.
