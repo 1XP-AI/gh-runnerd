@@ -344,6 +344,15 @@ private names or personal paths into the public report. Suppression barriers mus
 operate inside the controller adapter after receipt of a response; do not use a
 credential-recording HTTPS interception proxy.
 
+The private `Event` journal is not a public report format. Convert independently
+verified observations to `livecanary.PublicEvidenceObservation` and serialize
+them only with `livecanary.MarshalPublicEvidence`. The serializer emits the
+versioned allowlist, requires fixed phase/operation/category values, bounds time,
+input size and counters, aliases resource IDs within the report, and reduces HTTP
+status to its class. Their input fields are excluded from direct JSON output.
+Rejected input returns a generic error without echoing values. This offline
+serializer does not execute a canary or establish that an observation occurred.
+
 ## Minimal execution phases
 
 Run phases serially. Each phase begins by verifying that only its owned resources
