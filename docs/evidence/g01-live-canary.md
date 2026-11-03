@@ -257,6 +257,15 @@ conditional cleanup, or the Linux ARM64/JIT behavior. No workflow was
 dispatched and no runner, JIT, credential, Scale Set, Docker or host operation
 was performed.
 
+### Read-only protected-environment status — 2026-11-03
+
+A read-only GitHub CLI listing for Actions environments in the private canary
+repository returned `total_count: 0`. No GitHub Actions environment or
+environment-protection rule is configured. This metadata check changed no
+environment, workflow, secret or repository setting. A protected approval
+environment remains an open pre-execution gate; configuring one requires its
+own explicit authorization and does not qualify the live harness or runtime.
+
 - [x] Maintainer identified one disposable **private** repository in the
   organization. The reviewed workflow identity and full SHA are recorded in
   the private repository and group configuration; no public fork/PR execution
