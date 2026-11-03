@@ -551,7 +551,9 @@ is not atomic with handoff. Authenticated production provenance and trust-root
 provisioning, broker-only execution and trusted credential custody, qualified
 runtime isolation and resource enforcement, concrete separate canary
 authorization, and sanitized live evidence remain open. No canary dispatch,
-credential issuance, Scale Set, runner, Docker, or host-service action occurred.
+credential issuance, Scale Set, runner, Docker, or host-service action occurred
+as part of PR #153. A separate historical macOS baseline execution is verified
+in the next section; it does not qualify the current Linux ARM64 experiment.
 
 ### Canary policy recheck — 2026-11-03
 
@@ -571,7 +573,14 @@ GitHub documents that a reusable workflow uses the caller's `github` context and
 that `ref_protected` is true only when branch protections or rulesets are
 configured ([contexts](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#github-context),
 [reusable workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations#github-context)).
-No workflow was dispatched.
+No workflow was dispatched during this recheck.
+
+A read-only Actions history query independently found one completed
+`workflow_dispatch` on 2026-09-16 with a successful result. Its only job ran on
+a self-hosted macOS ARM64 runner in group #3. This corroborates the older
+baseline run noted above; it does not qualify the current Linux ARM64 workflow,
+current runner configuration, or current runtime isolation. No run logs were
+read, and no new dispatch occurred during this recheck.
 
 The GitHub App installation's access to the selected private repository was not
 independently verified in this recheck. No additional authentication scope was
