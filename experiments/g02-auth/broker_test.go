@@ -37,6 +37,9 @@ type brokerHTTPFixture struct {
 	badGroupPolicy               bool
 	mintError                    bool
 	revokeError                  bool
+	managementTokenFault         string
+	loseManagementTokenReply     bool
+	managementTokenRevokeError   bool
 	readTokenFault               string
 	readTokenToken               string
 	loseReadTokenResponse        bool
@@ -130,22 +133,48 @@ func (f *brokerHTTPFixture) RoundTrip(r *http.Request) (*http.Response, error) {
 			case "expired":
 				expiresAt = time.Now().Add(-time.Minute)
 			}
+		} else {
+			switch f.managementTokenFault {
+			case "read-only-scope":
+				responsePermissions = map[string]string{"organization_self_hosted_runners": "read", "metadata": "read"}
+			case "expired":
+				expiresAt = time.Now().Add(-time.Minute)
+			}
 		}
 		payload = map[string]any{"token": token, "expires_at": expiresAt, "permissions": responsePermissions, "repository_selection": "selected", "repositories": []any{repo}}
 		if readOnly && f.loseReadTokenResponse {
 			return nil, errors.New("synthetic accepted read-token response lost")
 		}
+		if !readOnly && f.loseManagementTokenReply {
+			return nil, errors.New("synthetic accepted management-token response lost")
+		}
 	case "/installation/token":
-		if r.Method != http.MethodDelete || r.Header.Get("Authorization") != "Bearer synthetic-private-read-installation-token" {
-			f.t.Error("installation-token revocation used the wrong method or authority")
+		if r.Method != http.MethodDelete {
+			f.t.Error("installation-token revocation used the wrong method")
 		}
 		data, err := os.ReadFile(filepath.Join(f.root, "broker.jsonl"))
-		if err != nil || !strings.Contains(string(data), "read_only_token_revocation_started") {
-			f.t.Error("installation-token revocation preceded its durable journal intent")
+		if err != nil {
+			f.t.Error("installation-token revocation could not read the attempt journal")
+		} else {
+			switch r.Header.Get("Authorization") {
+			case "Bearer synthetic-private-read-installation-token":
+				if !strings.Contains(string(data), "read_only_token_revocation_started") {
+					f.t.Error("read-token revocation preceded its durable journal intent")
+				}
+			case "Bearer " + f.token:
+				if !strings.Contains(string(data), "management_token_revocation_started") {
+					f.t.Error("management-token revocation preceded its durable journal intent")
+				}
+			default:
+				f.t.Error("installation-token revocation used an unexpected authority")
+			}
 		}
 		if f.revokeError {
 			status = http.StatusBadGateway
 			payload = map[string]string{"message": "synthetic revocation failure"}
+		} else if r.Header.Get("Authorization") == "Bearer "+f.token && f.managementTokenRevokeError {
+			status = http.StatusBadGateway
+			payload = map[string]string{"message": "synthetic management-token revocation failure"}
 		} else {
 			status = http.StatusNoContent
 		}
@@ -322,7 +351,7 @@ func TestBrokerDiscoveryUsesOneRestrictedTokenThenScopeBeforeAuth(t *testing.T) 
 	if f.tokenCalls != 1 {
 		t.Fatal("not exactly one token request")
 	}
-	want := []string{"GET /app", "GET /orgs/org-a/installation", "POST /app/installations/201/access_tokens", "GET /installation/repositories", "GET /repos/org-a/canary", "GET /orgs/org-a/actions/runner-groups/3", "GET /orgs/org-a/actions/runner-groups/3/repositories", "POST /orgs/org-a/actions/runners/registration-token", "POST /actions/runner-registration"}
+	want := []string{"GET /app", "GET /orgs/org-a/installation", "POST /app/installations/201/access_tokens", "GET /installation/repositories", "GET /repos/org-a/canary", "GET /orgs/org-a/actions/runner-groups/3", "GET /orgs/org-a/actions/runner-groups/3/repositories", "POST /orgs/org-a/actions/runners/registration-token", "POST /actions/runner-registration", "DELETE /installation/token"}
 	if !reflect.DeepEqual(f.calls, want) {
 		t.Fatalf("unsafe operation order: %v", f.calls)
 	}

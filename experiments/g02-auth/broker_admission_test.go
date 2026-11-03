@@ -109,8 +109,8 @@ func TestBrokerFinitePhasesAndUnknownRetention(t *testing.T) {
 }
 
 func TestBrokerLedgerCapacityDerivesFromFiniteSlotSchema(t *testing.T) {
-	want := 1 + 6*(len(brokerPhases)+len(brokerSpecialSlots)) + 1
-	if got := brokerLedgerMaxLines(); got != want || got != 80 || len(brokerPhases) != 11 || len(brokerSpecialSlots) != 2 {
+	want := 1 + 8*(len(brokerPhases)+len(brokerSpecialSlots)) + 1
+	if got := brokerLedgerMaxLines(); got != want || got != 106 || len(brokerPhases) != 11 || len(brokerSpecialSlots) != 2 {
 		t.Fatalf("ledger line bound=%d want schema-derived %d", got, want)
 	}
 	if brokerSlotAllowed("unreviewed-slot") || !brokerSlotAllowed("paired-terminal") || !brokerSlotAllowed("discover-actions-host") || !brokerSlotAllowed("session-replacement") || !brokerSlotAllowed("before-jit") {
@@ -141,16 +141,18 @@ func TestBrokerAdmissionAllowsLaterInspectAfterConfirmedReadTokenLifecycle(t *te
 				t.Fatalf("read admission ledger: %v", err)
 			}
 			records := strings.Split(strings.TrimSuffix(string(ledger), "\n"), "\n")
-			if len(records) != 3 {
+			if len(records) != 5 {
 				t.Fatalf("unexpected admission fixture records: %d", len(records))
 			}
 			var createClaim brokerClaimEvent
 			if decodeBrokerJSON([]byte(records[1]), &createClaim, true) != nil || createClaim.Kind != "claim" {
 				t.Fatal("decode create admission claim")
 			}
-			started, _ := json.Marshal(brokerReadTokenLifecycleEvent{Kind: tc.started, Slot: createClaim.Slot, Attempt: createClaim.Attempt, Journal: createClaim.Journal})
-			confirmed, _ := json.Marshal(brokerReadTokenLifecycleEvent{Kind: tc.confirmed, Slot: createClaim.Slot, Attempt: createClaim.Attempt, Journal: createClaim.Journal})
-			replayed := strings.Join([]string{records[0], records[1], string(started), string(confirmed), records[2], ""}, "\n")
+			started, _ := json.Marshal(brokerTokenLifecycleEvent{Kind: tc.started, Slot: createClaim.Slot, Attempt: createClaim.Attempt, Journal: createClaim.Journal})
+			confirmed, _ := json.Marshal(brokerTokenLifecycleEvent{Kind: tc.confirmed, Slot: createClaim.Slot, Attempt: createClaim.Attempt, Journal: createClaim.Journal})
+			replayedRecords := []string{records[0], records[1], string(started), string(confirmed)}
+			replayedRecords = append(replayedRecords, records[2:]...)
+			replayed := strings.Join(append(replayedRecords, ""), "\n")
 			if err := os.WriteFile(ledgerPath, []byte(replayed), 0600); err != nil {
 				t.Fatalf("write synthetic confirmed token history: %v", err)
 			}
