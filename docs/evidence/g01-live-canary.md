@@ -409,22 +409,31 @@ live authorization unless explicitly excluded or separately disabled.
   maintainer-supplied existing organization App installation has
   `organization_self_hosted_runners: write`. No App permission, installation or
   repository setting was changed. Private App identifiers are omitted here.
-- [ ] Verify that the separate secret broker keeps management credentials on the
-  controller. The organization-only App does not need repository access. Broker
-  and controller approvals must explicitly select the reviewed
-  [organization-only management scope](g01-organization-management-scope.md),
-  with separate workflow verification authority where required. Scope support
-  alone does not qualify issuance, provenance or execution.
+- [x] Offline source/fixture evidence verifies the v3 broker builds the management
+  credential payload from authenticated issuance and sends it through the bounded
+  handoff to the selected controller child; the controller validates the signed
+  receipt/binding before reading credentials. The controller validates the
+  approved organization-only scope and keeps the workflow-verification token
+  distinct where a phase requires it. See the [broker evidence](g01-broker.md),
+  [organization-only scope ledger](g01-organization-management-scope.md), and
+  passing separate-process fixtures
+  TestControllerProcessHandoffActualBrokerSeparateProcess and
+  TestControllerProcessHandoffV3ActualBrokerChild. This closes source-level
+  custody evidence only. The current controller launches no worker child, so
+  actual worker credential inheritance, deployed identity, runtime isolation,
+  live issuance and production provenance remain unqualified.
 - [ ] Dedicated trusted controller and disposable worker environment is named.
   Prefer one Linux ARM64 worker on an explicitly chosen Docker endpoint/runtime;
   Docker Desktop presence alone is not authorization to use it. Native macOS
   requires a separately approved trusted execution identity. Do not share the
   management credential context with job code.
-- [ ] Resource budget: **one active worker maximum**, one scale set, one session
+- [x] Plan a maximum budget of **one active worker**, one scale set, one session
   owner, at most two small queued canary jobs per phase, 1 vCPU / 1 GiB worker
-  target after host headroom is checked, 10-minute job deadline. Increase any
-  limit only with new concrete authorization. No service-container workloads in
-  this protocol canary.
+  target, and a 10-minute job deadline; no service-container workloads. Raise
+  any limit only with new concrete authorization.
+- [ ] Measure available host headroom and verify effective resource enforcement
+  on the selected trusted environment before execution; the budget above is a
+  target and does not establish current capacity.
 - [x] The offline adoption profile selects SDK `v0.5.0`/Go `1.27.3` and the
   byte-verified runner `2.338.0` ARM64 image. The archive, manifest and config
   digests are in the [runner checkpoint](g01-runner-release-checkpoint.md#2026-10-25-target-offer-archive-and-image-bytes);
@@ -613,6 +622,82 @@ execution authorization.
 The current `gh auth status` scope list omits `read:user`; no scope was added.
 The GitHub App installation's selected-repository access remains unverified.
 
+### Broker read-token revocation offline follow-up — 2026-11-03
+
+On base `8537b8ba93ced1cea995dbd4d0402b98ef85897b`, local implementation
+commit `47182b560b57ae6e9340e013c4a964a71ba6715c` adds a single revocation of the
+v3 broker's narrowly scoped read-only installation token after its provider
+preflight attempt. The broker durably records the revocation intent before
+`DELETE /installation/token`; only an empty `204` response is confirmed. An
+ambiguous result is journaled and stops before the final workflow check and
+management-token mint. The G01 separate-process fixture now covers the read and
+write mint scopes and verifies one read-token revocation. The broker journal
+fixture also rejects persistence of the synthetic read token.
+
+The meaningful RED was
+`go test -run '^TestBrokerExperimentV3StopsWhenReadOnlyTokenRevocationIsUncertain$' -count=1 .`
+against the parent source. It failed because the synthetic revocation failure
+still returned `controller_completed` after two mints and three workflow reads.
+After the fix, the same case passes and the broker stops before the write
+boundary. Go 1.27.3 results, with build/module caches and temporary build files
+on the external worktree volume:
+
+| Check | Result |
+|---|---|
+| G02 `go test -run '^TestBrokerExperimentV3StopsWhenReadOnlyTokenRevocationIsUncertain$' -count=1 .` | PASS |
+| G02 `go test -run '^TestBrokerExperimentV3' -count=1 .` | PASS (5.798s) |
+| G02 v3 suite rerun after the journal redaction assertion | PASS (5.344s) |
+| G02 `go test -count=1 -timeout=120s ./...` | PASS (all packages; library 48.110s) |
+| G02 `go test -race -run '^TestBrokerExperimentV3(ReadOnlyPreflightRejectsBeforeWriteMint|StopsWhenReadOnlyTokenRevocationIsUncertain|FinalGETFencesCalleeBeforeMintAndHandoff)$' -count=1 -timeout=60s .` | PASS (17.057s) |
+| G02 `go test -race -count=1 -timeout=120s ./...` | PASS (all packages; library 120.491s) |
+| G02 `go vet ./...` | PASS |
+| G01 `go test -tags=g01_pair_fixture -run '^(TestControllerProcessHandoffActualBrokerSeparateProcess|TestControllerProcessHandoffV3ActualBrokerChild)$' -count=1 -timeout=120s ./livecanary` | PASS (3.001s) |
+| `git diff --check` | PASS |
+| `git diff --unified=0 | rg -n 'BEGIN (RSA|OPENSSH|EC|PRIVATE)|ghs_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|/Users/|/private/var|/tmp/'` | No matches (rg exit 1) |
+
+The initial G02 full-race attempt at a 45-second timeout expired while the
+standalone compile test was running; the same full suite passed with a
+120-second timeout. The first G01 process-fixture run exposed that its synthetic
+server only modeled the previous single write-token flow; the fixture was
+updated and both v1 and v3 process-handoff cases then passed.
+
+This is synthetic offline evidence only. No real GitHub token was minted or revoked,
+and no provider, runner, Scale Set, Docker or host operation occurred. An
+uncertain read-token revocation may still leave that token valid until expiry;
+the later management token is not automatically revoked. The provider-read to
+handoff race, trust-root/custody, runtime/isolation, conditional deletion and
+separately authorized live canary gates remain open. Issue #1 and Project #2
+remain OPEN / In progress.
+
+### Read-token rejection and journal uncertainty regression — 2026-11-03
+
+The independent Luna Max exact-head review of PR #159 at
+`d8f387fdc7e367ac65e23a3b449ee7202aff2163` identified two P1 findings: rejected read-token scope/expiry
+responses discarded a usable
+token before cleanup, and a token equal to the caller verification credential
+could reach provider-state preflight and DELETE. It also identified a P2 gap:
+a successful DELETE followed by failed revoked-record sync did not append an
+uncertainty marker. Local regression tests reproduced the P1s. The correction
+retains only a lexically valid, bounded read-token candidate for one journaled
+revocation attempt, never preflights rejected issuance, records/skips a
+caller-token collision before provider-state preflight, and appends terminal
+uncertainty after a failed revoked-result sync. Verification on the corrected
+source commit `4f3d84f52402f21ec5b1031a19af92aaeb60b424`, using Go 1.27.3
+and Go caches on the external worktree volume:
+
+| Check | Result |
+|---|---|
+| RED on the pre-fix tree: rejected scope/expiry cleanup and caller-token collision regressions | FAIL as expected |
+| G02 focused test `go test -run 'TestBroker(ReadOnlyRevocationRecordsUncertainWhenRevokedSyncFails|ExperimentV3RevokesTokenFromRejectedReadIssuance|ExperimentV3DoesNotRevokeVerificationTokenCollision)$'` | PASS (1.777s) |
+| G02 `go test -count=1 -timeout=120s ./...` | PASS (all packages; library 47.211s) |
+| G02 `go vet ./...` | PASS |
+| G01 `go test -tags=g01_pair_fixture -run '^(TestControllerProcessHandoffActualBrokerSeparateProcess|TestControllerProcessHandoffV3ActualBrokerChild)$' -count=1 -timeout=120s ./livecanary` | PASS (3.773s) |
+
+No GitHub token, provider, runner, Scale Set or host operation was performed.
+This offline correction does not change the selected SDK `v0.5.0` path or
+close the still-unsupported conditional Scale Set deletion requirement; issue
+#1 and Project #2 remain OPEN / In progress.
+
 ## Minimal execution phases
 
 Run phases serially. Each phase begins by verifying that only its owned resources
@@ -660,3 +745,87 @@ retaining uncertain resources for diagnosis and removing only verified disposabl
 resources. Existing manual runners remain the operational fallback. This plan
 does not implement production providers or adopt the upstream demo's forced
 busy-runner shutdown.
+
+### Account-wide read-token revocation uncertainty fence — 2026-11-03
+
+The Luna Max review of PR #159 identified a compound journal failure: GitHub
+DELETE succeeds, then both the per-attempt `read_only_token_revoked` record and
+its uncertainty record fail to sync. The per-attempt durable intent stopped the
+same invocation, but an approved later `inspect` could open a new attempt and
+mint a management token. A regression run against base `1ea35587f5df5fa6`
+reproduced the gap: the later inspect returned `controller_completed` after two
+token mints.
+
+The correction adds a second intent/confirmation pair to the fixed account
+admission ledger. It binds only phase plus attempt and journal device/inode,
+contains no credential, and is synced before DELETE. Confirmation is written
+only after the exact successful DELETE response and the per-attempt success
+record are durable. Admission replay requires a unique start for the current
+claim, no intervening event, and a matching confirmation. An unmatched start
+refuses every later phase, including `inspect` and `cleanup`, before management
+token issuance or child handoff. A visible confirmation is re-synced before the
+next invocation may rely on it. The finite admission-ledger line bound now
+includes this event pair for every allowed slot.
+
+Verification on the corrected local candidate, with Go 1.27.3 and the
+gh-runnerd Go cache, module cache and temporary directory on the external
+worktree volume:
+
+| Check | Result |
+|---|---|
+| RED at base `1ea3558`: double per-attempt sync failure followed by inspect | FAIL as expected; inspect completed after two token mints |
+| Focused revocation, confirmed-history replay, inspect-fence and ledger-bound tests | PASS |
+| G02 `go test -count=1 -timeout=120s ./...` | PASS (all packages; library 46.635s) |
+| G02 `go vet ./...` | PASS |
+| G02 focused `go test -race` for compound failure, confirmed-history replay and revocation-sync failure | PASS (4.635s) |
+| `git diff --check` | PASS |
+
+These are synthetic offline results; no real GitHub token was minted or
+revoked, and no provider, runner, Scale Set, Docker or host operation occurred.
+This closes the identified offline admission-fence gap. The read-to-handoff
+race, management-token expiry/revocation, conditional Scale Set deletion,
+trusted runtime and custody, production provenance, live readiness, and
+separately authorized canary remain unresolved. Issue #1 and Project #2 remain
+OPEN / In progress.
+
+### Read-token issuance response-loss fence — 2026-11-03
+
+The independent Luna Max review of PR #159 at `a35220b089d3a3bd79ab1575620892f138739a42`
+identified a separate P1: the account admission ledger did not record the
+read-token lifecycle until after a usable token response existed. If GitHub
+accepted the POST but its response was lost, no token candidate was available
+for DELETE and a later `inspect` could mint management authority over an
+unresolved read-token issuance. The synthetic regression reproduced that
+sequence: no account-level intent was present and the later inspect completed.
+
+The local correction syncs `read_token_lifecycle_started` immediately before
+the read-token HTTP request is dispatched. A lost response therefore leaves a
+durable account-wide barrier. If a v3 attempt ends before the dispatch boundary,
+it records `read_token_request_not_dispatched`, allowing safe later recovery.
+An incomplete historical reusable-callee claim with neither lifecycle nor
+no-dispatch evidence now fails closed. Correctly paired historical
+`read_token_revocation_started` / `read_token_revocation_confirmed` records
+remain valid. The finding has a causal regression for accepted-POST/response
+loss, sync failure before request dispatch, no-dispatch recovery, legacy
+incomplete claims and both current and historical confirmed-pair replay.
+
+Local verification on the candidate based on `a35220b` used Go 1.27.3 and
+external-volume Go caches:
+
+| Check | Result |
+|---|---|
+| RED at `a35220b`: accepted read-token POST with lost response, then inspect | FAIL as expected; no account intent, inspect completed and minted again |
+| Focused lifecycle, failure-boundary, replay and recovery tests | PASS (3.113s) |
+| G02 `go test -race -count=1 -timeout=210s ./...` | PASS (all packages; library 129.994s) |
+| G02 `go vet ./...` | PASS |
+| `git diff --check` | PASS |
+
+The source and docs are still a local candidate; fresh independent and
+GitHub Codex review of its exact head and hosted PR quick checks remain pending.
+GitHub issue, PR and Project metadata were read through `gh`; no provider
+credential/token, runner, Scale Set, Docker or host operation was used. The
+selected SDK path is unchanged. Production provenance and trust
+roots, broker-only execution, management-token lifecycle, conditional Scale Set
+deletion, trusted runtime/isolation/resource qualification, the authorized
+Linux ARM64/JIT canary and sanitized live exit evidence remain open. Issue #1
+stays OPEN and Project #2 stays In progress.

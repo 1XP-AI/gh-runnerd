@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -31,6 +32,7 @@ func newBrokerV3RunFixture(t *testing.T, phase string, changedCallee bool, rootM
 	a, candidate, _, fixture, attempt := newBrokerFixture(t)
 	a.Mode, a.Phase = "controller", phase
 	a.GroupPolicy = groupPolicyFixture()
+	fixture.requireReadTokenLifecycle = true
 	a.AllowVerificationAuthority = phase == "after-ack"
 	now := time.Now()
 	a.ExpiresAt = now.Add(time.Hour)
@@ -160,6 +162,29 @@ func newBrokerV3RunFixture(t *testing.T, phase string, changedCallee bool, rootM
 	return brokerV3RunFixture{files: BrokerFiles{ApprovalPath: approvalPath, StateDirectory: attempt, ControllerBinary: binary.path, ControllerApproval: controllerPath, ControllerStateDirectory: controllerState}, candidate: candidate, fixture: fixture, workflowGET: workflowGET, changeCalleeAt: changeCalleeAt}
 }
 
+func brokerJournalSyncFailureContext(ctx context.Context, failedPhases ...string) context.Context {
+	failed := make(map[string]bool, len(failedPhases))
+	for _, phase := range failedPhases {
+		failed[phase] = true
+	}
+	return context.WithValue(ctx, brokerJournalSyncFailureHookKey{}, brokerJournalSyncFailureHook(func(journal *brokerJournal, phase string) error {
+		if failed[phase] {
+			return errors.New("synthetic fsync failure")
+		}
+		return journal.file.Sync()
+	}))
+}
+
+func brokerFixtureCallCount(calls []string, want string) int {
+	count := 0
+	for _, call := range calls {
+		if call == want {
+			count++
+		}
+	}
+	return count
+}
+
 func TestBrokerExperimentV3ReadOnlyPreflightRejectsBeforeWriteMint(t *testing.T) {
 	fixture := newBrokerV3RunFixture(t, "create", false)
 	fixture.fixture.badGroupPolicy = true
@@ -179,12 +204,283 @@ func TestBrokerExperimentV3ReadOnlyPreflightRejectsBeforeWriteMint(t *testing.T)
 	if len(fixture.fixture.mintRequests) != 1 || !reflect.DeepEqual(fixture.fixture.mintRequests[0].RepositoryIDs, []int64{501}) || !reflect.DeepEqual(fixture.fixture.mintRequests[0].Permissions, wantPermissions) {
 		t.Fatalf("ineligible group did not stop after an exact read-only token: requests=%+v", fixture.fixture.mintRequests)
 	}
+	if !reflect.DeepEqual(fixture.fixture.calls[len(fixture.fixture.calls)-1:], []string{"DELETE /installation/token"}) {
+		t.Fatalf("read-only token was not revoked after rejected provider preflight: %v", fixture.fixture.calls)
+	}
+	if got := brokerFixtureCallCount(fixture.fixture.calls, "DELETE /installation/token"); got != 1 {
+		t.Fatalf("read-only token DELETE requests=%d, want exactly one: %v", got, fixture.fixture.calls)
+	}
 	journal, err := os.ReadFile(filepath.Join(fixture.files.StateDirectory, "broker.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if bytes.Contains(journal, []byte("management_token_request_started")) || bytes.Contains(journal, []byte("controller_handoff_started")) {
 		t.Fatalf("ineligible group crossed write-token or handoff journal boundary: %s", journal)
+	}
+}
+
+func TestBrokerExperimentV3StopsWhenReadOnlyTokenRevocationIsUncertain(t *testing.T) {
+	fixture := newBrokerV3RunFixture(t, "create", false)
+	fixture.fixture.revokeError = true
+	management, err := json.Marshal(brokerInput{PEM: string(fixture.candidate.PEM), VerificationToken: "synthetic-private-workflow-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := brokerV3Pipe(t, management)
+	observation := brokerV3Pipe(t, []byte("synthetic-private-workflow-token"))
+	workflowSeed := brokerV3Pipe(t, bytes.Repeat([]byte{1}, ed25519.SeedSize))
+	issuerSeed := brokerV3Pipe(t, bytes.Repeat([]byte{71}, ed25519.SeedSize))
+	result, runErr := RunBrokerExperimentWithInputs(context.Background(), fixture.files, input, observation, workflowSeed, issuerSeed)
+	if runErr == nil || result.Status != "" || fixture.fixture.tokenCalls != 1 || *fixture.workflowGET != 1 {
+		t.Fatalf("uncertain read-only-token revocation crossed the write boundary: result=%+v err=%v mints=%d workflow_gets=%d calls=%v", result, runErr, fixture.fixture.tokenCalls, *fixture.workflowGET, fixture.fixture.calls)
+	}
+	if !reflect.DeepEqual(fixture.fixture.calls[len(fixture.fixture.calls)-1:], []string{"DELETE /installation/token"}) {
+		t.Fatalf("read-only installation token was not revoked as the final API operation: %v", fixture.fixture.calls)
+	}
+	if got := brokerFixtureCallCount(fixture.fixture.calls, "DELETE /installation/token"); got != 1 {
+		t.Fatalf("read-only token DELETE requests=%d, want exactly one: %v", got, fixture.fixture.calls)
+	}
+	journal, err := os.ReadFile(filepath.Join(fixture.files.StateDirectory, "broker.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(journal, []byte("read_only_token_revocation_uncertain")) || bytes.Contains(journal, []byte("management_token_request_started")) || bytes.Contains(journal, []byte("controller_handoff_started")) {
+		t.Fatalf("uncertain revocation was not durably fenced before write mint: %s", journal)
+	}
+	if bytes.Contains(journal, []byte("synthetic-private-read-installation-token")) {
+		t.Fatal("read-only installation token was persisted in the broker journal")
+	}
+}
+
+func TestBrokerExperimentV3RevokedRecordSyncFailureStopsBeforeWriteMint(t *testing.T) {
+	fixture := newBrokerV3RunFixture(t, "create", false)
+	management, err := json.Marshal(brokerInput{PEM: string(fixture.candidate.PEM), VerificationToken: "synthetic-private-workflow-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := brokerJournalSyncFailureContext(context.Background(), "read_only_token_revoked")
+	result, runErr := RunBrokerExperimentWithInputs(
+		ctx, fixture.files,
+		brokerV3Pipe(t, management),
+		brokerV3Pipe(t, []byte("synthetic-private-workflow-token")),
+		brokerV3Pipe(t, bytes.Repeat([]byte{1}, ed25519.SeedSize)),
+		brokerV3Pipe(t, bytes.Repeat([]byte{71}, ed25519.SeedSize)),
+	)
+	if runErr == nil || result.Status != "" || fixture.fixture.tokenCalls != 1 || *fixture.workflowGET != 1 {
+		t.Fatalf("revoked-record sync failure crossed the write boundary: result=%+v err=%v mints=%d workflow_gets=%d calls=%v", result, runErr, fixture.fixture.tokenCalls, *fixture.workflowGET, fixture.fixture.calls)
+	}
+	if got := brokerFixtureCallCount(fixture.fixture.calls, "DELETE /installation/token"); got != 1 {
+		t.Fatalf("read-only token DELETE requests=%d, want exactly one: %v", got, fixture.fixture.calls)
+	}
+	if len(fixture.fixture.calls) == 0 || fixture.fixture.calls[len(fixture.fixture.calls)-1] != "DELETE /installation/token" {
+		t.Fatalf("revocation was not the last provider operation: %v", fixture.fixture.calls)
+	}
+	journal, err := os.ReadFile(filepath.Join(fixture.files.StateDirectory, "broker.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(journal)
+	started := strings.Index(text, "read_only_token_revocation_started")
+	revoked := strings.Index(text, "read_only_token_revoked")
+	uncertain := strings.Index(text, "read_only_token_revocation_uncertain")
+	if started < 0 || revoked <= started || uncertain <= revoked || strings.Contains(text, "management_token_request_started") || strings.Contains(text, "controller_handoff_started") {
+		t.Fatalf("sync failure was not fenced by a terminal uncertainty record before writes: %s", text)
+	}
+	if bytes.Contains(journal, []byte("synthetic-private-read-installation-token")) {
+		t.Fatal("read-only installation token was persisted in the broker journal")
+	}
+}
+
+func TestBrokerExperimentV3DoubleRevocationJournalSyncFailureBlocksLaterInspect(t *testing.T) {
+	create := newBrokerV3RunFixture(t, "create", false)
+	_, runErr := executeBrokerV3Fixture(t,
+		brokerJournalSyncFailureContext(context.Background(), "read_only_token_revoked", "read_only_token_revocation_uncertain"),
+		create,
+	)
+	if runErr == nil || create.fixture.tokenCalls != 1 || brokerFixtureCallCount(create.fixture.calls, "DELETE /installation/token") != 1 {
+		t.Fatalf("compound journal fault did not stop after one read-token DELETE: err=%v mints=%d calls=%v", runErr, create.fixture.tokenCalls, create.fixture.calls)
+	}
+	admission, err := os.ReadFile(filepath.Join(create.fixture.admissionRoot, "broker-admission.jsonl"))
+	if err != nil || !bytes.Contains(admission, []byte(`"kind":"read_token_lifecycle_started"`)) || bytes.Contains(admission, []byte(`"kind":"read_token_lifecycle_confirmed"`)) {
+		t.Fatalf("compound journal fault did not leave an unresolved account-level lifecycle intent: err=%v", err)
+	}
+
+	inspect := newBrokerV3RunFixture(t, "inspect", false)
+	inspect.fixture.admissionRoot = create.fixture.admissionRoot
+	inspect.files.ControllerStateDirectory = create.files.ControllerStateDirectory
+	result, inspectErr := executeBrokerV3Fixture(t, context.Background(), inspect)
+	if inspectErr == nil || result.Status != "" || inspect.fixture.tokenCalls != 0 || brokerFixtureCallCount(inspect.fixture.calls, "DELETE /installation/token") != 0 {
+		t.Fatalf("later inspect crossed an unresolved read-token revocation: result=%+v err=%v mints=%d calls=%v", result, inspectErr, inspect.fixture.tokenCalls, inspect.fixture.calls)
+	}
+	for _, call := range inspect.fixture.calls {
+		if strings.HasPrefix(call, "POST /app/installations/") {
+			t.Fatalf("later inspect minted a token after unresolved revocation: %v", inspect.fixture.calls)
+		}
+	}
+}
+
+func TestBrokerExperimentV3LostReadTokenMintResponseBlocksLaterInspect(t *testing.T) {
+	create := newBrokerV3RunFixture(t, "create", false)
+	create.fixture.loseReadTokenResponse = true
+	_, createErr := executeBrokerV3Fixture(t, context.Background(), create)
+	if createErr == nil || create.fixture.tokenCalls != 1 || !create.fixture.readTokenAccepted || brokerFixtureCallCount(create.fixture.calls, "DELETE /installation/token") != 0 {
+		t.Fatalf("fixture did not model an accepted read-token mint with a lost response: err=%v mints=%d accepted=%t calls=%v", createErr, create.fixture.tokenCalls, create.fixture.readTokenAccepted, create.fixture.calls)
+	}
+	admission, err := os.ReadFile(filepath.Join(create.fixture.admissionRoot, "broker-admission.jsonl"))
+	started := bytes.Contains(admission, []byte(`"kind":"read_token_lifecycle_started"`))
+	confirmed := bytes.Contains(admission, []byte(`"kind":"read_token_lifecycle_confirmed"`))
+	if err != nil || !started || confirmed {
+		t.Errorf("lost response account-level lifecycle state: err=%v started=%t confirmed=%t", err, started, confirmed)
+	}
+
+	inspect := newBrokerV3RunFixture(t, "inspect", false)
+	inspect.fixture.admissionRoot = create.fixture.admissionRoot
+	inspect.files.ControllerStateDirectory = create.files.ControllerStateDirectory
+	result, inspectErr := executeBrokerV3Fixture(t, context.Background(), inspect)
+	if inspectErr == nil || result.Status != "" || inspect.fixture.tokenCalls != 0 || len(inspect.fixture.calls) != 0 {
+		t.Fatalf("later inspect crossed an unresolved read-token issuance: result=%+v err=%v mints=%d calls=%v", result, inspectErr, inspect.fixture.tokenCalls, inspect.fixture.calls)
+	}
+}
+
+func TestBrokerExperimentV3LegacyIncompleteClaimWithoutLifecycleBlocksLaterInspect(t *testing.T) {
+	create := newBrokerV3RunFixture(t, "create", false)
+	if _, err := executeBrokerV3Fixture(t, context.Background(), create); err != nil {
+		t.Fatalf("complete synthetic v3 create: %v", err)
+	}
+	ledgerPath := filepath.Join(create.fixture.admissionRoot, "broker-admission.jsonl")
+	ledger, err := os.ReadFile(ledgerPath)
+	if err != nil {
+		t.Fatalf("read synthetic admission ledger: %v", err)
+	}
+	var legacyLines []string
+	for _, line := range strings.Split(strings.TrimSuffix(string(ledger), "\n"), "\n") {
+		if strings.Contains(line, `"kind":"read_token_lifecycle_`) || strings.Contains(line, `"kind":"complete"`) {
+			continue
+		}
+		legacyLines = append(legacyLines, line)
+	}
+	if len(legacyLines) != 2 {
+		t.Fatalf("expected a legacy header plus one incomplete claim, got %d ledger lines", len(legacyLines))
+	}
+	if err := os.WriteFile(ledgerPath, []byte(strings.Join(legacyLines, "\n")+"\n"), 0600); err != nil {
+		t.Fatalf("write synthetic legacy incomplete ledger: %v", err)
+	}
+
+	inspect := newBrokerV3RunFixture(t, "inspect", false)
+	inspect.fixture.admissionRoot = create.fixture.admissionRoot
+	inspect.files.ControllerStateDirectory = create.files.ControllerStateDirectory
+	result, inspectErr := executeBrokerV3Fixture(t, context.Background(), inspect)
+	if inspectErr == nil || result.Status != "" || inspect.fixture.tokenCalls != 0 || len(inspect.fixture.calls) != 0 {
+		t.Fatalf("legacy incomplete reusable-callee claim without lifecycle proof was recovered: result=%+v err=%v mints=%d calls=%v", result, inspectErr, inspect.fixture.tokenCalls, inspect.fixture.calls)
+	}
+}
+
+func TestBrokerExperimentV3PreRequestFailureRecordsNoDispatchForLaterInspect(t *testing.T) {
+	create := newBrokerV3RunFixture(t, "create", false)
+	_, createErr := executeBrokerV3Fixture(t, brokerJournalSyncFailureContext(context.Background(), "token_request_started"), create)
+	if createErr == nil || create.fixture.tokenCalls != 0 || brokerFixtureCallCount(create.fixture.calls, "POST /app/installations/201/access_tokens") != 0 {
+		t.Fatalf("token-request journal failure reached issuance: err=%v mints=%d calls=%v", createErr, create.fixture.tokenCalls, create.fixture.calls)
+	}
+	admission, err := os.ReadFile(filepath.Join(create.fixture.admissionRoot, "broker-admission.jsonl"))
+	if err != nil || !bytes.Contains(admission, []byte(`"kind":"read_token_request_not_dispatched"`)) {
+		t.Fatalf("pre-request failure lacks durable no-dispatch proof: err=%v", err)
+	}
+
+	inspect := newBrokerV3RunFixture(t, "inspect", false)
+	inspect.fixture.admissionRoot = create.fixture.admissionRoot
+	inspect.files.ControllerStateDirectory = create.files.ControllerStateDirectory
+	result, inspectErr := executeBrokerV3Fixture(t, context.Background(), inspect)
+	if inspectErr != nil || result.Status != "controller_completed" || inspect.fixture.tokenCalls != 2 {
+		t.Fatalf("durable no-dispatch proof failed to permit later inspect: result=%+v err=%v mints=%d calls=%v", result, inspectErr, inspect.fixture.tokenCalls, inspect.fixture.calls)
+	}
+}
+
+func executeBrokerV3Fixture(t *testing.T, ctx context.Context, fixture brokerV3RunFixture) (BrokerResult, error) {
+	t.Helper()
+	management, err := json.Marshal(brokerInput{PEM: string(fixture.candidate.PEM), VerificationToken: "synthetic-private-workflow-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return RunBrokerExperimentWithInputs(
+		ctx, fixture.files,
+		brokerV3Pipe(t, management),
+		brokerV3Pipe(t, []byte("synthetic-private-workflow-token")),
+		brokerV3Pipe(t, bytes.Repeat([]byte{1}, ed25519.SeedSize)),
+		brokerV3Pipe(t, bytes.Repeat([]byte{71}, ed25519.SeedSize)),
+	)
+}
+
+func TestBrokerExperimentV3RevokesTokenFromRejectedReadIssuance(t *testing.T) {
+	for _, fault := range []string{"write-scope", "expired"} {
+		t.Run(fault, func(t *testing.T) {
+			fixture := newBrokerV3RunFixture(t, "create", false)
+			fixture.fixture.readTokenFault = fault
+			management, err := json.Marshal(brokerInput{PEM: string(fixture.candidate.PEM), VerificationToken: "synthetic-private-workflow-token"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			input := brokerV3Pipe(t, management)
+			observation := brokerV3Pipe(t, []byte("synthetic-private-workflow-token"))
+			workflowSeed := brokerV3Pipe(t, bytes.Repeat([]byte{1}, ed25519.SeedSize))
+			issuerSeed := brokerV3Pipe(t, bytes.Repeat([]byte{71}, ed25519.SeedSize))
+			result, runErr := RunBrokerExperimentWithInputs(context.Background(), fixture.files, input, observation, workflowSeed, issuerSeed)
+			if runErr == nil || result.Status != "" || fixture.fixture.tokenCalls != 1 || *fixture.workflowGET != 1 {
+				t.Fatalf("rejected read-token issuance crossed its initial workflow gate: result=%+v err=%v mints=%d workflow_gets=%d calls=%v", result, runErr, fixture.fixture.tokenCalls, *fixture.workflowGET, fixture.fixture.calls)
+			}
+			if len(fixture.fixture.calls) == 0 || fixture.fixture.calls[len(fixture.fixture.calls)-1] != "DELETE /installation/token" {
+				t.Fatalf("usable rejected token was not revoked: calls=%v", fixture.fixture.calls)
+			}
+			if got := brokerFixtureCallCount(fixture.fixture.calls, "DELETE /installation/token"); got != 1 {
+				t.Fatalf("read-only token DELETE requests=%d, want exactly one: %v", got, fixture.fixture.calls)
+			}
+			for _, call := range fixture.fixture.calls {
+				if call == "GET /installation/repositories" || strings.HasPrefix(call, "GET /orgs/org-a/actions/runner-groups/") {
+					t.Fatalf("rejected token was used for provider preflight: calls=%v", fixture.fixture.calls)
+				}
+			}
+			journal, err := os.ReadFile(filepath.Join(fixture.files.StateDirectory, "broker.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Contains(journal, []byte("read_only_token_revocation_started")) || !bytes.Contains(journal, []byte("read_only_token_revoked")) || bytes.Contains(journal, []byte("read_only_token_verified")) || bytes.Contains(journal, []byte("management_token_request_started")) || bytes.Contains(journal, []byte("controller_handoff_started")) {
+				t.Fatalf("rejected issuance cleanup crossed an invalid journal boundary: %s", journal)
+			}
+			if bytes.Contains(journal, []byte("synthetic-private-read-installation-token")) {
+				t.Fatal("rejected read-token candidate was persisted in the broker journal")
+			}
+		})
+	}
+}
+
+func TestBrokerExperimentV3DoesNotRevokeVerificationTokenCollision(t *testing.T) {
+	fixture := newBrokerV3RunFixture(t, "create", false)
+	fixture.fixture.readTokenToken = "synthetic-private-workflow-token"
+	management, err := json.Marshal(brokerInput{PEM: string(fixture.candidate.PEM), VerificationToken: "synthetic-private-workflow-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := brokerV3Pipe(t, management)
+	observation := brokerV3Pipe(t, []byte("synthetic-private-workflow-token"))
+	workflowSeed := brokerV3Pipe(t, bytes.Repeat([]byte{1}, ed25519.SeedSize))
+	issuerSeed := brokerV3Pipe(t, bytes.Repeat([]byte{71}, ed25519.SeedSize))
+	result, runErr := RunBrokerExperimentWithInputs(context.Background(), fixture.files, input, observation, workflowSeed, issuerSeed)
+	if runErr == nil || result.Status != "" || fixture.fixture.tokenCalls != 1 || *fixture.workflowGET != 1 {
+		t.Fatalf("verification-token collision was not rejected before use: result=%+v err=%v mints=%d workflow_gets=%d calls=%v", result, runErr, fixture.fixture.tokenCalls, *fixture.workflowGET, fixture.fixture.calls)
+	}
+	for _, call := range fixture.fixture.calls {
+		if call == "DELETE /installation/token" || call == "GET /installation/repositories" || strings.HasPrefix(call, "GET /orgs/org-a/actions/runner-groups/") {
+			t.Fatalf("caller verification token was used or revoked: calls=%v", fixture.fixture.calls)
+		}
+	}
+	journal, err := os.ReadFile(filepath.Join(fixture.files.StateDirectory, "broker.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(journal, []byte("read_only_token_revocation_skipped")) || !bytes.Contains(journal, []byte("verification_token_collision")) || bytes.Contains(journal, []byte("read_only_token_revocation_started")) {
+		t.Fatalf("verification-token collision outcome was not durably recorded without a revoke attempt: %s", journal)
+	}
+	if bytes.Contains(journal, []byte("synthetic-private-workflow-token")) {
+		t.Fatal("caller verification token was persisted in the broker journal")
 	}
 }
 
@@ -283,6 +579,7 @@ func TestBrokerExperimentV3FinalGETFencesCalleeBeforeMintAndHandoff(t *testing.T
 					"GET /repos/org-a/canary",
 					"GET /orgs/org-a/actions/runner-groups/3",
 					"GET /orgs/org-a/actions/runner-groups/3/repositories",
+					"DELETE /installation/token",
 					"GET /repos/org-a/canary/actions/runs/7",
 					"POST /app/installations/201/access_tokens",
 					"GET /installation/repositories",

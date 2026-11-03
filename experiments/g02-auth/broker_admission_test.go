@@ -109,12 +109,64 @@ func TestBrokerFinitePhasesAndUnknownRetention(t *testing.T) {
 }
 
 func TestBrokerLedgerCapacityDerivesFromFiniteSlotSchema(t *testing.T) {
-	want := 1 + 2*(len(brokerPhases)+len(brokerSpecialSlots)) + 1
-	if got := brokerLedgerMaxLines(); got != want || got != 28 || len(brokerPhases) != 11 || len(brokerSpecialSlots) != 2 {
+	want := 1 + 4*(len(brokerPhases)+len(brokerSpecialSlots)) + 1
+	if got := brokerLedgerMaxLines(); got != want || got != 54 || len(brokerPhases) != 11 || len(brokerSpecialSlots) != 2 {
 		t.Fatalf("ledger line bound=%d want schema-derived %d", got, want)
 	}
 	if brokerSlotAllowed("unreviewed-slot") || !brokerSlotAllowed("paired-terminal") || !brokerSlotAllowed("discover-actions-host") || !brokerSlotAllowed("session-replacement") || !brokerSlotAllowed("before-jit") {
 		t.Fatal("ledger schema widened beyond the finite reviewed slots")
+	}
+}
+
+func TestBrokerAdmissionAllowsLaterInspectAfterConfirmedReadTokenLifecycle(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		started   string
+		confirmed string
+	}{
+		{name: "legacy revocation pair", started: "read_token_revocation_started", confirmed: "read_token_revocation_confirmed"},
+		{name: "current lifecycle pair", started: "read_token_lifecycle_started", confirmed: "read_token_lifecycle_confirmed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, credential, api, fixture, attempt := newBrokerFixture(t)
+			a.Mode, a.Phase = "controller", "create"
+			parent := filepath.Dir(attempt)
+			plan := brokerTestPlan(t, &a, parent, func(context.Context, []byte, string) error { return nil })
+			if _, err := brokerExecute(context.Background(), a, brokerInput{PEM: string(credential.PEM)}, attempt, api, plan); err != nil {
+				t.Fatalf("complete create phase: %v", err)
+			}
+			ledgerPath := filepath.Join(fixture.admissionRoot, "broker-admission.jsonl")
+			ledger, err := os.ReadFile(ledgerPath)
+			if err != nil {
+				t.Fatalf("read admission ledger: %v", err)
+			}
+			records := strings.Split(strings.TrimSuffix(string(ledger), "\n"), "\n")
+			if len(records) != 3 {
+				t.Fatalf("unexpected admission fixture records: %d", len(records))
+			}
+			var createClaim brokerClaimEvent
+			if decodeBrokerJSON([]byte(records[1]), &createClaim, true) != nil || createClaim.Kind != "claim" {
+				t.Fatal("decode create admission claim")
+			}
+			started, _ := json.Marshal(brokerReadTokenLifecycleEvent{Kind: tc.started, Slot: createClaim.Slot, Attempt: createClaim.Attempt, Journal: createClaim.Journal})
+			confirmed, _ := json.Marshal(brokerReadTokenLifecycleEvent{Kind: tc.confirmed, Slot: createClaim.Slot, Attempt: createClaim.Attempt, Journal: createClaim.Journal})
+			replayed := strings.Join([]string{records[0], records[1], string(started), string(confirmed), records[2], ""}, "\n")
+			if err := os.WriteFile(ledgerPath, []byte(replayed), 0600); err != nil {
+				t.Fatalf("write synthetic confirmed token history: %v", err)
+			}
+
+			a.Phase = "inspect"
+			a.ExpiresAt = a.ExpiresAt.Add(time.Minute)
+			fixture.root = filepath.Join(parent, "inspect")
+			inspectPlan := brokerTestPlan(t, &a, parent, func(context.Context, []byte, string) error { return nil })
+			inspectPlan.controller.Phases = []string{"inspect", "cleanup"}
+			inspectPlan.raw, _ = json.Marshal(inspectPlan.controller)
+			a.ControllerApprovalSHA256 = brokerBytesDigest(inspectPlan.raw)
+			inspectPlan.approval = a
+			if _, err := brokerExecute(context.Background(), a, brokerInput{PEM: string(credential.PEM)}, fixture.root, api, inspectPlan); err != nil || fixture.tokenCalls != 2 {
+				t.Fatalf("confirmed read-token history blocked later inspect: err=%v mints=%d calls=%v", err, fixture.tokenCalls, fixture.calls)
+			}
+		})
 	}
 }
 

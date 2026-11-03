@@ -26,6 +26,7 @@ type processBrokerHTTP struct {
 	attempt       string
 	calls         []string
 	mints         int
+	revocations   int
 	failPreflight bool
 	groupFault    bool
 }
@@ -68,20 +69,41 @@ func (f *processBrokerHTTP) RoundTrip(r *http.Request) (*http.Response, error) {
 			f.t.Error("mint preceded durable intent")
 		}
 		body, _ := io.ReadAll(r.Body)
+		var request struct {
+			RepositoryIDs []int64           `json:"repository_ids"`
+			Permissions   map[string]string `json:"permissions"`
+		}
+		if json.Unmarshal(body, &request) != nil || (request.Permissions["organization_self_hosted_runners"] != "read" && request.Permissions["organization_self_hosted_runners"] != "write") {
+			f.t.Error("mint permission set was invalid")
+		}
 		organizationOnly := f.approval != nil && f.approval.ManagementScope == "organization-only"
-		if !organizationOnly && !bytes.Contains(body, []byte(`"repository_ids":[42]`)) {
+		if !organizationOnly && !reflect.DeepEqual(request.RepositoryIDs, []int64{42}) {
 			f.t.Error("mint not scoped")
 		}
 		status = 201
-		payload = map[string]any{"token": "synthetic-process-installation-token", "expires_at": time.Now().Add(time.Hour), "permissions": map[string]string{"organization_self_hosted_runners": "write", "metadata": "read"}, "repository_selection": "selected", "repositories": []any{repo}}
+		token := "synthetic-process-installation-token"
+		if request.Permissions["organization_self_hosted_runners"] == "read" {
+			token = "synthetic-process-read-installation-token"
+		}
+		payload = map[string]any{"token": token, "expires_at": time.Now().Add(time.Hour), "permissions": request.Permissions, "repository_selection": "selected", "repositories": []any{repo}}
 		if organizationOnly {
-			var request map[string]any
-			_ = json.Unmarshal(body, &request)
-			if len(request) != 1 {
+			var organizationRequest map[string]any
+			_ = json.Unmarshal(body, &organizationRequest)
+			if len(organizationRequest) != 1 {
 				f.t.Error("organization-only mint widened")
 			}
-			payload = map[string]any{"token": "synthetic-process-installation-token", "expires_at": time.Now().Add(time.Hour), "permissions": map[string]string{"organization_self_hosted_runners": "write"}}
+			payload = map[string]any{"token": token, "expires_at": time.Now().Add(time.Hour), "permissions": request.Permissions}
 		}
+	case "/installation/token":
+		f.revocations++
+		if r.Method != http.MethodDelete || r.Header.Get("Authorization") != "Bearer synthetic-process-read-installation-token" {
+			f.t.Error("read-token revocation used the wrong method or authority")
+		}
+		stored, e := os.ReadFile(filepath.Join(f.attempt, "broker.jsonl"))
+		if e != nil || !bytes.Contains(stored, []byte("read_only_token_revocation_started")) {
+			f.t.Error("read-token revocation preceded durable intent")
+		}
+		status = http.StatusNoContent
 	case "/installation/repositories":
 		payload = map[string]any{"total_count": 1, "repositories": []any{repo}}
 	case "/repos/fixture-org/canary":
@@ -101,7 +123,10 @@ func (f *processBrokerHTTP) RoundTrip(r *http.Request) (*http.Response, error) {
 	default:
 		return nil, fmt.Errorf("unexpected synthetic route")
 	}
-	raw, _ := json.Marshal(payload)
+	var raw []byte
+	if status != http.StatusNoContent {
+		raw, _ = json.Marshal(payload)
+	}
 	return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(raw)), ContentLength: int64(len(raw))}, nil
 }
 func TestControllerProcessHandoffActualBrokerSeparateProcess(t *testing.T) {

@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"syscall"
 	"time"
+
+	"github.com/1XP-AI/gh-runnerd/experiments/g02-auth/handoff"
 )
 
 // One finite experiment per native controller account. Never selected by HOME,
@@ -75,9 +77,10 @@ func brokerOwnedDirectory(i os.FileInfo, private bool) bool {
 	return ok && int(s.Uid) == os.Geteuid()
 }
 
-// The finite slot schema has eight controller phases plus discovery and paired
-// terminal. Each stored controller authority is bounded by the 16 KiB input
-// contract; allow one claim and completion for every schema slot.
+// The finite slot schema is the union of the named phases and special slots.
+// Each stored controller authority is bounded by the 16 KiB input
+// contract; allow one claim/completion and one read-token revocation
+// start/confirmation pair for every schema slot.
 const maxBrokerLedgerBytes = 512 << 10
 
 type brokerInode struct {
@@ -146,6 +149,12 @@ type brokerClaimEvent struct {
 	Snapshot       brokerInode                `json:"snapshot"`
 	SnapshotDigest string                     `json:"snapshot_digest,omitempty"`
 }
+type brokerReadTokenLifecycleEvent struct {
+	Kind    string      `json:"kind"`
+	Slot    string      `json:"slot"`
+	Attempt brokerInode `json:"attempt"`
+	Journal brokerInode `json:"journal"`
+}
 type brokerLedgerHeader struct {
 	Version  int         `json:"version"`
 	Resource string      `json:"resource"`
@@ -161,6 +170,7 @@ type brokerAdmission struct {
 	rootInfo, parentInfo, fileInfo os.FileInfo
 	data                           []byte
 	event                          brokerClaimEvent
+	readTokenLifecyclePending      bool
 	sync                           func(*os.Root) error
 }
 
@@ -217,7 +227,7 @@ func (c *brokerAdmission) append(value any) error {
 	return nil
 }
 func (c *brokerAdmission) complete() error {
-	if c.check() != nil {
+	if c == nil || c.readTokenLifecyclePending || c.check() != nil {
 		return errBroker
 	}
 	e := c.event
@@ -226,6 +236,38 @@ func (c *brokerAdmission) complete() error {
 		return errBroker
 	}
 	return c.check()
+}
+func (c *brokerAdmission) beginReadTokenLifecycle() error {
+	if c == nil || c.readTokenLifecyclePending || c.check() != nil {
+		return errBroker
+	}
+	event := brokerReadTokenLifecycleEvent{Kind: "read_token_lifecycle_started", Slot: c.event.Slot, Attempt: c.event.Attempt, Journal: c.event.Journal}
+	if c.append(event) != nil || c.check() != nil {
+		return errBroker
+	}
+	c.readTokenLifecyclePending = true
+	return nil
+}
+func (c *brokerAdmission) confirmReadTokenLifecycle() error {
+	if c == nil || !c.readTokenLifecyclePending || c.check() != nil {
+		return errBroker
+	}
+	event := brokerReadTokenLifecycleEvent{Kind: "read_token_lifecycle_confirmed", Slot: c.event.Slot, Attempt: c.event.Attempt, Journal: c.event.Journal}
+	if c.append(event) != nil || c.check() != nil {
+		return errBroker
+	}
+	c.readTokenLifecyclePending = false
+	return nil
+}
+func (c *brokerAdmission) recordReadTokenRequestNotDispatched() error {
+	if c == nil || c.readTokenLifecyclePending || c.event.Provenance == nil || c.event.Provenance.Source != handoff.ReusableCalleeSource || c.check() != nil {
+		return errBroker
+	}
+	event := brokerReadTokenLifecycleEvent{Kind: "read_token_request_not_dispatched", Slot: c.event.Slot, Attempt: c.event.Attempt, Journal: c.event.Journal}
+	if c.append(event) != nil || c.check() != nil {
+		return errBroker
+	}
+	return nil
 }
 func openBrokerAdmission(directory string, a BrokerApproval, j *brokerJournal, p *brokerControllerPlan, syncRoot func(*os.Root) error) (claim *brokerAdmission, err error) {
 	if syncRoot == nil || !filepath.IsAbs(directory) || filepath.Clean(directory) != directory {
@@ -312,58 +354,118 @@ func openBrokerAdmission(directory string, a BrokerApproval, j *brokerJournal, p
 	var workerBinding *brokerWorkerBinding
 	var authority *brokerControllerAuthority
 	provenanceNonces := map[string]bool{}
+	readTokenLifecycleSlots := map[string]bool{}
+	readTokenRequestNotDispatchedSlots := map[string]bool{}
 	latestSlot := ""
+	var pendingReadTokenLifecycle *brokerReadTokenLifecycleEvent
 	for _, line := range lines[1 : len(lines)-1] {
-		var event brokerClaimEvent
-		if decodeBrokerJSON(line, &event, true) != nil || !validBrokerClaimEvent(a, event) {
+		var kind struct {
+			Kind string `json:"kind"`
+		}
+		if decodeBrokerJSON(line, &kind, false) != nil {
 			return nil, errBroker
 		}
-		switch event.Kind {
-		case "claim":
-			if event.Provenance != nil {
-				nonce := event.Provenance.ReceiptNonce
-				if provenanceNonces[nonce] {
-					return nil, errBroker
-				}
-				provenanceNonces[nonce] = true
-			}
-			for previous, receipt := range slots {
-				if (!done[previous] && event.Slot != "inspect" && event.Slot != "cleanup") || receipt.Attempt == event.Attempt || receipt.Journal == event.Journal || (event.Controller != nil && receipt.Controller != nil && receipt.Snapshot == event.Snapshot) || (event.Worker != nil && receipt.Worker != nil && receipt.Worker.State == event.Worker.State) {
-					return nil, errBroker
-				}
-			}
-			latestSlot = event.Slot
-			if _, ok := slots[event.Slot]; ok {
+		switch kind.Kind {
+		case "read_token_lifecycle_started", "read_token_lifecycle_confirmed", "read_token_revocation_started", "read_token_revocation_confirmed", "read_token_request_not_dispatched":
+			var event brokerReadTokenLifecycleEvent
+			if decodeBrokerJSON(line, &event, true) != nil || !validBrokerReadTokenLifecycleEvent(event) {
 				return nil, errBroker
 			}
-			if event.Controller != nil {
-				if binding != nil && *binding != *event.Controller {
+			switch event.Kind {
+			case "read_token_lifecycle_started", "read_token_revocation_started":
+				old, ok := slots[event.Slot]
+				if pendingReadTokenLifecycle != nil || readTokenLifecycleSlots[event.Slot] || latestSlot != event.Slot || !ok || done[event.Slot] || old.Attempt != event.Attempt || old.Journal != event.Journal {
 					return nil, errBroker
 				}
-				if event.Authority == nil {
+				readTokenLifecycleSlots[event.Slot] = true
+				pendingReadTokenLifecycle = &event
+			case "read_token_lifecycle_confirmed", "read_token_revocation_confirmed":
+				if pendingReadTokenLifecycle == nil || !sameBrokerReadTokenLifecycle(*pendingReadTokenLifecycle, event) {
 					return nil, errBroker
 				}
-				if !brokerAuthorityTransition(authority, event.Authority) {
+				pendingReadTokenLifecycle = nil
+			case "read_token_request_not_dispatched":
+				old, ok := slots[event.Slot]
+				if latestSlot != event.Slot || !ok || done[event.Slot] || readTokenRequestNotDispatchedSlots[event.Slot] || old.Attempt != event.Attempt || old.Journal != event.Journal || old.Provenance == nil || old.Provenance.Source != handoff.ReusableCalleeSource {
 					return nil, errBroker
 				}
-				binding = event.Controller
-				if event.Worker != nil {
-					if workerBinding != nil && *workerBinding != *event.Worker {
+				if pendingReadTokenLifecycle != nil {
+					if pendingReadTokenLifecycle.Kind != "read_token_lifecycle_started" || !sameBrokerReadTokenIdentity(*pendingReadTokenLifecycle, event) {
 						return nil, errBroker
 					}
-					workerBinding = event.Worker
+					pendingReadTokenLifecycle = nil
+				} else if readTokenLifecycleSlots[event.Slot] {
+					return nil, errBroker
 				}
-				authority = event.Authority
+				readTokenLifecycleSlots[event.Slot] = true
+				readTokenRequestNotDispatchedSlots[event.Slot] = true
 			}
-			slots[event.Slot] = event
-		case "complete":
-			old, ok := slots[event.Slot]
-			event.Kind = "claim"
-			if !ok || latestSlot != event.Slot || done[event.Slot] || brokerDigest(old) != brokerDigest(event) {
+		case "claim", "complete":
+			if pendingReadTokenLifecycle != nil {
 				return nil, errBroker
 			}
-			done[event.Slot] = true
+			var event brokerClaimEvent
+			if decodeBrokerJSON(line, &event, true) != nil || !validBrokerClaimEvent(a, event) {
+				return nil, errBroker
+			}
+			switch event.Kind {
+			case "claim":
+				if event.Provenance != nil {
+					nonce := event.Provenance.ReceiptNonce
+					if provenanceNonces[nonce] {
+						return nil, errBroker
+					}
+					provenanceNonces[nonce] = true
+				}
+				for previous, receipt := range slots {
+					if (!done[previous] && event.Slot != "inspect" && event.Slot != "cleanup") || receipt.Attempt == event.Attempt || receipt.Journal == event.Journal || (event.Controller != nil && receipt.Controller != nil && receipt.Snapshot == event.Snapshot) || (event.Worker != nil && receipt.Worker != nil && receipt.Worker.State == event.Worker.State) {
+						return nil, errBroker
+					}
+				}
+				latestSlot = event.Slot
+				if _, ok := slots[event.Slot]; ok {
+					return nil, errBroker
+				}
+				if event.Controller != nil {
+					if binding != nil && *binding != *event.Controller {
+						return nil, errBroker
+					}
+					if event.Authority == nil {
+						return nil, errBroker
+					}
+					if !brokerAuthorityTransition(authority, event.Authority) {
+						return nil, errBroker
+					}
+					binding = event.Controller
+					if event.Worker != nil {
+						if workerBinding != nil && *workerBinding != *event.Worker {
+							return nil, errBroker
+						}
+						workerBinding = event.Worker
+					}
+					authority = event.Authority
+				}
+				slots[event.Slot] = event
+			case "complete":
+				old, ok := slots[event.Slot]
+				event.Kind = "claim"
+				if !ok || latestSlot != event.Slot || done[event.Slot] || readTokenRequestNotDispatchedSlots[event.Slot] || brokerDigest(old) != brokerDigest(event) {
+					return nil, errBroker
+				}
+				done[event.Slot] = true
+			}
 		default:
+			return nil, errBroker
+		}
+	}
+	if pendingReadTokenLifecycle != nil {
+		return nil, errBroker
+	}
+	for slot, event := range slots {
+		if !done[slot] && event.Provenance != nil && event.Provenance.Source == handoff.ReusableCalleeSource && !readTokenLifecycleSlots[slot] {
+			// Older reusable-callee claims may predate account-wide token
+			// lifecycle intents. Their incomplete state cannot prove whether a
+			// read-token POST was accepted, so recovery must fail closed.
 			return nil, errBroker
 		}
 	}
@@ -498,4 +600,20 @@ func validBrokerClaimEvent(a BrokerApproval, e brokerClaimEvent) bool {
 	c.ExpiresAt = time.Time{}
 	c.Phases = nil
 	return e.Controller.Ownership == brokerDigest(c)
+}
+
+func validBrokerReadTokenLifecycleEvent(e brokerReadTokenLifecycleEvent) bool {
+	return (e.Kind == "read_token_lifecycle_started" || e.Kind == "read_token_lifecycle_confirmed" || e.Kind == "read_token_revocation_started" || e.Kind == "read_token_revocation_confirmed" || e.Kind == "read_token_request_not_dispatched") &&
+		brokerSlotAllowed(e.Slot) && e.Slot != "discover-actions-host" &&
+		e.Attempt.Device != 0 && e.Attempt.Inode != 0 && e.Journal.Device != 0 && e.Journal.Inode != 0
+}
+
+func sameBrokerReadTokenIdentity(started, event brokerReadTokenLifecycleEvent) bool {
+	return started.Slot == event.Slot && started.Attempt == event.Attempt && started.Journal == event.Journal
+}
+
+func sameBrokerReadTokenLifecycle(started, confirmed brokerReadTokenLifecycleEvent) bool {
+	legacyPair := started.Kind == "read_token_revocation_started" && confirmed.Kind == "read_token_revocation_confirmed"
+	lifecyclePair := started.Kind == "read_token_lifecycle_started" && confirmed.Kind == "read_token_lifecycle_confirmed"
+	return (legacyPair || lifecyclePair) && sameBrokerReadTokenIdentity(started, confirmed)
 }

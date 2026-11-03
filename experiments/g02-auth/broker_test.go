@@ -3,6 +3,7 @@ package enrollment
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -27,17 +28,23 @@ func TestPairedTerminalBrokerApprovalUsesDedicatedMode(t *testing.T) {
 }
 
 type brokerHTTPFixture struct {
-	t              *testing.T
-	calls          []string
-	events         []string
-	tokenCalls     int
-	mintRequests   []brokerMintRequestFixture
-	badGroup       bool
-	badGroupPolicy bool
-	mintError      bool
-	token          string
-	root           string
-	admissionRoot  string
+	t                         *testing.T
+	calls                     []string
+	events                    []string
+	tokenCalls                int
+	mintRequests              []brokerMintRequestFixture
+	badGroup                  bool
+	badGroupPolicy            bool
+	mintError                 bool
+	revokeError               bool
+	readTokenFault            string
+	readTokenToken            string
+	loseReadTokenResponse     bool
+	readTokenAccepted         bool
+	requireReadTokenLifecycle bool
+	token                     string
+	root                      string
+	admissionRoot             string
 }
 
 type brokerMintRequestFixture struct {
@@ -74,6 +81,13 @@ func (f *brokerHTTPFixture) RoundTrip(r *http.Request) (*http.Response, error) {
 		if json.Unmarshal(body, &request) != nil || !reflect.DeepEqual(request.RepositoryIDs, []int64{501}) || len(request.Permissions) != 2 || request.Permissions["metadata"] != "read" || (request.Permissions["organization_self_hosted_runners"] != "read" && request.Permissions["organization_self_hosted_runners"] != "write") {
 			f.t.Error("token request not narrowly scoped")
 		}
+		readOnly := request.Permissions["organization_self_hosted_runners"] == "read"
+		if readOnly && f.requireReadTokenLifecycle {
+			admission, err := os.ReadFile(filepath.Join(f.admissionRoot, "broker-admission.jsonl"))
+			if err != nil || !strings.Contains(string(admission), `"kind":"read_token_lifecycle_started"`) {
+				f.t.Error("read-only token request preceded its durable account-level lifecycle intent")
+			}
+		}
 		if request.Permissions["organization_self_hosted_runners"] == "write" && strings.Contains(string(data), "read_only_token_verified") && !strings.Contains(string(data), "management_token_request_started") {
 			f.t.Error("management token request preceded its durable intent")
 		}
@@ -87,10 +101,39 @@ func (f *brokerHTTPFixture) RoundTrip(r *http.Request) (*http.Response, error) {
 		}
 		status = 201
 		token := f.token
+		expiresAt := time.Now().Add(time.Hour)
+		responsePermissions := request.Permissions
 		if request.Permissions["organization_self_hosted_runners"] == "read" {
+			f.readTokenAccepted = true
 			token = "synthetic-private-read-installation-token"
+			if f.readTokenToken != "" {
+				token = f.readTokenToken
+			}
+			switch f.readTokenFault {
+			case "write-scope":
+				responsePermissions = map[string]string{"organization_self_hosted_runners": "write", "metadata": "read"}
+			case "expired":
+				expiresAt = time.Now().Add(-time.Minute)
+			}
 		}
-		payload = map[string]any{"token": token, "expires_at": time.Now().Add(time.Hour), "permissions": request.Permissions, "repository_selection": "selected", "repositories": []any{repo}}
+		payload = map[string]any{"token": token, "expires_at": expiresAt, "permissions": responsePermissions, "repository_selection": "selected", "repositories": []any{repo}}
+		if readOnly && f.loseReadTokenResponse {
+			return nil, errors.New("synthetic accepted read-token response lost")
+		}
+	case "/installation/token":
+		if r.Method != http.MethodDelete || r.Header.Get("Authorization") != "Bearer synthetic-private-read-installation-token" {
+			f.t.Error("installation-token revocation used the wrong method or authority")
+		}
+		data, err := os.ReadFile(filepath.Join(f.root, "broker.jsonl"))
+		if err != nil || !strings.Contains(string(data), "read_only_token_revocation_started") {
+			f.t.Error("installation-token revocation preceded its durable journal intent")
+		}
+		if f.revokeError {
+			status = http.StatusBadGateway
+			payload = map[string]string{"message": "synthetic revocation failure"}
+		} else {
+			status = http.StatusNoContent
+		}
 	case "/installation/repositories":
 		payload = map[string]any{"total_count": 1, "repositories": []any{repo}}
 	case "/repos/org-a/canary":
@@ -112,6 +155,9 @@ func (f *brokerHTTPFixture) RoundTrip(r *http.Request) (*http.Response, error) {
 	default:
 		f.t.Fatal("unapproved API call")
 	}
+	if status == http.StatusNoContent {
+		return response(status, ""), nil
+	}
 	data, _ := json.Marshal(payload)
 	return response(status, string(data)), nil
 }
@@ -124,6 +170,85 @@ func TestBrokerWorkflowVerificationUsesHeadBranchForAttestedBranchRef(t *testing
 	provenance := &BrokerProvenanceReceipt{WorkflowRef: controller.WorkflowRef}
 	if err := api.verifyWorkflowWithReceipt(context.Background(), a, controller, "synthetic-private-workflow-token", provenance); err != nil {
 		t.Fatalf("workflow run with the API's head_branch field was refused: %v", err)
+	}
+}
+
+func TestBrokerReadOnlyRevocationRecordsUncertainWhenRevokedSyncFails(t *testing.T) {
+	a, _, fixtureAPI, fixture, root := newBrokerFixture(t)
+	journal, err := openBrokerJournal(root, a)
+	if err != nil {
+		t.Fatalf("open attempt journal: %v", err)
+	}
+	t.Cleanup(journal.close)
+	claim, err := openBrokerAdmission(fixture.admissionRoot, a, journal, nil, fixtureAPI.syncDirectory)
+	if err != nil {
+		t.Fatalf("open admission claim: %v", err)
+	}
+	t.Cleanup(claim.close)
+	if err := claim.beginReadTokenLifecycle(); err != nil {
+		t.Fatalf("record read-token lifecycle intent: %v", err)
+	}
+	journal.syncFile = func(phase string) error {
+		if phase == "read_only_token_revoked" {
+			return errors.New("synthetic fsync failure")
+		}
+		return journal.file.Sync()
+	}
+	deleteCalls := 0
+	api := newBrokerAPI(time.Now, transportFunc(func(r *http.Request) (*http.Response, error) {
+		deleteCalls++
+		if r.Method != http.MethodDelete || r.Header.Get("Authorization") != "Bearer synthetic-private-read-installation-token" {
+			t.Errorf("revocation used the wrong method or authority: %s %s", r.Method, r.URL.Path)
+		}
+		return response(http.StatusNoContent, ""), nil
+	}))
+	if err := revokeBrokerReadOnlyToken(context.Background(), api, journal, claim, "synthetic-private-read-installation-token", "synthetic-private-workflow-token"); err == nil {
+		t.Fatal("revocation succeeded despite a failed durable success record")
+	}
+	if deleteCalls != 1 {
+		t.Fatalf("revocation requests=%d, want exactly one", deleteCalls)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "broker.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := strings.Index(string(data), "read_only_token_revocation_started")
+	revoked := strings.Index(string(data), "read_only_token_revoked")
+	uncertain := strings.Index(string(data), "read_only_token_revocation_uncertain")
+	if started < 0 || revoked <= started || uncertain <= revoked || !strings.Contains(string(data), "revocation_result_persistence_failed") {
+		t.Fatalf("failed revoked sync was not followed by a terminal uncertainty record: %s", data)
+	}
+	if strings.Contains(string(data), "synthetic-private-read-installation-token") {
+		t.Fatal("read-only installation token was persisted in the broker journal")
+	}
+}
+
+func TestBrokerReadOnlyMintDoesNotSendWhenLifecycleIntentCannotSync(t *testing.T) {
+	a, credential, api, fixture, root := newBrokerFixture(t)
+	journal, err := openBrokerJournal(root, a)
+	if err != nil {
+		t.Fatalf("open attempt journal: %v", err)
+	}
+	t.Cleanup(journal.close)
+	claim, err := openBrokerAdmission(fixture.admissionRoot, a, journal, nil, api.syncDirectory)
+	if err != nil {
+		t.Fatalf("open admission claim: %v", err)
+	}
+	t.Cleanup(claim.close)
+	claim.sync = func(*os.Root) error { return errors.New("synthetic admission fsync failure") }
+	parsedCredential, err := parseCredential(credential)
+	if err != nil {
+		t.Fatalf("parse synthetic App credential: %v", err)
+	}
+	if issued, err := api.mintReadOnlyWithIntent(context.Background(), a, parsedCredential, nil); err == nil || issued.Token != "" || fixture.tokenCalls != 0 || len(fixture.calls) != 0 {
+		t.Fatalf("read-only mint allowed a missing lifecycle callback: issued=%v err=%v mints=%d calls=%v", issued, err, fixture.tokenCalls, fixture.calls)
+	}
+
+	if issued, err := api.mintReadOnlyWithIntent(context.Background(), a, parsedCredential, claim.beginReadTokenLifecycle); err == nil || issued.Token != "" {
+		t.Fatalf("read-only mint crossed a failed lifecycle intent: issued=%v err=%v", issued, err)
+	}
+	if fixture.tokenCalls != 0 || len(fixture.calls) != 0 {
+		t.Fatalf("read-token request dispatched before durable account intent: mints=%d calls=%v", fixture.tokenCalls, fixture.calls)
 	}
 }
 

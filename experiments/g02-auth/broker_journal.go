@@ -1,6 +1,7 @@
 package enrollment
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -14,6 +15,7 @@ type brokerJournal struct {
 	root                    *os.Root
 	path                    string
 	directoryInfo, fileInfo os.FileInfo
+	syncFile                func(phase string) error
 }
 
 // openBrokerJournal durably claims one exact attempt path and holds its
@@ -75,6 +77,28 @@ func openBrokerJournal(path string, a BrokerApproval) (j *brokerJournal, err err
 	}
 	return j, nil
 }
+
+type brokerJournalSyncFailureHookKey struct{}
+
+type brokerJournalSyncFailureHook func(*brokerJournal, string) error
+
+// openBrokerJournalForExecution keeps test-only sync fault injection scoped to
+// one execution context. Production contexts carry no hook and use the
+// canonical journal opener.
+func openBrokerJournalForExecution(ctx context.Context, path string, a BrokerApproval) (*brokerJournal, error) {
+	if ctx == nil {
+		return nil, errBroker
+	}
+	journal, err := openBrokerJournal(path, a)
+	if err != nil {
+		return nil, err
+	}
+	if hook, ok := ctx.Value(brokerJournalSyncFailureHookKey{}).(brokerJournalSyncFailureHook); ok && hook != nil {
+		journal.syncFile = func(phase string) error { return hook(journal, phase) }
+	}
+	return journal, nil
+}
+
 func (j *brokerJournal) append(phase string, metadata map[string]any) error {
 	record := struct {
 		Phase    string         `json:"phase"`
@@ -85,7 +109,11 @@ func (j *brokerJournal) append(phase string, metadata map[string]any) error {
 	if n, err := j.file.Write(data); err != nil || n != len(data) {
 		return errBroker
 	}
-	if j.file.Sync() != nil {
+	if j.syncFile != nil {
+		if j.syncFile(phase) != nil {
+			return errBroker
+		}
+	} else if j.file.Sync() != nil {
 		return errBroker
 	}
 	return nil

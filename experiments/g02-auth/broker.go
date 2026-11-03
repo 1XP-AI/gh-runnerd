@@ -62,10 +62,10 @@ const organizationOnlyManagementScope = "organization-only"
 
 func brokerSlotAllowed(slot string) bool { return brokerPhases[slot] || brokerSpecialSlots[slot] }
 
-// One header, one claim and one completion for every finite schema slot, and
-// the final empty split element from the required trailing newline. This is a
-// structural bound derived from the actual slot schema, not an unbounded log.
-func brokerLedgerMaxLines() int { return 1 + 2*(len(brokerPhases)+len(brokerSpecialSlots)) + 1 }
+// One header, one claim and one completion for every finite schema slot, up to
+// one read-token revocation start/confirmation pair per slot, and the final
+// empty split element from the required trailing newline.
+func brokerLedgerMaxLines() int { return 1 + 4*(len(brokerPhases)+len(brokerSpecialSlots)) + 1 }
 
 const (
 	// Terminal collection has seven five-second cadence gaps in production.
@@ -149,6 +149,36 @@ func brokerPairedAuthorityDeadline(parent context.Context, a BrokerApproval, pla
 	return deadline, nil
 }
 
+func revokeBrokerReadOnlyToken(ctx context.Context, api *brokerAPI, j *brokerJournal, claim *brokerAdmission, token, verificationToken string) error {
+	if !validBrokerToken(token) || len(token) > 1024 || claim == nil || !claim.readTokenLifecyclePending || claim.check() != nil {
+		return errBroker
+	}
+	if token == verificationToken {
+		if j.append("read_only_token_revocation_skipped", map[string]any{"reason": "verification_token_collision"}) != nil {
+			return errBroker
+		}
+		return errBroker
+	}
+	if j.append("read_only_token_revocation_started", nil) != nil {
+		return errBroker
+	}
+	if api.revokeInstallationToken(ctx, token) != nil {
+		_ = j.append("read_only_token_revocation_uncertain", map[string]any{"reason": "revoke_request_failed_or_ambiguous"})
+		return errBroker
+	}
+	if j.append("read_only_token_revoked", nil) != nil {
+		// The revoked record may have reached disk without a durable sync. A
+		// later uncertainty record is terminal and overrides that observation.
+		_ = j.append("read_only_token_revocation_uncertain", map[string]any{"reason": "revocation_result_persistence_failed"})
+		return errBroker
+	}
+	if claim.confirmReadTokenLifecycle() != nil {
+		_ = j.append("read_only_token_revocation_uncertain", map[string]any{"reason": "admission_lifecycle_confirmation_failed"})
+		return errBroker
+	}
+	return nil
+}
+
 func brokerExecute(parent context.Context, a BrokerApproval, input brokerInput, path string, api *brokerAPI, plan *brokerControllerPlan) (BrokerResult, error) {
 	return brokerExecuteWithProvenance(parent, a, input, path, api, plan, nil)
 }
@@ -192,7 +222,7 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 		j = claimed[0]
 	} else {
 		var err error
-		j, err = openBrokerJournal(path, a)
+		j, err = openBrokerJournalForExecution(parent, path, a)
 		if err != nil {
 			return BrokerResult{}, errBroker
 		}
@@ -237,6 +267,14 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 		return BrokerResult{}, errBroker
 	}
 	defer claim.close()
+	readTokenLifecycleStarted := false
+	if v3ReusableCallee {
+		defer func() {
+			if !readTokenLifecycleStarted {
+				_ = claim.recordReadTokenRequestNotDispatched()
+			}
+		}()
+	}
 	guard := func(checkPrepared bool) error {
 		if claim.check() != nil || j.check() != nil {
 			return errBroker
@@ -298,17 +336,32 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 		if j.append("token_request_started", nil) != nil {
 			return BrokerResult{}, errBroker
 		}
-		readOnly, err := api.mintReadOnly(ctx, a, cred)
+		readOnly, err := api.mintReadOnlyWithIntent(ctx, a, cred, func() error {
+			if err := claim.beginReadTokenLifecycle(); err != nil {
+				return err
+			}
+			readTokenLifecycleStarted = true
+			return nil
+		})
 		if err != nil {
+			if readOnly.Token != "" {
+				_ = revokeBrokerReadOnlyToken(ctx, api, j, claim, readOnly.Token, input.VerificationToken)
+			}
+			return BrokerResult{}, errBroker
+		}
+		if readOnly.Token != "" && readOnly.Token == input.VerificationToken {
+			_ = revokeBrokerReadOnlyToken(ctx, api, j, claim, readOnly.Token, input.VerificationToken)
 			return BrokerResult{}, errBroker
 		}
 		readCtx, stopRead := context.WithDeadline(ctx, readOnly.ExpiresAt.Add(-time.Minute))
 		preflightErr := api.preflight(readCtx, a, readOnly.Token)
 		stopRead()
-		if input.VerificationToken == readOnly.Token || preflightErr != nil {
-			return BrokerResult{}, errBroker
+		readOnlyVerified := preflightErr == nil
+		verifiedJournaled := true
+		if readOnlyVerified {
+			verifiedJournaled = j.append("read_only_token_verified", map[string]any{"expires_at": readOnly.ExpiresAt, "app_id": identity.ID, "installation_id": install.ID}) == nil
 		}
-		if j.append("read_only_token_verified", map[string]any{"expires_at": readOnly.ExpiresAt, "app_id": identity.ID, "installation_id": install.ID}) != nil {
+		if revokeBrokerReadOnlyToken(ctx, api, j, claim, readOnly.Token, input.VerificationToken) != nil || !readOnlyVerified || !verifiedJournaled {
 			return BrokerResult{}, errBroker
 		}
 		// The final workflow GET is deliberately after read-only provider
