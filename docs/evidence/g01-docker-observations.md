@@ -88,6 +88,12 @@ mutation-result handling; InspectExact retains its own final cancellation guard.
 The complete worker race suite (including these regressions and all added alias
 cases), worker vet and `git diff --check` then passed on the combined tree.
 
-Final-head independent review, repository-wide checks, hosted CI and GitHub Codex
-review remain pending. No real Docker/GitHub live behavior, paired execution,
-account admission or daemon-verified absence was tested.
+At this pre-merge checkpoint, final-head independent review, repository-wide
+checks, hosted CI and GitHub Codex review remained pending. No real
+Docker/GitHub live behavior, paired execution, account admission or
+daemon-verified absence was tested.
+
+Historical gate snapshot: the pending review/check status above was recorded at
+the pre-merge candidate in [PR #45](https://github.com/1XP-AI/gh-runnerd/pull/45),
+which merged as `f676e8c`. It is not a current work queue. The
+live-behavior limitations in the preceding paragraph remain unchanged.
