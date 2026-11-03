@@ -692,14 +692,7 @@ func (f *ackCommandFixture) assertBroker() {
 			f.t.Error("ACK durable broker claim unavailable")
 		}
 		if workflowEvents == 2 {
-			var started, confirmed struct {
-				Kind    string          `json:"kind"`
-				Slot    string          `json:"slot"`
-				Attempt json.RawMessage `json:"attempt"`
-				Journal json.RawMessage `json:"journal"`
-				Source  string          `json:"source"`
-			}
-			if json.Unmarshal(ledger[1], &started) != nil || json.Unmarshal(ledger[2], &confirmed) != nil || started.Kind != "workflow_provenance_get_started" || confirmed.Kind != "workflow_provenance_get_confirmed" || started.Slot != claimIdentity.Slot || confirmed.Slot != claimIdentity.Slot || !bytes.Equal(started.Attempt, claimIdentity.Attempt) || !bytes.Equal(started.Journal, claimIdentity.Journal) || !bytes.Equal(confirmed.Attempt, claimIdentity.Attempt) || !bytes.Equal(confirmed.Journal, claimIdentity.Journal) || started.Source != claimIdentity.Provenance.Source || confirmed.Source != claimIdentity.Provenance.Source {
+			if !workflowProvenancePairMatchesClaim(ledger[1], ledger[2], ledger[claimIndex]) {
 				f.t.Error("ACK workflow provenance lifecycle claim identity differs")
 			}
 		}
