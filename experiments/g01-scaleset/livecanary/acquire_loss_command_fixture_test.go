@@ -160,6 +160,10 @@ func acquireLossPreflight(w http.ResponseWriter, r *http.Request, a Approval) bo
 		body = repo
 	case "/orgs/fixture-org/actions/runner-groups/3":
 		body = map[string]any{"id": 3, "visibility": "selected", "default": false, "allows_public_repositories": false, "inherited": false}
+		if a.GroupPolicy.Version == 2 {
+			body.(map[string]any)["restricted_to_workflows"] = true
+			body.(map[string]any)["selected_workflows"] = []string{a.GroupPolicy.Workflow}
+		}
 	default:
 		return false
 	}
@@ -193,6 +197,11 @@ func newCommandQualificationFixture(t *testing.T, controller, broker, variant, p
 	t.Helper()
 	a := approval()
 	a.WorkflowRef = "refs/heads/main"
+	// Actual command qualification uses the reusable-callee v3 contract.
+	// Keep its independent group-policy authority aligned with the policy and
+	// approval it writes; the legacy zero-value policy is rejected before any
+	// provider request or issuance.
+	a.GroupPolicy = handoff.GroupPolicy{Version: 2, OrganizationID: 101, Workflow: a.Organization + "/" + a.Repository + "/.github/workflows/runner.yml@" + strings.Repeat("d", 40)}
 	if phase == "drain" {
 		a.Phases = append(append([]string(nil), a.Phases...), phase)
 	}
@@ -326,7 +335,7 @@ func newCommandQualificationFixture(t *testing.T, controller, broker, variant, p
 	if os.WriteFile(f.controller, data, 0500) != nil {
 		t.Fatal("controller TEST helper copy")
 	}
-	ba := enrollment.BrokerApproval{OwnerNonce: a.OwnerNonce, Mode: "controller", Phase: phase, AppID: a.AppID, AppName: "fixture-app", AppOwner: a.Organization, AppOwnerID: 101, InstallationID: a.InstallationID, Organization: a.Organization, OrganizationID: 101, Repository: a.Repository, RepositoryID: a.RepositoryID, RunnerGroupID: int64(a.RunnerGroupID), RunnerGroupName: "fixture-group", ExpiresAt: a.ExpiresAt, ControllerBinarySHA256: handoff.Digest(data), ControllerApprovalSHA256: handoff.Digest(f.raw), ControllerHarnessSHA: a.HarnessSHA, AllowVerificationAuthority: true}
+	ba := enrollment.BrokerApproval{GroupPolicy: a.GroupPolicy, ManagementScope: a.ManagementScope, OwnerNonce: a.OwnerNonce, Mode: "controller", Phase: phase, AppID: a.AppID, AppName: "fixture-app", AppOwner: a.Organization, AppOwnerID: 101, InstallationID: a.InstallationID, Organization: a.Organization, OrganizationID: 101, Repository: a.Repository, RepositoryID: a.RepositoryID, RunnerGroupID: int64(a.RunnerGroupID), RunnerGroupName: "fixture-group", ExpiresAt: a.ExpiresAt, ControllerBinarySHA256: handoff.Digest(data), ControllerApprovalSHA256: handoff.Digest(f.raw), ControllerHarnessSHA: a.HarnessSHA, AllowVerificationAuthority: true}
 	raw, _ := json.Marshal(ba)
 	if os.WriteFile(f.brokerApprovalPath, raw, 0600) != nil {
 		t.Fatal("broker approval write")
@@ -645,8 +654,9 @@ func (f *acquireLossCommandFixture) guardControlsForPhase(events []Event, phase 
 	brokerAfter, _ := os.ReadFile(brokerJournal)
 	f.brokerMu.Lock()
 	replayCalls, replayMints := len(f.transport.calls), f.transport.mints
+	replayReadOnlyMints, replayManagementMints, replayRevocations := f.transport.readOnlyMints, f.transport.managementMints, f.transport.revocations
 	f.brokerMu.Unlock()
-	if !bytes.Equal(brokerBefore, brokerAfter) || replayCalls != originalCalls || replayMints != 1 {
+	if !bytes.Equal(brokerBefore, brokerAfter) || replayCalls != originalCalls || replayMints != 2 || replayReadOnlyMints != 1 || replayManagementMints != 1 || replayRevocations != 1 {
 		t.Error("exact broker-attempt replay changed history or crossed API/mint boundary")
 	}
 	claimPath := filepath.Join(f.admission, "broker-admission.jsonl")
@@ -665,8 +675,9 @@ func (f *acquireLossCommandFixture) guardControlsForPhase(events []Event, phase 
 	f.run(f.broker, f.brokerArgs(fresh), inputs...)
 	f.brokerMu.Lock()
 	calls, mints := append([]string(nil), f.transport.calls[callCount:]...), f.transport.mints
+	readOnlyMints, managementMints, revocations := f.transport.readOnlyMints, f.transport.managementMints, f.transport.revocations
 	f.brokerMu.Unlock()
-	if !reflect.DeepEqual(calls, []string{"GET " + workflowRunFixturePath(f.transport)}) || mints != 1 {
+	if !reflect.DeepEqual(calls, []string{"GET " + workflowRunFixturePath(f.transport)}) || mints != 2 || readOnlyMints != 1 || managementMints != 1 || revocations != 1 {
 		t.Error("fresh valid broker attempt did not reach observation/admission without remint")
 	}
 	snapshot, e := os.ReadFile(filepath.Join(fresh, "controller-approval.json"))
@@ -697,9 +708,16 @@ func TestExperimentalAcquireLossCommand(t *testing.T) {
 			f.run(f.broker, f.brokerArgs(f.attempt), f.management, []byte("synthetic-observation-credential"), f.workflowSeed, f.issuerSeed)
 			f.brokerMu.Lock()
 			mints := f.transport.mints
+			managementMints := f.transport.managementMints
+			readOnlyMints := f.transport.readOnlyMints
+			revocations := f.transport.revocations
+			calls := append([]string(nil), f.transport.calls...)
 			f.brokerMu.Unlock()
-			if mints != 1 {
-				t.Fatal("actual broker issuance did not mint exactly once")
+			if managementMints != 1 {
+				t.Fatalf("actual broker management issuance did not mint exactly once: total=%d read-only=%d management=%d revocations=%d calls=%v", mints, readOnlyMints, managementMints, revocations, calls)
+			}
+			if mints != 2 || readOnlyMints != 1 || revocations != 1 {
+				t.Fatalf("actual broker issuance lifecycle differs: total=%d read-only=%d management=%d revocations=%d calls=%v", mints, readOnlyMints, managementMints, revocations, calls)
 			}
 			events := f.assertRetained(variant)
 			if t.Failed() {

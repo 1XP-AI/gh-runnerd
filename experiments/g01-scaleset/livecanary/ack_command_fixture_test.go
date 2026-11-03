@@ -298,7 +298,11 @@ func (f *ackCommandFixture) brokerWire(r *http.Request) {
 	}
 	key := r.Method + " " + r.URL.Path
 	f.brokerAttempts = append(f.brokerAttempts, key) // count before body drain or dispatch
+	v3 := f.base.a.GroupPolicy.Version == 2
 	primary := []string{"GET " + workflowRunFixturePath(f.transport), "GET /app", "GET /orgs/fixture-org/installation", "GET " + workflowRunFixturePath(f.transport), "POST /app/installations/12/access_tokens", "GET /installation/repositories", "GET /repos/fixture-org/canary", "GET /orgs/fixture-org/actions/runner-groups/3", "GET /orgs/fixture-org/actions/runner-groups/3/repositories"}
+	if v3 {
+		primary = []string{"GET " + workflowRunFixturePath(f.transport), "GET /app", "GET /orgs/fixture-org/installation", "POST /app/installations/12/access_tokens", "GET /installation/repositories", "GET /repos/fixture-org/canary", "GET /orgs/fixture-org/actions/runner-groups/3", "GET /orgs/fixture-org/actions/runner-groups/3/repositories", "DELETE /installation/token", "GET " + workflowRunFixturePath(f.transport), "POST /app/installations/12/access_tokens", "GET /installation/repositories", "GET /repos/fixture-org/canary", "GET /orgs/fixture-org/actions/runner-groups/3", "GET /orgs/fixture-org/actions/runner-groups/3/repositories", "GET " + workflowRunFixturePath(f.transport)}
+	}
 	position := len(f.brokerAttempts) - 1 // shared lock held; already counted before drain
 	fresh := f.transport.attempt == f.attempt+"-fresh"
 	if fresh {
@@ -351,13 +355,21 @@ func (f *ackCommandFixture) brokerWire(r *http.Request) {
 			if position == 0 || fresh {
 				token = "synthetic-observation-credential"
 			}
+		} else if v3 && position >= 4 && position <= 7 {
+			token = "synthetic-process-read-installation-token"
+		} else if v3 && r.URL.Path == "/installation/token" {
+			token = "synthetic-process-read-installation-token"
 		}
 		if auth != "Bearer "+token {
 			t.Error("ACK broker distinct observation/verification/installation authority differs")
 		}
 	}
 	if key == "POST /app/installations/12/access_tokens" {
-		if string(data) != `{"repository_ids":[42],"permissions":{"metadata":"read","organization_self_hosted_runners":"write"}}` {
+		want := `{"repository_ids":[42],"permissions":{"metadata":"read","organization_self_hosted_runners":"write"}}`
+		if v3 && position == 3 {
+			want = `{"repository_ids":[42],"permissions":{"metadata":"read","organization_self_hosted_runners":"read"}}`
+		}
+		if string(data) != want {
 			t.Error("ACK broker exact scoped mint body differs")
 		}
 	} else if len(data) != 0 {
@@ -423,7 +435,7 @@ func (f *ackCommandFixture) consumption() *controllerHandoffConsumption {
 		}
 		if event.Kind == "claim" && event.Slot == f.phase && event.Provenance != nil {
 			p := event.Provenance
-			if found != nil || p.Source != "github-rest-workflow-v1" || len(p.Digest) != 64 || len(p.Nonce) != 32 {
+			if found != nil || p.Source != originalContextClaimSource(f.base.a) || len(p.Digest) != 64 || len(p.Nonce) != 32 {
 				f.t.Error("ACK original claim provenance differs")
 			}
 			found = &controllerHandoffConsumption{ReceiptNonce: p.Nonce, Phase: f.phase, ApprovalSHA256: handoff.Digest(f.raw), ReceiptSHA256: p.Digest, KeyID: "fixture-ed25519-v1"}
@@ -588,11 +600,22 @@ func (f *ackCommandFixture) assertBroker() {
 	f.brokerMu.Lock()
 	defer f.brokerMu.Unlock()
 	want := []string{"GET " + workflowRunFixturePath(f.transport), "GET /app", "GET /orgs/fixture-org/installation", "GET " + workflowRunFixturePath(f.transport), "POST /app/installations/12/access_tokens", "GET /installation/repositories", "GET /repos/fixture-org/canary", "GET /orgs/fixture-org/actions/runner-groups/3", "GET /orgs/fixture-org/actions/runner-groups/3/repositories"}
+	v3 := f.base.a.GroupPolicy.Version == 2
+	if v3 {
+		want = []string{"GET " + workflowRunFixturePath(f.transport), "GET /app", "GET /orgs/fixture-org/installation", "POST /app/installations/12/access_tokens", "GET /installation/repositories", "GET /repos/fixture-org/canary", "GET /orgs/fixture-org/actions/runner-groups/3", "GET /orgs/fixture-org/actions/runner-groups/3/repositories", "DELETE /installation/token", "GET " + workflowRunFixturePath(f.transport), "POST /app/installations/12/access_tokens", "GET /installation/repositories", "GET /repos/fixture-org/canary", "GET /orgs/fixture-org/actions/runner-groups/3", "GET /orgs/fixture-org/actions/runner-groups/3/repositories", "GET " + workflowRunFixturePath(f.transport)}
+	}
 	if !reflect.DeepEqual(f.brokerAttempts, f.transport.calls) {
 		f.t.Error("ACK broker server-entry counts differ from dispatched calls")
 	}
-	if f.transport.mints != 1 || !reflect.DeepEqual(f.transport.calls, want) {
-		f.t.Errorf("ACK actual broker exact trace differs: calls=%v mints=%d", f.transport.calls, f.transport.mints)
+	if !reflect.DeepEqual(f.transport.calls, want) {
+		f.t.Errorf("ACK actual broker exact trace differs: calls=%v want=%v", f.transport.calls, want)
+	}
+	if v3 {
+		if f.transport.mints != 2 || f.transport.readOnlyMints != 1 || f.transport.managementMints != 1 || f.transport.revocations != 1 {
+			f.t.Errorf("ACK actual broker issuance lifecycle differs: mints=%d read-only=%d management=%d revocations=%d", f.transport.mints, f.transport.readOnlyMints, f.transport.managementMints, f.transport.revocations)
+		}
+	} else if f.transport.mints != 1 {
+		f.t.Errorf("ACK actual broker issuance lifecycle differs: mints=%d", f.transport.mints)
 	}
 	raw := f.read(filepath.Join(f.attempt, "broker.jsonl"))
 	completed := 0
@@ -624,16 +647,46 @@ func (f *ackCommandFixture) assertBroker() {
 	}
 	// Completion preserves the permanent occupied claim and all its provenance.
 	ledger := bytes.Split(bytes.TrimSpace(f.read(filepath.Join(f.admission, "broker-admission.jsonl"))), []byte{'\n'})
-	if len(ledger) != 2+wantComplete {
+	wantLedger := 2 + wantComplete
+	if v3 {
+		wantLedger += 2 // read-token lifecycle start and confirmation surround completion.
+	}
+	claimIndex, completionIndex := 1, 2
+	if v3 {
+		completionIndex = 4
+	}
+	if len(ledger) != wantLedger {
 		f.t.Error("ACK exact broker claim/completion count differs")
-	} else if wantComplete == 1 {
-		var claim, completion map[string]any
-		if json.Unmarshal(ledger[1], &claim) != nil || json.Unmarshal(ledger[2], &completion) != nil || claim["kind"] != "claim" || completion["kind"] != "complete" {
-			f.t.Error("ACK durable broker claim/completion unavailable")
+	} else {
+		var claimIdentity struct {
+			Kind    string          `json:"kind"`
+			Slot    string          `json:"slot"`
+			Attempt json.RawMessage `json:"attempt"`
+			Journal json.RawMessage `json:"journal"`
 		}
-		completion["kind"] = "claim"
-		if !reflect.DeepEqual(claim, completion) {
-			f.t.Error("ACK completion changed occupied claim/provenance")
+		if json.Unmarshal(ledger[claimIndex], &claimIdentity) != nil || claimIdentity.Kind != "claim" {
+			f.t.Error("ACK durable broker claim unavailable")
+		}
+		if v3 {
+			var started, confirmed struct {
+				Kind    string          `json:"kind"`
+				Slot    string          `json:"slot"`
+				Attempt json.RawMessage `json:"attempt"`
+				Journal json.RawMessage `json:"journal"`
+			}
+			if json.Unmarshal(ledger[2], &started) != nil || json.Unmarshal(ledger[3], &confirmed) != nil || started.Kind != "read_token_lifecycle_started" || confirmed.Kind != "read_token_lifecycle_confirmed" || started.Slot != claimIdentity.Slot || confirmed.Slot != claimIdentity.Slot || !bytes.Equal(started.Attempt, claimIdentity.Attempt) || !bytes.Equal(started.Journal, claimIdentity.Journal) || !bytes.Equal(confirmed.Attempt, claimIdentity.Attempt) || !bytes.Equal(confirmed.Journal, claimIdentity.Journal) {
+				f.t.Error("ACK read-token lifecycle claim identity differs")
+			}
+		}
+		if wantComplete == 1 {
+			var claim, completion map[string]any
+			if json.Unmarshal(ledger[claimIndex], &claim) != nil || json.Unmarshal(ledger[completionIndex], &completion) != nil || claim["kind"] != "claim" || completion["kind"] != "complete" {
+				f.t.Error("ACK durable broker claim/completion unavailable")
+			}
+			completion["kind"] = "claim"
+			if !reflect.DeepEqual(claim, completion) {
+				f.t.Error("ACK completion changed occupied claim/provenance")
+			}
 		}
 	}
 	snapshot := f.read(filepath.Join(f.attempt, "controller-approval.json"))
@@ -652,7 +705,21 @@ func (f *ackCommandFixture) validatePreparation(receipt PreparationReceipt, phas
 		return preparedIdentity(info)
 	}
 	claimPath := f.base.j.claim.file.Name()
-	want := PreparationReceipt{Version: 1, Status: "controller_journal_prepared", Phase: phase, ApprovalDigest: approvalDigest(f.base.a), State: identity(f.base.j.directory), Journal: identity(filepath.Join(f.base.j.directory, "journal.jsonl")), Claim: identity(claimPath), AdmissionDirectory: identity(f.admission), JournalDigest: handoff.Digest(journal), ClaimDigest: handoff.Digest(f.read(claimPath))}
+	var rootBinding *handoff.RootBinding
+	if f.base.a.GroupPolicy.Version == 2 && phase == f.phase {
+		_, workflow, issuer, e := handoff.DecodePublicPolicy([]byte(experimentalPolicy(f.t, f.base.a, f.raw, "controller", phase, "controller")), "controller", time.Now())
+		if e != nil {
+			f.t.Error("ACK reusable-callee policy decode differs")
+		} else {
+			binding, e := handoff.NewRootBinding(workflow, issuer)
+			if e != nil {
+				f.t.Error("ACK reusable-callee root binding unavailable")
+			} else {
+				rootBinding = &binding
+			}
+		}
+	}
+	want := PreparationReceipt{Version: 1, Status: "controller_journal_prepared", Phase: phase, ApprovalDigest: approvalDigest(f.base.a), State: identity(f.base.j.directory), Journal: identity(filepath.Join(f.base.j.directory, "journal.jsonl")), Claim: identity(claimPath), AdmissionDirectory: identity(f.admission), JournalDigest: handoff.Digest(journal), ClaimDigest: handoff.Digest(f.read(claimPath)), RootBinding: rootBinding}
 	if !reflect.DeepEqual(receipt, want) {
 		f.t.Error("ACK actual preparation full concrete receipt differs")
 	}

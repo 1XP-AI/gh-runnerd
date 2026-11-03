@@ -286,7 +286,7 @@ func (f *OriginalContextCommandFixture) sync(file *os.File) error {
 		return ErrJournal
 	}
 	events, e := originalContextEvents(raw, f.approval)
-	if e != nil || len(events) < 8 || !originalContextBrokerClaim(f.admission, events[7].ControllerHandoff) {
+	if e != nil || len(events) < 8 || !originalContextBrokerClaim(f.admission, events[7].ControllerHandoff, originalContextClaimSource(f.approval)) {
 		return ErrJournal
 	}
 	n := f.config.frame("", "", "").Sequence
@@ -541,7 +541,14 @@ func (o *OriginalContextFixtureOutput) Bytes() []byte {
 	return o.data
 }
 
-func originalContextBrokerClaim(admission string, c *controllerHandoffConsumption) bool {
+func originalContextClaimSource(a Approval) string {
+	if a.GroupPolicy.Version == 2 {
+		return handoff.ReusableCalleeSource
+	}
+	return "github-rest-workflow-v1"
+}
+
+func originalContextBrokerClaim(admission string, c *controllerHandoffConsumption, source string) bool {
 	if c == nil {
 		return false
 	}
@@ -568,7 +575,7 @@ func originalContextBrokerClaim(admission string, c *controllerHandoffConsumptio
 			Nonce  string `json:"receipt_nonce"`
 			Source string `json:"source"`
 		}
-		if originalContextDecode(event["provenance"], &provenance) != nil || provenance.Digest != c.ReceiptSHA256 || provenance.Nonce != c.ReceiptNonce || provenance.Source != "github-rest-workflow-v1" {
+		if originalContextDecode(event["provenance"], &provenance) != nil || provenance.Digest != c.ReceiptSHA256 || provenance.Nonce != c.ReceiptNonce || provenance.Source != source {
 			return false
 		}
 		count++
