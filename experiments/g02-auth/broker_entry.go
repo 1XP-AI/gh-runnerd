@@ -292,7 +292,7 @@ func runBrokerWithPrivateHandoff(ctx context.Context, files BrokerFiles, input *
 	} else if files.ControllerBinary != "" || files.ControllerApproval != "" || files.ControllerStateDirectory != "" || files.WorkerApproval != "" || files.WorkerStateDirectory != "" || approval.ControllerBinarySHA256 != "" || approval.ControllerApprovalSHA256 != "" || approval.ControllerHarnessSHA != "" {
 		return BrokerResult{}, errBroker
 	}
-	attempt, err := openBrokerJournal(files.StateDirectory, approval)
+	attempt, err := openBrokerJournalForExecution(files.StateDirectory, approval)
 	if err != nil {
 		return BrokerResult{}, errBroker
 	}

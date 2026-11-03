@@ -76,6 +76,12 @@ func openBrokerJournal(path string, a BrokerApproval) (j *brokerJournal, err err
 	}
 	return j, nil
 }
+
+// openBrokerJournalForExecution is replaceable by package tests to inject a
+// specific sync failure into the full broker path. Production keeps the
+// canonical opener above.
+var openBrokerJournalForExecution = openBrokerJournal
+
 func (j *brokerJournal) append(phase string, metadata map[string]any) error {
 	record := struct {
 		Phase    string         `json:"phase"`

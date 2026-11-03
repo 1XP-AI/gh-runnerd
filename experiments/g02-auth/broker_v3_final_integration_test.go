@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -160,6 +161,35 @@ func newBrokerV3RunFixture(t *testing.T, phase string, changedCallee bool, rootM
 	return brokerV3RunFixture{files: BrokerFiles{ApprovalPath: approvalPath, StateDirectory: attempt, ControllerBinary: binary.path, ControllerApproval: controllerPath, ControllerStateDirectory: controllerState}, candidate: candidate, fixture: fixture, workflowGET: workflowGET, changeCalleeAt: changeCalleeAt}
 }
 
+func injectBrokerJournalSyncFailure(t *testing.T, failedPhase string) {
+	t.Helper()
+	oldOpener := openBrokerJournalForExecution
+	openBrokerJournalForExecution = func(path string, approval BrokerApproval) (*brokerJournal, error) {
+		journal, err := openBrokerJournal(path, approval)
+		if err != nil {
+			return nil, err
+		}
+		journal.syncFile = func(phase string) error {
+			if phase == failedPhase {
+				return errors.New("synthetic fsync failure")
+			}
+			return journal.file.Sync()
+		}
+		return journal, nil
+	}
+	t.Cleanup(func() { openBrokerJournalForExecution = oldOpener })
+}
+
+func brokerFixtureCallCount(calls []string, want string) int {
+	count := 0
+	for _, call := range calls {
+		if call == want {
+			count++
+		}
+	}
+	return count
+}
+
 func TestBrokerExperimentV3ReadOnlyPreflightRejectsBeforeWriteMint(t *testing.T) {
 	fixture := newBrokerV3RunFixture(t, "create", false)
 	fixture.fixture.badGroupPolicy = true
@@ -181,6 +211,9 @@ func TestBrokerExperimentV3ReadOnlyPreflightRejectsBeforeWriteMint(t *testing.T)
 	}
 	if !reflect.DeepEqual(fixture.fixture.calls[len(fixture.fixture.calls)-1:], []string{"DELETE /installation/token"}) {
 		t.Fatalf("read-only token was not revoked after rejected provider preflight: %v", fixture.fixture.calls)
+	}
+	if got := brokerFixtureCallCount(fixture.fixture.calls, "DELETE /installation/token"); got != 1 {
+		t.Fatalf("read-only token DELETE requests=%d, want exactly one: %v", got, fixture.fixture.calls)
 	}
 	journal, err := os.ReadFile(filepath.Join(fixture.files.StateDirectory, "broker.jsonl"))
 	if err != nil {
@@ -209,12 +242,54 @@ func TestBrokerExperimentV3StopsWhenReadOnlyTokenRevocationIsUncertain(t *testin
 	if !reflect.DeepEqual(fixture.fixture.calls[len(fixture.fixture.calls)-1:], []string{"DELETE /installation/token"}) {
 		t.Fatalf("read-only installation token was not revoked as the final API operation: %v", fixture.fixture.calls)
 	}
+	if got := brokerFixtureCallCount(fixture.fixture.calls, "DELETE /installation/token"); got != 1 {
+		t.Fatalf("read-only token DELETE requests=%d, want exactly one: %v", got, fixture.fixture.calls)
+	}
 	journal, err := os.ReadFile(filepath.Join(fixture.files.StateDirectory, "broker.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Contains(journal, []byte("read_only_token_revocation_uncertain")) || bytes.Contains(journal, []byte("management_token_request_started")) || bytes.Contains(journal, []byte("controller_handoff_started")) {
 		t.Fatalf("uncertain revocation was not durably fenced before write mint: %s", journal)
+	}
+	if bytes.Contains(journal, []byte("synthetic-private-read-installation-token")) {
+		t.Fatal("read-only installation token was persisted in the broker journal")
+	}
+}
+
+func TestBrokerExperimentV3RevokedRecordSyncFailureStopsBeforeWriteMint(t *testing.T) {
+	fixture := newBrokerV3RunFixture(t, "create", false)
+	injectBrokerJournalSyncFailure(t, "read_only_token_revoked")
+	management, err := json.Marshal(brokerInput{PEM: string(fixture.candidate.PEM), VerificationToken: "synthetic-private-workflow-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, runErr := RunBrokerExperimentWithInputs(
+		context.Background(), fixture.files,
+		brokerV3Pipe(t, management),
+		brokerV3Pipe(t, []byte("synthetic-private-workflow-token")),
+		brokerV3Pipe(t, bytes.Repeat([]byte{1}, ed25519.SeedSize)),
+		brokerV3Pipe(t, bytes.Repeat([]byte{71}, ed25519.SeedSize)),
+	)
+	if runErr == nil || result.Status != "" || fixture.fixture.tokenCalls != 1 || *fixture.workflowGET != 1 {
+		t.Fatalf("revoked-record sync failure crossed the write boundary: result=%+v err=%v mints=%d workflow_gets=%d calls=%v", result, runErr, fixture.fixture.tokenCalls, *fixture.workflowGET, fixture.fixture.calls)
+	}
+	if got := brokerFixtureCallCount(fixture.fixture.calls, "DELETE /installation/token"); got != 1 {
+		t.Fatalf("read-only token DELETE requests=%d, want exactly one: %v", got, fixture.fixture.calls)
+	}
+	if len(fixture.fixture.calls) == 0 || fixture.fixture.calls[len(fixture.fixture.calls)-1] != "DELETE /installation/token" {
+		t.Fatalf("revocation was not the last provider operation: %v", fixture.fixture.calls)
+	}
+	journal, err := os.ReadFile(filepath.Join(fixture.files.StateDirectory, "broker.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(journal)
+	started := strings.Index(text, "read_only_token_revocation_started")
+	revoked := strings.Index(text, "read_only_token_revoked")
+	uncertain := strings.Index(text, "read_only_token_revocation_uncertain")
+	if started < 0 || revoked <= started || uncertain <= revoked || strings.Contains(text, "management_token_request_started") || strings.Contains(text, "controller_handoff_started") {
+		t.Fatalf("sync failure was not fenced by a terminal uncertainty record before writes: %s", text)
 	}
 	if bytes.Contains(journal, []byte("synthetic-private-read-installation-token")) {
 		t.Fatal("read-only installation token was persisted in the broker journal")
@@ -240,6 +315,9 @@ func TestBrokerExperimentV3RevokesTokenFromRejectedReadIssuance(t *testing.T) {
 			}
 			if len(fixture.fixture.calls) == 0 || fixture.fixture.calls[len(fixture.fixture.calls)-1] != "DELETE /installation/token" {
 				t.Fatalf("usable rejected token was not revoked: calls=%v", fixture.fixture.calls)
+			}
+			if got := brokerFixtureCallCount(fixture.fixture.calls, "DELETE /installation/token"); got != 1 {
+				t.Fatalf("read-only token DELETE requests=%d, want exactly one: %v", got, fixture.fixture.calls)
 			}
 			for _, call := range fixture.fixture.calls {
 				if call == "GET /installation/repositories" || strings.HasPrefix(call, "GET /orgs/org-a/actions/runner-groups/") {
