@@ -298,11 +298,12 @@ in the [driver record](g01-live-driver.md#private-approval-and-invocation).
   controller approval must use that same suffix as `owner_nonce`, making its
   scale-set name equal to the workflow's required runner label. Private names,
   suffix and immutable workflow SHA remain in the private record.
-- [ ] Maintainer supplies an existing user-owned App installation with
-  organization self-hosted runners write permission. G01 does not create an App,
-  change its permissions or borrow credentials from existing runner installs.
-  A separate secret broker keeps management credentials on the controller.
-  The existing organization-only App does not need repository access. Its broker
+- [x] A read-only `gh api` recheck on 2026-11-03 confirmed that the
+  maintainer-supplied existing organization App installation has
+  `organization_self_hosted_runners: write`. No App permission, installation or
+  repository setting was changed. Private App identifiers are omitted here.
+- [ ] Verify that the separate secret broker keeps management credentials on the
+  controller. The organization-only App does not need repository access. Broker
   and controller approvals must explicitly select the reviewed
   [organization-only management scope](g01-organization-management-scope.md),
   with separate workflow verification authority where required. Scope support
