@@ -28,23 +28,26 @@ func TestPairedTerminalBrokerApprovalUsesDedicatedMode(t *testing.T) {
 }
 
 type brokerHTTPFixture struct {
-	t                         *testing.T
-	calls                     []string
-	events                    []string
-	tokenCalls                int
-	mintRequests              []brokerMintRequestFixture
-	badGroup                  bool
-	badGroupPolicy            bool
-	mintError                 bool
-	revokeError               bool
-	readTokenFault            string
-	readTokenToken            string
-	loseReadTokenResponse     bool
-	readTokenAccepted         bool
-	requireReadTokenLifecycle bool
-	token                     string
-	root                      string
-	admissionRoot             string
+	t                            *testing.T
+	calls                        []string
+	events                       []string
+	tokenCalls                   int
+	mintRequests                 []brokerMintRequestFixture
+	badGroup                     bool
+	badGroupPolicy               bool
+	mintError                    bool
+	revokeError                  bool
+	readTokenFault               string
+	readTokenToken               string
+	loseReadTokenResponse        bool
+	loseWorkflowResponse         bool
+	timeoutWorkflowResponse      bool
+	requireWorkflowGETBeforeMint bool
+	readTokenAccepted            bool
+	requireReadTokenLifecycle    bool
+	token                        string
+	root                         string
+	admissionRoot                string
 }
 
 type brokerMintRequestFixture struct {
@@ -68,6 +71,18 @@ func (f *brokerHTTPFixture) RoundTrip(r *http.Request) (*http.Response, error) {
 	case "/orgs/org-a/installation":
 		payload = map[string]any{"id": 201, "app_id": 71, "target_id": 101, "target_type": "Organization", "suspended_at": nil, "account": map[string]any{"id": 101, "login": "org-a", "type": "Organization"}, "permissions": map[string]string{"organization_self_hosted_runners": "write", "metadata": "read"}}
 	case "/app/installations/201/access_tokens":
+		if f.requireWorkflowGETBeforeMint {
+			observed := false
+			for _, event := range f.events {
+				if strings.HasPrefix(event, "GET /repos/") && strings.Contains(event, "/actions/runs/") {
+					observed = true
+					break
+				}
+			}
+			if !observed {
+				f.t.Fatal("installation-token mint preceded the observed workflow provenance GET")
+			}
+		}
 		f.tokenCalls++
 		data, _ := os.ReadFile(filepath.Join(f.root, "broker.jsonl"))
 		if !strings.Contains(string(data), "token_request_started") {

@@ -78,9 +78,10 @@ func brokerOwnedDirectory(i os.FileInfo, private bool) bool {
 }
 
 // The finite slot schema is the union of the named phases and special slots.
-// Each stored controller authority is bounded by the 16 KiB input
-// contract; allow one claim/completion and one read-token revocation
-// start/confirmation pair for every schema slot.
+// Each stored controller authority is bounded by the 16 KiB input contract;
+// allow one claim/completion, one workflow-provenance GET start/confirmation
+// pair and one read-token revocation start/confirmation pair for every schema
+// slot.
 const maxBrokerLedgerBytes = 512 << 10
 
 type brokerInode struct {
@@ -155,6 +156,24 @@ type brokerReadTokenLifecycleEvent struct {
 	Attempt brokerInode `json:"attempt"`
 	Journal brokerInode `json:"journal"`
 }
+
+// brokerWorkflowProvenanceEvent binds the authenticated workflow-run GET to
+// the exact attempt, journal, approval and observed run identity. The event
+// carries no credential or response body. A started event is durable before
+// dispatch; only its exact confirmation or an explicit no-dispatch outcome
+// may release replay.
+type brokerWorkflowProvenanceEvent struct {
+	Kind                     string      `json:"kind"`
+	Slot                     string      `json:"slot"`
+	Attempt                  brokerInode `json:"attempt"`
+	Journal                  brokerInode `json:"journal"`
+	ControllerApprovalSHA256 string      `json:"controller_approval_sha256"`
+	Source                   string      `json:"source"`
+	WorkflowRunID            int64       `json:"workflow_run_id"`
+	WorkflowRef              string      `json:"workflow_ref"`
+	WorkflowSHA              string      `json:"workflow_sha"`
+	WorkflowPath             string      `json:"workflow_path"`
+}
 type brokerLedgerHeader struct {
 	Version  int         `json:"version"`
 	Resource string      `json:"resource"`
@@ -171,6 +190,12 @@ type brokerAdmission struct {
 	data                           []byte
 	event                          brokerClaimEvent
 	readTokenLifecyclePending      bool
+	workflowProvenancePending      *brokerWorkflowProvenanceEvent
+	workflowProvenanceConfirmed    map[string]brokerWorkflowProvenanceEvent
+	workflowProvenanceNoDispatch   map[string]bool
+	ledgerOnly                     bool
+	ledgerSlot                     string
+	ledgerAttempt, ledgerJournal   brokerInode
 	sync                           func(*os.Root) error
 }
 
@@ -269,7 +294,61 @@ func (c *brokerAdmission) recordReadTokenRequestNotDispatched() error {
 	}
 	return nil
 }
-func openBrokerAdmission(directory string, a BrokerApproval, j *brokerJournal, p *brokerControllerPlan, syncRoot func(*os.Root) error) (claim *brokerAdmission, err error) {
+
+func (c *brokerAdmission) beginWorkflowProvenance(event brokerWorkflowProvenanceEvent) error {
+	if c == nil || !c.ledgerOnly || c.workflowProvenancePending != nil || !validBrokerWorkflowProvenanceEvent(event) || event.Kind != "workflow_provenance_get_started" {
+		return errBroker
+	}
+	_, confirmed := c.workflowProvenanceConfirmed[event.Slot]
+	if event.Slot != c.ledgerSlot || event.Attempt != c.ledgerAttempt || event.Journal != c.ledgerJournal || confirmed || c.workflowProvenanceNoDispatch[event.Slot] || c.check() != nil {
+		return errBroker
+	}
+	if c.append(event) != nil || c.check() != nil {
+		return errBroker
+	}
+	c.workflowProvenancePending = &event
+	return nil
+}
+
+func (c *brokerAdmission) confirmWorkflowProvenance(event brokerWorkflowProvenanceEvent) error {
+	if c == nil || !c.ledgerOnly || c.workflowProvenancePending == nil || event.Kind != "workflow_provenance_get_confirmed" || !sameBrokerWorkflowProvenance(*c.workflowProvenancePending, event) || c.check() != nil {
+		return errBroker
+	}
+	if c.append(event) != nil || c.check() != nil {
+		return errBroker
+	}
+	c.workflowProvenanceConfirmed[event.Slot] = event
+	c.workflowProvenancePending = nil
+	return nil
+}
+
+func (c *brokerAdmission) recordWorkflowProvenanceNotDispatched(event brokerWorkflowProvenanceEvent) error {
+	if c == nil || !c.ledgerOnly || event.Kind != "workflow_provenance_get_not_dispatched" || !validBrokerWorkflowProvenanceEvent(event) || event.Slot != c.ledgerSlot || event.Attempt != c.ledgerAttempt || event.Journal != c.ledgerJournal || c.workflowProvenanceNoDispatch[event.Slot] || c.workflowProvenanceConfirmed[event.Slot].Kind != "" || c.check() != nil {
+		return errBroker
+	}
+	if c.workflowProvenancePending != nil && !sameBrokerWorkflowProvenance(*c.workflowProvenancePending, event) {
+		return errBroker
+	}
+	if c.append(event) != nil || c.check() != nil {
+		return errBroker
+	}
+	c.workflowProvenanceNoDispatch[event.Slot] = true
+	c.workflowProvenancePending = nil
+	return nil
+}
+
+func openBrokerAdmission(directory string, a BrokerApproval, j *brokerJournal, p *brokerControllerPlan, syncRoot func(*os.Root) error) (*brokerAdmission, error) {
+	return openBrokerAdmissionMode(directory, a, j, p, syncRoot, false)
+}
+
+// openBrokerAdmissionLedger acquires the same fixed account lock and replays
+// the same ledger as claim admission, but deliberately creates no phase claim.
+// The caller holds the returned lock across the authenticated provenance GET.
+func openBrokerAdmissionLedger(directory string, a BrokerApproval, j *brokerJournal, syncRoot func(*os.Root) error) (*brokerAdmission, error) {
+	return openBrokerAdmissionMode(directory, a, j, nil, syncRoot, true)
+}
+
+func openBrokerAdmissionMode(directory string, a BrokerApproval, j *brokerJournal, p *brokerControllerPlan, syncRoot func(*os.Root) error, ledgerOnly bool) (claim *brokerAdmission, err error) {
 	if syncRoot == nil || !filepath.IsAbs(directory) || filepath.Clean(directory) != directory {
 		return nil, errBroker
 	}
@@ -356,8 +435,11 @@ func openBrokerAdmission(directory string, a BrokerApproval, j *brokerJournal, p
 	provenanceNonces := map[string]bool{}
 	readTokenLifecycleSlots := map[string]bool{}
 	readTokenRequestNotDispatchedSlots := map[string]bool{}
+	workflowProvenanceConfirmed := map[string]brokerWorkflowProvenanceEvent{}
+	workflowProvenanceNoDispatch := map[string]bool{}
 	latestSlot := ""
 	var pendingReadTokenLifecycle *brokerReadTokenLifecycleEvent
+	var pendingWorkflowProvenance *brokerWorkflowProvenanceEvent
 	for _, line := range lines[1 : len(lines)-1] {
 		var kind struct {
 			Kind string `json:"kind"`
@@ -366,6 +448,44 @@ func openBrokerAdmission(directory string, a BrokerApproval, j *brokerJournal, p
 			return nil, errBroker
 		}
 		switch kind.Kind {
+		case "workflow_provenance_get_started", "workflow_provenance_get_confirmed", "workflow_provenance_get_not_dispatched":
+			var event brokerWorkflowProvenanceEvent
+			if decodeBrokerJSON(line, &event, true) != nil || !validBrokerWorkflowProvenanceEvent(event) {
+				return nil, errBroker
+			}
+			switch event.Kind {
+			case "workflow_provenance_get_started":
+				if pendingWorkflowProvenance != nil || event.Slot == "discover-actions-host" || workflowProvenanceConfirmed[event.Slot].Kind != "" || workflowProvenanceNoDispatch[event.Slot] {
+					return nil, errBroker
+				}
+				if _, exists := slots[event.Slot]; exists {
+					return nil, errBroker
+				}
+				for _, receipt := range slots {
+					if receipt.Attempt == event.Attempt || receipt.Journal == event.Journal {
+						return nil, errBroker
+					}
+				}
+				pendingWorkflowProvenance = &event
+			case "workflow_provenance_get_confirmed":
+				if pendingWorkflowProvenance == nil || !sameBrokerWorkflowProvenance(*pendingWorkflowProvenance, event) {
+					return nil, errBroker
+				}
+				workflowProvenanceConfirmed[event.Slot] = event
+				pendingWorkflowProvenance = nil
+			case "workflow_provenance_get_not_dispatched":
+				if workflowProvenanceNoDispatch[event.Slot] || workflowProvenanceConfirmed[event.Slot].Kind != "" {
+					return nil, errBroker
+				}
+				if _, exists := slots[event.Slot]; exists {
+					return nil, errBroker
+				}
+				if pendingWorkflowProvenance != nil && !sameBrokerWorkflowProvenance(*pendingWorkflowProvenance, event) {
+					return nil, errBroker
+				}
+				workflowProvenanceNoDispatch[event.Slot] = true
+				pendingWorkflowProvenance = nil
+			}
 		case "read_token_lifecycle_started", "read_token_lifecycle_confirmed", "read_token_revocation_started", "read_token_revocation_confirmed", "read_token_request_not_dispatched":
 			var event brokerReadTokenLifecycleEvent
 			if decodeBrokerJSON(line, &event, true) != nil || !validBrokerReadTokenLifecycleEvent(event) {
@@ -401,7 +521,7 @@ func openBrokerAdmission(directory string, a BrokerApproval, j *brokerJournal, p
 				readTokenRequestNotDispatchedSlots[event.Slot] = true
 			}
 		case "claim", "complete":
-			if pendingReadTokenLifecycle != nil {
+			if pendingReadTokenLifecycle != nil || pendingWorkflowProvenance != nil {
 				return nil, errBroker
 			}
 			var event brokerClaimEvent
@@ -458,7 +578,7 @@ func openBrokerAdmission(directory string, a BrokerApproval, j *brokerJournal, p
 			return nil, errBroker
 		}
 	}
-	if pendingReadTokenLifecycle != nil {
+	if pendingReadTokenLifecycle != nil || pendingWorkflowProvenance != nil {
 		return nil, errBroker
 	}
 	for slot, event := range slots {
@@ -468,6 +588,15 @@ func openBrokerAdmission(directory string, a BrokerApproval, j *brokerJournal, p
 			// read-token POST was accepted, so recovery must fail closed.
 			return nil, errBroker
 		}
+		if event.Provenance != nil && event.Provenance.Source == handoff.ReusableCalleeSource {
+			confirmed, ok := workflowProvenanceConfirmed[slot]
+			if !ok || !brokerClaimMatchesWorkflowProvenance(event, confirmed) {
+				// A reusable-callee claim is valid only after the exact
+				// authenticated workflow-run GET for this claim was confirmed
+				// in account history.
+				return nil, errBroker
+			}
+		}
 	}
 	slot := a.Phase
 	if a.Mode == "discover-actions-host" {
@@ -475,7 +604,7 @@ func openBrokerAdmission(directory string, a BrokerApproval, j *brokerJournal, p
 	} else if a.Mode == "paired-terminal" {
 		slot = "paired-terminal"
 	}
-	if _, ok := slots[slot]; ok {
+	if _, ok := slots[slot]; ok || workflowProvenanceNoDispatch[slot] {
 		return nil, errBroker
 	}
 	for previous := range slots {
@@ -483,12 +612,26 @@ func openBrokerAdmission(directory string, a BrokerApproval, j *brokerJournal, p
 			return nil, errBroker
 		}
 	}
+	if j == nil || j.file == nil || j.root == nil {
+		return nil, errBroker
+	}
 	ji, e := j.file.Stat()
 	ri, re := j.root.Stat(".")
 	if e != nil || re != nil || j.check() != nil {
 		return nil, errBroker
 	}
+	if ledgerOnly {
+		c.ledgerOnly = true
+		c.ledgerSlot = slot
+		c.ledgerAttempt = brokerFileIdentity(ri)
+		c.ledgerJournal = brokerFileIdentity(ji)
+		c.workflowProvenanceConfirmed = workflowProvenanceConfirmed
+		c.workflowProvenanceNoDispatch = workflowProvenanceNoDispatch
+		return c, nil
+	}
 	c.event = brokerClaimEvent{Kind: "claim", Slot: slot, Attempt: brokerFileIdentity(ri), Journal: brokerFileIdentity(ji)}
+	c.workflowProvenanceConfirmed = workflowProvenanceConfirmed
+	c.workflowProvenanceNoDispatch = workflowProvenanceNoDispatch
 	if p != nil {
 		b, e := p.binding()
 		if e != nil || (binding != nil && *binding != b) {
@@ -506,6 +649,13 @@ func openBrokerAdmission(directory string, a BrokerApproval, j *brokerJournal, p
 				return nil, errBroker
 			}
 			c.event.Provenance = &binding
+			if p.provenance.Source == handoff.ReusableCalleeSource {
+				expected, e := brokerWorkflowProvenanceEventFor(a, p.controller, j, p.provenance.Source)
+				confirmed, ok := workflowProvenanceConfirmed[slot]
+				if e != nil || !ok || !sameBrokerWorkflowProvenance(expected, confirmed) {
+					return nil, errBroker
+				}
+			}
 		}
 		c.event.Snapshot = brokerFileIdentity(p.snapshotInfo)
 		c.event.SnapshotDigest = a.ControllerApprovalSHA256
@@ -616,4 +766,62 @@ func sameBrokerReadTokenLifecycle(started, confirmed brokerReadTokenLifecycleEve
 	legacyPair := started.Kind == "read_token_revocation_started" && confirmed.Kind == "read_token_revocation_confirmed"
 	lifecyclePair := started.Kind == "read_token_lifecycle_started" && confirmed.Kind == "read_token_lifecycle_confirmed"
 	return (legacyPair || lifecyclePair) && sameBrokerReadTokenIdentity(started, confirmed)
+}
+
+func brokerWorkflowProvenanceEventFor(a BrokerApproval, c controllerApproval, j *brokerJournal, source string) (brokerWorkflowProvenanceEvent, error) {
+	if j == nil || j.file == nil || j.root == nil || (a.Mode != "controller" && a.Mode != "paired-terminal") || !brokerProvenanceSource.MatchString(source) {
+		return brokerWorkflowProvenanceEvent{}, errBroker
+	}
+	ji, e := j.file.Stat()
+	ri, re := j.root.Stat(".")
+	if e != nil || re != nil || j.check() != nil {
+		return brokerWorkflowProvenanceEvent{}, errBroker
+	}
+	slot := a.Phase
+	if a.Mode == "paired-terminal" {
+		slot = "paired-terminal"
+	}
+	event := brokerWorkflowProvenanceEvent{
+		Kind:                     "workflow_provenance_get_started",
+		Slot:                     slot,
+		Attempt:                  brokerFileIdentity(ri),
+		Journal:                  brokerFileIdentity(ji),
+		ControllerApprovalSHA256: a.ControllerApprovalSHA256,
+		Source:                   source,
+		WorkflowRunID:            c.WorkflowRunID,
+		WorkflowRef:              c.WorkflowRef,
+		WorkflowSHA:              c.WorkflowSHA,
+		WorkflowPath:             c.WorkflowPath,
+	}
+	if !validBrokerWorkflowProvenanceEvent(event) {
+		return brokerWorkflowProvenanceEvent{}, errBroker
+	}
+	return event, nil
+}
+
+func validBrokerWorkflowProvenanceEvent(e brokerWorkflowProvenanceEvent) bool {
+	return (e.Kind == "workflow_provenance_get_started" || e.Kind == "workflow_provenance_get_confirmed" || e.Kind == "workflow_provenance_get_not_dispatched") &&
+		brokerSlotAllowed(e.Slot) && e.Slot != "discover-actions-host" &&
+		e.Attempt.Device != 0 && e.Attempt.Inode != 0 && e.Journal.Device != 0 && e.Journal.Inode != 0 &&
+		brokerSHA256.MatchString(e.ControllerApprovalSHA256) && brokerProvenanceSource.MatchString(e.Source) && e.WorkflowRunID > 0 &&
+		brokerWorkflowRef.MatchString(e.WorkflowRef) && brokerSHA40.MatchString(e.WorkflowSHA) && brokerWorkflow.MatchString(e.WorkflowPath)
+}
+
+func sameBrokerWorkflowProvenance(started, event brokerWorkflowProvenanceEvent) bool {
+	return started.Slot == event.Slot && started.Attempt == event.Attempt && started.Journal == event.Journal &&
+		started.ControllerApprovalSHA256 == event.ControllerApprovalSHA256 && started.Source == event.Source &&
+		started.WorkflowRunID == event.WorkflowRunID && started.WorkflowRef == event.WorkflowRef &&
+		started.WorkflowSHA == event.WorkflowSHA && started.WorkflowPath == event.WorkflowPath &&
+		event.Kind != started.Kind
+}
+
+func brokerClaimMatchesWorkflowProvenance(claim brokerClaimEvent, confirmed brokerWorkflowProvenanceEvent) bool {
+	if claim.Provenance == nil || claim.Authority == nil || confirmed.Kind != "workflow_provenance_get_confirmed" {
+		return false
+	}
+	approval := claim.Authority.Approval
+	return confirmed.Slot == claim.Slot && confirmed.Attempt == claim.Attempt && confirmed.Journal == claim.Journal &&
+		confirmed.ControllerApprovalSHA256 == claim.SnapshotDigest && confirmed.Source == claim.Provenance.Source &&
+		confirmed.WorkflowRunID == approval.WorkflowRunID && confirmed.WorkflowRef == approval.WorkflowRef &&
+		confirmed.WorkflowSHA == approval.WorkflowSHA && confirmed.WorkflowPath == approval.WorkflowPath
 }

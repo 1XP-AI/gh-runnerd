@@ -200,22 +200,100 @@ func brokerWorkflowReceiptForRequest(ctx context.Context, api *brokerAPI, a Brok
 	if err != nil || request.ControllerApprovalSHA256 != controllerDigest {
 		return nil, errBroker
 	}
+	var provenanceLedger *brokerAdmission
+	var provenanceEvent brokerWorkflowProvenanceEvent
+	dispatchState := brokerWorkflowProvenanceDispatchState{attempted: true}
+	_, accountWorkflowGET := adapter.(*workflowProvenanceAdapter)
+	recordNoDispatch := func() {
+		if provenanceLedger == nil {
+			return
+		}
+		provenanceEvent.Kind = "workflow_provenance_get_not_dispatched"
+		if claimed[0].append("workflow_provenance_get_not_dispatched", brokerWorkflowProvenanceMetadata(provenanceEvent)) == nil && provenanceLedger.recordWorkflowProvenanceNotDispatched(provenanceEvent) == nil {
+			return
+		}
+		// A failed no-dispatch record must not release the account-wide
+		// intent. If no start was durable yet, retain one now so replay
+		// remains fenced rather than guessing that no request happened.
+		provenanceEvent.Kind = "workflow_provenance_get_started"
+		if provenanceLedger.workflowProvenancePending == nil {
+			_ = provenanceLedger.beginWorkflowProvenance(provenanceEvent)
+		}
+	}
+	if len(claimed) == 1 && accountWorkflowGET {
+		if api.admissionDirectory == nil || api.syncDirectory == nil {
+			return nil, errBroker
+		}
+		directory, e := api.admissionDirectory()
+		if e != nil {
+			return nil, errBroker
+		}
+		provenanceLedger, e = openBrokerAdmissionLedger(directory, a, claimed[0], api.syncDirectory)
+		if e != nil {
+			return nil, errBroker
+		}
+		defer provenanceLedger.close()
+		provenanceEvent, e = brokerWorkflowProvenanceEventFor(a, c, claimed[0], adapter.Source())
+		if e != nil {
+			return nil, errBroker
+		}
+		// The attempt journal is already held and records the non-secret GET
+		// intent. The account-wide start follows while its fixed lock is held;
+		// either durable record precedes the HTTP boundary.
+		if claimed[0].append("workflow_provenance_get_started", brokerWorkflowProvenanceMetadata(provenanceEvent)) != nil {
+			recordNoDispatch()
+			return nil, errBroker
+		}
+		if provenanceLedger.beginWorkflowProvenance(provenanceEvent) != nil {
+			recordNoDispatch()
+			return nil, errBroker
+		}
+	}
 	provenanceCtx, cancel, err := brokerProvenanceContext(ctx, a, c, api.now())
 	if err != nil {
+		recordNoDispatch()
 		return nil, errBroker
 	}
 	defer cancel()
 	if claimCheck() != nil {
+		recordNoDispatch()
 		return nil, errBroker
 	}
+	// Once the account start is durable, a timeout, transport failure or lost
+	// response is ambiguous and intentionally remains pending. The adapter only
+	// clears that ambiguity when it proves failure before entering observation.
+	provenanceCtx = context.WithValue(provenanceCtx, brokerWorkflowProvenanceDispatchStateKey{}, &dispatchState)
 	receipt, err := adapter.Attest(provenanceCtx, request)
 	if err != nil || provenanceCtx.Err() != nil || claimCheck() != nil || receipt.Validate(request, api.now()) != nil || receipt.ExpiresAt.Before(a.ExpiresAt) {
+		if provenanceLedger != nil && !dispatchState.attempted {
+			recordNoDispatch()
+		}
 		return nil, errBroker
 	}
 	if provenanceCtx.Err() != nil || claimCheck() != nil || root.Verify(request, receipt, api.now()) != nil || adapter.Verify(provenanceCtx, request, receipt) != nil || provenanceCtx.Err() != nil || claimCheck() != nil {
 		return nil, errBroker
 	}
+	if provenanceLedger != nil {
+		if claimed[0].append("workflow_provenance_get_observed", brokerWorkflowProvenanceMetadata(provenanceEvent)) != nil {
+			return nil, errBroker
+		}
+		provenanceEvent.Kind = "workflow_provenance_get_confirmed"
+		if provenanceLedger.confirmWorkflowProvenance(provenanceEvent) != nil {
+			return nil, errBroker
+		}
+	}
 	return &receipt, nil
+}
+
+func brokerWorkflowProvenanceMetadata(event brokerWorkflowProvenanceEvent) map[string]any {
+	return map[string]any{
+		"controller_approval_sha256": event.ControllerApprovalSHA256,
+		"source":                     event.Source,
+		"workflow_run_id":            event.WorkflowRunID,
+		"workflow_ref":               event.WorkflowRef,
+		"workflow_sha":               event.WorkflowSHA,
+		"workflow_path":              event.WorkflowPath,
+	}
 }
 
 // runBrokerWithAPI is a test seam for the shared broker phases. The public

@@ -829,3 +829,100 @@ roots, broker-only execution, management-token lifecycle, conditional Scale Set
 deletion, trusted runtime/isolation/resource qualification, the authorized
 Linux ARM64/JIT canary and sanitized live exit evidence remain open. Issue #1
 stays OPEN and Project #2 stays In progress.
+
+### Workflow-run provenance GET accounting fence — 2026-11-04
+
+Issue #160 starts from the exact local base `a4d6f03b81cbc77f51bf9eb0d37fdf47d67c02f3`.
+The initial authenticated workflow-run GET now has a two-record lifecycle in
+the fixed account ledger, bound to the already-open per-attempt journal,
+attempt/journal device+inode, controller-approval digest, source and exact run
+identity. The per-attempt intent is durable first; the account start is synced
+before dispatch; the account confirmation follows the validated GET and durable
+per-attempt observation while the account lock remains held. Timeout, transport
+failure, lost response, crash-visible start and confirmation failure remain
+pending and block later replay before any installation-token mint. Only an
+explicitly durable pre-dispatch outcome permits a later different recovery
+slot; the consumed attempt and same phase are not automatically retried.
+
+The causal fixture records the workflow GET itself in its ordered event stream,
+including the synthetic lost-response and timeout cases, while its API fixture
+rejects any installation-token mint before the workflow fence. A journal-boundary
+failure records `workflow_provenance_get_not_dispatched` and permits a later
+inspect; ambiguous GET outcomes leave `workflow_provenance_get_started` without
+confirmation and block the inspect before any API call.
+
+Historical local offline verification at exact candidate head
+`6950a80639931e497b55e665049af4d4956eacdf` used the cached Go 1.27.3 toolchain
+with external GOCACHE/GOMODCACHE/GOTMPDIR and downloads disabled:
+
+The RED fixture files were applied to a clean archive of exact base
+`a4d6f03b81cbc77f51bf9eb0d37fdf47d67c02f3`; no implementation files were
+changed in that archive. The identical selector was rerun on a fresh archive
+of the same base. Both runs showed no account workflow intent, then `inspect`
+completed and minted twice.
+
+| Check | Result |
+|---|---|
+| `go test -race -count=1 -timeout=120s -run '^TestBrokerExperimentV3LostWorkflowProvenanceResponseBlocksLaterInspect$' .` on exact base | FAIL as expected; `inspect` completed (`controller_completed`) and minted twice |
+| Same RED command on a fresh archive of exact base | Same failure and behavior |
+| Focused lost-response, timeout, no-dispatch and replay tests on candidate | PASS (4.573s) |
+| G02 `go test -race -p=1 -count=1 -timeout=300s ./...` | PASS (all packages; library 138.676s) |
+| G02 `go vet -p=1 ./...` | PASS |
+| Provider/credential/workflow/runner/Scale Set/Docker/host/live-canary actions | Not run |
+
+These are synthetic offline fixture results only. No provider credential or
+installation token was minted, no workflow or runner was invoked, and no live
+canary operation was attempted. At this historical `6950a80` candidate,
+independent exact-head review and hosted quick checks were still pending; the
+later PR #161 status is recorded below. All live authorization gates remain
+unresolved.
+
+### Historical workflow-provenance claim replay binding — 2026-11-04
+
+Independent Luna Max review of PR #161 at exact head
+`b9ca7c96c7881391a1cc9ed6f06b6a7848e9f1b4` found a P2 replay-binding gap:
+historical reusable-callee claims required a confirmed workflow GET record to
+exist, but did not require that record to match the claim's authority and
+workflow identity. A test-only overlay on a clean archive of that exact source
+reproduced the issue: after changing the historical event's attempt/journal,
+approval digest and workflow identity while retaining the claim, `inspect`
+completed and minted twice.
+
+Commit `eefe8dfde5134b014b54ca45277640c6401c0395` fixes replay by matching the
+claim to the confirmed record across slot, attempt and journal identities,
+controller-approval digest, provenance source, workflow run ID, ref, SHA and
+path. The exact-base RED was reproduced twice; the corrected focused race test
+passed in 4.498s, the full G02 race suite passed all packages (root package
+143.977s), and `go vet -p=1 ./...` passed. These checks were offline and used
+the cached Go 1.27.3 toolchain with caches and temporary files configured on an
+external volume.
+
+The corrected code and initial regression test were pushed as PR head
+`73c1299319441da6499dca55b79c237a3df5e4e2`; hosted Go checks passed and GitHub
+Codex review completed on that exact SHA with no major findings. The subsequent
+independent Luna Max review returned HOLD/P2: the regression changed several
+binding fields together, lacked isolated slot/source cases and did not name a
+matching-history positive control. The reviewer found the source comparisons
+correct and reported no P0/P1 source defect. A follow-up test-only change now
+mutates slot, attempt, journal, approval digest, source, run ID, ref, SHA and
+path independently, checks each rejection before API calls or minting, and
+includes a named matching-history replay control. On a clean archive of exact
+prior head `b9ca7c96c7881391a1cc9ed6f06b6a7848e9f1b4` with only this test file
+overlaid, the focused race test reproduced unsafe replay for each mismatched
+field except slot (which already failed closed); the matching-history control
+passed. The same focused race selector passes on the corrected local source,
+covering all nine mismatch cases and the positive control in 7.673s.
+
+The test refinement was committed and pushed in PR head
+`f0b4e97d323a0dc637dfe6cff9c74fa62ca1d922`; hosted Go checks passed. At the
+time of the independent Luna Max re-review, the exact-head Codex review was
+still running. Luna Max confirmed the P2 binding-test gap was resolved and no
+source P0/P1/P2 finding remained, but held overall because this section still
+described the pushed candidate as local and pending. The historical `6950a80`
+pending-review statements above are now explicitly labeled as such. At the time
+this review result arrived, the documentation correction was committed locally
+but not pushed; the follow-up PR head still required a hosted check
+and fresh exact-head Codex/Luna Max reviews. No live GitHub provider,
+credential, runner, Scale Set, Docker or host operation was performed. Issue
+#160 and parent issue #1 remain OPEN / Project #2 In progress; all live canary
+and production qualification gates remain unresolved.
