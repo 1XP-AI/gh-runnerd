@@ -301,7 +301,7 @@ func (f *ackCommandFixture) brokerWire(r *http.Request) {
 	v3 := f.base.a.GroupPolicy.Version == 2
 	primary := []string{"GET " + workflowRunFixturePath(f.transport), "GET /app", "GET /orgs/fixture-org/installation", "GET " + workflowRunFixturePath(f.transport), "POST /app/installations/12/access_tokens", "GET /installation/repositories", "GET /repos/fixture-org/canary", "GET /orgs/fixture-org/actions/runner-groups/3", "GET /orgs/fixture-org/actions/runner-groups/3/repositories"}
 	if v3 {
-		primary = []string{"GET " + workflowRunFixturePath(f.transport), "GET /app", "GET /orgs/fixture-org/installation", "POST /app/installations/12/access_tokens", "GET /installation/repositories", "GET /repos/fixture-org/canary", "GET /orgs/fixture-org/actions/runner-groups/3", "GET /orgs/fixture-org/actions/runner-groups/3/repositories", "DELETE /installation/token", "GET " + workflowRunFixturePath(f.transport), "POST /app/installations/12/access_tokens", "GET /installation/repositories", "GET /repos/fixture-org/canary", "GET /orgs/fixture-org/actions/runner-groups/3", "GET /orgs/fixture-org/actions/runner-groups/3/repositories", "GET " + workflowRunFixturePath(f.transport)}
+		primary = []string{"GET " + workflowRunFixturePath(f.transport), "GET /app", "GET /orgs/fixture-org/installation", "POST /app/installations/12/access_tokens", "GET /installation/repositories", "GET /repos/fixture-org/canary", "GET /orgs/fixture-org/actions/runner-groups/3", "GET /orgs/fixture-org/actions/runner-groups/3/repositories", "DELETE /installation/token", "GET " + workflowRunFixturePath(f.transport), "POST /app/installations/12/access_tokens", "GET /installation/repositories", "GET /repos/fixture-org/canary", "GET /orgs/fixture-org/actions/runner-groups/3", "GET /orgs/fixture-org/actions/runner-groups/3/repositories", "GET " + workflowRunFixturePath(f.transport), "DELETE /installation/token"}
 	}
 	position := len(f.brokerAttempts) - 1 // shared lock held; already counted before drain
 	fresh := f.transport.attempt == f.attempt+"-fresh"
@@ -359,6 +359,9 @@ func (f *ackCommandFixture) brokerWire(r *http.Request) {
 			token = "synthetic-process-read-installation-token"
 		} else if v3 && r.URL.Path == "/installation/token" {
 			token = "synthetic-process-read-installation-token"
+			if position == len(primary)-1 {
+				token = "synthetic-process-installation-token"
+			}
 		}
 		if auth != "Bearer "+token {
 			t.Error("ACK broker distinct observation/verification/installation authority differs")
@@ -602,7 +605,7 @@ func (f *ackCommandFixture) assertBroker() {
 	want := []string{"GET " + workflowRunFixturePath(f.transport), "GET /app", "GET /orgs/fixture-org/installation", "GET " + workflowRunFixturePath(f.transport), "POST /app/installations/12/access_tokens", "GET /installation/repositories", "GET /repos/fixture-org/canary", "GET /orgs/fixture-org/actions/runner-groups/3", "GET /orgs/fixture-org/actions/runner-groups/3/repositories"}
 	v3 := f.base.a.GroupPolicy.Version == 2
 	if v3 {
-		want = []string{"GET " + workflowRunFixturePath(f.transport), "GET /app", "GET /orgs/fixture-org/installation", "POST /app/installations/12/access_tokens", "GET /installation/repositories", "GET /repos/fixture-org/canary", "GET /orgs/fixture-org/actions/runner-groups/3", "GET /orgs/fixture-org/actions/runner-groups/3/repositories", "DELETE /installation/token", "GET " + workflowRunFixturePath(f.transport), "POST /app/installations/12/access_tokens", "GET /installation/repositories", "GET /repos/fixture-org/canary", "GET /orgs/fixture-org/actions/runner-groups/3", "GET /orgs/fixture-org/actions/runner-groups/3/repositories", "GET " + workflowRunFixturePath(f.transport)}
+		want = []string{"GET " + workflowRunFixturePath(f.transport), "GET /app", "GET /orgs/fixture-org/installation", "POST /app/installations/12/access_tokens", "GET /installation/repositories", "GET /repos/fixture-org/canary", "GET /orgs/fixture-org/actions/runner-groups/3", "GET /orgs/fixture-org/actions/runner-groups/3/repositories", "DELETE /installation/token", "GET " + workflowRunFixturePath(f.transport), "POST /app/installations/12/access_tokens", "GET /installation/repositories", "GET /repos/fixture-org/canary", "GET /orgs/fixture-org/actions/runner-groups/3", "GET /orgs/fixture-org/actions/runner-groups/3/repositories", "GET " + workflowRunFixturePath(f.transport), "DELETE /installation/token"}
 	}
 	if !reflect.DeepEqual(f.brokerAttempts, f.transport.calls) {
 		f.t.Error("ACK broker server-entry counts differ from dispatched calls")
@@ -611,7 +614,7 @@ func (f *ackCommandFixture) assertBroker() {
 		f.t.Errorf("ACK actual broker exact trace differs: calls=%v want=%v", f.transport.calls, want)
 	}
 	if v3 {
-		if f.transport.mints != 2 || f.transport.readOnlyMints != 1 || f.transport.managementMints != 1 || f.transport.revocations != 1 {
+		if f.transport.mints != 2 || f.transport.readOnlyMints != 1 || f.transport.managementMints != 1 || f.transport.revocations != 2 || f.transport.readOnlyRevocations != 1 || f.transport.managementRevocations != 1 {
 			f.t.Errorf("ACK actual broker issuance lifecycle differs: mints=%d read-only=%d management=%d revocations=%d", f.transport.mints, f.transport.readOnlyMints, f.transport.managementMints, f.transport.revocations)
 		}
 	} else if f.transport.mints != 1 {
@@ -670,11 +673,11 @@ func (f *ackCommandFixture) assertBroker() {
 		f.t.Errorf("ACK workflow provenance lifecycle events=%d, want none or a start/confirmation pair", workflowEvents)
 	}
 	if v3 {
-		wantLedger += 2 // read-token lifecycle start and confirmation surround completion.
+		wantLedger += 4 // read and management lifecycle starts and confirmations surround completion.
 	}
 	completionIndex := claimIndex + 1
 	if v3 {
-		completionIndex += 2
+		completionIndex += 4
 	}
 	if len(ledger) != wantLedger || claimIndex >= len(ledger) {
 		f.t.Errorf("ACK exact broker claim/completion count differs: events=%d want=%d claim-index=%d", len(ledger), wantLedger, claimIndex)
@@ -706,6 +709,10 @@ func (f *ackCommandFixture) assertBroker() {
 			readTokenStartIndex := claimIndex + 1
 			if json.Unmarshal(ledger[readTokenStartIndex], &started) != nil || json.Unmarshal(ledger[readTokenStartIndex+1], &confirmed) != nil || started.Kind != "read_token_lifecycle_started" || confirmed.Kind != "read_token_lifecycle_confirmed" || started.Slot != claimIdentity.Slot || confirmed.Slot != claimIdentity.Slot || !bytes.Equal(started.Attempt, claimIdentity.Attempt) || !bytes.Equal(started.Journal, claimIdentity.Journal) || !bytes.Equal(confirmed.Attempt, claimIdentity.Attempt) || !bytes.Equal(confirmed.Journal, claimIdentity.Journal) {
 				f.t.Error("ACK read-token lifecycle claim identity differs")
+			}
+			managementTokenStartIndex := claimIndex + 3
+			if json.Unmarshal(ledger[managementTokenStartIndex], &started) != nil || json.Unmarshal(ledger[managementTokenStartIndex+1], &confirmed) != nil || started.Kind != "management_token_lifecycle_started" || confirmed.Kind != "management_token_lifecycle_confirmed" || started.Slot != claimIdentity.Slot || confirmed.Slot != claimIdentity.Slot || !bytes.Equal(started.Attempt, claimIdentity.Attempt) || !bytes.Equal(started.Journal, claimIdentity.Journal) || !bytes.Equal(confirmed.Attempt, claimIdentity.Attempt) || !bytes.Equal(confirmed.Journal, claimIdentity.Journal) {
+				f.t.Error("ACK management-token lifecycle claim identity differs")
 			}
 		}
 		if wantComplete == 1 {

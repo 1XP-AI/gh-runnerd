@@ -40,6 +40,7 @@ type WorkflowRunForFixture struct {
 	HeadSHA        string                       `json:"head_sha"`
 	HeadBranch     string                       `json:"head_branch"`
 	Event          string                       `json:"event"`
+	Status         string                       `json:"status"`
 	Path           string                       `json:"path"`
 	RunAttempt     int                          `json:"run_attempt"`
 	Repository     WorkflowRepositoryForFixture `json:"repository"`

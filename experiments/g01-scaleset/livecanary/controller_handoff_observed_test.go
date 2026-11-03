@@ -30,7 +30,7 @@ func observedHandoffInputs(t *testing.T, f controllerHandoffFixture) (enrollment
 	grant := enrollment.WorkflowGrantForFixture{Request: request, OrganizationID: 101, RepositoryID: f.approval.RepositoryID, ExpiresAt: f.now.Add(time.Hour)}
 	repo := enrollment.WorkflowRepositoryForFixture{ID: grant.RepositoryID, FullName: request.Repository, Private: true}
 	repo.Owner.ID, repo.Owner.Login = grant.OrganizationID, f.approval.Organization
-	run := enrollment.WorkflowRunForFixture{ID: request.WorkflowRunID, HeadSHA: request.WorkflowSHA, HeadBranch: "main", Event: "workflow_dispatch", Path: request.WorkflowPath, RunAttempt: 1, Repository: repo, HeadRepository: repo}
+	run := enrollment.WorkflowRunForFixture{ID: request.WorkflowRunID, HeadSHA: request.WorkflowSHA, HeadBranch: "main", Event: "workflow_dispatch", Status: "in_progress", Path: request.WorkflowPath, RunAttempt: 1, Repository: repo, HeadRepository: repo}
 	return grant, run
 }
 

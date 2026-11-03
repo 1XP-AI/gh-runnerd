@@ -464,7 +464,11 @@ func newCommandQualificationFixture(t *testing.T, controller, broker, variant, p
 	if os.WriteFile(f.brokerApprovalPath, raw, 0600) != nil {
 		t.Fatal("broker approval write")
 	}
-	f.transport = &processBrokerHTTP{t: t, attempt: f.attempt, approval: &f.base.a}
+	verificationAuthorization := "Bearer " + f.base.api.credentials.VerificationToken
+	f.transport = &processBrokerHTTP{
+		t: t, attempt: f.attempt, approval: &f.base.a,
+		expectedWorkflowAuthorizations: []string{"Bearer synthetic-observation-credential", verificationAuthorization, verificationAuthorization},
+	}
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.brokerMu.Lock()
 		defer f.brokerMu.Unlock()
@@ -791,8 +795,9 @@ func (f *acquireLossCommandFixture) guardControlsForPhase(events []Event, phase 
 	f.brokerMu.Lock()
 	replayCalls, replayMints := len(f.transport.calls), f.transport.mints
 	replayReadOnlyMints, replayManagementMints, replayRevocations := f.transport.readOnlyMints, f.transport.managementMints, f.transport.revocations
+	replayReadOnlyRevocations, replayManagementRevocations := f.transport.readOnlyRevocations, f.transport.managementRevocations
 	f.brokerMu.Unlock()
-	if !bytes.Equal(brokerBefore, brokerAfter) || replayCalls != originalCalls || replayMints != 2 || replayReadOnlyMints != 1 || replayManagementMints != 1 || replayRevocations != 1 {
+	if !bytes.Equal(brokerBefore, brokerAfter) || replayCalls != originalCalls || replayMints != 2 || replayReadOnlyMints != 1 || replayManagementMints != 1 || replayRevocations != 2 || replayReadOnlyRevocations != 1 || replayManagementRevocations != 1 {
 		t.Error("exact broker-attempt replay changed history or crossed API/mint boundary")
 	}
 	claimPath := filepath.Join(f.admission, "broker-admission.jsonl")
@@ -845,6 +850,8 @@ func (f *acquireLossCommandFixture) guardControlsForPhase(events []Event, phase 
 	readOnlyMintsBefore := f.transport.readOnlyMints
 	managementMintsBefore := f.transport.managementMints
 	revocationsBefore := f.transport.revocations
+	readOnlyRevocationsBefore := f.transport.readOnlyRevocations
+	managementRevocationsBefore := f.transport.managementRevocations
 	f.transport.attempt = fresh
 	f.brokerMu.Unlock()
 	f.run(f.broker, f.brokerArgs(fresh), inputs...)
@@ -854,12 +861,14 @@ func (f *acquireLossCommandFixture) guardControlsForPhase(events []Event, phase 
 	readOnlyMintsAfter := f.transport.readOnlyMints
 	managementMintsAfter := f.transport.managementMints
 	revocationsAfter := f.transport.revocations
+	readOnlyRevocationsAfter := f.transport.readOnlyRevocations
+	managementRevocationsAfter := f.transport.managementRevocations
 	f.brokerMu.Unlock()
 	wantCalls := []string{"GET " + workflowRunFixturePath(f.transport)}
 	if workflowGETAccounted {
 		wantCalls = nil
 	}
-	if !reflect.DeepEqual(calls, wantCalls) || mintsAfter != mintsBefore || readOnlyMintsAfter != readOnlyMintsBefore || managementMintsAfter != managementMintsBefore || revocationsAfter != revocationsBefore {
+	if !reflect.DeepEqual(calls, wantCalls) || mintsAfter != mintsBefore || readOnlyMintsAfter != readOnlyMintsBefore || managementMintsAfter != managementMintsBefore || revocationsAfter != revocationsBefore || readOnlyRevocationsAfter != readOnlyRevocationsBefore || managementRevocationsAfter != managementRevocationsBefore {
 		t.Error("fresh occupied-phase broker attempt crossed the expected provider or token boundary")
 	}
 	snapshotPath := filepath.Join(fresh, "controller-approval.json")
@@ -900,12 +909,14 @@ func TestExperimentalAcquireLossCommand(t *testing.T) {
 			managementMints := f.transport.managementMints
 			readOnlyMints := f.transport.readOnlyMints
 			revocations := f.transport.revocations
+			readOnlyRevocations := f.transport.readOnlyRevocations
+			managementRevocations := f.transport.managementRevocations
 			calls := append([]string(nil), f.transport.calls...)
 			f.brokerMu.Unlock()
 			if managementMints != 1 {
 				t.Fatalf("actual broker management issuance did not mint exactly once: total=%d read-only=%d management=%d revocations=%d calls=%v", mints, readOnlyMints, managementMints, revocations, calls)
 			}
-			if mints != 2 || readOnlyMints != 1 || revocations != 1 {
+			if mints != 2 || readOnlyMints != 1 || revocations != 2 || readOnlyRevocations != 1 || managementRevocations != 1 {
 				t.Fatalf("actual broker issuance lifecycle differs: total=%d read-only=%d management=%d revocations=%d calls=%v", mints, readOnlyMints, managementMints, revocations, calls)
 			}
 			events := f.assertRetained(variant)

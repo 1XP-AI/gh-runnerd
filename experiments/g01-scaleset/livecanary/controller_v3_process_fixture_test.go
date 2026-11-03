@@ -170,7 +170,14 @@ func newControllerV3ProcessFixture(t *testing.T) controllerV3ProcessFixture {
 	if err := os.WriteFile(brokerApprovalPath, brokerRaw, 0600); err != nil {
 		t.Fatal(err)
 	}
-	base := &processBrokerHTTP{t: t, attempt: attempt, approval: &approval}
+	base := &processBrokerHTTP{
+		t: t, attempt: attempt, approval: &approval,
+		expectedWorkflowAuthorizations: []string{
+			"Bearer synthetic-observation-token",
+			"Bearer synthetic-process-verification-token",
+			"Bearer synthetic-process-verification-token",
+		},
+	}
 	return controllerV3ProcessFixture{
 		controller: controller,
 		files: enrollment.BrokerFiles{
@@ -276,15 +283,17 @@ func TestControllerProcessHandoffV3ActualBrokerChild(t *testing.T) {
 			result, effects, err := enrollment.RunProcessHandoffForFixtureWithOptions(context.Background(), fixture.files, fixture.transport, fixture.grant, options)
 			controllerEffects := controllerV3ProcessEffects(t, fixture)
 			events := controllerV3ProcessEvents(t, fixture)
+			assertProcessBrokerTrace(t, fixture.transport.base, expectedProcessBrokerV3Trace(*fixture.transport.base.approval, false))
+			assertProcessBrokerTokenLifecycle(t, fixture.files.StateDirectory, filepath.Join(filepath.Dir(fixture.files.StateDirectory), "admission"), true, true)
 			if tc.wantSuccess {
 				receipt, receiptErr := handoff.DecodeStrictReceipt(observedReceipt)
 				binding, bindingErr := handoff.DecodeStrictBinding(observedBinding)
-				if err != nil || result.Status != "controller_completed" || effects.WorkflowSignatures != 1 || effects.BindingSignatures != 1 || fixture.transport.base.mints != 2 || fixture.transport.base.revocations != 1 || receiptErr != nil || bindingErr != nil || receipt.Callee != fixture.controller.request.Callee || binding.Request != fixture.controller.request || controllerEffects["factory_calls"] != 1 || controllerEffects["create_calls"] != 1 || len(events) != 7 {
+				if err != nil || result.Status != "controller_completed" || effects.WorkflowSignatures != 1 || effects.BindingSignatures != 1 || fixture.transport.base.mints != 2 || fixture.transport.base.revocations != 2 || fixture.transport.base.readOnlyRevocations != 1 || fixture.transport.base.managementRevocations != 1 || receiptErr != nil || bindingErr != nil || receipt.Callee != fixture.controller.request.Callee || binding.Request != fixture.controller.request || controllerEffects["factory_calls"] != 1 || controllerEffects["create_calls"] != 1 || len(events) != 7 {
 					t.Fatalf("positive child handoff: result=%+v err=%v effects=%+v mints=%d calls=%v controller_effects=%v journal_events=%d receipt_err=%v binding_err=%v", result, err, effects, fixture.transport.base.mints, fixture.transport.base.calls, controllerEffects, len(events), receiptErr, bindingErr)
 				}
 				return
 			}
-			if err == nil || result.Status == "controller_completed" || effects.WorkflowSignatures != 1 || effects.BindingSignatures != 1 || fixture.transport.base.mints != 2 || fixture.transport.base.revocations != 1 || controllerEffects["factory_calls"] != 0 || controllerEffects["create_calls"] != 0 || len(events) != 0 {
+			if err == nil || result.Status == "controller_completed" || effects.WorkflowSignatures != 1 || effects.BindingSignatures != 1 || fixture.transport.base.mints != 2 || fixture.transport.base.revocations != 2 || fixture.transport.base.readOnlyRevocations != 1 || fixture.transport.base.managementRevocations != 1 || controllerEffects["factory_calls"] != 0 || controllerEffects["create_calls"] != 0 || len(events) != 0 {
 				t.Fatalf("rejected child handoff crossed effect boundary: result=%+v err=%v effects=%+v mints=%d calls=%v controller_effects=%v journal_events=%d", result, err, effects, fixture.transport.base.mints, fixture.transport.base.calls, controllerEffects, len(events))
 			}
 		})

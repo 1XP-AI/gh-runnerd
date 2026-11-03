@@ -99,8 +99,7 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 	for _, caseName := range cases {
 		t.Run(caseName, func(t *testing.T) {
 			mode := caseName
-			groupCase := strings.HasPrefix(caseName, "group-policy")
-			if groupCase {
+			if strings.HasPrefix(caseName, "group-policy") {
 				mode = "before-ack"
 			}
 			variant := "old41"
@@ -126,16 +125,15 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 			var physicalJIT, workerReads int
 			committedName := ""
 			if mode == "paired-terminal" {
-				terminal = newTerminalFixtureWithCreate(t, []string{"create", "start", "inspect", "cleanup"}, nil, func(j *FileJournal, a Approval) { completedHandoffCreate(t, j, a) })
+				groupPolicy := handoff.GroupPolicy{Version: 2, OrganizationID: 101, Workflow: "fixture-org/canary/.github/workflows/runner.yml@" + strings.Repeat("d", 40)}
+				terminal = newTerminalFixtureWithControllerGroupPolicy(t, []string{"create", "start", "inspect", "cleanup"}, nil, func(j *FileJournal, a Approval) { completedHandoffCreate(t, j, a) }, &groupPolicy)
 				base = terminal.c
 				fixture := newExportedPairedFixture(t, terminal)
 				files = fixture.files
 			} else {
 				a := approval()
 				a.WorkflowRef = "refs/heads/main"
-				if groupCase {
-					a.GroupPolicy = handoff.GroupPolicy{Version: 2, OrganizationID: 101, Workflow: a.Organization + "/" + a.Repository + "/.github/workflows/runner.yml@" + strings.Repeat("d", 40)}
-				}
+				a.GroupPolicy = handoff.GroupPolicy{Version: 2, OrganizationID: 101, Workflow: a.Organization + "/" + a.Repository + "/.github/workflows/runner.yml@" + strings.Repeat("d", 40)}
 				if caseName == "group-policy-org" {
 					a.ManagementScope = "organization-only"
 				}
@@ -212,7 +210,7 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 						body = repo
 					case "/orgs/fixture-org/actions/runner-groups/3":
 						body = map[string]any{"id": 3, "visibility": "selected", "default": false, "allows_public_repositories": false, "inherited": false}
-						if groupCase {
+						if a.GroupPolicy.Version == 2 {
 							expected := a.GroupPolicy.Workflow
 							if caseName == "group-policy-controller-wrong" {
 								expected = strings.Replace(expected, "dddd", "eeee", 1)
@@ -313,7 +311,12 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 				t.Fatal("broker approval")
 			}
 			brokerFiles := enrollment.BrokerFiles{ApprovalPath: approvalPath, StateDirectory: filepath.Join(parent, "attempt-"+mode), ControllerBinary: binPath, ControllerApproval: files.ControllerApprovalPath, ControllerStateDirectory: files.ControllerStateDirectory, WorkerApproval: files.WorkerApprovalPath, WorkerStateDirectory: files.WorkerStateDirectory}
-			transport := &processBrokerHTTP{t: t, attempt: brokerFiles.StateDirectory, approval: &a, groupFault: caseName == "group-policy-broker-wrong"}
+			verificationAuthorization := "Bearer " + base.api.credentials.VerificationToken
+			transport := &processBrokerHTTP{
+				t: t, attempt: brokerFiles.StateDirectory, approval: &a,
+				expectedWorkflowAuthorizations: []string{"Bearer synthetic-observation-credential", verificationAuthorization, verificationAuthorization},
+				groupFault:                     caseName == "group-policy-broker-wrong",
+			}
 			if e := enrollment.ConfigureBrokerExperimentForFixture(experimentalPolicy(t, a, raw, brokerMode, phase, "broker"), transport, admission, workerAdmission); e != nil {
 				t.Fatal(e)
 			}
@@ -354,7 +357,7 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 				defer server.Close()
 				policy := experimentalPolicy(t, a, raw, brokerMode, phase, "broker")
 				if caseName == "unknown-policy" {
-					policy = strings.Replace(policy, `"version":1`, `"version":1,"unreviewed":true`, 1)
+					policy = strings.Replace(policy, `"version":3`, `"version":3,"unreviewed":true`, 1)
 				}
 				config, _ := json.Marshal(map[string]string{"policy": policy, "base_url": server.URL, "ca_pem": string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})), "admission": admission, "worker_admission": workerAdmission})
 				if os.WriteFile(filepath.Join(files.ControllerStateDirectory, "broker-experiment-fixture.json"), config, 0600) != nil {
@@ -418,8 +421,8 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 				return
 			}
 			if mode == replacementPhase && (variant == "missing" || variant == "null") {
-				if e == nil || transport.mints != 1 || !reflect.DeepEqual(replacement.snapshot(), []string{"set", "worker", "open1", "poll1"}) || base.acks.Load() != 0 || base.acquires.Load() != 0 {
-					t.Fatal("missing/null identity crossed replacement boundary", replacement.snapshot())
+				if e == nil || transport.mints != 2 || transport.readOnlyMints != 1 || transport.managementMints != 1 || transport.revocations != 2 || transport.readOnlyRevocations != 1 || transport.managementRevocations != 1 || !reflect.DeepEqual(replacement.snapshot(), []string{"set", "worker", "open1", "poll1"}) || base.acks.Load() != 0 || base.acquires.Load() != 0 {
+					t.Fatalf("missing/null identity crossed replacement boundary: err=%v trace=%v mints=%d read-only=%d management=%d revocations=%d read-only-revocations=%d management-revocations=%d ack=%d acquire=%d", e, replacement.snapshot(), transport.mints, transport.readOnlyMints, transport.managementMints, transport.revocations, transport.readOnlyRevocations, transport.managementRevocations, base.acks.Load(), base.acquires.Load())
 				}
 				return
 			}
@@ -432,10 +435,25 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 					t.Fatalf("actual %s command produced no typed physical boundary evidence (physical JIT %d)", mode, physicalJIT)
 				}
 			}
-			if caseName == "group-policy-broker-wrong" || caseName == "group-policy-controller-wrong" {
-				if e == nil || transport.mints != 1 || base.acks.Load() != 0 || base.acquires.Load() != 0 {
+			if caseName == "group-policy-broker-wrong" {
+				if e == nil || transport.mints != 1 || transport.readOnlyMints != 1 || transport.managementMints != 0 || transport.revocations != 1 || transport.readOnlyRevocations != 1 || transport.managementRevocations != 0 || base.acks.Load() != 0 || base.acquires.Load() != 0 {
 					t.Fatal("wrong group crossed actual command boundary", e, transport.mints)
 				}
+				assertProcessBrokerTrace(t, transport, expectedProcessBrokerV3Trace(a, true))
+				assertProcessBrokerTokenLifecycle(t, brokerFiles.StateDirectory, admission, true, false)
+				for _, event := range base.readEvents() {
+					if event.ControllerHandoff != nil && event.ControllerHandoff.Phase == phase {
+						t.Fatal("broker-side group rejection consumed the signed handoff")
+					}
+				}
+				return
+			}
+			if caseName == "group-policy-controller-wrong" {
+				if e == nil || transport.mints != 2 || transport.readOnlyMints != 1 || transport.managementMints != 1 || transport.revocations != 2 || transport.readOnlyRevocations != 1 || transport.managementRevocations != 1 || base.acks.Load() != 0 || base.acquires.Load() != 0 {
+					t.Fatal("wrong controller group crossed actual command boundary", e, transport.mints)
+				}
+				assertProcessBrokerTrace(t, transport, expectedProcessBrokerV3Trace(a, false))
+				assertProcessBrokerTokenLifecycle(t, brokerFiles.StateDirectory, admission, true, true)
 				consumed := false
 				for _, event := range base.readEvents() {
 					if event.ControllerHandoff != nil && event.ControllerHandoff.Phase == phase {
@@ -447,7 +465,7 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 				}
 				return
 			}
-			if e != nil || transport.mints != 1 {
+			if e != nil || transport.mints != 2 || transport.readOnlyMints != 1 || transport.managementMints != 1 || transport.revocations != 2 || transport.readOnlyRevocations != 1 || transport.managementRevocations != 1 {
 				for _, path := range []string{filepath.Join(brokerFiles.StateDirectory, "broker.jsonl"), filepath.Join(files.ControllerStateDirectory, "journal.jsonl")} {
 					data, _ := os.ReadFile(path)
 					for _, line := range bytes.Split(data, []byte("\n")) {
@@ -458,8 +476,10 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 					}
 				}
 				t.Logf("safe counts: requests=%d forbidden=%d", base.requests.Load(), base.forbidden.Load())
-				t.Fatalf("actual %s command failed: %v result=%+v mints=%d calls=%v", mode, e, result, transport.mints, transport.calls)
+				t.Fatalf("actual %s command failed: %v result=%+v mints=%d read-only=%d management=%d revocations=%d read-only-revocations=%d management-revocations=%d calls=%v", mode, e, result, transport.mints, transport.readOnlyMints, transport.managementMints, transport.revocations, transport.readOnlyRevocations, transport.managementRevocations, transport.calls)
 			}
+			assertProcessBrokerTrace(t, transport, expectedProcessBrokerV3Trace(a, false))
+			assertProcessBrokerTokenLifecycle(t, brokerFiles.StateDirectory, admission, true, true)
 			data, e := os.ReadFile(filepath.Join(files.ControllerStateDirectory, "journal.jsonl"))
 			if e != nil {
 				t.Fatal(e)

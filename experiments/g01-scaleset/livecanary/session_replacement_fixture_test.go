@@ -166,7 +166,12 @@ func (f *replacementTrace) extra(w http.ResponseWriter, r *http.Request) bool {
 	case "/repos/fixture-org/canary":
 		value = repo
 	case "/orgs/fixture-org/actions/runner-groups/3":
-		value = map[string]any{"id": 3, "visibility": "selected", "default": false, "allows_public_repositories": false, "inherited": false}
+		group := map[string]any{"id": 3, "name": "fixture-group", "visibility": "selected", "default": false, "allows_public_repositories": false, "inherited": false}
+		if a.GroupPolicy.Version == 2 {
+			group["restricted_to_workflows"] = true
+			group["selected_workflows"] = []string{a.GroupPolicy.Workflow}
+		}
+		value = group
 	default:
 		return false
 	}
