@@ -25,6 +25,8 @@ type verifiedBrokerBinary struct {
 	digest string
 }
 
+const brokerScaleSetSDKSum = "h1:IoE2xjt9cXyTndIrpz5pMoKpzV/fW2ECIEJc5xuHRbM="
+
 // brokerBinaryOpener is kept narrow so offline tests can exercise the real
 // BrokerFiles entrypoint with the test executable without weakening the
 // production build metadata gate.
@@ -48,7 +50,7 @@ func validBrokerBuild(info *debug.BuildInfo, expected string) bool {
 	if info == nil || info.GoVersion != "go1.27.3" || info.Path != "github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/cmd/g01-live" || !brokerSHA40.MatchString(expected) {
 		return false
 	}
-	revision, clean, sdk := "", false, false
+	revision, clean, sdkFound, sdk := "", false, false, false
 	goos, goarch, cgo, tags := "", "", "", ""
 	for _, setting := range info.Settings {
 		switch setting.Key {
@@ -68,7 +70,11 @@ func validBrokerBuild(info *debug.BuildInfo, expected string) bool {
 	}
 	for _, dep := range info.Deps {
 		if dep.Path == "github.com/actions/scaleset" {
-			sdk = dep.Version == "v0.5.0" && dep.Replace == nil
+			if sdkFound {
+				return false
+			}
+			sdkFound = true
+			sdk = dep.Version == "v0.5.0" && dep.Sum == brokerScaleSetSDKSum && dep.Replace == nil
 		}
 	}
 	for _, tag := range strings.FieldsFunc(tags, func(r rune) bool { return r == ',' || unicode.IsSpace(r) }) {
@@ -80,7 +86,7 @@ func validBrokerBuild(info *debug.BuildInfo, expected string) bool {
 			return false
 		}
 	}
-	return goos == runtime.GOOS && goarch == runtime.GOARCH && cgo == "1" && revision == expected && clean && sdk && tags == "g01_live"
+	return goos == runtime.GOOS && goarch == runtime.GOARCH && cgo == "1" && revision == expected && clean && sdkFound && sdk && tags == "g01_live"
 }
 func openBrokerBinary(path string, a BrokerApproval) (*verifiedBrokerBinary, error) {
 	f, err := openBrokerPrivateFile(path, 0500, 128<<20)
