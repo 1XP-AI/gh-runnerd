@@ -53,12 +53,132 @@ type publicEvidenceCountsInput struct {
 	Idle       *int `json:"idle"`
 }
 
+func consumePublicEvidenceJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return livecanary.ErrPublicEvidence
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch delimiter {
+	case '{':
+		keys := make(map[string]struct{})
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			key, ok := keyToken.(string)
+			if err != nil || !ok {
+				return livecanary.ErrPublicEvidence
+			}
+			if _, exists := keys[key]; exists {
+				return livecanary.ErrPublicEvidence
+			}
+			keys[key] = struct{}{}
+			if consumePublicEvidenceJSONValue(decoder) != nil {
+				return livecanary.ErrPublicEvidence
+			}
+		}
+		end, err := decoder.Token()
+		if err != nil || end != json.Delim('}') {
+			return livecanary.ErrPublicEvidence
+		}
+	case '[':
+		for decoder.More() {
+			if consumePublicEvidenceJSONValue(decoder) != nil {
+				return livecanary.ErrPublicEvidence
+			}
+		}
+		end, err := decoder.Token()
+		if err != nil || end != json.Delim(']') {
+			return livecanary.ErrPublicEvidence
+		}
+	default:
+		return livecanary.ErrPublicEvidence
+	}
+	return nil
+}
+
+func publicEvidenceObjectFields(raw json.RawMessage, allowed, required []string) (map[string]json.RawMessage, bool) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return nil, false
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(trimmed, &fields) != nil || fields == nil {
+		return nil, false
+	}
+	allowedFields := make(map[string]struct{}, len(allowed))
+	for _, name := range allowed {
+		allowedFields[name] = struct{}{}
+	}
+	for name, value := range fields {
+		if _, ok := allowedFields[name]; !ok || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			return nil, false
+		}
+	}
+	for _, name := range required {
+		if _, ok := fields[name]; !ok {
+			return nil, false
+		}
+	}
+	return fields, true
+}
+
+func validatePublicEvidenceInputJSON(raw []byte) bool {
+	duplicateCheck := json.NewDecoder(bytes.NewReader(raw))
+	duplicateCheck.UseNumber()
+	if consumePublicEvidenceJSONValue(duplicateCheck) != nil {
+		return false
+	}
+	if _, err := duplicateCheck.Token(); err != io.EOF {
+		return false
+	}
+
+	var events []json.RawMessage
+	if json.Unmarshal(raw, &events) != nil || len(events) == 0 {
+		return false
+	}
+	for _, event := range events {
+		fields, ok := publicEvidenceObjectFields(event,
+			[]string{"elapsed_ms", "attempt", "session_generation", "phase", "operation", "outcome", "resources", "http_status", "succeeded", "counts"},
+			[]string{"elapsed_ms", "phase", "operation", "outcome"})
+		if !ok {
+			return false
+		}
+		if resources, exists := fields["resources"]; exists {
+			trimmed := bytes.TrimSpace(resources)
+			if len(trimmed) == 0 || trimmed[0] != '[' {
+				return false
+			}
+			var items []json.RawMessage
+			if json.Unmarshal(trimmed, &items) != nil {
+				return false
+			}
+			for _, item := range items {
+				if _, ok := publicEvidenceObjectFields(item, []string{"kind", "id"}, []string{"kind", "id"}); !ok {
+					return false
+				}
+			}
+		}
+		if counts, exists := fields["counts"]; exists {
+			if _, ok := publicEvidenceObjectFields(counts, []string{"available", "acquired", "assigned", "running", "registered", "busy", "idle"}, nil); !ok {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func decodePublicEvidenceInput(input io.Reader) ([]livecanary.PublicEvidenceObservation, error) {
 	if input == nil {
 		return nil, livecanary.ErrPublicEvidence
 	}
 	raw, err := io.ReadAll(io.LimitReader(input, maxPublicEvidenceInputBytes+1))
 	if err != nil || len(raw) == 0 || len(raw) > maxPublicEvidenceInputBytes {
+		return nil, livecanary.ErrPublicEvidence
+	}
+	if !validatePublicEvidenceInputJSON(raw) {
 		return nil, livecanary.ErrPublicEvidence
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))

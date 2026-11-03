@@ -306,17 +306,21 @@ program execution, file mutation, GitHub write, credential, runner, host or
 Scale Set operation.
 
 Finding F1 was the mismatch between legacy broker launch flags and the
-`g01-live` command's unconditional rejection of direct execution. This is not
-an executable G01 bypass: the selected GroupPolicy v2 broker admission rejects
-missing or nonexperimental signed assemblies, the supported reusable-callee
-path sets an explicit experimental mode, and the command rejects the legacy
-direct flag before reading its input. The old non-v2 path remains unavailable
-for canary execution and is outside the selected G01 path; this disposition
-does not authorize it. This is rebutted for the selected G01 path based on
-`runBrokerWithPrivateHandoff`, the signed handoff launcher, the direct-flag
-rejection in `g01-live`, and the passing
-`TestBrokerGroupApprovalRequiresReusableCalleeBinding` regression. The legacy
-broker/CLI mismatch remains fail-closed and is not claimed fixed here.
+`g01-live` command's unconditional rejection of direct execution. The rebuttal
+is limited to the selected GroupPolicy v2 reusable-callee route: ordinary
+`RunBroker` rejects a v2 approval without the experimental signed assembly
+before making GitHub API calls; the selected route validates the signed
+reusable-callee binding and launches the explicit experimental mode. The
+direct-execution CLI flags remain rejected.
+
+The legacy `g01-broker --execute-approved-broker` / `RunBroker` route remains
+callable for a v1 approval. It can make authenticated identity calls and mint
+an installation token before launching `g01-live` with the incompatible direct
+flags, which `g01-live` rejects before reading its input. This route therefore
+has pre-rejection live effects; it is not side-effect-free and must not be used
+for the selected canary. The finding is rebutted only within the selected v2
+route's scope. This PR does not disable the legacy route; bringing it into G01
+scope requires separately blocking that path before live use.
 
 Finding F2 was the absence of a production caller for the public evidence
 allowlist. The candidate adds the tagged `--sanitize-public-evidence` output
@@ -418,11 +422,16 @@ serializer does not execute a canary or establish that an observation occurred.
 The tagged `g01-live --sanitize-public-evidence` mode is the output boundary for
 manually assembled, independently verified observations. It accepts one JSON
 array from stdin, limits the input to 1 MiB, rejects unknown fields, trailing
-documents and mixed execution flags, then writes only the serializer's
-allowlisted document. It does not open the private journal, credentials or a
-network connection, and it does not attest that the supplied observations
-occurred. Use it only after the observations have been independently verified;
-sanitized output alone is not canary evidence. Each input item can provide
+documents, duplicate keys, case-folded field names, explicit null values and
+mixed execution flags, then writes only the serializer's allowlisted document.
+Required fields must be present. The exact schema check avoids Go decoder
+case-folding, duplicate-key overwrite and null-as-zero behavior. It does not
+open the private journal, credentials or a network connection, and it does not
+attest that the supplied observations occurred. Use it only after the
+observations have been independently verified; sanitized output alone is not
+canary evidence. Treat any nonzero command result as invalid output: a failed
+or short stdout write returns nonzero but cannot retract bytes already accepted
+by the output sink. Each input item can provide
 `elapsed_ms`, `attempt`, `session_generation`, `phase`, `operation`, `outcome`,
 `resources` (`kind` and private `id`), `http_status`, `succeeded`, and bounded
 `counts`; private resource IDs are replaced by stable aliases in the output.

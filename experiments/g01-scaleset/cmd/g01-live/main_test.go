@@ -181,6 +181,12 @@ func TestPublicEvidenceSanitizerRejectsInvalidOrMixedInputWithoutPublishing(t *t
 		{name: "malformed input", args: []string{"--sanitize-public-evidence"}, input: `[{"phase":`},
 		{name: "oversized input", args: []string{"--sanitize-public-evidence"}, input: oversized},
 		{name: "elapsed exceeds bound", args: []string{"--sanitize-public-evidence"}, input: `[{"elapsed_ms":86400001,"phase":"baseline","operation":"inspect","outcome":"observed"}]`},
+		{name: "case-folded event field", args: []string{"--sanitize-public-evidence"}, input: `[{"elapsed_ms":1,"Phase":"baseline","operation":"inspect","outcome":"observed"}]`},
+		{name: "duplicate event field", args: []string{"--sanitize-public-evidence"}, input: `[{"elapsed_ms":1,"phase":"baseline","phase":"cleanup","operation":"inspect","outcome":"observed"}]`},
+		{name: "duplicate nested resource field", args: []string{"--sanitize-public-evidence"}, input: `[{"elapsed_ms":1,"phase":"baseline","operation":"inspect","outcome":"observed","resources":[{"kind":"session","id":"first","id":"second"}]}]`},
+		{name: "null required number", args: []string{"--sanitize-public-evidence"}, input: `[{"elapsed_ms":null,"phase":"baseline","operation":"inspect","outcome":"observed"}]`},
+		{name: "null optional number", args: []string{"--sanitize-public-evidence"}, input: `[{"elapsed_ms":1,"attempt":null,"phase":"baseline","operation":"inspect","outcome":"observed"}]`},
+		{name: "null optional container", args: []string{"--sanitize-public-evidence"}, input: `[{"elapsed_ms":1,"phase":"baseline","operation":"inspect","outcome":"observed","resources":null}]`},
 		{name: "mixed plan", args: []string{"--sanitize-public-evidence", "--plan"}, input: valid},
 		{name: "approval path", args: []string{"--sanitize-public-evidence", "--approval", "/private/approval.json"}, input: valid},
 	} {
