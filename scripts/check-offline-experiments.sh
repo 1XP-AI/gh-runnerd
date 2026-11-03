@@ -47,8 +47,12 @@ paired_prep_regex='^TestPairedBrokerPrepareReviewedG01LiveBinary$'
 paired_prep_or_cadence_regex='^TestPairedBroker(PrepareReviewedG01LiveBinary|RealCadenceChildExceedsThirtySeconds)$'
 paired_broker_regex='^TestPaired'
 non_paired_heavy_regex='^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$'
-final_fence_regex='^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint|CredentialInputFailureConsumesAttempt)$'
-g02_non_paired_skip_regex='^TestPaired|^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint|CredentialInputFailureConsumesAttempt)$|^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$'
+final_fence_regex='^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint|CredentialInputFailureConsumesAttempt|WorkflowProvenanceTimeoutBlocksLaterInspect)$'
+v3_management_regex='^TestBrokerExperimentV3(ManagementTokenRevokedBeforeClaimCompletion|RevokesKnownRejectedManagementTokens|LostManagementTokenResponseBlocksLaterInspection|ManagementRequestJournalFailureRecordsNoDispatch|UncertainManagementTokenRevocationBlocksLaterInspection|DoesNotRevokeCallerVerificationTokenCollision)$'
+v3_read_only_regex='^TestBrokerExperimentV3(ReadOnlyPreflightRejectsBeforeWriteMint|StopsWhenReadOnlyTokenRevocationIsUncertain|RevokedRecordSyncFailureStopsBeforeWriteMint|DoubleRevocationJournalSyncFailureBlocksLaterInspect|LostReadTokenMintResponseBlocksLaterInspect|RevokesTokenFromRejectedReadIssuance|DoesNotRevokeVerificationTokenCollision)$'
+v3_provenance_regex='^TestBrokerExperimentV3(LostWorkflowProvenanceResponseBlocksLaterInspect|WorkflowProvenancePreRequestFailureRecordsNoDispatchForLaterInspect|HistoricalWorkflowProvenanceClaimReplayBinding|LegacyIncompleteClaimWithoutManagementLifecycleBlocksLaterInspect|PreRequestFailureRecordsNoDispatchForLaterInspect|RepeatsCalleeFenceAfterWritePreflight)$'
+paired_process_regex='^TestBrokerPaired'
+g02_non_paired_skip_regex='^TestPaired|^TestBrokerPaired|^TestBrokerExperimentV3|^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$'
 
 # These are the established offline gate modules. Keep this list explicit so
 # a new or unreviewed experiment cannot enter public CI by directory naming.
@@ -117,10 +121,10 @@ for module_dir in "${selected_modules[@]}"; do
 			# Bounded fixture clone/build is a separate 45-second process so the
 			# cadence partition keeps the production seven-times-five-second wait
 			# without hiding preparation in an unbounded helper. Then isolate the
-			# exact cadence name, the bounded non-paired heavy family, the final v3
-			# fence (whose fixture hashes the race test binary), the remaining
-			# TestPaired family, and an unfiltered complement so Example Output and
-			# fuzz seeds still run.
+			# exact cadence name, bounded non-paired heavy family, final fences, and
+			# the v3 management, read-only, and provenance recovery families. Keep
+			# paired broker-child binary checks separate from paired fixtures too.
+			# The remaining complements still discover tests, examples, and fuzz seeds.
 			# Package discovery stays on ./... in every command.
 			g02_prep_dir=$(mktemp -d)
 			# Remove only this owned mktemp path. EXIT covers success and set -e
@@ -136,6 +140,10 @@ for module_dir in "${selected_modules[@]}"; do
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -run "${real_pair_cadence_regex}" ./...
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -run "${non_paired_heavy_regex}" ./...
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -run "${final_fence_regex}" ./...
+			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -run "${v3_management_regex}" ./...
+			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -run "${v3_read_only_regex}" ./...
+			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -run "${v3_provenance_regex}" ./...
+			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -run "${paired_process_regex}" ./...
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -run "${paired_broker_regex}" -skip "${paired_prep_or_cadence_regex}" ./...
 			GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -skip "${g02_non_paired_skip_regex}" ./...
 			unset G01_PAIR_BRIDGE_PREP_DIR

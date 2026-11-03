@@ -3414,9 +3414,13 @@ func FuzzDefaultG01Fixture(f *testing.F) {
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerPrepareReviewedG01LiveBinary$ ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint|CredentialInputFailureConsumesAttempt)$ ./...",
+		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint|CredentialInputFailureConsumesAttempt|WorkflowProvenanceTimeoutBlocksLaterInspect)$ ./...",
+		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(ManagementTokenRevokedBeforeClaimCompletion|RevokesKnownRejectedManagementTokens|LostManagementTokenResponseBlocksLaterInspection|ManagementRequestJournalFailureRecordsNoDispatch|UncertainManagementTokenRevocationBlocksLaterInspection|DoesNotRevokeCallerVerificationTokenCollision)$ ./...",
+		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(ReadOnlyPreflightRejectsBeforeWriteMint|StopsWhenReadOnlyTokenRevocationIsUncertain|RevokedRecordSyncFailureStopsBeforeWriteMint|DoubleRevocationJournalSyncFailureBlocksLaterInspect|LostReadTokenMintResponseBlocksLaterInspect|RevokesTokenFromRejectedReadIssuance|DoesNotRevokeVerificationTokenCollision)$ ./...",
+		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(LostWorkflowProvenanceResponseBlocksLaterInspect|WorkflowProvenancePreRequestFailureRecordsNoDispatchForLaterInspect|HistoricalWorkflowProvenanceClaimReplayBinding|LegacyIncompleteClaimWithoutManagementLifecycleBlocksLaterInspect|PreRequestFailureRecordsNoDispatchForLaterInspect|RepeatsCalleeFenceAfterWritePreflight)$ ./...",
+		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerPaired ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPaired -skip ^TestPairedBroker(PrepareReviewedG01LiveBinary|RealCadenceChildExceedsThirtySeconds)$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -skip ^TestPaired|^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint|CredentialInputFailureConsumesAttempt)$|^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
+		"go1.27.3\ttest -race -count=1 -timeout=45s -skip ^TestPaired|^TestBrokerPaired|^TestBrokerExperimentV3|^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
 	} {
 		count := 0
 		for _, line := range lines {
@@ -3494,9 +3498,19 @@ func TestToolingDefaultG02PartitionsRun(t *testing.T) {
 	const finalName = "TestBrokerExperimentV3FinalGETFencesCalleeBeforeMintAndHandoff"
 	const finalRootMismatchName = "TestBrokerExperimentV3ControllerRootMismatchRefusesBeforeManagementInputAndMint"
 	const finalInputFailureName = "TestBrokerExperimentV3CredentialInputFailureConsumesAttempt"
+	const workflowTimeoutName = "TestBrokerExperimentV3WorkflowProvenanceTimeoutBlocksLaterInspect"
+	const pairedBinaryPrefixName = "TestBrokerPairedTerminalRealDigestPrefixDoesNotTriggerFixtureSleep"
+	const v3ManagementName = "TestBrokerExperimentV3ManagementTokenRevokedBeforeClaimCompletion"
+	const v3ReadOnlyName = "TestBrokerExperimentV3ReadOnlyPreflightRejectsBeforeWriteMint"
+	const v3ProvenanceName = "TestBrokerExperimentV3LostWorkflowProvenanceResponseBlocksLaterInspect"
 	const finalSentinel = "default-g02-final-regression"
 	const finalRootMismatchSentinel = "default-g02-final-root-mismatch-regression"
 	const finalInputFailureSentinel = "default-g02-final-input-failure-regression"
+	const workflowTimeoutSentinel = "default-g02-workflow-timeout-regression"
+	const pairedBinaryPrefixSentinel = "default-g02-paired-binary-prefix-regression"
+	const v3ManagementSentinel = "default-g02-v3-management-regression"
+	const v3ReadOnlySentinel = "default-g02-v3-read-only-regression"
+	const v3ProvenanceSentinel = "default-g02-v3-provenance-regression"
 	const pairedFamilyName = "TestPairedBrokerClaimFenceFixture"
 	const pairedFamilySentinel = "default-g02-paired-family-regression"
 	const remainderSentinel = "default-g02-remainder-regression"
@@ -3679,12 +3693,52 @@ func FuzzG02Fixture(f *testing.F) {
 			partition:      3,
 		},
 		{
+			name:           "workflow provenance timeout",
+			path:           g02Base + "/default_workflow_timeout_regression_test.go",
+			marker:         workflowTimeoutSentinel,
+			positiveSource: defaultTestSource("fixture", workflowTimeoutName, workflowTimeoutSentinel, ""),
+			failureSource:  defaultTestSource("fixture", workflowTimeoutName, workflowTimeoutSentinel, workflowTimeoutSentinel),
+			partition:      3,
+		},
+		{
+			name:           "v3 management lifecycle",
+			path:           g02Base + "/default_v3_management_regression_test.go",
+			marker:         v3ManagementSentinel,
+			positiveSource: defaultTestSource("fixture", v3ManagementName, v3ManagementSentinel, ""),
+			failureSource:  defaultTestSource("fixture", v3ManagementName, v3ManagementSentinel, v3ManagementSentinel),
+			partition:      4,
+		},
+		{
+			name:           "v3 read-only lifecycle",
+			path:           g02Base + "/default_v3_read_only_regression_test.go",
+			marker:         v3ReadOnlySentinel,
+			positiveSource: defaultTestSource("fixture", v3ReadOnlyName, v3ReadOnlySentinel, ""),
+			failureSource:  defaultTestSource("fixture", v3ReadOnlyName, v3ReadOnlySentinel, v3ReadOnlySentinel),
+			partition:      5,
+		},
+		{
+			name:           "v3 provenance recovery",
+			path:           g02Base + "/default_v3_provenance_regression_test.go",
+			marker:         v3ProvenanceSentinel,
+			positiveSource: defaultTestSource("fixture", v3ProvenanceName, v3ProvenanceSentinel, ""),
+			failureSource:  defaultTestSource("fixture", v3ProvenanceName, v3ProvenanceSentinel, v3ProvenanceSentinel),
+			partition:      6,
+		},
+		{
+			name:           "paired binary prefix",
+			path:           g02Base + "/default_paired_binary_prefix_regression_test.go",
+			marker:         pairedBinaryPrefixSentinel,
+			positiveSource: defaultTestSource("fixture", pairedBinaryPrefixName, pairedBinaryPrefixSentinel, ""),
+			failureSource:  defaultTestSource("fixture", pairedBinaryPrefixName, pairedBinaryPrefixSentinel, pairedBinaryPrefixSentinel),
+			partition:      7,
+		},
+		{
 			name:           "paired family",
 			path:           g02Base + "/default_paired_family_regression_test.go",
 			marker:         pairedFamilySentinel,
 			positiveSource: defaultTestSource("fixture", pairedFamilyName, pairedFamilySentinel, ""),
 			failureSource:  defaultTestSource("fixture", pairedFamilyName, pairedFamilySentinel, pairedFamilySentinel),
-			partition:      4,
+			partition:      8,
 		},
 		{
 			name:           "remainder",
@@ -3692,7 +3746,7 @@ func FuzzG02Fixture(f *testing.F) {
 			marker:         remainderSentinel,
 			positiveSource: defaultTestSource("remainderfixture", "TestDefaultG02RemainderFixture", remainderSentinel, ""),
 			failureSource:  defaultTestSource("remainderfixture", "TestDefaultG02RemainderFixture", remainderSentinel, remainderSentinel),
-			partition:      5,
+			partition:      9,
 		},
 		{
 			name:           "other package",
@@ -3700,7 +3754,7 @@ func FuzzG02Fixture(f *testing.F) {
 			marker:         otherPackageSentinel,
 			positiveSource: defaultTestSource("otherfixture", "TestDefaultG02OtherPackageFixture", otherPackageSentinel, ""),
 			failureSource:  defaultTestSource("otherfixture", "TestDefaultG02OtherPackageFixture", otherPackageSentinel, otherPackageSentinel),
-			partition:      5,
+			partition:      9,
 		},
 		{
 			name:           "same-name other package",
@@ -3716,7 +3770,7 @@ func FuzzG02Fixture(f *testing.F) {
 			marker:         sameNamePairedFamilySentinel,
 			positiveSource: defaultTestSource("pairedfixture", pairedFamilyName, sameNamePairedFamilySentinel, ""),
 			failureSource:  defaultTestSource("pairedfixture", pairedFamilyName, sameNamePairedFamilySentinel, sameNamePairedFamilySentinel),
-			partition:      4,
+			partition:      8,
 		},
 		{
 			name:           "same-name prep other package",
@@ -3732,7 +3786,7 @@ func FuzzG02Fixture(f *testing.F) {
 			marker:         exampleSentinel,
 			positiveSource: defaultExampleSource(exampleSentinel, exampleSentinel),
 			failureSource:  defaultExampleSource(exampleSentinel, "unexpected-default-g02-example-output"),
-			partition:      5,
+			partition:      9,
 		},
 		{
 			name:           "Fuzz seed",
@@ -3740,7 +3794,7 @@ func FuzzG02Fixture(f *testing.F) {
 			marker:         fuzzSentinel,
 			positiveSource: defaultFuzzSource(fuzzSentinel, ""),
 			failureSource:  defaultFuzzSource(fuzzSentinel, fuzzSentinel),
-			partition:      5,
+			partition:      9,
 		},
 	}
 	toolingFile(t, root, remainderPackageBase+"/fixture.go", "package remainderfixture\n", 0600)
@@ -3763,9 +3817,13 @@ func FuzzG02Fixture(f *testing.F) {
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerPrepareReviewedG01LiveBinary$ ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint|CredentialInputFailureConsumesAttempt)$ ./...",
+		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint|CredentialInputFailureConsumesAttempt|WorkflowProvenanceTimeoutBlocksLaterInspect)$ ./...",
+		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(ManagementTokenRevokedBeforeClaimCompletion|RevokesKnownRejectedManagementTokens|LostManagementTokenResponseBlocksLaterInspection|ManagementRequestJournalFailureRecordsNoDispatch|UncertainManagementTokenRevocationBlocksLaterInspection|DoesNotRevokeCallerVerificationTokenCollision)$ ./...",
+		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(ReadOnlyPreflightRejectsBeforeWriteMint|StopsWhenReadOnlyTokenRevocationIsUncertain|RevokedRecordSyncFailureStopsBeforeWriteMint|DoubleRevocationJournalSyncFailureBlocksLaterInspect|LostReadTokenMintResponseBlocksLaterInspect|RevokesTokenFromRejectedReadIssuance|DoesNotRevokeVerificationTokenCollision)$ ./...",
+		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(LostWorkflowProvenanceResponseBlocksLaterInspect|WorkflowProvenancePreRequestFailureRecordsNoDispatchForLaterInspect|HistoricalWorkflowProvenanceClaimReplayBinding|LegacyIncompleteClaimWithoutManagementLifecycleBlocksLaterInspect|PreRequestFailureRecordsNoDispatchForLaterInspect|RepeatsCalleeFenceAfterWritePreflight)$ ./...",
+		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerPaired ./...",
 		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPaired -skip ^TestPairedBroker(PrepareReviewedG01LiveBinary|RealCadenceChildExceedsThirtySeconds)$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -skip ^TestPaired|^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint|CredentialInputFailureConsumesAttempt)$|^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
+		"go1.27.3\ttest -race -count=1 -timeout=45s -skip ^TestPaired|^TestBrokerPaired|^TestBrokerExperimentV3|^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
 	}
 	// This positive control intentionally runs the full default module list.
 	// The bounded G01 partitions add enough subprocesses to exceed the old limit.

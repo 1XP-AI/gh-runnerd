@@ -624,8 +624,10 @@ func TestExperimentalDrainCommand(t *testing.T) {
 			readOnlyMints := f.transport.readOnlyMints
 			managementMints := f.transport.managementMints
 			revocations := f.transport.revocations
+			readOnlyRevocations := f.transport.readOnlyRevocations
+			managementRevocations := f.transport.managementRevocations
 			f.brokerMu.Unlock()
-			if mints != 2 || readOnlyMints != 1 || managementMints != 1 || revocations != 1 {
+			if mints != 2 || readOnlyMints != 1 || managementMints != 1 || revocations != 2 || readOnlyRevocations != 1 || managementRevocations != 1 {
 				t.Errorf("actual signed broker issuance lifecycle differs: total=%d read-only=%d management=%d revocations=%d", mints, readOnlyMints, managementMints, revocations)
 			}
 			events := f.assertDrain()

@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/liveworker"
+	"github.com/1XP-AI/gh-runnerd/experiments/g02-auth/handoff"
 )
 
 type terminalFixture struct {
@@ -46,6 +47,10 @@ func newTerminalFixtureWithControllerPhases(t *testing.T, phases, controllerPhas
 	return newTerminalFixtureWithCreate(t, phases, controllerPhases, nil)
 }
 func newTerminalFixtureWithCreate(t *testing.T, phases, controllerPhases []string, create func(*FileJournal, Approval)) *terminalFixture {
+	return newTerminalFixtureWithControllerGroupPolicy(t, phases, controllerPhases, create, nil)
+}
+
+func newTerminalFixtureWithControllerGroupPolicy(t *testing.T, phases, controllerPhases []string, create func(*FileJournal, Approval), groupPolicy *handoff.GroupPolicy) *terminalFixture {
 	t.Helper()
 	f := &terminalFixture{setETag: `"fixture-v1"`}
 	config := &pairedFixtureConfiguration{controllerResponse: func(stage string, value any) any {
@@ -61,6 +66,7 @@ func newTerminalFixtureWithCreate(t *testing.T, phases, controllerPhases []strin
 		}
 		return value
 	}}
+	config.controllerGroupPolicy = groupPolicy
 	config.controllerCreate = create
 	config.workerPhases = phases
 	config.controllerPhases = controllerPhases

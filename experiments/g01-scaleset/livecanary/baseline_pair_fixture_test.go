@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/liveworker"
+	"github.com/1XP-AI/gh-runnerd/experiments/g02-auth/handoff"
 )
 
 const pairFixtureJIT = "c3ludGhldGljLXByaXZhdGUtaml0LWNvbmZpZw=="
@@ -39,10 +40,11 @@ type pairedIntegrationFixture struct {
 }
 
 type pairedFixtureConfiguration struct {
-	controllerCreate   func(*FileJournal, Approval)
-	workerPhases       []string
-	controllerPhases   []string
-	controllerResponse func(string, any) any
+	controllerCreate      func(*FileJournal, Approval)
+	controllerGroupPolicy *handoff.GroupPolicy
+	workerPhases          []string
+	controllerPhases      []string
+	controllerResponse    func(string, any) any
 }
 
 func newPairedIntegrationFixture(t *testing.T) *pairedIntegrationFixture {
@@ -52,6 +54,9 @@ func newPairedIntegrationFixtureConfigured(t *testing.T, config *pairedFixtureCo
 	t.Helper()
 	f := &pairedIntegrationFixture{}
 	a := approval()
+	if config != nil && config.controllerGroupPolicy != nil {
+		a.GroupPolicy = *config.controllerGroupPolicy
+	}
 	if config != nil && config.controllerPhases != nil {
 		a.Phases = append([]string(nil), config.controllerPhases...)
 	}

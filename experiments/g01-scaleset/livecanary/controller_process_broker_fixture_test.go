@@ -21,16 +21,18 @@ import (
 )
 
 type processBrokerHTTP struct {
-	approval        *Approval
-	t               *testing.T
-	attempt         string
-	calls           []string
-	mints           int
-	readOnlyMints   int
-	managementMints int
-	revocations     int
-	failPreflight   bool
-	groupFault      bool
+	approval              *Approval
+	t                     *testing.T
+	attempt               string
+	calls                 []string
+	mints                 int
+	readOnlyMints         int
+	managementMints       int
+	revocations           int
+	readOnlyRevocations   int
+	managementRevocations int
+	failPreflight         bool
+	groupFault            bool
 }
 
 func (f *processBrokerHTTP) RoundTrip(r *http.Request) (*http.Response, error) {
@@ -53,7 +55,7 @@ func (f *processBrokerHTTP) RoundTrip(r *http.Request) (*http.Response, error) {
 			runID = f.approval.WorkflowRunID
 			sha = f.approval.WorkflowSHA
 		}
-		run := map[string]any{"id": runID, "head_sha": sha, "head_branch": "main", "event": "workflow_dispatch", "path": ".github/workflows/canary.yml", "run_attempt": 1, "repository": repo, "head_repository": repo}
+		run := map[string]any{"id": runID, "head_sha": sha, "head_branch": "main", "event": "workflow_dispatch", "status": "in_progress", "path": ".github/workflows/canary.yml", "run_attempt": 1, "repository": repo, "head_repository": repo}
 		if f.approval != nil && f.approval.GroupPolicy != (handoff.GroupPolicy{}) {
 			workflow := f.approval.GroupPolicy.Workflow
 			at := strings.LastIndexByte(workflow, '@')
@@ -103,12 +105,23 @@ func (f *processBrokerHTTP) RoundTrip(r *http.Request) (*http.Response, error) {
 		}
 	case "/installation/token":
 		f.revocations++
-		if r.Method != http.MethodDelete || r.Header.Get("Authorization") != "Bearer synthetic-process-read-installation-token" {
-			f.t.Error("read-token revocation used the wrong method or authority")
+		if r.Method != http.MethodDelete {
+			f.t.Error("installation-token revocation used the wrong method")
 		}
 		stored, e := os.ReadFile(filepath.Join(f.attempt, "broker.jsonl"))
-		if e != nil || !bytes.Contains(stored, []byte("read_only_token_revocation_started")) {
-			f.t.Error("read-token revocation preceded durable intent")
+		switch r.Header.Get("Authorization") {
+		case "Bearer synthetic-process-read-installation-token":
+			f.readOnlyRevocations++
+			if e != nil || !bytes.Contains(stored, []byte("read_only_token_revocation_started")) {
+				f.t.Error("read-token revocation preceded durable intent")
+			}
+		case "Bearer synthetic-process-installation-token":
+			f.managementRevocations++
+			if e != nil || !bytes.Contains(stored, []byte("management_token_revocation_started")) {
+				f.t.Error("management-token revocation preceded durable intent")
+			}
+		default:
+			f.t.Error("installation-token revocation used an unexpected authority")
 		}
 		status = http.StatusNoContent
 	case "/installation/repositories":
@@ -136,6 +149,33 @@ func (f *processBrokerHTTP) RoundTrip(r *http.Request) (*http.Response, error) {
 	}
 	return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(raw)), ContentLength: int64(len(raw))}, nil
 }
+
+func TestProcessBrokerWorkflowRunFixtureProvidesInProgressStatus(t *testing.T) {
+	attempt := t.TempDir()
+	if err := os.WriteFile(filepath.Join(attempt, "broker.jsonl"), []byte("attempt\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	transport := &processBrokerHTTP{t: t, attempt: attempt}
+	request, err := http.NewRequest(http.MethodGet, "https://api.github.com"+workflowRunFixturePath(transport), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := transport.RoundTrip(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var workflow struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&workflow); err != nil {
+		t.Fatal(err)
+	}
+	if workflow.Status != "in_progress" {
+		t.Fatalf("workflow fixture status = %q, want in_progress", workflow.Status)
+	}
+}
+
 func TestControllerProcessHandoffActualBrokerSeparateProcess(t *testing.T) {
 	for _, preflightFail := range []bool{false, true} {
 		t.Run(fmt.Sprint(preflightFail), func(t *testing.T) {
@@ -196,6 +236,7 @@ func TestControllerProcessHandoffActualBrokerSeparateProcess(t *testing.T) {
 			if !preflightFail {
 				want = append(want, "GET /orgs/fixture-org/actions/runner-groups/3/repositories")
 			}
+			want = append(want, "DELETE /installation/token")
 			if !reflect.DeepEqual(transport.calls, want) {
 				t.Fatalf("operation order changed: %v", transport.calls)
 			}
