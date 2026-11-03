@@ -181,6 +181,32 @@ supersedes it only for current Docker version and image presence. Rollback:
 remove this subsection only; it is documentation-only and changes no source,
 runtime, or GitHub state.
 
+### Authorized runner-group workflow policy — 2026-11-03
+
+After explicit maintainer authorization, runner group `#3` was updated through
+the GitHub CLI to require workflow restrictions and allow exactly one
+same-repository reusable workflow pinned to a full commit SHA. The private
+repository path and workflow SHA are omitted from this public evidence. The
+existing repository scope was intended to remain one selected private
+repository, with public repositories disabled.
+
+The initial update enabled workflow restrictions but also cleared the selected
+repository list. Read-after-write immediately found zero selected repositories
+and zero runners. The original private repository selection was restored using
+the group repository-access endpoint. Final read-back confirmed one selected
+private repository, public repositories disabled, workflow restriction enabled,
+one full-SHA workflow entry, and zero runners. A read-only workflow-run listing
+at 2026-11-03 02:22 UTC showed only historical run `35095628204` from the
+2026-09-16 macOS runner baseline; no post-policy canary run was present.
+
+This is a permission-policy result only. The pinned reusable workflow remains a
+static proposal; this change did not review its runtime, broker provenance,
+trust roots, worker isolation/resource limits, or cleanup safety. It does not
+authorize workflow dispatch, runner registration, JIT issuance, or host/Docker
+operations. Full G01 remains HOLD / NO-GO. Rollback to the previous
+workflow-access setting requires explicit maintainer authorization; no canary
+execution state was created.
+
 - [ ] Maintainer identifies one disposable **private** repository and one
   organization; no public fork/PR execution. Record the reviewed workflow SHA.
 - [ ] Dedicated runner group allows only that repository, and a unique canary
