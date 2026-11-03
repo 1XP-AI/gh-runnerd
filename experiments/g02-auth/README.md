@@ -58,10 +58,22 @@ Controller and paired-terminal entrypoints require a one-shot signed
 `BrokerProvenanceReceipt` before reading credential input. Its Ed25519 payload
 binds the controller-approval SHA-256, workflow run ID, workflow ref and
 commit, selected outer phase, owner nonce, receipt nonce, and named source.
-The admission ledger retains the receipt digest, receipt nonce, and source so a
-completed receipt cannot be replayed for another claim; direct regular-file,
-FIFO, or tagged-entry paths without a receipt stop before credential input or
-GitHub API effects.
+The authenticated workflow-run GET that supplies the receipt is itself
+accounted: the per-attempt journal records its non-secret intent, then the
+fixed account admission ledger records `workflow_provenance_get_started`
+before dispatch and `workflow_provenance_get_confirmed` only after the
+validated observation and journal record are durable. The ledger retains the
+receipt digest, receipt nonce, and source so a completed receipt cannot be
+replayed for another claim; direct regular-file, FIFO, or tagged-entry paths
+without a receipt stop before credential input or GitHub API effects.
+
+Timeout, transport failure, lost response, crash-visible start, or failed
+confirmation leaves the workflow GET intent pending and blocks later replay
+before installation-token minting. Only a failure proven before HTTP dispatch
+may record the matching `workflow_provenance_get_not_dispatched` outcome;
+that permits a later different recovery slot, while the consumed attempt and
+same phase are never automatically retried. No provider credential or
+workflow action is used by these fixture tests.
 
 The current GitHub REST response does not attest which workflow input selected
 the controller phase or whether an ambiguous `head_branch` names a branch or a

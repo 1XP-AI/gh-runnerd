@@ -829,3 +829,40 @@ roots, broker-only execution, management-token lifecycle, conditional Scale Set
 deletion, trusted runtime/isolation/resource qualification, the authorized
 Linux ARM64/JIT canary and sanitized live exit evidence remain open. Issue #1
 stays OPEN and Project #2 stays In progress.
+
+### Workflow-run provenance GET accounting fence — 2026-11-04
+
+Issue #160 starts from the exact local base `a4d6f03b81cbc77f51bf9eb0d37fdf47d67c02f3`.
+The initial authenticated workflow-run GET now has a two-record lifecycle in
+the fixed account ledger, bound to the already-open per-attempt journal,
+attempt/journal device+inode, controller-approval digest, source and exact run
+identity. The per-attempt intent is durable first; the account start is synced
+before dispatch; the account confirmation follows the validated GET and durable
+per-attempt observation while the account lock remains held. Timeout, transport
+failure, lost response, crash-visible start and confirmation failure remain
+pending and block later replay before any installation-token mint. Only an
+explicitly durable pre-dispatch outcome permits a later different recovery
+slot; the consumed attempt and same phase are not automatically retried.
+
+The causal fixture records the workflow GET itself in its ordered event stream,
+including the synthetic lost-response and timeout cases, while its API fixture
+rejects any installation-token mint before the workflow fence. A journal-boundary
+failure records `workflow_provenance_get_not_dispatched` and permits a later
+inspect; ambiguous GET outcomes leave `workflow_provenance_get_started` without
+confirmation and block the inspect before any API call.
+
+Local offline verification used the cached Go 1.27.3 toolchain with external
+GOCACHE/GOMODCACHE/GOTMPDIR and downloads disabled:
+
+| Check | Result |
+|---|---|
+| RED at exact base `a4d6f03`: lost workflow-provenance response, then inspect | FAIL as expected; inspect completed and minted twice, with no account workflow intent |
+| Restored immutable base `a4d6f03`, rerunning the exact RED test | FAIL as expected; inspect completed and minted twice |
+| GREEN focused causal, timeout, no-dispatch, replay and ledger-bound tests | PASS |
+| G02 `go test -count=1 -timeout=300s .` | PASS (50.413s) |
+| Provider/credential/workflow/runner/Scale Set/Docker/host/live-canary actions | Not run |
+
+These are synthetic offline fixture results only. No provider credential or
+installation token was minted, no workflow or runner was invoked, and no live
+canary operation was attempted. Independent exact-head review, hosted quick
+checks and all live authorization gates remain pending.

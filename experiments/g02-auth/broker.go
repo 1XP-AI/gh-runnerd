@@ -63,9 +63,10 @@ const organizationOnlyManagementScope = "organization-only"
 func brokerSlotAllowed(slot string) bool { return brokerPhases[slot] || brokerSpecialSlots[slot] }
 
 // One header, one claim and one completion for every finite schema slot, up to
-// one read-token revocation start/confirmation pair per slot, and the final
-// empty split element from the required trailing newline.
-func brokerLedgerMaxLines() int { return 1 + 4*(len(brokerPhases)+len(brokerSpecialSlots)) + 1 }
+// one workflow-provenance GET start/confirmation pair and one read-token
+// revocation start/confirmation pair per slot, plus the final empty split
+// element from the required trailing newline.
+func brokerLedgerMaxLines() int { return 1 + 6*(len(brokerPhases)+len(brokerSpecialSlots)) + 1 }
 
 const (
 	// Terminal collection has seven five-second cadence gaps in production.

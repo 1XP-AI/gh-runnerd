@@ -33,6 +33,7 @@ func newBrokerV3RunFixture(t *testing.T, phase string, changedCallee bool, rootM
 	a.Mode, a.Phase = "controller", phase
 	a.GroupPolicy = groupPolicyFixture()
 	fixture.requireReadTokenLifecycle = true
+	fixture.requireWorkflowGETBeforeMint = true
 	a.AllowVerificationAuthority = phase == "after-ack"
 	now := time.Now()
 	a.ExpiresAt = now.Add(time.Hour)
@@ -113,7 +114,15 @@ func newBrokerV3RunFixture(t *testing.T, phase string, changedCallee bool, rootM
 	transport := transportFunc(func(r *http.Request) (*http.Response, error) {
 		if r.URL.Path == workflowRunPath(request.Repository, request.WorkflowRunID) {
 			*workflowGET = *workflowGET + 1
+			fixture.calls = append(fixture.calls, "GET "+r.URL.Path)
 			fixture.events = append(fixture.events, "GET "+r.URL.Path)
+			if fixture.loseWorkflowResponse && *workflowGET == 1 {
+				return nil, errors.New("synthetic accepted workflow response lost")
+			}
+			if fixture.timeoutWorkflowResponse && *workflowGET == 1 {
+				<-r.Context().Done()
+				return nil, r.Context().Err()
+			}
 			body := goodRun
 			if *changeCalleeAt != 0 && *workflowGET == *changeCalleeAt {
 				body = badRun
@@ -342,6 +351,73 @@ func TestBrokerExperimentV3LostReadTokenMintResponseBlocksLaterInspect(t *testin
 	}
 }
 
+func TestBrokerExperimentV3LostWorkflowProvenanceResponseBlocksLaterInspect(t *testing.T) {
+	create := newBrokerV3RunFixture(t, "create", false)
+	create.fixture.loseWorkflowResponse = true
+	_, createErr := executeBrokerV3Fixture(t, context.Background(), create)
+	if createErr == nil || create.fixture.tokenCalls != 0 || *create.workflowGET != 1 {
+		t.Fatalf("fixture did not model a lost workflow provenance response before mint: err=%v mints=%d workflow_gets=%d calls=%v", createErr, create.fixture.tokenCalls, *create.workflowGET, create.fixture.calls)
+	}
+	if len(create.fixture.events) == 0 || create.fixture.events[0] != "GET /repos/org-a/canary/actions/runs/7" {
+		t.Fatalf("workflow provenance GET was not causally observed: events=%v", create.fixture.events)
+	}
+	admission, err := os.ReadFile(filepath.Join(create.fixture.admissionRoot, "broker-admission.jsonl"))
+	if err != nil || !bytes.Contains(admission, []byte(`"kind":"workflow_provenance_get_started"`)) || bytes.Contains(admission, []byte(`"kind":"workflow_provenance_get_confirmed"`)) {
+		t.Fatalf("lost response did not leave an unresolved workflow provenance intent: err=%v ledger=%s", err, admission)
+	}
+
+	inspect := newBrokerV3RunFixture(t, "inspect", false)
+	inspect.fixture.admissionRoot = create.fixture.admissionRoot
+	inspect.files.ControllerStateDirectory = create.files.ControllerStateDirectory
+	result, inspectErr := executeBrokerV3Fixture(t, context.Background(), inspect)
+	if inspectErr == nil || result.Status != "" || inspect.fixture.tokenCalls != 0 || len(inspect.fixture.calls) != 0 {
+		t.Fatalf("later inspect crossed unresolved workflow provenance: result=%+v err=%v mints=%d calls=%v", result, inspectErr, inspect.fixture.tokenCalls, inspect.fixture.calls)
+	}
+}
+
+func TestBrokerExperimentV3WorkflowProvenanceTimeoutBlocksLaterInspect(t *testing.T) {
+	create := newBrokerV3RunFixture(t, "create", false)
+	create.fixture.timeoutWorkflowResponse = true
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, createErr := executeBrokerV3Fixture(t, ctx, create)
+	if createErr == nil || create.fixture.tokenCalls != 0 || *create.workflowGET != 1 {
+		t.Fatalf("workflow provenance timeout crossed the mint fence: err=%v mints=%d workflow_gets=%d calls=%v", createErr, create.fixture.tokenCalls, *create.workflowGET, create.fixture.calls)
+	}
+	admission, err := os.ReadFile(filepath.Join(create.fixture.admissionRoot, "broker-admission.jsonl"))
+	if err != nil || !bytes.Contains(admission, []byte(`"kind":"workflow_provenance_get_started"`)) || bytes.Contains(admission, []byte(`"kind":"workflow_provenance_get_confirmed"`)) {
+		t.Fatalf("timeout did not leave an unresolved workflow provenance intent: err=%v ledger=%s", err, admission)
+	}
+
+	inspect := newBrokerV3RunFixture(t, "inspect", false)
+	inspect.fixture.admissionRoot = create.fixture.admissionRoot
+	inspect.files.ControllerStateDirectory = create.files.ControllerStateDirectory
+	result, inspectErr := executeBrokerV3Fixture(t, context.Background(), inspect)
+	if inspectErr == nil || result.Status != "" || inspect.fixture.tokenCalls != 0 || len(inspect.fixture.calls) != 0 {
+		t.Fatalf("later inspect crossed timeout-ambiguous workflow provenance: result=%+v err=%v mints=%d calls=%v", result, inspectErr, inspect.fixture.tokenCalls, inspect.fixture.calls)
+	}
+}
+
+func TestBrokerExperimentV3WorkflowProvenancePreRequestFailureRecordsNoDispatchForLaterInspect(t *testing.T) {
+	create := newBrokerV3RunFixture(t, "create", false)
+	_, createErr := executeBrokerV3Fixture(t, brokerJournalSyncFailureContext(context.Background(), "workflow_provenance_get_started"), create)
+	if createErr == nil || create.fixture.tokenCalls != 0 || *create.workflowGET != 0 || len(create.fixture.calls) != 0 {
+		t.Fatalf("workflow provenance journal failure crossed the HTTP boundary: err=%v mints=%d workflow_gets=%d calls=%v", createErr, create.fixture.tokenCalls, *create.workflowGET, create.fixture.calls)
+	}
+	admission, err := os.ReadFile(filepath.Join(create.fixture.admissionRoot, "broker-admission.jsonl"))
+	if err != nil || !bytes.Contains(admission, []byte(`"kind":"workflow_provenance_get_not_dispatched"`)) || bytes.Contains(admission, []byte(`"kind":"workflow_provenance_get_started"`)) {
+		t.Fatalf("pre-request failure lacks an explicit no-dispatch outcome: err=%v ledger=%s", err, admission)
+	}
+
+	inspect := newBrokerV3RunFixture(t, "inspect", false)
+	inspect.fixture.admissionRoot = create.fixture.admissionRoot
+	inspect.files.ControllerStateDirectory = create.files.ControllerStateDirectory
+	result, inspectErr := executeBrokerV3Fixture(t, context.Background(), inspect)
+	if inspectErr != nil || result.Status != "controller_completed" || inspect.fixture.tokenCalls != 2 || *inspect.workflowGET != 3 {
+		t.Fatalf("explicit no-dispatch proof did not permit later inspect: result=%+v err=%v mints=%d workflow_gets=%d calls=%v", result, inspectErr, inspect.fixture.tokenCalls, *inspect.workflowGET, inspect.fixture.calls)
+	}
+}
+
 func TestBrokerExperimentV3LegacyIncompleteClaimWithoutLifecycleBlocksLaterInspect(t *testing.T) {
 	create := newBrokerV3RunFixture(t, "create", false)
 	if _, err := executeBrokerV3Fixture(t, context.Background(), create); err != nil {
@@ -354,7 +430,7 @@ func TestBrokerExperimentV3LegacyIncompleteClaimWithoutLifecycleBlocksLaterInspe
 	}
 	var legacyLines []string
 	for _, line := range strings.Split(strings.TrimSuffix(string(ledger), "\n"), "\n") {
-		if strings.Contains(line, `"kind":"read_token_lifecycle_`) || strings.Contains(line, `"kind":"complete"`) {
+		if strings.Contains(line, `"kind":"read_token_lifecycle_`) || strings.Contains(line, `"kind":"workflow_provenance_get_`) || strings.Contains(line, `"kind":"complete"`) {
 			continue
 		}
 		legacyLines = append(legacyLines, line)

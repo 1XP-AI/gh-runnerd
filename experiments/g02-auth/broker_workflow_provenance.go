@@ -41,6 +41,12 @@ type workflowProvenanceAdapter struct {
 	checkAttempt   func() error
 }
 
+// The broker may release a durable provenance intent only when it can prove
+// that this adapter failed before the HTTP boundary. Once observation is
+// entered, a timeout or transport error is treated as an ambiguous response.
+type brokerWorkflowProvenanceDispatchState struct{ attempted bool }
+type brokerWorkflowProvenanceDispatchStateKey struct{}
+
 func newWorkflowProvenanceAdapter(grant reviewedWorkflowGrant, observer *workflowRunObserver, readCredential func(context.Context) (string, error), signer receiptSigner, keyID string, now func() time.Time, nonce func() ([16]byte, error), checkAttempt func() error) (BrokerProvenanceAdapter, error) {
 	if !grant.valid() || observer == nil || observer.client == nil || readCredential == nil || signer == nil || !brokerComponent.MatchString(keyID) || now == nil || checkAttempt == nil {
 		return nil, errBroker
@@ -75,6 +81,11 @@ func (a *workflowProvenanceAdapter) check(ctx context.Context) error {
 
 func (a *workflowProvenanceAdapter) Attest(parent context.Context, request BrokerProvenanceRequest) (BrokerProvenanceReceipt, error) {
 	fail := BrokerProvenanceReceipt{}
+	if parent != nil {
+		if state, ok := parent.Value(brokerWorkflowProvenanceDispatchStateKey{}).(*brokerWorkflowProvenanceDispatchState); ok && state != nil {
+			state.attempted = false
+		}
+	}
 	if request != a.grant.Request || a.check(parent) != nil {
 		return fail, errBroker
 	}
@@ -88,6 +99,9 @@ func (a *workflowProvenanceAdapter) Attest(parent context.Context, request Broke
 	token, err := a.readCredential(ctx)
 	if err != nil || a.check(ctx) != nil {
 		return fail, errBroker
+	}
+	if state, ok := ctx.Value(brokerWorkflowProvenanceDispatchStateKey{}).(*brokerWorkflowProvenanceDispatchState); ok && state != nil {
+		state.attempted = true
 	}
 	if _, err = a.observer.observe(ctx, a.grant, token); err != nil || a.check(ctx) != nil {
 		return fail, errBroker
