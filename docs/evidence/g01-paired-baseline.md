@@ -339,3 +339,23 @@ Issue54's private terminal journal stages and terminal result are documented in 
 [terminal evidence](g01-paired-terminal.md). This collection-only record does not
 infer terminal cleanup, live behavior or the terminal failure matrix from its
 historical checks; G01 and its remaining live/platform gates stay open.
+
+### Disposition of the correction checkpoint — 2026-11-03
+
+The pending sentence above records the state before PR #139 completed. PR #139
+merged source head
+[`f66c02c4dd23021be524d996df1858441d7e72f6`](https://github.com/1XP-AI/gh-runnerd/commit/f66c02c4dd23021be524d996df1858441d7e72f6)
+as merge commit
+[`f90b2d173d8ea4a39f7d3b54be15de0d900412bf`](https://github.com/1XP-AI/gh-runnerd/commit/f90b2d173d8ea4a39f7d3b54be15de0d900412bf).
+GitHub Codex reviewed that exact head with no major findings
+([review receipt](https://github.com/1XP-AI/gh-runnerd/pull/139#issuecomment-6559008565)).
+The hosted PR Go check passed on the same head
+([run 41314275553](https://github.com/1XP-AI/gh-runnerd/actions/runs/41314275553)).
+Post-merge Public CI passed on the merge commit
+([run 41314427148](https://github.com/1XP-AI/gh-runnerd/actions/runs/41314427148)),
+including all root, G01, G02, R1, race and vulnerability jobs.
+
+These receipts reconcile the review and hosted-check status for this correction.
+They do not claim a separate local `make check` invocation. This collection
+checkpoint still does not establish terminal cleanup, live behavior or platform
+qualification; those G01 gates remain open.

@@ -961,3 +961,26 @@ provenance and trust-root provisioning, provider-supported conditional cleanup,
 exact workflow/group restrictions, approved-runtime checks and concrete live
 authorization. G01 and full G02 remain unresolved. Rollback is reverting this
 bounded pin/test/current-docs change; no live resource needs cleanup.
+
+### PR #108 review and merge disposition — 2026-11-03
+
+The pending statements above were accurate for their pre-merge checkpoints. The
+final correction head was
+[`bb1d32548e838892fe4ac64d68bf9e0cd6f6c078`](https://github.com/1XP-AI/gh-runnerd/commit/bb1d32548e838892fe4ac64d68bf9e0cd6f6c078).
+GitHub Codex reviewed that exact head and reported no major findings
+([review receipt](https://github.com/1XP-AI/gh-runnerd/pull/108#issuecomment-6394326693)).
+The PR thread records the separate GPT-6.1 Sol/medium correction review as
+APPROVE and the F1 broker-image admission finding as resolved
+([pre-merge audit](https://github.com/1XP-AI/gh-runnerd/pull/108#issuecomment-6394335160)).
+The hosted Go check passed on the same head
+([run 40168682345](https://github.com/1XP-AI/gh-runnerd/actions/runs/40168682345)).
+PR #108 merged that reviewed head as
+[`edd5d8fb651476c03d906434712130e1163a998c`](https://github.com/1XP-AI/gh-runnerd/commit/edd5d8fb651476c03d906434712130e1163a998c).
+Post-merge Public CI passed all seven required jobs on the merge commit
+([run 40168813105](https://github.com/1XP-AI/gh-runnerd/actions/runs/40168813105);
+[checkpoint](https://github.com/1XP-AI/gh-runnerd/pull/108#issuecomment-6394411863)).
+
+This reconciles the pre-merge review and CI statements for PR #108. It does not
+close package provenance, authenticated trust-root, conditional cleanup,
+runtime/isolation/resource qualification or the separately authorized live
+canary gates.
