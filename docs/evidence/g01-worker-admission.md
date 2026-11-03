@@ -46,5 +46,10 @@ Author verification after the correction: liveworker race passed2.550s;
 unsupported `osusergo` race guard passed1.405s and CGO-disabled guard passed0.919s.
 Full `make check` passed, including both experiments and tagged commands, build,
 vet/race, dependencies/licenses and the configured root vulnerability scan.
-Fuzz explicitly skipped because the repository has no fuzz targets. Independent
-review and hosted/external final-head gates are still required before merge.
+Fuzz was explicitly skipped because the repository has no fuzz targets. At this
+pre-merge checkpoint, independent review and hosted/external final-head gates
+were still required before merge.
+
+Historical gate snapshot: the pending review status above was recorded on the
+pre-merge candidate in [PR #38](https://github.com/1XP-AI/gh-runnerd/pull/38)
+at `e3fcc32`; it later merged as `c1c0b6a`. This is not a current review queue.

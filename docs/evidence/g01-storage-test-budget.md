@@ -87,10 +87,16 @@ compiler/cache/toolchain locations. No ambient credentials or private proxy
 were inherited. Tests use only inspected synthetic fixture sources and owned
 temporary files, not live canary resources.
 
-Independent review, GitHub Codex review and same-head PR quick remain pending
-for this new tooling candidate. Record their receipts and postmerge main matrix
-in the PR rather than creating another source head solely to copy results.
-The prior authentication-scope reviews are reused only for unchanged code.
+At this pre-merge candidate checkpoint, independent review, GitHub Codex review
+and same-head PR quick remained pending. Their receipts and the postmerge main
+matrix belong to the PR rather than another source head created solely to copy
+results. The prior authentication-scope reviews were reused only for unchanged
+code.
+
+Historical gate snapshot: this pending status was recorded on the pre-merge
+candidate in [PR #110](https://github.com/1XP-AI/gh-runnerd/pull/110) at
+`cda82ee`; the PR later merged as `ab4adaa`. It is not a current work queue and
+does not add live-canary or server-side recovery evidence.
 
 Rollback is reverting this checker/test/ledger change as one unit; the previous
 combined storage budget would then return. There is no state migration, token
