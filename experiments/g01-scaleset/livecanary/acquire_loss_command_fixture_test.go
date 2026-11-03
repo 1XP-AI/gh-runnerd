@@ -30,6 +30,130 @@ import (
 
 const acquireLossPhase = "acquire-loss"
 
+func workflowProvenancePairMatchesClaim(startedRaw, confirmedRaw, claimRaw []byte) bool {
+	type inode struct {
+		Device uint64 `json:"device"`
+		Inode  uint64 `json:"inode"`
+	}
+	type workflowEvent struct {
+		Kind                     string `json:"kind"`
+		Slot                     string `json:"slot"`
+		Attempt                  inode  `json:"attempt"`
+		Journal                  inode  `json:"journal"`
+		ControllerApprovalSHA256 string `json:"controller_approval_sha256"`
+		Source                   string `json:"source"`
+		WorkflowRunID            int64  `json:"workflow_run_id"`
+		WorkflowRef              string `json:"workflow_ref"`
+		WorkflowSHA              string `json:"workflow_sha"`
+		WorkflowPath             string `json:"workflow_path"`
+	}
+	type claimEvent struct {
+		Kind           string `json:"kind"`
+		Slot           string `json:"slot"`
+		Attempt        inode  `json:"attempt"`
+		Journal        inode  `json:"journal"`
+		SnapshotDigest string `json:"snapshot_digest"`
+		Provenance     struct {
+			Source string `json:"source"`
+		} `json:"provenance"`
+		Authority struct {
+			Approval struct {
+				WorkflowRunID int64  `json:"workflow_run_id"`
+				WorkflowRef   string `json:"workflow_ref"`
+				WorkflowSHA   string `json:"workflow_sha"`
+				WorkflowPath  string `json:"workflow_path"`
+			} `json:"approval"`
+		} `json:"authority"`
+	}
+	decode := func(raw []byte, target any) bool {
+		var fields map[string]json.RawMessage
+		return DecodeStrict(raw, &fields) == nil && json.Unmarshal(raw, target) == nil
+	}
+	var started, confirmed workflowEvent
+	var claim claimEvent
+	if !decode(startedRaw, &started) || !decode(confirmedRaw, &confirmed) || !decode(claimRaw, &claim) ||
+		started.Kind != "workflow_provenance_get_started" || confirmed.Kind != "workflow_provenance_get_confirmed" || claim.Kind != "claim" ||
+		claim.Slot == "" || claim.Attempt.Device == 0 || claim.Attempt.Inode == 0 || claim.Journal.Device == 0 || claim.Journal.Inode == 0 ||
+		claim.SnapshotDigest == "" || claim.Provenance.Source == "" || claim.Authority.Approval.WorkflowRunID <= 0 ||
+		claim.Authority.Approval.WorkflowRef == "" || claim.Authority.Approval.WorkflowSHA == "" || claim.Authority.Approval.WorkflowPath == "" {
+		return false
+	}
+	confirmed.Kind = ""
+	started.Kind = ""
+	return started == confirmed && started.Slot == claim.Slot && started.Attempt == claim.Attempt && started.Journal == claim.Journal &&
+		started.ControllerApprovalSHA256 == claim.SnapshotDigest && started.Source == claim.Provenance.Source &&
+		started.WorkflowRunID == claim.Authority.Approval.WorkflowRunID && started.WorkflowRef == claim.Authority.Approval.WorkflowRef &&
+		started.WorkflowSHA == claim.Authority.Approval.WorkflowSHA && started.WorkflowPath == claim.Authority.Approval.WorkflowPath
+}
+
+func TestWorkflowProvenancePairMatchesExactClaim(t *testing.T) {
+	event := func(kind string) map[string]any {
+		return map[string]any{
+			"kind": kind, "slot": "after-ack",
+			"attempt":                    map[string]any{"device": uint64(1), "inode": uint64(2)},
+			"journal":                    map[string]any{"device": uint64(3), "inode": uint64(4)},
+			"controller_approval_sha256": strings.Repeat("a", 64),
+			"source":                     "signed-fixture-v1",
+			"workflow_run_id":            int64(7),
+			"workflow_ref":               "refs/heads/main",
+			"workflow_sha":               strings.Repeat("b", 40),
+			"workflow_path":              ".github/workflows/canary.yml",
+		}
+	}
+	claim := map[string]any{
+		"kind": "claim", "slot": "after-ack",
+		"attempt":         map[string]any{"device": uint64(1), "inode": uint64(2)},
+		"journal":         map[string]any{"device": uint64(3), "inode": uint64(4)},
+		"snapshot_digest": strings.Repeat("a", 64),
+		"provenance":      map[string]any{"source": "signed-fixture-v1"},
+		"authority": map[string]any{"approval": map[string]any{
+			"workflow_run_id": int64(7), "workflow_ref": "refs/heads/main",
+			"workflow_sha": strings.Repeat("b", 40), "workflow_path": ".github/workflows/canary.yml",
+		}},
+	}
+	encode := func(value any) []byte {
+		t.Helper()
+		raw, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal("fixture JSON encoding failed")
+		}
+		return raw
+	}
+	if !workflowProvenancePairMatchesClaim(encode(event("workflow_provenance_get_started")), encode(event("workflow_provenance_get_confirmed")), encode(claim)) {
+		t.Fatal("matching workflow provenance pair rejected")
+	}
+	mutations := []struct {
+		name  string
+		field string
+		value any
+	}{
+		{"controller approval", "controller_approval_sha256", strings.Repeat("c", 64)},
+		{"workflow run", "workflow_run_id", int64(8)},
+		{"workflow ref", "workflow_ref", "refs/heads/other"},
+		{"workflow SHA", "workflow_sha", strings.Repeat("d", 40)},
+		{"workflow path", "workflow_path", ".github/workflows/other.yml"},
+		{"attempt", "attempt", map[string]any{"device": uint64(5), "inode": uint64(6)}},
+		{"journal", "journal", map[string]any{"device": uint64(7), "inode": uint64(8)}},
+		{"source", "source", "other-source"},
+	}
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			started, confirmed := event("workflow_provenance_get_started"), event("workflow_provenance_get_confirmed")
+			started[mutation.field], confirmed[mutation.field] = mutation.value, mutation.value
+			if workflowProvenancePairMatchesClaim(encode(started), encode(confirmed), encode(claim)) {
+				t.Error("mismatched workflow provenance identity accepted")
+			}
+		})
+	}
+	t.Run("start-and-confirmation-pair", func(t *testing.T) {
+		started, confirmed := event("workflow_provenance_get_started"), event("workflow_provenance_get_confirmed")
+		confirmed["workflow_ref"] = "refs/heads/other"
+		if workflowProvenancePairMatchesClaim(encode(started), encode(confirmed), encode(claim)) {
+			t.Error("mismatched start and confirmation accepted")
+		}
+	})
+}
+
 // Qualification requires both actual, current-source commands. Missing/stale
 // helpers are setup failures, never optional coverage or an in-process fallback.
 func acquireLossHelpers(t *testing.T) (string, string) {
@@ -160,6 +284,10 @@ func acquireLossPreflight(w http.ResponseWriter, r *http.Request, a Approval) bo
 		body = repo
 	case "/orgs/fixture-org/actions/runner-groups/3":
 		body = map[string]any{"id": 3, "visibility": "selected", "default": false, "allows_public_repositories": false, "inherited": false}
+		if a.GroupPolicy.Version == 2 {
+			body.(map[string]any)["restricted_to_workflows"] = true
+			body.(map[string]any)["selected_workflows"] = []string{a.GroupPolicy.Workflow}
+		}
 	default:
 		return false
 	}
@@ -193,6 +321,11 @@ func newCommandQualificationFixture(t *testing.T, controller, broker, variant, p
 	t.Helper()
 	a := approval()
 	a.WorkflowRef = "refs/heads/main"
+	// Actual command qualification uses the reusable-callee v3 contract.
+	// Keep its independent group-policy authority aligned with the policy and
+	// approval it writes; the legacy zero-value policy is rejected before any
+	// provider request or issuance.
+	a.GroupPolicy = handoff.GroupPolicy{Version: 2, OrganizationID: 101, Workflow: a.Organization + "/" + a.Repository + "/.github/workflows/runner.yml@" + strings.Repeat("d", 40)}
 	if phase == "drain" {
 		a.Phases = append(append([]string(nil), a.Phases...), phase)
 	}
@@ -326,7 +459,7 @@ func newCommandQualificationFixture(t *testing.T, controller, broker, variant, p
 	if os.WriteFile(f.controller, data, 0500) != nil {
 		t.Fatal("controller TEST helper copy")
 	}
-	ba := enrollment.BrokerApproval{OwnerNonce: a.OwnerNonce, Mode: "controller", Phase: phase, AppID: a.AppID, AppName: "fixture-app", AppOwner: a.Organization, AppOwnerID: 101, InstallationID: a.InstallationID, Organization: a.Organization, OrganizationID: 101, Repository: a.Repository, RepositoryID: a.RepositoryID, RunnerGroupID: int64(a.RunnerGroupID), RunnerGroupName: "fixture-group", ExpiresAt: a.ExpiresAt, ControllerBinarySHA256: handoff.Digest(data), ControllerApprovalSHA256: handoff.Digest(f.raw), ControllerHarnessSHA: a.HarnessSHA, AllowVerificationAuthority: true}
+	ba := enrollment.BrokerApproval{GroupPolicy: a.GroupPolicy, ManagementScope: a.ManagementScope, OwnerNonce: a.OwnerNonce, Mode: "controller", Phase: phase, AppID: a.AppID, AppName: "fixture-app", AppOwner: a.Organization, AppOwnerID: 101, InstallationID: a.InstallationID, Organization: a.Organization, OrganizationID: 101, Repository: a.Repository, RepositoryID: a.RepositoryID, RunnerGroupID: int64(a.RunnerGroupID), RunnerGroupName: "fixture-group", ExpiresAt: a.ExpiresAt, ControllerBinarySHA256: handoff.Digest(data), ControllerApprovalSHA256: handoff.Digest(f.raw), ControllerHarnessSHA: a.HarnessSHA, AllowVerificationAuthority: true}
 	raw, _ := json.Marshal(ba)
 	if os.WriteFile(f.brokerApprovalPath, raw, 0600) != nil {
 		t.Fatal("broker approval write")
@@ -601,12 +734,26 @@ func (f *acquireLossCommandFixture) guardControlsForPhase(events []Event, phase 
 	for _, n := range []string{nonce, freshNonce} {
 		a := f.base.a
 		now := time.Now().UTC().Truncate(time.Second)
-		_, request, e := controllerHandoffRequest(f.raw, phase, "github-rest-workflow-v1", now)
-		if e != nil {
-			t.Fatal("receiver negative request setup")
+		policyJSON := []byte(experimentalPolicy(t, a, f.raw, "controller", phase, "controller"))
+		policy, workflowRoot, issuerRoot, e := handoff.DecodePublicPolicy(policyJSON, "controller", now)
+		if e != nil || len(policy.Grants) != 1 {
+			t.Fatal("receiver negative selected policy unavailable")
+		}
+		var request handoff.Request
+		if policy.Version == 3 {
+			_, request, e = controllerHandoffRequestForExpected(f.raw, phase, policy.Source, &policy.Grants[0].Request, now)
+		} else {
+			_, request, e = controllerHandoffRequest(f.raw, phase, policy.Source, now)
+		}
+		if e != nil || request != policy.Grants[0].Request {
+			t.Fatal("receiver negative request does not match selected policy grant")
 		}
 		key := ed25519.NewKeyFromSeed(f.workflowSeed)
 		receipt := signedControllerReceipt(t, request, now, n, key)
+		if request.Version == 2 {
+			receipt.Version = 2
+			receipt.Callee = request.Callee
+		}
 		receipt.ExpiresAt = a.ExpiresAt
 		receipt.Signature = base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, receipt.SigningBytes()))
 		receiptRaw, _ := json.Marshal(receipt)
@@ -615,9 +762,7 @@ func (f *acquireLossCommandFixture) guardControlsForPhase(events []Event, phase 
 		binding := handoff.PhaseBinding{BindingClaims: handoff.BindingClaims{Request: request, Version: 2, Kind: handoff.PhaseBindingKind, Algorithm: "ed25519", Audience: handoff.PhaseAudience("controller", phase), KeyID: "fixture-issuer-v1", IssuerSource: handoff.IssuerSource, WorkflowKeyID: receipt.KeyID, ReceiptSHA256: handoff.Digest(receiptRaw), PayloadSHA256: handoff.Digest(payload), PayloadLength: len(payload), ReceiptNonce: n, IssuedAt: now, ExpiresAt: a.ExpiresAt}, Mode: "controller"}
 		issuerKey := ed25519.NewKeyFromSeed(f.issuerSeed)
 		binding.Signature = base64.RawURLEncoding.EncodeToString(ed25519.Sign(issuerKey, binding.SigningBytes()))
-		workflow, _ := handoff.NewTrustRoot(receipt.KeyID, key.Public().(ed25519.PublicKey))
-		issuer, _ := handoff.NewIssuerRoot(binding.KeyID, issuerKey.Public().(ed25519.PublicKey))
-		if workflow.Verify(request, receipt, time.Now()) != nil || issuer.VerifyPhaseBinding(handoff.BindingExpected{Request: request, Receipt: receipt, ReceiptBytes: receiptRaw, ApprovalExpiresAt: a.ExpiresAt, Deadline: a.ExpiresAt}, binding, time.Now()) != nil {
+		if workflowRoot.Verify(request, receipt, time.Now()) != nil || issuerRoot.VerifyPhaseBinding(handoff.BindingExpected{Request: request, Receipt: receipt, ReceiptBytes: receiptRaw, ApprovalExpiresAt: a.ExpiresAt, Deadline: a.ExpiresAt}, binding, time.Now()) != nil {
 			t.Fatal("receiver negative specimen is not otherwise valid")
 		}
 		clear(key)
@@ -645,33 +790,88 @@ func (f *acquireLossCommandFixture) guardControlsForPhase(events []Event, phase 
 	brokerAfter, _ := os.ReadFile(brokerJournal)
 	f.brokerMu.Lock()
 	replayCalls, replayMints := len(f.transport.calls), f.transport.mints
+	replayReadOnlyMints, replayManagementMints, replayRevocations := f.transport.readOnlyMints, f.transport.managementMints, f.transport.revocations
 	f.brokerMu.Unlock()
-	if !bytes.Equal(brokerBefore, brokerAfter) || replayCalls != originalCalls || replayMints != 1 {
+	if !bytes.Equal(brokerBefore, brokerAfter) || replayCalls != originalCalls || replayMints != 2 || replayReadOnlyMints != 1 || replayManagementMints != 1 || replayRevocations != 1 {
 		t.Error("exact broker-attempt replay changed history or crossed API/mint boundary")
 	}
 	claimPath := filepath.Join(f.admission, "broker-admission.jsonl")
 	claim, e := os.ReadFile(claimPath)
-	if e != nil || !bytes.Contains(claim, []byte(`"slot":"`+phase+`"`)) {
+	if e != nil {
 		t.Fatal("original occupied broker claim missing")
 	}
-	// Fresh valid inputs may be consumed. Require valid observation plus the
-	// exact synced approval snapshot and unchanged occupied claim, establishing
-	// admission-stage refusal rather than a bad seed/payload/setup rejection.
+	ledger := bytes.Split(bytes.TrimSpace(claim), []byte{'\n'})
+	claimIndex := -1
+	for i := 1; i < len(ledger); i++ {
+		var event struct {
+			Kind string `json:"kind"`
+			Slot string `json:"slot"`
+		}
+		if json.Unmarshal(ledger[i], &event) != nil {
+			t.Fatal("original broker admission event malformed")
+		}
+		if event.Kind == "claim" && event.Slot == phase {
+			if claimIndex >= 0 {
+				t.Fatal("duplicate original occupied broker claim")
+			}
+			claimIndex = i
+		}
+	}
+	if claimIndex < 0 {
+		t.Fatal("original occupied broker claim identity missing")
+	}
+	// A confirmed account-ledger workflow GET permanently occupies this phase.
+	// Older source without account-level GET accounting reaches the existing
+	// broker admission fence after observation; both paths must avoid reminting.
 	fresh := f.attempt + "-fresh"
+	workflowGETAccounted := false
+	for i := 1; i < claimIndex; i++ {
+		var event struct {
+			Kind string `json:"kind"`
+		}
+		if json.Unmarshal(ledger[i], &event) != nil {
+			t.Fatal("original broker workflow provenance event malformed")
+		}
+		if event.Kind == "workflow_provenance_get_started" {
+			if workflowGETAccounted || i+1 >= claimIndex || !workflowProvenancePairMatchesClaim(ledger[i], ledger[i+1], ledger[claimIndex]) {
+				t.Fatal("original broker workflow provenance pair is not bound to its claim")
+			}
+			workflowGETAccounted = true
+		}
+	}
 	f.brokerMu.Lock()
 	callCount := len(f.transport.calls)
+	mintsBefore := f.transport.mints
+	readOnlyMintsBefore := f.transport.readOnlyMints
+	managementMintsBefore := f.transport.managementMints
+	revocationsBefore := f.transport.revocations
 	f.transport.attempt = fresh
 	f.brokerMu.Unlock()
 	f.run(f.broker, f.brokerArgs(fresh), inputs...)
 	f.brokerMu.Lock()
-	calls, mints := append([]string(nil), f.transport.calls[callCount:]...), f.transport.mints
+	calls := append([]string(nil), f.transport.calls[callCount:]...)
+	mintsAfter := f.transport.mints
+	readOnlyMintsAfter := f.transport.readOnlyMints
+	managementMintsAfter := f.transport.managementMints
+	revocationsAfter := f.transport.revocations
 	f.brokerMu.Unlock()
-	if !reflect.DeepEqual(calls, []string{"GET " + workflowRunFixturePath(f.transport)}) || mints != 1 {
-		t.Error("fresh valid broker attempt did not reach observation/admission without remint")
+	wantCalls := []string{"GET " + workflowRunFixturePath(f.transport)}
+	if workflowGETAccounted {
+		wantCalls = nil
 	}
-	snapshot, e := os.ReadFile(filepath.Join(fresh, "controller-approval.json"))
-	if e != nil || !bytes.Equal(snapshot, f.raw) {
-		t.Error("fresh broker admission exact approval snapshot absent")
+	if !reflect.DeepEqual(calls, wantCalls) || mintsAfter != mintsBefore || readOnlyMintsAfter != readOnlyMintsBefore || managementMintsAfter != managementMintsBefore || revocationsAfter != revocationsBefore {
+		t.Error("fresh occupied-phase broker attempt crossed the expected provider or token boundary")
+	}
+	snapshotPath := filepath.Join(fresh, "controller-approval.json")
+	if workflowGETAccounted {
+		if _, e := os.Lstat(snapshotPath); !os.IsNotExist(e) {
+			t.Error("fresh account-ledger occupied-phase attempt created an approval snapshot")
+		}
+	} else {
+		snapshot, e := os.ReadFile(snapshotPath)
+		if e != nil || !bytes.Equal(snapshot, f.raw) {
+			t.Error("fresh legacy attempt did not reach the existing admission fence")
+		}
 	}
 	claimAfter, _ := os.ReadFile(claimPath)
 	after, _ := os.ReadFile(journal)
@@ -697,9 +897,16 @@ func TestExperimentalAcquireLossCommand(t *testing.T) {
 			f.run(f.broker, f.brokerArgs(f.attempt), f.management, []byte("synthetic-observation-credential"), f.workflowSeed, f.issuerSeed)
 			f.brokerMu.Lock()
 			mints := f.transport.mints
+			managementMints := f.transport.managementMints
+			readOnlyMints := f.transport.readOnlyMints
+			revocations := f.transport.revocations
+			calls := append([]string(nil), f.transport.calls...)
 			f.brokerMu.Unlock()
-			if mints != 1 {
-				t.Fatal("actual broker issuance did not mint exactly once")
+			if managementMints != 1 {
+				t.Fatalf("actual broker management issuance did not mint exactly once: total=%d read-only=%d management=%d revocations=%d calls=%v", mints, readOnlyMints, managementMints, revocations, calls)
+			}
+			if mints != 2 || readOnlyMints != 1 || revocations != 1 {
+				t.Fatalf("actual broker issuance lifecycle differs: total=%d read-only=%d management=%d revocations=%d calls=%v", mints, readOnlyMints, managementMints, revocations, calls)
 			}
 			events := f.assertRetained(variant)
 			if t.Failed() {

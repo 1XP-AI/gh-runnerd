@@ -179,7 +179,7 @@ func (p *originalContextParent) coordinate() {
 	f.mu.Lock()
 	f.checkpoint("original-context-target", target.Sequence)
 	raw := f.read(filepath.Join(f.base.j.directory, "journal.jsonl"))
-	if handoff.Digest(raw) != target.Digest || !originalContextBrokerClaim(f.admission, f.consumption()) || f.counts["DELETE /queue/9"] != 1 || f.counts["POST /tenant/_apis/runtime/runnerscalesets/7/acquirejobs"] != 0 || f.counts["DELETE /tenant/_apis/runtime/runnerscalesets/7/sessions/"+f.sid] != 0 {
+	if handoff.Digest(raw) != target.Digest || !originalContextBrokerClaim(f.admission, f.consumption(), originalContextClaimSource(f.base.a)) || f.counts["DELETE /queue/9"] != 1 || f.counts["POST /tenant/_apis/runtime/runnerscalesets/7/acquirejobs"] != 0 || f.counts["DELETE /tenant/_apis/runtime/runnerscalesets/7/sessions/"+f.sid] != 0 {
 		f.t.Error("original context target full-prefix/physical prerequisite differs")
 		f.mu.Unlock()
 		return

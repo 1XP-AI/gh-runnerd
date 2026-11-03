@@ -21,14 +21,16 @@ import (
 )
 
 type processBrokerHTTP struct {
-	approval      *Approval
-	t             *testing.T
-	attempt       string
-	calls         []string
-	mints         int
-	revocations   int
-	failPreflight bool
-	groupFault    bool
+	approval        *Approval
+	t               *testing.T
+	attempt         string
+	calls           []string
+	mints           int
+	readOnlyMints   int
+	managementMints int
+	revocations     int
+	failPreflight   bool
+	groupFault      bool
 }
 
 func (f *processBrokerHTTP) RoundTrip(r *http.Request) (*http.Response, error) {
@@ -75,6 +77,11 @@ func (f *processBrokerHTTP) RoundTrip(r *http.Request) (*http.Response, error) {
 		}
 		if json.Unmarshal(body, &request) != nil || (request.Permissions["organization_self_hosted_runners"] != "read" && request.Permissions["organization_self_hosted_runners"] != "write") {
 			f.t.Error("mint permission set was invalid")
+		}
+		if request.Permissions["organization_self_hosted_runners"] == "read" {
+			f.readOnlyMints++
+		} else {
+			f.managementMints++
 		}
 		organizationOnly := f.approval != nil && f.approval.ManagementScope == "organization-only"
 		if !organizationOnly && !reflect.DeepEqual(request.RepositoryIDs, []int64{42}) {
