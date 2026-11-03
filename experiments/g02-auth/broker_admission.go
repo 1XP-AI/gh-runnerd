@@ -310,12 +310,16 @@ func (c *brokerAdmission) recordReadTokenRequestNotDispatched() error {
 	return nil
 }
 func (c *brokerAdmission) recordManagementTokenRequestNotDispatched() error {
-	if c == nil || c.tokenLifecyclePending || c.check() != nil {
+	if c == nil || c.check() != nil || (c.tokenLifecyclePending && c.tokenLifecycleKind != "management") {
 		return errBroker
 	}
 	event := brokerTokenLifecycleEvent{Kind: "management_token_request_not_dispatched", Slot: c.event.Slot, Attempt: c.event.Attempt, Journal: c.event.Journal}
 	if c.append(event) != nil || c.check() != nil {
 		return errBroker
+	}
+	if c.tokenLifecyclePending {
+		c.tokenLifecyclePending = false
+		c.tokenLifecycleKind = ""
 	}
 	return nil
 }

@@ -96,6 +96,22 @@ func TestBrokerExperimentV3LostManagementTokenResponseBlocksLaterInspection(t *t
 	}
 }
 
+func TestBrokerExperimentV3ManagementRequestJournalFailureRecordsNoDispatch(t *testing.T) {
+	create := newBrokerV3RunFixture(t, "create", false)
+	_, createErr := executeBrokerV3Fixture(t, brokerJournalSyncFailureContext(context.Background(), "management_token_request_started"), create)
+	if createErr == nil || create.fixture.tokenCalls != 1 || brokerFixtureCallCount(create.fixture.calls, "DELETE /installation/token") != 1 {
+		t.Fatalf("management request journal failure did not stop before write-token dispatch: err=%v mints=%d calls=%v", createErr, create.fixture.tokenCalls, create.fixture.calls)
+	}
+
+	inspect := newBrokerV3RunFixture(t, "inspect", false)
+	inspect.fixture.admissionRoot = create.fixture.admissionRoot
+	inspect.files.ControllerStateDirectory = create.files.ControllerStateDirectory
+	result, inspectErr := executeBrokerV3Fixture(t, context.Background(), inspect)
+	if inspectErr != nil || result.Status != "controller_completed" || inspect.fixture.tokenCalls != 2 {
+		t.Fatalf("known pre-dispatch journal failure poisoned later inspection: result=%+v err=%v mints=%d calls=%v", result, inspectErr, inspect.fixture.tokenCalls, inspect.fixture.calls)
+	}
+}
+
 func TestBrokerExperimentV3UncertainManagementTokenRevocationBlocksLaterInspection(t *testing.T) {
 	create := newBrokerV3RunFixture(t, "create", false)
 	create.fixture.managementTokenRevokeError = true

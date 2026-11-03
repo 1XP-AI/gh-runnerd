@@ -437,6 +437,10 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 		}
 		managementTokenLifecycleStarted = true
 		if j.append("management_token_request_started", nil) != nil {
+			// callWithBeforeRequest will not dispatch the POST when this
+			// callback fails. Close the account intent only with that explicit
+			// pre-dispatch record; failure to persist it remains fail-stopped.
+			_ = claim.recordManagementTokenRequestNotDispatched()
 			return errBroker
 		}
 		return nil
