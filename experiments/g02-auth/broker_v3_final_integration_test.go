@@ -418,7 +418,7 @@ func TestBrokerExperimentV3WorkflowProvenancePreRequestFailureRecordsNoDispatchF
 	}
 }
 
-func TestBrokerExperimentV3RejectsMismatchedHistoricalWorkflowProvenanceClaim(t *testing.T) {
+func TestBrokerExperimentV3HistoricalWorkflowProvenanceClaimReplayBinding(t *testing.T) {
 	create := newBrokerV3RunFixture(t, "create", false)
 	if _, err := executeBrokerV3Fixture(t, context.Background(), create); err != nil {
 		t.Fatalf("complete synthetic create: %v", err)
@@ -428,50 +428,79 @@ func TestBrokerExperimentV3RejectsMismatchedHistoricalWorkflowProvenanceClaim(t 
 	if err != nil {
 		t.Fatalf("read admission ledger: %v", err)
 	}
-	lines := strings.Split(strings.TrimSuffix(string(ledger), "\n"), "\n")
-	mutated := 0
-	for i, line := range lines {
-		var kind struct {
-			Kind string `json:"kind"`
+	mutateLedger := func(mutate func(*brokerWorkflowProvenanceEvent)) []byte {
+		t.Helper()
+		lines := strings.Split(strings.TrimSuffix(string(ledger), "\n"), "\n")
+		mutated := 0
+		for i, line := range lines {
+			var kind struct {
+				Kind string `json:"kind"`
+			}
+			if decodeBrokerJSON([]byte(line), &kind, false) != nil {
+				t.Fatal("decode admission event kind")
+			}
+			if kind.Kind != "workflow_provenance_get_started" && kind.Kind != "workflow_provenance_get_confirmed" {
+				continue
+			}
+			var event brokerWorkflowProvenanceEvent
+			if decodeBrokerJSON([]byte(line), &event, true) != nil {
+				t.Fatal("decode workflow provenance event")
+			}
+			mutate(&event)
+			encoded, err := json.Marshal(event)
+			if err != nil {
+				t.Fatalf("encode changed workflow provenance event: %v", err)
+			}
+			lines[i] = string(encoded)
+			mutated++
 		}
-		if decodeBrokerJSON([]byte(line), &kind, false) != nil {
-			t.Fatal("decode admission event kind")
+		if mutated != 2 {
+			t.Fatalf("mutated %d workflow provenance lifecycle events, want start and confirmation", mutated)
 		}
-		if kind.Kind != "workflow_provenance_get_started" && kind.Kind != "workflow_provenance_get_confirmed" {
-			continue
-		}
-		var event brokerWorkflowProvenanceEvent
-		if decodeBrokerJSON([]byte(line), &event, true) != nil {
-			t.Fatal("decode workflow provenance event")
-		}
-		event.Attempt.Inode += 1000
-		event.Journal.Inode += 1000
-		event.ControllerApprovalSHA256 = strings.Repeat("e", 64)
-		event.WorkflowRunID++
-		event.WorkflowRef = "refs/heads/release"
-		event.WorkflowSHA = strings.Repeat("f", 40)
-		event.WorkflowPath = ".github/workflows/other.yml"
-		encoded, err := json.Marshal(event)
-		if err != nil {
-			t.Fatalf("encode changed workflow provenance event: %v", err)
-		}
-		lines[i] = string(encoded)
-		mutated++
-	}
-	if mutated != 2 {
-		t.Fatalf("mutated %d workflow provenance lifecycle events, want start and confirmation", mutated)
-	}
-	if err := os.WriteFile(ledgerPath, []byte(strings.Join(lines, "\n")+"\n"), 0600); err != nil {
-		t.Fatalf("write mismatched workflow provenance history: %v", err)
+		return []byte(strings.Join(lines, "\n") + "\n")
 	}
 
-	inspect := newBrokerV3RunFixture(t, "inspect", false)
-	inspect.fixture.admissionRoot = create.fixture.admissionRoot
-	inspect.files.ControllerStateDirectory = create.files.ControllerStateDirectory
-	result, inspectErr := executeBrokerV3Fixture(t, context.Background(), inspect)
-	if inspectErr == nil || result.Status != "" || inspect.fixture.tokenCalls != 0 || len(inspect.fixture.calls) != 0 {
-		t.Fatalf("inspect crossed mismatched historical workflow identity: result=%+v err=%v mints=%d calls=%v", result, inspectErr, inspect.fixture.tokenCalls, inspect.fixture.calls)
+	cases := []struct {
+		name   string
+		mutate func(*brokerWorkflowProvenanceEvent)
+	}{
+		{name: "slot", mutate: func(event *brokerWorkflowProvenanceEvent) { event.Slot = "cleanup" }},
+		{name: "attempt", mutate: func(event *brokerWorkflowProvenanceEvent) { event.Attempt.Inode++ }},
+		{name: "journal", mutate: func(event *brokerWorkflowProvenanceEvent) { event.Journal.Inode++ }},
+		{name: "controller-approval-digest", mutate: func(event *brokerWorkflowProvenanceEvent) { event.ControllerApprovalSHA256 = strings.Repeat("e", 64) }},
+		{name: "source", mutate: func(event *brokerWorkflowProvenanceEvent) { event.Source = "other-source" }},
+		{name: "workflow-run-id", mutate: func(event *brokerWorkflowProvenanceEvent) { event.WorkflowRunID++ }},
+		{name: "workflow-ref", mutate: func(event *brokerWorkflowProvenanceEvent) { event.WorkflowRef = "refs/heads/release" }},
+		{name: "workflow-sha", mutate: func(event *brokerWorkflowProvenanceEvent) { event.WorkflowSHA = strings.Repeat("f", 40) }},
+		{name: "workflow-path", mutate: func(event *brokerWorkflowProvenanceEvent) { event.WorkflowPath = ".github/workflows/other.yml" }},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(ledgerPath, mutateLedger(tc.mutate), 0600); err != nil {
+				t.Fatalf("write mismatched workflow provenance history: %v", err)
+			}
+			inspect := newBrokerV3RunFixture(t, "inspect", false)
+			inspect.fixture.admissionRoot = create.fixture.admissionRoot
+			inspect.files.ControllerStateDirectory = create.files.ControllerStateDirectory
+			result, inspectErr := executeBrokerV3Fixture(t, context.Background(), inspect)
+			if inspectErr == nil || result.Status != "" || inspect.fixture.tokenCalls != 0 || *inspect.workflowGET != 0 || len(inspect.fixture.calls) != 0 {
+				t.Fatalf("inspect crossed mismatched historical %s: result=%+v err=%v mints=%d workflow_gets=%d calls=%v", tc.name, result, inspectErr, inspect.fixture.tokenCalls, *inspect.workflowGET, inspect.fixture.calls)
+			}
+		})
+	}
+
+	if err := os.WriteFile(ledgerPath, ledger, 0600); err != nil {
+		t.Fatalf("restore matching workflow provenance history: %v", err)
+	}
+	t.Run("matching-history", func(t *testing.T) {
+		inspect := newBrokerV3RunFixture(t, "inspect", false)
+		inspect.fixture.admissionRoot = create.fixture.admissionRoot
+		inspect.files.ControllerStateDirectory = create.files.ControllerStateDirectory
+		result, inspectErr := executeBrokerV3Fixture(t, context.Background(), inspect)
+		if inspectErr != nil || result.Status != "controller_completed" || inspect.fixture.tokenCalls != 2 || *inspect.workflowGET != 3 {
+			t.Fatalf("inspect rejected matching historical workflow identity: result=%+v err=%v mints=%d workflow_gets=%d calls=%v", result, inspectErr, inspect.fixture.tokenCalls, *inspect.workflowGET, inspect.fixture.calls)
+		}
+	})
 }
 
 func TestBrokerExperimentV3LegacyIncompleteClaimWithoutLifecycleBlocksLaterInspect(t *testing.T) {

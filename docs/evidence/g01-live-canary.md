@@ -889,18 +889,31 @@ completed and minted twice.
 Commit `eefe8dfde5134b014b54ca45277640c6401c0395` fixes replay by matching the
 claim to the confirmed record across slot, attempt and journal identities,
 controller-approval digest, provenance source, workflow run ID, ref, SHA and
-path. The regression test verifies a mismatched historical pair is rejected
-before API calls or token minting. The exact-base RED was reproduced twice;
-the corrected focused race test passed in 4.498s, the full G02 race suite passed
-all packages (root package 143.977s), and `go vet -p=1 ./...` passed. These
-checks were offline and used the cached Go 1.27.3 toolchain with caches and
-temporary files configured on an external volume.
+path. The exact-base RED was reproduced twice; the corrected focused race test
+passed in 4.498s, the full G02 race suite passed all packages (root package
+143.977s), and `go vet -p=1 ./...` passed. These checks were offline and used
+the cached Go 1.27.3 toolchain with caches and temporary files configured on an
+external volume.
 
-On the prior PR head `b9ca7c96c7881391a1cc9ed6f06b6a7848e9f1b4`, hosted Go
-checks and GitHub Codex review completed with no findings. The independent P2
-was found afterward, so those results do not review or qualify the corrected
-head. The correction is committed locally and still needs a fresh push, hosted
-quick check, exact-head Codex review and independent Luna Max review. No live
-GitHub provider, credential, runner, Scale Set, Docker or host operation was
-performed. Issue #160 and parent issue #1 remain OPEN / Project #2 In progress;
-all live canary and production qualification gates remain unresolved.
+The corrected code and initial regression test were pushed as PR head
+`73c1299319441da6499dca55b79c237a3df5e4e2`; hosted Go checks passed and GitHub
+Codex review completed on that exact SHA with no major findings. The subsequent
+independent Luna Max review returned HOLD/P2: the regression changed several
+binding fields together, lacked isolated slot/source cases and did not name a
+matching-history positive control. The reviewer found the source comparisons
+correct and reported no P0/P1 source defect. A follow-up test-only change now
+mutates slot, attempt, journal, approval digest, source, run ID, ref, SHA and
+path independently, checks each rejection before API calls or minting, and
+includes a named matching-history replay control. On a clean archive of exact
+prior head `b9ca7c96c7881391a1cc9ed6f06b6a7848e9f1b4` with only this test file
+overlaid, the focused race test reproduced unsafe replay for each mismatched
+field except slot (which already failed closed); the matching-history control
+passed. The same focused race selector passes on the corrected local source,
+covering all nine mismatch cases and the positive control in 7.673s.
+
+This test refinement and its evidence update are local and still need a commit
+and push, then a fresh hosted quick check and exact-head Codex and Luna Max
+reviews. No live GitHub provider, credential, runner, Scale Set, Docker or host
+operation was performed. Issue #160 and parent issue #1 remain OPEN / Project #2
+In progress; all live canary and production qualification gates remain
+unresolved.
