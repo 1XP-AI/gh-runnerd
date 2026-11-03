@@ -6,10 +6,11 @@ provision keys, or replace the production implementation gates.
 
 `g01-broker --execute-experimental-broker` selects sealed `RunBrokerExperiment`.
 `g01-live --execute-experimental-phase --mode MODE --phase PHASE` selects sealed
-`RunControllerExperiment`. Existing ordinary broker behavior and both legacy
-controller execution quarantines remain. The receiver uses the actual Driver or
-the complete same-process paired terminal implementation; there is no dispatcher
-callback or legacy launch fallback.
+`RunControllerExperiment`. Existing ordinary broker behavior remains, while the
+legacy direct controller and standalone worker execution flags are hard
+refusals. The signed receiver reaches the actual Driver or private same-process
+paired terminal implementation only after its controller handoff checks; public
+`Driver.Run` and `RunPairedTerminal` do not provide a local bypass.
 
 Each executable independently links a public registry string:
 `enrollment.brokerExperimentPolicyJSON` and
@@ -58,9 +59,15 @@ renumbering any physical event. The consuming controller journal stays open into
 paired execution. Recovery-only renewals cannot restore create/pair authority.
 
 Generic cleanup refuses before intent/input/mint because the current SDK has no
-conditional deletion capability. The paired normal-success direct deletion
-remains its existing exclusive experiment policy; no fault reconciliation or
-unconditional fallback was added.
+conditional deletion capability. The pinned SDK's ID-only
+`DeleteRunnerScaleSet` is intentionally not exposed by `SDKAPI`. The paired
+production route also refuses before Docker when its API lacks
+`ConditionalScaleSetDeleter`; no unconditional fallback remains. A
+`g01_pair_fixture && !g01_worker` adapter is available only for synthetic tests,
+requires a TLS loopback endpoint and sends `If-Match` to that fixture. Its
+replacement test proves the fake provider rejects a changed ETag; it does not
+establish GitHub's versioning/conditional-delete semantics or atomic coupling to
+runner inventory. Live cleanup remains unresolved.
 
 The separately bounded [session replacement experiment](g01-session-replacement.md)
 uses its exact signed phase, original create prefix and v2 audience. Its two
@@ -76,3 +83,18 @@ normal/race commands/results belong in each candidate's implementation report.
 Independent security/recovery review, exact-head Codex/quick checks, integration
 CI, real custody/pins/policy/headroom, fault cleanup/reconciliation, explicit live
 authority and the remaining full acceptance evidence stay open.
+
+### Current source validation — 2026-11-03
+
+At implementation commit `f854496` (with only the two evidence documents
+modified in the worktree), the official G01 `core` and `jit` profiles both
+exited 0 with the pinned local Go 1.27.3 darwin/arm64 toolchain, `GOTOOLCHAIN=local`,
+`GOPROXY=off`, `GOSUMDB=off`, and task-scoped temporary/build storage on the
+external worktree volume. The machine-specific absolute toolchain/cache paths
+are omitted; both invocations used `GO=/path/to/go1.27.3/bin/go`, with
+`TMPDIR` and `GOCACHE` set to a task-scoped directory on that volume and
+`GOMODCACHE` set to a pre-populated local module cache. Module downloads were
+disabled. Both reported `offline experiment checks passed: 1 module(s)`.
+These are offline fixture results only; they do not qualify a provider ETag,
+runner/JIT behavior or a live canary. GitHub CLI read-only checks confirmed
+issue #1 OPEN and Project #2 In progress.
