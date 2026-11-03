@@ -851,15 +851,23 @@ failure records `workflow_provenance_get_not_dispatched` and permits a later
 inspect; ambiguous GET outcomes leave `workflow_provenance_get_started` without
 confirmation and block the inspect before any API call.
 
-Local offline verification used the cached Go 1.27.3 toolchain with external
-GOCACHE/GOMODCACHE/GOTMPDIR and downloads disabled:
+Local offline verification at exact candidate head
+`6950a80639931e497b55e665049af4d4956eacdf` used the cached Go 1.27.3 toolchain
+with external GOCACHE/GOMODCACHE/GOTMPDIR and downloads disabled:
+
+The RED fixture files were applied to a clean archive of exact base
+`a4d6f03b81cbc77f51bf9eb0d37fdf47d67c02f3`; no implementation files were
+changed in that archive. The identical selector was rerun on a fresh archive
+of the same base. Both runs showed no account workflow intent, then `inspect`
+completed and minted twice.
 
 | Check | Result |
 |---|---|
-| RED at exact base `a4d6f03`: lost workflow-provenance response, then inspect | FAIL as expected; inspect completed and minted twice, with no account workflow intent |
-| Restored immutable base `a4d6f03`, rerunning the exact RED test | FAIL as expected; inspect completed and minted twice |
-| GREEN focused causal, timeout, no-dispatch, replay and ledger-bound tests | PASS |
-| G02 `go test -count=1 -timeout=300s .` | PASS (50.413s) |
+| `go test -race -count=1 -timeout=120s -run '^TestBrokerExperimentV3LostWorkflowProvenanceResponseBlocksLaterInspect$' .` on exact base | FAIL as expected; `inspect` completed (`controller_completed`) and minted twice |
+| Same RED command on a fresh archive of exact base | Same failure and behavior |
+| Focused lost-response, timeout, no-dispatch and replay tests on candidate | PASS (4.573s) |
+| G02 `go test -race -p=1 -count=1 -timeout=300s ./...` | PASS (all packages; library 138.676s) |
+| G02 `go vet -p=1 ./...` | PASS |
 | Provider/credential/workflow/runner/Scale Set/Docker/host/live-canary actions | Not run |
 
 These are synthetic offline fixture results only. No provider credential or
