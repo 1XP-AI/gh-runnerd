@@ -589,9 +589,11 @@ func openBrokerAdmissionMode(directory string, a BrokerApproval, j *brokerJourna
 			return nil, errBroker
 		}
 		if event.Provenance != nil && event.Provenance.Source == handoff.ReusableCalleeSource {
-			if _, ok := workflowProvenanceConfirmed[slot]; !ok {
+			confirmed, ok := workflowProvenanceConfirmed[slot]
+			if !ok || !brokerClaimMatchesWorkflowProvenance(event, confirmed) {
 				// A reusable-callee claim is valid only after the exact
-				// authenticated workflow-run GET was confirmed in account history.
+				// authenticated workflow-run GET for this claim was confirmed
+				// in account history.
 				return nil, errBroker
 			}
 		}
@@ -811,4 +813,15 @@ func sameBrokerWorkflowProvenance(started, event brokerWorkflowProvenanceEvent) 
 		started.WorkflowRunID == event.WorkflowRunID && started.WorkflowRef == event.WorkflowRef &&
 		started.WorkflowSHA == event.WorkflowSHA && started.WorkflowPath == event.WorkflowPath &&
 		event.Kind != started.Kind
+}
+
+func brokerClaimMatchesWorkflowProvenance(claim brokerClaimEvent, confirmed brokerWorkflowProvenanceEvent) bool {
+	if claim.Provenance == nil || claim.Authority == nil || confirmed.Kind != "workflow_provenance_get_confirmed" {
+		return false
+	}
+	approval := claim.Authority.Approval
+	return confirmed.Slot == claim.Slot && confirmed.Attempt == claim.Attempt && confirmed.Journal == claim.Journal &&
+		confirmed.ControllerApprovalSHA256 == claim.SnapshotDigest && confirmed.Source == claim.Provenance.Source &&
+		confirmed.WorkflowRunID == approval.WorkflowRunID && confirmed.WorkflowRef == approval.WorkflowRef &&
+		confirmed.WorkflowSHA == approval.WorkflowSHA && confirmed.WorkflowPath == approval.WorkflowPath
 }
