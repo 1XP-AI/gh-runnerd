@@ -550,8 +550,35 @@ tokens may remain valid until expiry after rejection, and the final provider rea
 is not atomic with handoff. Authenticated production provenance and trust-root
 provisioning, broker-only execution and trusted credential custody, qualified
 runtime isolation and resource enforcement, concrete separate canary
-authorization, and sanitized live evidence remain open. No live GitHub,
-credential, Scale Set, runner, Docker, or host-service operation occurred.
+authorization, and sanitized live evidence remain open. No canary dispatch,
+credential issuance, Scale Set, runner, Docker, or host-service action occurred.
+
+### Canary policy recheck — 2026-11-03
+
+An authenticated, read-only `gh` recheck now finds the dedicated runner group
+limited to one selected private repository, with public repositories disabled,
+workflow restrictions enabled for one immutable workflow reference, and zero
+registered runners. This supersedes the 2026-11-01 observation that workflow
+restriction was disabled. Private repository, workflow, and commit identities
+are omitted from this public record. No group or repository setting changed.
+
+The manual caller is on the private target's `main` branch and calls the
+SHA-pinned reusable workflow. The called workflow is explicitly marked as a
+local static proposal that needs separate review and authorization. Its job
+guard requires `github.ref_protected == true`; the current `main` branch reports
+`protected: false`, so dispatching from that ref would not run the canary job.
+GitHub documents that a reusable workflow uses the caller's `github` context and
+that `ref_protected` is true only when branch protections or rulesets are
+configured ([contexts](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#github-context),
+[reusable workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations#github-context)).
+No workflow was dispatched.
+
+The GitHub App installation's access to the selected private repository was not
+independently verified in this recheck. No additional authentication scope was
+requested or added. Branch protection, App installation selection, live harness
+review, runtime/isolation/resource qualification, conditional cleanup, separate
+canary authorization, and all live execution evidence remain open. This
+configuration read does not authorize the experiment.
 
 ## Minimal execution phases
 
