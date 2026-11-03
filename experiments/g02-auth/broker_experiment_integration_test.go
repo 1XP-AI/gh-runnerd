@@ -81,6 +81,7 @@ func TestBrokerOfflineReusableCalleeReceiptReachesHandoff(t *testing.T) {
 	runJSON = strings.TrimSuffix(runJSON, "}") + `,"referenced_workflows":[{"path":"org-a/canary/.github/workflows/runner.yml@` + request.Callee.SHA + `","sha":"` + request.Callee.SHA + `"}]}`
 	transport := transportFunc(func(r *http.Request) (*http.Response, error) {
 		if r.URL.Path == workflowRunPath(request.Repository, request.WorkflowRunID) {
+			fixture.events = append(fixture.events, "GET "+r.URL.Path)
 			return response(http.StatusOK, runJSON), nil
 		}
 		if r.URL.Path == "/orgs/org-a/actions/runner-groups/3" {
@@ -134,6 +135,7 @@ func TestBrokerOfflineReusableCalleeReceiptReachesHandoff(t *testing.T) {
 	plan.handoff = &brokerHandoffAssembly{
 		experimental: true,
 		signer: workflowSignerFunc(func(ctx context.Context, data []byte) ([]byte, error) {
+			fixture.events = append(fixture.events, "handoff-sign")
 			if ctx.Err() != nil {
 				return nil, errBroker
 			}
@@ -146,6 +148,7 @@ func TestBrokerOfflineReusableCalleeReceiptReachesHandoff(t *testing.T) {
 		source:   selected.grant.Request.Source,
 		launch: func(_ context.Context, h *issuedControllerHandoff, _ string) error {
 			launches++
+			fixture.events = append(fixture.events, "handoff-launch")
 			handoffBytes = bytes.Clone(h.envelope)
 			return nil
 		},
@@ -159,6 +162,22 @@ func TestBrokerOfflineReusableCalleeReceiptReachesHandoff(t *testing.T) {
 	result, err := brokerExecuteWithProvenance(context.Background(), a, brokerInput{PEM: string(candidate.PEM), VerificationToken: "synthetic-private-workflow-token"}, attempt, api, plan, &provenance, journal)
 	if err != nil || result.Status != "controller_completed" || launches != 1 {
 		t.Fatalf("offline v2 broker handoff failed: result=%+v err=%v launches=%d token=%d calls=%v", result, err, launches, fixture.tokenCalls, fixture.calls)
+	}
+	workflowEvent := "GET " + workflowRunPath(request.Repository, request.WorkflowRunID)
+	signAt, finalGetAt, launchAt := -1, -1, -1
+	for i, event := range fixture.events {
+		if event == "handoff-sign" {
+			signAt = i
+		}
+		if event == workflowEvent {
+			finalGetAt = i
+		}
+		if event == "handoff-launch" {
+			launchAt = i
+		}
+	}
+	if signAt < 0 || finalGetAt <= signAt || launchAt != finalGetAt+1 {
+		t.Fatalf("final workflow GET did not immediately precede handoff after binding construction: sign=%d final_get=%d launch=%d events=%v", signAt, finalGetAt, launchAt, fixture.events)
 	}
 	phase, err := handoff.DecodeStrictPhaseBinding(handoffBytes)
 	if err != nil || phase.Request != request || phase.Request.Callee != request.Callee || phase.Version != 2 {

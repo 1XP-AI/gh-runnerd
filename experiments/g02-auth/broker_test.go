@@ -187,7 +187,7 @@ func (f *brokerHTTPFixture) RoundTrip(r *http.Request) (*http.Response, error) {
 	case "/orgs/org-a/actions/runner-groups/3/repositories":
 		payload = map[string]any{"total_count": 1, "repositories": []any{repo}}
 	case "/repos/org-a/canary/actions/runs/7":
-		payload = map[string]any{"id": 7, "head_branch": "main", "head_sha": strings.Repeat("b", 40), "path": ".github/workflows/canary.yml", "event": "workflow_dispatch", "run_attempt": 1, "repository": repo, "head_repository": repo}
+		payload = map[string]any{"id": 7, "head_branch": "main", "head_sha": strings.Repeat("b", 40), "path": ".github/workflows/canary.yml", "event": "workflow_dispatch", "status": "in_progress", "run_attempt": 1, "repository": repo, "head_repository": repo}
 	case "/orgs/org-a/actions/runners/registration-token":
 		status = 201
 		payload = map[string]any{"token": "synthetic-private-registration-token", "expires_at": time.Now().Add(time.Hour)}

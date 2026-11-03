@@ -24,7 +24,7 @@ func workflowGrantFixture() reviewedWorkflowGrant {
 func workflowRunJSON(t *testing.T, grant reviewedWorkflowGrant) string {
 	t.Helper()
 	repo := map[string]any{"id": grant.RepositoryID, "full_name": grant.Request.Repository, "private": true, "fork": false, "owner": map[string]any{"id": grant.OrganizationID, "login": strings.Split(grant.Request.Repository, "/")[0]}}
-	run := map[string]any{"id": grant.Request.WorkflowRunID, "head_sha": grant.Request.WorkflowSHA, "head_branch": strings.TrimPrefix(grant.Request.WorkflowRef, "refs/heads/"), "path": grant.Request.WorkflowPath, "event": "workflow_dispatch", "run_attempt": 1, "repository": repo, "head_repository": repo}
+	run := map[string]any{"id": grant.Request.WorkflowRunID, "head_sha": grant.Request.WorkflowSHA, "head_branch": strings.TrimPrefix(grant.Request.WorkflowRef, "refs/heads/"), "path": grant.Request.WorkflowPath, "event": "workflow_dispatch", "status": "in_progress", "run_attempt": 1, "repository": repo, "head_repository": repo}
 	b, err := json.Marshal(run)
 	if err != nil {
 		t.Fatal(err)
@@ -620,7 +620,7 @@ func TestWorkflowProvenanceV2AuthorityKeysExact(t *testing.T) {
 	grant.Request.Source = handoff.ReusableCalleeSource
 	grant.Request.Callee = handoff.CalleeIdentity{Repository: grant.Request.Repository, WorkflowPath: ".github/workflows/reusable.yml", SHA: strings.Repeat("d", 40)}
 	base := strings.TrimSuffix(workflowRunJSON(t, grant), "}") + `,"referenced_workflows":[{"path":"` + grant.Request.Repository + `/` + grant.Request.Callee.WorkflowPath + `@` + grant.Request.Callee.SHA + `","sha":"` + grant.Request.Callee.SHA + `"}]}`
-	paths := [][]string{{"id"}, {"head_sha"}, {"head_branch"}, {"event"}, {"path"}, {"run_attempt"}, {"repository"}, {"head_repository"}}
+	paths := [][]string{{"id"}, {"head_sha"}, {"head_branch"}, {"event"}, {"status"}, {"path"}, {"run_attempt"}, {"repository"}, {"head_repository"}}
 	for _, repo := range []string{"repository", "head_repository"} {
 		for _, key := range []string{"id", "full_name", "private", "fork", "owner"} {
 			paths = append(paths, []string{repo, key})

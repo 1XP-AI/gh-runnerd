@@ -410,8 +410,8 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 		if revokeBrokerReadOnlyToken(ctx, api, j, claim, readOnly.Token, input.VerificationToken) != nil || !readOnlyVerified || !verifiedJournaled {
 			return BrokerResult{}, errBroker
 		}
-		// The final workflow GET is deliberately after read-only provider
-		// inspection and immediately before the management write-token request.
+		// Recheck after read-only provider inspection before requesting the
+		// management write token; a second check fences the eventual handoff.
 		if api.verifyFinalReusableWorkflow(ctx, a, plan.controller, input.VerificationToken, plan.handoff.grant) != nil {
 			return BrokerResult{}, errBroker
 		}
@@ -471,9 +471,6 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 	if j.append("token_verified", map[string]any{"expires_at": issued.ExpiresAt, "app_id": identity.ID, "installation_id": install.ID}) != nil {
 		return BrokerResult{}, errBroker
 	}
-	if v3ReusableCallee && api.verifyFinalReusableWorkflow(ctx, a, plan.controller, input.VerificationToken, plan.handoff.grant) != nil {
-		return BrokerResult{}, errBroker
-	}
 	if a.Mode == "discover-actions-host" {
 		host, err := api.discover(ctx, a, issued.Token, j)
 		if err != nil || revokeManagementToken() != nil || j.append("actions_host_observed", map[string]any{"actions_host": host}) != nil || claim.complete() != nil {
@@ -504,7 +501,7 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 	}
 	data, _ := json.Marshal(payload)
 	defer clear(data)
-	if len(data) > 16384 || j.append("controller_handoff_started", nil) != nil {
+	if len(data) > 16384 {
 		return BrokerResult{}, errBroker
 	}
 	var launchErr error
@@ -589,9 +586,21 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 		if guardLive() != nil || ctx.Err() != nil {
 			return BrokerResult{}, errBroker
 		}
+		if v3ReusableCallee && (api.verifyFinalReusableWorkflow(ctx, a, plan.controller, input.VerificationToken, assembly.grant) != nil || assembly.workflow.Verify(request, rawReceipt, api.now()) != nil) {
+			return BrokerResult{}, errBroker
+		}
+		if guardLive() != nil || ctx.Err() != nil || j.append("controller_handoff_started", nil) != nil {
+			return BrokerResult{}, errBroker
+		}
 		launchErr = assembly.launch(ctx, owned, filepath.Join(path, "controller-approval.json"))
 	} else {
-		if guardLive() != nil {
+		if guardLive() != nil || ctx.Err() != nil {
+			return BrokerResult{}, errBroker
+		}
+		if v3ReusableCallee && api.verifyFinalReusableWorkflow(ctx, a, plan.controller, input.VerificationToken, plan.handoff.grant) != nil {
+			return BrokerResult{}, errBroker
+		}
+		if guardLive() != nil || ctx.Err() != nil || j.append("controller_handoff_started", nil) != nil {
 			return BrokerResult{}, errBroker
 		}
 		launchErr = plan.launch(ctx, data, filepath.Join(path, "controller-approval.json"))
