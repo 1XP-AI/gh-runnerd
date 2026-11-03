@@ -662,8 +662,9 @@ remain OPEN / In progress.
 
 ### Read-token rejection and journal uncertainty regression — 2026-11-03
 
-The independent Luna Max exact-head review of PR #159 at `d8f387fdc7e367ac65e23a3b449ee7202aff2163` identified
-two P1 findings: rejected read-token scope/expiry responses discarded a usable
+The independent Luna Max exact-head review of PR #159 at
+`d8f387fdc7e367ac65e23a3b449ee7202aff2163` identified two P1 findings: rejected read-token scope/expiry
+responses discarded a usable
 token before cleanup, and a token equal to the caller verification credential
 could reach provider-state preflight and DELETE. It also identified a P2 gap:
 a successful DELETE followed by failed revoked-record sync did not append an
@@ -672,7 +673,8 @@ retains only a lexically valid, bounded read-token candidate for one journaled
 revocation attempt, never preflights rejected issuance, records/skips a
 caller-token collision before provider-state preflight, and appends terminal
 uncertainty after a failed revoked-result sync. Verification on the corrected
-local tree, using Go 1.27.3 and caches on /Volumes/worktree:
+source commit `4f3d84f52402f21ec5b1031a19af92aaeb60b424`, using Go 1.27.3
+and Go caches on the external worktree volume:
 
 | Check | Result |
 |---|---|
