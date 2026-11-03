@@ -3050,14 +3050,14 @@ func TestG01PairedTerminalPartitionRegistry(t *testing.T) {
 	if out := toolingLivecanarySkipCheck(t, "^TestPairedTerminalClosedReplayActualFile$", remainderSkip); !strings.Contains(out, "[no tests to run]") {
 		t.Fatalf("remainder skip still selects a storage name: %s", out)
 	}
-	if len(all) != 26 {
-		t.Fatalf("listed %d TestPairedTerminal names, want 26: %q", len(all), all)
+	if len(all) != 27 {
+		t.Fatalf("listed %d TestPairedTerminal names, want 27: %q", len(all), all)
 	}
 	if len(heavyNames) != 5 {
 		t.Fatalf("heavy partition listed %d names, want 5: %q", len(heavyNames), heavyNames)
 	}
-	if len(remainderNames) != 15 {
-		t.Fatalf("remainder partition listed %d names, want 15: %q", len(remainderNames), remainderNames)
+	if len(remainderNames) != 16 {
+		t.Fatalf("remainder partition listed %d names, want 16: %q", len(remainderNames), remainderNames)
 	}
 	if len(storageNames) != 6 {
 		t.Fatalf("storage partition listed %d names, want 6: %q", len(storageNames), storageNames)
@@ -3082,8 +3082,8 @@ func TestG01PairedTerminalPartitionRegistry(t *testing.T) {
 	assign("remainder", remainderNames)
 	assign("storage-journal", journalNames)
 	assign("storage-remainder", storageRemainderNames)
-	if len(seen) != 26 {
-		t.Fatalf("partitions covered %d names, want 26", len(seen))
+	if len(seen) != 27 {
+		t.Fatalf("partitions covered %d names, want 27", len(seen))
 	}
 	for _, name := range all {
 		if _, ok := seen[name]; !ok {
