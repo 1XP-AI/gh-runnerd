@@ -203,6 +203,27 @@ func TestPublicEvidenceSanitizerRejectsInvalidOrMixedInputWithoutPublishing(t *t
 	}
 }
 
+func TestPublicEvidenceJSONScannerBoundsNesting(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		depth   int
+		wantErr bool
+	}{
+		{name: "at limit", depth: maxPublicEvidenceJSONDepth},
+		{name: "over limit", depth: maxPublicEvidenceJSONDepth + 1, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := strings.Repeat("[", tc.depth) + "null" + strings.Repeat("]", tc.depth)
+			decoder := json.NewDecoder(strings.NewReader(input))
+			decoder.UseNumber()
+			err := consumePublicEvidenceJSONValue(decoder)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("nesting depth %d error=%v, wantErr=%v", tc.depth, err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestPreparationCommandNeverReadsCredentialsOrRunsRemotePhase(t *testing.T) {
 	a := livecanary.Approval{AppID: 11, InstallationID: 12, Organization: "fixture-org", Repository: "canary", RepositoryID: 42, RunnerGroupID: 3, OwnerNonce: strings.Repeat("a", 32), HarnessSHA: strings.Repeat("b", 40), WorkflowSHA: strings.Repeat("c", 40), WorkflowPath: ".github/workflows/canary.yml", Controller: "fixture-controller", ExpiresAt: time.Now().Add(time.Hour), ActionsHosts: []string{"fixture.actions.githubusercontent.com"}, Phases: []string{"create"}}
 	parent := t.TempDir()

@@ -23,7 +23,10 @@ import (
 	"github.com/1XP-AI/gh-runnerd/experiments/g02-auth/handoff"
 )
 
-const maxPublicEvidenceInputBytes = 1 << 20
+const (
+	maxPublicEvidenceInputBytes = 1 << 20
+	maxPublicEvidenceJSONDepth  = 16
+)
 
 type publicEvidenceInput struct {
 	ElapsedMS         int64                         `json:"elapsed_ms"`
@@ -54,6 +57,10 @@ type publicEvidenceCountsInput struct {
 }
 
 func consumePublicEvidenceJSONValue(decoder *json.Decoder) error {
+	return consumePublicEvidenceJSONValueAtDepth(decoder, 0)
+}
+
+func consumePublicEvidenceJSONValueAtDepth(decoder *json.Decoder, depth int) error {
 	token, err := decoder.Token()
 	if err != nil {
 		return livecanary.ErrPublicEvidence
@@ -64,6 +71,9 @@ func consumePublicEvidenceJSONValue(decoder *json.Decoder) error {
 	}
 	switch delimiter {
 	case '{':
+		if depth >= maxPublicEvidenceJSONDepth {
+			return livecanary.ErrPublicEvidence
+		}
 		keys := make(map[string]struct{})
 		for decoder.More() {
 			keyToken, err := decoder.Token()
@@ -75,7 +85,7 @@ func consumePublicEvidenceJSONValue(decoder *json.Decoder) error {
 				return livecanary.ErrPublicEvidence
 			}
 			keys[key] = struct{}{}
-			if consumePublicEvidenceJSONValue(decoder) != nil {
+			if consumePublicEvidenceJSONValueAtDepth(decoder, depth+1) != nil {
 				return livecanary.ErrPublicEvidence
 			}
 		}
@@ -84,8 +94,11 @@ func consumePublicEvidenceJSONValue(decoder *json.Decoder) error {
 			return livecanary.ErrPublicEvidence
 		}
 	case '[':
+		if depth >= maxPublicEvidenceJSONDepth {
+			return livecanary.ErrPublicEvidence
+		}
 		for decoder.More() {
-			if consumePublicEvidenceJSONValue(decoder) != nil {
+			if consumePublicEvidenceJSONValueAtDepth(decoder, depth+1) != nil {
 				return livecanary.ErrPublicEvidence
 			}
 		}

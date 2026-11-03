@@ -298,7 +298,7 @@ would require separately rechecking its owner plan, App access and runner-group
 scope. No canary workflow was dispatched; execution still requires its own
 concrete maintainer authorization.
 
-### Independent Luna Max static harness review — 2026-11-03
+### Historical Luna Max static harness review — 2026-11-03
 
 Disposition: **HOLD** at exact public source HEAD
 `686df326b911184b9c3df2c9bd2a9f7ba65b5b49`. The review performed no tests,
@@ -314,13 +314,15 @@ reusable-callee binding and launches the explicit experimental mode. The
 direct-execution CLI flags remain rejected.
 
 The legacy `g01-broker --execute-approved-broker` / `RunBroker` route remains
-callable for a v1 approval. It can make authenticated identity calls and mint
-an installation token before launching `g01-live` with the incompatible direct
-flags, which `g01-live` rejects before reading its input. This route therefore
-has pre-rejection live effects; it is not side-effect-free and must not be used
-for the selected canary. The finding is rebutted only within the selected v2
-route's scope. This PR does not disable the legacy route; bringing it into G01
-scope requires separately blocking that path before live use.
+callable when `GroupPolicy` is omitted and has its zero value. Explicit
+non-v2 `GroupPolicy` JSON is rejected; the legacy approval is unversioned. It
+can make authenticated identity calls and mint an installation token before
+launching `g01-live` with the incompatible direct flags, which `g01-live`
+rejects before reading its input. This route therefore has pre-rejection live
+effects; it is not side-effect-free and must not be used for the selected
+canary. The finding is rebutted only within the selected v2 route's scope.
+This PR does not disable the legacy route; any broad G01 live authorization
+must explicitly exclude it or separately block that path before use.
 
 Finding F2 was the absence of a production caller for the public evidence
 allowlist. The candidate adds the tagged `--sanitize-public-evidence` output
@@ -335,12 +337,32 @@ GOTOOLCHAIN=auto go test -tags g01_live ./cmd/g01-live -run 'TestPublicEvidenceS
 The sanitizer closes the output-path gap for manually verified observations
 but does not establish their truth or close the live checklist.
 
-The review could not close checklist items 353–356 offline: the rendered
+The historical review could not close checklist items 353–356 offline: the rendered
 private workflow and worker/executor are not in this checkout, and current
 runtime, isolation, resource enforcement, live fault outcomes, actual sanitized
 timeline, authorization and owned cleanup remain unqualified. Preserve the
 checklist as open. Re-review the final immutable candidate after its changes are
 committed.
+
+### Follow-up Luna Max candidate review — 2026-11-03
+
+Disposition at exact public source HEAD
+`9483727b42054c94ba4511d86ab9343f831f6c01`: **APPROVE offline/static;
+HOLD live**. The source and documentation review ran no tests, programs, or
+live actions. It found no P0/P1 issue in the sanitizer or selected v2 route.
+The review confirmed the bounded single-document parser and allowlisted output,
+and identified a P2: the recursive duplicate-key scan lacked an explicit JSON
+nesting-depth cap. A focused test reproduced that the 17-level input was
+accepted at this head; the candidate now caps container nesting at 16 and the
+boundary test passes at 16 and rejects 17. A fresh exact-head review of this
+correction remains pending.
+
+The same review noted that the preceding section recorded only the historical
+`686df326` review. This follow-up is the exact-head record for `9483727`; neither
+review closes the live runtime, authority, authorization, fault-outcome,
+sanitized-timeline or owned-cleanup gates. The legacy zero-GroupPolicy route
+remains outside the selected v2 canary and is a no-go for any broader G01 live
+authorization unless explicitly excluded or separately disabled.
 
 - [x] Maintainer identified one disposable **private** repository in the
   organization. The reviewed workflow identity and full SHA are recorded in
@@ -423,7 +445,8 @@ The tagged `g01-live --sanitize-public-evidence` mode is the output boundary for
 manually assembled, independently verified observations. It accepts one JSON
 array from stdin, limits the input to 1 MiB, rejects unknown fields, trailing
 documents, duplicate keys, case-folded field names, explicit null values and
-mixed execution flags, then writes only the serializer's allowlisted document.
+mixed execution flags, caps nested JSON containers at 16 levels, then writes
+only the serializer's allowlisted document.
 Required fields must be present. The exact schema check avoids Go decoder
 case-folding, duplicate-key overwrite and null-as-zero behavior. It does not
 open the private journal, credentials or a network connection, and it does not
