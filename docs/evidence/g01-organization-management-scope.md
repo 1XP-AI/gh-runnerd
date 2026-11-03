@@ -1,6 +1,18 @@
 # G01 organization-only management compatibility
 
-Writer checkpoint: 2026-10-25, based on merged main
+## Current disposition — 2026-11-03
+
+The organization-only compatibility change recorded below merged in
+[PR #109](https://github.com/1XP-AI/gh-runnerd/pull/109) as
+`98e950394d2d2075dee969361fb5337fba67a71e`. The writer checkpoint is a
+pre-merge snapshot; its pending-review wording is historical. Detailed review
+and CI receipts remain in that PR, as directed by this ledger. The merge proves
+the bounded offline compatibility change only; actual issuance and live
+qualification remain unproven. G01 remains OPEN / Project In progress.
+
+## Historical writer checkpoint — 2026-10-25
+
+Based on merged main
 `edd5d8fb651476c03d906434712130e1163a998c`. This is the single change-impact
 and finding ledger for the experimental broker/controller scope correction.
 G01 remains OPEN / Project In progress. Implementation review and GitHub review
