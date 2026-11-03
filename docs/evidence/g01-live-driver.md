@@ -27,8 +27,9 @@ and controller approvals. Both preflights require the selected group to restrict
 workflows to that one literal. Whenever an approval carries a nonempty
 `GroupPolicy`, the independently compiled `PublicPolicy` must be v3 and bind the
 provider-reported reusable callee; caller-only v1/v2 grants are refused. The
-broker group read occurs after its existing management-token mint. V1 receipt
-provenance still covers the caller only; group policy alone does not establish
+empty `GroupPolicy` retains only the legacy caller-only v1 selection path; a v2
+grant without a nonempty group policy fails closed. The broker group read occurs
+after its existing management-token mint. Group policy alone does not establish
 provider callee metadata, scheduler enforcement, private runtime behavior or
 live authorization. Empty compiled policies grant no authority.
 

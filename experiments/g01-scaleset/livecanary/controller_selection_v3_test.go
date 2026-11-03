@@ -119,4 +119,50 @@ func TestControllerExperimentRejectsCallerOnlyPolicyForReusableGroup(t *testing.
 	if _, err := selectControllerExperiment(files, "controller", "create", now); err == nil {
 		t.Fatal("caller-only v2 policy selected a reusable-workflow group")
 	}
+	oldOpen, oldAPI := controllerExperimentFixtureOpen, controllerExperimentFixtureAPI
+	defer func() {
+		controllerExperimentFixtureOpen, controllerExperimentFixtureAPI = oldOpen, oldAPI
+	}()
+	var journalOpens, apiBuilds int
+	controllerExperimentFixtureOpen = func(string, Approval) (*FileJournal, error) {
+		journalOpens++
+		return nil, ErrJournal
+	}
+	controllerExperimentFixtureAPI = func(Approval, Credentials) (API, error) {
+		apiBuilds++
+		return nil, ErrApproval
+	}
+	var inputs [2]*os.File
+	var copies [2]*os.File
+	for i := range inputs {
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		fd, err := syscall.Dup(int(r.Fd()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		inputs[i], copies[i] = r, os.NewFile(uintptr(fd), "caller-only-policy-inspection")
+		defer copies[i].Close()
+		if _, err = w.Write([]byte("unconsumed")); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	err = RunControllerExperimentWithInputs(context.Background(), files, "controller", "create", inputs[0], inputs[1])
+	if journalOpens != 0 || apiBuilds != 0 {
+		t.Fatalf("caller-only v2 crossed pre-effect boundary: journal opens=%d API builds=%d", journalOpens, apiBuilds)
+	}
+	if err != ErrApproval {
+		t.Fatalf("caller-only v2 entrypoint error = %v, want approval refusal", err)
+	}
+	for _, file := range copies {
+		data, err := io.ReadAll(file)
+		if err != nil || string(data) != "unconsumed" {
+			t.Fatal("caller-only v2 consumed inherited input")
+		}
+	}
 }

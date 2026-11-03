@@ -6,7 +6,8 @@ import (
 )
 
 // GroupPolicy is independently reviewed configuration, never provider provenance.
-// Its explicit v2 selection does not change the caller-only v1 receipt schema.
+// A nonempty v2 policy requires PublicPolicy v3 to bind the invoked reusable
+// callee; the legacy v1 receipt schema remains caller-only.
 type GroupPolicy struct {
 	Version        int    `json:"version"`
 	OrganizationID int64  `json:"organization_id"`
