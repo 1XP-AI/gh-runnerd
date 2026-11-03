@@ -512,9 +512,8 @@ deletes a scale set by numeric ID and exposes no server-side version/ETag
 precondition. Therefore the existing `ConditionalScaleSetDeleter` requirement
 still has no supported implementation; cleanup remains quarantined and no
 delete fallback is enabled. The canary remains unrun and unauthorized. Issue
-#1 and Project #2 must stay In Progress pending independent exact-head review,
-the remaining live-readiness evidence, concrete canary authorization, and a
-safe conditional cleanup path.
+#1 and Project #2 must stay In Progress pending the remaining live-readiness
+evidence, concrete canary authorization, and a safe conditional cleanup path.
 
 ### Independent offline review triage — 2026-11-03
 
@@ -528,10 +527,31 @@ preflight, and verify the pinned SDK checksum in both broker and child build
 admission. The remaining token lifetime and non-atomic provider race are recorded
 as live limitations; no live token, provider, runner, or host operation occurred.
 
-The issue remains OPEN and Project #2 remains In progress. Conditional Scale Set
-cleanup, exact-final-head review/quick check, trusted runtime and custody evidence,
-and concrete separately authorized canary execution are still gates. The offline
-tests do not satisfy any live acceptance criterion.
+At this premerge checkpoint, the issue remained OPEN and Project #2 remained In
+progress. Conditional Scale Set cleanup, final-head review/quick check, trusted
+runtime and custody evidence, and concrete separately authorized canary
+execution were still gates. The offline tests do not satisfy any live acceptance
+criterion.
+
+### Post-merge reconciliation — 2026-11-03
+
+PR #153 merged as `0b7741c045b1da55e50f758b3feaf179eb053cea` from reviewed head
+`a82764feafcf1dd3f081a14074efb1efed655f05`. GitHub Codex reviewed that exact
+head and reported no major issues; the hosted `Go checks` run passed for the
+same SHA. The PR records the completed G01/G02 offline suites, vet checks, RED /
+GREEN evidence, and exact clean Go 1.27.3 build metadata. The binary was inspected
+but not executed.
+
+This closes the PR #153 exact-head Codex review and hosted quick-check gates. It
+does not close G01 or authorize execution: issue #1 remains OPEN and Project #2
+remains In progress. The pinned v0.5.0 SDK has no server-side version/ETag
+precondition for Scale Set deletion, so cleanup remains quarantined. Installation
+tokens may remain valid until expiry after rejection, and the final provider read
+is not atomic with handoff. Authenticated production provenance and trust-root
+provisioning, broker-only execution and trusted credential custody, qualified
+runtime isolation and resource enforcement, concrete separate canary
+authorization, and sanitized live evidence remain open. No live GitHub,
+credential, Scale Set, runner, Docker, or host-service operation occurred.
 
 ## Minimal execution phases
 
