@@ -478,6 +478,44 @@ by the output sink. Each input item can provide
 `resources` (`kind` and private `id`), `http_status`, `succeeded`, and bounded
 `counts`; private resource IDs are replaced by stable aliases in the output.
 
+### Offline authority and build identity update — 2026-11-03
+
+Local candidate source commit `7e87850e181e958cae21043ba47e1eae0b7cf1c3`
+closes two additional offline admission gaps. Public broker selection now
+requires PublicPolicy v3 plus a nonzero valid GroupPolicy v2; exported
+`RunBroker` is an inert compatibility stub, and the legacy approved-broker and
+host-discovery CLI routes are disabled. For the selected v3 reusable-callee
+route, exact read-only installation-token permissions are used for repository,
+runner-group and workflow preflight. A failed preflight cannot request the
+management write token. After it succeeds, the broker repeats the final
+reusable-callee GET, requests the write token, and repeats provider preflight
+before handoff. A read-only token issued before a later rejection is not
+revoked and can remain valid until expiry. No real GitHub token was requested
+or issued; tests used synthetic API responses.
+
+The `g01-live` build admission check now requires Go `1.27.3`, its exact command
+import path, native `GOOS`/`GOARCH`, `CGO_ENABLED=1`, only the `g01_live` tag, a
+clean lowercase 40-character VCS revision, and the unreplaced
+`github.com/actions/scaleset v0.5.0` dependency. A clean build of the candidate
+recorded those exact values, revision
+`7e87850e181e958cae21043ba47e1eae0b7cf1c3`, and `vcs.modified=false`; the binary
+was inspected but not run. Go 1.27.3 offline checks passed:
+`go test ./... -count=1` and `go vet ./...` in `experiments/g02-auth`, plus
+`go test -tags=g01_live ./... -count=1` and `go vet -tags=g01_live ./...` in
+`experiments/g01-scaleset`. These tests use fixtures and do not establish live
+GitHub, credential, Scale Set, runner or host behavior.
+
+As checked on 2026-11-03, the upstream [actions/scaleset release page](https://github.com/actions/scaleset/releases)
+marks `v0.5.0` as its latest release, and the candidate build uses its exact
+module checksum. The pinned [v0.5.0 client source](https://github.com/actions/scaleset/blob/v0.5.0/client.go)
+deletes a scale set by numeric ID and exposes no server-side version/ETag
+precondition. Therefore the existing `ConditionalScaleSetDeleter` requirement
+still has no supported implementation; cleanup remains quarantined and no
+delete fallback is enabled. The canary remains unrun and unauthorized. Issue
+#1 and Project #2 must stay In Progress pending independent exact-head review,
+the remaining live-readiness evidence, concrete canary authorization, and a
+safe conditional cleanup path.
+
 ## Minimal execution phases
 
 Run phases serially. Each phase begins by verifying that only its owned resources
