@@ -355,7 +355,7 @@ and identified a P2: the recursive duplicate-key scan lacked an explicit JSON
 nesting-depth cap. A focused test reproduced that the 17-level input was
 accepted at this head; the candidate now caps container nesting at 16 and the
 boundary test passes at 16 and rejects 17. A fresh exact-head review of this
-correction remains pending.
+correction was pending at that time; the following section records its result.
 
 The same review noted that the preceding section recorded only the historical
 `686df326` review. This follow-up is the exact-head record for `9483727`; neither
@@ -363,6 +363,25 @@ review closes the live runtime, authority, authorization, fault-outcome,
 sanitized-timeline or owned-cleanup gates. The legacy zero-GroupPolicy route
 remains outside the selected v2 canary and is a no-go for any broader G01 live
 authorization unless explicitly excluded or separately disabled.
+
+### Exact-head Luna Max delta review — 2026-11-03
+
+Disposition at exact public source HEAD
+`88331bdb7fc81a4b390bf0d62502755ea009337d`: **APPROVE offline/static;
+HOLD live**. The read-only review ran no tests, programs, or live actions and
+reported no P0/P1/P2/P3 findings. It confirmed the scanner starts at depth zero
+and rejects objects or arrays at depth 16 or greater, the boundary test accepts
+16 containers and rejects 17, and the exact-case, duplicate-key, null
+prevalidation and allowlisted-serialization checks remain present. Previously
+recorded focused-test results were not independently rerun by this review and
+remain attributed to their original execution.
+
+This review resolves the pending exact-head delta for the depth-cap correction;
+it does not qualify runtime behavior or authorize a canary. Provenance/trust,
+isolation and resource enforcement, cleanup, concrete live authorization and
+the remaining checklist gates remain open. The omitted zero-GroupPolicy legacy
+route remains excluded from the selected v2 canary and a no-go for broader G01
+live authorization unless explicitly excluded or separately disabled.
 
 - [x] Maintainer identified one disposable **private** repository in the
   organization. The reviewed workflow identity and full SHA are recorded in
