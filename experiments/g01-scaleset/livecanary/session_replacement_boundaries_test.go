@@ -221,11 +221,11 @@ func TestSessionReplacementRawPreparationAndInspectSlot(t *testing.T) {
 			t.Fatal(err)
 		}
 		driver := &Driver{f.base.a, f.base.j, f.base.api}
-		if err := driver.Run(context.Background(), "inspect"); err != nil {
+		if err := driver.runForTest(context.Background(), "inspect"); err != nil {
 			t.Fatal("existing inspect slot refused", err)
 		}
 		requests := f.base.requests.Load()
-		if driver.Run(context.Background(), "inspect") == nil || f.base.requests.Load() != requests || !replay(f.base.j.Events()).reserved {
+		if driver.runForTest(context.Background(), "inspect") == nil || f.base.requests.Load() != requests || !replay(f.base.j.Events()).reserved {
 			t.Fatal("inspect replay became authority or released work")
 		}
 	})

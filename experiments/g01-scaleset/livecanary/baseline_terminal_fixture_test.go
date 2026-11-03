@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -23,6 +24,12 @@ type terminalFixture struct {
 	*pairedIntegrationFixture
 	sessionDeletes, workerDeletes, setDeletes, setAbsences, workerAbsences, rosters atomic.Int32
 	deletedSet, deletedWorker                                                       atomic.Bool
+	setETag                                                                         string
+	beforeSetDelete                                                                 func()
+}
+
+func runPairedTerminalForTest(ctx context.Context, files PairedTerminalFiles, credentials Credentials) error {
+	return runPairedTerminalOwned(ctx, files, credentials, nil, nil)
 }
 
 func newTerminalFixture(t *testing.T, cleanup bool) *terminalFixture {
@@ -40,7 +47,7 @@ func newTerminalFixtureWithControllerPhases(t *testing.T, phases, controllerPhas
 }
 func newTerminalFixtureWithCreate(t *testing.T, phases, controllerPhases []string, create func(*FileJournal, Approval)) *terminalFixture {
 	t.Helper()
-	f := &terminalFixture{}
+	f := &terminalFixture{setETag: `"fixture-v1"`}
 	config := &pairedFixtureConfiguration{controllerResponse: func(stage string, value any) any {
 		if f.controllerResponse != nil {
 			value = f.controllerResponse(stage, value)
@@ -66,6 +73,14 @@ func newTerminalFixtureWithCreate(t *testing.T, phases, controllerPhases []strin
 			return true
 		case r.Method == "DELETE" && strings.HasSuffix(r.URL.Path, "/runnerscalesets/7"):
 			f.setDeletes.Add(1)
+			if f.beforeSetDelete != nil {
+				f.beforeSetDelete()
+				f.beforeSetDelete = nil
+			}
+			if r.Header.Get("If-Match") != f.setETag {
+				w.WriteHeader(http.StatusPreconditionFailed)
+				return true
+			}
 			f.deletedSet.Store(true)
 			w.WriteHeader(204)
 			return true
@@ -198,14 +213,14 @@ func newExportedPairedFixture(t *testing.T, f *terminalFixture) exportedPairedFi
 	return exportedPairedFixture{files: files, credentials: Credentials{InstallationToken: f.c.api.credentials.InstallationToken, VerificationToken: f.c.api.credentials.VerificationToken, AppID: f.c.a.AppID, InstallationID: f.c.a.InstallationID, Organization: f.c.a.Organization, ExpiresAt: f.c.api.credentials.ExpiresAt, SelfHostedRunners: "write", Metadata: "read", PairedBinding: binding}}
 }
 
-func TestPairedTerminalExportedAdapterActualJournalsFinalize(t *testing.T) {
+func TestPairedTerminalFixtureUsesConditionalSetDelete(t *testing.T) {
 	f := newTerminalFixture(t, true)
 	fixture := newExportedPairedFixture(t, f)
-	if err := RunPairedTerminal(context.Background(), fixture.files, fixture.credentials); err != nil {
-		t.Fatalf("exported paired adapter refused private TLS/Unix fixture: %v", err)
+	if err := runPairedTerminalForTest(context.Background(), fixture.files, fixture.credentials); err != nil {
+		t.Fatalf("paired fixture conditional terminal cleanup: %v", err)
 	}
-	if f.c.acks.Load() != 2 || f.c.acquires.Load() != 1 || f.jit.Load() != 1 || f.creates.Load() != 1 || f.starts.Load() != 1 || f.sessionDeletes.Load() != 1 || f.workerDeletes.Load() != 1 || f.setDeletes.Load() != 1 || f.workerAbsences.Load() != 1 || f.setAbsences.Load() != 1 || f.rosters.Load() != 4 || f.cleanup.Load() != 0 || f.c.forbidden.Load() != 0 {
-		t.Fatalf("exported terminal sequence: ack=%d acquire=%d JIT=%d create=%d start=%d session=%d worker=%d set=%d worker404=%d set404=%d roster=%d forbidden=%d", f.c.acks.Load(), f.c.acquires.Load(), f.jit.Load(), f.creates.Load(), f.starts.Load(), f.sessionDeletes.Load(), f.workerDeletes.Load(), f.setDeletes.Load(), f.workerAbsences.Load(), f.setAbsences.Load(), f.rosters.Load(), f.c.forbidden.Load())
+	if f.c.acks.Load() != 2 || f.c.acquires.Load() != 1 || f.jit.Load() != 1 || f.creates.Load() != 1 || f.starts.Load() != 1 || f.sessionDeletes.Load() != 1 || f.workerDeletes.Load() != 1 || f.setDeletes.Load() != 1 || f.workerAbsences.Load() != 1 || f.setAbsences.Load() != 1 || f.rosters.Load() != 4 || f.cleanup.Load() != 0 || f.c.forbidden.Load() != 0 || !f.deletedSet.Load() {
+		t.Fatalf("terminal conditional cleanup counts: ack=%d acquire=%d JIT=%d create=%d start=%d session=%d worker=%d set=%d worker404=%d set404=%d roster=%d deleted=%t forbidden=%d", f.c.acks.Load(), f.c.acquires.Load(), f.jit.Load(), f.creates.Load(), f.starts.Load(), f.sessionDeletes.Load(), f.workerDeletes.Load(), f.setDeletes.Load(), f.workerAbsences.Load(), f.setAbsences.Load(), f.rosters.Load(), f.deletedSet.Load(), f.c.forbidden.Load())
 	}
 	raw, _ := json.Marshal(f.c.j.Events())
 	workerRaw, _ := json.Marshal(f.wf.Journal.Events())
@@ -213,6 +228,38 @@ func TestPairedTerminalExportedAdapterActualJournalsFinalize(t *testing.T) {
 		if strings.Contains(string(raw), secret) || strings.Contains(string(workerRaw), secret) {
 			t.Fatal("exported fixture journal leaked credential or JIT")
 		}
+	}
+}
+
+func TestPairedTerminalFixtureRejectsReplacementBeforeConditionalSetDelete(t *testing.T) {
+	f := newTerminalFixture(t, true)
+	fixture := newExportedPairedFixture(t, f)
+	f.beforeSetDelete = func() { f.setETag = `"fixture-v2"` }
+	if err := runPairedTerminalForTest(context.Background(), fixture.files, fixture.credentials); !errors.Is(err, ErrQuarantine) {
+		t.Fatalf("stale Scale Set ETag result = %v, want quarantine", err)
+	}
+	if f.setDeletes.Load() != 1 || f.deletedSet.Load() || f.setAbsences.Load() != 0 || f.rosters.Load() != 3 {
+		t.Fatalf("replacement crossed conditional delete: attempts=%d deleted=%t absences=%d rosters=%d", f.setDeletes.Load(), f.deletedSet.Load(), f.setAbsences.Load(), f.rosters.Load())
+	}
+	var outcome string
+	for _, event := range f.c.j.Events() {
+		if event.Baseline != nil && event.Baseline.Stage == "terminal-set-delete" {
+			outcome = event.Baseline.Outcome
+		}
+	}
+	if outcome != "unknown" {
+		t.Fatalf("stale conditional-delete journal outcome = %q, want unknown", outcome)
+	}
+}
+
+func TestRunPairedTerminalRejectsLocalPairedBindingBeforeEffects(t *testing.T) {
+	f := newTerminalFixture(t, true)
+	fixture := newExportedPairedFixture(t, f)
+	if err := RunPairedTerminal(context.Background(), fixture.files, fixture.credentials); err == nil {
+		t.Fatal("local approval, paired binding and credentials authorized exported terminal execution")
+	}
+	if f.c.requests.Load() != 0 || f.c.acquires.Load() != 0 || f.jit.Load() != 0 || f.creates.Load() != 0 || f.starts.Load() != 0 || f.sessionDeletes.Load() != 0 || f.workerDeletes.Load() != 0 || f.setDeletes.Load() != 0 {
+		t.Fatalf("unproven exported terminal crossed effects: requests=%d acquire=%d JIT=%d create=%d start=%d session=%d worker=%d set=%d", f.c.requests.Load(), f.c.acquires.Load(), f.jit.Load(), f.creates.Load(), f.starts.Load(), f.sessionDeletes.Load(), f.workerDeletes.Load(), f.setDeletes.Load())
 	}
 }
 
@@ -226,12 +273,12 @@ func TestPairedTerminalExportedAdapterCancellationAndReopenNoReplay(t *testing.T
 			cancel()
 		}
 	}
-	if err := RunPairedTerminal(ctx, fixture.files, fixture.credentials); err == nil || f.sessionDeletes.Load() != 1 || f.workerDeletes.Load() != 0 || f.setDeletes.Load() != 0 {
+	if err := runPairedTerminalForTest(ctx, fixture.files, fixture.credentials); err == nil || f.sessionDeletes.Load() != 1 || f.workerDeletes.Load() != 0 || f.setDeletes.Load() != 0 {
 		t.Fatalf("canceled exported terminal crossed cleanup boundary: err=%v session=%d worker=%d set=%d", err, f.sessionDeletes.Load(), f.workerDeletes.Load(), f.setDeletes.Load())
 	}
 	before := [3]int32{f.sessionDeletes.Load(), f.workerDeletes.Load(), f.setDeletes.Load()}
 	reopened := newExportedPairedFixture(t, f)
-	if err := RunPairedTerminal(context.Background(), reopened.files, reopened.credentials); err == nil {
+	if err := runPairedTerminalForTest(context.Background(), reopened.files, reopened.credentials); err == nil {
 		t.Fatal("reopened canceled exported terminal was replayed")
 	}
 	after := [3]int32{f.sessionDeletes.Load(), f.workerDeletes.Load(), f.setDeletes.Load()}
@@ -251,12 +298,12 @@ func TestPairedTerminalExportedAdapterLostResponseStopsWithoutReplay(t *testing.
 		return original(w, r)
 	}
 	fixture := newExportedPairedFixture(t, f)
-	if err := RunPairedTerminal(context.Background(), fixture.files, fixture.credentials); err == nil || f.sessionDeletes.Load() != 0 || f.workerDeletes.Load() != 0 || f.setDeletes.Load() != 0 {
+	if err := runPairedTerminalForTest(context.Background(), fixture.files, fixture.credentials); err == nil || f.sessionDeletes.Load() != 0 || f.workerDeletes.Load() != 0 || f.setDeletes.Load() != 0 {
 		t.Fatalf("lost exported session response crossed effect boundary: err=%v session=%d worker=%d set=%d", err, f.sessionDeletes.Load(), f.workerDeletes.Load(), f.setDeletes.Load())
 	}
 	before := [3]int32{f.sessionDeletes.Load(), f.workerDeletes.Load(), f.setDeletes.Load()}
 	reopened := newExportedPairedFixture(t, f)
-	if err := RunPairedTerminal(context.Background(), reopened.files, reopened.credentials); err == nil {
+	if err := runPairedTerminalForTest(context.Background(), reopened.files, reopened.credentials); err == nil {
 		t.Fatal("reopened lost-response terminal was replayed")
 	}
 	after := [3]int32{f.sessionDeletes.Load(), f.workerDeletes.Load(), f.setDeletes.Load()}
@@ -281,7 +328,7 @@ func TestPairedTerminalBindingRechecksAfterJournalOpenBeforeEffects(t *testing.T
 		return j, err
 	}
 	pairedTerminalFixtureAdapters = &adapters
-	if err := RunPairedTerminal(context.Background(), fixture.files, fixture.credentials); err == nil || f.c.requests.Load() != 0 || f.c.acquires.Load() != 0 || f.jit.Load() != 0 || f.creates.Load() != 0 || f.starts.Load() != 0 || f.sessionDeletes.Load() != 0 || f.workerDeletes.Load() != 0 || f.setDeletes.Load() != 0 {
+	if err := runPairedTerminalForTest(context.Background(), fixture.files, fixture.credentials); err == nil || f.c.requests.Load() != 0 || f.c.acquires.Load() != 0 || f.jit.Load() != 0 || f.creates.Load() != 0 || f.starts.Load() != 0 || f.sessionDeletes.Load() != 0 || f.workerDeletes.Load() != 0 || f.setDeletes.Load() != 0 {
 		t.Fatalf("approval replacement after initial binding crossed pre-effect fence: err=%v requests=%d acquire=%d JIT=%d create=%d start=%d session=%d worker=%d set=%d", err, f.c.requests.Load(), f.c.acquires.Load(), f.jit.Load(), f.creates.Load(), f.starts.Load(), f.sessionDeletes.Load(), f.workerDeletes.Load(), f.setDeletes.Load())
 	}
 }
@@ -340,7 +387,7 @@ func TestPairedTerminalBindingRejectsChangedBytesAndStateBeforeEffects(t *testin
 					t.Fatal("worker state symlink")
 				}
 			}
-			if err := RunPairedTerminal(context.Background(), fixture.files, fixture.credentials); err == nil || f.c.requests.Load() != 0 || f.c.acquires.Load() != 0 || f.jit.Load() != 0 || f.creates.Load() != 0 || f.starts.Load() != 0 || f.sessionDeletes.Load() != 0 || f.workerDeletes.Load() != 0 || f.setDeletes.Load() != 0 {
+			if err := runPairedTerminalForTest(context.Background(), fixture.files, fixture.credentials); err == nil || f.c.requests.Load() != 0 || f.c.acquires.Load() != 0 || f.jit.Load() != 0 || f.creates.Load() != 0 || f.starts.Load() != 0 || f.sessionDeletes.Load() != 0 || f.workerDeletes.Load() != 0 || f.setDeletes.Load() != 0 {
 				t.Fatalf("changed paired identity crossed pre-effect gate: err=%v requests=%d acquire=%d jit=%d create=%d start=%d session=%d worker=%d set=%d", err, f.c.requests.Load(), f.c.acquires.Load(), f.jit.Load(), f.creates.Load(), f.starts.Load(), f.sessionDeletes.Load(), f.workerDeletes.Load(), f.setDeletes.Load())
 			}
 		})

@@ -13,7 +13,7 @@ func created(t *testing.T) (*Driver, *fakeRuntime, *memoryJournal) {
 	j := &memoryJournal{}
 	f := &fakeRuntime{image: ImageProfile{Env: []string{"PATH=/usr/bin"}}}
 	d := &Driver{approval(), j, f}
-	if err := d.Run(context.Background(), "create", syntheticJIT); err != nil {
+	if err := d.runForTest(context.Background(), "create", syntheticJIT); err != nil {
 		t.Fatal(err)
 	}
 	return d, f, j
@@ -22,7 +22,7 @@ func created(t *testing.T) (*Driver, *fakeRuntime, *memoryJournal) {
 func TestOneWorkerNeverRecreatedAndOnlyJITAddedToEnvironment(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "synthetic-controller-secret")
 	d, f, j := created(t)
-	if d.Run(context.Background(), "create", syntheticJIT) == nil || f.creates.Load() != 1 {
+	if d.runForTest(context.Background(), "create", syntheticJIT) == nil || f.creates.Load() != 1 {
 		t.Fatal("second worker admitted")
 	}
 	env := f.container.Config["Env"].([]any)
@@ -44,13 +44,13 @@ func TestUncertainStartNeverRetriesAndCannotCleanup(t *testing.T) {
 			} else {
 				f.afterStart = func() { j.fail = true }
 			}
-			err := d.Run(context.Background(), "start", "")
+			err := d.runForTest(context.Background(), "start", "")
 			if err == nil || f.starts.Load() != 1 || strings.Contains(err.Error(), "synthetic-secret") {
 				t.Fatal("start ambiguity not sanitized")
 			}
 			j.fail = false
 			restarted := Driver{d.Approval, j, f}
-			if restarted.Run(context.Background(), "start", "") == nil || restarted.Run(context.Background(), "cleanup", "") == nil || f.starts.Load() != 1 || f.deletes.Load() != 0 {
+			if restarted.runForTest(context.Background(), "start", "") == nil || restarted.runForTest(context.Background(), "cleanup", "") == nil || f.starts.Load() != 1 || f.deletes.Load() != 0 {
 				t.Fatal("uncertain start allowed retry or cleanup")
 			}
 		})
@@ -79,7 +79,7 @@ func TestEveryRuntimeBoundaryRejectsProfileAndOwnershipMismatch(t *testing.T) {
 			t.Run(name+"/"+phase, func(t *testing.T) {
 				d, f, _ := created(t)
 				mutation(f.container)
-				if d.Run(context.Background(), phase, "") == nil || f.starts.Load() != 0 || f.deletes.Load() != 0 {
+				if d.runForTest(context.Background(), phase, "") == nil || f.starts.Load() != 0 || f.deletes.Load() != 0 {
 					t.Fatal("unverified profile changed external state")
 				}
 			})
@@ -92,7 +92,7 @@ func TestCleanupRetainsActiveAndUnknownWorkers(t *testing.T) {
 		t.Run(status, func(t *testing.T) {
 			d, f, _ := created(t)
 			f.container.State.Status = status
-			if d.Run(context.Background(), "cleanup", "") == nil || f.deletes.Load() != 0 {
+			if d.runForTest(context.Background(), "cleanup", "") == nil || f.deletes.Load() != 0 {
 				t.Fatal("active/unknown worker removed")
 			}
 		})
@@ -110,7 +110,7 @@ func TestOwnedTerminalCleanupAndRunningRemovalRace(t *testing.T) {
 			if status == "race" {
 				f.deleteErr = errors.New("synthetic busy refusal")
 			}
-			err := d.Run(context.Background(), "cleanup", "")
+			err := d.runForTest(context.Background(), "cleanup", "")
 			if f.deletes.Load() != 1 {
 				t.Fatal("verified terminal removal not attempted once")
 			}
@@ -121,7 +121,7 @@ func TestOwnedTerminalCleanupAndRunningRemovalRace(t *testing.T) {
 			} else if err != nil || !replay(j.Events()).deleted {
 				t.Fatal("terminal removal result not durable")
 			}
-			if d.Run(context.Background(), "create", syntheticJIT) == nil || f.creates.Load() != 1 {
+			if d.runForTest(context.Background(), "create", syntheticJIT) == nil || f.creates.Load() != 1 {
 				t.Fatal("cleanup released the one-worker experiment reservation")
 			}
 		})
@@ -131,7 +131,7 @@ func TestOwnedTerminalCleanupAndRunningRemovalRace(t *testing.T) {
 func TestUnverifiedRunnerUpdatePolicyRefusesBeforeRuntime(t *testing.T) {
 	d, f, _ := created(t)
 	d.Approval.RunnerUpdatesDisabled = false
-	if d.Run(context.Background(), "start", "") == nil || f.starts.Load() != 0 {
+	if d.runForTest(context.Background(), "start", "") == nil || f.starts.Load() != 0 {
 		t.Fatal("image digest falsely used as proof of disabled runner updates")
 	}
 }

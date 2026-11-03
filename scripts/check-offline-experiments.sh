@@ -152,8 +152,8 @@ for module_dir in "${selected_modules[@]}"; do
 			if [[ "${profile}" != jit ]]; then
 				# These reviewed command tests use synthetic fixtures and refusal/plan
 				# paths only. Do not discover arbitrary opt-in tags or platform probes.
-				GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -tags=g01_live,g01_worker ./cmd/g01-live ./cmd/g01-worker
-				GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" vet -tags=g01_live,g01_worker ./cmd/g01-live ./cmd/g01-worker
+				GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" test -race -count=1 -timeout=45s -tags=g01_live,g01_worker,g01_pair_fixture ./cmd/g01-live ./cmd/g01-worker
+				GOTOOLCHAIN="${exact_toolchain}" "${go_cmd}" vet -tags=g01_live,g01_worker,g01_pair_fixture ./cmd/g01-live ./cmd/g01-worker
 			fi
 			# Keep the non-terminal collection/listener tests exhaustive and disjoint:
 			# paired collection, replacement, JIT boundary, then fixed non-paired name ranges. Terminal coverage

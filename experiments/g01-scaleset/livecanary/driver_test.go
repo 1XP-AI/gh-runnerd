@@ -86,10 +86,26 @@ func approval() Approval {
 	return Approval{AppID: 11, InstallationID: 12, Organization: "fixture-org", Repository: "canary", RepositoryID: 42, RunnerGroupID: 3, OwnerNonce: "0123456789abcdef0123456789abcdef", HarnessSHA: "1111111111111111111111111111111111111111", WorkflowSHA: "2222222222222222222222222222222222222222", WorkflowPath: ".github/workflows/canary.yml", WorkflowRunID: 5, Controller: "disposable-controller", ExpiresAt: time.Now().Add(time.Hour), ActionsHosts: []string{"fixture.actions.githubusercontent.com"}, Phases: []string{"create", "inspect", "cleanup", "before-ack", "after-ack", "before-acquire", "acquire-loss", "jit-loss"}}
 }
 
+func (d *Driver) runForTest(ctx context.Context, phase string) error {
+	return d.run(ctx, phase, nil)
+}
+
+func TestExportedDriverRunRejectsLocalApprovalBeforeEffects(t *testing.T) {
+	f := &fakeAPI{}
+	j := &memoryJournal{}
+	d := Driver{approval(), j, f}
+	if err := d.Run(context.Background(), "create"); !errors.Is(err, ErrApproval) {
+		t.Fatalf("unproven exported execution returned %v, want ErrApproval", err)
+	}
+	if f.createCalls != 0 || len(j.Events()) != 0 {
+		t.Fatalf("unproven exported execution crossed effects: creates=%d journal=%d", f.createCalls, len(j.Events()))
+	}
+}
+
 func TestJournalFailureStopsBeforeCreate(t *testing.T) {
 	f := &fakeAPI{}
 	d := Driver{approval(), &memoryJournal{fail: true}, f}
-	if d.Run(context.Background(), "create") == nil || f.createCalls != 0 {
+	if d.runForTest(context.Background(), "create") == nil || f.createCalls != 0 {
 		t.Fatal("external create ran without durable intent")
 	}
 }
@@ -98,9 +114,9 @@ func TestAmbiguousCreateNeverRetriesAfterRestart(t *testing.T) {
 	j := &memoryJournal{}
 	f := &fakeAPI{createErr: errors.New("synthetic-token-response-body")}
 	d := Driver{approval(), j, f}
-	_ = d.Run(context.Background(), "create")
+	_ = d.runForTest(context.Background(), "create")
 	restarted := Driver{d.Approval, j, f}
-	err := restarted.Run(context.Background(), "create")
+	err := restarted.runForTest(context.Background(), "create")
 	if !errors.Is(err, ErrQuarantine) || f.createCalls != 1 {
 		t.Fatal("uncertain side effect was retried across restart")
 	}
@@ -109,7 +125,7 @@ func TestAmbiguousCreateNeverRetriesAfterRestart(t *testing.T) {
 func TestAuthorityMismatchStopsBeforeCreate(t *testing.T) {
 	f := &fakeAPI{preflightErr: errors.New("wrong installation or public repository")}
 	d := Driver{approval(), &memoryJournal{}, f}
-	if d.Run(context.Background(), "create") == nil || f.createCalls != 0 {
+	if d.runForTest(context.Background(), "create") == nil || f.createCalls != 0 {
 		t.Fatal("creation bypassed remote authority/policy verification")
 	}
 }

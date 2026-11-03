@@ -352,7 +352,7 @@ func TestCreateContinuationStoredHashesNeverAuthorizeCreate(t *testing.T) {
 	f.j.events = events
 	fake := &fakeAPI{}
 	d := Driver{a, f.j, completedCreateAPI{fake}}
-	if d.Run(context.Background(), "create") == nil || fake.createCalls != 0 {
+	if d.runForTest(context.Background(), "create") == nil || fake.createCalls != 0 {
 		t.Fatal("stored metadata became create proof")
 	}
 	bad := controllerHandoffFixtureForApproval(t, a, "create", time.Now().UTC().Truncate(time.Second))

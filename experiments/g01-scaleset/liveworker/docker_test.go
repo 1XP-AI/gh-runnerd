@@ -79,7 +79,7 @@ func TestSocketReplacementAfterPreflightCannotReceiveAnyMutation(t *testing.T) {
 	for _, phase := range []string{"create", "start", "cleanup"} {
 		t.Run(phase, func(t *testing.T) {
 			f := unixFixture(t)
-			if phase != "create" && f.driver.Run(context.Background(), "create", syntheticJIT) != nil {
+			if phase != "create" && f.driver.runForTest(context.Background(), "create", syntheticJIT) != nil {
 				t.Fatal("synthetic setup failed")
 			}
 			operation := phase
@@ -92,7 +92,7 @@ func TestSocketReplacementAfterPreflightCannotReceiveAnyMutation(t *testing.T) {
 			if phase == "create" {
 				jit = syntheticJIT
 			}
-			err := f.driver.Run(context.Background(), phase, jit)
+			err := f.driver.runForTest(context.Background(), phase, jit)
 			if replacement == nil {
 				t.Fatal("replacement boundary not reached")
 			}
@@ -100,7 +100,7 @@ func TestSocketReplacementAfterPreflightCannotReceiveAnyMutation(t *testing.T) {
 				t.Fatalf("socket replacement crossed authority boundary: error=%v calls=%d received_jit=%t", err, replacement.calls.Load(), replacement.receivedJIT.Load())
 			}
 			requests := f.requests.Load()
-			_ = f.driver.Run(context.Background(), phase, jit)
+			_ = f.driver.runForTest(context.Background(), phase, jit)
 			if f.requests.Load() != requests || replacement.calls.Load() != 0 {
 				t.Fatal("replacement mutation retried")
 			}
@@ -126,7 +126,7 @@ func TestSocketModesAndControllerOwnership(t *testing.T) {
 			if os.Chmod(f.socket, mode) != nil {
 				t.Fatal("synthetic chmod failed")
 			}
-			err := f.driver.Run(context.Background(), "create", syntheticJIT)
+			err := f.driver.runForTest(context.Background(), "create", syntheticJIT)
 			allowed := mode == 0600 || mode == 0755
 			if (err == nil) != allowed || (!allowed && f.requests.Load() != 0) {
 				t.Fatal("socket mode policy mismatch")
@@ -162,7 +162,7 @@ func TestSocketPostConnectRecheckClosesBeforeHTTP(t *testing.T) {
 				return connection, err
 			}
 			f.driver.Runtime.(*Docker).client.Transport.(*http.Transport).DialContext = connector.dial
-			if f.driver.Run(context.Background(), "create", syntheticJIT) == nil || f.requests.Load() != 3 || !replay(f.driver.Journal.Events()).uncertain {
+			if f.driver.runForTest(context.Background(), "create", syntheticJIT) == nil || f.requests.Load() != 3 || !replay(f.driver.Journal.Events()).uncertain {
 				t.Fatal("request bytes transmitted before post-connect identity/permission check")
 			}
 			if replacement != nil && (replacement.calls.Load() != 0 || replacement.receivedJIT.Load()) {
@@ -332,7 +332,7 @@ func TestUnixRuntimeRejectsWrongIdentityImagesAndUnsupportedLimits(t *testing.T)
 		t.Run(fault, func(t *testing.T) {
 			f := unixFixture(t)
 			f.fault = fault
-			if f.driver.Run(context.Background(), "create", syntheticJIT) == nil || f.runtime.creates.Load() != 0 {
+			if f.driver.runForTest(context.Background(), "create", syntheticJIT) == nil || f.runtime.creates.Load() != 0 {
 				t.Fatal("preflight failed to reject incompatible runtime")
 			}
 		})
@@ -341,18 +341,18 @@ func TestUnixRuntimeRejectsWrongIdentityImagesAndUnsupportedLimits(t *testing.T)
 
 func TestUnixRuntimeOneShotCreateStartAndNonForceCleanup(t *testing.T) {
 	f := unixFixture(t)
-	if f.driver.Run(context.Background(), "create", syntheticJIT) != nil || f.driver.Run(context.Background(), "start", "") != nil {
+	if f.driver.runForTest(context.Background(), "create", syntheticJIT) != nil || f.driver.runForTest(context.Background(), "start", "") != nil {
 		t.Fatal("synthetic baseline failed")
 	}
 	if f.runtime.creates.Load() != 1 || f.runtime.starts.Load() != 1 {
 		t.Fatal("duplicate mutation")
 	}
-	if f.driver.Run(context.Background(), "cleanup", "") == nil || f.runtime.deletes.Load() != 0 {
+	if f.driver.runForTest(context.Background(), "cleanup", "") == nil || f.runtime.deletes.Load() != 0 {
 		t.Fatal("running worker removed")
 	}
 	f.runtime.container.State.Running = false
 	f.runtime.container.State.Status = "exited"
-	if err := f.driver.Run(context.Background(), "cleanup", ""); err != nil || f.runtime.deletes.Load() != 1 {
+	if err := f.driver.runForTest(context.Background(), "cleanup", ""); err != nil || f.runtime.deletes.Load() != 1 {
 		t.Fatal("owned exited worker not removed")
 	}
 }
@@ -364,7 +364,7 @@ func TestUnixRuntimeAmbiguousEffectsNeverRetry(t *testing.T) {
 			phase := "create"
 			jit := syntheticJIT
 			if fault != "lost-create" {
-				if f.driver.Run(context.Background(), "create", jit) != nil {
+				if f.driver.runForTest(context.Background(), "create", jit) != nil {
 					t.Fatal("fixture create failed")
 				}
 				phase = "start"
@@ -375,12 +375,12 @@ func TestUnixRuntimeAmbiguousEffectsNeverRetry(t *testing.T) {
 				}
 			}
 			f.fault = fault
-			err := f.driver.Run(context.Background(), phase, jit)
+			err := f.driver.runForTest(context.Background(), phase, jit)
 			if err == nil || strings.Contains(err.Error(), "synthetic-private") {
 				t.Fatal("unsafe external error")
 			}
 			requests := f.requests.Load()
-			_ = f.driver.Run(context.Background(), phase, jit)
+			_ = f.driver.runForTest(context.Background(), phase, jit)
 			if f.requests.Load() != requests {
 				t.Fatal("ambiguous effect retried")
 			}
@@ -392,11 +392,11 @@ func TestChangedDaemonOrAbsentContainerNeverMeansCleanupComplete(t *testing.T) {
 	for _, fault := range []string{"daemon", "absent-container"} {
 		t.Run(fault, func(t *testing.T) {
 			f := unixFixture(t)
-			if f.driver.Run(context.Background(), "create", syntheticJIT) != nil {
+			if f.driver.runForTest(context.Background(), "create", syntheticJIT) != nil {
 				t.Fatal("fixture failed")
 			}
 			f.fault = fault
-			if f.driver.Run(context.Background(), "cleanup", "") == nil || f.runtime.deletes.Load() != 0 || replay(f.driver.Journal.Events()).deleted {
+			if f.driver.runForTest(context.Background(), "cleanup", "") == nil || f.runtime.deletes.Load() != 0 || replay(f.driver.Journal.Events()).deleted {
 				t.Fatal("identity change/absence released worker")
 			}
 		})
@@ -417,7 +417,7 @@ func TestUnixTransportRejectsSymlinksAndInheritedTCPDestinations(t *testing.T) {
 	if os.Rename(f.socket, f.socket+".owned") != nil || os.Symlink(f.socket+".owned", f.socket) != nil {
 		t.Fatal("socket fixture failed")
 	}
-	if f.driver.Run(context.Background(), "create", syntheticJIT) == nil || f.requests.Load() != 0 {
+	if f.driver.runForTest(context.Background(), "create", syntheticJIT) == nil || f.requests.Load() != 0 {
 		t.Fatal("symlink endpoint accepted")
 	}
 }
@@ -427,7 +427,7 @@ func TestUnixResponsesAreBoundedAndRedirectsNeverFollowed(t *testing.T) {
 		t.Run(fault, func(t *testing.T) {
 			f := unixFixture(t)
 			f.fault = fault
-			err := f.driver.Run(context.Background(), "create", syntheticJIT)
+			err := f.driver.runForTest(context.Background(), "create", syntheticJIT)
 			if err == nil || strings.Contains(err.Error(), "synthetic-private") {
 				t.Fatal("unsafe response accepted or exposed")
 			}
@@ -435,7 +435,7 @@ func TestUnixResponsesAreBoundedAndRedirectsNeverFollowed(t *testing.T) {
 				if f.runtime.creates.Load() != 1 || !replay(f.driver.Journal.Events()).uncertain {
 					t.Fatal("oversized creation result was not retained as ambiguous")
 				}
-				_ = f.driver.Run(context.Background(), "create", syntheticJIT)
+				_ = f.driver.runForTest(context.Background(), "create", syntheticJIT)
 				if f.runtime.creates.Load() != 1 {
 					t.Fatal("oversize effect repeated")
 				}

@@ -12,7 +12,7 @@ func TestAuditPR25ObservedJobsMustBlockCleanup(t *testing.T) {
 	for _, phase := range []string{"before-ack", "after-ack", "before-acquire"} {
 		t.Run(phase, func(t *testing.T) {
 			d, f, j := created(t)
-			if err := d.Run(context.Background(), phase); err != nil {
+			if err := d.runForTest(context.Background(), phase); err != nil {
 				t.Fatal("fixture barrier failed")
 			}
 			observed := false
@@ -24,7 +24,7 @@ func TestAuditPR25ObservedJobsMustBlockCleanup(t *testing.T) {
 			if !observed {
 				t.Fatal("fixture did not observe a job")
 			}
-			err := d.Run(context.Background(), "cleanup")
+			err := d.runForTest(context.Background(), "cleanup")
 			if !errors.Is(err, ErrQuarantine) || f.deleteCalls != 0 {
 				t.Fatalf("unresolved observed job allowed cleanup: error=%v delete_calls=%d", err, f.deleteCalls)
 			}
@@ -49,7 +49,7 @@ func TestUnexpectedWorkMessageQuarantinesBeforeSafeClose(t *testing.T) {
 			case "nil":
 				f.session.message = nil
 			}
-			err := d.Run(context.Background(), "before-ack")
+			err := d.runForTest(context.Background(), "before-ack")
 			if shape == "empty" || shape == "nil" {
 				if !errors.Is(err, ErrNoMessage) || f.session.close != 1 {
 					t.Fatal("empty queue did not retain no-message behavior")
@@ -59,7 +59,7 @@ func TestUnexpectedWorkMessageQuarantinesBeforeSafeClose(t *testing.T) {
 			if !errors.Is(err, ErrQuarantine) || f.session.close != 0 || !replay(j.Events()).uncertain {
 				t.Errorf("unexpected work was treated as empty: error=%v close=%d", err, f.session.close)
 			}
-			if d.Run(context.Background(), "cleanup") == nil || f.deleteCalls != 0 {
+			if d.runForTest(context.Background(), "cleanup") == nil || f.deleteCalls != 0 {
 				t.Error("unexpected work followed by stale zero permitted cleanup")
 			}
 		})
@@ -74,10 +74,10 @@ func TestEmptyAvailableWithWorkStatisticsStaysQuarantined(t *testing.T) {
 		d, f, j := created(t)
 		f.session.message.JobAvailableMessages = nil
 		f.session.message.Statistics = &statistics
-		if err := d.Run(context.Background(), "before-ack"); !errors.Is(err, ErrQuarantine) || f.session.close != 0 || !replay(j.Events()).uncertain {
+		if err := d.runForTest(context.Background(), "before-ack"); !errors.Is(err, ErrQuarantine) || f.session.close != 0 || !replay(j.Events()).uncertain {
 			t.Errorf("nonzero work statistics took empty-poll safe close: error=%v close=%d", err, f.session.close)
 		}
-		if d.Run(context.Background(), "cleanup") == nil || f.deleteCalls != 0 {
+		if d.runForTest(context.Background(), "cleanup") == nil || f.deleteCalls != 0 {
 			t.Error("positive work evidence was cleared by a stale-zero cleanup snapshot")
 		}
 	}
@@ -91,7 +91,7 @@ func TestAuditPR25MultiJobAcquisitionMustRefuseBeforeACK(t *testing.T) {
 			second.RunnerRequestID++
 			f.session.message.JobAvailableMessages = append(f.session.message.JobAvailableMessages, &second)
 			f.session.message.Statistics.TotalAssignedJobs = 2
-			err := d.Run(context.Background(), phase)
+			err := d.runForTest(context.Background(), phase)
 			if err == nil || f.session.ack != 0 || f.session.acquire != 0 {
 				t.Fatalf("multi-job acquisition was not refused before ACK: error=%v ack=%d acquire=%d", err, f.session.ack, f.session.acquire)
 			}

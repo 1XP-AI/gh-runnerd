@@ -290,7 +290,7 @@ func TestCanonicalPreparationRecoveryAndDriverShareLocalGate(t *testing.T) {
 	}
 	// This phase must return through the shared local gate before touching API.
 	d := Driver{Approval: renewed, Journal: j, API: nil}
-	if d.Run(context.Background(), "cleanup") == nil {
+	if d.runForTest(context.Background(), "cleanup") == nil {
 		t.Fatal("Driver bypassed canonical preparation gate")
 	}
 }

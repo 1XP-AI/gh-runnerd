@@ -32,10 +32,10 @@ func TestUnconfirmedUpdateSettingQuarantinesCreate(t *testing.T) {
 	f := updateResponseAPI{fakeAPI: &fakeAPI{}, disableUpdate: false}
 	j := &memoryJournal{}
 	d := Driver{approval(), j, f}
-	if !errors.Is(d.Run(context.Background(), "create"), ErrQuarantine) || !replay(j.Events()).uncertain {
+	if !errors.Is(d.runForTest(context.Background(), "create"), ErrQuarantine) || !replay(j.Events()).uncertain {
 		t.Fatal("server omitted update setting without retaining uncertain create")
 	}
-	if !errors.Is(d.Run(context.Background(), "create"), ErrQuarantine) || f.createCalls != 1 {
+	if !errors.Is(d.runForTest(context.Background(), "create"), ErrQuarantine) || f.createCalls != 1 {
 		t.Fatal("unconfirmed create was retried")
 	}
 }
@@ -45,7 +45,7 @@ func TestUpdateSettingDriftStopsBeforeSessionOrJIT(t *testing.T) {
 		t.Run(phase, func(t *testing.T) {
 			d, f, j := created(t)
 			f.set.RunnerSetting.DisableUpdate = false
-			if !errors.Is(d.Run(context.Background(), phase), ErrQuarantine) {
+			if !errors.Is(d.runForTest(context.Background(), phase), ErrQuarantine) {
 				t.Fatal("server setting drift admitted session or JIT work")
 			}
 			for _, event := range j.Events() {
@@ -63,7 +63,7 @@ func TestUpdateSettingDriftStopsBeforeSessionOrJIT(t *testing.T) {
 func TestUpdateSettingDriftDoesNotBypassCleanupQuarantine(t *testing.T) {
 	d, f, _ := created(t)
 	f.set.RunnerSetting.DisableUpdate = false
-	if err := d.Run(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) || f.deleteCalls != 0 {
+	if err := d.runForTest(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) || f.deleteCalls != 0 {
 		t.Fatal("update setting drift bypassed cleanup quarantine")
 	}
 }

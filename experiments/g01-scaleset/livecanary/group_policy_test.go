@@ -3,6 +3,7 @@ package livecanary
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -29,7 +30,7 @@ func TestControllerGroupPolicyCannotFallBackToDirectDriver(t *testing.T) {
 	defer j.Close()
 	api := &fakeAPI{}
 	d := Driver{a, j, api}
-	if e := d.Run(context.Background(), "create"); e == nil || api.createCalls != 0 || len(j.Events()) != 0 {
+	if e := d.Run(context.Background(), "create"); !errors.Is(e, ErrApproval) || api.createCalls != 0 || len(j.Events()) != 0 {
 		t.Fatal("v2 group approval fell back to direct driver", e, api.createCalls)
 	}
 }

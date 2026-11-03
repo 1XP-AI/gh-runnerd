@@ -45,7 +45,7 @@ func TestPrivateJournalLocksAndRetainsReservationAcrossRestart(t *testing.T) {
 	defer reopened.Close()
 	f := &fakeRuntime{}
 	d := Driver{a, reopened, f}
-	if d.Run(context.Background(), "create", syntheticJIT) == nil || f.creates.Load() != 0 || !replay(reopened.Events()).uncertain {
+	if d.runForTest(context.Background(), "create", syntheticJIT) == nil || f.creates.Load() != 0 || !replay(reopened.Events()).uncertain {
 		t.Fatal("incomplete creation intent lost its reservation")
 	}
 	data, err := os.ReadFile(filepath.Join(dir, "journal.jsonl"))
@@ -129,17 +129,17 @@ func TestCreationWarningsPreserveKnownIDWithoutAuthorizingStart(t *testing.T) {
 	j := &memoryJournal{}
 	f := &fakeRuntime{warnings: true}
 	d := Driver{approval(), j, f}
-	if d.Run(context.Background(), "create", syntheticJIT) == nil {
+	if d.runForTest(context.Background(), "create", syntheticJIT) == nil {
 		t.Fatal("warning ignored")
 	}
 	s := replay(j.Events())
 	if s.id != f.container.ID || !s.uncertain {
 		t.Fatal("known warning response identity lost")
 	}
-	if d.Run(context.Background(), "start", "") == nil || f.starts.Load() != 0 {
+	if d.runForTest(context.Background(), "start", "") == nil || f.starts.Load() != 0 {
 		t.Fatal("warned worker started")
 	}
-	if d.Run(context.Background(), "inspect", "") != nil || !replay(j.Events()).uncertain {
+	if d.runForTest(context.Background(), "inspect", "") != nil || !replay(j.Events()).uncertain {
 		t.Fatal("inspection cleared uncertainty")
 	}
 }
@@ -147,7 +147,7 @@ func TestCreationWarningsPreserveKnownIDWithoutAuthorizingStart(t *testing.T) {
 func TestObservationDoesNotJournalRawRuntimeStatus(t *testing.T) {
 	d, f, j := created(t)
 	f.container.State.Status = "synthetic-private-error"
-	if d.Run(context.Background(), "inspect", "") != nil {
+	if d.runForTest(context.Background(), "inspect", "") != nil {
 		t.Fatal("read observation failed")
 	}
 	events := j.Events()

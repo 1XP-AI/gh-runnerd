@@ -2583,6 +2583,27 @@ func TestToolingTaggedCLIRegressionRuns(t *testing.T) {
 	}
 }
 
+func TestToolingTaggedPairCLIRegressionsRun(t *testing.T) {
+	root := toolingFixture(t)
+	for _, tc := range []struct {
+		command string
+		tag     string
+	}{
+		{command: "g01-live", tag: "g01_live && g01_pair_fixture"},
+		{command: "g01-worker", tag: "g01_worker && g01_pair_fixture"},
+	} {
+		name := "experiments/g01-scaleset/cmd/" + tc.command + "/pair_regression_test.go"
+		source := "//go:build " + tc.tag + "\n\npackage main\n\nimport \"testing\"\n\nfunc TestTaggedPairFailure(t *testing.T) { t.Fatal(\"tagged-pair-CLI-regression\") }\n"
+		toolingFile(t, root, name, source, 0600)
+		if out, err := toolingRun(t, root, nil, "bash", "scripts/check-offline-experiments.sh"); err == nil || !strings.Contains(out, "tagged-pair-CLI-regression") {
+			t.Fatalf("tagged pair %s failure was skipped: %s", tc.command, out)
+		}
+		if err := os.Remove(filepath.Join(root, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestToolingTaggedPairFixturePartitionsRun(t *testing.T) {
 	root := toolingFixture(t)
 	const pairedCollectionSentinel = "tagged-pair-fixture-paired-collection-regression"

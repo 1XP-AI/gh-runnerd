@@ -134,7 +134,7 @@ func TestPreflightRejectsCompleteResponseWhenBodyCloseFailsBeforeDrain(t *testin
 	}
 	j := &memoryJournal{events: append([]Event(nil), drainReplayPrefix()[:3]...)}
 	d := Driver{Approval: a, Journal: j, API: api}
-	if err := d.Run(context.Background(), "drain"); !errors.Is(err, ErrApproval) {
+	if err := d.runForTest(context.Background(), "drain"); !errors.Is(err, ErrApproval) {
 		t.Fatalf("preflight body close error = %v, want approval rejection", err)
 	}
 	if api.drainCalls != 0 {

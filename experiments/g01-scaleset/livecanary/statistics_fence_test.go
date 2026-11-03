@@ -80,7 +80,7 @@ func TestStatisticsAtEverySourceSurviveLaterZeroAndFreshDriver(t *testing.T) {
 			t.Run(source+"/"+observation.name, func(t *testing.T) {
 				d, f, j := created(t)
 				phase := statisticsSource(d, f, j, source, observation.statistics)
-				_ = d.Run(context.Background(), phase)
+				_ = d.runForTest(context.Background(), phase)
 				if source == "create" && replay(j.Events()).setID != 7 {
 					t.Error("valid create receipt was lost with observed statistics")
 				}
@@ -92,8 +92,8 @@ func TestStatisticsAtEverySourceSurviveLaterZeroAndFreshDriver(t *testing.T) {
 				f.session.session.Statistics = &scaleset.RunnerScaleSetStatistic{}
 				f.session.session.RunnerScaleSet = nil
 				restarted := Driver{d.Approval, j, f}
-				_ = restarted.Run(context.Background(), "inspect")
-				if err := restarted.Run(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) || f.deleteCalls != 0 {
+				_ = restarted.runForTest(context.Background(), "inspect")
+				if err := restarted.runForTest(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) || f.deleteCalls != 0 {
 					t.Fatalf("observed statistics forgotten after zero inspection: cleanup=%v deletes=%d", err, f.deleteCalls)
 				}
 			})
@@ -108,10 +108,10 @@ func TestDemandStatisticsAllowControlledProbeButNeverCleanup(t *testing.T) {
 			message := f.session.message
 			statisticsSource(d, f, j, source, &scaleset.RunnerScaleSetStatistic{TotalAvailableJobs: 1, TotalAssignedJobs: 1})
 			f.session.message = message
-			if err := d.Run(context.Background(), "after-ack"); err != nil || f.session.ack != 1 || f.session.acquire != 0 || f.session.close != 1 {
+			if err := d.runForTest(context.Background(), "after-ack"); err != nil || f.session.ack != 1 || f.session.acquire != 0 || f.session.close != 1 {
 				t.Fatalf("normal demand prevented the controlled barrier: %v", err)
 			}
-			if d.Run(context.Background(), "cleanup") == nil || f.deleteCalls != 0 {
+			if d.runForTest(context.Background(), "cleanup") == nil || f.deleteCalls != 0 {
 				t.Fatal("controlled probe cleared demand or observed request evidence")
 			}
 		})
@@ -138,7 +138,7 @@ func TestStatisticsFenceSurvivesFileJournalReopen(t *testing.T) {
 			}
 			d.Journal = j
 			d.API = statisticsInventoryAPI{d.API}
-			_ = d.Run(context.Background(), phase)
+			_ = d.runForTest(context.Background(), phase)
 			if j.Close() != nil {
 				t.Fatal("close private fixture")
 			}
@@ -149,8 +149,8 @@ func TestStatisticsFenceSurvivesFileJournalReopen(t *testing.T) {
 			defer j.Close()
 			f.set.Statistics = &scaleset.RunnerScaleSetStatistic{}
 			restarted := Driver{d.Approval, j, statisticsInventoryAPI{f}}
-			_ = restarted.Run(context.Background(), "inspect")
-			if err := restarted.Run(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) || f.deleteCalls != 0 {
+			_ = restarted.runForTest(context.Background(), "inspect")
+			if err := restarted.runForTest(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) || f.deleteCalls != 0 {
 				t.Fatalf("statistics fence lost across actual journal reopen: cleanup=%v deletes=%d", err, f.deleteCalls)
 			}
 		})
@@ -184,12 +184,12 @@ func TestStatisticsResultWriteFailureRetainsFenceAcrossRestart(t *testing.T) {
 	d.API = &statisticsAPI{API: f, owned: true, statistics: &scaleset.RunnerScaleSetStatistic{TotalRunningJobs: 1}}
 	j := &statisticsResultFailure{memoryJournal: memory, refuse: true}
 	d.Journal = j
-	if err := d.Run(context.Background(), "inspect"); !errors.Is(err, ErrJournal) {
+	if err := d.runForTest(context.Background(), "inspect"); !errors.Is(err, ErrJournal) {
 		t.Errorf("positive-read result failure was not surfaced: %v", err)
 	}
 	j.refuse = false
 	restarted := Driver{d.Approval, j, f}
-	if err := restarted.Run(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) || f.deleteCalls != 0 {
+	if err := restarted.runForTest(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) || f.deleteCalls != 0 {
 		t.Fatalf("failed observation persistence lost the pre-read fence: cleanup=%v deletes=%d", err, f.deleteCalls)
 	}
 }
@@ -208,7 +208,7 @@ func TestUnsafeStatisticsStopNewEffectsBeforeControlledMessage(t *testing.T) {
 					message.Statistics.TotalRunningJobs = 1
 				}
 				f.session.message = message
-				if err := d.Run(context.Background(), phase); !errors.Is(err, ErrQuarantine) || f.session.ack != 0 || f.session.acquire != 0 || f.session.close != 0 || f.jitCalls != 0 {
+				if err := d.runForTest(context.Background(), phase); !errors.Is(err, ErrQuarantine) || f.session.ack != 0 || f.session.acquire != 0 || f.session.close != 0 || f.jitCalls != 0 {
 					t.Fatalf("unsafe statistics admitted effects: phase=%v ack=%d acquire=%d close=%d jit=%d", err, f.session.ack, f.session.acquire, f.session.close, f.jitCalls)
 				}
 			})
@@ -221,11 +221,11 @@ func TestZeroStatisticsAndOptionalAbsencePermitEmptyCleanup(t *testing.T) {
 		t.Run(source, func(t *testing.T) {
 			d, f, j := created(t)
 			phase := statisticsSource(d, f, j, source, &scaleset.RunnerScaleSetStatistic{})
-			err := d.Run(context.Background(), phase)
+			err := d.runForTest(context.Background(), phase)
 			if err != nil && !errors.Is(err, ErrNoMessage) {
 				t.Fatalf("zero/optional absence fixture refused: %v", err)
 			}
-			if err := d.Run(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) || f.deleteCalls != 0 {
+			if err := d.runForTest(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) || f.deleteCalls != 0 {
 				t.Fatalf("unfenced empty cleanup was not quarantined: %v", err)
 			}
 		})
@@ -237,10 +237,10 @@ func TestOlderPendingIntentSurvivesSuccessfulZeroInspection(t *testing.T) {
 	if j.Append(Event{Kind: "intent", Operation: "session-open"}) != nil {
 		t.Fatal("synthetic pending intent")
 	}
-	if err := d.Run(context.Background(), "inspect"); err != nil {
+	if err := d.runForTest(context.Background(), "inspect"); err != nil {
 		t.Fatalf("read-only zero inspection refused: %v", err)
 	}
-	if !replay(j.Events()).uncertain || d.Run(context.Background(), "cleanup") == nil || f.deleteCalls != 0 {
+	if !replay(j.Events()).uncertain || d.runForTest(context.Background(), "cleanup") == nil || f.deleteCalls != 0 {
 		t.Fatal("a later successful observation released an older pending intent")
 	}
 }
@@ -259,7 +259,7 @@ func TestObservedRunnerSurvivesLaterAbsenceAndFirstCleanup(t *testing.T) {
 				case "invalid id":
 					f.findRunner.ID = 0
 				}
-				_ = d.Run(context.Background(), phase)
+				_ = d.runForTest(context.Background(), phase)
 				if f.jitCalls != 0 {
 					t.Fatal("known runner presence allowed another JIT")
 				}
@@ -274,8 +274,8 @@ func TestObservedRunnerSurvivesLaterAbsenceAndFirstCleanup(t *testing.T) {
 				}
 				f.findRunner = nil
 				restarted := Driver{d.Approval, j, f}
-				_ = restarted.Run(context.Background(), "inspect")
-				if err := restarted.Run(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) || f.deleteCalls != 0 {
+				_ = restarted.runForTest(context.Background(), "inspect")
+				if err := restarted.runForTest(context.Background(), "cleanup"); !errors.Is(err, ErrQuarantine) || f.deleteCalls != 0 {
 					t.Fatalf("runner evidence lost before first cleanup: %v deletes=%d", err, f.deleteCalls)
 				}
 			})
@@ -300,7 +300,7 @@ func TestObservationIntentFailureStopsBeforeRead(t *testing.T) {
 	api := &statisticsAPI{API: f, owned: true, statistics: &scaleset.RunnerScaleSetStatistic{TotalRunningJobs: 1}}
 	d.API = api
 	d.Journal = observationWriteFailure{j, "intent", "observe-owned"}
-	if err := d.Run(context.Background(), "inspect"); !errors.Is(err, ErrJournal) || api.reads != 0 {
+	if err := d.runForTest(context.Background(), "inspect"); !errors.Is(err, ErrJournal) || api.reads != 0 {
 		t.Fatalf("work-bearing read occurred without durable intent: error=%v reads=%d", err, api.reads)
 	}
 }
@@ -328,7 +328,7 @@ func TestObservationResultFailureSurvivesFileReopenAndInspection(t *testing.T) {
 			} else {
 				f.findRunner = &scaleset.RunnerReference{ID: 8, Name: d.Approval.workerName(), RunnerScaleSetID: 7}
 			}
-			if err := d.Run(context.Background(), "inspect"); !errors.Is(err, ErrJournal) {
+			if err := d.runForTest(context.Background(), "inspect"); !errors.Is(err, ErrJournal) {
 				t.Fatalf("result refusal not surfaced: %v", err)
 			}
 			if j.Close() != nil {
@@ -341,10 +341,10 @@ func TestObservationResultFailureSurvivesFileReopenAndInspection(t *testing.T) {
 			defer j.Close()
 			f.findRunner = nil
 			restarted := Driver{d.Approval, j, statisticsInventoryAPI{f}}
-			if err := restarted.Run(context.Background(), "inspect"); !errors.Is(err, ErrQuarantine) {
+			if err := restarted.runForTest(context.Background(), "inspect"); !errors.Is(err, ErrQuarantine) {
 				t.Fatalf("second zero/absent inspection escaped the one-slot gate: %v", err)
 			}
-			if !replay(j.Events()).uncertain || restarted.Run(context.Background(), "cleanup") == nil || f.deleteCalls != 0 {
+			if !replay(j.Events()).uncertain || restarted.runForTest(context.Background(), "cleanup") == nil || f.deleteCalls != 0 {
 				t.Fatal("successful inspection cleared the persisted unfinished observation")
 			}
 		})
@@ -368,14 +368,14 @@ func TestUnownedDiscoveryEvidenceCannotAuthorizeCreationAfterAbsence(t *testing.
 		f.set.Statistics = statistics
 		api := &discoveryStatisticsAPI{API: f, found: f.set}
 		d.API = api
-		_ = d.Run(context.Background(), "inspect")
+		_ = d.runForTest(context.Background(), "inspect")
 		if replay(j.Events()).setID != 0 {
 			t.Fatal("unowned discovery adopted a scale-set ID")
 		}
 		api.found = nil
-		_ = d.Run(context.Background(), "inspect")
+		_ = d.runForTest(context.Background(), "inspect")
 		restarted := Driver{d.Approval, j, api}
-		if restarted.Run(context.Background(), "create") == nil || f.createCalls != 0 {
+		if restarted.runForTest(context.Background(), "create") == nil || f.createCalls != 0 {
 			t.Fatal("later absent discovery authorized creation after observed work")
 		}
 	}

@@ -380,9 +380,11 @@ func validDrainSessionWire(a Approval, id int, owner string, wire *baselineSessi
 func (a *SDKAPI) CreateScaleSet(c context.Context, s *scaleset.RunnerScaleSet) (*scaleset.RunnerScaleSet, error) {
 	return a.client.CreateRunnerScaleSet(c, s)
 }
-func (a *SDKAPI) DeleteScaleSet(c context.Context, id int) error {
-	return a.client.DeleteRunnerScaleSet(c, id)
-}
+
+// The pinned SDK's DeleteRunnerScaleSet accepts only an ID and exposes no
+// server-side ownership/version precondition, so SDKAPI intentionally does not
+// expose that deletion method. Cleanup requires ConditionalScaleSetDeleter.
+
 func (a *SDKAPI) OpenSession(c context.Context, id int, owner string) (Session, error) {
 	return a.client.MessageSessionClient(c, id, owner, a.options...)
 }

@@ -382,7 +382,14 @@ func TestSessionReplacementExpiryAtEveryEffectIntent(t *testing.T) {
 		}
 		t.Run(fmt.Sprintf("%s-%d", step.stage, step.generation), func(t *testing.T) {
 			f := newReplacementFixture(t, "old41")
-			ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(time.Second))
+			deadlineBudget := time.Second
+			if step.stage == "close" && step.generation == 2 {
+				// The final close follows two generations of listener/network work.
+				// Give the race-instrumented fixture time to reach this intent, then
+				// expire the parent exactly at the durable append barrier below.
+				deadlineBudget = 5 * time.Second
+			}
+			ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(deadlineBudget))
 			defer cancel()
 			calls, target := 0, index+3
 			var stoppedAt int32 = -1

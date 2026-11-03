@@ -257,7 +257,7 @@ func TestInventoryMalformedStopsLegacyEffects(t *testing.T) {
 				}
 			}()
 			driver := Driver{a, journal, api}
-			createErr := driver.Run(context.Background(), "create")
+			createErr := driver.runForTest(context.Background(), "create")
 			if strings.HasSuffix(scenario, "_create") {
 				if createErr == nil || creates.Load() != 0 {
 					t.Fatalf("malformed inventory authorized legacy create: creates=%d inventories=%d error=%v", creates.Load(), inventories.Load(), createErr)
@@ -267,13 +267,27 @@ func TestInventoryMalformedStopsLegacyEffects(t *testing.T) {
 			if createErr != nil || creates.Load() != 1 {
 				t.Fatalf("valid initial inventory control failed: creates=%d error=%v", creates.Load(), createErr)
 			}
-			cleanupErr := driver.Run(context.Background(), "cleanup")
+			cleanupErr := driver.runForTest(context.Background(), "cleanup")
 			if strings.HasSuffix(scenario, "_cleanup") {
 				if cleanupErr == nil || deletes.Load() != 0 {
 					t.Fatalf("malformed inventory authorized legacy delete: deletes=%d inventories=%d error=%v", deletes.Load(), inventories.Load(), cleanupErr)
 				}
-			} else if !errors.Is(cleanupErr, ErrQuarantine) || deletes.Load() != 0 || inventories.Load() != 1 {
-				t.Fatalf("unfenced empty cleanup was not quarantined: creates=%d deletes=%d inventory=%d error=%v", creates.Load(), deletes.Load(), inventories.Load(), cleanupErr)
+			} else {
+				if deletes.Load() != 0 {
+					t.Fatalf("unfenced empty cleanup deleted Scale Set: creates=%d deletes=%d", creates.Load(), deletes.Load())
+				}
+				if !errors.Is(cleanupErr, ErrQuarantine) {
+					t.Fatalf("unfenced empty cleanup was not quarantined: creates=%d deletes=%d inventory=%d error=%v", creates.Load(), deletes.Load(), inventories.Load(), cleanupErr)
+				}
+				switch inventories.Load() {
+				case 1: // The production SDK has no conditional-delete adapter.
+				case 2: // The fixture adapter reached a versionless provider response.
+					if !replay(journal.Events()).uncertain {
+						t.Fatal("failed conditional-delete preparation did not retain journal uncertainty")
+					}
+				default:
+					t.Fatalf("unfenced cleanup crossed unexpected inventory reads: %d", inventories.Load())
+				}
 			}
 		})
 	}

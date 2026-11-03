@@ -12,7 +12,7 @@ func TestAuditPR28MissingBridgeMustNotStart(t *testing.T) {
 			a := approval()
 			f := &fakeRuntime{}
 			d := Driver{a, &memoryJournal{}, f}
-			if d.Run(context.Background(), "create", syntheticJIT) != nil {
+			if d.runForTest(context.Background(), "create", syntheticJIT) != nil {
 				t.Fatal("fixture create failed")
 			}
 			if shape == "nil" {
@@ -24,7 +24,7 @@ func TestAuditPR28MissingBridgeMustNotStart(t *testing.T) {
 			if shape == "bridge" {
 				f.container.NetworkSettings.Networks = map[string]any{"bridge": map[string]any{}}
 			}
-			err := d.Run(context.Background(), "start", "")
+			err := d.runForTest(context.Background(), "start", "")
 			if shape == "bridge" {
 				if err != nil || f.starts.Load() != 1 {
 					t.Fatal("approved bridge fixture refused")

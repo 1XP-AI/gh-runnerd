@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"runtime/debug"
-	"time"
 
 	"github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/liveworker"
 )
@@ -81,9 +80,9 @@ func run(args []string, in io.Reader, out io.Writer) (code int) {
 	flags.SetOutput(io.Discard)
 	plan := flags.Bool("plan", false, "")
 	execute := flags.Bool("execute-approved-worker", false, "")
-	approvalPath := flags.String("approval", "", "")
-	statePath := flags.String("state-dir", "", "")
-	phase := flags.String("phase", "", "")
+	flags.String("approval", "", "")
+	flags.String("state-dir", "", "")
+	flags.String("phase", "", "")
 	refuse := func() int {
 		fmt.Fprintln(out, "worker refused; exact approval, authority or private state requires review")
 		return 1
@@ -91,50 +90,15 @@ func run(args []string, in io.Reader, out io.Writer) (code int) {
 	if flags.Parse(args) != nil || flags.NArg() != 0 {
 		return refuse()
 	}
-	if *plan && !*execute {
-		fmt.Fprintln(out, "Explicit worker phases: create, start, inspect, cleanup. One preloaded pinned ARM64 image; 1 CPU, 1 GiB, 256 PIDs; non-root, no host mounts/socket, no restart, no log capture. No pull, dispatch, stop or kill. Reviewed exact-build approval and controller-provided JIT are required.")
-		return 0
-	}
-	if !*execute || *plan || *approvalPath == "" || *statePath == "" || *phase == "" {
-		return refuse()
-	}
-	a, err := liveworker.ReadApproval(*approvalPath)
-	if err != nil || a.Validate(time.Now()) != nil {
-		return refuse()
-	}
-	revision, ok := buildRevision()
-	if !ok || revision != a.HarnessSHA {
-		return refuse()
-	}
-	journal, err := liveworker.OpenJournal(*statePath, a)
-	if err != nil {
-		return refuse()
-	}
-	defer journal.Close()
-	jit := ""
-	if *phase == "create" {
-		deadline := time.Now().Add(30 * time.Second)
-		if a.ExpiresAt.Before(deadline) {
-			deadline = a.ExpiresAt
-		}
-		ctx, cancel := context.WithDeadline(context.Background(), deadline)
-		jit, err = readJIT(ctx, in)
-		cancel()
-		if err != nil {
-			return refuse()
-		}
-	}
-	runtime, err := liveworker.NewDocker(a)
-	if err != nil {
-		return refuse()
-	}
-	driver := liveworker.Driver{Approval: a, Journal: journal, Runtime: runtime}
-	if driver.Run(context.Background(), *phase, jit) != nil {
-		fmt.Fprintln(out, "worker phase stopped; retain unknown resources and reservation; no automatic retry")
+	if *execute {
+		fmt.Fprintln(out, "standalone worker execution disabled; signed controller handoff is required")
 		return 1
 	}
-	fmt.Fprintln(out, "worker phase completed; GitHub reservation and live evidence gate remain unresolved")
-	return 0
+	if *plan {
+		fmt.Fprintln(out, "Plan only: one preloaded pinned ARM64 image; 1 CPU, 1 GiB, 256 PIDs; non-root, no host mounts/socket, no restart or log capture. This standalone command has no Docker execution path; the signed controller handoff remains separately gated.")
+		return 0
+	}
+	return refuse()
 }
 
 func main() { os.Exit(run(os.Args[1:], os.Stdin, os.Stdout)) }

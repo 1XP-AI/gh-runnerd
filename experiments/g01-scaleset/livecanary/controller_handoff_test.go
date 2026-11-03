@@ -726,8 +726,9 @@ func TestControllerHandoffCreatePrefixRejectsProofMismatchesBeforeEffects(t *tes
 				proofArg = &proof
 			}
 			driver := Driver{fixture.approval, journal, fake}
-			if err := driver.runWithHandoff(context.Background(), "create", proofArg); !errors.Is(err, ErrQuarantine) {
-				t.Fatalf("invalid create authority was not quarantined: %v", err)
+			err := driver.runWithHandoff(context.Background(), "create", proofArg)
+			if err == nil || (testCase.missing && !errors.Is(err, ErrApproval)) || (!testCase.missing && !errors.Is(err, ErrQuarantine)) {
+				t.Fatalf("invalid create authority was not rejected: %v", err)
 			}
 			if fake.createCalls != 0 || !reflect.DeepEqual(journal.Events(), before) {
 				t.Fatalf("invalid proof changed effects/history: creates=%d", fake.createCalls)
@@ -879,7 +880,7 @@ func TestControllerHandoffCreateRechecksHistoryAtomicallyWithEffect(t *testing.T
 	journal := &appendAfterCreateIntentSnapshotJournal{FileJournal: fileJournal}
 	fake := &fakeAPI{}
 	driver := Driver{fixture.approval, journal, handoffValidInventoryAPI{fake}}
-	err := driver.runWithHandoff(context.Background(), "create", nil)
+	err := driver.run(context.Background(), "create", nil)
 	if !journal.injected || journal.appendErr != nil {
 		t.Fatalf("concurrent unknown-history injection failed: injected=%v appendErr=%v", journal.injected, journal.appendErr)
 	}
@@ -920,7 +921,7 @@ func TestControllerHandoffCreateSerializesConcurrentJournalAppend(t *testing.T) 
 	defer releaseCreate()
 	driver := Driver{fixture.approval, journal, api}
 	runDone := make(chan error, 1)
-	go func() { runDone <- driver.runWithHandoff(context.Background(), "create", nil) }()
+	go func() { runDone <- driver.run(context.Background(), "create", nil) }()
 	select {
 	case <-api.started:
 	case <-time.After(time.Second):
