@@ -276,6 +276,28 @@ experiment's ownership and journal; the candidate identity must not be reused
 for a later experiment without the separately reviewed reconciliation described
 in the [driver record](g01-live-driver.md#private-approval-and-invocation).
 
+### Read-only repository-plan check — 2026-11-03
+
+Additional read-only `gh api` checks against the private canary repository's
+`main` branch-protection and repository-ruleset endpoints returned HTTP 403
+with GitHub's plan-entitlement response requiring GitHub Pro or public
+visibility. The repository is intentionally private, so the `main` ref cannot
+currently satisfy `github.ref_protected`; retain the caller's fail-closed
+guard. No branch rule, ruleset, environment, visibility, workflow, runner or
+other repository setting was changed. See the [branch-protection API
+documentation](https://docs.github.com/en/rest/branches/branch-protection#get-branch-protection).
+
+GitHub's [deployment-environment documentation](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments)
+states that required-reviewer protection for private-repository environments
+is available only with GitHub Enterprise; Free, Pro and Team provide that
+protection only for public repositories. Therefore the private canary needs an
+eligible Enterprise-backed owner before both protected-ref and human-review
+gates can be configured. Do not make the canary public or weaken the caller
+guard to work around this constraint. Selecting another private repository
+would require separately rechecking its owner plan, App access and runner-group
+scope. No canary workflow was dispatched; execution still requires its own
+concrete maintainer authorization.
+
 - [x] Maintainer identified one disposable **private** repository in the
   organization. The reviewed workflow identity and full SHA are recorded in
   the private repository and group configuration; no public fork/PR execution
