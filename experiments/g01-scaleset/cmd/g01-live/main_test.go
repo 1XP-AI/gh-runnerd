@@ -26,7 +26,7 @@ func TestBuildRevisionAdmissionRequiresGo1273(t *testing.T) {
 	good := &debug.BuildInfo{
 		Path:      "github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/cmd/g01-live",
 		GoVersion: "go1.27.3",
-		Deps:      []*debug.Module{{Path: "github.com/actions/scaleset", Version: "v0.5.0"}},
+		Deps:      []*debug.Module{{Path: "github.com/actions/scaleset", Version: "v0.5.0", Sum: "h1:IoE2xjt9cXyTndIrpz5pMoKpzV/fW2ECIEJc5xuHRbM="}},
 		Settings: []debug.BuildSetting{
 			{Key: "GOOS", Value: runtime.GOOS},
 			{Key: "GOARCH", Value: runtime.GOARCH},
@@ -51,6 +51,19 @@ func TestBuildRevisionAdmissionRequiresGo1273(t *testing.T) {
 		bad.Deps = []*debug.Module{{Path: "github.com/actions/scaleset", Version: version}}
 		if _, ok := buildRevisionFromInfo(&bad, true); ok {
 			t.Errorf("unselected SDK %q admitted", version)
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		sum  string
+	}{
+		{name: "missing SDK checksum"},
+		{name: "wrong SDK checksum", sum: "h1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
+	} {
+		bad := *good
+		bad.Deps = []*debug.Module{{Path: "github.com/actions/scaleset", Version: "v0.5.0", Sum: tc.sum}}
+		if _, ok := buildRevisionFromInfo(&bad, true); ok {
+			t.Errorf("unsupported SDK checksum admitted: %s", tc.name)
 		}
 	}
 	wrongGOOS := "windows"

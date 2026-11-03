@@ -351,6 +351,9 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 	if j.append("token_verified", map[string]any{"expires_at": issued.ExpiresAt, "app_id": identity.ID, "installation_id": install.ID}) != nil {
 		return BrokerResult{}, errBroker
 	}
+	if v3ReusableCallee && api.verifyFinalReusableWorkflow(ctx, a, plan.controller, input.VerificationToken, plan.handoff.grant) != nil {
+		return BrokerResult{}, errBroker
+	}
 	if a.Mode == "discover-actions-host" {
 		host, err := api.discover(ctx, a, issued.Token, j)
 		if err != nil || j.append("actions_host_observed", map[string]any{"actions_host": host}) != nil || claim.complete() != nil {

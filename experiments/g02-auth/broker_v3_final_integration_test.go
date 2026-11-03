@@ -19,10 +19,11 @@ import (
 )
 
 type brokerV3RunFixture struct {
-	files       BrokerFiles
-	candidate   Candidate
-	fixture     *brokerHTTPFixture
-	workflowGET *int
+	files          BrokerFiles
+	candidate      Candidate
+	fixture        *brokerHTTPFixture
+	workflowGET    *int
+	changeCalleeAt *int
 }
 
 func newBrokerV3RunFixture(t *testing.T, phase string, changedCallee bool, rootMismatch ...bool) brokerV3RunFixture {
@@ -103,12 +104,16 @@ func newBrokerV3RunFixture(t *testing.T, phase string, changedCallee bool, rootM
 	badRun := strings.Replace(goodRun, request.Callee.Repository+"/"+request.Callee.WorkflowPath+"@"+request.Callee.SHA, badCallee.Repository+"/"+badCallee.WorkflowPath+"@"+badCallee.SHA, 1)
 	badRun = strings.Replace(badRun, `"sha":"`+request.Callee.SHA+`"`, `"sha":"`+badCallee.SHA+`"`, 1)
 	workflowGET := new(int)
+	changeCalleeAt := new(int)
+	if changedCallee {
+		*changeCalleeAt = 2
+	}
 	transport := transportFunc(func(r *http.Request) (*http.Response, error) {
 		if r.URL.Path == workflowRunPath(request.Repository, request.WorkflowRunID) {
 			*workflowGET = *workflowGET + 1
 			fixture.events = append(fixture.events, "GET "+r.URL.Path)
 			body := goodRun
-			if changedCallee && *workflowGET == 2 {
+			if *changeCalleeAt != 0 && *workflowGET == *changeCalleeAt {
 				body = badRun
 			}
 			return response(http.StatusOK, body), nil
@@ -152,7 +157,7 @@ func newBrokerV3RunFixture(t *testing.T, phase string, changedCallee bool, rootM
 		return &verifiedBrokerBinary{path: binary.path, file: file, digest: binary.digest}, nil
 	}
 	t.Cleanup(func() { brokerBinaryOpener = oldOpener })
-	return brokerV3RunFixture{files: BrokerFiles{ApprovalPath: approvalPath, StateDirectory: attempt, ControllerBinary: binary.path, ControllerApproval: controllerPath, ControllerStateDirectory: controllerState}, candidate: candidate, fixture: fixture, workflowGET: workflowGET}
+	return brokerV3RunFixture{files: BrokerFiles{ApprovalPath: approvalPath, StateDirectory: attempt, ControllerBinary: binary.path, ControllerApproval: controllerPath, ControllerStateDirectory: controllerState}, candidate: candidate, fixture: fixture, workflowGET: workflowGET, changeCalleeAt: changeCalleeAt}
 }
 
 func TestBrokerExperimentV3ReadOnlyPreflightRejectsBeforeWriteMint(t *testing.T) {
@@ -264,7 +269,7 @@ func TestBrokerExperimentV3FinalGETFencesCalleeBeforeMintAndHandoff(t *testing.T
 					}
 					return
 				}
-				if runErr != nil || result.Status != "controller_completed" || fixture.fixture.tokenCalls != 2 || *fixture.workflowGET != 2 {
+				if runErr != nil || result.Status != "controller_completed" || fixture.fixture.tokenCalls != 2 || *fixture.workflowGET != 3 {
 					t.Fatalf("unchanged callee did not complete one handoff: result=%+v err=%v mints=%d workflow_gets=%d calls=%v", result, runErr, fixture.fixture.tokenCalls, *fixture.workflowGET, fixture.fixture.calls)
 				}
 				wantRead := map[string]string{"metadata": "read", "organization_self_hosted_runners": "read"}
@@ -284,6 +289,7 @@ func TestBrokerExperimentV3FinalGETFencesCalleeBeforeMintAndHandoff(t *testing.T
 					"GET /repos/org-a/canary",
 					"GET /orgs/org-a/actions/runner-groups/3",
 					"GET /orgs/org-a/actions/runner-groups/3/repositories",
+					"GET /repos/org-a/canary/actions/runs/7",
 				}
 				at := 0
 				for _, event := range fixture.fixture.events {
@@ -296,6 +302,27 @@ func TestBrokerExperimentV3FinalGETFencesCalleeBeforeMintAndHandoff(t *testing.T
 				}
 			})
 		}
+	}
+}
+
+func TestBrokerExperimentV3RepeatsCalleeFenceAfterWritePreflight(t *testing.T) {
+	fixture := newBrokerV3RunFixture(t, "create", false)
+	*fixture.changeCalleeAt = 3
+	management, err := json.Marshal(brokerInput{PEM: string(fixture.candidate.PEM), VerificationToken: "synthetic-private-workflow-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation := brokerV3Pipe(t, []byte("synthetic-private-workflow-token"))
+	workflowSeed := brokerV3Pipe(t, bytes.Repeat([]byte{1}, ed25519.SeedSize))
+	issuerSeed := brokerV3Pipe(t, bytes.Repeat([]byte{71}, ed25519.SeedSize))
+	input := brokerV3Pipe(t, management)
+	result, runErr := RunBrokerExperimentWithInputs(context.Background(), fixture.files, input, observation, workflowSeed, issuerSeed)
+	journal, readErr := os.ReadFile(filepath.Join(fixture.files.StateDirectory, "broker.jsonl"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if runErr == nil || result.Status != "" || fixture.fixture.tokenCalls != 2 || *fixture.workflowGET != 3 || bytes.Contains(journal, []byte("controller_handoff_started")) {
+		t.Fatalf("callee change after write preflight crossed handoff fence: result=%+v err=%v mints=%d workflow_gets=%d journal=%s", result, runErr, fixture.fixture.tokenCalls, *fixture.workflowGET, journal)
 	}
 }
 

@@ -29,6 +29,7 @@ import (
 const (
 	maxPublicEvidenceInputBytes = 1 << 20
 	maxPublicEvidenceJSONDepth  = 16
+	supportedScaleSetSDKSum     = "h1:IoE2xjt9cXyTndIrpz5pMoKpzV/fW2ECIEJc5xuHRbM="
 )
 
 type publicEvidenceInput struct {
@@ -254,7 +255,7 @@ func buildRevisionFromInfo(info *debug.BuildInfo, ok bool) (string, bool) {
 	if !ok || info == nil || info.GoVersion != "go1.27.3" || info.Path != "github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/cmd/g01-live" {
 		return "", false
 	}
-	version, clean, sdk := "", false, false
+	version, clean, sdkFound, sdk := "", false, false, false
 	goos, goarch, cgo, tags := "", "", "", ""
 	for _, setting := range info.Settings {
 		switch setting.Key {
@@ -279,14 +280,18 @@ func buildRevisionFromInfo(info *debug.BuildInfo, ok bool) (string, bool) {
 	}
 	for _, dep := range info.Deps {
 		if dep.Path == "github.com/actions/scaleset" {
-			sdk = dep.Version == "v0.5.0" && dep.Replace == nil
+			if sdkFound {
+				return "", false
+			}
+			sdkFound = true
+			sdk = dep.Version == "v0.5.0" && dep.Sum == supportedScaleSetSDKSum && dep.Replace == nil
 		}
 	}
 	validRevision := len(version) == 40
 	for _, c := range version {
 		validRevision = validRevision && (c >= '0' && c <= '9' || c >= 'a' && c <= 'f')
 	}
-	return version, validRevision && clean && sdk && goos == runtime.GOOS && goarch == runtime.GOARCH && cgo == "1" && tags == "g01_live"
+	return version, validRevision && clean && sdkFound && sdk && goos == runtime.GOOS && goarch == runtime.GOARCH && cgo == "1" && tags == "g01_live"
 }
 
 var pairedPrepareJournalForCommand = livecanary.PreparePairedJournal
