@@ -6,11 +6,23 @@ provision keys, or replace the production implementation gates.
 
 `g01-broker --execute-experimental-broker` selects sealed `RunBrokerExperiment`.
 `g01-live --execute-experimental-phase --mode MODE --phase PHASE` selects sealed
-`RunControllerExperiment`. Existing ordinary broker behavior remains, while the
-legacy direct controller and standalone worker execution flags are hard
-refusals. The signed receiver reaches the actual Driver or private same-process
-paired terminal implementation only after its controller handoff checks; public
-`Driver.Run` and `RunPairedTerminal` do not provide a local bypass.
+`RunControllerExperiment`. The legacy `--execute-approved-broker` route is
+rejected, and the exported `RunBroker` API is an inert fail-closed compatibility
+stub. Experimental broker selection requires PublicPolicy v3 and a nonzero
+GroupPolicy v2 before credential input or API construction. The legacy direct
+controller and standalone worker execution flags are hard refusals. The signed
+receiver reaches the actual Driver or private same-process paired terminal
+implementation only after its controller handoff checks; public `Driver.Run` and
+`RunPairedTerminal` do not provide a local bypass.
+
+For the v3 broker path, provider state is first checked with an exact
+repository-scoped read-only installation token (`organization_self_hosted_runners:read`, plus
+`metadata:read` when repository-scoped). A failed group/repository/workflow
+policy check stops before management write-token issuance. After the read-only
+preflight succeeds, the broker repeats the final reusable-callee workflow GET,
+requests the exact management write token, and repeats provider-state preflight
+before handoff. This narrows credential issuance on observed policy failures;
+it does not eliminate provider-state races or revoke a token after issuance.
 
 Each executable independently links a public registry string:
 `enrollment.brokerExperimentPolicyJSON` and
@@ -23,8 +35,11 @@ run, ref/SHA/path, phase, owner nonce, source, organization/repository IDs and
 expiry. Parsing rejects duplicate/unknown/missing/null fields, including nested
 case substitutions, role/key collisions, duplicate grants and expired authority.
 Build inputs, actual public pins/grants and deployment remain separately reviewed
-external decisions. The exact existing controller binary metadata/tag gate is
-unchanged; fixture builds remain inadmissible.
+external decisions. Both the `g01-live` front door and broker require Go 1.27.3,
+the exact command import path, native `GOOS`/`GOARCH`, `CGO_ENABLED=1`, only the
+`g01_live` build tag, a clean embedded VCS revision and the unreplaced Scale Set
+SDK v0.5.0. Fixture builds remain inadmissible. These metadata gates do not
+establish live readiness or authorize execution.
 
 The fixed broker inputs are owned management stdin, FD3 independent workflow
 observation credential, FD4 workflow signer seed, and FD5 issuer signer seed.

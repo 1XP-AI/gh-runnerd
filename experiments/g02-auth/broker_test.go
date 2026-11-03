@@ -27,18 +27,28 @@ func TestPairedTerminalBrokerApprovalUsesDedicatedMode(t *testing.T) {
 }
 
 type brokerHTTPFixture struct {
-	t             *testing.T
-	calls         []string
-	tokenCalls    int
-	badGroup      bool
-	mintError     bool
-	token         string
-	root          string
-	admissionRoot string
+	t              *testing.T
+	calls          []string
+	events         []string
+	tokenCalls     int
+	mintRequests   []brokerMintRequestFixture
+	badGroup       bool
+	badGroupPolicy bool
+	mintError      bool
+	token          string
+	root           string
+	admissionRoot  string
+}
+
+type brokerMintRequestFixture struct {
+	RepositoryIDs []int64
+	Permissions   map[string]string
 }
 
 func (f *brokerHTTPFixture) RoundTrip(r *http.Request) (*http.Response, error) {
-	f.calls = append(f.calls, r.Method+" "+r.URL.Path)
+	call := r.Method + " " + r.URL.Path
+	f.calls = append(f.calls, call)
+	f.events = append(f.events, call)
 	if r.URL.Scheme != "https" || r.URL.Host != "api.github.com" {
 		f.t.Fatal("unexpected live destination")
 	}
@@ -61,14 +71,26 @@ func (f *brokerHTTPFixture) RoundTrip(r *http.Request) (*http.Response, error) {
 			RepositoryIDs []int64           `json:"repository_ids"`
 			Permissions   map[string]string `json:"permissions"`
 		}
-		if json.Unmarshal(body, &request) != nil || !reflect.DeepEqual(request.RepositoryIDs, []int64{501}) || len(request.Permissions) != 2 || request.Permissions["metadata"] != "read" || request.Permissions["organization_self_hosted_runners"] != "write" {
+		if json.Unmarshal(body, &request) != nil || !reflect.DeepEqual(request.RepositoryIDs, []int64{501}) || len(request.Permissions) != 2 || request.Permissions["metadata"] != "read" || (request.Permissions["organization_self_hosted_runners"] != "read" && request.Permissions["organization_self_hosted_runners"] != "write") {
 			f.t.Error("token request not narrowly scoped")
 		}
+		if request.Permissions["organization_self_hosted_runners"] == "write" && strings.Contains(string(data), "read_only_token_verified") && !strings.Contains(string(data), "management_token_request_started") {
+			f.t.Error("management token request preceded its durable intent")
+		}
+		permissions := make(map[string]string, len(request.Permissions))
+		for name, value := range request.Permissions {
+			permissions[name] = value
+		}
+		f.mintRequests = append(f.mintRequests, brokerMintRequestFixture{RepositoryIDs: append([]int64(nil), request.RepositoryIDs...), Permissions: permissions})
 		if f.mintError {
 			return response(502, "synthetic-private-api-error"), nil
 		}
 		status = 201
-		payload = map[string]any{"token": f.token, "expires_at": time.Now().Add(time.Hour), "permissions": request.Permissions, "repository_selection": "selected", "repositories": []any{repo}}
+		token := f.token
+		if request.Permissions["organization_self_hosted_runners"] == "read" {
+			token = "synthetic-private-read-installation-token"
+		}
+		payload = map[string]any{"token": token, "expires_at": time.Now().Add(time.Hour), "permissions": request.Permissions, "repository_selection": "selected", "repositories": []any{repo}}
 	case "/installation/repositories":
 		payload = map[string]any{"total_count": 1, "repositories": []any{repo}}
 	case "/repos/org-a/canary":

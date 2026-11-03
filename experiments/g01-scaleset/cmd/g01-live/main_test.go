@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"strings"
 	"syscall"
@@ -23,9 +24,14 @@ import (
 func TestBuildRevisionAdmissionRequiresGo1273(t *testing.T) {
 	revision := strings.Repeat("a", 40)
 	good := &debug.BuildInfo{
+		Path:      "github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/cmd/g01-live",
 		GoVersion: "go1.27.3",
 		Deps:      []*debug.Module{{Path: "github.com/actions/scaleset", Version: "v0.5.0"}},
 		Settings: []debug.BuildSetting{
+			{Key: "GOOS", Value: runtime.GOOS},
+			{Key: "GOARCH", Value: runtime.GOARCH},
+			{Key: "CGO_ENABLED", Value: "1"},
+			{Key: "-tags", Value: "g01_live"},
 			{Key: "vcs.revision", Value: revision},
 			{Key: "vcs.modified", Value: "false"},
 		},
@@ -47,6 +53,64 @@ func TestBuildRevisionAdmissionRequiresGo1273(t *testing.T) {
 			t.Errorf("unselected SDK %q admitted", version)
 		}
 	}
+	wrongGOOS := "windows"
+	if runtime.GOOS == wrongGOOS {
+		wrongGOOS = "linux"
+	}
+	wrongGOARCH := "amd64"
+	if runtime.GOARCH == wrongGOARCH {
+		wrongGOARCH = "arm64"
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*debug.BuildInfo)
+	}{
+		{name: "wrong path", mutate: func(info *debug.BuildInfo) { info.Path = "example.com/other" }},
+		{name: "missing platform", mutate: func(info *debug.BuildInfo) { info.Settings = removeBuildSetting(info.Settings, "GOOS") }},
+		{name: "wrong platform", mutate: func(info *debug.BuildInfo) { setBuildSetting(info, "GOOS", wrongGOOS) }},
+		{name: "wrong architecture", mutate: func(info *debug.BuildInfo) { setBuildSetting(info, "GOARCH", wrongGOARCH) }},
+		{name: "cgo disabled", mutate: func(info *debug.BuildInfo) { setBuildSetting(info, "CGO_ENABLED", "0") }},
+		{name: "missing tags", mutate: func(info *debug.BuildInfo) { info.Settings = removeBuildSetting(info.Settings, "-tags") }},
+		{name: "fixture tag", mutate: func(info *debug.BuildInfo) { setBuildSetting(info, "-tags", "g01_live,g01_pair_fixture") }},
+		{name: "dirty source", mutate: func(info *debug.BuildInfo) { setBuildSetting(info, "vcs.modified", "true") }},
+		{name: "replaced SDK", mutate: func(info *debug.BuildInfo) {
+			info.Deps[0].Replace = &debug.Module{Path: "github.com/actions/scaleset", Version: "v0.5.0"}
+		}},
+	} {
+		bad := *good
+		bad.Settings = append([]debug.BuildSetting(nil), good.Settings...)
+		bad.Deps = append([]*debug.Module(nil), good.Deps...)
+		for i, dep := range bad.Deps {
+			if dep != nil {
+				copy := *dep
+				bad.Deps[i] = &copy
+			}
+		}
+		tc.mutate(&bad)
+		if _, ok := buildRevisionFromInfo(&bad, true); ok {
+			t.Errorf("unsupported build identity admitted: %s", tc.name)
+		}
+	}
+}
+
+func setBuildSetting(info *debug.BuildInfo, key, value string) {
+	for i := range info.Settings {
+		if info.Settings[i].Key == key {
+			info.Settings[i].Value = value
+			return
+		}
+	}
+	info.Settings = append(info.Settings, debug.BuildSetting{Key: key, Value: value})
+}
+
+func removeBuildSetting(settings []debug.BuildSetting, key string) []debug.BuildSetting {
+	result := settings[:0]
+	for _, setting := range settings {
+		if setting.Key != key {
+			result = append(result, setting)
+		}
+	}
+	return result
 }
 
 type unreadable struct{ t *testing.T }

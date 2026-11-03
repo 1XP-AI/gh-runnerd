@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
@@ -105,6 +106,7 @@ func newBrokerV3RunFixture(t *testing.T, phase string, changedCallee bool, rootM
 	transport := transportFunc(func(r *http.Request) (*http.Response, error) {
 		if r.URL.Path == workflowRunPath(request.Repository, request.WorkflowRunID) {
 			*workflowGET = *workflowGET + 1
+			fixture.events = append(fixture.events, "GET "+r.URL.Path)
 			body := goodRun
 			if changedCallee && *workflowGET == 2 {
 				body = badRun
@@ -112,6 +114,11 @@ func newBrokerV3RunFixture(t *testing.T, phase string, changedCallee bool, rootM
 			return response(http.StatusOK, body), nil
 		}
 		if r.URL.Path == "/orgs/org-a/actions/runner-groups/3" {
+			fixture.events = append(fixture.events, "GET "+r.URL.Path)
+			selectedWorkflows := []string{a.GroupPolicy.Workflow}
+			if fixture.badGroupPolicy {
+				selectedWorkflows = []string{"org-a/canary/.github/workflows/other.yml@" + strings.Repeat("e", 40)}
+			}
 			groupJSON, err := json.Marshal(map[string]any{
 				"id":                         3,
 				"name":                       "synthetic-group",
@@ -120,7 +127,7 @@ func newBrokerV3RunFixture(t *testing.T, phase string, changedCallee bool, rootM
 				"inherited":                  false,
 				"allows_public_repositories": false,
 				"restricted_to_workflows":    true,
-				"selected_workflows":         []string{a.GroupPolicy.Workflow},
+				"selected_workflows":         selectedWorkflows,
 			})
 			if err != nil {
 				return nil, errBroker
@@ -146,6 +153,34 @@ func newBrokerV3RunFixture(t *testing.T, phase string, changedCallee bool, rootM
 	}
 	t.Cleanup(func() { brokerBinaryOpener = oldOpener })
 	return brokerV3RunFixture{files: BrokerFiles{ApprovalPath: approvalPath, StateDirectory: attempt, ControllerBinary: binary.path, ControllerApproval: controllerPath, ControllerStateDirectory: controllerState}, candidate: candidate, fixture: fixture, workflowGET: workflowGET}
+}
+
+func TestBrokerExperimentV3ReadOnlyPreflightRejectsBeforeWriteMint(t *testing.T) {
+	fixture := newBrokerV3RunFixture(t, "create", false)
+	fixture.fixture.badGroupPolicy = true
+	management, err := json.Marshal(brokerInput{PEM: string(fixture.candidate.PEM), VerificationToken: "synthetic-private-workflow-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := brokerV3Pipe(t, management)
+	observation := brokerV3Pipe(t, []byte("synthetic-private-workflow-token"))
+	workflowSeed := brokerV3Pipe(t, bytes.Repeat([]byte{1}, ed25519.SeedSize))
+	issuerSeed := brokerV3Pipe(t, bytes.Repeat([]byte{71}, ed25519.SeedSize))
+	result, runErr := RunBrokerExperimentWithInputs(context.Background(), fixture.files, input, observation, workflowSeed, issuerSeed)
+	if runErr == nil || result.Status != "" || fixture.fixture.tokenCalls != 1 || *fixture.workflowGET != 1 {
+		t.Fatalf("ineligible group crossed read-only preflight: result=%+v err=%v mints=%d workflow_gets=%d calls=%v", result, runErr, fixture.fixture.tokenCalls, *fixture.workflowGET, fixture.fixture.calls)
+	}
+	wantPermissions := map[string]string{"metadata": "read", "organization_self_hosted_runners": "read"}
+	if len(fixture.fixture.mintRequests) != 1 || !reflect.DeepEqual(fixture.fixture.mintRequests[0].RepositoryIDs, []int64{501}) || !reflect.DeepEqual(fixture.fixture.mintRequests[0].Permissions, wantPermissions) {
+		t.Fatalf("ineligible group did not stop after an exact read-only token: requests=%+v", fixture.fixture.mintRequests)
+	}
+	journal, err := os.ReadFile(filepath.Join(fixture.files.StateDirectory, "broker.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(journal, []byte("management_token_request_started")) || bytes.Contains(journal, []byte("controller_handoff_started")) {
+		t.Fatalf("ineligible group crossed write-token or handoff journal boundary: %s", journal)
+	}
 }
 
 func brokerV3Pipe(t *testing.T, data []byte) *os.File {
@@ -224,13 +259,40 @@ func TestBrokerExperimentV3FinalGETFencesCalleeBeforeMintAndHandoff(t *testing.T
 					if readErr != nil {
 						t.Fatal(readErr)
 					}
-					if runErr == nil || fixture.fixture.tokenCalls != 0 || *fixture.workflowGET != 2 || result.Status != "" || bytes.Contains(journal, []byte("token_request_started")) || bytes.Contains(journal, []byte("controller_handoff_started")) {
+					if runErr == nil || fixture.fixture.tokenCalls != 1 || *fixture.workflowGET != 2 || result.Status != "" || !bytes.Contains(journal, []byte("token_request_started")) || !bytes.Contains(journal, []byte("read_only_token_verified")) || bytes.Contains(journal, []byte("management_token_request_started")) || bytes.Contains(journal, []byte("controller_handoff_started")) {
 						t.Fatalf("changed callee crossed final fence: result=%+v err=%v mints=%d workflow_gets=%d journal=%s", result, runErr, fixture.fixture.tokenCalls, *fixture.workflowGET, journal)
 					}
 					return
 				}
-				if runErr != nil || result.Status != "controller_completed" || fixture.fixture.tokenCalls != 1 || *fixture.workflowGET != 2 {
+				if runErr != nil || result.Status != "controller_completed" || fixture.fixture.tokenCalls != 2 || *fixture.workflowGET != 2 {
 					t.Fatalf("unchanged callee did not complete one handoff: result=%+v err=%v mints=%d workflow_gets=%d calls=%v", result, runErr, fixture.fixture.tokenCalls, *fixture.workflowGET, fixture.fixture.calls)
+				}
+				wantRead := map[string]string{"metadata": "read", "organization_self_hosted_runners": "read"}
+				wantWrite := map[string]string{"metadata": "read", "organization_self_hosted_runners": "write"}
+				if len(fixture.fixture.mintRequests) != 2 || !reflect.DeepEqual(fixture.fixture.mintRequests[0].Permissions, wantRead) || !reflect.DeepEqual(fixture.fixture.mintRequests[1].Permissions, wantWrite) {
+					t.Fatalf("v3 token sequence did not minimize authority before final write: %+v", fixture.fixture.mintRequests)
+				}
+				wantEvents := []string{
+					"POST /app/installations/201/access_tokens",
+					"GET /installation/repositories",
+					"GET /repos/org-a/canary",
+					"GET /orgs/org-a/actions/runner-groups/3",
+					"GET /orgs/org-a/actions/runner-groups/3/repositories",
+					"GET /repos/org-a/canary/actions/runs/7",
+					"POST /app/installations/201/access_tokens",
+					"GET /installation/repositories",
+					"GET /repos/org-a/canary",
+					"GET /orgs/org-a/actions/runner-groups/3",
+					"GET /orgs/org-a/actions/runner-groups/3/repositories",
+				}
+				at := 0
+				for _, event := range fixture.fixture.events {
+					if at < len(wantEvents) && event == wantEvents[at] {
+						at++
+					}
+				}
+				if at != len(wantEvents) {
+					t.Fatalf("expected ordered read preflight, final workflow fence, write mint and write preflight; events=%v", fixture.fixture.events)
 				}
 			})
 		}

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -163,8 +164,10 @@ func TestBrokerOfflineReusableCalleeReceiptReachesHandoff(t *testing.T) {
 	if err != nil || phase.Request != request || phase.Request.Callee != request.Callee || phase.Version != 2 {
 		t.Fatalf("handoff lost selected callee grant: phase=%+v err=%v", phase, err)
 	}
-	if fixture.tokenCalls != 1 {
-		t.Fatalf("unexpected management token count: %d", fixture.tokenCalls)
+	wantRead := map[string]string{"metadata": "read", "organization_self_hosted_runners": "read"}
+	wantWrite := map[string]string{"metadata": "read", "organization_self_hosted_runners": "write"}
+	if fixture.tokenCalls != 2 || len(fixture.mintRequests) != 2 || !reflect.DeepEqual(fixture.mintRequests[0].Permissions, wantRead) || !reflect.DeepEqual(fixture.mintRequests[1].Permissions, wantWrite) {
+		t.Fatalf("unexpected v3 read/write token sequence: requests=%+v", fixture.mintRequests)
 	}
 }
 

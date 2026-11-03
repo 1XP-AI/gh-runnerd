@@ -30,7 +30,7 @@ func selectBrokerExperiment(files BrokerFiles, now time.Time) (brokerExperimentS
 	if _, e = readBrokerPrivateJSON(files.ApprovalPath, &a); e != nil || a.validate(now) != nil || a.Mode != "controller" && a.Mode != "paired-terminal" || a.Phase == "cleanup" {
 		return brokerExperimentSelection{}, errBroker
 	}
-	if a.GroupPolicy != (handoff.GroupPolicy{}) && p.Version != 3 {
+	if a.GroupPolicy == (handoff.GroupPolicy{}) || a.GroupPolicy.Version != 2 || !a.GroupPolicy.Valid(a.Organization+"/"+a.Repository, "") || p.Version != 3 || p.Source != handoff.ReusableCalleeSource {
 		return brokerExperimentSelection{}, errBroker
 	}
 	var c controllerApproval
@@ -38,22 +38,12 @@ func selectBrokerExperiment(files BrokerFiles, now time.Time) (brokerExperimentS
 	if e != nil || handoff.Digest(raw) != a.ControllerApprovalSHA256 || c.validate(a, now) != nil {
 		return brokerExperimentSelection{}, errBroker
 	}
-	source := p.Source
-	if p.Version == 3 {
-		source = workflowProvenanceSource
-	}
-	request, e := brokerProvenanceRequest(a, c, source)
+	request, e := brokerProvenanceRequest(a, c, workflowProvenanceSource)
 	if e != nil {
 		return brokerExperimentSelection{}, errBroker
 	}
-	var g handoff.PhaseGrant
-	if p.Version == 3 {
-		request.Version, request.Source = 2, handoff.ReusableCalleeSource
-		g, e = p.SelectCallee(a.Mode, request, a.OrganizationID, a.RepositoryID, a.RunnerGroupID, a.ManagementScope, a.GroupPolicy, now)
-	} else {
-		groupDigest := a.GroupPolicy.GrantDigest(request, a.RepositoryID, a.RunnerGroupID, a.ManagementScope)
-		g, e = p.SelectGroup(a.Mode, request, groupDigest, now)
-	}
+	request.Version, request.Source = 2, handoff.ReusableCalleeSource
+	g, e := p.SelectCallee(a.Mode, request, a.OrganizationID, a.RepositoryID, a.RunnerGroupID, a.ManagementScope, a.GroupPolicy, now)
 	if e != nil || g.OrganizationID != a.OrganizationID || g.RepositoryID != a.RepositoryID || g.ExpiresAt.Before(a.ExpiresAt) {
 		return brokerExperimentSelection{}, errBroker
 	}
