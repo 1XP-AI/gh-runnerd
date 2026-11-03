@@ -5,6 +5,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -21,6 +22,225 @@ import (
 	"github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/liveworker"
 	"github.com/1XP-AI/gh-runnerd/experiments/g02-auth/handoff"
 )
+
+const (
+	maxPublicEvidenceInputBytes = 1 << 20
+	maxPublicEvidenceJSONDepth  = 16
+)
+
+type publicEvidenceInput struct {
+	ElapsedMS         int64                         `json:"elapsed_ms"`
+	Attempt           int                           `json:"attempt"`
+	SessionGeneration int                           `json:"session_generation"`
+	Phase             string                        `json:"phase"`
+	Operation         string                        `json:"operation"`
+	Outcome           string                        `json:"outcome"`
+	Resources         []publicEvidenceResourceInput `json:"resources"`
+	HTTPStatus        int                           `json:"http_status"`
+	Succeeded         *bool                         `json:"succeeded"`
+	Counts            *publicEvidenceCountsInput    `json:"counts"`
+}
+
+type publicEvidenceResourceInput struct {
+	Kind string `json:"kind"`
+	ID   string `json:"id"`
+}
+
+type publicEvidenceCountsInput struct {
+	Available  *int `json:"available"`
+	Acquired   *int `json:"acquired"`
+	Assigned   *int `json:"assigned"`
+	Running    *int `json:"running"`
+	Registered *int `json:"registered"`
+	Busy       *int `json:"busy"`
+	Idle       *int `json:"idle"`
+}
+
+func consumePublicEvidenceJSONValue(decoder *json.Decoder) error {
+	return consumePublicEvidenceJSONValueAtDepth(decoder, 0)
+}
+
+func consumePublicEvidenceJSONValueAtDepth(decoder *json.Decoder, depth int) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return livecanary.ErrPublicEvidence
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch delimiter {
+	case '{':
+		if depth >= maxPublicEvidenceJSONDepth {
+			return livecanary.ErrPublicEvidence
+		}
+		keys := make(map[string]struct{})
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			key, ok := keyToken.(string)
+			if err != nil || !ok {
+				return livecanary.ErrPublicEvidence
+			}
+			if _, exists := keys[key]; exists {
+				return livecanary.ErrPublicEvidence
+			}
+			keys[key] = struct{}{}
+			if consumePublicEvidenceJSONValueAtDepth(decoder, depth+1) != nil {
+				return livecanary.ErrPublicEvidence
+			}
+		}
+		end, err := decoder.Token()
+		if err != nil || end != json.Delim('}') {
+			return livecanary.ErrPublicEvidence
+		}
+	case '[':
+		if depth >= maxPublicEvidenceJSONDepth {
+			return livecanary.ErrPublicEvidence
+		}
+		for decoder.More() {
+			if consumePublicEvidenceJSONValueAtDepth(decoder, depth+1) != nil {
+				return livecanary.ErrPublicEvidence
+			}
+		}
+		end, err := decoder.Token()
+		if err != nil || end != json.Delim(']') {
+			return livecanary.ErrPublicEvidence
+		}
+	default:
+		return livecanary.ErrPublicEvidence
+	}
+	return nil
+}
+
+func publicEvidenceObjectFields(raw json.RawMessage, allowed, required []string) (map[string]json.RawMessage, bool) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return nil, false
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(trimmed, &fields) != nil || fields == nil {
+		return nil, false
+	}
+	allowedFields := make(map[string]struct{}, len(allowed))
+	for _, name := range allowed {
+		allowedFields[name] = struct{}{}
+	}
+	for name, value := range fields {
+		if _, ok := allowedFields[name]; !ok || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			return nil, false
+		}
+	}
+	for _, name := range required {
+		if _, ok := fields[name]; !ok {
+			return nil, false
+		}
+	}
+	return fields, true
+}
+
+func validatePublicEvidenceInputJSON(raw []byte) bool {
+	duplicateCheck := json.NewDecoder(bytes.NewReader(raw))
+	duplicateCheck.UseNumber()
+	if consumePublicEvidenceJSONValue(duplicateCheck) != nil {
+		return false
+	}
+	if _, err := duplicateCheck.Token(); err != io.EOF {
+		return false
+	}
+
+	var events []json.RawMessage
+	if json.Unmarshal(raw, &events) != nil || len(events) == 0 {
+		return false
+	}
+	for _, event := range events {
+		fields, ok := publicEvidenceObjectFields(event,
+			[]string{"elapsed_ms", "attempt", "session_generation", "phase", "operation", "outcome", "resources", "http_status", "succeeded", "counts"},
+			[]string{"elapsed_ms", "phase", "operation", "outcome"})
+		if !ok {
+			return false
+		}
+		if resources, exists := fields["resources"]; exists {
+			trimmed := bytes.TrimSpace(resources)
+			if len(trimmed) == 0 || trimmed[0] != '[' {
+				return false
+			}
+			var items []json.RawMessage
+			if json.Unmarshal(trimmed, &items) != nil {
+				return false
+			}
+			for _, item := range items {
+				if _, ok := publicEvidenceObjectFields(item, []string{"kind", "id"}, []string{"kind", "id"}); !ok {
+					return false
+				}
+			}
+		}
+		if counts, exists := fields["counts"]; exists {
+			if _, ok := publicEvidenceObjectFields(counts, []string{"available", "acquired", "assigned", "running", "registered", "busy", "idle"}, nil); !ok {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func decodePublicEvidenceInput(input io.Reader) ([]livecanary.PublicEvidenceObservation, error) {
+	if input == nil {
+		return nil, livecanary.ErrPublicEvidence
+	}
+	raw, err := io.ReadAll(io.LimitReader(input, maxPublicEvidenceInputBytes+1))
+	if err != nil || len(raw) == 0 || len(raw) > maxPublicEvidenceInputBytes {
+		return nil, livecanary.ErrPublicEvidence
+	}
+	if !validatePublicEvidenceInputJSON(raw) {
+		return nil, livecanary.ErrPublicEvidence
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var encoded []publicEvidenceInput
+	if decoder.Decode(&encoded) != nil {
+		return nil, livecanary.ErrPublicEvidence
+	}
+	var trailing any
+	if decoder.Decode(&trailing) != io.EOF || len(encoded) == 0 {
+		return nil, livecanary.ErrPublicEvidence
+	}
+
+	observations := make([]livecanary.PublicEvidenceObservation, len(encoded))
+	for index, event := range encoded {
+		if event.ElapsedMS < 0 || event.ElapsedMS > int64((24*time.Hour)/time.Millisecond) {
+			return nil, livecanary.ErrPublicEvidence
+		}
+		observation := livecanary.PublicEvidenceObservation{
+			Elapsed:           time.Duration(event.ElapsedMS) * time.Millisecond,
+			Attempt:           event.Attempt,
+			SessionGeneration: event.SessionGeneration,
+			Phase:             event.Phase,
+			Operation:         event.Operation,
+			Outcome:           event.Outcome,
+			HTTPStatus:        event.HTTPStatus,
+			Succeeded:         event.Succeeded,
+		}
+		if len(event.Resources) != 0 {
+			observation.Resources = make([]livecanary.PublicEvidenceResource, len(event.Resources))
+			for resourceIndex, resource := range event.Resources {
+				observation.Resources[resourceIndex] = livecanary.PublicEvidenceResource{Kind: resource.Kind, ID: resource.ID}
+			}
+		}
+		if event.Counts != nil {
+			observation.Counts = &livecanary.PublicEvidenceCounts{
+				Available:  event.Counts.Available,
+				Acquired:   event.Counts.Acquired,
+				Assigned:   event.Counts.Assigned,
+				Running:    event.Counts.Running,
+				Registered: event.Counts.Registered,
+				Busy:       event.Counts.Busy,
+				Idle:       event.Counts.Idle,
+			}
+		}
+		observations[index] = observation
+	}
+	return observations, nil
+}
 
 func buildRevision() (string, bool) {
 	info, ok := debug.ReadBuildInfo()
@@ -80,6 +300,7 @@ func runWithPreparationContext(ctx context.Context, args []string, in io.Reader,
 	flags := flag.NewFlagSet("g01-live", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	plan := flags.Bool("plan", false, "")
+	sanitizePublicEvidence := flags.Bool("sanitize-public-evidence", false, "")
 	execute := flags.Bool("execute-approved-canary", false, "")
 	experimental := flags.Bool("execute-experimental-phase", false, "")
 	experimentalMode := flags.String("mode", "", "")
@@ -100,6 +321,26 @@ func runWithPreparationContext(ctx context.Context, args []string, in io.Reader,
 	}
 	if flags.Parse(args) != nil || flags.NArg() != 0 {
 		return reject()
+	}
+	if *sanitizePublicEvidence {
+		if *plan || *execute || *experimental || *pairedExecute || *prepare || *pairedPrepare || *prepareWorker || *experimentalMode != "" || *approvalPath != "" || *statePath != "" || *phase != "" || *workerApprovalPath != "" || *workerStatePath != "" || *pairedBinding != "" || *rootBinding != "" {
+			return reject()
+		}
+		observations, err := decodePublicEvidenceInput(in)
+		if err != nil {
+			fmt.Fprintln(out, "public evidence refused")
+			return 1
+		}
+		encoded, err := livecanary.MarshalPublicEvidence(observations)
+		if err != nil {
+			fmt.Fprintln(out, "public evidence refused")
+			return 1
+		}
+		encoded = append(encoded, '\n')
+		if n, err := out.Write(encoded); err != nil || n != len(encoded) {
+			return 1
+		}
+		return 0
 	}
 	if *execute || *pairedExecute {
 		fmt.Fprintln(out, controllerExecutionQuarantineMessage)

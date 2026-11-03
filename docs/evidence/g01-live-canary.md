@@ -298,6 +298,91 @@ would require separately rechecking its owner plan, App access and runner-group
 scope. No canary workflow was dispatched; execution still requires its own
 concrete maintainer authorization.
 
+### Historical Luna Max static harness review — 2026-11-03
+
+Disposition: **HOLD** at exact public source HEAD
+`686df326b911184b9c3df2c9bd2a9f7ba65b5b49`. The review performed no tests,
+program execution, file mutation, GitHub write, credential, runner, host or
+Scale Set operation.
+
+Finding F1 was the mismatch between legacy broker launch flags and the
+`g01-live` command's unconditional rejection of direct execution. The rebuttal
+is limited to the selected GroupPolicy v2 reusable-callee route: ordinary
+`RunBroker` rejects a v2 approval without the experimental signed assembly
+before making GitHub API calls; the selected route validates the signed
+reusable-callee binding and launches the explicit experimental mode. The
+direct-execution CLI flags remain rejected.
+
+The legacy `g01-broker --execute-approved-broker` / `RunBroker` route remains
+callable when `GroupPolicy` is omitted and has its zero value. Explicit
+non-v2 `GroupPolicy` JSON is rejected; the legacy approval is unversioned. It
+can make authenticated identity calls and mint an installation token before
+launching `g01-live` with the incompatible direct flags, which `g01-live`
+rejects before reading its input. This route therefore has pre-rejection live
+effects; it is not side-effect-free and must not be used for the selected
+canary. The finding is rebutted only within the selected v2 route's scope.
+This PR does not disable the legacy route; any broad G01 live authorization
+must explicitly exclude it or separately block that path before use.
+
+Finding F2 was the absence of a production caller for the public evidence
+allowlist. The candidate adds the tagged `--sanitize-public-evidence` output
+mode described below. At the reviewed parent, the new focused CLI test failed
+because this mode was not recognized; after the change,
+the focused test passed under Go 1.27.3:
+
+```sh
+GOTOOLCHAIN=auto go test -tags g01_live ./cmd/g01-live -run 'TestPublicEvidenceSanitizer' -count=1
+```
+
+The sanitizer closes the output-path gap for manually verified observations
+but does not establish their truth or close the live checklist.
+
+The historical review could not close checklist items 353–356 offline: the rendered
+private workflow and worker/executor are not in this checkout, and current
+runtime, isolation, resource enforcement, live fault outcomes, actual sanitized
+timeline, authorization and owned cleanup remain unqualified. Preserve the
+checklist as open. Re-review the final immutable candidate after its changes are
+committed.
+
+### Follow-up Luna Max candidate review — 2026-11-03
+
+Disposition at exact public source HEAD
+`9483727b42054c94ba4511d86ab9343f831f6c01`: **APPROVE offline/static;
+HOLD live**. The source and documentation review ran no tests, programs, or
+live actions. It found no P0/P1 issue in the sanitizer or selected v2 route.
+The review confirmed the bounded single-document parser and allowlisted output,
+and identified a P2: the recursive duplicate-key scan lacked an explicit JSON
+nesting-depth cap. A focused test reproduced that the 17-level input was
+accepted at this head; the candidate now caps container nesting at 16 and the
+boundary test passes at 16 and rejects 17. A fresh exact-head review of this
+correction was pending at that time; the following section records its result.
+
+The same review noted that the preceding section recorded only the historical
+`686df326` review. This follow-up is the exact-head record for `9483727`; neither
+review closes the live runtime, authority, authorization, fault-outcome,
+sanitized-timeline or owned-cleanup gates. The legacy zero-GroupPolicy route
+remains outside the selected v2 canary and is a no-go for any broader G01 live
+authorization unless explicitly excluded or separately disabled.
+
+### Exact-head Luna Max delta review — 2026-11-03
+
+Disposition at exact public source HEAD
+`88331bdb7fc81a4b390bf0d62502755ea009337d`: **APPROVE offline/static;
+HOLD live**. The read-only review ran no tests, programs, or live actions and
+reported no P0/P1/P2/P3 findings. It confirmed the scanner starts at depth zero
+and rejects objects or arrays at depth 16 or greater, the boundary test accepts
+16 containers and rejects 17, and the exact-case, duplicate-key, null
+prevalidation and allowlisted-serialization checks remain present. Previously
+recorded focused-test results were not independently rerun by this review and
+remain attributed to their original execution.
+
+This review resolves the pending exact-head delta for the depth-cap correction;
+it does not qualify runtime behavior or authorize a canary. Provenance/trust,
+isolation and resource enforcement, cleanup, concrete live authorization and
+the remaining checklist gates remain open. The omitted zero-GroupPolicy legacy
+route remains excluded from the selected v2 canary and a no-go for broader G01
+live authorization unless explicitly excluded or separately disabled.
+
 - [x] Maintainer identified one disposable **private** repository in the
   organization. The reviewed workflow identity and full SHA are recorded in
   the private repository and group configuration; no public fork/PR execution
@@ -375,6 +460,23 @@ input size and counters, aliases resource IDs within the report, and reduces HTT
 status to its class. Their input fields are excluded from direct JSON output.
 Rejected input returns a generic error without echoing values. This offline
 serializer does not execute a canary or establish that an observation occurred.
+The tagged `g01-live --sanitize-public-evidence` mode is the output boundary for
+manually assembled, independently verified observations. It accepts one JSON
+array from stdin, limits the input to 1 MiB, rejects unknown fields, trailing
+documents, duplicate keys, case-folded field names, explicit null values and
+mixed execution flags, caps nested JSON containers at 16 levels, then writes
+only the serializer's allowlisted document.
+Required fields must be present. The exact schema check avoids Go decoder
+case-folding, duplicate-key overwrite and null-as-zero behavior. It does not
+open the private journal, credentials or a network connection, and it does not
+attest that the supplied observations occurred. Use it only after the
+observations have been independently verified; sanitized output alone is not
+canary evidence. Treat any nonzero command result as invalid output: a failed
+or short stdout write returns nonzero but cannot retract bytes already accepted
+by the output sink. Each input item can provide
+`elapsed_ms`, `attempt`, `session_generation`, `phase`, `operation`, `outcome`,
+`resources` (`kind` and private `id`), `http_status`, `succeeded`, and bounded
+`counts`; private resource IDs are replaced by stable aliases in the output.
 
 ## Minimal execution phases
 
