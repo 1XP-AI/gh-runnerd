@@ -3,6 +3,7 @@ package enrollment
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -36,6 +37,8 @@ type brokerHTTPFixture struct {
 	badGroupPolicy bool
 	mintError      bool
 	revokeError    bool
+	readTokenFault string
+	readTokenToken string
 	token          string
 	root           string
 	admissionRoot  string
@@ -88,10 +91,21 @@ func (f *brokerHTTPFixture) RoundTrip(r *http.Request) (*http.Response, error) {
 		}
 		status = 201
 		token := f.token
+		expiresAt := time.Now().Add(time.Hour)
+		responsePermissions := request.Permissions
 		if request.Permissions["organization_self_hosted_runners"] == "read" {
 			token = "synthetic-private-read-installation-token"
+			if f.readTokenToken != "" {
+				token = f.readTokenToken
+			}
+			switch f.readTokenFault {
+			case "write-scope":
+				responsePermissions = map[string]string{"organization_self_hosted_runners": "write", "metadata": "read"}
+			case "expired":
+				expiresAt = time.Now().Add(-time.Minute)
+			}
 		}
-		payload = map[string]any{"token": token, "expires_at": time.Now().Add(time.Hour), "permissions": request.Permissions, "repository_selection": "selected", "repositories": []any{repo}}
+		payload = map[string]any{"token": token, "expires_at": expiresAt, "permissions": responsePermissions, "repository_selection": "selected", "repositories": []any{repo}}
 	case "/installation/token":
 		if r.Method != http.MethodDelete || r.Header.Get("Authorization") != "Bearer synthetic-private-read-installation-token" {
 			f.t.Error("installation-token revocation used the wrong method or authority")
@@ -142,6 +156,48 @@ func TestBrokerWorkflowVerificationUsesHeadBranchForAttestedBranchRef(t *testing
 	provenance := &BrokerProvenanceReceipt{WorkflowRef: controller.WorkflowRef}
 	if err := api.verifyWorkflowWithReceipt(context.Background(), a, controller, "synthetic-private-workflow-token", provenance); err != nil {
 		t.Fatalf("workflow run with the API's head_branch field was refused: %v", err)
+	}
+}
+
+func TestBrokerReadOnlyRevocationRecordsUncertainWhenRevokedSyncFails(t *testing.T) {
+	journalFile, err := os.CreateTemp(t.TempDir(), "broker-journal-*.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = journalFile.Close() })
+	journal := &brokerJournal{file: journalFile}
+	journal.syncFile = func(phase string) error {
+		if phase == "read_only_token_revoked" {
+			return errors.New("synthetic fsync failure")
+		}
+		return journalFile.Sync()
+	}
+	deleteCalls := 0
+	api := newBrokerAPI(time.Now, transportFunc(func(r *http.Request) (*http.Response, error) {
+		deleteCalls++
+		if r.Method != http.MethodDelete || r.Header.Get("Authorization") != "Bearer synthetic-private-read-installation-token" {
+			t.Errorf("revocation used the wrong method or authority: %s %s", r.Method, r.URL.Path)
+		}
+		return response(http.StatusNoContent, ""), nil
+	}))
+	if err := revokeBrokerReadOnlyToken(context.Background(), api, journal, "synthetic-private-read-installation-token", "synthetic-private-workflow-token"); err == nil {
+		t.Fatal("revocation succeeded despite a failed durable success record")
+	}
+	if deleteCalls != 1 {
+		t.Fatalf("revocation requests=%d, want exactly one", deleteCalls)
+	}
+	data, err := os.ReadFile(journalFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := strings.Index(string(data), "read_only_token_revocation_started")
+	revoked := strings.Index(string(data), "read_only_token_revoked")
+	uncertain := strings.Index(string(data), "read_only_token_revocation_uncertain")
+	if started < 0 || revoked <= started || uncertain <= revoked || !strings.Contains(string(data), "revocation_result_persistence_failed") {
+		t.Fatalf("failed revoked sync was not followed by a terminal uncertainty record: %s", data)
+	}
+	if strings.Contains(string(data), "synthetic-private-read-installation-token") {
+		t.Fatal("read-only installation token was persisted in the broker journal")
 	}
 }
 

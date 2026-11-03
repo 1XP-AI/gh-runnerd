@@ -14,6 +14,7 @@ type brokerJournal struct {
 	root                    *os.Root
 	path                    string
 	directoryInfo, fileInfo os.FileInfo
+	syncFile                func(phase string) error
 }
 
 // openBrokerJournal durably claims one exact attempt path and holds its
@@ -85,7 +86,11 @@ func (j *brokerJournal) append(phase string, metadata map[string]any) error {
 	if n, err := j.file.Write(data); err != nil || n != len(data) {
 		return errBroker
 	}
-	if j.file.Sync() != nil {
+	if j.syncFile != nil {
+		if j.syncFile(phase) != nil {
+			return errBroker
+		}
+	} else if j.file.Sync() != nil {
 		return errBroker
 	}
 	return nil

@@ -221,6 +221,77 @@ func TestBrokerExperimentV3StopsWhenReadOnlyTokenRevocationIsUncertain(t *testin
 	}
 }
 
+func TestBrokerExperimentV3RevokesTokenFromRejectedReadIssuance(t *testing.T) {
+	for _, fault := range []string{"write-scope", "expired"} {
+		t.Run(fault, func(t *testing.T) {
+			fixture := newBrokerV3RunFixture(t, "create", false)
+			fixture.fixture.readTokenFault = fault
+			management, err := json.Marshal(brokerInput{PEM: string(fixture.candidate.PEM), VerificationToken: "synthetic-private-workflow-token"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			input := brokerV3Pipe(t, management)
+			observation := brokerV3Pipe(t, []byte("synthetic-private-workflow-token"))
+			workflowSeed := brokerV3Pipe(t, bytes.Repeat([]byte{1}, ed25519.SeedSize))
+			issuerSeed := brokerV3Pipe(t, bytes.Repeat([]byte{71}, ed25519.SeedSize))
+			result, runErr := RunBrokerExperimentWithInputs(context.Background(), fixture.files, input, observation, workflowSeed, issuerSeed)
+			if runErr == nil || result.Status != "" || fixture.fixture.tokenCalls != 1 || *fixture.workflowGET != 1 {
+				t.Fatalf("rejected read-token issuance crossed its initial workflow gate: result=%+v err=%v mints=%d workflow_gets=%d calls=%v", result, runErr, fixture.fixture.tokenCalls, *fixture.workflowGET, fixture.fixture.calls)
+			}
+			if len(fixture.fixture.calls) == 0 || fixture.fixture.calls[len(fixture.fixture.calls)-1] != "DELETE /installation/token" {
+				t.Fatalf("usable rejected token was not revoked: calls=%v", fixture.fixture.calls)
+			}
+			for _, call := range fixture.fixture.calls {
+				if call == "GET /installation/repositories" || strings.HasPrefix(call, "GET /orgs/org-a/actions/runner-groups/") {
+					t.Fatalf("rejected token was used for provider preflight: calls=%v", fixture.fixture.calls)
+				}
+			}
+			journal, err := os.ReadFile(filepath.Join(fixture.files.StateDirectory, "broker.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Contains(journal, []byte("read_only_token_revocation_started")) || !bytes.Contains(journal, []byte("read_only_token_revoked")) || bytes.Contains(journal, []byte("read_only_token_verified")) || bytes.Contains(journal, []byte("management_token_request_started")) || bytes.Contains(journal, []byte("controller_handoff_started")) {
+				t.Fatalf("rejected issuance cleanup crossed an invalid journal boundary: %s", journal)
+			}
+			if bytes.Contains(journal, []byte("synthetic-private-read-installation-token")) {
+				t.Fatal("rejected read-token candidate was persisted in the broker journal")
+			}
+		})
+	}
+}
+
+func TestBrokerExperimentV3DoesNotRevokeVerificationTokenCollision(t *testing.T) {
+	fixture := newBrokerV3RunFixture(t, "create", false)
+	fixture.fixture.readTokenToken = "synthetic-private-workflow-token"
+	management, err := json.Marshal(brokerInput{PEM: string(fixture.candidate.PEM), VerificationToken: "synthetic-private-workflow-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := brokerV3Pipe(t, management)
+	observation := brokerV3Pipe(t, []byte("synthetic-private-workflow-token"))
+	workflowSeed := brokerV3Pipe(t, bytes.Repeat([]byte{1}, ed25519.SeedSize))
+	issuerSeed := brokerV3Pipe(t, bytes.Repeat([]byte{71}, ed25519.SeedSize))
+	result, runErr := RunBrokerExperimentWithInputs(context.Background(), fixture.files, input, observation, workflowSeed, issuerSeed)
+	if runErr == nil || result.Status != "" || fixture.fixture.tokenCalls != 1 || *fixture.workflowGET != 1 {
+		t.Fatalf("verification-token collision was not rejected before use: result=%+v err=%v mints=%d workflow_gets=%d calls=%v", result, runErr, fixture.fixture.tokenCalls, *fixture.workflowGET, fixture.fixture.calls)
+	}
+	for _, call := range fixture.fixture.calls {
+		if call == "DELETE /installation/token" || call == "GET /installation/repositories" || strings.HasPrefix(call, "GET /orgs/org-a/actions/runner-groups/") {
+			t.Fatalf("caller verification token was used or revoked: calls=%v", fixture.fixture.calls)
+		}
+	}
+	journal, err := os.ReadFile(filepath.Join(fixture.files.StateDirectory, "broker.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(journal, []byte("read_only_token_revocation_skipped")) || !bytes.Contains(journal, []byte("verification_token_collision")) || bytes.Contains(journal, []byte("read_only_token_revocation_started")) {
+		t.Fatalf("verification-token collision outcome was not durably recorded without a revoke attempt: %s", journal)
+	}
+	if bytes.Contains(journal, []byte("synthetic-private-workflow-token")) {
+		t.Fatal("caller verification token was persisted in the broker journal")
+	}
+}
+
 func brokerV3Pipe(t *testing.T, data []byte) *os.File {
 	t.Helper()
 	r, w, err := os.Pipe()

@@ -660,6 +660,33 @@ handoff race, trust-root/custody, runtime/isolation, conditional deletion and
 separately authorized live canary gates remain open. Issue #1 and Project #2
 remain OPEN / In progress.
 
+### Read-token rejection and journal uncertainty regression — 2026-11-03
+
+The independent Luna Max exact-head review of PR #159 at `d8f387fdc7e367ac65e23a3b449ee7202aff2163` identified
+two P1 findings: rejected read-token scope/expiry responses discarded a usable
+token before cleanup, and a token equal to the caller verification credential
+could reach provider-state preflight and DELETE. It also identified a P2 gap:
+a successful DELETE followed by failed revoked-record sync did not append an
+uncertainty marker. Local regression tests reproduced the P1s. The correction
+retains only a lexically valid, bounded read-token candidate for one journaled
+revocation attempt, never preflights rejected issuance, records/skips a
+caller-token collision before provider-state preflight, and appends terminal
+uncertainty after a failed revoked-result sync. Verification on the corrected
+local tree, using Go 1.27.3 and caches on /Volumes/worktree:
+
+| Check | Result |
+|---|---|
+| RED on the pre-fix tree: rejected scope/expiry cleanup and caller-token collision regressions | FAIL as expected |
+| G02 focused test `go test -run 'TestBroker(ReadOnlyRevocationRecordsUncertainWhenRevokedSyncFails|ExperimentV3RevokesTokenFromRejectedReadIssuance|ExperimentV3DoesNotRevokeVerificationTokenCollision)$'` | PASS (1.777s) |
+| G02 `go test -count=1 -timeout=120s ./...` | PASS (all packages; library 47.211s) |
+| G02 `go vet ./...` | PASS |
+| G01 `go test -tags=g01_pair_fixture -run '^(TestControllerProcessHandoffActualBrokerSeparateProcess|TestControllerProcessHandoffV3ActualBrokerChild)$' -count=1 -timeout=120s ./livecanary` | PASS (3.773s) |
+
+No GitHub token, provider, runner, Scale Set or host operation was performed.
+This offline correction does not change the selected SDK `v0.5.0` path or
+close the still-unsupported conditional Scale Set deletion requirement; issue
+#1 and Project #2 remain OPEN / In progress.
+
 ## Minimal execution phases
 
 Run phases serially. Each phase begins by verifying that only its owned resources

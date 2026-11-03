@@ -228,13 +228,29 @@ func (a *brokerAPI) mintWithPermissions(ctx context.Context, approval BrokerAppr
 		Permissions   map[string]string `json:"permissions"`
 	}{repositories, permissions}
 	var result brokerIssued
-	if a.call(ctx, "POST", "/app/installations/"+strconv.FormatInt(approval.InstallationID, 10)+"/access_tokens", "Bearer "+jwt, body, 201, &result) != nil || !validBrokerToken(result.Token) || len(result.Token) > 1024 || !result.ExpiresAt.After(a.now().Add(time.Minute)) || result.ExpiresAt.After(a.now().Add(65*time.Minute)) {
+	err = a.call(ctx, "POST", "/app/installations/"+strconv.FormatInt(approval.InstallationID, 10)+"/access_tokens", "Bearer "+jwt, body, 201, &result)
+	if err != nil {
+		return readOnlyRevocationCandidate(result, readOnly), errBroker
+	}
+	if !validBrokerToken(result.Token) || len(result.Token) > 1024 {
 		return brokerIssued{}, errBroker
 	}
-	if (readOnly && !result.matchesReadOnlyScope(approval)) || (!readOnly && !result.matchesScope(approval)) {
-		return brokerIssued{}, errBroker
+	if !result.ExpiresAt.After(a.now().Add(time.Minute)) || result.ExpiresAt.After(a.now().Add(65*time.Minute)) ||
+		(readOnly && !result.matchesReadOnlyScope(approval)) || (!readOnly && !result.matchesScope(approval)) {
+		return readOnlyRevocationCandidate(result, readOnly), errBroker
 	}
 	return result, nil
+}
+
+// A syntactically valid token returned by the read-only endpoint must remain
+// available to the caller for cleanup even when the response fails a later
+// expiry or scope check. Management-token validation never exposes a cleanup
+// candidate because that credential has a different authority boundary.
+func readOnlyRevocationCandidate(result brokerIssued, readOnly bool) brokerIssued {
+	if !readOnly || !validBrokerToken(result.Token) || len(result.Token) > 1024 {
+		return brokerIssued{}
+	}
+	return brokerIssued{Token: result.Token}
 }
 func (a *brokerAPI) preflight(ctx context.Context, approval BrokerApproval, token string) error {
 	if approval.ManagementScope != "" && approval.ManagementScope != organizationOnlyManagementScope {

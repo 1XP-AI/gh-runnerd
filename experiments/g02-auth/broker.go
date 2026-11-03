@@ -149,6 +149,32 @@ func brokerPairedAuthorityDeadline(parent context.Context, a BrokerApproval, pla
 	return deadline, nil
 }
 
+func revokeBrokerReadOnlyToken(ctx context.Context, api *brokerAPI, j *brokerJournal, token, verificationToken string) error {
+	if !validBrokerToken(token) || len(token) > 1024 {
+		return errBroker
+	}
+	if token == verificationToken {
+		if j.append("read_only_token_revocation_skipped", map[string]any{"reason": "verification_token_collision"}) != nil {
+			return errBroker
+		}
+		return errBroker
+	}
+	if j.append("read_only_token_revocation_started", nil) != nil {
+		return errBroker
+	}
+	if api.revokeInstallationToken(ctx, token) != nil {
+		_ = j.append("read_only_token_revocation_uncertain", map[string]any{"reason": "revoke_request_failed_or_ambiguous"})
+		return errBroker
+	}
+	if j.append("read_only_token_revoked", nil) != nil {
+		// The revoked record may have reached disk without a durable sync. A
+		// later uncertainty record is terminal and overrides that observation.
+		_ = j.append("read_only_token_revocation_uncertain", map[string]any{"reason": "revocation_result_persistence_failed"})
+		return errBroker
+	}
+	return nil
+}
+
 func brokerExecute(parent context.Context, a BrokerApproval, input brokerInput, path string, api *brokerAPI, plan *brokerControllerPlan) (BrokerResult, error) {
 	return brokerExecuteWithProvenance(parent, a, input, path, api, plan, nil)
 }
@@ -300,25 +326,24 @@ func brokerExecuteWithProvenance(parent context.Context, a BrokerApproval, input
 		}
 		readOnly, err := api.mintReadOnly(ctx, a, cred)
 		if err != nil {
+			if readOnly.Token != "" {
+				_ = revokeBrokerReadOnlyToken(ctx, api, j, readOnly.Token, input.VerificationToken)
+			}
+			return BrokerResult{}, errBroker
+		}
+		if readOnly.Token != "" && readOnly.Token == input.VerificationToken {
+			_ = revokeBrokerReadOnlyToken(ctx, api, j, readOnly.Token, input.VerificationToken)
 			return BrokerResult{}, errBroker
 		}
 		readCtx, stopRead := context.WithDeadline(ctx, readOnly.ExpiresAt.Add(-time.Minute))
 		preflightErr := api.preflight(readCtx, a, readOnly.Token)
 		stopRead()
-		readOnlyVerified := input.VerificationToken != readOnly.Token && preflightErr == nil
-		if readOnlyVerified && j.append("read_only_token_verified", map[string]any{"expires_at": readOnly.ExpiresAt, "app_id": identity.ID, "installation_id": install.ID}) != nil {
-			return BrokerResult{}, errBroker
+		readOnlyVerified := preflightErr == nil
+		verifiedJournaled := true
+		if readOnlyVerified {
+			verifiedJournaled = j.append("read_only_token_verified", map[string]any{"expires_at": readOnly.ExpiresAt, "app_id": identity.ID, "installation_id": install.ID}) == nil
 		}
-		if j.append("read_only_token_revocation_started", nil) != nil {
-			return BrokerResult{}, errBroker
-		}
-		if api.revokeInstallationToken(ctx, readOnly.Token) != nil {
-			if j.append("read_only_token_revocation_uncertain", nil) != nil {
-				return BrokerResult{}, errBroker
-			}
-			return BrokerResult{}, errBroker
-		}
-		if j.append("read_only_token_revoked", nil) != nil || !readOnlyVerified {
+		if revokeBrokerReadOnlyToken(ctx, api, j, readOnly.Token, input.VerificationToken) != nil || !readOnlyVerified || !verifiedJournaled {
 			return BrokerResult{}, errBroker
 		}
 		// The final workflow GET is deliberately after read-only provider
