@@ -27,8 +27,9 @@ type ProcessHandoffEffectsForFixture struct {
 // ProcessHandoffFixtureOptions changes only the tagged offline fixture's
 // handoff observation. It cannot configure an ordinary broker build.
 type ProcessHandoffFixtureOptions struct {
-	ObserveHandoff func(receipt, envelope []byte)
-	MutateReceipt  func([]byte) []byte
+	ObserveHandoff   func(receipt, envelope []byte)
+	ObserveAppJWTKey func(*rsa.PublicKey)
+	MutateReceipt    func([]byte) []byte
 }
 type processFixtureSigner struct {
 	key     ed25519.PrivateKey
@@ -100,6 +101,9 @@ func RunProcessHandoffForFixtureWithOptions(ctx context.Context, files BrokerFil
 	key, e := rsa.GenerateKey(rand.Reader, 2048)
 	if e != nil {
 		return BrokerResult{}, effects, errBroker
+	}
+	if options.ObserveAppJWTKey != nil {
+		options.ObserveAppJWTKey(&key.PublicKey)
 	}
 	private := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
 	defer clear(private)

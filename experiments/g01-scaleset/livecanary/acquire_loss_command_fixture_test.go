@@ -466,7 +466,7 @@ func newCommandQualificationFixture(t *testing.T, controller, broker, variant, p
 	}
 	verificationAuthorization := "Bearer " + f.base.api.credentials.VerificationToken
 	f.transport = &processBrokerHTTP{
-		t: t, attempt: f.attempt, approval: &f.base.a,
+		t: t, attempt: f.attempt, admissionDirectory: f.admission, approval: &f.base.a,
 		expectedWorkflowAuthorizations: []string{"Bearer synthetic-observation-credential", verificationAuthorization, verificationAuthorization},
 	}
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -494,7 +494,7 @@ func newCommandQualificationFixture(t *testing.T, controller, broker, variant, p
 	}
 	f.workflowSeed, _ = hex.DecodeString("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
 	f.issuerSeed = bytes.Repeat([]byte{71}, ed25519.SeedSize)
-	f.management = experimentalManagement(t, f.base.api.credentials.VerificationToken)
+	f.management, f.transport.appPublicKey = experimentalManagement(t, f.base.api.credentials.VerificationToken)
 	t.Cleanup(func() { clear(f.management); clear(f.workflowSeed); clear(f.issuerSeed) })
 	return f
 }
