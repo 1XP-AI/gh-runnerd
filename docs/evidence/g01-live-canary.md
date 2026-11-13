@@ -1074,6 +1074,6 @@ boundary; production code is unchanged.
 | Other Public CI matrix jobs on `227d6f5` | PASS (8 jobs); aggregate Go check failed because G01 core failed |
 
 The focused local checks used Go `1.27.3`, disabled module downloads, and kept
-the Go caches, test helper binaries and temporary files on `/Volumes/worktree`.
+Go caches, test helper binaries and temporary files on an external volume.
 This does not establish live provider behavior or canary execution. Issue #1
 remains OPEN and Project #2 remains In progress.
