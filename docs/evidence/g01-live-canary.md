@@ -1129,3 +1129,35 @@ provenance and trust-root custody, broker-only execution, conditional cleanup,
 trusted runtime/isolation/resource qualification, and the separately authorized
 live canary remain unresolved. Issue #1 remains OPEN and Project #2 remains In
 progress.
+
+### Private-target entitlement and post-reboot runner check — 2026-11-13
+
+Fresh read-only `gh` checks confirmed that organization `1XP-AI` is on the
+Free plan and the prepared target `1XP-AI/gh-runnerd-canary` remains private.
+Its `main` branch is still unprotected at
+`3b555b3398fbb2b989df51b031681f95b13a6e33`. Reading that branch's protection
+returns HTTP 403 with “Upgrade to GitHub Pro or make this repository public.”
+Reading organization rulesets separately returns HTTP 403 with “Upgrade to
+GitHub Team to enable this feature.” The target was not made public and no plan
+or policy was changed. The generic branch-protection response and the explicit
+organization-rulesets Team requirement are recorded separately; an eligible
+private caller-protection path still needs to be established.
+
+Runner group `gh-runnerd-canary` (ID 3) still allows only selected repositories,
+disables public repositories, and restricts use to the exact reusable callee
+pin `e9bc03f29f5c69dec5526bb79f87e62f8851cb58`. Its runner inventory is empty,
+and the canary workflow run inventory remains empty. After the `office-mini`
+restart, Orca's registered `office-mini` runtime reported Lima `ci-linux`
+`Running`; the service
+`actions.runner.1XP-AI.linux-arm64-1xp-ai.service` reported
+`active/running/enabled`; and read-only `gh` reported runner ID 94 online and
+idle. That general runner is not in group 3, so it does not satisfy the canary
+runner requirement. The service needed no start command.
+
+No workflow was dispatched and no runner, Scale Set, App, credential, host
+service, repository policy, or organization plan was changed. A supported
+private caller-protection path, App inclusion, production provenance and
+trust-root custody, broker-only execution, conditional cleanup, trusted
+runtime/isolation/resource qualification, and separate concrete authorization
+for the Linux ARM64/JIT canary remain open. Issue #1 stays OPEN and Project #2
+stays In progress.
