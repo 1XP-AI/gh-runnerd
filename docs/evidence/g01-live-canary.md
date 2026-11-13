@@ -1124,8 +1124,8 @@ does not establish that an environment is configured or absent.
 The current Linux ARM64 canary-runner workflow's run inventory is empty. No
 workflow, repository policy, runner group, App installation, runner, Scale Set
 or credential was changed, and no workflow was dispatched. Protected-caller
-authorization, exact workflow admission, authenticated production provenance
-and trust-root custody, broker-only execution, conditional cleanup, trusted
-runtime/isolation/resource qualification, and the separately authorized live
-canary remain unresolved. Issue #1 remains OPEN and Project #2 remains In
+authorization, live job-admission and runner behavior, authenticated production
+provenance and trust-root custody, broker-only execution, conditional cleanup,
+trusted runtime/isolation/resource qualification, and the separately authorized
+live canary remain unresolved. Issue #1 remains OPEN and Project #2 remains In
 progress.
