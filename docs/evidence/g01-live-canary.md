@@ -1096,5 +1096,5 @@ This is hosted integration evidence only. It does not satisfy authenticated
 production provenance/trust-root authority, broker-only execution, conditional
 Scale Set cleanup, trusted runtime/isolation/resource qualification, protected
 canary configuration, or the separately authorized Linux ARM64/JIT canary.
-Issue #1 remains OPEN and Project #2 remains In progress; no live provider,
-runner, credential, Scale Set, Docker or host operation was performed.
+Issue #1 remains OPEN and Project #2 remains In progress. This Public CI run
+did not execute the separately authorized live canary.
