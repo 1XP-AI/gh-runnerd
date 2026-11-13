@@ -5,7 +5,12 @@ package livecanary
 import (
 	"bytes"
 	"context"
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +20,8 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -26,7 +33,10 @@ type processBrokerHTTP struct {
 	approval                       *Approval
 	t                              *testing.T
 	attempt                        string
+	admissionDirectory             string
+	appPublicKey                   *rsa.PublicKey
 	calls                          []string
+	traces                         []processBrokerRequestTrace
 	expectedWorkflowAuthorizations []string
 	workflowAuthorizationsChecked  int
 	mints                          int
@@ -37,6 +47,50 @@ type processBrokerHTTP struct {
 	managementRevocations          int
 	failPreflight                  bool
 	groupFault                     bool
+	workflowSnapshotOnce           sync.Once
+	workflowSnapshot               processWorkflowRunSnapshot
+}
+
+type processBrokerRequestTrace struct {
+	Method             string
+	RequestURI         string
+	AuthorizationClass string
+	Accept             string
+	APIVersion         string
+	ContentType        string
+	AcceptEncoding     string
+	UserAgent          string
+	BodySHA256         string
+	BodyLength         int
+}
+
+type processWorkflowRunSnapshot struct {
+	RunID              int64
+	SHA                string
+	Branch             string
+	Event              string
+	Status             string
+	Path               string
+	Attempt            int
+	ReferencedWorkflow string
+}
+
+func (f *processBrokerHTTP) workflow() processWorkflowRunSnapshot {
+	if f == nil {
+		return processWorkflowRunSnapshot{RunID: 7, SHA: strings.Repeat("b", 40), Branch: "main", Event: "workflow_dispatch", Status: "in_progress", Path: ".github/workflows/canary.yml", Attempt: 1}
+	}
+	f.workflowSnapshotOnce.Do(func() {
+		snapshot := processWorkflowRunSnapshot{RunID: 7, SHA: strings.Repeat("b", 40), Branch: "main", Event: "workflow_dispatch", Status: "in_progress", Path: ".github/workflows/canary.yml", Attempt: 1}
+		if f.approval != nil {
+			snapshot.RunID = f.approval.WorkflowRunID
+			snapshot.SHA = f.approval.WorkflowSHA
+			if f.approval.GroupPolicy != (handoff.GroupPolicy{}) {
+				snapshot.ReferencedWorkflow = f.approval.GroupPolicy.Workflow
+			}
+		}
+		f.workflowSnapshot = snapshot
+	})
+	return f.workflowSnapshot
 }
 
 func TestProcessBrokerHTTPRejectsUnrecognizedAuthorization(t *testing.T) {
@@ -85,6 +139,27 @@ func TestProcessBrokerHTTPRejectsUnrecognizedAuthorization(t *testing.T) {
 	}
 }
 
+func TestProcessAppJWTRejectsForgedSignature(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	claims, err := json.Marshal(struct {
+		Issuer    string `json:"iss"`
+		IssuedAt  int64  `json:"iat"`
+		ExpiresAt int64  `json:"exp"`
+	}{"11", now.Add(-time.Minute).Unix(), now.Add(9 * time.Minute).Unix()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	forgedSignature := bytes.Repeat([]byte{0x01}, key.Size())
+	forged := "Bearer " + base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","typ":"JWT"}`)) + "." + base64.RawURLEncoding.EncodeToString(claims) + "." + base64.RawURLEncoding.EncodeToString(forgedSignature)
+	if processAppJWTMatches(forged, 11, now, &key.PublicKey) {
+		t.Fatal("App JWT with a forged nonempty signature was accepted")
+	}
+}
+
 func (f *processBrokerHTTP) validateAuthorization(r *http.Request) error {
 	if f.approval == nil {
 		return nil
@@ -98,7 +173,7 @@ func (f *processBrokerHTTP) validateAuthorization(r *http.Request) error {
 		f.workflowAuthorizationsChecked++
 		return nil
 	case r.URL.Path == "/app" || r.URL.Path == "/orgs/fixture-org/installation" || r.URL.Path == "/app/installations/12/access_tokens":
-		if !processAppJWTMatches(authorization, f.approval.AppID, time.Now()) {
+		if !processAppJWTMatches(authorization, f.approval.AppID, time.Now(), f.appPublicKey) {
 			return fmt.Errorf("unexpected synthetic App authority")
 		}
 		return nil
@@ -149,11 +224,11 @@ func expectedProcessBrokerV3Trace(approval Approval, readGroupReject bool) []str
 	trace := []string{workflowGet, "GET /app", "GET /orgs/fixture-org/installation", "POST /app/installations/12/access_tokens"}
 	appendPreflight := func(rejectGroup bool) {
 		if approval.ManagementScope != "organization-only" {
-			trace = append(trace, "GET /installation/repositories", "GET /repos/fixture-org/canary")
+			trace = append(trace, "GET /installation/repositories?per_page=100", "GET /repos/fixture-org/canary")
 		}
 		trace = append(trace, "GET /orgs/fixture-org/actions/runner-groups/3")
 		if !rejectGroup {
-			trace = append(trace, "GET /orgs/fixture-org/actions/runner-groups/3/repositories")
+			trace = append(trace, "GET /orgs/fixture-org/actions/runner-groups/3/repositories?per_page=100")
 		}
 	}
 	appendPreflight(readGroupReject)
@@ -169,8 +244,44 @@ func expectedProcessBrokerV3Trace(approval Approval, readGroupReject bool) []str
 
 func assertProcessBrokerTrace(t *testing.T, transport *processBrokerHTTP, want []string) {
 	t.Helper()
-	if !reflect.DeepEqual(transport.calls, want) {
-		t.Fatalf("broker request order differs: got=%v want=%v", transport.calls, want)
+	wantCalls := make([]string, 0, len(want))
+	for _, expected := range want {
+		method, requestURI, found := strings.Cut(expected, " ")
+		path, _, _ := strings.Cut(requestURI, "?")
+		if !found {
+			t.Fatalf("invalid expected broker request %q", expected)
+		}
+		wantCalls = append(wantCalls, method+" "+path)
+	}
+	if !reflect.DeepEqual(transport.calls, wantCalls) {
+		t.Fatalf("broker request order differs: got=%v want=%v", transport.calls, wantCalls)
+	}
+	if len(transport.traces) != len(want) {
+		t.Fatalf("broker request trace count=%d, want %d", len(transport.traces), len(want))
+	}
+	for index, expected := range want {
+		method, requestURI, found := strings.Cut(expected, " ")
+		trace := transport.traces[index]
+		if !found || trace.Method != method || trace.RequestURI != requestURI {
+			t.Fatalf("broker request target differs at %d: trace=%+v want=%q", index, trace, expected)
+		}
+		requestPath, _, _ := strings.Cut(trace.RequestURI, "?")
+		g02IdentityRequest := requestPath == "/app" || requestPath == "/orgs/fixture-org/installation"
+		g01Headers := trace.Accept == "application/vnd.github+json" && trace.APIVersion == "2022-11-28" && trace.ContentType == "application/json" && trace.AcceptEncoding == "identity" && trace.UserAgent == "gh-runnerd-g01-broker-evidence"
+		g02Headers := trace.Accept == "application/vnd.github+json" && trace.APIVersion == "2022-11-28" && trace.ContentType == "" && trace.AcceptEncoding == "gzip" && trace.UserAgent == "gh-runnerd-g02-evidence"
+		if (g02IdentityRequest && !g02Headers) || (!g02IdentityRequest && !g01Headers) {
+			t.Fatalf("broker request headers differ at %d: %+v", index, trace)
+		}
+		if trace.AuthorizationClass == "" || trace.BodySHA256 == "" {
+			t.Fatalf("broker request omitted safe authority/body evidence at %d: %+v", index, trace)
+		}
+		if method == http.MethodPost {
+			if !strings.Contains(requestURI, "/access_tokens") || trace.BodyLength == 0 {
+				t.Fatalf("unexpected POST trace at %d: %+v", index, trace)
+			}
+		} else if trace.BodyLength != 0 {
+			t.Fatalf("unexpected body on %s request at %d: %+v", method, index, trace)
+		}
 	}
 	workflowGets := 0
 	for _, call := range want {
@@ -180,6 +291,141 @@ func assertProcessBrokerTrace(t *testing.T, transport *processBrokerHTTP, want [
 	}
 	if transport.workflowAuthorizationsChecked != workflowGets {
 		t.Fatalf("workflow authority count=%d, want one checked identity per GET (%d)", transport.workflowAuthorizationsChecked, workflowGets)
+	}
+}
+
+type processBrokerInode struct {
+	Device uint64 `json:"device"`
+	Inode  uint64 `json:"inode"`
+}
+
+func processBrokerFileInode(info os.FileInfo) (processBrokerInode, bool) {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return processBrokerInode{}, false
+	}
+	return processBrokerInode{Device: uint64(stat.Dev), Inode: stat.Ino}, true
+}
+
+func (f *processBrokerHTTP) requireMintIntent(body []byte) error {
+	var request struct {
+		RepositoryIDs []int64           `json:"repository_ids"`
+		Permissions   map[string]string `json:"permissions"`
+	}
+	if json.Unmarshal(body, &request) != nil {
+		return fmt.Errorf("malformed token request")
+	}
+	permission := request.Permissions["organization_self_hosted_runners"]
+	if permission != "read" && permission != "write" {
+		return fmt.Errorf("invalid token permission")
+	}
+	organizationOnly := f.approval != nil && f.approval.ManagementScope == "organization-only"
+	wantPermissions := map[string]string{"organization_self_hosted_runners": permission, "metadata": "read"}
+	wantRepositories := []int64{42}
+	if organizationOnly {
+		wantPermissions = map[string]string{"organization_self_hosted_runners": permission}
+		wantRepositories = nil
+	}
+	if !reflect.DeepEqual(request.Permissions, wantPermissions) || !reflect.DeepEqual(request.RepositoryIDs, wantRepositories) {
+		return fmt.Errorf("token request scope mismatch")
+	}
+
+	attemptInfo, err := os.Lstat(f.attempt)
+	if err != nil || !attemptInfo.IsDir() || attemptInfo.Mode().Perm() != 0700 {
+		return fmt.Errorf("attempt identity unavailable")
+	}
+	journalInfo, err := os.Lstat(filepath.Join(f.attempt, "broker.jsonl"))
+	if err != nil || !journalInfo.Mode().IsRegular() || journalInfo.Mode().Perm() != 0600 {
+		return fmt.Errorf("attempt journal unavailable")
+	}
+	wantAttempt, ok := processBrokerFileInode(attemptInfo)
+	if !ok {
+		return fmt.Errorf("attempt identity unsupported")
+	}
+	wantJournal, ok := processBrokerFileInode(journalInfo)
+	if !ok {
+		return fmt.Errorf("journal identity unsupported")
+	}
+	attemptRaw, err := os.ReadFile(filepath.Join(f.attempt, "broker.jsonl"))
+	if err != nil {
+		return fmt.Errorf("attempt intent unavailable")
+	}
+	wantAttemptPhase := "token_request_started"
+	wantAdmissionKind := "read_token_lifecycle_started"
+	if permission == "write" {
+		wantAttemptPhase = "management_token_request_started"
+		wantAdmissionKind = "management_token_lifecycle_started"
+	}
+	attemptIntent := false
+	for _, line := range bytes.Split(attemptRaw, []byte("\n")) {
+		var event struct {
+			Phase string `json:"phase"`
+		}
+		if len(line) != 0 && json.Unmarshal(line, &event) == nil && event.Phase == wantAttemptPhase {
+			attemptIntent = true
+		}
+	}
+	if !attemptIntent {
+		return fmt.Errorf("attempt intent missing before mint")
+	}
+
+	admissionDirectory := f.admissionDirectory
+	if admissionDirectory == "" {
+		admissionDirectory = filepath.Join(filepath.Dir(f.attempt), "admission")
+	}
+	ledger, err := os.ReadFile(filepath.Join(admissionDirectory, "broker-admission.jsonl"))
+	if err != nil {
+		return fmt.Errorf("account admission intent unavailable")
+	}
+	var latestStarted processTokenLifecycleRecord
+	for _, line := range bytes.Split(ledger, []byte("\n")) {
+		var record processTokenLifecycleRecord
+		if len(line) == 0 {
+			continue
+		}
+		if json.Unmarshal(line, &record) != nil {
+			return fmt.Errorf("account admission record malformed")
+		}
+		if record.Kind == "read_token_lifecycle_started" || record.Kind == "management_token_lifecycle_started" {
+			latestStarted = record
+		}
+	}
+	var recordedAttempt, recordedJournal processBrokerInode
+	if latestStarted.Kind != wantAdmissionKind || latestStarted.Slot == "" ||
+		json.Unmarshal(latestStarted.Attempt, &recordedAttempt) != nil || json.Unmarshal(latestStarted.Journal, &recordedJournal) != nil ||
+		recordedAttempt != wantAttempt || recordedJournal != wantJournal {
+		return fmt.Errorf("matching account admission intent missing before mint")
+	}
+	return nil
+}
+
+func processAuthorizationClass(f *processBrokerHTTP, r *http.Request) string {
+	authorization := r.Header.Get("Authorization")
+	if r.URL.Path == "/app" || r.URL.Path == "/orgs/fixture-org/installation" || r.URL.Path == "/app/installations/12/access_tokens" {
+		if f.approval != nil && processAppJWTMatches(authorization, f.approval.AppID, time.Now(), f.appPublicKey) {
+			return "app-jwt"
+		}
+		return "invalid-app-jwt"
+	}
+	if r.URL.Path == workflowRunFixturePath(f) {
+		return "workflow-authority"
+	}
+	switch authorization {
+	case "Bearer synthetic-process-read-installation-token":
+		return "installation-read"
+	case "Bearer synthetic-process-installation-token":
+		return "installation-management"
+	case "":
+		return "none"
+	default:
+		if f.approval != nil {
+			for _, expected := range f.expectedWorkflowAuthorizations {
+				if authorization == expected {
+					return "workflow-credential"
+				}
+			}
+		}
+		return "other"
 	}
 }
 
@@ -289,11 +535,10 @@ func assertProcessBrokerTokenLifecycle(t *testing.T, attemptDirectory, admission
 	}
 }
 
-// The adapter's focused unit test verifies the RS256 signature against its
-// synthetic key. Process fixtures additionally bind provider requests to the
-// intended App identity and the broker's bounded ten-minute JWT lifetime.
-func processAppJWTMatches(authorization string, appID int64, now time.Time) bool {
-	if appID < 1 || !strings.HasPrefix(authorization, "Bearer ") {
+// Process fixtures verify the RS256 signature against the public half of the
+// exact synthetic key used by the broker, along with App identity and lifetime.
+func processAppJWTMatches(authorization string, appID int64, now time.Time, publicKey *rsa.PublicKey) bool {
+	if appID < 1 || publicKey == nil || !strings.HasPrefix(authorization, "Bearer ") {
 		return false
 	}
 	parts := strings.Split(strings.TrimPrefix(authorization, "Bearer "), ".")
@@ -319,15 +564,39 @@ func processAppJWTMatches(authorization string, appID int64, now time.Time) bool
 		return false
 	}
 	nowUnix := now.Unix()
-	return header.Algorithm == "RS256" && header.Type == "JWT" && claims.Issuer == strconv.FormatInt(appID, 10) &&
-		claims.IssuedAt <= nowUnix && claims.IssuedAt >= now.Add(-2*time.Minute).Unix() &&
-		claims.ExpiresAt > nowUnix && claims.ExpiresAt-nowUnix <= 10*60 && claims.ExpiresAt-claims.IssuedAt == 10*60
+	if header.Algorithm != "RS256" || header.Type != "JWT" || claims.Issuer != strconv.FormatInt(appID, 10) ||
+		!(claims.IssuedAt <= nowUnix && claims.IssuedAt >= now.Add(-2*time.Minute).Unix() &&
+			claims.ExpiresAt > nowUnix && claims.ExpiresAt-nowUnix <= 10*60 && claims.ExpiresAt-claims.IssuedAt == 10*60) {
+		return false
+	}
+	digest := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
+	return rsa.VerifyPKCS1v15(publicKey, crypto.SHA256, digest[:], signature) == nil
 }
 
 func (f *processBrokerHTTP) RoundTrip(r *http.Request) (*http.Response, error) {
 	if err := f.validateAuthorization(r); err != nil {
 		return nil, err
 	}
+	var body []byte
+	if r.Body != nil {
+		var err error
+		body, err = io.ReadAll(io.LimitReader(r.Body, 64<<10+1))
+		if err != nil || len(body) > 64<<10 {
+			return nil, fmt.Errorf("request body unreadable")
+		}
+	}
+	if r.Method == http.MethodPost && r.URL.Path == "/app/installations/12/access_tokens" {
+		if err := f.requireMintIntent(body); err != nil {
+			return nil, err
+		}
+	}
+	digest := sha256.Sum256(body)
+	f.traces = append(f.traces, processBrokerRequestTrace{
+		Method: r.Method, RequestURI: r.URL.RequestURI(), AuthorizationClass: processAuthorizationClass(f, r),
+		Accept: r.Header.Get("Accept"), APIVersion: r.Header.Get("X-GitHub-Api-Version"), ContentType: r.Header.Get("Content-Type"),
+		AcceptEncoding: r.Header.Get("Accept-Encoding"), UserAgent: r.Header.Get("User-Agent"),
+		BodySHA256: hex.EncodeToString(digest[:]), BodyLength: len(body),
+	})
 	f.calls = append(f.calls, r.Method+" "+r.URL.Path)
 	repo := map[string]any{"id": 42, "full_name": "fixture-org/canary", "private": true, "fork": false, "owner": map[string]any{"id": 101, "login": "fixture-org"}}
 	var payload any
@@ -342,14 +611,10 @@ func (f *processBrokerHTTP) RoundTrip(r *http.Request) (*http.Response, error) {
 		if e != nil || len(stored) == 0 {
 			f.t.Error("observation preceded durable attempt")
 		}
-		runID, sha := int64(7), strings.Repeat("b", 40)
-		if f.approval != nil {
-			runID = f.approval.WorkflowRunID
-			sha = f.approval.WorkflowSHA
-		}
-		run := map[string]any{"id": runID, "head_sha": sha, "head_branch": "main", "event": "workflow_dispatch", "status": "in_progress", "path": ".github/workflows/canary.yml", "run_attempt": 1, "repository": repo, "head_repository": repo}
-		if f.approval != nil && f.approval.GroupPolicy != (handoff.GroupPolicy{}) {
-			workflow := f.approval.GroupPolicy.Workflow
+		snapshot := f.workflow()
+		run := map[string]any{"id": snapshot.RunID, "head_sha": snapshot.SHA, "head_branch": snapshot.Branch, "event": snapshot.Event, "status": snapshot.Status, "path": snapshot.Path, "run_attempt": snapshot.Attempt, "repository": repo, "head_repository": repo}
+		if snapshot.ReferencedWorkflow != "" {
+			workflow := snapshot.ReferencedWorkflow
 			at := strings.LastIndexByte(workflow, '@')
 			if at <= 0 || at == len(workflow)-1 {
 				f.t.Error("fixture reusable workflow pin is malformed")
@@ -360,11 +625,6 @@ func (f *processBrokerHTTP) RoundTrip(r *http.Request) (*http.Response, error) {
 		payload = run
 	case "/app/installations/12/access_tokens":
 		f.mints++
-		stored, _ := os.ReadFile(filepath.Join(f.attempt, "broker.jsonl"))
-		if !bytes.Contains(stored, []byte("token_request_started")) {
-			f.t.Error("mint preceded durable intent")
-		}
-		body, _ := io.ReadAll(r.Body)
 		var request struct {
 			RepositoryIDs []int64           `json:"repository_ids"`
 			Permissions   map[string]string `json:"permissions"`
@@ -422,8 +682,8 @@ func (f *processBrokerHTTP) RoundTrip(r *http.Request) (*http.Response, error) {
 		payload = repo
 	case "/orgs/fixture-org/actions/runner-groups/3":
 		payload = map[string]any{"id": 3, "name": "fixture-group", "visibility": "selected", "default": false, "inherited": false, "allows_public_repositories": f.failPreflight}
-		if f.approval != nil && f.approval.GroupPolicy.Version == 2 {
-			expected := f.approval.GroupPolicy.Workflow
+		if snapshot := f.workflow(); snapshot.ReferencedWorkflow != "" {
+			expected := snapshot.ReferencedWorkflow
 			if f.groupFault {
 				expected = strings.Replace(expected, "dddd", "eeee", 1)
 			}
@@ -448,7 +708,7 @@ func TestProcessBrokerWorkflowRunFixtureProvidesInProgressStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	transport := &processBrokerHTTP{t: t, attempt: attempt}
-	request, err := http.NewRequest(http.MethodGet, "https://api.github.com"+workflowRunFixturePath(transport), nil)
+	request, err := http.NewRequest(http.MethodGet, "https://api.github.com"+workflowRunFixturePath(transport)+"?per_page=100", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -465,6 +725,72 @@ func TestProcessBrokerWorkflowRunFixtureProvidesInProgressStatus(t *testing.T) {
 	}
 	if workflow.Status != "in_progress" {
 		t.Fatalf("workflow fixture status = %q, want in_progress", workflow.Status)
+	}
+	if len(transport.traces) != 1 || transport.traces[0].RequestURI != "/repos/fixture-org/canary/actions/runs/7?per_page=100" {
+		t.Fatalf("request trace omitted the query: %+v", transport.traces)
+	}
+}
+
+func TestProcessBrokerWorkflowRunFixtureKeepsProviderIdentityStable(t *testing.T) {
+	attempt := t.TempDir()
+	if err := os.WriteFile(filepath.Join(attempt, "broker.jsonl"), []byte("attempt\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	approval := &Approval{AppID: 11, WorkflowRunID: 7, WorkflowSHA: strings.Repeat("b", 40), Organization: "fixture-org", Repository: "canary", GroupPolicy: handoff.GroupPolicy{Version: 2, Workflow: "fixture-org/canary/.github/workflows/runner.yml@" + strings.Repeat("d", 40)}}
+	transport := &processBrokerHTTP{t: t, attempt: attempt, approval: approval, expectedWorkflowAuthorizations: []string{"Bearer synthetic-observation-token", "Bearer synthetic-observation-token"}}
+	path := workflowRunFixturePath(transport)
+	observe := func() (map[string]any, error) {
+		request, err := http.NewRequest(http.MethodGet, "https://api.github.com"+path, nil)
+		if err != nil {
+			return nil, err
+		}
+		request.Header.Set("Authorization", "Bearer synthetic-observation-token")
+		response, err := transport.RoundTrip(request)
+		if err != nil {
+			return nil, err
+		}
+		defer response.Body.Close()
+		var run map[string]any
+		err = json.NewDecoder(response.Body).Decode(&run)
+		return run, err
+	}
+	first, err := observe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	approval.WorkflowRunID = 8
+	approval.WorkflowSHA = strings.Repeat("c", 40)
+	approval.GroupPolicy.Workflow = "fixture-org/canary/.github/workflows/runner.yml@" + strings.Repeat("e", 40)
+	second, err := observe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first["id"] != float64(7) || first["head_sha"] != strings.Repeat("b", 40) || first["referenced_workflows"] == nil || !reflect.DeepEqual(first, second) {
+		t.Fatalf("provider identity changed within one fixture: first=%v second=%v", first, second)
+	}
+}
+
+func TestProcessBrokerHTTPRequiresAdmissionIntentBeforeMint(t *testing.T) {
+	parent := t.TempDir()
+	attempt := filepath.Join(parent, "attempt")
+	if err := os.Mkdir(attempt, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(attempt, "broker.jsonl"), []byte(`{"phase":"token_request_started"}`+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	transport := &processBrokerHTTP{t: t, attempt: attempt}
+	body := `{"repository_ids":[42],"permissions":{"metadata":"read","organization_self_hosted_runners":"read"}}`
+	request, err := http.NewRequest(http.MethodPost, "https://api.github.com/app/installations/12/access_tokens", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := transport.RoundTrip(request)
+	if response != nil {
+		response.Body.Close()
+	}
+	if err == nil || transport.mints != 0 || len(transport.calls) != 0 {
+		t.Fatalf("token mint crossed dispatch without account-ledger intent: err=%v mints=%d calls=%v", err, transport.mints, transport.calls)
 	}
 }
 
@@ -513,10 +839,11 @@ func TestControllerProcessHandoffActualBrokerSeparateProcess(t *testing.T) {
 				t.Fatal(e)
 			}
 			grant := enrollment.WorkflowGrantForFixture{Request: request, OrganizationID: 101, RepositoryID: a.RepositoryID, ExpiresAt: a.ExpiresAt}
-			transport := &processBrokerHTTP{t: t, attempt: files.StateDirectory, approval: &a, expectedWorkflowAuthorizations: []string{"Bearer synthetic-observation-token"}, failPreflight: preflightFail}
+			transport := &processBrokerHTTP{t: t, attempt: files.StateDirectory, admissionDirectory: filepath.Join(parent, "admission"), approval: &a, expectedWorkflowAuthorizations: []string{"Bearer synthetic-observation-token"}, failPreflight: preflightFail}
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			result, effects, e := enrollment.RunProcessHandoffForFixture(ctx, files, transport, grant)
+			options := enrollment.ProcessHandoffFixtureOptions{ObserveAppJWTKey: func(key *rsa.PublicKey) { transport.appPublicKey = key }}
+			result, effects, e := enrollment.RunProcessHandoffForFixtureWithOptions(ctx, files, transport, grant, options)
 			wantSignatures := 1
 			if preflightFail {
 				wantSignatures = 0
@@ -539,7 +866,7 @@ func TestControllerProcessHandoffActualBrokerSeparateProcess(t *testing.T) {
 			}
 			// A second actual entry must not mint or sign again, even after failure.
 			mints := transport.mints
-			_, again, e := enrollment.RunProcessHandoffForFixture(ctx, files, transport, grant)
+			_, again, e := enrollment.RunProcessHandoffForFixtureWithOptions(ctx, files, transport, grant, options)
 			if e == nil || transport.mints != mints || again.BindingSignatures != 0 {
 				t.Fatal("permanent broker attempt was retried")
 			}
@@ -554,8 +881,5 @@ func TestControllerProcessHandoffActualBrokerSeparateProcess(t *testing.T) {
 }
 
 func workflowRunFixturePath(f *processBrokerHTTP) string {
-	if f.approval != nil {
-		return fmt.Sprintf("/repos/fixture-org/canary/actions/runs/%d", f.approval.WorkflowRunID)
-	}
-	return "/repos/fixture-org/canary/actions/runs/7"
+	return fmt.Sprintf("/repos/fixture-org/canary/actions/runs/%d", f.workflow().RunID)
 }

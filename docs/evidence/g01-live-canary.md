@@ -991,3 +991,40 @@ remains quarantined. Issue #1 remains OPEN and Project #2 remains In progress
 until the external acceptance gates and separately authorized Linux ARM64/JIT
 canary are satisfied. No live GitHub write, provider request, credential,
 runner, Scale Set, Docker or host operation was performed for this recheck.
+
+### Process-fixture oracle strengthening — 2026-11-13
+
+Starting from local branch head `6341ad223da4f8d240445a4a891f123e2fea0153`,
+the tagged separate-process fixtures had four oracle gaps: they accepted any
+nonempty App JWT signature, recorded only request method and path, rewrote
+workflow identity from mutable approval state on each GET, and checked attempt
+and account-admission journals only after the process had finished. Four new
+regressions reproduced these gaps before the fixture changes: a forged RS256
+signature was accepted, query parameters were omitted, changing run identity
+made a second GET route unexpectedly, and a token POST was counted with no
+account-ledger intent.
+
+The offline fixture now verifies RS256 using the public key paired with the
+synthetic broker key; snapshots run ID, SHA and reusable-workflow pin on first
+observation; and checks the exact attempt and journal inode identities plus
+the matching read/management lifecycle-start event inside the HTTP dispatch
+before counting a token POST. Its safe request trace now captures full request
+URI, selected non-secret headers, authorization class, and body length/SHA-256.
+It does not retain authorization values or request bodies. The two expected
+HTTP client header profiles are asserted separately.
+
+| Check | Result |
+|---|---|
+| Forged-signature, stable-workflow, query-capture and missing-ledger RED regressions | FAIL as expected before fixture fixes |
+| Focused G01 process-broker and v3 child tests with `-race` | PASS |
+| Current-source controller/broker TEST helper preparation | PASS; helper artifacts were placed on `/Volumes/worktree` |
+| Actual command group-policy success, organization-only and both rejection cases with `-race` | PASS |
+| Actual acquire-loss command qualification with `-race` | PASS |
+| G02 broker command: `go test -race -p=1 -count=1 -timeout=180s -tags=g01_pair_fixture ./cmd/g01-broker` | PASS |
+| G01 tagged fixture: `go vet -p=1 -tags='g01_live g01_pair_fixture' ./livecanary` | PASS |
+| `git diff --check` | PASS |
+
+These remain synthetic offline proofs. They do not establish live GitHub
+workflow stability, Scale Set cleanup, or runner execution. Issue #1 remains
+OPEN and Project #2 remains In progress; no live provider, runner, credential,
+Docker or host operation was performed.

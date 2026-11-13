@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/rsa"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -171,7 +172,7 @@ func newControllerV3ProcessFixture(t *testing.T) controllerV3ProcessFixture {
 		t.Fatal(err)
 	}
 	base := &processBrokerHTTP{
-		t: t, attempt: attempt, approval: &approval,
+		t: t, attempt: attempt, admissionDirectory: filepath.Join(parent, "admission"), approval: &approval,
 		expectedWorkflowAuthorizations: []string{
 			"Bearer synthetic-observation-token",
 			"Bearer synthetic-process-verification-token",
@@ -251,6 +252,9 @@ func TestControllerProcessHandoffV3ActualBrokerChild(t *testing.T) {
 			options := enrollment.ProcessHandoffFixtureOptions{
 				ObserveHandoff: func(receipt, envelope []byte) {
 					observedReceipt, observedBinding = receipt, envelope
+				},
+				ObserveAppJWTKey: func(key *rsa.PublicKey) {
+					fixture.transport.base.appPublicKey = key
 				},
 			}
 			switch tc.name {

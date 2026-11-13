@@ -56,7 +56,7 @@ func ownedExperimentalPipe(t *testing.T, data []byte) *os.File {
 	t.Cleanup(func() { r.Close(); w.Close(); <-done })
 	return r
 }
-func experimentalManagement(t *testing.T, verification string) []byte {
+func experimentalManagement(t *testing.T, verification string) ([]byte, *rsa.PublicKey) {
 	t.Helper()
 	key, e := rsa.GenerateKey(rand.Reader, 2048)
 	if e != nil {
@@ -65,7 +65,7 @@ func experimentalManagement(t *testing.T, verification string) []byte {
 	private := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
 	defer clear(private)
 	raw, _ := json.Marshal(map[string]string{"pem": string(private), "verification_token": verification})
-	return raw
+	return raw, &key.PublicKey
 }
 func writePhaseFixtureConfig(t *testing.T, state, admission, policy, harness string, api *SDKAPI, ca []byte) {
 	t.Helper()
@@ -313,7 +313,7 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 			brokerFiles := enrollment.BrokerFiles{ApprovalPath: approvalPath, StateDirectory: filepath.Join(parent, "attempt-"+mode), ControllerBinary: binPath, ControllerApproval: files.ControllerApprovalPath, ControllerStateDirectory: files.ControllerStateDirectory, WorkerApproval: files.WorkerApprovalPath, WorkerStateDirectory: files.WorkerStateDirectory}
 			verificationAuthorization := "Bearer " + base.api.credentials.VerificationToken
 			transport := &processBrokerHTTP{
-				t: t, attempt: brokerFiles.StateDirectory, approval: &a,
+				t: t, attempt: brokerFiles.StateDirectory, admissionDirectory: admission, approval: &a,
 				expectedWorkflowAuthorizations: []string{"Bearer synthetic-observation-credential", verificationAuthorization, verificationAuthorization},
 				groupFault:                     caseName == "group-policy-broker-wrong",
 			}
@@ -329,7 +329,8 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 			if caseName == "issuer-seed" {
 				issuerSeed = bytes.Repeat([]byte{9}, 32)
 			}
-			management := experimentalManagement(t, base.api.credentials.VerificationToken)
+			management, appPublicKey := experimentalManagement(t, base.api.credentials.VerificationToken)
+			transport.appPublicKey = appPublicKey
 			defer clear(management)
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 			defer cancel()
