@@ -1016,6 +1016,7 @@ HTTP client header profiles are asserted separately.
 | Check | Result |
 |---|---|
 | Forged-signature, stable-workflow, query-capture and missing-ledger RED regressions | FAIL as expected before fixture fixes |
+| Admission-intent guard regression: missing record, wrong lifecycle, mismatched attempt inode and mismatched journal inode (`go test -race -p=1 -count=1 -tags=g01_pair_fixture -run '^TestProcessBrokerHTTPRequiresAdmissionIntentBeforeMint$' ./livecanary`) | PASS: all four refused before mint, request trace or transport dispatch |
 | Focused G01 process-broker and v3 child tests with `-race` | PASS |
 | Current-source controller/broker TEST helper preparation | PASS; helper artifacts were placed on `/Volumes/worktree` |
 | Actual command group-policy success, organization-only and both rejection cases with `-race` | PASS |

@@ -771,26 +771,89 @@ func TestProcessBrokerWorkflowRunFixtureKeepsProviderIdentityStable(t *testing.T
 }
 
 func TestProcessBrokerHTTPRequiresAdmissionIntentBeforeMint(t *testing.T) {
-	parent := t.TempDir()
-	attempt := filepath.Join(parent, "attempt")
-	if err := os.Mkdir(attempt, 0700); err != nil {
-		t.Fatal(err)
+	cases := []struct {
+		name             string
+		omitLedgerRecord bool
+		kind             string
+		wrongAttempt     bool
+		wrongJournal     bool
+	}{
+		{name: "missing ledger record", kind: "read_token_lifecycle_started", omitLedgerRecord: true},
+		{name: "wrong lifecycle", kind: "management_token_lifecycle_started"},
+		{name: "different attempt inode", kind: "read_token_lifecycle_started", wrongAttempt: true},
+		{name: "different journal inode", kind: "read_token_lifecycle_started", wrongJournal: true},
 	}
-	if err := os.WriteFile(filepath.Join(attempt, "broker.jsonl"), []byte(`{"phase":"token_request_started"}`+"\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	transport := &processBrokerHTTP{t: t, attempt: attempt}
-	body := `{"repository_ids":[42],"permissions":{"metadata":"read","organization_self_hosted_runners":"read"}}`
-	request, err := http.NewRequest(http.MethodPost, "https://api.github.com/app/installations/12/access_tokens", strings.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	response, err := transport.RoundTrip(request)
-	if response != nil {
-		response.Body.Close()
-	}
-	if err == nil || transport.mints != 0 || len(transport.calls) != 0 {
-		t.Fatalf("token mint crossed dispatch without account-ledger intent: err=%v mints=%d calls=%v", err, transport.mints, transport.calls)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			parent := t.TempDir()
+			attempt := filepath.Join(parent, "attempt")
+			if err := os.Mkdir(attempt, 0700); err != nil {
+				t.Fatal(err)
+			}
+			journal := filepath.Join(attempt, "broker.jsonl")
+			if err := os.WriteFile(journal, []byte(`{"phase":"token_request_started"}`+"\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			admissionDirectory := filepath.Join(parent, "admission")
+			if err := os.Mkdir(admissionDirectory, 0700); err != nil {
+				t.Fatal(err)
+			}
+
+			attemptInfo, err := os.Lstat(attempt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			journalInfo, err := os.Lstat(journal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			attemptIdentity, ok := processBrokerFileInode(attemptInfo)
+			if !ok {
+				t.Fatal("attempt identity unavailable")
+			}
+			journalIdentity, ok := processBrokerFileInode(journalInfo)
+			if !ok {
+				t.Fatal("journal identity unavailable")
+			}
+			if tc.wrongAttempt {
+				attemptIdentity.Inode++
+			}
+			if tc.wrongJournal {
+				journalIdentity.Inode++
+			}
+			if !tc.omitLedgerRecord {
+				record := processTokenLifecycleRecord{Kind: tc.kind, Slot: "fixture-read-slot"}
+				record.Attempt, err = json.Marshal(attemptIdentity)
+				if err != nil {
+					t.Fatal(err)
+				}
+				record.Journal, err = json.Marshal(journalIdentity)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ledgerRecord, err := json.Marshal(record)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(admissionDirectory, "broker-admission.jsonl"), append(ledgerRecord, '\n'), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			transport := &processBrokerHTTP{t: t, attempt: attempt, admissionDirectory: admissionDirectory}
+			body := `{"repository_ids":[42],"permissions":{"metadata":"read","organization_self_hosted_runners":"read"}}`
+			request, err := http.NewRequest(http.MethodPost, "https://api.github.com/app/installations/12/access_tokens", strings.NewReader(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := transport.RoundTrip(request)
+			if response != nil {
+				response.Body.Close()
+			}
+			if err == nil || transport.mints != 0 || len(transport.calls) != 0 || len(transport.traces) != 0 {
+				t.Fatalf("token mint crossed dispatch without matching account-ledger identity: err=%v mints=%d calls=%v traces=%+v", err, transport.mints, transport.calls, transport.traces)
+			}
+		})
 	}
 }
 
