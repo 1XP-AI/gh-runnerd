@@ -1077,3 +1077,24 @@ The focused local checks used Go `1.27.3`, disabled module downloads, and kept
 Go caches, test helper binaries and temporary files on an external volume.
 This does not establish live provider behavior or canary execution. Issue #1
 remains OPEN and Project #2 remains In progress.
+
+### Post-merge capture-boundary integration confirmation — 2026-11-13
+
+PR [#168](https://github.com/1XP-AI/gh-runnerd/pull/168) merged its reviewed
+head `8c148191823bd1a6c3d257493d81efc99265c482` as `3bfc366b3bcafcc3f10430ee506a5ce95071f3ee`.
+The independent Luna review approved the capture-boundary contract, GitHub
+Codex completed review on the exact head with no major issues, and the hosted
+PR Go check passed at [run 43406606728](https://github.com/1XP-AI/gh-runnerd/actions/runs/43406606728).
+
+Post-merge [Public CI run 43406858323](https://github.com/1XP-AI/gh-runnerd/actions/runs/43406858323)
+completed successfully on the merge SHA. All ten jobs passed, including G01
+core and JIT, G02, R1 credentials, root normal/race core and fixture partitions,
+and vulnerability checks. This confirms the fixture correction against the
+complete hosted matrix and resolves the G01-core regression recorded above.
+
+This is hosted integration evidence only. It does not satisfy authenticated
+production provenance/trust-root authority, broker-only execution, conditional
+Scale Set cleanup, trusted runtime/isolation/resource qualification, protected
+canary configuration, or the separately authorized Linux ARM64/JIT canary.
+Issue #1 remains OPEN and Project #2 remains In progress; no live provider,
+runner, credential, Scale Set, Docker or host operation was performed.
