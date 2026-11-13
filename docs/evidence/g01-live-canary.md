@@ -1029,3 +1029,26 @@ These remain synthetic offline proofs. They do not establish live GitHub
 workflow stability, Scale Set cleanup, or runner execution. Issue #1 remains
 OPEN and Project #2 remains In progress; no live provider, runner, credential,
 Docker or host operation was performed.
+
+### Post-merge Public CI G01-core correction — 2026-11-13
+
+Public CI [run 43399911927](https://github.com/1XP-AI/gh-runnerd/actions/runs/43399911927)
+completed on merge SHA `4b9b7be9179224f02a87c555d1743ced6652f11a`. G01 core
+failed in `TestControllerProcessHandoffV3ActualBrokerChild` for the
+`selected-callee`, `changed-callee`, and `forged-receipt` cases; the other eight
+jobs passed. The failed trace showed G02's explicit User-Agent and an unset
+Accept-Encoding on `/app`, while the fixture incorrectly required `gzip`.
+This was a fixture-oracle mismatch: `github.go` sets User-Agent but does not
+set Accept-Encoding, and the synthetic RoundTripper records the client request
+headers rather than final wire-level transport behavior.
+
+| Check | Result |
+|---|---|
+| Public CI `TestControllerProcessHandoffV3ActualBrokerChild` | FAIL before fixture correction; three cases rejected the unset Accept-Encoding |
+| Go 1.27.3 `go test -race -p=1 -count=1 -tags=g01_pair_fixture -run '^TestControllerProcessHandoffV3ActualBrokerChild$' ./livecanary` | FAIL before correction with the same three cases; PASS after correcting the expected unset header |
+| Remaining Public CI jobs on merge SHA `4b9b7be` | PASS (8 jobs); aggregate Go check failed due to G01 core |
+
+Local build/module caches and temporary files remained on `/Volumes/worktree`.
+The correction changes only the tagged fixture header expectation. A fresh
+fix PR and its exact-head review/CI are still required; no production behavior
+or live canary is changed by this correction.

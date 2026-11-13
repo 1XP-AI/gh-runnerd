@@ -268,7 +268,9 @@ func assertProcessBrokerTrace(t *testing.T, transport *processBrokerHTTP, want [
 		requestPath, _, _ := strings.Cut(trace.RequestURI, "?")
 		g02IdentityRequest := requestPath == "/app" || requestPath == "/orgs/fixture-org/installation"
 		g01Headers := trace.Accept == "application/vnd.github+json" && trace.APIVersion == "2022-11-28" && trace.ContentType == "application/json" && trace.AcceptEncoding == "identity" && trace.UserAgent == "gh-runnerd-g01-broker-evidence"
-		g02Headers := trace.Accept == "application/vnd.github+json" && trace.APIVersion == "2022-11-28" && trace.ContentType == "" && trace.AcceptEncoding == "gzip" && trace.UserAgent == "gh-runnerd-g02-evidence"
+		// The G02 github.go client sets User-Agent but leaves Accept-Encoding
+		// unset; this synthetic RoundTripper records the client request headers.
+		g02Headers := trace.Accept == "application/vnd.github+json" && trace.APIVersion == "2022-11-28" && trace.ContentType == "" && trace.AcceptEncoding == "" && trace.UserAgent == "gh-runnerd-g02-evidence"
 		if (g02IdentityRequest && !g02Headers) || (!g02IdentityRequest && !g01Headers) {
 			t.Fatalf("broker request headers differ at %d: %+v", index, trace)
 		}
