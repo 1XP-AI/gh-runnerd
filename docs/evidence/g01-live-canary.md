@@ -958,3 +958,36 @@ These checks use synthetic HTTP/subprocess fixtures only. They do not prove live
 - The selected path remains Go `1.27.3`, `github.com/actions/scaleset v0.5.0`, the high-level listener and independent reconciliation. The current upstream latest release remains [v0.5.0](https://github.com/actions/scaleset/releases/tag/v0.5.0).
 - Independent review rejected removing `github.ref_protected`: pinning the reusable callee does not bind or authorize the mutable caller. The guard remains. Private branch protection is unavailable under the current repository plan; no workflow or repository policy was changed. See the [caller-protection review record](https://github.com/1XP-AI/gh-runnerd/issues/1#issuecomment-6616630311).
 - The live canary remains unrun. Issue #1 remains OPEN and Project #2 remains In progress. Outstanding gates include a supported caller-protection path, production provenance and trust-root authority, broker-only execution, conditional Scale Set cleanup, trusted runtime/isolation/resource qualification, and separate concrete authorization plus evidence for the Linux ARM64/JIT canary. No live provider, credential, runner, Scale Set, Docker or host operation was performed for this update.
+
+### Exact-main offline and release recheck — 2026-11-13
+
+Read-only GitHub and local repository checks confirmed both `main` refs at
+`2a71461447bfea7acd61b5c82a38c9f380fb19b9`. The only change since source CI
+commit `853d176766db50c55bbf84575c429ed4924db835` is documentation; the G01
+experiment source is unchanged. The pinned path remains Go `1.27.3` and
+`github.com/actions/scaleset v0.5.0`, using the high-level listener with
+independent reconciliation. The official releases endpoint still reports
+`v0.5.0` as latest (published 2026-10-23).
+
+Offline verification on the exact current checkout used the local Go `1.27.3`
+toolchain, disabled module downloads, read-only module manifests, and external
+volume `GOCACHE`, `GOMODCACHE` and `GOTMPDIR`. The tagged fixture checks also
+set `TMPDIR` to the external volume.
+
+| Check | Result |
+|---|---|
+| G01 module: `go test -race -p=1 -count=1 -timeout=300s ./...` | PASS: root, `livecanary` and `liveworker` packages |
+| G01 module: `go vet -p=1 ./...` | PASS |
+| G01 tagged gate: `go test -race -p=1 -count=1 -timeout=180s -tags='g01_live g01_pair_fixture' -run '^TestTaggedControllerExecutionRequiresBrokerProvenanceBeforeInput$' ./cmd/g01-live` | PASS: refused before controller input was read |
+| G02 module: `go test -race -p=1 -count=1 -timeout=180s -tags=g01_pair_fixture ./cmd/g01-broker` | PASS: loopback broker fixture |
+| Public CI run [41720512574](https://github.com/1XP-AI/gh-runnerd/actions/runs/41720512574) | PASS on unchanged source SHA `853d176766db50c55bbf84575c429ed4924db835` |
+
+This recheck found no additional failure in the exercised offline boundaries.
+It does not establish atomic workflow handoff, production provenance or
+trust-root custody, broker-only authority, server-side conditional deletion,
+trusted runtime/isolation/resource qualification, or live canary behavior.
+The v0.5.0 adapter still lacks conditional Scale Set deletion, so cleanup
+remains quarantined. Issue #1 remains OPEN and Project #2 remains In progress
+until the external acceptance gates and separately authorized Linux ARM64/JIT
+canary are satisfied. No live GitHub write, provider request, credential,
+runner, Scale Set, Docker or host operation was performed for this recheck.
