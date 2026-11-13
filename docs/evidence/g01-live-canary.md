@@ -1098,3 +1098,34 @@ Scale Set cleanup, trusted runtime/isolation/resource qualification, protected
 canary configuration, or the separately authorized Linux ARM64/JIT canary.
 Issue #1 remains OPEN and Project #2 remains In progress. This Public CI run
 did not execute the separately authorized live canary.
+
+### Read-only canary policy recheck — 2026-11-13
+
+An additional `gh api` read-only check found that the private, non-archived
+target's default `main` branch reports `protected: false`. Branch-protection and
+repository-ruleset reads are unavailable under the repository's current plan;
+the API returns the upgrade-to-GitHub-Pro response. No caller-protection policy
+was changed, so the checked-in protected-ref predicate remains unsatisfied.
+
+The dedicated organization runner group currently reports selected-repository
+visibility, public repositories disabled, and workflow restriction enabled.
+Its selected-repository inventory contains exactly one repository, the canary
+target, and its runner inventory is empty. The group response's
+`selected_workflows` field contains exactly one entry matching the current
+caller's full-SHA reusable-callee pin; the caller workflow itself is not the
+selected entry. This matches GitHub's documented [runner-group response
+shape](https://docs.github.com/en/rest/actions/self-hosted-runner-groups#get-a-self-hosted-runner-group-for-an-organization).
+The group reports that its workflow restriction is not read-only. Exact callee
+selection is therefore verified, but it does not bind the mutable caller; the
+unprotected `main` ref still fails the callee's `github.ref_protected` guard.
+The private target's Actions-environment inventory returned 404, so this check
+does not establish that an environment is configured or absent.
+
+The current Linux ARM64 canary-runner workflow's run inventory is empty. No
+workflow, repository policy, runner group, App installation, runner, Scale Set
+or credential was changed, and no workflow was dispatched. Protected-caller
+authorization, exact workflow admission, authenticated production provenance
+and trust-root custody, broker-only execution, conditional cleanup, trusted
+runtime/isolation/resource qualification, and the separately authorized live
+canary remain unresolved. Issue #1 remains OPEN and Project #2 remains In
+progress.
