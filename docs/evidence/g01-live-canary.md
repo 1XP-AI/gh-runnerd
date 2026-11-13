@@ -1052,3 +1052,28 @@ Local build/module caches and temporary files remained on `/Volumes/worktree`.
 The correction changes only the tagged fixture header expectation. A fresh
 fix PR and its exact-head review/CI are still required; no production behavior
 or live canary is changed by this correction.
+
+### G01-core capture-boundary follow-up — 2026-11-13
+
+Public CI [run 43403108575](https://github.com/1XP-AI/gh-runnerd/actions/runs/43403108575)
+completed on merge SHA `227d6f5c9efbda9a09f764af23c03bdd5872dcf0`. G01 core
+failed in `TestExperimentalActualCommandBrokerReceiver`: its actual child
+command sends requests through Go's `net/http` transport to an HTTPS test
+server, where the transport-added `Accept-Encoding: gzip` is visible. The
+previous fixture correction expected the unset client value at this server
+boundary. Direct synthetic RoundTripper fixtures still correctly observe an
+empty value. The assertion now takes the expected value for its capture
+boundary; production code is unchanged.
+
+| Check | Result |
+|---|---|
+| Public CI G01 core | FAIL before this follow-up; 12 actual-command subcases failed on the same `/app` header mismatch |
+| Local actual-command `group-policy` subcase with the pre-fix assertion | FAIL as expected with `AcceptEncoding:gzip` |
+| Local `TestExperimentalActualCommandBrokerReceiver` with `-race` after the boundary-specific assertion | PASS |
+| Local `TestControllerProcessHandoffV3ActualBrokerChild` with `-race` | PASS; direct RoundTripper still expects an unset header |
+| Other Public CI matrix jobs on `227d6f5` | PASS (8 jobs); aggregate Go check failed because G01 core failed |
+
+The focused local checks used Go `1.27.3`, disabled module downloads, and kept
+the Go caches, test helper binaries and temporary files on `/Volumes/worktree`.
+This does not establish live provider behavior or canary execution. Issue #1
+remains OPEN and Project #2 remains In progress.

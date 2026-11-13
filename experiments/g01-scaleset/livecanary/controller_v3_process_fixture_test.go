@@ -287,7 +287,7 @@ func TestControllerProcessHandoffV3ActualBrokerChild(t *testing.T) {
 			result, effects, err := enrollment.RunProcessHandoffForFixtureWithOptions(context.Background(), fixture.files, fixture.transport, fixture.grant, options)
 			controllerEffects := controllerV3ProcessEffects(t, fixture)
 			events := controllerV3ProcessEvents(t, fixture)
-			assertProcessBrokerTrace(t, fixture.transport.base, expectedProcessBrokerV3Trace(*fixture.transport.base.approval, false))
+			assertProcessBrokerTrace(t, fixture.transport.base, expectedProcessBrokerV3Trace(*fixture.transport.base.approval, false), "")
 			assertProcessBrokerTokenLifecycle(t, fixture.files.StateDirectory, filepath.Join(filepath.Dir(fixture.files.StateDirectory), "admission"), true, true)
 			if tc.wantSuccess {
 				receipt, receiptErr := handoff.DecodeStrictReceipt(observedReceipt)
