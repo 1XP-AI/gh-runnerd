@@ -336,9 +336,13 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 			defer cancel()
 			var result enrollment.BrokerResult
 			brokerBinary := os.Getenv("G01_PHASE_BROKER_TEST_BINARY")
+			g02AcceptEncoding := ""
 			if brokerBinary == "" {
 				result, e = enrollment.RunBrokerExperimentWithInputs(ctx, brokerFiles, ownedExperimentalPipe(t, management), ownedExperimentalPipe(t, []byte("synthetic-observation-credential")), ownedExperimentalPipe(t, workflowSeed), ownedExperimentalPipe(t, issuerSeed))
 			} else {
+				// The actual child command crosses net/http's transport before this
+				// fixture observes the request, which adds gzip on the wire.
+				g02AcceptEncoding = "gzip"
 				var mu sync.Mutex
 				server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					mu.Lock()
@@ -440,7 +444,7 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 				if e == nil || transport.mints != 1 || transport.readOnlyMints != 1 || transport.managementMints != 0 || transport.revocations != 1 || transport.readOnlyRevocations != 1 || transport.managementRevocations != 0 || base.acks.Load() != 0 || base.acquires.Load() != 0 {
 					t.Fatal("wrong group crossed actual command boundary", e, transport.mints)
 				}
-				assertProcessBrokerTrace(t, transport, expectedProcessBrokerV3Trace(a, true))
+				assertProcessBrokerTrace(t, transport, expectedProcessBrokerV3Trace(a, true), g02AcceptEncoding)
 				assertProcessBrokerTokenLifecycle(t, brokerFiles.StateDirectory, admission, true, false)
 				for _, event := range base.readEvents() {
 					if event.ControllerHandoff != nil && event.ControllerHandoff.Phase == phase {
@@ -453,7 +457,7 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 				if e == nil || transport.mints != 2 || transport.readOnlyMints != 1 || transport.managementMints != 1 || transport.revocations != 2 || transport.readOnlyRevocations != 1 || transport.managementRevocations != 1 || base.acks.Load() != 0 || base.acquires.Load() != 0 {
 					t.Fatal("wrong controller group crossed actual command boundary", e, transport.mints)
 				}
-				assertProcessBrokerTrace(t, transport, expectedProcessBrokerV3Trace(a, false))
+				assertProcessBrokerTrace(t, transport, expectedProcessBrokerV3Trace(a, false), g02AcceptEncoding)
 				assertProcessBrokerTokenLifecycle(t, brokerFiles.StateDirectory, admission, true, true)
 				consumed := false
 				for _, event := range base.readEvents() {
@@ -479,7 +483,7 @@ func TestExperimentalActualCommandBrokerReceiver(t *testing.T) {
 				t.Logf("safe counts: requests=%d forbidden=%d", base.requests.Load(), base.forbidden.Load())
 				t.Fatalf("actual %s command failed: %v result=%+v mints=%d read-only=%d management=%d revocations=%d read-only-revocations=%d management-revocations=%d calls=%v", mode, e, result, transport.mints, transport.readOnlyMints, transport.managementMints, transport.revocations, transport.readOnlyRevocations, transport.managementRevocations, transport.calls)
 			}
-			assertProcessBrokerTrace(t, transport, expectedProcessBrokerV3Trace(a, false))
+			assertProcessBrokerTrace(t, transport, expectedProcessBrokerV3Trace(a, false), g02AcceptEncoding)
 			assertProcessBrokerTokenLifecycle(t, brokerFiles.StateDirectory, admission, true, true)
 			data, e := os.ReadFile(filepath.Join(files.ControllerStateDirectory, "journal.jsonl"))
 			if e != nil {
