@@ -1,6 +1,6 @@
 # Historical G01 toolchain pin inventory — Go 1.26.9 snapshot
 
-## Current status — 2026-11-01
+## Status at snapshot date — 2026-11-01
 
 This inventory is a static snapshot of source commit
 `9776562fc792e0fb76684fb7be90a7ed118ed0ec`; its Go `1.26.9`, SDK `v0.4.0`
