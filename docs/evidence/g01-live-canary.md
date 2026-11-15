@@ -1161,3 +1161,24 @@ trust-root custody, broker-only execution, conditional cleanup, trusted
 runtime/isolation/resource qualification, and separate concrete authorization
 for the Linux ARM64/JIT canary remain open. Issue #1 stays OPEN and Project #2
 stays In progress.
+
+### User declined 1XP-AI plan upgrade; alternate-org preflight — 2026-11-15
+
+The user declined upgrading organization `1XP-AI` to Team. No billing page was
+opened, no plan change was submitted, and no charge was made.
+
+A read-only `gh` survey found that `1XP-Inc` already has a Team plan. Its
+private repository `1XP-Inc/demo-repository` has a protected `main` branch,
+but this does not make it a ready canary target: the organization exposes only
+the `Default` runner group, which has visibility `all`, no workflow restriction,
+and two existing runners. No installation matching App slug
+`1xp-gh-runnerd-test` was found in `1XP-Inc`. Reusing that repository or group
+would require new authorization and an isolated setup.
+
+No repository was switched or created; no runner group, App installation,
+runner, credential, host service, workflow or policy was changed, and no
+canary was dispatched. An `1XP-Inc` route would require an explicitly approved
+dedicated private canary target, selected-repository/workflow runner group,
+dedicated runner and App access. Live execution still requires its own
+concrete authorization. Issue #1 remains OPEN and Project #2 remains In
+progress.
