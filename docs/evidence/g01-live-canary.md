@@ -1129,3 +1129,93 @@ provenance and trust-root custody, broker-only execution, conditional cleanup,
 trusted runtime/isolation/resource qualification, and the separately authorized
 live canary remain unresolved. Issue #1 remains OPEN and Project #2 remains In
 progress.
+
+### Private-target entitlement and post-reboot runner check — 2026-11-13
+
+Fresh read-only `gh` checks confirmed that organization `1XP-AI` is on the
+Free plan and the prepared target `1XP-AI/gh-runnerd-canary` remains private.
+Its `main` branch is still unprotected at
+`3b555b3398fbb2b989df51b031681f95b13a6e33`. Reading that branch's protection
+returns HTTP 403 with “Upgrade to GitHub Pro or make this repository public.”
+Reading organization rulesets separately returns HTTP 403 with “Upgrade to
+GitHub Team to enable this feature.” The target was not made public and no plan
+or policy was changed. The generic branch-protection response and the explicit
+organization-rulesets Team requirement are recorded separately; an eligible
+private caller-protection path still needs to be established.
+
+Runner group `gh-runnerd-canary` (ID 3) still allows only selected repositories,
+disables public repositories, and restricts use to the exact reusable callee
+pin `e9bc03f29f5c69dec5526bb79f87e62f8851cb58`. Its runner inventory is empty,
+and the canary workflow run inventory remains empty. After the `office-mini`
+restart, Orca's registered `office-mini` runtime reported Lima `ci-linux`
+`Running`; the service
+`actions.runner.1XP-AI.linux-arm64-1xp-ai.service` reported
+`active/running/enabled`; and read-only `gh` reported runner ID 94 online and
+idle. That general runner is not in group 3, so it does not satisfy the canary
+runner requirement. The service needed no start command.
+
+No workflow was dispatched and no runner, Scale Set, App, credential, host
+service, repository policy, or organization plan was changed. A supported
+private caller-protection path, App inclusion, production provenance and
+trust-root custody, broker-only execution, conditional cleanup, trusted
+runtime/isolation/resource qualification, and separate concrete authorization
+for the Linux ARM64/JIT canary remain open. Issue #1 stays OPEN and Project #2
+stays In progress.
+
+### User declined 1XP-AI plan upgrade; alternate-org preflight — 2026-11-15
+
+The user declined upgrading organization `1XP-AI` to Team. No billing page was
+opened, no plan change was submitted, and no charge was made.
+
+A read-only `gh` survey found that `1XP-Inc` already has a Team plan. Its
+private repository `1XP-Inc/demo-repository` has a protected `main` branch,
+but this does not make it a ready canary target: the organization exposes only
+the `Default` runner group, which has visibility `all`, no workflow restriction,
+and two existing runners. No installation matching App slug
+`1xp-gh-runnerd-test` was found in `1XP-Inc`. Reusing that repository or group
+would require new authorization and an isolated setup.
+
+No repository was switched or created; no runner group, App installation,
+runner, credential, host service, workflow or policy was changed, and no
+canary was dispatched. An `1XP-Inc` route would require an explicitly approved
+dedicated private canary target, selected-repository/workflow runner group,
+dedicated runner and App access. Live execution still requires its own
+concrete authorization. Issue #1 remains OPEN and Project #2 remains In
+progress.
+
+### 1XP-Inc canary target prepared — 2026-11-15
+
+After explicit user approval, the `1XP-Inc` alternative was prepared without
+changing the `1XP-AI` plan or existing App installation:
+
+- Created private repository `1XP-Inc/gh-runnerd-canary` (ID
+  `1458455679`). Its only commit is a fail-closed README at `main` SHA
+  `dc680e2143b8af916d60aa4a9dce750698c666da`; it has no workflow or source
+  code.
+- Created `1XP-Inc` runner group `gh-runnerd-canary` (ID `3`) with selected
+  repository visibility bound only to this target, public repositories
+  disabled, and workflow restriction enabled. The selected-workflow list is
+  empty and the runner inventory is zero, so the group cannot run a job.
+- Read-only ruleset inspection found inherited active organization ruleset
+  `main - disable commit` (ID `166403`), targeted at `~DEFAULT_BRANCH`. It
+  requires pull requests and one approval, enables CODEOWNERS and Copilot
+  review requirements, and prevents branch deletion and force-push. No
+  repository-specific ruleset was created. Read-after-create for `main` reports
+  `protected: true` under the inherited ruleset. No workflow has run, so the
+  runtime `github.ref_protected` value has not been observed.
+- The existing `1XP-AI/1xp-gh-runnerd-test` App install flow offered only its
+  owning organization. It was left unchanged. Created and installed a separate
+  private `1XP-Inc` App, `gh-runnerd-g01-canary` (App ID `5766540`, installation
+  ID `182120614`), with only `organization_self_hosted_runners: write`. It has
+  no repository permissions, webhook, or subscribed events; no private key was
+  generated.
+- No repository-specific branch ruleset, runner, credential, host service,
+  workflow or Scale Set was created or changed. No canary was dispatched. Issue
+  #1 remains OPEN and Project #2 remains In progress.
+
+This prepares the repository, protected default branch, group and App
+registration only. The immutable workflow has not been installed or pinned.
+Live qualification still needs dedicated trusted runtime/isolation/resource
+evidence, App key custody and broker-only authorization, authenticated
+production provenance/trust roots, conditional cleanup, and separate concrete
+authorization for the Linux ARM64/JIT canary.

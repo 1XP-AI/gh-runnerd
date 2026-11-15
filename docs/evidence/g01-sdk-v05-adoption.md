@@ -1,6 +1,6 @@
 # G01 v0.5.0 adoption ledger and current evidence profile
 
-## Current status — 2026-11-01
+## Status snapshot — 2026-11-01 (superseded by the current live-canary record)
 
 The premerge status and review checklist below are preserved as the immutable
 checkpoint for [PR #107](https://github.com/1XP-AI/gh-runnerd/pull/107). PR #107
@@ -14,14 +14,16 @@ runner profile is `2.338.0` ARM64. G01 #1 remains open and the GitHub Project
 remains In progress. Production workflow provenance/trust-root provisioning,
 provider-side conditional cleanup, runtime qualification and the separately
 authorized live canary remain unresolved. No live operation is authorized by
-this status note.
+this status note. For the present canary policy, entitlement and authorization
+state, use the [current G01 live-canary evidence](g01-live-canary.md).
 
 ## Historical premerge checkpoint — PR #107
 
 The candidate status and review/merge checklist below record the state before
 PR #107 merged on 2026-10-25. They remain as historical evidence; their
 "pending" and "required before merge" statements are not current disposition.
-Use the current status above for the merged profile and remaining G01 gates.
+The 2026-11-01 snapshot above is not the latest canary status; use the
+[current G01 live-canary evidence](g01-live-canary.md) for present gates.
 
 Issue: [G01 #1](https://github.com/1XP-AI/gh-runnerd/issues/1). Writer: Codex,
 maintainer-selected Sol medium. Status: **local adoption candidate; independent
