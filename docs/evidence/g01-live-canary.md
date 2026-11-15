@@ -1189,7 +1189,9 @@ After explicit user approval, the `1XP-Inc` alternative was prepared without
 changing the `1XP-AI` plan or existing App installation:
 
 - Created private repository `1XP-Inc/gh-runnerd-canary` (ID
-  `1458455679`). It has zero branches and no workflow; no source was pushed.
+  `1458455679`). Its only commit is a fail-closed README at `main` SHA
+  `dc680e2143b8af916d60aa4a9dce750698c666da`; it has no workflow or source
+  code.
 - Created `1XP-Inc` runner group `gh-runnerd-canary` (ID `3`) with selected
   repository visibility bound only to this target, public repositories
   disabled, and workflow restriction enabled. The selected-workflow list is
@@ -1198,21 +1200,22 @@ changing the `1XP-AI` plan or existing App installation:
   `main - disable commit` (ID `166403`), targeted at `~DEFAULT_BRANCH`. It
   requires pull requests and one approval, enables CODEOWNERS and Copilot
   review requirements, and prevents branch deletion and force-push. No
-  repository-specific ruleset was created. Because the new repository has zero
-  branches, `github.ref_protected` has not yet been observed on a branch.
+  repository-specific ruleset was created. Read-after-create for `main` reports
+  `protected: true` under the inherited ruleset. No workflow has run, so the
+  runtime `github.ref_protected` value has not been observed.
 - The existing `1XP-AI/1xp-gh-runnerd-test` App install flow offered only its
   owning organization. It was left unchanged. Created and installed a separate
   private `1XP-Inc` App, `gh-runnerd-g01-canary` (App ID `5766540`, installation
   ID `182120614`), with only `organization_self_hosted_runners: write`. It has
   no repository permissions, webhook, or subscribed events; no private key was
   generated.
-- No branch protection/ruleset, runner, credential, host service, workflow or
-  Scale Set was created or changed. No canary was dispatched. Issue #1 remains
-  OPEN and Project #2 remains In progress.
+- No repository-specific branch ruleset, runner, credential, host service,
+  workflow or Scale Set was created or changed. No canary was dispatched. Issue
+  #1 remains OPEN and Project #2 remains In progress.
 
-This prepares repository, group and App registration only. The target still
-needs a protected caller branch and immutable workflow configuration. Live
-qualification still needs dedicated trusted runtime/isolation/resource
+This prepares the repository, protected default branch, group and App
+registration only. The immutable workflow has not been installed or pinned.
+Live qualification still needs dedicated trusted runtime/isolation/resource
 evidence, App key custody and broker-only authorization, authenticated
 production provenance/trust roots, conditional cleanup, and separate concrete
 authorization for the Linux ARM64/JIT canary.
