@@ -1194,6 +1194,12 @@ changing the `1XP-AI` plan or existing App installation:
   repository visibility bound only to this target, public repositories
   disabled, and workflow restriction enabled. The selected-workflow list is
   empty and the runner inventory is zero, so the group cannot run a job.
+- Read-only ruleset inspection found inherited active organization ruleset
+  `main - disable commit` (ID `166403`), targeted at `~DEFAULT_BRANCH`. It
+  requires pull requests and one approval, enables CODEOWNERS and Copilot
+  review requirements, and prevents branch deletion and force-push. No
+  repository-specific ruleset was created. Because the new repository has zero
+  branches, `github.ref_protected` has not yet been observed on a branch.
 - The existing `1XP-AI/1xp-gh-runnerd-test` App install flow offered only its
   owning organization. It was left unchanged. Created and installed a separate
   private `1XP-Inc` App, `gh-runnerd-g01-canary` (App ID `5766540`, installation
