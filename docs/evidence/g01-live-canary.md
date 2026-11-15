@@ -1182,3 +1182,31 @@ dedicated private canary target, selected-repository/workflow runner group,
 dedicated runner and App access. Live execution still requires its own
 concrete authorization. Issue #1 remains OPEN and Project #2 remains In
 progress.
+
+### 1XP-Inc canary target prepared — 2026-11-15
+
+After explicit user approval, the `1XP-Inc` alternative was prepared without
+changing the `1XP-AI` plan or existing App installation:
+
+- Created private repository `1XP-Inc/gh-runnerd-canary` (ID
+  `1458455679`). It has zero branches and no workflow; no source was pushed.
+- Created `1XP-Inc` runner group `gh-runnerd-canary` (ID `3`) with selected
+  repository visibility bound only to this target, public repositories
+  disabled, and workflow restriction enabled. The selected-workflow list is
+  empty and the runner inventory is zero, so the group cannot run a job.
+- The existing `1XP-AI/1xp-gh-runnerd-test` App install flow offered only its
+  owning organization. It was left unchanged. Created and installed a separate
+  private `1XP-Inc` App, `gh-runnerd-g01-canary` (App ID `5766540`, installation
+  ID `182120614`), with only `organization_self_hosted_runners: write`. It has
+  no repository permissions, webhook, or subscribed events; no private key was
+  generated.
+- No branch protection/ruleset, runner, credential, host service, workflow or
+  Scale Set was created or changed. No canary was dispatched. Issue #1 remains
+  OPEN and Project #2 remains In progress.
+
+This prepares repository, group and App registration only. The target still
+needs a protected caller branch and immutable workflow configuration. Live
+qualification still needs dedicated trusted runtime/isolation/resource
+evidence, App key custody and broker-only authorization, authenticated
+production provenance/trust roots, conditional cleanup, and separate concrete
+authorization for the Linux ARM64/JIT canary.
