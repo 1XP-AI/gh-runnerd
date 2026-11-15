@@ -1219,3 +1219,21 @@ Live qualification still needs dedicated trusted runtime/isolation/resource
 evidence, App key custody and broker-only authorization, authenticated
 production provenance/trust roots, conditional cleanup, and separate concrete
 authorization for the Linux ARM64/JIT canary.
+
+### Canary execution-host preflight — 2026-11-15
+
+Read-only preflight of the paired `office-mini` runtime found:
+
+- The Lima `ci-linux` VM is running with 12 GiB memory and 80 GiB disk. Its
+  guest reports Linux `7.0.0-42-generic` on `aarch64`.
+- The existing manually installed 1XP-AI runner service is active; GitHub
+  runner ID 94 (`linux-arm64-1xp-ai`) is online and idle. It is not a runner in
+  the new 1XP-Inc group #3; that group's runner inventory remains empty.
+- The private target repository still has no Actions workflow or workflow run.
+  The 1XP-Inc group remains restricted to the selected repository and
+  workflows.
+
+This confirms an available ARM64 Linux VM but does not qualify it as a dedicated
+1XP-Inc controller or trusted canary worker. The existing 1XP-AI runner and VM
+service were left untouched. No new runner, Scale Set, workflow, App private
+key, host service, or canary execution was created.
