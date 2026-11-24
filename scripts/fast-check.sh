@@ -3,7 +3,7 @@
 set -euo pipefail
 
 go_cmd="${GO:-go}"
-exact_toolchain="go1.27.3"
+exact_toolchain="go1.27.4"
 
 # Keep this standalone entry point on the same pinned toolchain as Make and
 # hosted CI. It is an iteration aid, not a replacement for the complete gate.

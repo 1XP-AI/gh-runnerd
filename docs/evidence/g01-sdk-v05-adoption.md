@@ -241,3 +241,47 @@ separately planned canary from this change.
 Rollback is reverting the adoption as one coherent unit (pins, admission,
 adapters, test routing and current-profile docs), retaining the historical
 evidence. There is no production state or live resource created by this work.
+
+## Shared toolchain patch refresh — 2026-11-24
+
+The dated 2026-11-01 adoption snapshot above remains historical. On 2026-11-24,
+`gh release list -R actions/scaleset --limit 8` still reported v0.5.0 as Latest;
+`gh api repos/actions/scaleset/commits/v0.5.0 --jq .sha` returned
+`af394d86c0d5024225238b0209043c70193bcfe6`, matching the selected ADR source.
+The upstream SDK's minimum remains Go 1.27.3, so v0.5.0 stays selected. The
+official [Go release history](https://go.dev/doc/devel/release) records Go
+1.27.4 on 2026-11-10 with security fixes to cgo, the `go` command, compiler,
+linker and `net/http`; the shared exact pin was advanced to 1.27.4.
+
+The refresh covers the root, G01, G02 and R1 module directives; Make, CI and
+standalone toolchain selectors; and exact build-metadata admission for the G01
+controller, worker and G02 broker. The worker admission had remained on 1.27.3;
+its changed test first failed with `Go 1.27.4 reviewed build rejected`, then
+passed after the checker was advanced and the previous patch was added to its
+rejection cases. The isolated `testdata/sdk-v05/go.mod` remains a minimum-version
+fixture; historical evidence and frozen comparison inputs were not rewritten.
+
+Verification on the local candidate, with Go build/module caches and temporary
+files on the external worktree volume:
+
+- Focused exact-toolchain, controller, worker, broker and paired-binary metadata
+  tests passed. The evidence-packet toolchain profile test passed all 7 tests.
+- `make check` passed toolchain selection, gofmt, root build/vet, normal and race
+  root tests/fixtures, fuzz smoke, module tidy/verify, license checks, and the
+  complete G01/G02/R1 offline matrix. Its final vulnerability step could not
+  download `govulncheck@v1.7.0` because this invocation set `GOPROXY=off`;
+  running `make vuln` separately with downloads enabled completed with
+  `No vulnerabilities found.` The `make check` command itself therefore exited
+  nonzero at that network-disabled step; it is not recorded as an exit-0 run.
+- The first root run exposed a 45-second timeout in the synthetic full-check
+  fixture. Its scoped timeout is now 120 seconds; the focused fixture passed,
+  as did the subsequent normal and race root suites.
+- `git diff --check` passed. No canary workflow was dispatched; no runner,
+  credential, host service or Scale Set was created or changed, and no GitHub
+  write operation occurred.
+
+This refresh changes the offline toolchain/admission profile only. Issue #1
+remains OPEN and Project #2 remains In progress. Authenticated production
+provenance/trust roots, broker-only execution, server-side conditional cleanup,
+trusted runtime/isolation/resource qualification, and the separately authorized
+Linux ARM64/JIT canary remain open.

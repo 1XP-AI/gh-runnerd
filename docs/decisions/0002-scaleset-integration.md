@@ -1,7 +1,7 @@
 # ADR 0002: Released Scale Set listener with independent reconciliation
 
 Status: **v0.5.0/Go 1.27.3 experimental adoption merged in PR #107 after protocol,
-security and GitHub review. Historical
+security and GitHub review; the current shared Go pin is 1.27.4. Historical
 v0.4.0 offline review approved on 2026-10-03. G01 closure and production G01/G02
 remain unresolved.** See the [current adoption ledger](../evidence/g01-sdk-v05-adoption.md).
 
@@ -35,10 +35,12 @@ and [focused-test supplement](https://github.com/1XP-AI/gh-runnerd/issues/1#issu
 ## Decision
 
 Select `github.com/actions/scaleset v0.5.0`, source
-`af394d86c0d5024225238b0209043c70193bcfe6`, with exact Go 1.27.3. Keep the
-high-level listener plus independent reconciliation. The handler validates the
-already durable poll and approved-source records before SDK ACK. The bounded
-experiment explicitly acquires and processes lifecycle observations after its
+`af394d86c0d5024225238b0209043c70193bcfe6`, with exact Go 1.27.4. The SDK's
+minimum is Go 1.27.3; the current patch refresh is recorded in the
+[adoption ledger](../evidence/g01-sdk-v05-adoption.md#shared-toolchain-patch-refresh--2026-11-24).
+Keep the high-level listener plus independent reconciliation. The handler
+validates the already durable poll and approved-source records before SDK ACK.
+The bounded experiment explicitly acquires and processes lifecycle observations after its
 journaled ACK, preserving the receipt chain required before worker continuation.
 That post-ACK policy belongs to the experiment, not the SDK: v0.5.0 itself does
 not acquire jobs or provide the old lifecycle callbacks. Uncertain side effects

@@ -53,7 +53,7 @@ jobs:
             target: test-race-fixtures
     env:
       # Match Make's explicit selection even if the installed default changes.
-      GOTOOLCHAIN: go1.27.3
+      GOTOOLCHAIN: go1.27.4
       GOEXPERIMENT: ""
     steps:
       - name: Check out source
@@ -118,7 +118,7 @@ jobs:
           - module: experiments/r1-credentials
             profile: all
     env:
-      GOTOOLCHAIN: go1.27.3
+      GOTOOLCHAIN: go1.27.4
       GOEXPERIMENT: ""
       OFFLINE_EXPERIMENT_MODULE: ${{ matrix.module }}
       OFFLINE_EXPERIMENT_PROFILE: ${{ matrix.profile }}
@@ -145,7 +145,7 @@ jobs:
     timeout-minutes: 15
     env:
       # Match Make's explicit selection even if the installed default changes.
-      GOTOOLCHAIN: go1.27.3
+      GOTOOLCHAIN: go1.27.4
       GOEXPERIMENT: ""
     steps:
       - name: Check out source

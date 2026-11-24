@@ -21,11 +21,11 @@ import (
 	"github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/liveworker"
 )
 
-func TestBuildRevisionAdmissionRequiresGo1273(t *testing.T) {
+func TestBuildRevisionAdmissionRequiresGo1274(t *testing.T) {
 	revision := strings.Repeat("a", 40)
 	good := &debug.BuildInfo{
 		Path:      "github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/cmd/g01-live",
-		GoVersion: "go1.27.3",
+		GoVersion: "go1.27.4",
 		Deps:      []*debug.Module{{Path: "github.com/actions/scaleset", Version: "v0.5.0", Sum: "h1:IoE2xjt9cXyTndIrpz5pMoKpzV/fW2ECIEJc5xuHRbM="}},
 		Settings: []debug.BuildSetting{
 			{Key: "GOOS", Value: runtime.GOOS},
@@ -37,9 +37,9 @@ func TestBuildRevisionAdmissionRequiresGo1273(t *testing.T) {
 		},
 	}
 	if got, ok := buildRevisionFromInfo(good, true); !ok || got != revision {
-		t.Fatalf("Go 1.27.3 reviewed build rejected: revision=%q admitted=%v", got, ok)
+		t.Fatalf("Go 1.27.4 reviewed build rejected: revision=%q admitted=%v", got, ok)
 	}
-	for _, version := range []string{"go1.26.8", "go1.26.9", "go1.27.2", "go1.27.3-X:nojsonv2", "go1.28.1", ""} {
+	for _, version := range []string{"go1.26.8", "go1.26.9", "go1.27.2", "go1.27.3", "go1.27.4-X:nojsonv2", "go1.28.1", ""} {
 		bad := *good
 		bad.GoVersion = version
 		if _, ok := buildRevisionFromInfo(&bad, true); ok {

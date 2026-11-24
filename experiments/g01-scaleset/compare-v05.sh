@@ -9,7 +9,7 @@ trap 'rm -rf -- "$candidate_dir"' EXIT HUP INT TERM
 cp "$experiment_dir/testdata/sdk-v05/go.mod" "$experiment_dir/testdata/sdk-v05/go.sum" \
     "$experiment_dir/client_test.go" "$experiment_dir/listener_test.go" \
     "$experiment_dir/server_test.go" "$experiment_dir/recovery.go" "$candidate_dir/"
-export GOTOOLCHAIN=go1.27.3
+export GOTOOLCHAIN=go1.27.4
 export GOEXPERIMENT=
 export GOWORK=off
 cd "$candidate_dir"

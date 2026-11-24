@@ -20,7 +20,7 @@ const (
 	pairedRealCadenceBridgeTags = "g01_live,g01_pair_fixture,g01_pair_real_cadence"
 	pairedFixtureProgramPath    = "github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/cmd/g01-live"
 	pairedFixtureSDKVersion     = "v0.5.0"
-	pairedFixtureGoVersion      = "go1.27.3"
+	pairedFixtureGoVersion      = "go1.27.4"
 )
 
 type preparedBridgeBinary struct {
@@ -101,7 +101,7 @@ func compilePairedG01Binaries(t *testing.T, tagSets []string) map[string]prepare
 		}
 		command = exec.Command("go", "build", "-buildvcs=true", "-tags", tags, "-o", out, "./cmd/g01-live")
 		command.Dir = filepath.Join(cloneRoot, "experiments", "g01-scaleset")
-		command.Env = append(os.Environ(), "GOTOOLCHAIN=go1.27.3")
+		command.Env = append(os.Environ(), "GOTOOLCHAIN=go1.27.4")
 		if output, err := command.CombinedOutput(); err != nil {
 			_ = output
 			t.Fatal("build reviewed g01 bridge binary")
@@ -176,7 +176,7 @@ func validPairedFixtureBuild(info *debug.BuildInfo, expectedHead, expectedTags s
 	return goos == runtime.GOOS && goarch == runtime.GOARCH && cgo == "1" && revision == expectedHead && clean && sdk && tags == expectedTags
 }
 
-func TestPairedFixtureBuildRequiresExactGo1273(t *testing.T) {
+func TestPairedFixtureBuildRequiresExactGo1274(t *testing.T) {
 	head := strings.Repeat("a", 40)
 	info := &debug.BuildInfo{
 		GoVersion: pairedFixtureGoVersion,
@@ -192,9 +192,9 @@ func TestPairedFixtureBuildRequiresExactGo1273(t *testing.T) {
 		},
 	}
 	if !validPairedFixtureBuild(info, head, pairedFixtureBridgeTags) {
-		t.Fatal("Go 1.27.3 fixture build rejected")
+		t.Fatal("Go 1.27.4 fixture build rejected")
 	}
-	for _, version := range []string{"go1.26.8", "go1.26.9", "go1.27.2", "go1.27.3-X:nojsonv2", "go1.28.1", ""} {
+	for _, version := range []string{"go1.26.8", "go1.26.9", "go1.27.2", "go1.27.3", "go1.27.4-X:nojsonv2", "go1.28.1", ""} {
 		previous := *info
 		previous.GoVersion = version
 		if validPairedFixtureBuild(&previous, head, pairedFixtureBridgeTags) {

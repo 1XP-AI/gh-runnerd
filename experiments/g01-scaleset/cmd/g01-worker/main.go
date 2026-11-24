@@ -19,7 +19,7 @@ func buildRevision() (string, bool) {
 }
 
 func buildRevisionFromInfo(info *debug.BuildInfo, ok bool) (string, bool) {
-	if !ok || info == nil || info.GoVersion != "go1.27.3" {
+	if !ok || info == nil || info.GoVersion != "go1.27.4" {
 		return "", false
 	}
 	revision := ""

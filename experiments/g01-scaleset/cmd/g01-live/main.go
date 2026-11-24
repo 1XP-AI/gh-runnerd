@@ -252,7 +252,7 @@ func buildRevision() (string, bool) {
 }
 
 func buildRevisionFromInfo(info *debug.BuildInfo, ok bool) (string, bool) {
-	if !ok || info == nil || info.GoVersion != "go1.27.3" || info.Path != "github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/cmd/g01-live" {
+	if !ok || info == nil || info.GoVersion != "go1.27.4" || info.Path != "github.com/1XP-AI/gh-runnerd/experiments/g01-scaleset/cmd/g01-live" {
 		return "", false
 	}
 	version, clean, sdkFound, sdk := "", false, false, false

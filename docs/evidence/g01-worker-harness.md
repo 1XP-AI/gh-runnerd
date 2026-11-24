@@ -208,13 +208,13 @@ refuses missing metadata, dirty builds and a mismatching SHA. From
 `experiments/g01-scaleset` in that standalone clone:
 
 ```sh
-GOTOOLCHAIN=go1.26.8 go build -buildvcs=true -trimpath -tags=g01_worker -o "$G01_PRIVATE_BINARY" ./cmd/g01-worker
-GOTOOLCHAIN=go1.26.8 go version -m "$G01_PRIVATE_BINARY"
+GOTOOLCHAIN=go1.27.4 go build -buildvcs=true -trimpath -tags=g01_worker -o "$G01_PRIVATE_BINARY" ./cmd/g01-worker
+GOTOOLCHAIN=go1.27.4 go version -m "$G01_PRIVATE_BINARY"
 "$G01_PRIVATE_BINARY" --plan
 ```
 
 Verify `vcs.revision` equals the approved 40-character commit, `vcs.modified=false`
-and Go `go1.26.8`. The compile/plan commands above are offline. After actual
+and Go `go1.27.4`. The compile/plan commands above are offline. After actual
 approval, each invocation has this shape, using approved private variable values:
 
 ```sh

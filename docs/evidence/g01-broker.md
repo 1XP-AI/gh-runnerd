@@ -17,7 +17,7 @@ repository permission. Its [scope compatibility ledger](g01-organization-managem
 defines exact approval/credential matching, permission response and group-policy
 checks. The repository-scoped sequence below remains the omitted/empty-scope
 contract; it must not be used to justify adding repository permissions to an
-organization-only App. Current builds use the adopted SDK v0.5.0/Go 1.27.3
+organization-only App. Current builds use the adopted SDK v0.5.0/Go 1.27.4
 [profile](g01-sdk-v05-adoption.md); older build observations below retain their
 historical inputs. This addition does not enable the quarantined live entrypoint.
 
@@ -55,7 +55,7 @@ The authenticated response supplies a tenant URL and admin credential. The broke
 
 ## Controller handoff
 
-`controller` requires a separate digest-pinned G01 controller approval, the exact binary SHA-256 and matching reviewed `harness_sha`. The Go `1.26.8`/SDK `v0.4.0` controller-admission values below describe the historical broker profile. Current source admission requires Go `1.27.3` and the un-replaced SDK `v0.5.0` (`experiments/g02-auth/broker_process.go` and `experiments/g01-scaleset/cmd/g01-live/main.go`); this is static pin evidence, not a live run. Both the direct `g01-live` experimental front door and broker verify the command import path, native host `GOOS`/`GOARCH`, `CGO_ENABLED=1`, exact `g01_live` tag set and clean embedded VCS revision. The broker additionally requires a current-UID private source directory and an owned singly-linked regular binary of mode `0500`, capped at 128 MiB; symlinks are refused. It keeps the opened descriptor and checks the named inode and content hash again immediately before execution. This catches accidental replacement; it does not isolate a hostile process with the same controlling UID.
+`controller` requires a separate digest-pinned G01 controller approval, the exact binary SHA-256 and matching reviewed `harness_sha`. The Go `1.26.8`/SDK `v0.4.0` controller-admission values below describe the historical broker profile. Current source admission requires Go `1.27.4` and the un-replaced SDK `v0.5.0` (`experiments/g02-auth/broker_process.go` and `experiments/g01-scaleset/cmd/g01-live/main.go`); this is static pin evidence, not a live run. Both the direct `g01-live` experimental front door and broker verify the command import path, native host `GOOS`/`GOARCH`, `CGO_ENABLED=1`, exact `g01_live` tag set and clean embedded VCS revision. The broker additionally requires a current-UID private source directory and an owned singly-linked regular binary of mode `0500`, capped at 128 MiB; symlinks are refused. It keeps the opened descriptor and checks the named inode and content hash again immediately before execution. This catches accidental replacement; it does not isolate a hostile process with the same controlling UID.
 
 The controller approval is bounded, strict JSON with no duplicate/unknown keys. Its raw SHA-256 must match the broker approval; its App/installation/repo/group identity, exact phase, harness SHA, workflow facts, expiry and exact Actions hosts must agree. Before issuance, the broker exclusively reserves, writes and syncs only a non-secret snapshot of the digest-verified bytes into its private attempt directory. A pre-existing file or symlink refuses before any API call. The owned snapshot inode and digest are checked before authenticated calls and again before handoff; local replacement stops the attempt. The child's persistent state directory must already be owned and mode `0700`; the broker verifies the captured directory identity again before execution. The existing G01 controller independently validates approval/build metadata and its own journal during both local preparation and later execution.
 
@@ -131,7 +131,7 @@ Build only the reviewed broker source; these path variables are non-secret opera
 
 ```sh
 cd experiments/g02-auth
-GOEXPERIMENT= CGO_ENABLED=1 GOTOOLCHAIN=go1.27.3 go build -trimpath -o "$G01_BROKER_BINARY" ./cmd/g01-broker
+GOEXPERIMENT= CGO_ENABLED=1 GOTOOLCHAIN=go1.27.4 go build -trimpath -o "$G01_BROKER_BINARY" ./cmd/g01-broker
 "$G01_BROKER_BINARY" --plan  # offline plan check; no live authorization
 ```
 

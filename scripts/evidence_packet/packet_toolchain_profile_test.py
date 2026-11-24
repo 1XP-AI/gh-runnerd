@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[2]
 PACKET_PATH = ROOT / "docs" / "evidence" / "g01-recovery-packet.md"
 GO_MOD_PATH = ROOT / "go.mod"
 CHECK_TOOLCHAIN_PATH = ROOT / "scripts" / "check-toolchain.sh"
-ACTIVE_GO = "1.27.3"
+ACTIVE_GO = "1.27.4"
 FROZEN_GO = "1.26.9"
 FROZEN_PACKET_SHA256 = "e2a0d876e47e9ced7565a5dbde083f72ae1aeb14a7ac01cc9fccf56abf377959"
 

@@ -8,19 +8,19 @@ own test server. Public dependency/toolchain downloads are separate from tests.
 
 ```sh
 cd experiments/g01-scaleset
-GOTOOLCHAIN=go1.27.3 go test -race -count=1 -timeout=45s ./...
-GOTOOLCHAIN=go1.27.3 go vet ./...
+GOTOOLCHAIN=go1.27.4 go test -race -count=1 -timeout=45s ./...
+GOTOOLCHAIN=go1.27.4 go vet ./...
 ./compare-sdk.sh
 ```
 
-Current selection is SDK `v0.5.0` and Go 1.27.3; the
+Current selection is SDK `v0.5.0` and Go 1.27.4; the
 [adoption ledger](../../docs/evidence/g01-sdk-v05-adoption.md) distinguishes local
 validation, required reviews and live gaps. `compare-sdk.sh` instead copies the
 frozen `testdata/sdk-v04` baseline plus unchanged recovery helper to disposable
 modules and compares `v0.4.0` with the historical audited pseudo-version under
 exact Go 1.26.9. It does not run the current v0.5 suite against an old API or
 change the selected pin. With dependencies cached, tests are offline.
-`GOTOOLCHAIN=go1.27.3` makes current verification exact; the module's Go
+`GOTOOLCHAIN=go1.27.4` makes current verification exact; the module's Go
 directive alone is a minimum and the toolchain directive alone is a suggestion.
 
 The red commit contains a compiling callback-only recovery baseline. The green
@@ -44,7 +44,7 @@ remains loopback-only and cannot be repointed to GitHub.
 ## SDK v0.5.0 isolated comparison
 
 From the repository root, `sh experiments/g01-scaleset/compare-v05.sh` runs a
-separate minimal Go 1.27.3/SDK v0.5.0 module against synthetic loopback fixtures.
+separate minimal Go 1.27.4/SDK v0.5.0 module against synthetic loopback fixtures.
 Public toolchain/module downloads may occur. It copies the promoted root
 client/listener/server tests, unchanged recovery helper and `testdata/sdk-v05`
 manifests into a disposable module. Do not run either testdata directory directly.

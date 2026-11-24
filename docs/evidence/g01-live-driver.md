@@ -4,7 +4,7 @@ Status: **implemented and tested offline; no live authorization or live result**
 This is a controller slice of the [live-canary plan](g01-live-canary.md), not
 completion of G01. The original fixture remains permanently loopback-only. The
 separate command is compiled only with `-tags=g01_live`. Public CI has no
-credentials. The adopted profile selects SDK `v0.5.0` and Go `1.27.3`; see the
+credentials. The adopted profile selects SDK `v0.5.0` and Go `1.27.4`; see the
 [changed-boundary evidence and review status](g01-sdk-v05-adoption.md). Legacy
 `--execute-approved-canary` and `--execute-approved-paired-terminal` flags are
 hard refusals before approval/state reads, credential stdin, journal access, SDK
@@ -228,16 +228,16 @@ enforcement. The controller account must be trusted. A same-UID attacker can
 alter state; permissions/locks do not isolate hostile jobs. Keep approval,
 journal and credentials outside repository/shared directories and worker mounts.
 
-For the current Go 1.27.3 profile, build from a clean **standalone clone with a
+For the current Go 1.27.4 profile, build from a clean **standalone clone with a
 real `.git` directory**, detached at the reviewed SHA, and write the binary
 outside the checkout. The linked-worktree `.git`-file VCS-stamping failure was
-observed with Go 1.26.8; it remains historical evidence and is not a claim about
-Go 1.27.3. A local clone of the reviewed repository is sufficient and needs no
-live API.
+observed with Go 1.26.8; it remains historical evidence and does not qualify Go
+1.27.4. A local clone of the reviewed repository is sufficient and needs no live
+API.
 
 ```sh
 cd experiments/g01-scaleset
-GOEXPERIMENT= CGO_ENABLED=1 GOTOOLCHAIN=go1.27.3 go build -buildvcs=true -trimpath -tags=g01_live -o "$G01_PRIVATE_BINARY" ./cmd/g01-live
+GOEXPERIMENT= CGO_ENABLED=1 GOTOOLCHAIN=go1.27.4 go build -buildvcs=true -trimpath -tags=g01_live -o "$G01_PRIVATE_BINARY" ./cmd/g01-live
 "$G01_PRIVATE_BINARY" --plan  # offline plan check; no live authorization
 go version -m "$G01_PRIVATE_BINARY"
 ```
@@ -365,7 +365,7 @@ the budget-plus-one read bound, gzip coverage, and quarantine/no retry after
 oversized SDK creation success/error responses.
 
 Historical validation record (Go 1.26.8; retained as executed, not the current
-Go 1.27.3 profile):
+Go 1.27.4 profile):
 
 ```sh
 GOTOOLCHAIN=go1.26.8 go test -race -count=1 -timeout=45s ./...

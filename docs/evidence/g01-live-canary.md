@@ -434,8 +434,9 @@ live authorization unless explicitly excluded or separately disabled.
 - [ ] Measure available host headroom and verify effective resource enforcement
   on the selected trusted environment before execution; the budget above is a
   target and does not establish current capacity.
-- [x] The offline adoption profile selects SDK `v0.5.0`/Go `1.27.3` and the
-  byte-verified runner `2.338.0` ARM64 image. The archive, manifest and config
+- [x] The offline adoption profile selects SDK `v0.5.0` and pins Go `1.27.4`
+  (the SDK minimum is Go `1.27.3`), with the byte-verified runner `2.338.0`
+  ARM64 image. The archive, manifest and config
   digests are in the [runner checkpoint](g01-runner-release-checkpoint.md#2026-10-25-target-offer-archive-and-image-bytes);
   see the [adoption ledger](g01-sdk-v05-adoption.md) and PR #107 for SDK review
   and verification. The frozen v0.4 recovery packet (Go 1.26.9 wrapper and older
@@ -1237,3 +1238,16 @@ This confirms an available ARM64 Linux VM but does not qualify it as a dedicated
 1XP-Inc controller or trusted canary worker. The existing 1XP-AI runner and VM
 service were left untouched. No new runner, Scale Set, workflow, App private
 key, host service, or canary execution was created.
+
+
+### Shared toolchain patch refresh — 2026-11-24
+
+The shared Go pin and exact controller/worker/broker build admission now use
+Go 1.27.4. The SDK v0.5.0 selection remains pinned to source
+`af394d86c0d5024225238b0209043c70193bcfe6`; complete offline verification and
+the precise `make check`/`make vuln` outcomes are recorded in the [adoption
+ledger](g01-sdk-v05-adoption.md#shared-toolchain-patch-refresh--2026-11-24).
+This is local offline evidence only. No canary workflow was dispatched; no
+runner, credential, Scale Set or host service was used or changed, and no
+GitHub write operation occurred. Issue #1 remains OPEN and Project #2 remains
+In progress; all live gates remain unresolved.
