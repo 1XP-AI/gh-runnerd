@@ -2349,6 +2349,21 @@ func TestPullRequestQuickWorkflowContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	workflow := string(workflowData)
+	moduleData, err := os.ReadFile("../go.mod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	moduleVersion := regexp.MustCompile(`(?m)^go[ \t]+([0-9]+\.[0-9]+\.[0-9]+)[ \t]*$`).FindSubmatch(moduleData)
+	if len(moduleVersion) != 2 {
+		t.Fatal("could not extract the root go.mod minimum version")
+	}
+	workflowToolchain := regexp.MustCompile(`(?m)^[ \t]+GOTOOLCHAIN:[ \t]*([^ \t#]+)[ \t]*$`).FindStringSubmatch(workflow)
+	if len(workflowToolchain) != 2 {
+		t.Fatal("could not extract the PR quick workflow toolchain pin")
+	}
+	if want := "go" + string(moduleVersion[1]); workflowToolchain[1] != want {
+		t.Errorf("PR quick workflow toolchain %q does not match root go.mod minimum %q", workflowToolchain[1], want)
+	}
 	for _, required := range []string{
 		"name: Pull Request Checks",
 		"name: Go checks",

@@ -19,7 +19,7 @@ jobs:
     env:
       BASE_SHA: ${{ github.event.pull_request.base.sha }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-      GOTOOLCHAIN: go1.27.3
+      GOTOOLCHAIN: go1.27.4
       GOEXPERIMENT: ""
     steps:
       - name: Check out source
