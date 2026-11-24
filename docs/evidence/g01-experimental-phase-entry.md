@@ -43,8 +43,10 @@ run, ref/SHA/path, phase, owner nonce, source, organization/repository IDs and
 expiry. Parsing rejects duplicate/unknown/missing/null fields, including nested
 case substitutions, role/key collisions, duplicate grants and expired authority.
 Build inputs, actual public pins/grants and deployment remain separately reviewed
-external decisions. Both the `g01-live` front door and broker require Go 1.27.3,
-the exact command import path, native `GOOS`/`GOARCH`, `CGO_ENABLED=1`, only the
+external decisions. Both the `g01-live` front door and broker require exactly Go
+1.27.4. The selected SDK module's minimum Go directive is 1.27.3; it does not
+change the executable admission pin. The gates also require the exact command
+import path, native `GOOS`/`GOARCH`, `CGO_ENABLED=1`, only the
 `g01_live` build tag, a clean embedded VCS revision and the unreplaced Scale Set
 SDK v0.5.0 with the exact `go.sum` module checksum
 `h1:IoE2xjt9cXyTndIrpz5pMoKpzV/fW2ECIEJc5xuHRbM=`. Missing, mismatched, or
