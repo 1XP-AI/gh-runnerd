@@ -16,18 +16,21 @@ execution path. `--plan` prints the offline plan. `--execute-approved-worker`
 exits with status 1 and `standalone worker execution disabled; signed controller
 handoff is required`. The approval, state-directory and phase flags do not enable
 execution: this command does not read an approval or journal, consume JIT, or make
-Docker requests. The paired experimental path enters through `g01-live` and its
-signed controller handoff (`livecanary/controller_handoff_entry.go`); this
-standalone CLI is not its entry point and cannot bypass it.
+Docker requests. The paired experimental path enters through `cmd/g01-live` and
+its signed process handoff (`livecanary/controller_experiment.go` and
+`livecanary/controller_process_handoff.go`); this standalone CLI is not that
+entry point and cannot bypass it.
 
-The phase table summarizes the `liveworker` paired execution contract, exercised
-by synthetic tests and reachable only through the signed controller handoff. It
-is not an invocation guide for the standalone CLI. No current `cmd/g01-worker`
-command can perform these phases.
+The phase table summarizes `liveworker` paired operations exercised by synthetic
+tests. `WithPairedExecution` accepts a caller-supplied controller-check callback;
+the library does not establish signed authority by itself. The G01 `g01-live`
+path reaches paired execution only after its signed controller handoff checks.
+This is not an invocation guide for the standalone CLI. No current
+`cmd/g01-worker` command can perform these phases.
 
 | Library phase | Effect and prerequisite |
 | --- | --- |
-| `create` | After the bound controller handoff, verify daemon and preloaded image, persist intent, submit one create request with that handoff's JIT, then persist its returned immutable ID. |
+| `create` | Require a matching handoff receipt and JIT from the caller; verify daemon and preloaded image, persist intent, submit one create request, then persist its returned immutable ID. |
 | `start` | Inspect only the journaled ID and verify its complete profile. Require `created`, persist start intent and submit one start request. |
 | `inspect` | Recheck daemon/image and inspect the journaled ID. Record only an allowlisted status. Observation never clears an uncertain effect. |
 | `cleanup` | Recheck exact ID, ownership and profile. Only `created` or `exited` may be removed with `force=false&v=false`; active, unknown or mismatched resources stay reserved. |
@@ -186,18 +189,22 @@ delete or confers authority merely because an earlier approval expired.
 
 ## Plan-only CLI and remaining integration gate
 
-The CLI can be built and inspected offline from a clean checkout. Put the binary
-outside the checkout. From `experiments/g01-scaleset`:
+The CLI can be built and inspected without network access only when the local
+Go 1.27.4 toolchain and all required modules are already available. Put the
+binary outside the checkout. From `experiments/g01-scaleset`, use the verified
+Go 1.27.4 executable with strict offline module settings:
 
 ```sh
-GOTOOLCHAIN=go1.27.4 go build -buildvcs=true -trimpath -tags=g01_worker -o "$G01_PRIVATE_BINARY" ./cmd/g01-worker
-GOTOOLCHAIN=go1.27.4 go version -m "$G01_PRIVATE_BINARY"
+GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off go version
+GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off go build -buildvcs=true -trimpath -tags=g01_worker -o "$G01_PRIVATE_BINARY" ./cmd/g01-worker
+GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off go version -m "$G01_PRIVATE_BINARY"
 "$G01_PRIVATE_BINARY" --plan
 ```
 
-Verify `vcs.revision` equals the reviewed 40-character commit,
-`vcs.modified=false` and Go `go1.27.4`. These compile/inspection/plan commands
-are offline. They do not validate a live approval or enable worker execution.
+Confirm the first command reports `go1.27.4`; then verify `vcs.revision` equals
+the reviewed 40-character commit and `vcs.modified=false`. With the stated local
+toolchain and module cache prerequisites, these commands do not access the
+network. They do not validate a live approval or enable worker execution.
 
 The current CLI does not read approval or state files and does not accept JIT for
 execution. The signed paired route is code-present, but its public trust roots and
