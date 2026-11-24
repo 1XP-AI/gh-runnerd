@@ -1,3 +1,3 @@
 module github.com/1XP-AI/gh-runnerd/experiments/g02-auth
 
-go 1.27.3
+go 1.27.4

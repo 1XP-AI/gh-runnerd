@@ -24,13 +24,13 @@ const (
 	g01TerminalRemainderSkipRegex  = `^TestPairedTerminal(FinalResultCapacity|PendingChildCapacity|EligibilityUsesFreshExactFacts|CapturedAcknowledgementCancellation|MissingAcknowledgementsAndPostchecks|Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$`
 	g01TerminalStorageRegex        = `^TestPairedTerminal(Actual(Controller|Worker)SyncFailures|PostIntent(JournalIdentity|AuthorityBoundaries)|ClosedReplayActualFile|WorkerReceiptSurvivesControllerWriteFailure|FixtureStorageFailure)$`
 	g01StorageJournalRegex         = `^TestPairedTerminalPostIntentJournalIdentity$`
-	g01TerminalHeavyInvocation     = "go1.27.3\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run " + g01TerminalHeavyRegex + " ./livecanary"
-	g01TerminalRemainderInvocation = "go1.27.3\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run ^TestPairedTerminal -skip " + g01TerminalRemainderSkipRegex + " ./livecanary"
-	g01StorageJournalInvocation    = "go1.27.3\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run " + g01StorageJournalRegex + " ./livecanary"
-	g01TerminalStorageInvocation   = "go1.27.3\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run " + g01TerminalStorageRegex + " -skip " + g01StorageJournalRegex + " ./livecanary"
-	g01LegacyStorageInvocation     = "go1.27.3\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run " + g01TerminalStorageRegex + " ./livecanary"
-	g01LegacyTerminalInvocation    = "go1.27.3\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run ^TestPairedTerminal -skip " + g01TerminalStorageRegex + " ./livecanary"
-	g01ReplacementInvocation       = "go1.27.3\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run ^TestSessionReplacement ./livecanary"
+	g01TerminalHeavyInvocation     = "go1.27.4\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run " + g01TerminalHeavyRegex + " ./livecanary"
+	g01TerminalRemainderInvocation = "go1.27.4\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run ^TestPairedTerminal -skip " + g01TerminalRemainderSkipRegex + " ./livecanary"
+	g01StorageJournalInvocation    = "go1.27.4\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run " + g01StorageJournalRegex + " ./livecanary"
+	g01TerminalStorageInvocation   = "go1.27.4\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run " + g01TerminalStorageRegex + " -skip " + g01StorageJournalRegex + " ./livecanary"
+	g01LegacyStorageInvocation     = "go1.27.4\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run " + g01TerminalStorageRegex + " ./livecanary"
+	g01LegacyTerminalInvocation    = "go1.27.4\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run ^TestPairedTerminal -skip " + g01TerminalStorageRegex + " ./livecanary"
+	g01ReplacementInvocation       = "go1.27.4\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run ^TestSessionReplacement ./livecanary"
 )
 
 func toolingFile(t *testing.T, root, name, data string, mode os.FileMode) {
@@ -73,7 +73,7 @@ func toolingRunWithTimeout(t *testing.T, timeout time.Duration, root string, ext
 		}
 		env = append(env, entry)
 	}
-	cmd.Env = append(env, "GOTOOLCHAIN=go1.27.3", "GOFLAGS=", "GOWORK=off")
+	cmd.Env = append(env, "GOTOOLCHAIN=go1.27.4", "GOFLAGS=", "GOWORK=off")
 	cmd.Env = append(cmd.Env, extra...)
 	data, err := cmd.CombinedOutput()
 	if ctxErr := ctx.Err(); ctxErr != nil {
@@ -126,7 +126,7 @@ func toolingFixture(t *testing.T) string {
 	toolingFile(t, root, "scripts/fixture_test.go", "package tooling\n\nimport \"testing\"\n\nfunc TestToolingTaggedPairFixturePartitionsRun(t *testing.T) {}\n", 0600)
 	for _, module := range []string{"g01-scaleset", "g02-auth", "r1-credentials"} {
 		base := "experiments/" + module
-		toolingFile(t, root, base+"/go.mod", "module example.test/"+module+"\n\ngo 1.27.3\n", 0600)
+		toolingFile(t, root, base+"/go.mod", "module example.test/"+module+"\n\ngo 1.27.4\n", 0600)
 		toolingFile(t, root, base+"/fixture.go", "package fixture\n", 0600)
 	}
 	toolingFile(t, root, "experiments/g01-scaleset/livecanary/fixture.go", "package livecanary\n\nfunc fixtureValue() string { return \"livecanary-fixture\" }\n", 0600)
@@ -208,7 +208,7 @@ printf 'done\n' >> "$TOOLING_GO_LOG"
 					if i+1 < target.first || i+1 > target.last {
 						continue
 					}
-					want += "go1.27.3\t-mod=readonly -p=2\ttest " + target.flags + " " + selection + "\n"
+					want += "go1.27.4\t-mod=readonly -p=2\ttest " + target.flags + " " + selection + "\n"
 					if failCall == i+2-target.first {
 						break
 					}
@@ -367,10 +367,10 @@ func TestToolingPinsNewerSystemGo(t *testing.T) {
 	}
 	// Controlled newer-installation fixture: only an explicit exact selection
 	// delegates to the actual installed Go; auto reports a newer bundled version.
-	toolingFile(t, root, "newer-go", "#!/bin/sh\nif [ \"${GOTOOLCHAIN:-auto}\" = go1.27.3 ]; then exec \"$TOOLING_REAL_GO\" \"$@\"; fi\nif [ \"$1\" = version ]; then echo 'go version go1.28.1 linux/amd64'; else exit 88; fi\n", 0700)
+	toolingFile(t, root, "newer-go", "#!/bin/sh\nif [ \"${GOTOOLCHAIN:-auto}\" = go1.27.4 ]; then exec \"$TOOLING_REAL_GO\" \"$@\"; fi\nif [ \"$1\" = version ]; then echo 'go version go1.28.1 linux/amd64'; else exit 88; fi\n", 0700)
 	for _, args := range [][]string{{"make", "GO=" + filepath.Join(root, "newer-go"), "toolchain"}, {"bash", "scripts/check-toolchain.sh"}} {
 		env := []string{"GOTOOLCHAIN=auto", "GO=" + filepath.Join(root, "newer-go"), "TOOLING_REAL_GO=" + realGo}
-		if out, err := toolingRun(t, root, env, args...); err != nil || !strings.Contains(out, "toolchain: go1.27.3") {
+		if out, err := toolingRun(t, root, env, args...); err != nil || !strings.Contains(out, "toolchain: go1.27.4") {
 			t.Errorf("newer system selection did not use pin: %s", out)
 		}
 	}
@@ -398,20 +398,20 @@ func TestToolingCheckToolchainRequiresReleaseDefaults(t *testing.T) {
 	}
 }
 
-func TestToolingCheckToolchainRequiresGo1273(t *testing.T) {
+func TestToolingCheckToolchainRequiresGo1274(t *testing.T) {
 	for _, tc := range []struct {
 		name, reportedVersion, want string
 		wantError                   bool
 	}{
-		{name: "accept exact patch", reportedVersion: "go1.27.3", want: "toolchain: go1.27.3"},
-		{name: "reject prior shared pin", reportedVersion: "go1.26.9", want: "selected go1.26.9, want go1.27.3", wantError: true},
-		{name: "reject previous patch", reportedVersion: "go1.27.2", want: "selected go1.27.2, want go1.27.3", wantError: true},
-		{name: "reject nondefault build stamp", reportedVersion: "go1.27.3-X:nojsonv2", want: "selected go1.27.3-X:nojsonv2, want go1.27.3", wantError: true},
-		{name: "reject different newer patch", reportedVersion: "go1.27.4", want: "selected go1.27.4, want go1.27.3", wantError: true},
+		{name: "accept exact patch", reportedVersion: "go1.27.4", want: "toolchain: go1.27.4"},
+		{name: "reject prior shared pin", reportedVersion: "go1.26.9", want: "selected go1.26.9, want go1.27.4", wantError: true},
+		{name: "reject previous patch", reportedVersion: "go1.27.3", want: "selected go1.27.3, want go1.27.4", wantError: true},
+		{name: "reject nondefault build stamp", reportedVersion: "go1.27.4-X:nojsonv2", want: "selected go1.27.4-X:nojsonv2, want go1.27.4", wantError: true},
+		{name: "reject different newer patch", reportedVersion: "go1.27.5", want: "selected go1.27.5, want go1.27.4", wantError: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := toolingFixture(t)
-			toolingFile(t, root, "go.mod", "module example.test/root\n\ngo 1.27.3\n", 0600)
+			toolingFile(t, root, "go.mod", "module example.test/root\n\ngo 1.27.4\n", 0600)
 			toolingFile(t, root, "reported-go", `#!/bin/sh
 set -eu
 if [ "${1:-}" = version ]; then
@@ -434,7 +434,7 @@ fi
 				return
 			}
 			if err != nil || !strings.Contains(out, tc.want) {
-				t.Fatalf("Go 1.27.3 did not pass exact toolchain admission: err=%v output=%s", err, out)
+				t.Fatalf("Go 1.27.4 did not pass exact toolchain admission: err=%v output=%s", err, out)
 			}
 		})
 	}
@@ -1095,14 +1095,14 @@ func TestNestedFastSelected(t *testing.T) {}
 			module:      ".",
 			packagePath: "./...",
 			test:        "^TestFastSelected$",
-			invocation:  "go1.27.3\tlist -json=false -f {{.Dir}} ./...\ngo1.27.3\ttest -v -json=false -list= -bench= -fuzz= -skip= -c=false -count=1 -cpu=1 -exec= -run ^TestFastSelected$ ./... -args -test.v=test2json",
+			invocation:  "go1.27.4\tlist -json=false -f {{.Dir}} ./...\ngo1.27.4\ttest -v -json=false -list= -bench= -fuzz= -skip= -c=false -count=1 -cpu=1 -exec= -run ^TestFastSelected$ ./... -args -test.v=test2json",
 		},
 		{
 			name:        "nested module",
 			module:      "./experiments/g01-scaleset",
 			packagePath: ".",
 			test:        "^TestNestedFastSelected$",
-			invocation:  "go1.27.3\tlist -json=false -f {{.Dir}} .\ngo1.27.3\ttest -v -json=false -list= -bench= -fuzz= -skip= -c=false -count=1 -cpu=1 -exec= -run ^TestNestedFastSelected$ . -args -test.v=test2json",
+			invocation:  "go1.27.4\tlist -json=false -f {{.Dir}} .\ngo1.27.4\ttest -v -json=false -list= -bench= -fuzz= -skip= -c=false -count=1 -cpu=1 -exec= -run ^TestNestedFastSelected$ . -args -test.v=test2json",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1256,12 +1256,15 @@ func TestFastSelected(t *testing.T) {}
 
 func TestToolingCheckRequiresExecutableLink(t *testing.T) {
 	root := toolingFixture(t)
-	if out, err := toolingRun(t, root, nil, "make", "check"); err != nil {
+	// This synthetic full-check fixture runs the selected offline partitions
+	// under the exact shared toolchain, so it needs more than the generic
+	// single-command timeout.
+	if out, err := toolingRunWithTimeout(t, 120*time.Second, root, nil, "make", "check"); err != nil {
 		t.Fatalf("positive check fixture: %s", out)
 	}
 	toolingFile(t, root, "cmd/gh-runnerd/main.go", "package main\n\nfunc missingLinkSymbol()\n\nfunc main() {\n\tmissingLinkSymbol()\n}\n", 0600)
 	toolingFile(t, root, "cmd/gh-runnerd/fixture.s", "// No definition of missingLinkSymbol.\n", 0600)
-	if out, err := toolingRun(t, root, nil, "make", "check"); err == nil || !strings.Contains(out, "missingLinkSymbol") {
+	if out, err := toolingRunWithTimeout(t, 120*time.Second, root, nil, "make", "check"); err == nil || !strings.Contains(out, "missingLinkSymbol") {
 		t.Fatalf("check accepted an un-linkable command: %s", out)
 	}
 	workflow, err := os.ReadFile("../.github/workflows/ci.yml")
@@ -2258,7 +2261,7 @@ func TestPublicWorkflowCapacityContract(t *testing.T) {
 	)
 	for _, job := range []string{"root", "offline", "vuln"} {
 		block := jobs[job]
-		for _, required := range []string{checkout, setupGo, "timeout-minutes: 15", "persist-credentials: false", "cache: false", mainHead, "runs-on: ubuntu-24.04", "GOTOOLCHAIN: go1.27.3", `GOEXPERIMENT: ""`, "go-version-file: go.mod"} {
+		for _, required := range []string{checkout, setupGo, "timeout-minutes: 15", "persist-credentials: false", "cache: false", mainHead, "runs-on: ubuntu-24.04", "GOTOOLCHAIN: go1.27.4", `GOEXPERIMENT: ""`, "go-version-file: go.mod"} {
 			if !strings.Contains(block, required) {
 				t.Errorf("job %s is missing %q", job, required)
 			}
@@ -2626,14 +2629,14 @@ func TestToolingTaggedPairFixturePartitionsRun(t *testing.T) {
 	storageJournalPath := "experiments/g01-scaleset/livecanary/pair_fixture_storage_journal_regression_test.go"
 	nonPairedTestRegexes := []string{"^TestA", "^TestB", "^TestC", "^Test[D-F]", "^Test[G-J]", "^Test[K-P]", "^Test[Q-Z]", `^Test($|[^A-Za-z])`}
 	nonPairedTestInvocation := func(testRegex string) string {
-		return "go1.27.3\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run " + testRegex + " -skip ^Test(Paired|SessionReplacement|JITBoundary|ExperimentalAcquireLossCommand$|ExperimentalDrainCommand$|ExperimentalACKBoundaryCommand$) ./livecanary"
+		return "go1.27.4\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run " + testRegex + " -skip ^Test(Paired|SessionReplacement|JITBoundary|ExperimentalAcquireLossCommand$|ExperimentalDrainCommand$|ExperimentalACKBoundaryCommand$) ./livecanary"
 	}
 	var nonPairedTestInvocations []string
 	for _, testRegex := range nonPairedTestRegexes {
 		nonPairedTestInvocations = append(nonPairedTestInvocations, nonPairedTestInvocation(testRegex))
 	}
 	listenerInvocation := nonPairedTestInvocation("^Test[K-P]")
-	exampleFuzzInvocation := "go1.27.3\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run ^(Example|Fuzz) ./livecanary"
+	exampleFuzzInvocation := "go1.27.4\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run ^(Example|Fuzz) ./livecanary"
 	taggedPositiveSource := func(testName, marker string) string {
 		return `//go:build g01_pair_fixture && !g01_live && !g01_worker
 
@@ -2818,7 +2821,7 @@ func TestPairedTerminalFutureCoverage(t *testing.T) {
 			"paired-collection",
 			pairedCollectionSource,
 			pairedCollectionPositiveSource,
-			"go1.27.3\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run ^TestPaired -skip ^TestPairedTerminal ./livecanary",
+			"go1.27.4\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run ^TestPaired -skip ^TestPairedTerminal ./livecanary",
 		},
 		{
 			listenerPath,
@@ -2944,13 +2947,13 @@ func TestPairedTerminalFutureCoverage(t *testing.T) {
 	log := string(data)
 	lines := strings.Split(strings.TrimSpace(log), "\n")
 	for _, invocation := range []string{
-		"go1.27.3\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run ^TestPaired -skip ^TestPairedTerminal ./livecanary",
+		"go1.27.4\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -run ^TestPaired -skip ^TestPairedTerminal ./livecanary",
 		g01ReplacementInvocation,
 		g01TerminalHeavyInvocation,
 		g01TerminalRemainderInvocation,
 		g01StorageJournalInvocation,
 		g01TerminalStorageInvocation,
-		"go1.27.3\tvet -tags=g01_pair_fixture ./livecanary",
+		"go1.27.4\tvet -tags=g01_pair_fixture ./livecanary",
 	} {
 		count := 0
 		for _, line := range lines {
@@ -2973,7 +2976,7 @@ func TestPairedTerminalFutureCoverage(t *testing.T) {
 			t.Fatalf("offline gate logged %q %d times; wrapper log:\n%s", invocation, count, log)
 		}
 	}
-	legacyCollectionInvocation := "go1.27.3\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -skip ^TestPairedTerminal ./livecanary"
+	legacyCollectionInvocation := "go1.27.4\ttest -race -count=1 -timeout=120s -tags=g01_pair_fixture -skip ^TestPairedTerminal ./livecanary"
 	for _, line := range lines {
 		if line == legacyCollectionInvocation {
 			t.Fatalf("offline gate retained the unsplit collection invocation: %s", line)
@@ -3138,7 +3141,7 @@ func toolingListLivecanary(t *testing.T, run string) []string {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "go", "test", "-count=1", "-tags=g01_pair_fixture", "-list", run, "./livecanary")
 	cmd.Dir = filepath.Join("..", "experiments", "g01-scaleset")
-	cmd.Env = append(os.Environ(), "GOTOOLCHAIN=go1.27.3", "GOFLAGS=", "GOWORK=off")
+	cmd.Env = append(os.Environ(), "GOTOOLCHAIN=go1.27.4", "GOFLAGS=", "GOWORK=off")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("list run=%q: %s", run, out)
@@ -3159,7 +3162,7 @@ func toolingLivecanarySkipCheck(t *testing.T, run, skip string) string {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "go", "test", "-count=1", "-timeout=15s", "-tags=g01_pair_fixture", "-run", run, "-skip", skip, "./livecanary")
 	cmd.Dir = filepath.Join("..", "experiments", "g01-scaleset")
-	cmd.Env = append(os.Environ(), "GOTOOLCHAIN=go1.27.3", "GOFLAGS=", "GOWORK=off")
+	cmd.Env = append(os.Environ(), "GOTOOLCHAIN=go1.27.4", "GOFLAGS=", "GOWORK=off")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("skip check run=%q skip=%q: %s", run, skip, out)
@@ -3408,19 +3411,19 @@ func FuzzDefaultG01Fixture(f *testing.F) {
 	log := string(logData)
 	lines := strings.Split(strings.TrimSpace(log), "\n")
 	for _, invocation := range []string{
-		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBaselineStatisticsPresenceAndEligibility$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestControllerHandoff ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -skip ^Test(BaselineStatisticsPresenceAndEligibility|ControllerHandoff.*)$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerPrepareReviewedG01LiveBinary$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint|CredentialInputFailureConsumesAttempt|WorkflowProvenanceTimeoutBlocksLaterInspect)$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(ManagementTokenRevokedBeforeClaimCompletion|RevokesKnownRejectedManagementTokens|LostManagementTokenResponseBlocksLaterInspection|ManagementRequestJournalFailureRecordsNoDispatch|UncertainManagementTokenRevocationBlocksLaterInspection|DoesNotRevokeCallerVerificationTokenCollision)$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(ReadOnlyPreflightRejectsBeforeWriteMint|StopsWhenReadOnlyTokenRevocationIsUncertain|RevokedRecordSyncFailureStopsBeforeWriteMint|DoubleRevocationJournalSyncFailureBlocksLaterInspect|LostReadTokenMintResponseBlocksLaterInspect|RevokesTokenFromRejectedReadIssuance|DoesNotRevokeVerificationTokenCollision|SelectionRejectsMissingStateBeforePipeOwnership)$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(LostWorkflowProvenanceResponseBlocksLaterInspect|WorkflowProvenancePreRequestFailureRecordsNoDispatchForLaterInspect|HistoricalWorkflowProvenanceClaimReplayBinding|LegacyIncompleteClaimWithoutManagementLifecycleBlocksLaterInspect|PreRequestFailureRecordsNoDispatchForLaterInspect|RepeatsCalleeFenceAfterWritePreflight)$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerPaired ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPaired -skip ^TestPairedBroker(PrepareReviewedG01LiveBinary|RealCadenceChildExceedsThirtySeconds)$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -skip ^TestPaired|^TestBrokerPaired|^TestBrokerExperimentV3|^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
+		"go1.27.4\ttest -race -count=1 -timeout=45s -run ^TestBaselineStatisticsPresenceAndEligibility$ ./...",
+		"go1.27.4\ttest -race -count=1 -timeout=45s -run ^TestControllerHandoff ./...",
+		"go1.27.4\ttest -race -count=1 -timeout=45s -skip ^Test(BaselineStatisticsPresenceAndEligibility|ControllerHandoff.*)$ ./...",
+		"go1.27.4\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerPrepareReviewedG01LiveBinary$ ./...",
+		"go1.27.4\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
+		"go1.27.4\ttest -race -count=1 -timeout=45s -run ^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
+		"go1.27.4\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint|CredentialInputFailureConsumesAttempt|WorkflowProvenanceTimeoutBlocksLaterInspect)$ ./...",
+		"go1.27.4\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(ManagementTokenRevokedBeforeClaimCompletion|RevokesKnownRejectedManagementTokens|LostManagementTokenResponseBlocksLaterInspection|ManagementRequestJournalFailureRecordsNoDispatch|UncertainManagementTokenRevocationBlocksLaterInspection|DoesNotRevokeCallerVerificationTokenCollision)$ ./...",
+		"go1.27.4\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(ReadOnlyPreflightRejectsBeforeWriteMint|StopsWhenReadOnlyTokenRevocationIsUncertain|RevokedRecordSyncFailureStopsBeforeWriteMint|DoubleRevocationJournalSyncFailureBlocksLaterInspect|LostReadTokenMintResponseBlocksLaterInspect|RevokesTokenFromRejectedReadIssuance|DoesNotRevokeVerificationTokenCollision|SelectionRejectsMissingStateBeforePipeOwnership)$ ./...",
+		"go1.27.4\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(LostWorkflowProvenanceResponseBlocksLaterInspect|WorkflowProvenancePreRequestFailureRecordsNoDispatchForLaterInspect|HistoricalWorkflowProvenanceClaimReplayBinding|LegacyIncompleteClaimWithoutManagementLifecycleBlocksLaterInspect|PreRequestFailureRecordsNoDispatchForLaterInspect|RepeatsCalleeFenceAfterWritePreflight)$ ./...",
+		"go1.27.4\ttest -race -count=1 -timeout=45s -run ^TestBrokerPaired ./...",
+		"go1.27.4\ttest -race -count=1 -timeout=45s -run ^TestPaired -skip ^TestPairedBroker(PrepareReviewedG01LiveBinary|RealCadenceChildExceedsThirtySeconds)$ ./...",
+		"go1.27.4\ttest -race -count=1 -timeout=45s -skip ^TestPaired|^TestBrokerPaired|^TestBrokerExperimentV3|^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
 	} {
 		count := 0
 		for _, line := range lines {
@@ -3432,7 +3435,7 @@ func FuzzDefaultG01Fixture(f *testing.F) {
 			t.Fatalf("default G01 partition invocation %q ran %d times; wrapper log:\n%s", invocation, count, log)
 		}
 	}
-	r1Invocation := "go1.27.3\ttest -race -count=1 -timeout=45s ./..."
+	r1Invocation := "go1.27.4\ttest -race -count=1 -timeout=45s ./..."
 	r1Count := 0
 	for _, line := range lines {
 		if line == r1Invocation {
@@ -3443,10 +3446,10 @@ func FuzzDefaultG01Fixture(f *testing.F) {
 		t.Fatalf("offline gate ran the R1 fixture invocation %d times; wrapper log:\n%s", r1Count, log)
 	}
 	for _, invocation := range []string{
-		"go1.27.3\ttest -race -count=1 -timeout=45s -skip ^TestPaired ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPaired -skip ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -skip ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=120s -run ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
+		"go1.27.4\ttest -race -count=1 -timeout=45s -skip ^TestPaired ./...",
+		"go1.27.4\ttest -race -count=1 -timeout=45s -run ^TestPaired -skip ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
+		"go1.27.4\ttest -race -count=1 -timeout=45s -skip ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
+		"go1.27.4\ttest -race -count=1 -timeout=120s -run ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
 	} {
 		for _, line := range lines {
 			if line == invocation {
@@ -3824,16 +3827,16 @@ func FuzzG02Fixture(f *testing.F) {
 		"TOOLING_SENTINEL_LOG=" + sentinelLogPath,
 	}
 	g02Invocations := []string{
-		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerPrepareReviewedG01LiveBinary$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint|CredentialInputFailureConsumesAttempt|WorkflowProvenanceTimeoutBlocksLaterInspect)$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(ManagementTokenRevokedBeforeClaimCompletion|RevokesKnownRejectedManagementTokens|LostManagementTokenResponseBlocksLaterInspection|ManagementRequestJournalFailureRecordsNoDispatch|UncertainManagementTokenRevocationBlocksLaterInspection|DoesNotRevokeCallerVerificationTokenCollision)$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(ReadOnlyPreflightRejectsBeforeWriteMint|StopsWhenReadOnlyTokenRevocationIsUncertain|RevokedRecordSyncFailureStopsBeforeWriteMint|DoubleRevocationJournalSyncFailureBlocksLaterInspect|LostReadTokenMintResponseBlocksLaterInspect|RevokesTokenFromRejectedReadIssuance|DoesNotRevokeVerificationTokenCollision|SelectionRejectsMissingStateBeforePipeOwnership)$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(LostWorkflowProvenanceResponseBlocksLaterInspect|WorkflowProvenancePreRequestFailureRecordsNoDispatchForLaterInspect|HistoricalWorkflowProvenanceClaimReplayBinding|LegacyIncompleteClaimWithoutManagementLifecycleBlocksLaterInspect|PreRequestFailureRecordsNoDispatchForLaterInspect|RepeatsCalleeFenceAfterWritePreflight)$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestBrokerPaired ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPaired -skip ^TestPairedBroker(PrepareReviewedG01LiveBinary|RealCadenceChildExceedsThirtySeconds)$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -skip ^TestPaired|^TestBrokerPaired|^TestBrokerExperimentV3|^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
+		"go1.27.4\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerPrepareReviewedG01LiveBinary$ ./...",
+		"go1.27.4\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
+		"go1.27.4\ttest -race -count=1 -timeout=45s -run ^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
+		"go1.27.4\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(FinalGETFencesCalleeBeforeMintAndHandoff|ControllerRootMismatchRefusesBeforeManagementInputAndMint|CredentialInputFailureConsumesAttempt|WorkflowProvenanceTimeoutBlocksLaterInspect)$ ./...",
+		"go1.27.4\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(ManagementTokenRevokedBeforeClaimCompletion|RevokesKnownRejectedManagementTokens|LostManagementTokenResponseBlocksLaterInspection|ManagementRequestJournalFailureRecordsNoDispatch|UncertainManagementTokenRevocationBlocksLaterInspection|DoesNotRevokeCallerVerificationTokenCollision)$ ./...",
+		"go1.27.4\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(ReadOnlyPreflightRejectsBeforeWriteMint|StopsWhenReadOnlyTokenRevocationIsUncertain|RevokedRecordSyncFailureStopsBeforeWriteMint|DoubleRevocationJournalSyncFailureBlocksLaterInspect|LostReadTokenMintResponseBlocksLaterInspect|RevokesTokenFromRejectedReadIssuance|DoesNotRevokeVerificationTokenCollision|SelectionRejectsMissingStateBeforePipeOwnership)$ ./...",
+		"go1.27.4\ttest -race -count=1 -timeout=45s -run ^TestBrokerExperimentV3(LostWorkflowProvenanceResponseBlocksLaterInspect|WorkflowProvenancePreRequestFailureRecordsNoDispatchForLaterInspect|HistoricalWorkflowProvenanceClaimReplayBinding|LegacyIncompleteClaimWithoutManagementLifecycleBlocksLaterInspect|PreRequestFailureRecordsNoDispatchForLaterInspect|RepeatsCalleeFenceAfterWritePreflight)$ ./...",
+		"go1.27.4\ttest -race -count=1 -timeout=45s -run ^TestBrokerPaired ./...",
+		"go1.27.4\ttest -race -count=1 -timeout=45s -run ^TestPaired -skip ^TestPairedBroker(PrepareReviewedG01LiveBinary|RealCadenceChildExceedsThirtySeconds)$ ./...",
+		"go1.27.4\ttest -race -count=1 -timeout=45s -skip ^TestPaired|^TestBrokerPaired|^TestBrokerExperimentV3|^Test(LegacyControllerEntryRejectsMalformedInputBeforeAdmission|LegacyPairedEntryRejectsMalformedInputBeforeAdmission|BrokerControllerClaimsAttemptBeforeProvenanceSideEffects)$ ./...",
 	}
 	// This positive control intentionally runs the full default module list.
 	// The bounded G01 partitions add enough subprocesses to exceed the old limit.
@@ -3878,10 +3881,10 @@ func FuzzG02Fixture(f *testing.F) {
 		}
 	}
 	for _, invocation := range []string{
-		"go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPaired -skip ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=45s -skip ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=120s -run ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
-		"go1.27.3\ttest -race -count=1 -timeout=120s -skip ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
+		"go1.27.4\ttest -race -count=1 -timeout=45s -run ^TestPaired -skip ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
+		"go1.27.4\ttest -race -count=1 -timeout=45s -skip ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
+		"go1.27.4\ttest -race -count=1 -timeout=120s -run ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
+		"go1.27.4\ttest -race -count=1 -timeout=120s -skip ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./...",
 	} {
 		for _, line := range lines {
 			if line == invocation {
@@ -3889,7 +3892,7 @@ func FuzzG02Fixture(f *testing.F) {
 			}
 		}
 	}
-	r1Invocation := "go1.27.3\ttest -race -count=1 -timeout=45s ./..."
+	r1Invocation := "go1.27.4\ttest -race -count=1 -timeout=45s ./..."
 	r1Count := 0
 	for _, line := range lines {
 		if line == r1Invocation {
@@ -4174,7 +4177,7 @@ exec "$TOOLING_REAL_GO" "$@"
 			defer cancel()
 			cmd := exec.CommandContext(ctx, "bash", "scripts/check-offline-experiments.sh")
 			cmd.Dir = root
-			cmd.Env = append(os.Environ(), "GOTOOLCHAIN=go1.27.3", "GOFLAGS=", "GOWORK=off")
+			cmd.Env = append(os.Environ(), "GOTOOLCHAIN=go1.27.4", "GOFLAGS=", "GOWORK=off")
 			cmd.Env = append(cmd.Env, env...)
 			var out bytes.Buffer
 			cmd.Stdout = &out
@@ -4310,7 +4313,7 @@ func toolingMustNotInvokeCadence(t *testing.T, env []string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cadence := "go1.27.3\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./..."
+	cadence := "go1.27.4\ttest -race -count=1 -timeout=45s -run ^TestPairedBrokerRealCadenceChildExceedsThirtySeconds$ ./..."
 	for _, line := range strings.Split(string(data), "\n") {
 		if line == cadence {
 			t.Fatalf("cadence ran after G02 prep cleanup path; wrapper log:\n%s", data)
@@ -4401,8 +4404,8 @@ func toolingSignalExactPID(t *testing.T, pid int, spec string) {
 
 func TestToolingLicenseIdentityAndStaleRows(t *testing.T) {
 	root := toolingFixture(t)
-	toolingFile(t, root, "go.mod", "module example.test/audit\n\ngo 1.27.3\n\nrequire example.test/dependency v1.2.0\n\nreplace example.test/dependency => ./replacement\n", 0600)
-	toolingFile(t, root, "replacement/go.mod", "module example.test/dependency\n\ngo 1.27.3\n", 0600)
+	toolingFile(t, root, "go.mod", "module example.test/audit\n\ngo 1.27.4\n\nrequire example.test/dependency v1.2.0\n\nreplace example.test/dependency => ./replacement\n", 0600)
+	toolingFile(t, root, "replacement/go.mod", "module example.test/dependency\n\ngo 1.27.4\n", 0600)
 	toolingFile(t, root, "replacement/LICENSE", "Synthetic license fixture\n", 0600)
 	base := "## Runtime modules\n\n| Module | Version | Replacement | License | Source |\n| --- | --- | --- | --- | --- |\n| `example.test/audit` | `local` | `none` | MIT | root |\n"
 	good := "| `example.test/dependency` | `v1.2.0` | `./replacement` | MIT | local fixture |\n"
@@ -4651,7 +4654,7 @@ if [ -n "$PROFILE_FAIL" ] && [ "$*" = "$PROFILE_FAIL" ]; then exit 37; fi
 	prepDir := ""
 	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
 		parts := strings.Split(strings.TrimRight(line, "\t"), "\t")
-		if len(parts) < 3 || parts[0] != "go1.27.3" {
+		if len(parts) < 3 || parts[0] != "go1.27.4" {
 			t.Fatalf("unbounded/unpinned profile call %q", line)
 		}
 		if parts[1] != "" {
