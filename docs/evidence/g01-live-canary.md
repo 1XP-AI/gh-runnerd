@@ -434,8 +434,9 @@ live authorization unless explicitly excluded or separately disabled.
 - [ ] Measure available host headroom and verify effective resource enforcement
   on the selected trusted environment before execution; the budget above is a
   target and does not establish current capacity.
-- [x] The offline adoption profile selects SDK `v0.5.0`/Go `1.27.3` and the
-  byte-verified runner `2.338.0` ARM64 image. The archive, manifest and config
+- [x] The offline adoption profile selects SDK `v0.5.0` and pins Go `1.27.4`
+  (the SDK minimum is Go `1.27.3`), with the byte-verified runner `2.338.0`
+  ARM64 image. The archive, manifest and config
   digests are in the [runner checkpoint](g01-runner-release-checkpoint.md#2026-10-25-target-offer-archive-and-image-bytes);
   see the [adoption ledger](g01-sdk-v05-adoption.md) and PR #107 for SDK review
   and verification. The frozen v0.4 recovery packet (Go 1.26.9 wrapper and older

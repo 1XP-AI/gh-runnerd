@@ -2343,6 +2343,26 @@ func TestPublicWorkflowCapacityContract(t *testing.T) {
 
 }
 
+func toolingPRWorkflowToolchain(t *testing.T, workflow string) string {
+	t.Helper()
+	quickJob, ok := toolingWorkflowJobs(t, workflow)["quick"]
+	if !ok {
+		t.Fatal("PR workflow is missing the quick job")
+	}
+	toolchain := regexp.MustCompile(`(?m)^[ \t]+GOTOOLCHAIN:[ \t]*([^ \t#]+)[ \t]*$`).FindStringSubmatch(quickJob)
+	if len(toolchain) != 2 {
+		t.Fatal("could not extract the PR quick workflow toolchain pin")
+	}
+	return toolchain[1]
+}
+
+func TestToolingPRWorkflowToolchainIsScopedToQuickJob(t *testing.T) {
+	workflow := "jobs:\n  setup:\n    env:\n      GOTOOLCHAIN: go1.27.3\n  quick:\n    env:\n      GOTOOLCHAIN: go1.27.4\n  release:\n    env:\n      GOTOOLCHAIN: go1.28.1\n"
+	if got := toolingPRWorkflowToolchain(t, workflow); got != "go1.27.4" {
+		t.Fatalf("PR quick workflow toolchain = %q, want quick job pin go1.27.4", got)
+	}
+}
+
 func TestPullRequestQuickWorkflowContract(t *testing.T) {
 	workflowData, err := os.ReadFile("../.github/workflows/pr-fast.yml")
 	if err != nil {
@@ -2357,12 +2377,9 @@ func TestPullRequestQuickWorkflowContract(t *testing.T) {
 	if len(moduleVersion) != 2 {
 		t.Fatal("could not extract the root go.mod minimum version")
 	}
-	workflowToolchain := regexp.MustCompile(`(?m)^[ \t]+GOTOOLCHAIN:[ \t]*([^ \t#]+)[ \t]*$`).FindStringSubmatch(workflow)
-	if len(workflowToolchain) != 2 {
-		t.Fatal("could not extract the PR quick workflow toolchain pin")
-	}
-	if want := "go" + string(moduleVersion[1]); workflowToolchain[1] != want {
-		t.Errorf("PR quick workflow toolchain %q does not match root go.mod minimum %q", workflowToolchain[1], want)
+	workflowToolchain := toolingPRWorkflowToolchain(t, workflow)
+	if want := "go" + string(moduleVersion[1]); workflowToolchain != want {
+		t.Errorf("PR quick workflow toolchain %q does not match root go.mod minimum %q", workflowToolchain, want)
 	}
 	for _, required := range []string{
 		"name: Pull Request Checks",
@@ -2381,7 +2398,7 @@ func TestPullRequestQuickWorkflowContract(t *testing.T) {
 		"run: make fmt-check",
 		"run: make vet",
 		"go test -run '^$' -count=1 ./...",
-		"run: GOTOOLCHAIN=\"$GOTOOLCHAIN\" go test -run '^(TestPublicWorkflowCapacityContract|TestPullRequestQuickWorkflowContract|TestG01WorkflowModuleSelectionPredicate)$' -count=1 ./scripts",
+		"run: GOTOOLCHAIN=\"$GOTOOLCHAIN\" go test -run '^(TestPublicWorkflowCapacityContract|TestPullRequestQuickWorkflowContract|TestG01WorkflowModuleSelectionPredicate|TestToolingPRWorkflowToolchainIsScopedToQuickJob)$' -count=1 ./scripts",
 		"run: make deps",
 		"run: make licenses",
 		"run: make vuln",
